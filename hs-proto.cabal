@@ -73,6 +73,7 @@ library
       Proto.Compat
       Proto.Options
       Proto.Print
+      Proto.ToProto
       Proto.Inspect
       Proto.Setup
       Proto.TH
@@ -137,6 +138,7 @@ test-suite hs-proto-test
       Test.Schema
       Test.Options
       Test.Lens
+      Test.ToProto
 
     build-depends:
         base             >= 4.17 && < 5
