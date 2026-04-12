@@ -315,6 +315,7 @@ test-suite wireform-test
     , tasty-hedgehog       >= 1.0  && < 1.5
     , tasty-hunit          >= 0.10 && < 0.11
     , stm
+    , primitive
   hs-source-dirs: test
 
 test-suite conformance-self-test
@@ -360,6 +361,15 @@ test-suite html-dom-test
   hs-source-dirs: test-interop
   build-depends:
       base, wireform-html, bytestring, text,
+      tasty, tasty-hunit
+
+test-suite wpt-selector-test
+  import: defaults
+  type: exitcode-stdio-1.0
+  main-is: WPTSelectorTest.hs
+  hs-source-dirs: test-interop
+  build-depends:
+      base, wireform-html, text,
       tasty, tasty-hunit
 
 test-suite html-rewriter-test
@@ -522,7 +532,18 @@ benchmark html-bench
     , primitive
     , text
   hs-source-dirs: bench
-  ghc-options: -O2 -rtsopts
+  ghc-options: -O1 -rtsopts
+
+executable profile-rewriter
+  import: defaults
+  main-is: ProfileRewriter.hs
+  build-depends:
+      base >= 4.16 && < 5
+    , wireform-html
+    , bytestring
+    , text
+  hs-source-dirs: bench
+  ghc-options: -O1 -rtsopts -fprof-late -prof
 
 benchmark format-bench
   import: defaults

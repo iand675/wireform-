@@ -8,6 +8,7 @@ module HTML.Value
   , HTMLNode(..)
   , HTMLAttribute(..)
   , Doctype(..)
+  , TreeEvent(..)
   , textContent
   , getAttr
   , isVoidElement
@@ -94,3 +95,18 @@ isVoidElement t = case t of
 {-# INLINE isRawTextElement #-}
 isRawTextElement :: Text -> Bool
 isRawTextElement t = t == "script" || t == "style"
+
+
+-- | Events emitted during streaming tree construction.
+--
+-- These correspond to structural changes made by the HTML5 tree builder
+-- as it processes tokens. Consecutive 'TreeText' events may represent
+-- parts of the same logical text node (the tree builder coalesces
+-- adjacent text internally).
+data TreeEvent
+  = TreeOpen !Text !(SmallArray HTMLAttribute)
+  | TreeText !Text
+  | TreeComment !Text
+  | TreeClose !Text
+  | TreeDoctype !Text !(Maybe Text) !(Maybe Text)
+  deriving stock (Show, Eq)

@@ -568,3 +568,106 @@ int wireform_is_all_ascii(const uint8_t *buf, ptrdiff_t off, ptrdiff_t end) {
     }
     return 1;
 }
+
+/* HTML text escape: scan for '<', '>', '&'.
+   Returns offset of first match from 'offset', or 'len' if none found. */
+int hs_html_find_text_escape(const uint8_t *buf, int offset, int len)
+{
+    const uint8_t *p    = buf + offset;
+    const uint8_t *pend = buf + len;
+
+#if USE_NEON
+    {
+        const uint8x16_t v_lt  = vdupq_n_u8('<');
+        const uint8x16_t v_gt  = vdupq_n_u8('>');
+        const uint8x16_t v_amp = vdupq_n_u8('&');
+        while (p + 16 <= pend) {
+            uint8x16_t chunk = vld1q_u8(p);
+            uint8x16_t hit = vorrq_u8(
+                vorrq_u8(vceqq_u8(chunk, v_lt), vceqq_u8(chunk, v_gt)),
+                vceqq_u8(chunk, v_amp));
+            uint64x2_t hit64 = vreinterpretq_u64_u8(hit);
+            uint64_t lo = vgetq_lane_u64(hit64, 0);
+            uint64_t hi = vgetq_lane_u64(hit64, 1);
+            if (lo) return (int)(p - buf) + (__builtin_ctzll(lo) >> 3);
+            if (hi) return (int)(p - buf) + 8 + (__builtin_ctzll(hi) >> 3);
+            p += 16;
+        }
+    }
+#elif USE_SSE2
+    {
+        const __m128i v_lt  = _mm_set1_epi8('<');
+        const __m128i v_gt  = _mm_set1_epi8('>');
+        const __m128i v_amp = _mm_set1_epi8('&');
+        while (p + 16 <= pend) {
+            __m128i chunk = _mm_loadu_si128((const __m128i *)p);
+            int m1 = _mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v_lt));
+            int m2 = _mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v_gt));
+            int m3 = _mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v_amp));
+            int mask = m1 | m2 | m3;
+            if (mask) return (int)(p - buf) + __builtin_ctz(mask);
+            p += 16;
+        }
+    }
+#endif
+
+    while (p < pend) {
+        uint8_t b = *p;
+        if (b == '<' || b == '>' || b == '&') return (int)(p - buf);
+        p++;
+    }
+    return len;
+}
+
+/* HTML attr escape: scan for '"', '&', '<', '>' in attribute values.
+   Returns offset of first match from 'offset', or 'len' if none found. */
+int hs_html_find_attr_escape(const uint8_t *buf, int offset, int len)
+{
+    const uint8_t *p    = buf + offset;
+    const uint8_t *pend = buf + len;
+
+#if USE_NEON
+    {
+        const uint8x16_t v_dq  = vdupq_n_u8('"');
+        const uint8x16_t v_amp = vdupq_n_u8('&');
+        const uint8x16_t v_lt  = vdupq_n_u8('<');
+        const uint8x16_t v_gt  = vdupq_n_u8('>');
+        while (p + 16 <= pend) {
+            uint8x16_t chunk = vld1q_u8(p);
+            uint8x16_t hit = vorrq_u8(
+                vorrq_u8(vceqq_u8(chunk, v_dq), vceqq_u8(chunk, v_amp)),
+                vorrq_u8(vceqq_u8(chunk, v_lt), vceqq_u8(chunk, v_gt)));
+            uint64x2_t hit64 = vreinterpretq_u64_u8(hit);
+            uint64_t lo = vgetq_lane_u64(hit64, 0);
+            uint64_t hi = vgetq_lane_u64(hit64, 1);
+            if (lo) return (int)(p - buf) + (__builtin_ctzll(lo) >> 3);
+            if (hi) return (int)(p - buf) + 8 + (__builtin_ctzll(hi) >> 3);
+            p += 16;
+        }
+    }
+#elif USE_SSE2
+    {
+        const __m128i v_dq  = _mm_set1_epi8('"');
+        const __m128i v_amp = _mm_set1_epi8('&');
+        const __m128i v_lt  = _mm_set1_epi8('<');
+        const __m128i v_gt  = _mm_set1_epi8('>');
+        while (p + 16 <= pend) {
+            __m128i chunk = _mm_loadu_si128((const __m128i *)p);
+            int m1 = _mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v_dq));
+            int m2 = _mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v_amp));
+            int m3 = _mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v_lt));
+            int m4 = _mm_movemask_epi8(_mm_cmpeq_epi8(chunk, v_gt));
+            int mask = m1 | m2 | m3 | m4;
+            if (mask) return (int)(p - buf) + __builtin_ctz(mask);
+            p += 16;
+        }
+    }
+#endif
+
+    while (p < pend) {
+        uint8_t b = *p;
+        if (b == '"' || b == '&' || b == '<' || b == '>') return (int)(p - buf);
+        p++;
+    }
+    return len;
+}

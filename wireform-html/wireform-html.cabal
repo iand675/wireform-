@@ -9,6 +9,7 @@ build-type: Simple
 common defaults
   default-language: GHC2021
   ghc-options:
+    -O1
     -Wall
     -Wcompat
     -Widentities
@@ -16,7 +17,6 @@ common defaults
     -Wincomplete-uni-patterns
     -Wpartial-fields
     -Wredundant-constraints
-    -O2
   default-extensions:
     StrictData
     DerivingStrategies
@@ -27,13 +27,19 @@ common defaults
 
 library
   import: defaults
-  ghc-options: -fllvm
+  ghc-options:
   hs-source-dirs: src
+  other-modules:
+    HTML.DOM.Index
+    HTML.DOM.Zipper
+    HTML.DOM.Selector
+    HTML.Rewriter.StackFrame
+    HTML.Rewriter.Mutations
+    HTML.Rewriter.Config
   exposed-modules:
     HTML.Value
     HTML.Parse
     HTML.Encode
-    HTML.Query
     HTML.Class
     HTML.TagId
     HTML.DOM

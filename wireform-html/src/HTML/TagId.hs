@@ -1,12 +1,15 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE UnboxedTuples #-}
 module HTML.TagId
   ( TagId(..)
   , tagIdFromText
   , tagIdFromBS
   , internTagBS
   , internTagAddr
+  , internTagAddrU
+  , fastTagIdAddr
   , internAttrNameBS
   , internAttrNameRange
   , tagIdToText
@@ -142,6 +145,22 @@ internTagAddr addr# !off !tagLen !origBS =
   case fastTagLookupAddr addr# off tagLen of
     Just pair -> pair
     Nothing -> slowInternTagBS (BSU.unsafeTake tagLen (BSU.unsafeDrop off origBS))
+
+{-# INLINE internTagAddrU #-}
+internTagAddrU :: Addr# -> Int -> Int -> ByteString -> (# Text, TagId #)
+internTagAddrU addr# !off !tagLen !origBS =
+  case fastTagLookupAddr addr# off tagLen of
+    Just (!t, !tid) -> (# t, tid #)
+    Nothing -> case slowInternTagBS (BSU.unsafeTake tagLen (BSU.unsafeDrop off origBS)) of
+      (!t, !tid) -> (# t, tid #)
+
+{-# INLINE fastTagIdAddr #-}
+fastTagIdAddr :: Addr# -> Int -> Int -> ByteString -> TagId
+fastTagIdAddr addr# !off !tagLen !origBS =
+  case fastTagLookupAddr addr# off tagLen of
+    Just (_, !tid) -> tid
+    Nothing -> case slowInternTagBS (BSU.unsafeTake tagLen (BSU.unsafeDrop off origBS)) of
+      (_, !tid) -> tid
 
 slowInternTagBS :: ByteString -> (Text, TagId)
 slowInternTagBS !rawName =

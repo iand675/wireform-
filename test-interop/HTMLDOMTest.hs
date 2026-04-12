@@ -12,7 +12,8 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 import HTML.DOM
-import HTML.Value (HTMLNode(..), HTMLAttribute(..), Doctype(..))
+import qualified HTML.Selector as Sel
+import HTML.Value (HTMLNode(..), HTMLAttribute(..), Doctype(..), TreeEvent(..))
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -50,7 +51,9 @@ main = defaultMain $ testGroup "HTML.DOM"
   , testGroup "Node inspection" inspectionTests
   , testGroup "Serialization" serializationTests
   , testGroup "CSS selectors" selectorTests
+  , testGroup "CSS selectors (extended)" extendedSelectorTests
   , testGroup "Incremental parser" incrementalTests
+  , testGroup "Streaming tree events" streamingTests
   ]
 
 parsingTests :: [TestTree]
@@ -276,6 +279,276 @@ selectorTests =
       tagName (fromJust (parentNode result)) @?= Just "div"
   ]
 
+-- A richer document for testing the full breadth of CSS selectors.
+selectorDoc :: Document
+selectorDoc = parseDocument
+  "<!DOCTYPE html>\
+  \<html lang=\"en\" dir=\"ltr\">\
+  \<head><title>Selector Tests</title></head>\
+  \<body>\
+  \<div id=\"container\" class=\"wrapper main\">\
+  \  <h1>Title</h1>\
+  \  <p class=\"intro\">Intro</p>\
+  \  <ul>\
+  \    <li class=\"item active\">One</li>\
+  \    <li class=\"item\">Two</li>\
+  \    <li class=\"item\">Three</li>\
+  \    <li class=\"item last\">Four</li>\
+  \  </ul>\
+  \  <form>\
+  \    <input type=\"text\" name=\"user\" required=\"\" placeholder=\"Name\">\
+  \    <input type=\"email\" name=\"email\" placeholder=\"Email\" value=\"test@example.com\">\
+  \    <input type=\"checkbox\" name=\"agree\" checked=\"\">\
+  \    <input type=\"radio\" name=\"choice\" value=\"a\">\
+  \    <input type=\"hidden\" name=\"token\" value=\"abc\">\
+  \    <textarea readonly=\"\">Notes</textarea>\
+  \    <select name=\"color\">\
+  \      <option>Red</option>\
+  \      <option selected=\"\">Blue</option>\
+  \    </select>\
+  \    <button type=\"submit\">Go</button>\
+  \    <input type=\"submit\" value=\"Submit\" disabled=\"\">\
+  \  </form>\
+  \  <fieldset disabled=\"\">\
+  \    <legend><input type=\"text\" name=\"legend-input\" placeholder=\"Legend\"></legend>\
+  \    <input type=\"text\" name=\"fs-inner\" placeholder=\"Inside\">\
+  \  </fieldset>\
+  \  <div class=\"empty\"></div>\
+  \  <div class=\"blank\">  \n  </div>\
+  \  <div class=\"has-comment\"><!-- comment --></div>\
+  \  <span lang=\"fr\">Bonjour</span>\
+  \  <span lang=\"en-US\">Hello</span>\
+  \  <div dir=\"rtl\"><span>RTL content</span></div>\
+  \</div>\
+  \</body></html>"
+
+selRoot :: Node
+selRoot = documentElement selectorDoc
+
+qsa :: Text -> [Node]
+qsa sel = querySelectorAll selRoot sel
+
+qsaLen :: Text -> Int
+qsaLen sel = length (qsa sel)
+
+qs :: Text -> Maybe Node
+qs sel = querySelector selRoot sel
+
+extendedSelectorTests :: [TestTree]
+extendedSelectorTests =
+  -- === Structural pseudo-classes ===
+  [ testCase ":first-child" $ do
+      qsaLen "li:first-child" @?= 1
+      textContent (head (qsa "li:first-child")) @?= "One"
+
+  , testCase ":last-child" $ do
+      qsaLen "li:last-child" @?= 1
+      textContent (head (qsa "li:last-child")) @?= "Four"
+
+  , testCase ":only-child" $ do
+      qsaLen "ul:only-child" @?= 0
+      qsaLen "h1:only-child" @?= 0
+
+  , testCase ":nth-child(odd)" $ do
+      let items = qsa "li:nth-child(odd)"
+      length items @?= 2
+      textContent (head items) @?= "One"
+
+  , testCase ":nth-child(even)" $ do
+      let items = qsa "li:nth-child(even)"
+      length items @?= 2
+      textContent (head items) @?= "Two"
+
+  , testCase ":nth-child(2n+1)" $ do
+      qsaLen "li:nth-child(2n+1)" @?= 2
+
+  , testCase ":nth-last-child(1)" $ do
+      qsaLen "li:nth-last-child(1)" @?= 1
+      textContent (head (qsa "li:nth-last-child(1)")) @?= "Four"
+
+  , testCase ":first-of-type" $ do
+      qsaLen "li:first-of-type" @?= 1
+
+  , testCase ":last-of-type" $ do
+      qsaLen "li:last-of-type" @?= 1
+
+  , testCase ":nth-of-type(2)" $ do
+      qsaLen "li:nth-of-type(2)" @?= 1
+      textContent (head (qsa "li:nth-of-type(2)")) @?= "Two"
+
+  , testCase ":only-of-type" $ do
+      qsaLen "h1:only-of-type" @?= 1
+      qsaLen "li:only-of-type" @?= 0
+
+  , testCase ":root" $ do
+      let Right sel = Sel.parseSelector ":root"
+          roots = querySelectorAllDoc sel selectorDoc
+      length roots @?= 1
+      tagName (head roots) @?= Just "html"
+
+  , testCase ":empty" $ do
+      let empties = qsa "div:empty"
+      length empties >= 1 @? "should find the empty div"
+
+  , testCase ":blank" $ do
+      qsaLen "div.blank:blank" @?= 1
+      qsaLen "div.empty:blank" @?= 1
+      qsaLen "div.has-comment:blank" @?= 1
+
+  -- === :nth-child(An+B of S) ===
+  , testCase ":nth-child(1 of .item)" $ do
+      qsaLen "li:nth-child(1 of .item)" @?= 1
+      textContent (head (qsa "li:nth-child(1 of .item)")) @?= "One"
+
+  , testCase ":nth-child(2 of .item)" $ do
+      qsaLen ":nth-child(2 of .item)" @?= 1
+      textContent (head (qsa ":nth-child(2 of .item)")) @?= "Two"
+
+  , testCase ":nth-last-child(1 of .item)" $ do
+      qsaLen ":nth-last-child(1 of .item)" @?= 1
+      textContent (head (qsa ":nth-last-child(1 of .item)")) @?= "Four"
+
+  -- === Logical pseudo-classes ===
+  , testCase ":not(.item)" $ do
+      let items = qsa "li:not(.active)"
+      length items @?= 3
+
+  , testCase ":is(.intro, .item)" $ do
+      qsaLen ":is(.intro, .item)" @?= 5
+
+  , testCase ":where(.intro)" $ do
+      qsaLen ":where(.intro)" @?= 1
+
+  , testCase ":is() with invalid branch (forgiving)" $ do
+      qsaLen ":is(.intro, ::fake, .item)" @?= 5
+
+  , testCase ":has(> li)" $ do
+      qsaLen "ul:has(> li)" @?= 1
+
+  , testCase ":has(.item)" $ do
+      qsaLen "ul:has(.item)" @?= 1
+
+  , testCase ":has(+ .last)" $ do
+      qsaLen "li:has(+ .last)" @?= 1
+      textContent (head (qsa "li:has(+ .last)")) @?= "Three"
+
+  , testCase ":has(~ .last)" $ do
+      qsaLen "li.active:has(~ .last)" @?= 1
+
+  -- === :scope ===
+  , testCase ":scope" $ do
+      let Right sel = Sel.parseSelector ":scope"
+          scopes = querySelectorAllDoc sel selectorDoc
+      length scopes @?= 1
+      tagName (head scopes) @?= Just "html"
+
+  -- === :defined ===
+  , testCase ":defined matches all elements" $ do
+      qsaLen "li:defined" @?= 4
+
+  -- === :dir() ===
+  , testCase ":dir(ltr)" $ do
+      let ltrSpans = qsa "span:dir(ltr)"
+      length ltrSpans >= 1 @? "should find ltr spans"
+
+  , testCase ":dir(rtl)" $ do
+      qsaLen "span:dir(rtl)" @?= 1
+
+  -- === :lang() ===
+  , testCase ":lang(en)" $ do
+      let enNodes = qsa ":lang(en)"
+      length enNodes >= 1 @? "should match elements inheriting lang=en"
+
+  , testCase ":lang(fr)" $ do
+      qsaLen "span:lang(fr)" @?= 1
+      textContent (head (qsa "span:lang(fr)")) @?= "Bonjour"
+
+  , testCase ":lang(en, fr) multi-argument" $ do
+      qsaLen "span:lang(en, fr)" @?= 3
+
+  -- === Form pseudo-classes ===
+  , testCase ":enabled / :disabled" $ do
+      qsaLen "input:enabled" @?= 6
+      qsaLen "input:disabled" @?= 2
+
+  , testCase ":checked" $ do
+      qsaLen "input:checked" @?= 1
+      qsaLen "option:checked" @?= 1
+
+  , testCase ":required / :optional" $ do
+      qsaLen "input:required" @?= 1
+      qsaLen "input:optional" @?= 7
+
+  , testCase ":read-only / :read-write" $ do
+      qsaLen "textarea:read-only" @?= 1
+      qsaLen "input[type=text]:read-write" @?= 2
+
+  , testCase ":placeholder-shown" $
+      qsaLen "input:placeholder-shown" @?= 3
+
+  , testCase ":indeterminate" $ do
+      qsaLen "input:indeterminate" @?= 1
+
+  , testCase ":default" $ do
+      let defaults = qsa ":default"
+      length defaults >= 1 @? "should find default button/submit"
+
+  -- === Fieldset disabled inheritance ===
+  , testCase "fieldset disabled inherits to descendants" $ do
+      qsaLen "input[name=fs-inner]:disabled" @?= 1
+      qsaLen "input[name=fs-inner]:enabled" @?= 0
+
+  , testCase "first legend child exemption" $ do
+      qsaLen "input[name=legend-input]:disabled" @?= 0
+      qsaLen "input[name=legend-input]:enabled" @?= 1
+
+  , testCase "fieldset itself matches :disabled" $ do
+      qsaLen "fieldset:disabled" @?= 1
+
+  -- === HTML attribute case-insensitivity ===
+  , testCase "[type=text] matches case-insensitively" $ do
+      let doc' = parseDocument
+            "<html><body><input type=\"TEXT\"><input type=\"text\"></body></html>"
+          root' = documentElement doc'
+      length (querySelectorAll root' "input[type=text]") @?= 2
+
+  , testCase "[type=text s] forces case-sensitive" $ do
+      let doc' = parseDocument
+            "<html><body><input type=\"TEXT\"><input type=\"text\"></body></html>"
+          root' = documentElement doc'
+      length (querySelectorAll root' "input[type=text s]") @?= 1
+
+  -- === Dynamic pseudo-classes (always false in static DOM) ===
+  , testCase ":hover never matches" $
+      qsaLen ":hover" @?= 0
+
+  , testCase ":focus never matches" $
+      qsaLen ":focus" @?= 0
+
+  , testCase ":visited never matches" $
+      qsaLen ":visited" @?= 0
+
+  -- === querySelector document-order correctness ===
+  , testCase "querySelector returns earliest match across comma branches" $ do
+      let result = qs "li.last, li.active"
+      isJust result @? "should find a match"
+      textContent (fromJust result) @?= "One"
+
+  -- === Combinators ===
+  , testCase "descendant combinator" $
+      qsaLen "ul li" @?= 4
+
+  , testCase "child combinator" $
+      qsaLen "ul > li" @?= 4
+
+  , testCase "adjacent sibling" $ do
+      qsaLen "h1 + p" @?= 1
+      textContent (head (qsa "h1 + p")) @?= "Intro"
+
+  , testCase "general sibling" $
+      qsaLen "h1 ~ ul" @?= 1
+  ]
+
 incrementalTests :: [TestTree]
 incrementalTests =
   [ testCase "single chunk matches one-shot" $ do
@@ -319,3 +592,91 @@ incrementalTests =
       doc <- finishParser p
       textContent (documentElement doc) @?= textContent (documentElement oneShot)
   ]
+
+
+-- ---------------------------------------------------------------------------
+-- Streaming tree event tests
+-- ---------------------------------------------------------------------------
+
+collectEvents :: IO (Step TreeEvent) -> IO [TreeEvent]
+collectEvents act = do
+  s <- act
+  pure (stepToList s)
+  where
+    stepToList Done = []
+    stepToList (Yield evt rest) = evt : stepToList rest
+
+streamingTests :: [TestTree]
+streamingTests =
+  [ testCase "streamHTML emits open/close for simple doc" $ do
+      evts <- collectEvents (streamHTML "<p>hi</p>")
+      let opens = [t | TreeOpen t _ <- evts]
+          closes = [t | TreeClose t <- evts]
+          texts = [t | TreeText t <- evts]
+      assertBool "has <html>" ("html" `elem` opens)
+      assertBool "has <head>" ("head" `elem` opens)
+      assertBool "has <body>" ("body" `elem` opens)
+      assertBool "has <p>" ("p" `elem` opens)
+      assertBool "closes <html>" ("html" `elem` closes)
+      assertBool "closes <p>" ("p" `elem` closes)
+      assertBool "has text 'hi'" ("hi" `elem` texts)
+
+  , testCase "streamHTML emits doctype" $ do
+      evts <- collectEvents (streamHTML "<!DOCTYPE html><html><body></body></html>")
+      let doctypes = [n | TreeDoctype n _ _ <- evts]
+      assertBool "has doctype" (not (null doctypes))
+
+  , testCase "streamHTML events have correct nesting order" $ do
+      evts <- collectEvents (streamHTML "<div><span>x</span></div>")
+      let relevant = filter isStructural evts
+      case dropWhile (not . isOpenTag "div") relevant of
+        (TreeOpen "div" _ : rest) ->
+          case dropWhile (not . isOpenTag "span") rest of
+            (TreeOpen "span" _ : rest2) -> do
+              assertBool "text before span close" (any isText (takeWhile (not . isCloseTag "span") rest2))
+              let afterSpan = dropWhile (not . isCloseTag "span") rest2
+              assertBool "span closes" (not (null afterSpan))
+              let afterSpanClose = drop 1 afterSpan
+              assertBool "div closes after span" (any (isCloseTag "div") afterSpanClose)
+            _ -> assertFailure "no span open after div"
+        _ -> assertFailure "no div open"
+
+  , testCase "streamHTML with void element emits open+close" $ do
+      evts <- collectEvents (streamHTML "<div><br></div>")
+      let opens = [t | TreeOpen t _ <- evts]
+          closes = [t | TreeClose t <- evts]
+      assertBool "br opens" ("br" `elem` opens)
+      assertBool "br closes" ("br" `elem` closes)
+
+  , testCase "streamHTML preserves attributes" $ do
+      evts <- collectEvents (streamHTML "<div class=\"foo\" id=\"bar\">x</div>")
+      let divOpens = [() | TreeOpen "div" _ <- evts]
+      assertBool "has div open event" (not (null divOpens))
+
+  , testCase "incremental streaming matches one-shot" $ do
+      let html = "<html><body><div><p>hello</p><p>world</p></div></body></html>"
+      oneShotEvts <- collectEvents (streamHTML html)
+      sp <- newStreamParser
+      evts1 <- collectEvents (feedChunk sp "<html><body><div>")
+      evts2 <- collectEvents (feedChunk sp "<p>hello</p><p>world</p>")
+      evts3 <- collectEvents (feedChunk sp "</div></body></html>")
+      evtsFinal <- collectEvents (finishStream sp)
+      let incrEvts = evts1 ++ evts2 ++ evts3 ++ evtsFinal
+      length (filter isOpen incrEvts) @?= length (filter isOpen oneShotEvts)
+      length (filter isClose incrEvts) @?= length (filter isClose oneShotEvts)
+  ]
+  where
+    isStructural (TreeOpen _ _) = True
+    isStructural (TreeClose _) = True
+    isStructural (TreeText _) = True
+    isStructural _ = False
+    isOpenTag n (TreeOpen t _) = t == n
+    isOpenTag _ _ = False
+    isCloseTag n (TreeClose t) = t == n
+    isCloseTag _ _ = False
+    isText (TreeText _) = True
+    isText _ = False
+    isOpen (TreeOpen _ _) = True
+    isOpen _ = False
+    isClose (TreeClose _) = True
+    isClose _ = False

@@ -11,6 +11,7 @@ module HTML.Parse (
   parseHTMLFragment,
   parseHTMLNodes,
   tokenizeOnlyIO,
+  tokenizeCountChunk,
   treeBuildOnlyIO,
 
   -- * Low-level token API (for rewriter)
@@ -18,8 +19,51 @@ module HTML.Parse (
   tokenizeBS,
   tokenizeCallbackIO,
   tokenizeCallbackIOWith,
+
+  -- * Incremental / streaming tree builder
+  TreeBuilder,
+  newTreeBuilder,
+  newTreeBuilderWith,
+  -- newTreeBuilderRaw (unused; raw events use tokenizeRawEventsIO)
+  processToken,
+  buildDocument,
+  tokenizeBSIO,
+  freeTreeBuilder,
+  drainTreeBuilderStack,
+  tbGetEvents,
+  tbResetEvents,
+
+  -- * Raw event tokenizer (no tree builder)
+  tokenizeRawEventsIO,
+
+  -- * Low-level scanning (direct rewriter)
+  byteStringPinnedByteArray,
+  decodeTextSlice,
+  decodeTextSliceKnown,
+  scanTagNameFast,
+  scanTextFast,
+  scanTextAscii,
+  readTagAttrsBS,
+  scanClassAndSkip,
+  skipTagBS,
+  skipToGtBS,
+  skipAttrsBS,
+  readByteOff,
+  isAlphaByte,
+  isRawTextTag,
+  isRCDataTag,
+  isSvgHtmlIntegPoint,
+  markupDeclRemaining,
+  rawTextRemainingString,
+  utf8AdvanceNChars,
+  tokenizeMarkupDeclCtx,
+  ScanTextResult (..),
+  parseEntityRef,
+  isWSByte,
+  skipWSAddr,
 ) where
 
+import Control.Monad (when)
 import Data.Array.Byte (ByteArray (ByteArray))
 import Data.Bits (complement, unsafeShiftL, unsafeShiftR, xor, (.&.), (.|.))
 import Data.ByteString (ByteString)
@@ -50,8 +94,10 @@ import Data.Primitive.SmallArray (
   shrinkSmallMutableArray,
   sizeofSmallArray,
   sizeofSmallMutableArray,
+  getSizeofSmallMutableArray,
   smallArrayFromList,
   unsafeFreezeSmallArray,
+  freezeSmallArray,
   writeSmallArray,
  )
 import Data.Text (Text)
@@ -401,6 +447,14 @@ emptyChildVecRef = unsafePerformIO $ do
   arr <- newSmallArray 0 uninitChild
   newIORef (ChildVec emptyChildVecPool arr)
 {-# NOINLINE emptyChildVecRef #-}
+
+dummyParentRef :: IORef (Maybe TBNode)
+dummyParentRef = unsafePerformIO $ newIORef Nothing
+{-# NOINLINE dummyParentRef #-}
+
+dummyAttrsRef :: IORef (SmallArray HTMLAttribute)
+dummyAttrsRef = unsafePerformIO $ newIORef emptySmallArray
+{-# NOINLINE dummyAttrsRef #-}
 
 
 {-# INLINE pushChild #-}
@@ -830,7 +884,47 @@ data TreeBuilder = TreeBuilder
   , tbScriptingEnabled :: !Bool
   , tbFragmentContext :: !(Maybe (Text, Maybe Text))
   , tbFragmentContextElement :: !(Maybe TBNode)
+  , tbEmitEvents :: !Bool
+  , tbBuildDOM :: !Bool
+  , tbEventArr :: !(IORef (SmallMutableArray RealWorld TreeEvent))
+  , tbEventCntBA :: !(MutableByteArray RealWorld)
   }
+
+
+tbEmitEvent :: TreeBuilder -> TreeEvent -> IO ()
+tbEmitEvent tb evt
+  | not (tbEmitEvents tb) = pure ()
+  | otherwise = tbPushEvent tb evt
+
+tbPushEvent :: TreeBuilder -> TreeEvent -> IO ()
+tbPushEvent tb evt = do
+  n <- readByteArray (tbEventCntBA tb) 0 :: IO Int
+  cap <- readByteArray (tbEventCntBA tb) 1 :: IO Int
+  arr <- readIORef (tbEventArr tb)
+  if n < cap
+    then do
+      writeSmallArray arr n evt
+      writeByteArray (tbEventCntBA tb) 0 (n + 1 :: Int)
+    else do
+      let !newCap = cap * 2
+      bigger <- newSmallArray newCap evt
+      copySmallMutableArray bigger 0 arr 0 n
+      writeIORef (tbEventArr tb) bigger
+      writeSmallArray bigger n evt
+      writeByteArray (tbEventCntBA tb) 0 (n + 1 :: Int)
+      writeByteArray (tbEventCntBA tb) 1 newCap
+{-# NOINLINE tbPushEvent #-}
+
+
+tbGetEvents :: TreeBuilder -> IO (SmallArray TreeEvent)
+tbGetEvents tb = do
+  n <- readByteArray (tbEventCntBA tb) 0 :: IO Int
+  arr <- readIORef (tbEventArr tb)
+  freezeSmallArray arr 0 n
+
+
+tbResetEvents :: TreeBuilder -> IO ()
+tbResetEvents tb = writeByteArray (tbEventCntBA tb) 0 (0 :: Int)
 
 
 {-# INLINE tbMode #-}
@@ -936,6 +1030,23 @@ treeBuildOnlyIO bs = do
 {-# NOINLINE treeBuildOnlyIO #-}
 
 
+freeTreeBuilder :: TreeBuilder -> IO ()
+freeTreeBuilder tb = free (tbScalars tb)
+
+
+drainTreeBuilderStack :: TreeBuilder -> IO ()
+drainTreeBuilderStack tb = do
+  let es@(ElementStack esArr esCnt _) = tbStack tb
+  n <- readByteArray esCnt 0 :: IO Int
+  go esArr (n - 1)
+  where
+    go _ i | i < 0 = pure ()
+    go arr i = do
+      node <- readSmallArray arr i
+      tbEmitEvent tb (TreeClose (nodeName node))
+      go arr (i - 1)
+
+
 tokenizeOnlyIO :: ByteString -> IO Int
 tokenizeOnlyIO bs = do
   let !len = BS.length bs
@@ -992,6 +1103,207 @@ tokenizeOnlyIO bs = do
 {-# NOINLINE tokenizeOnlyIO #-}
 
 
+-- | Raw event tokenizer: scans HTML bytes and emits TreeEvents directly
+-- without running the HTML5 tree construction algorithm. No mode tracking,
+-- no element stack, no implicit elements, no adoption agency.
+tokenizeRawEventsIO :: ByteString -> IO (SmallArray TreeEvent)
+tokenizeRawEventsIO !bs = do
+  let !len = BS.length bs
+      !(BS (ForeignPtr addr# _) _) = bs
+      !sharedBA = case runRW#
+        ( \s0 ->
+            case newByteArray# len# s0 of
+              (# s1, mba# #) ->
+                case copyAddrToByteArray# addr# mba# 0# len# s1 of
+                  s2 ->
+                    case unsafeFreezeByteArray# mba# s2 of
+                      (# s3, ba# #) ->
+                        (# s3, ba# #)
+        ) of
+        (# _, ba# #) -> ByteArray ba#
+        where
+          !(I# len#) = len
+  let !initCap = max 256 (len `quot` 10)
+  arr0 <- newSmallArray initCap (TreeClose "")
+  evtArrRef <- newIORef arr0
+  let
+    {-# INLINE push #-}
+    push :: Int -> TreeEvent -> IO Int
+    push !n !evt
+      | n < initCap = do
+          writeSmallArray arr0 n evt
+          pure (n + 1)
+      | otherwise = pushOverflow n evt
+    pushOverflow :: Int -> TreeEvent -> IO Int
+    pushOverflow !n !evt = do
+      arr <- readIORef evtArrRef
+      cap <- getSizeofSmallMutableArray arr
+      arr' <- if n < cap
+        then pure arr
+        else do
+          bigger <- newSmallArray (cap * 2) evt
+          copySmallMutableArray bigger 0 arr 0 n
+          writeIORef evtArrRef bigger
+          pure bigger
+      writeSmallArray arr' n evt
+      pure (n + 1)
+    {-# NOINLINE pushOverflow #-}
+
+    pushMany :: Int -> [Token] -> IO Int
+    pushMany !n [] = pure n
+    pushMany !n (tok : rest) = do
+      n' <- case tok of
+        TStartTag name attrs sc tid -> do
+          n1 <- push n (TreeOpen name attrs)
+          if sc || tagIdIsVoid tid then push n1 (TreeClose name) else pure n1
+        TEndTag name _ -> push n (TreeClose name)
+        TString txt -> push n (TreeText txt)
+        TChar c -> push n (TreeText (T.singleton c))
+        TComment txt -> push n (TreeComment txt)
+        TDoctype name pub sys _ -> push n (TreeDoctype name pub sys)
+        TEOF -> pure n
+      pushMany n' rest
+
+    go :: Int -> Int -> IO Int
+    go !n !off
+      | off >= len = pure n
+      | otherwise =
+          let !b = readByteOff addr# off
+          in if b /= 0x3C && b /= 0x26 && b /= 0x00 && b /= 0x0D
+              then do
+                let !(ScanTextResult end ascii) = scanTextAscii addr# (off + 1) len
+                    !firstByteAscii = b < 0x80
+                    !allAscii = firstByteAscii && ascii
+                    !t = decodeTextSliceKnown sharedBA off (end - off) bs allAscii
+                n' <- push n (TreeText t)
+                go n' end
+              else case b of
+                0x3C -> goTag n (off + 1)
+                0x26 -> do
+                  let !windowEnd = min len (off + 65)
+                      !input = toStringFrom bs (off + 1) windowEnd
+                      (ent, rest) = parseEntityRef input
+                      !consumed = length input - length rest
+                  n' <- pushMany n (map TChar ent)
+                  go n' (off + 1 + consumed)
+                0x00 -> do
+                  n' <- push n (TreeText (T.singleton '\0'))
+                  go n' (off + 1)
+                0x0D -> do
+                  n' <- push n (TreeText (T.singleton '\n'))
+                  let !next = off + 1
+                  go n' (if next < len && readByteOff addr# next == 0x0A then next + 1 else next)
+                _ -> go n (off + 1)
+
+    goTag :: Int -> Int -> IO Int
+    goTag !n !off
+      | off >= len = push n (TreeText "<")
+      | otherwise = case readByteOff addr# off of
+          0x21 -> do
+            let toks = tokenizeMarkupDeclCtx 0 False (toStringFrom bs (off + 1) len)
+            pushMany n toks
+          0x2F -> goEndTag n (off + 1)
+          0x3F -> do
+            let (comment, remaining) = readUntilStr ">" (toStringFrom bs (off + 1) len)
+            n' <- push n (TreeComment (T.pack ('?' : comment)))
+            let toks = tokenizeCtx 0 False remaining
+            pushMany n' toks
+          b | isAlphaByte b -> goStartTag n off
+          _ -> do
+            n' <- push n (TreeText "<")
+            go n' off
+
+    goStartTag :: Int -> Int -> IO Int
+    goStartTag !n !off =
+      let !nameEnd = scanTagNameFast addr# off len
+          !tagLen = nameEnd - off
+          (# lcName, tid #) = internTagAddrU addr# off tagLen bs
+          (!attrs, !selfClose, !afterTag) = readTagAttrsBS sharedBA bs nameEnd len
+      in if afterTag > len
+          then pure n
+          else do
+            n' <- push n (TreeOpen lcName attrs)
+            n'' <- if selfClose || tagIdIsVoid tid
+              then push n' (TreeClose lcName)
+              else pure n'
+            if isRawTextTag tid && not selfClose
+              then pushMany n'' (tokenizeRawText (toStringFrom bs afterTag len) lcName)
+              else
+                if isRCDataTag tid && not selfClose
+                  then pushMany n'' (tokenizeRCData (toStringFrom bs afterTag len) lcName)
+                  else
+                    if tid == TagPlaintext
+                      then pushMany n'' (tokenizePlaintext (toStringFrom bs afterTag len))
+                      else go n'' afterTag
+
+    goEndTag :: Int -> Int -> IO Int
+    goEndTag !n !off
+      | off >= len = do n' <- push n (TreeText "<"); push n' (TreeText "/")
+      | isAlphaByte (readByteOff addr# off) =
+          let !nameEnd = scanTagNameFast addr# off len
+              !tagLen = nameEnd - off
+              (# lcName, _tid #) = internTagAddrU addr# off tagLen bs
+              !afterGt = skipToGtBS bs nameEnd len
+          in do
+            n' <- push n (TreeClose lcName)
+            go n' afterGt
+      | readByteOff addr# off == 0x3E = do
+          n' <- push n (TreeComment "")
+          go n' (off + 1)
+      | otherwise = do
+          let (comment, remaining) = readUntilStr ">" (toStringFrom bs off len)
+          n' <- push n (TreeComment (T.pack comment))
+          pushMany n' (tokenizeCtx 0 False remaining)
+  finalN <- go 0 0
+  arr <- readIORef evtArrRef
+  freezeSmallArray arr 0 finalN
+{-# NOINLINE tokenizeRawEventsIO #-}
+
+
+-- | Count tokens in a chunk without allocating Token objects.
+-- Uses the same fast-scan approach as tokenizeOnlyIO.
+tokenizeCountChunk :: ByteString -> IO Int
+tokenizeCountChunk bs = do
+  let !len = BS.length bs
+      !(BS (ForeignPtr addr# _) _) = bs
+  countRef <- newIORef (0 :: Int)
+  let go !off
+        | off >= len = pure ()
+        | otherwise =
+            let !b = readByteOff addr# off
+            in if b /= 0x3C && b /= 0x26 && b /= 0x00 && b /= 0x0D
+                then do
+                  let !end = scanTextFast addr# (off + 1) len
+                  modifyIORef' countRef (+ 1)
+                  go end
+                else case b of
+                  0x3C
+                    | off + 1 < len ->
+                        let !b2 = readByteOff addr# (off + 1)
+                        in if isAlphaByte b2
+                            then do
+                              let !nameEnd = scanTagName bs (off + 1) len
+                                  !afterTag = skipAttrsBS bs nameEnd len
+                              modifyIORef' countRef (+ 1)
+                              go afterTag
+                            else
+                              if b2 == 0x2F && off + 2 < len && isAlphaByte (readByteOff addr# (off + 2))
+                                then do
+                                  let !nameEnd = scanTagName bs (off + 2) len
+                                      !afterGt = skipToGtBS bs nameEnd len
+                                  modifyIORef' countRef (+ 1)
+                                  go afterGt
+                                else do
+                                  modifyIORef' countRef (+ 1)
+                                  go (off + 1)
+                  _ -> do
+                    modifyIORef' countRef (+ 1)
+                    go (off + 1)
+  go 0
+  readIORef countRef
+{-# NOINLINE tokenizeCountChunk #-}
+
+
 parseHTMLFragment :: Text -> Maybe Text -> ByteString -> [HTMLNode]
 parseHTMLFragment contextTag contextNs bs = unsafePerformIO $ do
   let txt = TE.decodeUtf8Lenient bs
@@ -1040,7 +1352,12 @@ fragmentTokenize ctx ctxNs txt
 ------------------------------------------------------------------------
 
 newTreeBuilder :: Maybe (Text, Maybe Text) -> IO TreeBuilder
-newTreeBuilder mCtx = do
+newTreeBuilder = newTreeBuilderWith False True 0
+
+
+
+newTreeBuilderWith :: Bool -> Bool -> Int -> Maybe (Text, Maybe Text) -> IO TreeBuilder
+newTreeBuilderWith emitting buildDOM initCap mCtx = do
   scalars <- mallocBytes (sTotalSlots * 8)
   writeScalar scalars sMode (fromEnum MInitial)
   writeScalar scalars sOriginalMode (fromEnum MInitial)
@@ -1058,6 +1375,11 @@ newTreeBuilder mCtx = do
   tmRef <- newIORef []
   docRef <- newIORef []
   qmRef <- newIORef "no-quirks"
+  let !arrCap = max 1 initCap
+  evtArr <- newSmallArray arrCap (TreeClose "") >>= newIORef
+  evtCntBA <- newByteArray 16
+  writeByteArray evtCntBA 0 (0 :: Int)
+  writeByteArray evtCntBA 1 arrCap
   let tb0 =
         TreeBuilder
           scalars
@@ -1072,17 +1394,21 @@ newTreeBuilder mCtx = do
           True
           mCtx
           Nothing
+          emitting
+          buildDOM
+          evtArr
+          evtCntBA
   case mCtx of
     Nothing -> pure tb0
     Just (ctxTag, ctxNs) -> do
       htmlNode <- newTBNode tb0 "html" TagHtml emptySmallArray Nothing False
-      modifyIORef' docRef (++ [CElement htmlNode])
+      when (tbBuildDOM tb0) $ modifyIORef' docRef (++ [CElement htmlNode])
       esPush stack htmlNode
       mCtxElem <- case ctxNs of
         Just ns | ns == "svg" || ns == "math" -> do
           let adjustedName = if ns == "svg" then adjustSVGTagName ctxTag else ctxTag
           ctxNode <- newTBNode tb0 adjustedName (tagIdFromText adjustedName) emptySmallArray ctxNs False
-          appendChild htmlNode ctxNode
+          when (tbBuildDOM tb0) $ appendChild htmlNode ctxNode
           esWriteList stack [ctxNode, htmlNode]
           tbSetMode tb0 MInBody
           pure (Just ctxNode)
@@ -1119,24 +1445,39 @@ resetInsertionModeForContext name _ns =
 
 {-# INLINE newTBNode #-}
 newTBNode :: TreeBuilder -> Text -> TagId -> SmallArray HTMLAttribute -> Maybe Text -> Bool -> IO TBNode
-newTBNode _tb name tid attrs ns isTmpl = do
-  attrRef <- newIORef attrs
-  childVecRef <- if tagIdIsVoid tid then pure emptyChildVecRef else newChildVec (initialChildCap tid)
-  parentRef <- newIORef Nothing
-  tmplRef <- if isTmpl then newChildVec 2 else pure emptyChildVecRef
+newTBNode tb name tid attrs ns isTmpl = do
   let !htmlNs = ns == Nothing || ns == Just "" || ns == Just "html"
-  pure $!
-    TBNode
-      { nodeName = name
-      , nodeTagId = tid
-      , nodeAttrs = attrRef
-      , nodeNs = ns
-      , nodeIsHTMLNs = htmlNs
-      , nodeIsTemplate = isTmpl
-      , nodeChildren = childVecRef
-      , nodeParent = parentRef
-      , nodeTemplateContents = tmplRef
-      }
+  if tbBuildDOM tb
+    then do
+      attrRef <- newIORef attrs
+      childVecRef <- if tagIdIsVoid tid then pure emptyChildVecRef else newChildVec (initialChildCap tid)
+      parentRef <- newIORef Nothing
+      tmplRef <- if isTmpl then newChildVec 2 else pure emptyChildVecRef
+      pure $!
+        TBNode
+          { nodeName = name
+          , nodeTagId = tid
+          , nodeAttrs = attrRef
+          , nodeNs = ns
+          , nodeIsHTMLNs = htmlNs
+          , nodeIsTemplate = isTmpl
+          , nodeChildren = childVecRef
+          , nodeParent = parentRef
+          , nodeTemplateContents = tmplRef
+          }
+    else
+      pure $!
+        TBNode
+          { nodeName = name
+          , nodeTagId = tid
+          , nodeAttrs = dummyAttrsRef
+          , nodeNs = ns
+          , nodeIsHTMLNs = htmlNs
+          , nodeIsTemplate = isTmpl
+          , nodeChildren = emptyChildVecRef
+          , nodeParent = dummyParentRef
+          , nodeTemplateContents = emptyChildVecRef
+          }
 
 
 initialChildCap :: TagId -> Int
@@ -1666,7 +2007,14 @@ currentNodeTagId tb = do
 
 
 popElement :: TreeBuilder -> IO ()
-popElement tb = esPop (tbStack tb)
+popElement tb = do
+  when (tbEmitEvents tb) $ do
+    let !(ElementStack esArr esCnt _) = tbStack tb
+    n <- readByteArray esCnt 0 :: IO Int
+    when (n > 0) $ do
+      top <- readSmallArray esArr (n - 1)
+      tbEmitEvent tb (TreeClose (nodeName top))
+  esPop (tbStack tb)
 
 
 popUntilInclusive :: Text -> TreeBuilder -> IO ()
@@ -1676,7 +2024,8 @@ popUntilInclusive target tb = popUntilInclusiveT (tagIdFromText target) target t
 {-# INLINE popUntilInclusiveT #-}
 popUntilInclusiveT :: TagId -> Text -> TreeBuilder -> IO ()
 popUntilInclusiveT !targetTid target tb = do
-  let es@(ElementStack _ esCnt tidsBuf) = tbStack tb
+  let es@(ElementStack esArr esCnt tidsBuf) = tbStack tb
+      !emitting = tbEmitEvents tb
       loop = do
         n <- readByteArray esCnt 0 :: IO Int
         if n <= 0
@@ -1701,6 +2050,9 @@ popUntilInclusiveT !targetTid target tb = do
                         else do
                           node <- esRead es (n - 1)
                           pure (nodeName node == target)
+            when emitting $ do
+              top <- readSmallArray esArr (n - 1)
+              tbEmitEvent tb (TreeClose (nodeName top))
             writeByteArray esCnt 0 (n - 1 :: Int)
             if matches then pure () else loop
   loop
@@ -1708,7 +2060,8 @@ popUntilInclusiveT !targetTid target tb = do
 
 popUntilPred :: (TagId -> Bool) -> TreeBuilder -> IO ()
 popUntilPred predicate tb = do
-  let es = tbStack tb
+  let es@(ElementStack esArr _ _) = tbStack tb
+      !emitting = tbEmitEvents tb
       loop = do
         n <- esSize es
         if n <= 0
@@ -1717,7 +2070,12 @@ popUntilPred predicate tb = do
             packed <- esReadTid es (n - 1)
             if predicate (tidFromPacked packed)
               then pure ()
-              else do esPop es; loop
+              else do
+                when emitting $ do
+                  top <- readSmallArray esArr (n - 1)
+                  tbEmitEvent tb (TreeClose (nodeName top))
+                esPop es
+                loop
   loop
 
 
@@ -1775,9 +2133,10 @@ insertElementT tb name tid attrs ns = do
       current <- readSmallArray esArr (n - 1)
       if insertFromTable && isFosterTarget (nodeTagId current)
         then fosterParentNode tb node
-        else appendChild current node
+        else when (tbBuildDOM tb) $ appendChild current node
     else insertIntoFragmentOrDoc tb node
   esPush (tbStack tb) node
+  tbEmitEvent tb (TreeOpen name attrs)
   if tid == TagP
     then do
       pc <- readScalar (tbScalars tb) sPOnStack
@@ -1787,11 +2146,12 @@ insertElementT tb name tid attrs ns = do
 
 
 insertIntoFragmentOrDoc :: TreeBuilder -> TBNode -> IO ()
-insertIntoFragmentOrDoc tb node = do
-  docNodes <- readIORef (tbDocument tb)
-  case findHtmlRoot docNodes of
-    Just htmlRoot -> appendChild htmlRoot node
-    Nothing -> modifyIORef' (tbDocument tb) (++ [CElement node])
+insertIntoFragmentOrDoc tb node =
+  when (tbBuildDOM tb) $ do
+    docNodes <- readIORef (tbDocument tb)
+    case findHtmlRoot docNodes of
+      Just htmlRoot -> appendChild htmlRoot node
+      Nothing -> modifyIORef' (tbDocument tb) (++ [CElement node])
   where
     findHtmlRoot [] = Nothing
     findHtmlRoot (CElement n : _) | nodeTagId n == TagHtml = Just n
@@ -1820,8 +2180,9 @@ insertComment tb txt = do
     then do
       current <- esTopUnsafe (tbStack tb)
       let ref = if nodeIsTemplate current then nodeTemplateContents current else nodeChildren current
-      pushChild ref (TBCComment commentText)
-    else modifyIORef' (tbDocument tb) (++ [CComment commentText])
+      when (tbBuildDOM tb) $ pushChild ref (TBCComment commentText)
+    else when (tbBuildDOM tb) $ modifyIORef' (tbDocument tb) (++ [CComment commentText])
+  tbEmitEvent tb (TreeComment commentText)
 
 
 cdataMarker :: Text
@@ -1848,11 +2209,11 @@ insertCommentToDocument tb txt = case tbFragmentContext tb of
     docNodes <- readIORef (tbDocument tb)
     case findHtmlRootInDoc docNodes of
       Just htmlRoot ->
-        pushChild (nodeChildren htmlRoot) (TBCComment (fixCDATAComment txt))
+        when (tbBuildDOM tb) $ pushChild (nodeChildren htmlRoot) (TBCComment (fixCDATAComment txt))
       Nothing ->
-        modifyIORef' (tbDocument tb) (++ [CComment (fixCDATAComment txt)])
+        when (tbBuildDOM tb) $ modifyIORef' (tbDocument tb) (++ [CComment (fixCDATAComment txt)])
   Nothing ->
-    modifyIORef' (tbDocument tb) (++ [CComment (fixCDATAComment txt)])
+    when (tbBuildDOM tb) $ modifyIORef' (tbDocument tb) (++ [CComment (fixCDATAComment txt)])
   where
     findHtmlRootInDoc [] = Nothing
     findHtmlRootInDoc (CElement n : _) | nodeTagId n == TagHtml = Just n
@@ -1860,8 +2221,9 @@ insertCommentToDocument tb txt = case tbFragmentContext tb of
 
 
 insertDoctype :: TreeBuilder -> Text -> Maybe Text -> Maybe Text -> IO ()
-insertDoctype tb name pub sys =
-  modifyIORef' (tbDocument tb) (++ [CDoctype name pub sys])
+insertDoctype tb name pub sys = do
+  when (tbBuildDOM tb) $ modifyIORef' (tbDocument tb) (++ [CDoctype name pub sys])
+  tbEmitEvent tb (TreeDoctype name pub sys)
 
 
 ------------------------------------------------------------------------
@@ -1888,10 +2250,10 @@ fosterParentText tb txt = do
           case mIdx of
             Just idx | idx > 0 -> do
               prev <- readSmallArray arr (idx - 1)
-              case prev of
+              when (tbBuildDOM tb) $ case prev of
                 TBCText old -> writeSmallArray arr (idx - 1) $! TBCText (old <> txt)
                 _ -> insertChildBefore ref tableNode (TBCText txt)
-            _ -> insertChildBefore ref tableNode (TBCText txt)
+            _ -> when (tbBuildDOM tb) $ insertChildBefore ref tableNode (TBCText txt)
         Nothing ->
           appendTextToCurrentNode tb txt
     (Nothing, Nothing) -> appendTextToCurrentNode tb txt
@@ -1899,32 +2261,34 @@ fosterParentText tb txt = do
 
 {-# INLINE appendTextInto #-}
 appendTextInto :: TreeBuilder -> TBNode -> Text -> IO ()
-appendTextInto _tb parent txt = do
-  let ref = if nodeIsTemplate parent then nodeTemplateContents parent else nodeChildren parent
-  pushText ref txt
+appendTextInto tb parent txt = do
+  when (tbBuildDOM tb) $ do
+    let ref = if nodeIsTemplate parent then nodeTemplateContents parent else nodeChildren parent
+    pushText ref txt
 
 
 fosterParentNode :: TreeBuilder -> TBNode -> IO ()
-fosterParentNode tb node = do
-  elems <- esReadAll (tbStack tb)
-  let mLastTable = findLastOnStack "table" elems
-      mLastTemplate = findLastTemplate elems
-  case (mLastTemplate, mLastTable) of
-    (Just (tmplIdx, tmplNode), Just (tblIdx, _))
-      | tmplIdx < tblIdx -> appendChild tmplNode node
-    (Just (_, tmplNode), Nothing) -> appendChild tmplNode node
-    (_, Just (_, tableNode)) -> do
-      mPar <- readIORef (nodeParent tableNode)
-      case mPar of
-        Just parent -> insertBefore parent tableNode node
-        Nothing ->
-          let above = dropWhile (/= tableNode) elems
-          in case drop 1 above of
-              (a : _) -> appendChild a node
-              [] -> pure ()
-    (Nothing, Nothing) -> case elems of
-      (current : _) -> appendChild current node
-      [] -> pure ()
+fosterParentNode tb node =
+  when (tbBuildDOM tb) $ do
+    elems <- esReadAll (tbStack tb)
+    let mLastTable = findLastOnStack "table" elems
+        mLastTemplate = findLastTemplate elems
+    case (mLastTemplate, mLastTable) of
+      (Just (tmplIdx, tmplNode), Just (tblIdx, _))
+        | tmplIdx < tblIdx -> appendChild tmplNode node
+      (Just (_, tmplNode), Nothing) -> appendChild tmplNode node
+      (_, Just (_, tableNode)) -> do
+        mPar <- readIORef (nodeParent tableNode)
+        case mPar of
+          Just parent -> insertBefore parent tableNode node
+          Nothing ->
+            let above = dropWhile (/= tableNode) elems
+            in case drop 1 above of
+                (a : _) -> appendChild a node
+                [] -> pure ()
+      (Nothing, Nothing) -> case elems of
+        (current : _) -> appendChild current node
+        [] -> pure ()
 
 
 findLastOnStack :: Text -> [TBNode] -> Maybe (Int, TBNode)
@@ -2191,19 +2555,19 @@ adoptionAgency subject tb = do
 
       mp <- readIORef (nodeParent lastNode)
       case mp of
-        Just parent -> removeChild parent lastNode
+        Just parent -> when (tbBuildDOM tb) $ removeChild parent lastNode
         Nothing -> pure ()
 
       insertFromTable <- tbInsertFromTable tb
       let shouldFoster = insertFromTable && nodeName commonAncestor `elem` ["table", "tbody", "tfoot", "thead", "tr"]
       if shouldFoster
         then fosterParentNode tb lastNode
-        else appendChild commonAncestor lastNode
+        else when (tbBuildDOM tb) $ appendChild commonAncestor lastNode
 
       newFmtNode <- newTBNode tb (nodeName fmtNode) (nodeTagId fmtNode) fmtAttrs (nodeNs fmtNode) False
 
-      transferChildren (nodeChildren furthestBlock) newFmtNode (nodeChildren newFmtNode)
-      appendChild furthestBlock newFmtNode
+      when (tbBuildDOM tb) $ transferChildren (nodeChildren furthestBlock) newFmtNode (nodeChildren newFmtNode)
+      when (tbBuildDOM tb) $ appendChild furthestBlock newFmtNode
 
       af2 <- readIORef (tbActiveFormatting tb)
       let updatedEntry = AFEntry (nodeName fmtNode) fmtAttrs newFmtNode
@@ -2264,9 +2628,9 @@ adoptionAgency subject tb = do
                   let newBookmark = if nodeRef == fb then afIdx + 1 else bookmark
                   mpLast <- readIORef (nodeParent nodeRef)
                   case mpLast of
-                    Just p -> removeChild p nodeRef
+                    Just p -> when (tbBuildDOM tb) $ removeChild p nodeRef
                     Nothing -> pure ()
-                  appendChild newElem nodeRef
+                  when (tbBuildDOM tb) $ appendChild newElem nodeRef
                   innerLoop newCount newElem fmtNode' newBookmark fb
 
     dropThrough' :: TBNode -> [TBNode] -> [TBNode]
@@ -2338,8 +2702,8 @@ runAdoptionInner fmtNode fmtIdx fmtAttrs furthestBlock tb = do
     finishAdoption :: Int -> Int -> TBNode -> IO ()
     finishAdoption bookmark fmtSIdx commonAnc = do
       newFmtNode <- newTBNode tb (nodeName fmtNode) (nodeTagId fmtNode) fmtAttrs (nodeNs fmtNode) False
-      transferChildren (nodeChildren furthestBlock) newFmtNode (nodeChildren newFmtNode)
-      appendChild furthestBlock newFmtNode
+      when (tbBuildDOM tb) $ transferChildren (nodeChildren furthestBlock) newFmtNode (nodeChildren newFmtNode)
+      when (tbBuildDOM tb) $ appendChild furthestBlock newFmtNode
       modifyIORef'
         (tbActiveFormatting tb)
         ( \af ->
@@ -2359,12 +2723,12 @@ runAdoptionInner fmtNode fmtIdx fmtAttrs furthestBlock tb = do
       -- Reparent fmtNode's later children into commonAncestor
       mp <- readIORef (nodeParent fmtNode)
       case mp of
-        Just parent -> removeChild parent fmtNode
+        Just parent -> when (tbBuildDOM tb) $ removeChild parent fmtNode
         Nothing -> pure ()
-      appendChild commonAnc furthestBlock
+      when (tbBuildDOM tb) $ appendChild commonAnc furthestBlock
       mp2 <- readIORef (nodeParent furthestBlock)
       case mp2 of
-        Just oldParent | oldParent /= commonAnc -> removeChild oldParent furthestBlock
+        Just oldParent | oldParent /= commonAnc -> when (tbBuildDOM tb) $ removeChild oldParent furthestBlock
         _ -> pure ()
 
 
@@ -2514,20 +2878,23 @@ modeBeforeHtml tb tok = case tok of
   TChar c | isWS c -> pure ()
   TStartTag "html" attrs _ _ -> do
     node <- newTBNode tb "html" TagHtml attrs Nothing False
-    modifyIORef' (tbDocument tb) (++ [CElement node])
+    when (tbBuildDOM tb) $ modifyIORef' (tbDocument tb) (++ [CElement node])
     esPush (tbStack tb) node
+    tbEmitEvent tb (TreeOpen "html" attrs)
     tbSetMode tb MBeforeHead
   TEndTag name _ | name `elem` ["head", "body", "html", "br"] -> do
     node <- newTBNode tb "html" TagHtml emptySmallArray Nothing False
-    modifyIORef' (tbDocument tb) (++ [CElement node])
+    when (tbBuildDOM tb) $ modifyIORef' (tbDocument tb) (++ [CElement node])
     esPush (tbStack tb) node
+    tbEmitEvent tb (TreeOpen "html" emptySmallArray)
     tbSetMode tb MBeforeHead
     processInMode tb tok
   TEndTag _ _ -> pure ()
   _ -> do
     node <- newTBNode tb "html" TagHtml emptySmallArray Nothing False
-    modifyIORef' (tbDocument tb) (++ [CElement node])
+    when (tbBuildDOM tb) $ modifyIORef' (tbDocument tb) (++ [CElement node])
     esPush (tbStack tb) node
+    tbEmitEvent tb (TreeOpen "html" emptySmallArray)
     tbSetMode tb MBeforeHead
     processInMode tb tok
 
@@ -2726,7 +3093,9 @@ modeInBodyStartTag !tb !name attrs !_sc !tid = do
         else do
           sz <- esSize (tbStack tb)
           if sz > 0
-            then do htmlNode <- esRead (tbStack tb) 0; addMissingAttrs htmlNode attrs
+            then do
+              when (tbBuildDOM tb) $ do
+                htmlNode <- esRead (tbStack tb) 0; addMissingAttrs htmlNode attrs
             else pure ()
     TagBody -> do
       tms <- readIORef (tbTemplateModes tb)
@@ -2738,7 +3107,9 @@ modeInBodyStartTag !tb !name attrs !_sc !tid = do
             then do
               bodyNode <- esRead (tbStack tb) 1
               if nodeTagId bodyNode == TagBody
-                then do addMissingAttrs bodyNode attrs; tbSetFramesetOk tb False
+                then do
+                  when (tbBuildDOM tb) $ addMissingAttrs bodyNode attrs
+                  tbSetFramesetOk tb False
                 else pure ()
             else pure ()
     TagFrameset -> do
@@ -2753,7 +3124,7 @@ modeInBodyStartTag !tb !name attrs !_sc !tid = do
               bodyNode <- esRead (tbStack tb) 1
               if nodeTagId bodyNode == TagBody
                 then do
-                  removeChild htmlNode bodyNode
+                  when (tbBuildDOM tb) $ removeChild htmlNode bodyNode
                   esSetSize (tbStack tb) 1
                   void $ insertElementT tb "frameset" TagFrameset attrs Nothing
                   tbSetMode tb MInFrameset
@@ -3848,7 +4219,7 @@ modeAfterBody tb tok = case tok of
     elems <- esReadAll (tbStack tb)
     case reverse elems of
       (htmlNode : _) ->
-        pushChild (nodeChildren htmlNode) (TBCComment t)
+        when (tbBuildDOM tb) $ pushChild (nodeChildren htmlNode) (TBCComment t)
       [] -> insertCommentToDocument tb t
   TDoctype _ _ _ _ -> pure ()
   TStartTag "html" _ _ _ -> modeInBody tb tok
@@ -4054,12 +4425,13 @@ appendTextToCurrentNode tb txt = do
         then fosterParentText tb txt
         else do
           let ref = if nodeIsTemplate current then nodeTemplateContents current else nodeChildren current
-          pushText ref txt
+          when (tbBuildDOM tb) $ pushText ref txt
     else do
       docNodes <- readIORef (tbDocument tb)
       case findHtmlRootDoc docNodes of
-        Just htmlRoot -> pushText (nodeChildren htmlRoot) txt
-        Nothing -> modifyIORef' (tbDocument tb) (appendTextToDocChildren txt)
+        Just htmlRoot -> when (tbBuildDOM tb) $ pushText (nodeChildren htmlRoot) txt
+        Nothing -> when (tbBuildDOM tb) $ modifyIORef' (tbDocument tb) (appendTextToDocChildren txt)
+  tbEmitEvent tb (TreeText txt)
   where
     findHtmlRootDoc [] = Nothing
     findHtmlRootDoc (CElement n : _) | nodeTagId n == TagHtml = Just n
@@ -4426,77 +4798,79 @@ tokenizeBSIO !bs !off0 !len !svgD0 !svgH0 !tb = go off0 svgD0 svgH0
 
     {-# INLINE emitText #-}
     emitText !t !firstByte = do
-      mode <- readMode scalars
-      case mode of
-        MInBody -> do
-          ignoreLF <- readBoolSlot scalars sIgnoreLF
-          if ignoreLF
-            then emit (TString t)
-            else do
-              hasAF <- readScalar scalars sHasAF
-              if hasAF /= 0 then reconstructActiveFormatting tb else pure ()
-              let !(ElementStack esArr esCnt _) = tbStack tb
-              n <- readByteArray esCnt 0 :: IO Int
-              cur <- readSmallArray esArr (n - 1)
-              pushText (nodeChildren cur) t
-              if not (isWSByte firstByte)
-                then writeScalar scalars sFramesetOk 0
+          mode <- readMode scalars
+          case mode of
+            MInBody -> do
+              ignoreLF <- readBoolSlot scalars sIgnoreLF
+              if ignoreLF
+                then emit (TString t)
                 else do
-                  fo <- readScalar scalars sFramesetOk
-                  if fo == 0
-                    then pure ()
-                    else
-                      if not (T.all isWS t)
-                        then writeScalar scalars sFramesetOk 0
-                        else pure ()
-        MText -> appendTextToCurrentNode tb t
-        _ -> emit (TString t)
+                  hasAF <- readScalar scalars sHasAF
+                  if hasAF /= 0 then reconstructActiveFormatting tb else pure ()
+                  let !(ElementStack esArr esCnt _) = tbStack tb
+                  n <- readByteArray esCnt 0 :: IO Int
+                  cur <- readSmallArray esArr (n - 1)
+                  when (tbBuildDOM tb) $ pushText (nodeChildren cur) t
+                  tbEmitEvent tb (TreeText t)
+                  if not (isWSByte firstByte)
+                    then writeScalar scalars sFramesetOk 0
+                    else do
+                      fo <- readScalar scalars sFramesetOk
+                      if fo == 0
+                        then pure ()
+                        else
+                          if not (T.all isWS t)
+                            then writeScalar scalars sFramesetOk 0
+                            else pure ()
+            MText -> appendTextToCurrentNode tb t
+            _ -> emit (TString t)
 
     {-# INLINE emitStartTag #-}
     emitStartTag !lcName attrs !selfClose !tid = do
-      ignoreLF <- readBoolSlot scalars sIgnoreLF
-      if ignoreLF then tbSetIgnoreLF tb False else pure ()
-      mode <- readMode scalars
-      case mode of
-        MInBody -> do
-          let ElementStack _ esCnt tidsBuf = tbStack tb
-          n <- readByteArray esCnt 0 :: IO Int
-          if n > 0
-            then do
-              packed <- readByteArray tidsBuf (n - 1) :: IO Int
-              if isHTMLFromPacked packed
-                then modeInBodyStartTag tb lcName attrs selfClose tid
+          ignoreLF <- readBoolSlot scalars sIgnoreLF
+          if ignoreLF then tbSetIgnoreLF tb False else pure ()
+          mode <- readMode scalars
+          case mode of
+            MInBody -> do
+              let ElementStack _ esCnt tidsBuf = tbStack tb
+              n <- readByteArray esCnt 0 :: IO Int
+              if n > 0
+                then do
+                  packed <- readByteArray tidsBuf (n - 1) :: IO Int
+                  if isHTMLFromPacked packed
+                    then modeInBodyStartTag tb lcName attrs selfClose tid
+                    else emit (TStartTag lcName attrs selfClose tid)
                 else emit (TStartTag lcName attrs selfClose tid)
-            else emit (TStartTag lcName attrs selfClose tid)
-        _ -> emit (TStartTag lcName attrs selfClose tid)
+            _ -> emit (TStartTag lcName attrs selfClose tid)
 
     {-# INLINE emitEndTag #-}
     emitEndTag !lcName !tid = do
-      ignoreLF <- readBoolSlot scalars sIgnoreLF
-      if ignoreLF then tbSetIgnoreLF tb False else pure ()
-      mode <- readMode scalars
-      case mode of
-        MInBody -> do
-          let ElementStack _ esCnt tidsBuf = tbStack tb
-          n <- readByteArray esCnt 0 :: IO Int
-          if n > 0
-            then do
-              packed <- readByteArray tidsBuf (n - 1) :: IO Int
-              if isHTMLFromPacked packed
+          ignoreLF <- readBoolSlot scalars sIgnoreLF
+          if ignoreLF then tbSetIgnoreLF tb False else pure ()
+          mode <- readMode scalars
+          case mode of
+            MInBody -> do
+              let ElementStack _ esCnt tidsBuf = tbStack tb
+              n <- readByteArray esCnt 0 :: IO Int
+              if n > 0
                 then do
-                  let !topTid = tidFromPacked packed
-                  if topTid == tid && endTagCanFastPop tid
+                  packed <- readByteArray tidsBuf (n - 1) :: IO Int
+                  if isHTMLFromPacked packed
                     then do
-                      writeByteArray esCnt 0 (n - 1 :: Int)
-                      if tid == TagP
+                      let !topTid = tidFromPacked packed
+                      if topTid == tid && endTagCanFastPop tid
                         then do
-                          pc <- readScalar scalars sPOnStack
-                          writeScalar scalars sPOnStack (max 0 (pc - 1))
-                        else pure ()
-                    else modeInBodyEndTag tb lcName tid
+                          tbEmitEvent tb (TreeClose lcName)
+                          writeByteArray esCnt 0 (n - 1 :: Int)
+                          if tid == TagP
+                            then do
+                              pc <- readScalar scalars sPOnStack
+                              writeScalar scalars sPOnStack (max 0 (pc - 1))
+                            else pure ()
+                        else modeInBodyEndTag tb lcName tid
+                    else emit (TEndTag lcName tid)
                 else emit (TEndTag lcName tid)
-            else emit (TEndTag lcName tid)
-        _ -> emit (TEndTag lcName tid)
+            _ -> emit (TEndTag lcName tid)
 
     go !off !svgD !svgH
       | off >= len = pure ()
@@ -4932,6 +5306,85 @@ skipTagBS addr# = go
       | otherwise = scanPast q (i + 1) len
 
 
+-- | Scan tag attrs, extracting only the class value (as ByteString slice).
+-- Returns (# classOff, classLen, selfClose, afterTag #) where classOff = -1
+-- means no class attribute found.  Zero allocation.
+{-# INLINE scanClassAndSkip #-}
+scanClassAndSkip :: Addr# -> Int -> Int -> (# Int, Int, Bool, Int #)
+scanClassAndSkip addr# !off0 !len = go off0 (-1) 0
+  where
+    rd :: Int -> Word8
+    rd = readByteOff addr#
+    {-# INLINE rd #-}
+
+    go !i !cOff !cLen
+      | i >= len = (# cOff, cLen, False, len + 1 #)
+      | otherwise = case rd i of
+          0x3E -> (# cOff, cLen, False, i + 1 #)
+          0x2F | i + 1 < len, rd (i + 1) == 0x3E -> (# cOff, cLen, True, i + 2 #)
+          b | isWSByte b -> go (i + 1) cOff cLen
+          _ ->
+            let !nameStart = i
+                !nameEnd = scanAttrNameEnd i
+                !nameLen = nameEnd - nameStart
+                !isClass = nameLen == 5
+                         && (rd nameStart .|. 0x20) == 0x63       -- c
+                         && (rd (nameStart+1) .|. 0x20) == 0x6C   -- l
+                         && (rd (nameStart+2) .|. 0x20) == 0x61   -- a
+                         && (rd (nameStart+3) .|. 0x20) == 0x73   -- s
+                         && (rd (nameStart+4) .|. 0x20) == 0x73   -- s
+            in if nameLen == 0
+                then go (max (i + 1) nameEnd) cOff cLen
+                else
+                  let !i2 = skipWSAddr addr# nameEnd len
+                  in if i2 >= len || rd i2 /= 0x3D
+                      then go i2 cOff cLen
+                      else
+                        let !i3 = skipWSAddr addr# (i2 + 1) len
+                        in if i3 >= len
+                            then go i3 cOff cLen
+                            else case rd i3 of
+                              0x22 -> let !vStart = i3 + 1
+                                          !vEnd = scanPastQ 0x22 vStart
+                                          !vLen = max 0 (vEnd - 1 - vStart)
+                                      in if isClass
+                                          then go vEnd vStart vLen
+                                          else go vEnd cOff cLen
+                              0x27 -> let !vStart = i3 + 1
+                                          !vEnd = scanPastQ 0x27 vStart
+                                          !vLen = max 0 (vEnd - 1 - vStart)
+                                      in if isClass
+                                          then go vEnd vStart vLen
+                                          else go vEnd cOff cLen
+                              _ -> let !vEnd = scanUnquotedEnd i3
+                                   in if isClass
+                                       then go vEnd i3 (vEnd - i3)
+                                       else go vEnd cOff cLen
+
+    scanAttrNameEnd !j
+      | j >= len = j
+      | otherwise = case rd j of
+          0x3D -> j
+          0x3E -> j
+          0x2F -> j
+          b | isWSByte b -> j
+          _ -> scanAttrNameEnd (j + 1)
+
+    scanPastQ :: Word8 -> Int -> Int
+    scanPastQ !q !j
+      | j >= len = len
+      | rd j == q = j + 1
+      | otherwise = scanPastQ q (j + 1)
+
+    scanUnquotedEnd :: Int -> Int
+    scanUnquotedEnd !j
+      | j >= len = len
+      | otherwise = case rd j of
+          0x3E -> j
+          b | isWSByte b -> j
+          _ -> scanUnquotedEnd (j + 1)
+
+
 {-# INLINE readTagAttrsBS #-}
 readTagAttrsBS :: ByteArray -> ByteString -> Int -> Int -> (SmallArray HTMLAttribute, Bool, Int)
 readTagAttrsBS !ba !bs !off !len =
@@ -4961,9 +5414,10 @@ readTagAttrsBS !ba !bs !off !len =
             in if T.null name
                 then go (max (i + 1) i3) acc n
                 else
-                  if any (\(HTMLAttribute na _) -> na == name) acc
+                  let !attr = HTMLAttribute name val
+                  in if n > 0 && any (\(HTMLAttribute na _) -> na == name) acc
                     then go i3 acc n
-                    else go i3 (HTMLAttribute name val : acc) (n + 1)
+                    else go i3 (attr : acc) (n + 1)
 
     scanAttrName !i = sn i
       where
@@ -5176,6 +5630,11 @@ bsToByteArray (BS (ForeignPtr addr# _) len) =
     (# _, ba# #) -> ByteArray ba#
   where
     !(I# len#) = len
+
+
+{-# INLINE byteStringPinnedByteArray #-}
+byteStringPinnedByteArray :: ByteString -> ByteArray
+byteStringPinnedByteArray = bsToByteArray
 
 
 skipWS :: ByteString -> Int -> Int -> Int
@@ -5683,6 +6142,122 @@ matchCloseTag cs tag =
       && case rest of
         [] -> False
         (c : _) -> c == '>' || c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\x0C' || c == '/'
+
+
+-- | Remaining input after the first markup declaration when the input is the
+-- substring that follows @\<!\@ (same convention as 'tokenizeMarkupDeclCtx').
+{-# NOINLINE markupDeclRemaining #-}
+markupDeclRemaining :: Int -> Bool -> String -> String
+markupDeclRemaining _ _ = \case
+  ('-':'-':rest) -> snd (readComment rest)
+  rest
+    | matchCaseI rest "doctype" ->
+        let rest1 = drop 7 rest
+            cs1 = dropWhile isSpDoctype rest1
+            (_name, cs2) = readDoctypeName cs1
+            cs3 = dropWhile isSpDoctype cs2
+            (_pub, _sys, _fq, cs4) = readDoctypeIds cs3
+         in cs4
+    | matchCaseI rest "[cdata[" ->
+        let rest1 = drop 7 rest
+         in snd (readUntilStr "]]>" rest1)
+    | otherwise ->
+        snd (readBogusComment rest)
+  where
+    isSpDoctype c = c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\x0C'
+
+
+-- | Advance a UTF-8 'ByteString' by @n@ Unicode scalar values starting at @off@.
+{-# INLINE utf8CharWidth #-}
+utf8CharWidth :: Word8 -> Int
+utf8CharWidth !w
+  | w .&. 0x80 == 0 = 1
+  | w .&. 0xE0 == 0xC0 = 2
+  | w .&. 0xF0 == 0xE0 = 3
+  | w .&. 0xF8 == 0xF0 = 4
+  | otherwise = 1
+
+
+{-# INLINE utf8AdvanceNChars #-}
+utf8AdvanceNChars :: ByteString -> Int -> Int -> Int
+utf8AdvanceNChars !bs !o !n
+  | n <= 0 = o
+  | o >= BS.length bs = o
+  | otherwise =
+      let !w = utf8CharWidth (BSU.unsafeIndex bs o)
+       in utf8AdvanceNChars bs (o + w) (n - 1)
+
+
+-- | String suffix after a raw-text element's closing tag (after @>@), or the
+-- original string if no closing tag is found.
+{-# NOINLINE rawTextRemainingString #-}
+rawTextRemainingString :: String -> Text -> String
+rawTextRemainingString cs tag
+  | tag == "plaintext" = []
+  | tag == "script" =
+      case scriptDataRemaining cs of
+        Nothing -> []
+        Just r -> r
+  | otherwise = goRaw (T.unpack tag) cs
+  where
+    goRaw !_ [] = []
+    goRaw !tagStr ('<' : '/' : rest)
+      | matchCloseTag rest tagStr =
+          skipToGtWithAttrs (drop (length tagStr) rest)
+    goRaw !tagStr (_ : rest) = goRaw tagStr rest
+
+
+{-# NOINLINE scriptDataRemaining #-}
+scriptDataRemaining :: String -> Maybe String
+scriptDataRemaining cs = scriptNormal cs
+  where
+    scriptNormal [] = Nothing
+    scriptNormal ('<' : '/' : rest)
+      | matchCloseTag rest "script" =
+          Just (skipToGtWithAttrs (drop 6 rest))
+    scriptNormal ('<' : '!' : '-' : '-' : rest) = scriptEscaped rest
+    scriptNormal ('\0' : rest) = scriptNormal rest
+    scriptNormal (_ : rest) = scriptNormal rest
+
+    scriptEscaped [] = Nothing
+    scriptEscaped ('-' : '-' : '>' : rest) = scriptNormal rest
+    scriptEscaped ('<' : '/' : rest)
+      | matchCloseTag rest "script" =
+          Just (skipToGtWithAttrs (drop 6 rest))
+    scriptEscaped ('<' : rest) =
+      case tryMatchScriptStart rest of
+        Just rest' -> scriptDoubleEscaped rest'
+        Nothing -> scriptEscaped rest
+    scriptEscaped ('\0' : rest) = scriptEscaped rest
+    scriptEscaped (_ : rest) = scriptEscaped rest
+
+    scriptDoubleEscaped [] = Nothing
+    scriptDoubleEscaped ('-' : '-' : '>' : rest) = scriptEscaped rest
+    scriptDoubleEscaped ('<' : '/' : rest) =
+      let (isScript, _consumed, rest') = tryMatchScriptEnd rest
+       in if isScript then scriptEscaped rest' else scriptDoubleEscaped rest'
+    scriptDoubleEscaped ('\0' : rest) = scriptDoubleEscaped rest
+    scriptDoubleEscaped (_ : rest) = scriptDoubleEscaped rest
+
+    tryMatchScriptStart ds =
+      case ds of
+        (c1 : c2 : c3 : c4 : c5 : c6 : rest)
+          | map toLower [c1, c2, c3, c4, c5, c6] == "script"
+          , case rest of
+              [] -> True
+              (r : _) -> r `elem` (" \t\n\r\x0C/>" :: [Char]) ->
+              Just rest
+        _ -> Nothing
+
+    tryMatchScriptEnd ds =
+      case ds of
+        (c1 : c2 : c3 : c4 : c5 : c6 : rest)
+          | map toLower [c1, c2, c3, c4, c5, c6] == "script"
+          , case rest of
+              [] -> True
+              (r : _) -> r `elem` (" \t\n\r\x0C/>" :: [Char]) ->
+              (True, [c1, c2, c3, c4, c5, c6], rest)
+        _ -> (False, [], ds)
 
 
 ------------------------------------------------------------------------

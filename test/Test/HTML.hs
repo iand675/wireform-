@@ -8,8 +8,7 @@ import Data.Foldable (toList)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Data.Primitive.SmallArray (SmallArray, emptySmallArray, smallArrayFromList, sizeofSmallArray, indexSmallArray)
-import qualified Data.Vector as V
+import Data.Primitive.SmallArray (emptySmallArray, smallArrayFromList, sizeofSmallArray, indexSmallArray)
 import GHC.Generics (Generic)
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -17,7 +16,7 @@ import Test.Tasty.HUnit
 import HTML.Value
 import HTML.Parse
 import HTML.Encode
-import HTML.Query
+import qualified HTML.DOM as DOM
 import HTML.Class
 
 htmlTests :: TestTree
@@ -107,22 +106,22 @@ autoCloseTests = testGroup "Auto-close"
   [ testCase "<p>one<p>two → two separate <p> elements" $ do
       let doc = parseHTML "<div><p>one<p>two</div>"
           root = htmlRoot doc
-          ps = getElementsByTag "p" root
-      V.length ps @?= 2
-      textContent (ps V.! 0) @?= "one"
-      textContent (ps V.! 1) @?= "two"
+          ps = queryAll "p" root
+      length ps @?= 2
+      textContent (ps !! 0) @?= "one"
+      textContent (ps !! 1) @?= "two"
 
   , testCase "<li> auto-close" $ do
       let doc = parseHTML "<ul><li>one<li>two<li>three</ul>"
           root = htmlRoot doc
-          lis = getElementsByTag "li" root
-      V.length lis @?= 3
+          lis = queryAll "li" root
+      length lis @?= 3
 
   , testCase "<td> auto-close" $ do
       let doc = parseHTML "<table><tr><td>a<td>b</tr></table>"
           root = htmlRoot doc
-          tds = getElementsByTag "td" root
-      V.length tds @?= 2
+          tds = queryAll "td" root
+      length tds @?= 2
   ]
 
 rawTextTests :: TestTree
@@ -237,49 +236,49 @@ queryTests = testGroup "Query"
   [ testCase "querySelector by tag" $ do
       let doc = parseHTML "<div><p>one</p><p>two</p></div>"
           root = htmlRoot doc
-      case querySelector "p" root of
+      case queryOne "p" root of
         Just n -> deepTextContent n @?= "one"
         Nothing -> assertFailure "expected p"
 
   , testCase "querySelectorAll by tag" $ do
       let doc = parseHTML "<div><p>one</p><p>two</p></div>"
           root = htmlRoot doc
-          ps = querySelectorAll "p" root
-      V.length ps @?= 2
+          ps = queryAll "p" root
+      length ps @?= 2
 
   , testCase "querySelector by class" $ do
       let doc = parseHTML "<div><span class=\"highlight\">yes</span><span>no</span></div>"
           root = htmlRoot doc
-      case querySelector ".highlight" root of
+      case queryOne ".highlight" root of
         Just n -> deepTextContent n @?= "yes"
         Nothing -> assertFailure "expected .highlight"
 
   , testCase "querySelector by id" $ do
       let doc = parseHTML "<div><span id=\"main\">target</span></div>"
           root = htmlRoot doc
-      case querySelector "#main" root of
+      case queryOne "#main" root of
         Just n -> deepTextContent n @?= "target"
         Nothing -> assertFailure "expected #main"
 
   , testCase "getElementById" $ do
       let doc = parseHTML "<div><p id=\"intro\">Hello</p></div>"
           root = htmlRoot doc
-      case getElementById "intro" root of
+      case queryOne "#intro" root of
         Just n -> deepTextContent n @?= "Hello"
         Nothing -> assertFailure "expected element with id intro"
 
   , testCase "getElementsByClass" $ do
       let doc = parseHTML "<div><p class=\"item\">a</p><p class=\"item\">b</p><p>c</p></div>"
           root = htmlRoot doc
-          items = getElementsByClass "item" root
-      V.length items @?= 2
+          items = queryAll ".item" root
+      length items @?= 2
 
   , testCase "descendant selector: div.main p" $ do
       let doc = parseHTML "<div class=\"main\"><p>target</p></div><p>other</p>"
           root = htmlRoot doc
-          results = querySelectorAll "div.main p" root
-      V.length results @?= 1
-      deepTextContent (V.head results) @?= "target"
+          results = queryAll "div.main p" root
+      length results @?= 1
+      deepTextContent (head results) @?= "target"
   ]
 
 encodeDecodeTests :: TestTree
@@ -305,8 +304,8 @@ encodeDecodeTests = testGroup "Encode/Decode"
           decoded = parseHTML encoded
           root = htmlRoot decoded
       assertBool "has div" (containsTag "div" root)
-      let ps = getElementsByTag "p" root
-      V.length ps @?= 2
+      let ps = queryAll "p" root
+      length ps @?= 2
 
   , testCase "boolean attributes minimized" $ do
       let doc = HTMLDocument Nothing
@@ -423,3 +422,9 @@ findComment _ = Nothing
 
 deepTextContent :: HTMLNode -> Text
 deepTextContent = textContent
+
+queryAll :: Text -> HTMLNode -> [HTMLNode]
+queryAll sel raw = map DOM.rawNode (DOM.querySelectorAll (DOM.rootNode raw) sel)
+
+queryOne :: Text -> HTMLNode -> Maybe HTMLNode
+queryOne sel raw = DOM.rawNode <$> DOM.querySelector (DOM.rootNode raw) sel

@@ -26,6 +26,9 @@ packages:
   wireform-ndjson/
   wireform-grpc/
 
+package *
+  optimization: 1
+
 package wireform
   flags: +snappy +zstd
 
