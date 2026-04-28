@@ -14,7 +14,7 @@ import Test.Tasty.HUnit hiding (assert)
 import Test.Tasty.Hedgehog
 
 import qualified CBOR.Value as C
-import CBOR.Encode (encode, encodeDeterministic, encodeSequence)
+import CBOR.Encode (encode, encodeDeterministic, encodeDeterministicLengthFirst, encodeSequence)
 import CBOR.Decode (decode, decodeSequence)
 import CBOR.JSON (toJSON, fromJSON)
 
@@ -598,7 +598,10 @@ jsonTests = testGroup "JSON conversion"
 
 deterministicTests :: TestTree
 deterministicTests = testGroup "Deterministic encoding"
-  [ testCase "sorted map keys by length first" $ do
+  [ testCase "RFC 8949 §4.2.1 bytewise lex ordering" $ do
+      -- UInt 1 encodes to [0x01]; "a" -> [0x61, 0x61]; "bb" -> [0x62, 0x62, 0x62].
+      -- Bytewise lex sort puts 0x01 first, then 0x61.., then 0x62..
+      -- which happens to coincide with length-first here.
       let val = C.Map (V.fromList
             [ (C.TextString "bb", C.UInt 2)
             , (C.UInt 1, C.UInt 1)
@@ -610,6 +613,39 @@ deterministicTests = testGroup "Deterministic encoding"
           let keys = V.toList (V.map fst kvs)
           keys @?= [C.UInt 1, C.TextString "a", C.TextString "bb"]
         other -> assertFailure $ "expected Map, got: " ++ show other
+
+  , testCase "RFC 8949 §4.2.1 short string sorts before longer with smaller first byte" $ do
+      -- Lex: "ab" (0x62 0x61 0x62) vs "b" (0x61 0x62) -> compare 0x61 vs 0x62
+      -- so text "b" (header 0x61, payload 0x62) sorts before text "ab"
+      -- (header 0x62, payload 0x61 0x62) bytewise.
+      let val = C.Map (V.fromList
+            [ (C.TextString "ab", C.UInt 1)
+            , (C.TextString "b", C.UInt 2)
+            ])
+          bs = encodeDeterministic val
+      case decode bs of
+        Right (C.Map kvs) ->
+          V.toList (V.map fst kvs) @?= [C.TextString "b", C.TextString "ab"]
+        other -> assertFailure $ "expected Map, got: " ++ show other
+
+  , testCase "RFC 8949 vs RFC 7049 length-first divergence" $ do
+      -- Constructed so the two sort orders disagree:
+      --   UInt 100        -> [0x18, 0x64]   (2 bytes, first byte 0x18)
+      --   TextString ""   -> [0x60]         (1 byte, first byte 0x60)
+      -- Bytewise lex (RFC 8949): 0x18 < 0x60 -> UInt 100 first.
+      -- Length-first (RFC 7049): 1 byte < 2 bytes -> TextString "" first.
+      let val = C.Map (V.fromList
+            [ (C.TextString "", C.UInt 1)
+            , (C.UInt 100, C.UInt 2)
+            ])
+      case decode (encodeDeterministic val) of
+        Right (C.Map kvs) ->
+          V.toList (V.map fst kvs) @?= [C.UInt 100, C.TextString ""]
+        other -> assertFailure $ "8949: expected Map, got: " ++ show other
+      case decode (encodeDeterministicLengthFirst val) of
+        Right (C.Map kvs) ->
+          V.toList (V.map fst kvs) @?= [C.TextString "", C.UInt 100]
+        other -> assertFailure $ "7049: expected Map, got: " ++ show other
 
   , testCase "deterministic roundtrip" $ do
       let val = C.Map (V.fromList

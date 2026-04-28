@@ -14,6 +14,7 @@
 module CBOR.Encode
   ( encode
   , encodeDeterministic
+  , encodeDeterministicLengthFirst
   , encodeSequence
   ) where
 
@@ -24,7 +25,6 @@ import qualified Data.ByteString.Internal as BSI
 import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as V
 import Data.List (sortBy)
-import Data.Ord (comparing)
 import Data.Word (Word8, Word16, Word32, Word64, byteSwap16, byteSwap32, byteSwap64)
 import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Marshal.Utils (copyBytes)
@@ -42,12 +42,27 @@ encode !val =
   let !sz = valueSize val
   in directEncode sz (\p off -> writeValue p off val)
 
--- | Encode in Deterministic CBOR (RFC 8949 Section 4.2):
--- map keys sorted by encoded form (shortest first, then lexicographic),
+-- | Encode in Deterministic CBOR (RFC 8949 Section 4.2.1):
+-- map keys sorted bytewise lexicographically (i.e. unsigned byte
+-- comparison) over the deterministic encoding of each key,
 -- minimal integer encoding (already done), no indefinite-length (already done).
+--
+-- This matches the bytewise lexicographic ordering required by RFC 8949 §4.2.1
+-- (Core Deterministic Encoding Requirements). Use
+-- 'encodeDeterministicLengthFirst' for the older RFC 7049 §3.9
+-- length-first ordering when interoperating with CTAP2-style consumers.
 encodeDeterministic :: C.Value -> ByteString
 encodeDeterministic !val =
-  let !sorted = sortMapKeys val
+  let !sorted = sortMapKeysWith cmpEncodedKeyLex val
+      !sz = valueSize sorted
+  in directEncode sz (\p off -> writeValue p off sorted)
+
+-- | Encode using RFC 7049 \§3.9 length-first ordering: shorter encoded
+-- keys first, then bytewise lexicographic. Retained for compatibility
+-- with CTAP2 / older deterministic CBOR consumers.
+encodeDeterministicLengthFirst :: C.Value -> ByteString
+encodeDeterministicLengthFirst !val =
+  let !sorted = sortMapKeysWith cmpEncodedKeyLengthFirst val
       !sz = valueSize sorted
   in directEncode sz (\p off -> writeValue p off sorted)
 
@@ -57,23 +72,34 @@ encodeSequence !vals =
   let !sz = V.foldl' (\acc v -> acc + valueSize v) 0 vals
   in directEncode sz (\p off -> V.foldM' (\o v -> writeValue p o v) off vals)
 
-sortMapKeys :: C.Value -> C.Value
-sortMapKeys = \case
-  C.Map kvs ->
-    let sorted = V.fromList $ sortBy cmpEncodedKey $ V.toList $ V.map (\(k, v) -> (sortMapKeys k, sortMapKeys v)) kvs
-    in C.Map sorted
-  C.Array vs -> C.Array (V.map sortMapKeys vs)
-  C.Tag n v -> C.Tag n (sortMapKeys v)
-  other -> other
+sortMapKeysWith
+  :: ((C.Value, C.Value) -> (C.Value, C.Value) -> Ordering)
+  -> C.Value
+  -> C.Value
+sortMapKeysWith cmp = go
+  where
+    go = \case
+      C.Map kvs ->
+        let !recursed = V.map (\(k, v) -> (go k, go v)) kvs
+            !sorted   = V.fromList $ sortBy cmp $ V.toList recursed
+        in C.Map sorted
+      C.Array vs -> C.Array (V.map go vs)
+      C.Tag n v  -> C.Tag n (go v)
+      other      -> other
 
-cmpEncodedKey :: (C.Value, C.Value) -> (C.Value, C.Value) -> Ordering
-cmpEncodedKey (k1, _) (k2, _) =
+-- | RFC 8949 §4.2.1 bytewise lexicographic comparison of encoded keys.
+-- Treats each encoded key as a sequence of unsigned bytes.
+cmpEncodedKeyLex :: (C.Value, C.Value) -> (C.Value, C.Value) -> Ordering
+cmpEncodedKeyLex (k1, _) (k2, _) = compare (encode k1) (encode k2)
+
+-- | RFC 7049 §3.9 length-first comparison: shorter encoded key first,
+-- then bytewise lexicographic.
+cmpEncodedKeyLengthFirst :: (C.Value, C.Value) -> (C.Value, C.Value) -> Ordering
+cmpEncodedKeyLengthFirst (k1, _) (k2, _) =
   let !e1 = encode k1
       !e2 = encode k2
-      !l1 = BS.length e1
-      !l2 = BS.length e2
-  in case compare l1 l2 of
-       EQ -> compare e1 e2
+  in case compare (BS.length e1) (BS.length e2) of
+       EQ    -> compare e1 e2
        other -> other
 
 writeHeader :: Ptr Word8 -> Int -> Word8 -> Word64 -> IO Int

@@ -70,12 +70,53 @@ buildNode (Element name attrs children)
       <> V.foldl' (\acc c -> acc <> buildNode c) mempty children
       <> B.string7 "</" <> buildName name <> B.char7 '>'
 buildNode (Text t) = escapeXMLText t
-buildNode (CData t) = B.string7 "<![CDATA[" <> B.byteString (TE.encodeUtf8 t) <> B.string7 "]]>"
-buildNode (Comment t) = B.string7 "<!--" <> B.byteString (TE.encodeUtf8 t) <> B.string7 "-->"
+buildNode (CData t) = buildCDataSafe t
+buildNode (Comment t) = buildCommentSafe t
 buildNode (ProcessingInstruction target content) =
-  B.string7 "<?" <> B.byteString (TE.encodeUtf8 target)
-  <> (if T.null content then mempty else B.char7 ' ' <> B.byteString (TE.encodeUtf8 content))
-  <> B.string7 "?>"
+  buildPISafe target content
+
+-- | Build a CDATA section, splitting on @]]>@ to keep the output well-formed.
+-- XML 1.0 §2.7 forbids the literal @]]>@ inside a CDATA section. We split
+-- such occurrences across two CDATA sections (@...]]@ + @]]>@ + @>...@) so
+-- the original text is preserved on parse.
+buildCDataSafe :: Text -> Builder
+buildCDataSafe t = go (T.splitOn "]]>" t)
+  where
+    open  = B.string7 "<![CDATA["
+    close = B.string7 "]]>"
+    splitMarker = B.string7 "]]]]><![CDATA[>"
+    -- splitOn yields N+1 chunks; insert "]]><![CDATA[>" between adjacent
+    -- chunks where a literal "]]>" used to live, but emit it as
+    -- "...]]" (end first CDATA) + ">..." (start of next CDATA payload).
+    go []     = open <> close
+    go [x]    = open <> B.byteString (TE.encodeUtf8 x) <> close
+    go (x:xs) =
+      open <> B.byteString (TE.encodeUtf8 x)
+        <> mconcat (fmap (\y -> splitMarker <> B.byteString (TE.encodeUtf8 y)) xs)
+        <> close
+
+-- | XML 1.0 §2.5 disallows @--@ inside a comment and forbids comments ending
+-- in @-@. Encode those by replacing @--@ with @- -@ and trimming trailing
+-- @-@ with a space; this preserves readability without producing
+-- ill-formed XML.
+buildCommentSafe :: Text -> Builder
+buildCommentSafe raw =
+  let !replaced = T.replace "--" "- -" raw
+      !final    = if not (T.null replaced) && T.last replaced == '-'
+                     then replaced <> " "
+                     else replaced
+  in B.string7 "<!--" <> B.byteString (TE.encodeUtf8 final) <> B.string7 "-->"
+
+-- | XML 1.0 §2.6 forbids @?>@ inside a processing-instruction body. Replace
+-- any literal @?>@ with @? >@ to keep the encoded form well-formed.
+buildPISafe :: Text -> Text -> Builder
+buildPISafe target content =
+  let !safeContent = T.replace "?>" "? >" content
+  in B.string7 "<?" <> B.byteString (TE.encodeUtf8 target)
+       <> (if T.null safeContent
+             then mempty
+             else B.char7 ' ' <> B.byteString (TE.encodeUtf8 safeContent))
+       <> B.string7 "?>"
 
 buildNodePretty :: Int -> Int -> Node -> Builder
 buildNodePretty indent level (Element name attrs children)
@@ -121,14 +162,32 @@ buildAttr :: Attribute -> Builder
 buildAttr (Attribute name val) =
   B.char7 ' ' <> buildName name <> B.string7 "=\"" <> escapeXMLAttr val <> B.char7 '"'
 
+-- | Escape character data per XML 1.0 §2.4. We escape @<@, @&@, the
+-- @]]>@ sequence (broken via @&gt;@), and the carriage return @\\r@
+-- (so it survives end-of-line normalization §2.11).
 escapeXMLText :: Text -> Builder
-escapeXMLText t = T.foldl' (\acc c -> acc <> escChar c) mempty t
+escapeXMLText = goText
   where
-    escChar '<' = B.string7 "&lt;"
-    escChar '>' = B.string7 "&gt;"
-    escChar '&' = B.string7 "&amp;"
-    escChar c   = B.charUtf8 c
+    goText t = case T.uncons t of
+      Nothing      -> mempty
+      Just (c, rest) -> escChar c rest <> goText rest
+    escChar '<'  _    = B.string7 "&lt;"
+    escChar '&'  _    = B.string7 "&amp;"
+    escChar '\r' _    = B.string7 "&#xD;"
+    escChar ']'  rest
+      -- Break "]]>" into "]]&gt;" so the literal sequence cannot escape an
+      -- enclosing CDATA-like context if the consumer concatenates encoded
+      -- text. This is allowed by §2.4.
+      | "]>" `T.isPrefixOf` rest = B.string7 "]"
+      | otherwise               = B.charUtf8 ']'
+    escChar '>'  _    = B.string7 "&gt;"
+    escChar c    _    = B.charUtf8 c
 
+-- | Escape an attribute value per XML 1.0 §3.3.3 (attribute-value
+-- normalization). All whitespace characters that survive normalization
+-- as themselves (TAB, LF, CR) MUST be encoded as character references
+-- so they round-trip; otherwise the parser will normalize them to
+-- spaces.
 escapeXMLAttr :: Text -> Builder
 escapeXMLAttr t = T.foldl' (\acc c -> acc <> escChar c) mempty t
   where
@@ -137,4 +196,7 @@ escapeXMLAttr t = T.foldl' (\acc c -> acc <> escChar c) mempty t
     escChar '&'  = B.string7 "&amp;"
     escChar '"'  = B.string7 "&quot;"
     escChar '\'' = B.string7 "&apos;"
+    escChar '\t' = B.string7 "&#x9;"
+    escChar '\n' = B.string7 "&#xA;"
+    escChar '\r' = B.string7 "&#xD;"
     escChar c    = B.charUtf8 c

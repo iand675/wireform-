@@ -761,6 +761,15 @@ isCommentNode :: Node -> Bool
 isCommentNode (Comment _) = True
 isCommentNode _ = False
 
+countSubstring :: String -> String -> Int
+countSubstring needle = go
+  where
+    nLen = length needle
+    go [] = 0
+    go s@(_:xs)
+      | take nLen s == needle = 1 + go (drop nLen s)
+      | otherwise = go xs
+
 isPINode :: Node -> Bool
 isPINode (ProcessingInstruction _ _) = True
 isPINode _ = False
@@ -1313,6 +1322,71 @@ encodeRobustnessTests = testGroup "Encode Robustness"
           doc = Document Nothing root
           encoded = encode doc
       assertBool "contains PI" (BS.isInfixOf "<?target" encoded)
+
+  , testCase "encode escapes ]]> in CDATA without losing content (XML 1.0 §2.7)" $ do
+      -- CDATA cannot contain "]]>" literally. Encoder must split it across
+      -- two CDATA sections so the round-tripped text remains intact.
+      let payload = "before ]]> after"
+          root = Element (simpleName "r") V.empty
+                   (V.singleton (CData payload))
+          doc = Document Nothing root
+          encoded = encode doc
+      assertBool "no literal ]]> in CDATA payload"
+        (not (BS.isInfixOf (BS8.pack "before ]]> after") encoded))
+      let Right doc2 = decode encoded
+          combined = textContent (docRoot doc2)
+      combined @?= "before ]]> after"
+
+  , testCase "encode escapes -- in comments (XML 1.0 §2.5)" $ do
+      let raw = "no -- double hyphens allowed"
+          root = Element (simpleName "r") V.empty
+                   (V.singleton (Comment raw))
+          doc = Document Nothing root
+          encoded = encode doc
+      -- The bare comment-body must not contain "--" (XML 1.0 §2.5);
+      -- expected total occurrences = 2 (the opening "<!--" and closing "-->").
+      countSubstring "--" (BS8.unpack encoded) @?= 2
+      -- And must round-trip through a parser cleanly.
+      let Right _doc2 = decode encoded
+      pure ()
+
+  , testCase "encode escapes ?> inside processing instruction body (XML 1.0 §2.6)" $ do
+      let root = Element (simpleName "r") V.empty
+                   (V.singleton (ProcessingInstruction "stylesheet" "href=\"x?>foo\""))
+          doc = Document Nothing root
+          encoded = encode doc
+      -- exactly one closing "?>" — the one terminating the PI itself.
+      countSubstring "?>" (BS8.unpack encoded) @?= 1
+
+  , testCase "encode escapes CR in attributes (XML 1.0 §3.3.3)" $ do
+      let val = "line1\rline2"
+          root = Element (simpleName "r")
+                   (V.singleton (Attribute (simpleName "a") val)) V.empty
+          doc = Document Nothing root
+          encoded = encode doc
+          Right doc2 = decode encoded
+      assertBool "CR was escaped"
+        (BS.isInfixOf (BS8.pack "&#xD;") encoded)
+      attr "a" (docRoot doc2) @?= Just val
+
+  , testCase "encode escapes tab/newline in attributes (XML 1.0 §3.3.3)" $ do
+      let val = "x\ty\nz"
+          root = Element (simpleName "r")
+                   (V.singleton (Attribute (simpleName "a") val)) V.empty
+          doc = Document Nothing root
+          encoded = encode doc
+          Right doc2 = decode encoded
+      attr "a" (docRoot doc2) @?= Just val
+
+  , testCase "encode escapes CR in text (XML 1.0 §2.11)" $ do
+      let raw = "first\rsecond"
+          root = Element (simpleName "r") V.empty (V.singleton (Text raw))
+          doc = Document Nothing root
+          encoded = encode doc
+          Right doc2 = decode encoded
+      assertBool "CR was character-referenced in text"
+        (BS.isInfixOf (BS8.pack "&#xD;") encoded)
+      textContent (docRoot doc2) @?= raw
 
   , testCase "encode produces valid XML declaration" $ do
       let decl = XMLDecl "1.0" (Just "UTF-8") (Just True)
