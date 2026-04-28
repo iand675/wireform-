@@ -46,7 +46,7 @@ optional spec extensions (encryption, advanced statistics, etc.) in late tiers.
 | A.6 | Column writer + file assembly + reference-file tests | Writer | **Done** |
 | A.7 | Statistics, Bloom filters, page indexes, encryption | Optional tier | **Partial** (page index + bloom filter Done; encryption Planned) |
 | A.8 | Remaining encodings (DELTA_LENGTH_BYTE_ARRAY, DELTA_BYTE_ARRAY, BYTE_STREAM_SPLIT, RLE_DICTIONARY) | — | **Done** |
-| A.9 | Repetition level semantics for repeated/nested columns | — | **Partial** (`materializeRepeated*`) |
+| A.9 | Repetition level semantics for repeated/nested columns | — | **Done** (`materializeRepeatedInt32`, `materializeRepeatedInt64`, `materializeRepeatedFloat`, `materializeRepeatedDouble`, `materializeRepeatedBool`, `materializeRepeatedByteArray`) |
 
 ## Phase B — Apache Arrow IPC
 
