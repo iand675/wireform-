@@ -857,7 +857,9 @@ readPlainFixedLenByteArrayColumnChunk typeLen codec chunk = go 0 V.empty
 {-# INLINE decodeByteStreamSplitFloat #-}
 decodeByteStreamSplitFloat :: Int -> ByteString -> Either String (VP.Vector Float)
 decodeByteStreamSplitFloat n bs
-  | BS.length bs < n * 4 = Left "Parquet.Read: BYTE_STREAM_SPLIT FLOAT buffer too small"
+  | n < 0 = Left "Parquet.Read: BYTE_STREAM_SPLIT FLOAT negative count"
+  | n > BS.length bs `div` 4 =
+      Left "Parquet.Read: BYTE_STREAM_SPLIT FLOAT buffer too small"
   | otherwise =
       Right $
         runST $ do
@@ -878,7 +880,9 @@ decodeByteStreamSplitFloat n bs
 {-# INLINE decodeByteStreamSplitDouble #-}
 decodeByteStreamSplitDouble :: Int -> ByteString -> Either String (VP.Vector Double)
 decodeByteStreamSplitDouble n bs
-  | BS.length bs < n * 8 = Left "Parquet.Read: BYTE_STREAM_SPLIT DOUBLE buffer too small"
+  | n < 0 = Left "Parquet.Read: BYTE_STREAM_SPLIT DOUBLE negative count"
+  | n > BS.length bs `div` 8 =
+      Left "Parquet.Read: BYTE_STREAM_SPLIT DOUBLE buffer too small"
   | otherwise =
       Right $
         runST $ do
