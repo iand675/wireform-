@@ -7,6 +7,7 @@ import qualified Data.Vector as V
 import System.Exit (exitFailure)
 
 import ASN1.Decode (decode)
+import ASN1.Encode (encode)
 import ASN1.Value
 
 main :: IO ()
@@ -75,7 +76,45 @@ main = do
       "decoder accepted reserved length 0xFF: " ++ show v
     Left _ -> putStrLn "OK: reserved length 0xFF rejected"
 
+  -- DER §11.5/§11.6: SET and SET-OF children must be emitted in
+  -- ascending byte order of their full DER encodings.
+  let unsorted = Set $ V.fromList [Integer 3, Integer 1, Integer 2]
+      enc = encode unsorted
+  -- After sort: 02 01 01 < 02 01 02 < 02 01 03.
+  -- Total inner length = 9, so TLV is: 31 09 02 01 01 02 01 02 02 01 03.
+  expectBytes "SET sorts children by DER bytes"
+    enc (BS.pack [0x31, 0x09
+                 , 0x02, 0x01, 0x01
+                 , 0x02, 0x01, 0x02
+                 , 0x02, 0x01, 0x03
+                 ])
+
+  -- A SET round-trip preserves the (sorted) order.
+  case decode enc of
+    Left e -> failTest ("SET round-trip: " ++ e)
+    Right (Set vs)
+      | V.toList vs == [Integer 1, Integer 2, Integer 3] ->
+          putStrLn "OK: SET round-trip preserves canonical order"
+      | otherwise -> failTest $
+          "SET round-trip mismatch: " ++ show vs
+    Right v -> failTest $
+      "SET decoded as non-Set: " ++ show v
+
+  -- BIT STRING with non-zero unused on empty data must normalise to
+  -- unused = 0 per DER §8.6.2.3.
+  let badEmptyBs = BitString 5 BS.empty
+      encEmpty = encode badEmptyBs
+  expectBytes "Empty BIT STRING normalises unused to 0"
+    encEmpty (BS.pack [0x03, 0x01, 0x00])
+
   putStrLn "All ASN.1 BER indefinite-length tests passed."
+
+expectBytes :: String -> BS.ByteString -> BS.ByteString -> IO ()
+expectBytes label got expected
+  | got == expected = putStrLn ("OK: " ++ label)
+  | otherwise = failTest $
+      label ++ ": got " ++ show (BS.unpack got)
+        ++ ", expected " ++ show (BS.unpack expected)
 
 expectValue :: String -> BS.ByteString -> Value -> IO ()
 expectValue label bs expected = case decode bs of

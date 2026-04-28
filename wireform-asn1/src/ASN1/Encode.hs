@@ -15,6 +15,7 @@ import Data.Bits (shiftR, shiftL, (.&.), (.|.), testBit)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BSI
+import Data.List (sortBy)
 import Data.Word (Word8, Word64)
 import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as V
@@ -90,10 +91,14 @@ writeValueDER val p off = case val of
   Integer n -> writeTLV p off 0x02 (encodeInteger n)
 
   BitString unused dat -> do
-    let !contentLen = 1 + BS.length dat
+    -- DER §8.6.2.3: an empty bit string must use 'unused == 0'.
+    -- Normalise rather than emitting an ill-formed TLV when callers
+    -- pass a non-zero unused with empty data.
+    let !normalisedUnused = if BS.null dat then 0 else unused
+        !contentLen = 1 + BS.length dat
     pokeByteOff p off (0x03 :: Word8)
     off1 <- writeLength p (off + 1) contentLen
-    pokeByteOff p off1 (fromIntegral unused :: Word8)
+    pokeByteOff p off1 (fromIntegral normalisedUnused :: Word8)
     writeRaw p (off1 + 1) dat
 
   OctetString bs -> writeTLV p off 0x04 bs
@@ -111,7 +116,16 @@ writeValueDER val p off = case val of
   GeneralizedTime t -> writeTLV p off 0x18 (TE.encodeUtf8 t)
 
   Sequence vs -> writeConstructed p off 0x30 vs
-  Set vs -> writeConstructed p off 0x31 vs
+  -- DER §11.5 / §11.6: SET (and SET OF) elements must be written in
+  -- ascending byte order of their full DER encodings, with the
+  -- shorter encoding padded at its trailing end with 0-octets when
+  -- comparing. Two encodings of the same length sort by raw byte
+  -- comparison, which is what 'compare' on 'ByteString' does. The
+  -- shorter-padded-with-zeros rule turns out to be equivalent to
+  -- normal lexicographic compare on the un-padded bytes (because
+  -- appending zeros to a shorter prefix can never make it greater
+  -- than the longer string at the diverging position).
+  Set vs -> writeConstructedSorted p off 0x31 vs
 
   Tagged tc tagNum v -> do
     let !innerLen = asn1Size v
@@ -139,6 +153,21 @@ writeConstructed p off tag vs = do
   pokeByteOff p off tag
   off1 <- writeLength p (off + 1) innerLen
   V.foldM' (\o v -> writeValueDER v p o) off1 vs
+
+-- | Like 'writeConstructed' but sorts the children by their full DER
+-- encoding before emitting them. Required for SET / SET OF per
+-- ITU-T X.690 §11.5–11.6.
+writeConstructedSorted :: Ptr Word8 -> Int -> Word8 -> V.Vector Value -> IO Int
+writeConstructedSorted p off tag vs = do
+  -- Encode each child once into its standalone DER bytes; sort by the
+  -- raw byte representation; emit the precomputed bytes in order. This
+  -- avoids encoding twice (once for sort comparison, once for output).
+  let !encoded = V.map encode vs
+      !sorted  = V.fromList (sortBy compare (V.toList encoded))
+      !innerLen = V.foldl' (\s b -> s + BS.length b) 0 sorted
+  pokeByteOff p off tag
+  off1 <- writeLength p (off + 1) innerLen
+  V.foldM' (\o b -> writeRaw p o b) off1 sorted
 
 writeLength :: Ptr Word8 -> Int -> Int -> IO Int
 writeLength p off n
