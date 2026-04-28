@@ -26,29 +26,69 @@ decode bs
       Left err     -> Left err
       Right (v, _) -> Right v
 
+-- | Decode a single TLV starting at @off@. Honours BER's indefinite
+-- length form ('Length' = 0x80) by collecting children until an
+-- end-of-contents marker (a primitive @0x00 0x00@ TLV) is seen.
+-- Indefinite length is only valid for /constructed/ encodings; an
+-- indefinite length on a primitive type is rejected.
 decodeValue :: ByteString -> Int -> Either String (Value, Int)
 decodeValue bs off = do
   ensure bs off 1
   let !b0 = rdByte bs off
   (tc, constructed, tagNum, off1) <- decodeTag bs off b0
-  (len, off2) <- decodeLength bs off1
-  let !valueEnd = off2 + len
-  ensure bs off2 len
-  let !contentSlice = BSU.unsafeTake len (BSU.unsafeDrop off2 bs)
-  if tc == Universal && not constructed
-    then do
-      v <- decodePrimitive tagNum contentSlice
-      Right (v, valueEnd)
-    else if tc == Universal && constructed
-    then do
-      v <- decodeConstructed tagNum bs off2 valueEnd
-      Right (v, valueEnd)
-    else if constructed
-    then do
-      inner <- decodeValue bs off2
-      Right (Tagged tc tagNum (fst inner), valueEnd)
-    else
-      Right (Other tc False tagNum contentSlice, valueEnd)
+  (mLen, off2) <- decodeLengthMaybe bs off1
+  case mLen of
+    Just len -> do
+      let !valueEnd = off2 + len
+      ensure bs off2 len
+      let !contentSlice = BSU.unsafeTake len (BSU.unsafeDrop off2 bs)
+      if tc == Universal && not constructed
+        then do
+          v <- decodePrimitive tagNum contentSlice
+          Right (v, valueEnd)
+        else if tc == Universal && constructed
+        then do
+          v <- decodeConstructed tagNum bs off2 valueEnd
+          Right (v, valueEnd)
+        else if constructed
+        then do
+          (inner, _) <- decodeValue bs off2
+          Right (Tagged tc tagNum inner, valueEnd)
+        else
+          Right (Other tc False tagNum contentSlice, valueEnd)
+    Nothing
+      -- Indefinite length form: only legal for constructed encodings.
+      | not constructed ->
+          Left "ASN1.Decode: indefinite length on a primitive encoding"
+      | otherwise -> do
+          (children, off3) <- decodeIndefiniteChildren bs off2
+          if tc == Universal && tagNum == 16
+            then Right (Sequence (V.fromList children), off3)
+            else if tc == Universal && tagNum == 17
+              then Right (Set (V.fromList children), off3)
+              else if tc == Universal
+                then
+                  let !content = BSU.unsafeTake (off3 - 2 - off2) (BSU.unsafeDrop off2 bs)
+                  in Right (Other Universal True tagNum content, off3)
+                else case children of
+                  [single] -> Right (Tagged tc tagNum single, off3)
+                  _ ->
+                    let !content = BSU.unsafeTake (off3 - 2 - off2) (BSU.unsafeDrop off2 bs)
+                    in Right (Other tc True tagNum content, off3)
+
+-- | Walk children of an indefinite-length constructed value until we
+-- encounter the @0x00 0x00@ end-of-contents marker. Returns the
+-- decoded children and the offset /after/ the EOC.
+decodeIndefiniteChildren :: ByteString -> Int -> Either String ([Value], Int)
+decodeIndefiniteChildren bs off0 = go off0 []
+  where
+    go !off !acc = do
+      ensure bs off 2
+      if rdByte bs off == 0x00 && rdByte bs (off + 1) == 0x00
+        then Right (reverse acc, off + 2)
+        else do
+          (v, off') <- decodeValue bs off
+          go off' (v : acc)
 
 decodePrimitive :: Int -> ByteString -> Either String Value
 decodePrimitive tagNum content = case tagNum of
@@ -123,20 +163,25 @@ decodeLongTag bs off tc constructed = go off 0
         then go (o + 1) val
         else Right (tc, constructed, val, o + 1)
 
-decodeLength :: ByteString -> Int -> Either String (Int, Int)
-decodeLength bs off = do
+-- | Decode a BER length octet sequence into 'Just' a definite length or
+-- 'Nothing' for the indefinite form. The reserved 0xFF byte
+-- (used as a marker in some restricted BER profiles) is rejected.
+decodeLengthMaybe :: ByteString -> Int -> Either String (Maybe Int, Int)
+decodeLengthMaybe bs off = do
   ensure bs off 1
   let !b0 = rdByte bs off
   if b0 < 128
-    then Right (fromIntegral b0, off + 1)
+    then Right (Just (fromIntegral b0), off + 1)
     else if b0 == 0x80
-    then Left "ASN1.Decode: indefinite length not supported in this decoder"
+    then Right (Nothing, off + 1)
+    else if b0 == 0xFF
+    then Left "ASN1.Decode: reserved length octet 0xFF"
     else do
       let !numBytes = fromIntegral (b0 .&. 0x7F) :: Int
       ensure bs (off + 1) numBytes
       let !len = foldl (\acc i -> acc `shiftL` 8 .|. fromIntegral (rdByte bs (off + 1 + i)))
                        (0 :: Int) [0 .. numBytes - 1]
-      Right (len, off + 1 + numBytes)
+      Right (Just len, off + 1 + numBytes)
 
 decodeIntegerBytes :: ByteString -> Integer
 decodeIntegerBytes bs
