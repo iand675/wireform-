@@ -91,12 +91,24 @@ decodeBondDouble bs off = do
 decodeBondString :: (T.Text -> Value) -> ByteString -> Offset -> Either String (Value, Offset)
 decodeBondString ctor bs off = do
   (len, off') <- decodeVarint bs off
-  let !n = fromIntegral len
-  checkLen bs off' n
-  let !raw = BS.take n (BS.drop off' bs)
-  case decodeTextFast raw of
-    Left e  -> Left $ "Bond.Decode: " ++ e
-    Right t -> Right (ctor t, off' + n)
+  n <- word64ToInt "string" len
+  -- Reject lengths that exceed the bytes left in the input before
+  -- the BS.take/drop slice runs (DoS prevention).
+  if n > BS.length bs - off'
+    then Left "Bond.Decode: string length exceeds remaining input"
+    else do
+      let !raw = BS.take n (BS.drop off' bs)
+      case decodeTextFast raw of
+        Left e  -> Left $ "Bond.Decode: " ++ e
+        Right t -> Right (ctor t, off' + n)
+
+-- | Convert a Bond varint length to a host Int, rejecting values
+-- that would silently wrap on 32-bit hosts.
+word64ToInt :: String -> Word64 -> Either String Int
+word64ToInt what n
+  | n <= fromIntegral (maxBound :: Int) = Right (fromIntegral n)
+  | otherwise = Left $
+      "Bond.Decode: " ++ what ++ " length overflows host Int"
 
 -- | Bond compact-binary @wstring@: varint count of UTF-16 /code
 -- units/, followed by @count * 2@ bytes of little-endian UTF-16 code
@@ -105,12 +117,16 @@ decodeBondString ctor bs off = do
 decodeBondWString :: ByteString -> Offset -> Either String (Value, Offset)
 decodeBondWString bs off = do
   (lenW, off') <- decodeVarint bs off
-  let !codeUnits = fromIntegral lenW :: Int
-      !byteLen   = codeUnits * 2
-  checkLen bs off' byteLen
-  case decodeUtf16LE bs off' codeUnits of
-    Left e  -> Left $ "Bond.Decode: " ++ e
-    Right t -> Right (WString t, off' + byteLen)
+  codeUnits <- word64ToInt "wstring code-unit count" lenW
+  -- Reject impossible lengths before computing 'codeUnits * 2', which
+  -- would otherwise overflow on hostile input.
+  if codeUnits > (BS.length bs - off') `div` 2
+    then Left "Bond.Decode: wstring length exceeds remaining input"
+    else do
+      let !byteLen = codeUnits * 2
+      case decodeUtf16LE bs off' codeUnits of
+        Left e  -> Left $ "Bond.Decode: " ++ e
+        Right t -> Right (WString t, off' + byteLen)
 
 -- | Decode @n@ UTF-16-LE code units starting at @off@ into 'Text'.
 decodeUtf16LE
@@ -215,7 +231,13 @@ decodeContainerHeader bs off = do
     then Right (bt, countOrFlag, off + 1)
     else do
       (cnt, off') <- decodeVarint bs (off + 1)
-      Right (bt, fromIntegral cnt, off')
+      n <- word64ToInt "container count" cnt
+      -- Reject impossibly-large counts up-front; each element is at
+      -- least one byte, so a count larger than the remaining input
+      -- can never represent a valid payload.
+      if n > BS.length bs - off'
+        then Left "Bond.Decode: container count exceeds remaining input"
+        else Right (bt, n, off')
 
 decodeItems :: BondType -> Int -> ByteString -> Offset -> Either String (V.Vector Value, Offset)
 decodeItems bt count bs off = go 0 V.empty off
