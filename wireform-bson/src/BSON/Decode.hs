@@ -170,6 +170,12 @@ readValue bs off tag = case tag of
   0x0D -> do
     (code, off1) <- readBSONString bs off
     Right (B.JavaScript code, off1)
+  0x0C -> do
+    -- Deprecated DBPointer: UTF-8 namespace followed by a 12-byte ObjectId.
+    (ns, off1) <- readBSONString bs off
+    ensure bs off1 12
+    let !oid = BSU.unsafeTake 12 (BSU.unsafeDrop off1 bs)
+    Right (B.DBPointer ns oid, off1 + 12)
   0x0E -> do
     (t, off1) <- readBSONString bs off
     Right (B.Symbol t, off1)

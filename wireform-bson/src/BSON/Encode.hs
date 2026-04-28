@@ -71,6 +71,7 @@ valuePayloadSize = \case
   B.Timestamp _    -> 8
   B.Symbol t       -> 4 + BS.length (TE.encodeUtf8 t) + 1
   B.Undefined      -> 0
+  B.DBPointer ns _ -> 4 + BS.length (TE.encodeUtf8 ns) + 1 + 12
 
 arrayDocSize :: V.Vector B.Value -> Int
 arrayDocSize vs = 4 + V.ifoldl' (\acc i v -> acc + elementSize (T.pack (show i)) v) 0 vs + 1
@@ -106,6 +107,7 @@ typeTag = \case
   B.Undefined   -> 0x06
   B.JavaScript _ -> 0x0D
   B.Symbol _    -> 0x0E
+  B.DBPointer _ _ -> 0x0C
   B.JavaScriptScope _ _ -> 0x0F
   B.Timestamp _ -> 0x11
   B.Decimal128 _ -> 0x13
@@ -183,6 +185,13 @@ writeValuePayload p off = \case
     off2 <- writeRawBytes p off1 bs
     pokeByteOff p off2 (0x00 :: Word8)
     pure $! off2 + 1
+  B.DBPointer ns oid -> do
+    let !nsBs = TE.encodeUtf8 ns
+        !len = BS.length nsBs + 1
+    off1 <- writeLE32 p off (fromIntegral len)
+    off2 <- writeRawBytes p off1 nsBs
+    pokeByteOff p off2 (0x00 :: Word8)
+    writeRawBytes p (off2 + 1) (BS.take 12 (oid <> BS.replicate 12 0))
   B.JavaScriptScope code scope -> do
     let !codeBS = TE.encodeUtf8 code
         !scopeFields = case scope of B.Document fs -> fs; _ -> V.empty

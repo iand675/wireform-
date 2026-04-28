@@ -57,6 +57,10 @@ data Value
   | Timestamp {-# UNPACK #-} !Word64  -- ^ MongoDB internal timestamp (secs + increment)
   | Symbol    !Text                 -- ^ deprecated but in spec
   | Undefined                       -- ^ deprecated but in spec
+  | DBPointer !Text !ByteString
+    -- ^ Deprecated DBPointer element (tag 0x0C): a UTF-8 namespace
+    -- followed by a 12-byte ObjectId. Required for spec compliance
+    -- when reading legacy MongoDB documents.
   deriving stock (Show, Eq, Generic)
   deriving anyclass (NFData)
 
@@ -85,6 +89,10 @@ instance Aeson.ToJSON Value where
   toJSON (Timestamp w)   = Aeson.object [(Key.fromText "$timestamp", Aeson.Number (fromIntegral w))]
   toJSON (Symbol t)      = Aeson.object [(Key.fromText "$symbol", Aeson.String t)]
   toJSON Undefined       = Aeson.object [(Key.fromText "$undefined", Aeson.Bool True)]
+  toJSON (DBPointer ns oid) = Aeson.object
+    [ (Key.fromText "$ref", Aeson.String ns)
+    , (Key.fromText "$id",  Aeson.String (TE.decodeUtf8 (Base64.encode oid)))
+    ]
 
 instance Aeson.FromJSON Value where
   parseJSON Aeson.Null       = pure Null
