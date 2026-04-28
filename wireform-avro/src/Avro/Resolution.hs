@@ -41,7 +41,19 @@ data ResolvedSchema
   | ResolvedEnum !Text !(V.Vector Int)
   | ResolvedArray !ResolvedSchema
   | ResolvedMap !ResolvedSchema
-  | ResolvedUnion !(V.Vector ResolvedSchema)
+  -- | @writer = union@: per-writer-branch lazily-checked resolution.
+  -- 'Right res' means that branch is compatible with the reader and
+  -- @res@ is the inner resolution; 'Left err' means the branch is
+  -- incompatible and decoding it should fail at runtime. The Avro
+  -- spec requires lazy evaluation here: only the writer branch
+  -- actually present in the data needs to be compatible.
+  | ResolvedUnion !(V.Vector (Either String ResolvedSchema))
+  -- | @reader = union, writer = non-union@: wrap the (recursively
+  -- resolved) writer value in @AV.Union readerIdx _@ to match the
+  -- reader union shape. The 'Int' is the chosen reader branch
+  -- index per the Avro spec ("the first schema in the reader's
+  -- union that matches the writer's schema").
+  | ResolvedNonUnionToUnion !Int !ResolvedSchema
   deriving stock (Show, Eq)
 
 -- | Check compatibility between a writer and reader schema and produce a
@@ -167,24 +179,45 @@ resolveFixed w r
 -- Union resolution
 -- ============================================================
 
+-- | Writer is a union (reader can be union or non-union; the
+-- non-union case below also delegates to this helper).
+--
+-- The Avro spec says only the /selected/ writer branch needs to
+-- match the reader, so we precompute one 'Either' per writer branch
+-- and let 'resolveValue' surface the relevant error if and only if
+-- the runtime data picks an incompatible branch. Resolution that
+-- eagerly rejected unions whose unused branches are incompatible
+-- (the previous behaviour) broke common evolutions like
+-- @[null, int]@ writer → @int@ reader.
 resolveWriterUnion :: V.Vector AvroType -> AvroType -> Either String ResolvedSchema
-resolveWriterUnion wBranches readerTy = do
-  resolutions <- V.mapM (\wb -> resolveSchema wb readerTy) wBranches
-  Right (ResolvedUnion resolutions)
+resolveWriterUnion wBranches readerTy =
+  Right (ResolvedUnion (V.map (\wb -> resolveSchema wb readerTy) wBranches))
 
+-- | Reader is a union, writer is not. Per the Avro spec we choose
+-- the /first/ reader branch whose type matches the writer's, then
+-- recursively resolve to that branch's type. The runtime side wraps
+-- the resolved value in the matching @AV.Union idx _@ so the
+-- reader sees a properly tagged union value.
 resolveReaderUnion :: AvroType -> V.Vector AvroType -> Either String ResolvedSchema
 resolveReaderUnion writerTy rBranches =
-  case findFirstMatch writerTy rBranches 0 of
-    Just _  -> Right ResolvedSame
+  case findFirstMatchWith writerTy rBranches of
+    Just (idx, inner) -> Right (ResolvedNonUnionToUnion idx inner)
     Nothing -> Left $ "writer type " ++ showType writerTy
                     ++ " does not match any reader union branch"
 
-findFirstMatch :: AvroType -> V.Vector AvroType -> Int -> Maybe Int
-findFirstMatch wt branches idx
-  | idx >= V.length branches = Nothing
-  | otherwise = case resolveSchema wt (branches V.! idx) of
-      Right _  -> Just idx
-      Left _   -> findFirstMatch wt branches (idx + 1)
+-- | Like 'findFirstMatch' but also returns the inner resolution
+-- so 'resolveValue' doesn't have to recompute it.
+findFirstMatchWith
+  :: AvroType
+  -> V.Vector AvroType
+  -> Maybe (Int, ResolvedSchema)
+findFirstMatchWith wt branches = go 0
+  where
+    go !idx
+      | idx >= V.length branches = Nothing
+      | otherwise = case resolveSchema wt (branches V.! idx) of
+          Right res -> Just (idx, res)
+          Left _    -> go (idx + 1)
 
 -- ============================================================
 -- Value resolution
@@ -220,10 +253,19 @@ resolveValue (ResolvedArray res) (AV.Array items) =
   AV.Array <$> V.mapM (resolveValue res) items
 resolveValue (ResolvedMap res) (AV.Map entries) =
   AV.Map <$> V.mapM (\(k, v) -> (k,) <$> resolveValue res v) entries
-resolveValue (ResolvedUnion resolutions) (AV.Union wIdx val) = do
-  if wIdx < V.length resolutions
-  then resolveValue (resolutions V.! wIdx) val
-  else Left "union: writer branch index out of range"
+resolveValue (ResolvedUnion resolutions) (AV.Union wIdx val) =
+  if wIdx >= V.length resolutions
+    then Left "union: writer branch index out of range"
+    else case resolutions V.! wIdx of
+      Left err -> Left $
+        "union: writer branch " ++ show wIdx ++ " incompatible: " ++ err
+      Right res -> resolveValue res val
+-- Reader is a union, writer is not. Recursively resolve the value
+-- against the matched reader branch, then wrap in 'AV.Union' so the
+-- reader sees a tagged union value.
+resolveValue (ResolvedNonUnionToUnion readerIdx inner) v = do
+  resolved <- resolveValue inner v
+  Right (AV.Union readerIdx resolved)
 resolveValue _ _ = Left "resolution/value mismatch"
 
 resolveField :: V.Vector AV.Value -> FieldResolution -> Either String AV.Value

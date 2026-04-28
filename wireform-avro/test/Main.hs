@@ -171,6 +171,42 @@ main = do
   expect "same schema yields the same marker"
     (sm == syncMarkerForSchema schema)
 
+  -- Avro union resolution: writer is non-union, reader is a union.
+  -- Per spec the resolution must wrap the writer value in
+  -- 'AV.Union readerIdx _' so the reader sees a tagged value.
+  do
+    let wInt = AvroPrimitive AvroInt
+        rUnion = AvroUnion (V.fromList [AvroPrimitive AvroNull, AvroPrimitive AvroInt])
+    case decodeAvroResolved wInt rUnion (encodeAvro wInt (AV.Int 42)) of
+      Right (AV.Union 1 (AV.Int 42)) ->
+        putStrLn "OK: writer Int -> reader [null,int] wraps in Union 1"
+      other -> failTest $ "non-union -> union mismatch: " ++ show other
+
+  -- Writer union has incompatible branches; only the *selected*
+  -- branch must be compatible with the reader. Previous code
+  -- rejected the whole resolution because some unused writer
+  -- branch (here 'string') didn't match the int reader. The fix
+  -- defers branch compatibility to runtime.
+  do
+    let wUnion = AvroUnion
+          (V.fromList [AvroPrimitive AvroNull, AvroPrimitive AvroInt, AvroPrimitive AvroString])
+        rInt   = AvroPrimitive AvroInt
+        -- Encode an Int via the writer union (branch index 1).
+        encoded = encodeAvro wUnion (AV.Union 1 (AV.Int 7))
+    case decodeAvroResolved wUnion rInt encoded of
+      Right (AV.Int 7) ->
+        putStrLn "OK: writer [null,int,string] -> reader int (lazy branch check)"
+      other -> failTest $
+        "writer-union/non-union mismatch: " ++ show other
+    -- Now verify the runtime check actually fires for an
+    -- incompatible branch. Encoding a String via the writer's
+    -- 'string' branch should fail to resolve to 'int'.
+    let badEncoded = encodeAvro wUnion (AV.Union 2 (AV.String "no"))
+    case decodeAvroResolved wUnion rInt badEncoded of
+      Left _ -> putStrLn "OK: incompatible writer branch fails at decode time"
+      Right v -> failTest $
+        "should have rejected string -> int but got " ++ show v
+
   -- A schema-derived container must round-trip cleanly.
   let containerBs = writeContainerWith "null" schema vals
   case readContainer containerBs of
