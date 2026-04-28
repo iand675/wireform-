@@ -403,11 +403,49 @@ avroTests = testGroup "Avro Encode/Decode"
                            [ ("a", AvroPrimitive AvroInt) ]
               readerTy = mkRecordTypeWithDefaults "Rec"
                            [ ("a", AvroPrimitive AvroInt, Nothing)
-                           , ("b", AvroPrimitive AvroString, Just AvroString)
+                           , ("b", AvroPrimitive AvroString, Just (Aeson.String "hello"))
                            ]
               Right res = resolveSchema writerTy readerTy
               writerVal = AV.Record (V.fromList [AV.Int 42])
-          resolveValue res writerVal @?= Right (AV.Record (V.fromList [AV.Int 42, AV.String ""]))
+          -- The default JSON literal "hello" is now actually
+          -- preserved through resolution (was lossily replaced with
+          -- the empty string by the old defaultSchemaToJSON path).
+          resolveValue res writerVal @?= Right (AV.Record (V.fromList [AV.Int 42, AV.String "hello"]))
+
+      , testCase "add field with non-trivial JSON default literal" $ do
+          -- Avro 1.11 §schema-record: the default JSON value is
+          -- preserved verbatim and interpreted under the field's
+          -- reader schema. The previous resolver always substituted
+          -- the type's zero (\"\" for string, 0 for int) regardless
+          -- of the actual default literal.
+          let writerTy = mkRecordType "Rec" [ ("a", AvroPrimitive AvroInt) ]
+              readerTy = mkRecordTypeWithDefaults "Rec"
+                           [ ("a", AvroPrimitive AvroInt, Nothing)
+                           , ("count", AvroPrimitive AvroInt,
+                                Just (Aeson.Number 17))
+                           , ("note", AvroPrimitive AvroString,
+                                Just (Aeson.String "n/a"))
+                           ]
+              Right res = resolveSchema writerTy readerTy
+              writerVal = AV.Record (V.fromList [AV.Int 1])
+          resolveValue res writerVal
+            @?= Right (AV.Record (V.fromList
+                  [ AV.Int 1
+                  , AV.Int 17
+                  , AV.String "n/a"
+                  ]))
+
+      , testCase "default mismatched against type is rejected" $ do
+          let writerTy = mkRecordType "Rec" [ ("a", AvroPrimitive AvroInt) ]
+              readerTy = mkRecordTypeWithDefaults "Rec"
+                           [ ("a", AvroPrimitive AvroInt, Nothing)
+                           , ("b", AvroPrimitive AvroInt,
+                                Just (Aeson.String "not-an-int"))
+                           ]
+          case resolveSchema writerTy readerTy of
+            Left _  -> pure ()
+            Right _ -> assertFailure
+              "expected resolveSchema to reject malformed default"
 
       , testCase "remove field" $ do
           let writerTy = mkRecordType "Rec"
@@ -789,7 +827,7 @@ deconflictComplianceTests = testGroup "Schema resolution (deconflict) compliance
                           , ("smell", AvroUnion (V.fromList
                               [ AvroPrimitive AvroNull
                               , AvroPrimitive AvroString
-                              ]), Just AvroNull)
+                              ]), Just Aeson.Null)
                           ]
           writerTy = mkRecordType "Outer"
                        [ ("name",  AvroPrimitive AvroString)
@@ -825,10 +863,14 @@ deconflictComplianceTests = testGroup "Schema resolution (deconflict) compliance
                       nm @?= "test"
                       V.length innerFields @?= 2
                       (innerFields V.! 0) @?= AV.Int 42
-                      (innerFields V.! 1) @?= AV.Null
+                      -- Avro 1.11 §schema-record: a union default is
+                      -- interpreted as the first branch; here that
+                      -- branch is null, so the resolved value is
+                      -- @Union 0 Null@, not bare @Null@.
+                      (innerFields V.! 1) @?= AV.Union 0 AV.Null
                       V.length otherFields @?= 2
                       (otherFields V.! 0) @?= AV.Int 99
-                      (otherFields V.! 1) @?= AV.Null
+                      (otherFields V.! 1) @?= AV.Union 0 AV.Null
                     other -> assertFailure $ "unexpected resolved value: " ++ show other
   ]
 
@@ -1042,7 +1084,7 @@ mkRecordType name fields = AvroRecord
       ]
   }
 
-mkRecordTypeWithDefaults :: Text -> [(Text, AvroType, Maybe AvroSchema)] -> AvroType
+mkRecordTypeWithDefaults :: Text -> [(Text, AvroType, Maybe Aeson.Value)] -> AvroType
 mkRecordTypeWithDefaults name fields = AvroRecord
   { avroRecordName      = name
   , avroRecordNamespace = Nothing

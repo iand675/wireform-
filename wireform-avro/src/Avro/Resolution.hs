@@ -16,6 +16,7 @@ import qualified Data.Text.Encoding
 import qualified Data.Vector as V
 
 import Avro.Schema (AvroType(..), AvroSchema(..), AvroField(..))
+import Avro.JSON (avroFromJSON)
 import qualified Avro.Value as AV
 
 -- | Describes how to convert a writer field to a reader field.
@@ -118,9 +119,20 @@ resolveOneField wFields rField =
       Right (FieldFromWriter wIdx res)
     Nothing ->
       case avroFieldDefault rField of
-        Just dflt -> Right (FieldDefault (defaultToValue (avroFieldType rField) dflt))
-        Nothing   -> Left $ "reader field '" ++ T.unpack (avroFieldName rField)
-                           ++ "' not in writer and has no default"
+        Just dflt ->
+          -- The Avro spec interprets the JSON @default@ value under
+          -- the field's reader schema. For unions, the default is
+          -- always interpreted as the FIRST branch of the union (Avro
+          -- 1.11 §schema-record). 'avroFromJSON' implements both
+          -- rules.
+          case avroFromJSON (avroFieldType rField) dflt of
+            Right v  -> Right (FieldDefault v)
+            Left err -> Left $
+              "reader field '" ++ T.unpack (avroFieldName rField)
+              ++ "' has default that does not match its type: " ++ err
+        Nothing -> Left $
+          "reader field '" ++ T.unpack (avroFieldName rField)
+          ++ "' not in writer and has no default"
 
 findFieldWithAliases :: V.Vector AvroField -> AvroField -> Maybe Int
 findFieldWithAliases wFields rField =
@@ -133,16 +145,6 @@ findFieldWithAliases wFields rField =
           let rName = avroFieldName rField
           in V.findIndex (\f -> rName `V.elem` avroFieldAliases f) wFields
 
-defaultToValue :: AvroType -> AvroSchema -> AV.Value
-defaultToValue _ AvroNull   = AV.Null
-defaultToValue _ AvroBool   = AV.Bool False
-defaultToValue _ AvroInt    = AV.Int 0
-defaultToValue _ AvroLong   = AV.Long 0
-defaultToValue _ AvroFloat  = AV.Float 0
-defaultToValue _ AvroDouble = AV.Double 0
-defaultToValue _ AvroBytes  = AV.Bytes ""
-defaultToValue _ AvroString = AV.String ""
-defaultToValue _ _          = AV.Null
 
 -- ============================================================
 -- Enum resolution

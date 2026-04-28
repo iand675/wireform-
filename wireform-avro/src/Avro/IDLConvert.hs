@@ -16,8 +16,11 @@ module Avro.IDLConvert
   , idlToType
   ) where
 
+import qualified Data.Aeson as Aeson
 import qualified Data.Map.Strict as Map
+import qualified Data.Scientific as Sci
 import Data.Text (Text)
+import qualified Data.Text as T
 import qualified Data.Vector as V
 
 import Avro.IDL
@@ -126,10 +129,31 @@ convertType ITUuid =
     , avroLogicalType = UuidLogical
     }
 
-convertDefault :: Maybe Text -> AvroIDLType -> Maybe AvroSchema
-convertDefault Nothing _       = Nothing
-convertDefault (Just "null") _ = Just AvroNull
-convertDefault (Just _) _     = Just AvroNull
+-- | Convert an Avro IDL default value (currently surfaced from the
+-- parser as plain @Text@) into the JSON literal Avro requires for
+-- @avroFieldDefault@. Supports the literal IDL forms @null@, @true@,
+-- @false@, integer literals, and string literals; anything else is
+-- preserved as a JSON string so the original IDL text survives.
+convertDefault :: Maybe Text -> AvroIDLType -> Maybe Aeson.Value
+convertDefault Nothing _ = Nothing
+convertDefault (Just t) _ = Just (parseIDLDefault t)
+
+parseIDLDefault :: Text -> Aeson.Value
+parseIDLDefault t
+  | t == T.pack "null"  = Aeson.Null
+  | t == T.pack "true"  = Aeson.Bool True
+  | t == T.pack "false" = Aeson.Bool False
+  | otherwise = case reads (T.unpack t) :: [(Double, String)] of
+      [(d, "")] -> Aeson.Number (Sci.fromFloatDigits d)
+      _ ->
+        -- Strip a single layer of wrapping quotes if present so
+        -- @"foo"@ becomes the JSON string @foo@.
+        let stripped =
+              case (T.uncons t, T.unsnoc t) of
+                (Just ('"', _), Just (_, '"')) ->
+                  T.dropEnd 1 (T.drop 1 t)
+                _ -> t
+        in Aeson.String stripped
 
 convertOrder :: Maybe Text -> Maybe SortOrder
 convertOrder Nothing            = Nothing

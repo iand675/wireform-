@@ -13,6 +13,7 @@ module Iceberg.Manifest
   ) where
 
 import Data.ByteString (ByteString)
+import qualified Data.Aeson as Aeson
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import qualified Data.Vector as V
@@ -135,7 +136,7 @@ mkFieldOpt :: Int -> String -> AvroType -> Maybe String -> AvroField
 mkFieldOpt fid name ty doc = AvroField
   { avroFieldName    = T.pack name
   , avroFieldType    = AvroUnion { avroUnionBranches = V.fromList [AvroPrimitive AvroNull, ty] }
-  , avroFieldDefault = Just AvroNull
+  , avroFieldDefault = Just Aeson.Null
   , avroFieldOrder   = Nothing
   , avroFieldAliases = V.empty
   , avroFieldDoc     = fmap T.pack doc

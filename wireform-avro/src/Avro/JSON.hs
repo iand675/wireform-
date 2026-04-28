@@ -380,7 +380,7 @@ fieldToJSON f = Aeson.Object $ KM.fromList $
   ] ++ dfltPair ++ orderPair ++ aliasesPair (avroFieldAliases f) ++ docPair
   where
     dfltPair = case avroFieldDefault f of
-      Just s  -> [("default", defaultSchemaToJSON s)]
+      Just v  -> [("default", v)]
       Nothing -> []
     orderPair = case avroFieldOrder f of
       Just Ascending  -> [("order", Aeson.String "ascending")]
@@ -391,16 +391,6 @@ fieldToJSON f = Aeson.Object $ KM.fromList $
       Just d  -> [("doc", Aeson.String d)]
       Nothing -> []
 
-defaultSchemaToJSON :: AvroSchema -> Aeson.Value
-defaultSchemaToJSON AvroNull   = Aeson.Null
-defaultSchemaToJSON AvroBool   = Aeson.Bool False
-defaultSchemaToJSON AvroInt    = Aeson.Number 0
-defaultSchemaToJSON AvroLong   = Aeson.Number 0
-defaultSchemaToJSON AvroFloat  = Aeson.Number 0
-defaultSchemaToJSON AvroDouble = Aeson.Number 0
-defaultSchemaToJSON AvroBytes  = Aeson.String ""
-defaultSchemaToJSON AvroString = Aeson.String ""
-defaultSchemaToJSON _          = Aeson.Null
 
 fieldFromJSON :: Aeson.Value -> Either String AvroField
 fieldFromJSON (Aeson.Object obj) = do
@@ -408,9 +398,7 @@ fieldFromJSON (Aeson.Object obj) = do
   ty <- case KM.lookup "type" obj of
     Just v  -> avroSchemaFromJSON v
     Nothing -> Left "field missing 'type'"
-  let dflt = case KM.lookup "default" obj of
-        Just _  -> defaultForType ty
-        Nothing -> Nothing
+  let dflt = KM.lookup "default" obj
       order = case KM.lookup "order" obj of
         Just (Aeson.String "ascending")  -> Just Ascending
         Just (Aeson.String "descending") -> Just Descending
@@ -431,9 +419,6 @@ fieldFromJSON (Aeson.Object obj) = do
     }
 fieldFromJSON _ = Left "field must be a JSON object"
 
-defaultForType :: AvroType -> Maybe AvroSchema
-defaultForType (AvroPrimitive s) = Just s
-defaultForType _                 = Just AvroNull
 
 requireString :: Text -> KM.KeyMap Aeson.Value -> Either String Text
 requireString k obj = case KM.lookup (Key.fromText k) obj of

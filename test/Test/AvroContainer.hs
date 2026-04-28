@@ -1,5 +1,6 @@
 module Test.AvroContainer (avroContainerTests) where
 
+import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import Data.List (isInfixOf)
 import Data.Int (Int32)
@@ -116,7 +117,7 @@ avroContainerTests = testGroup "Avro Container"
             , avroRecordProps     = Map.empty
             , avroRecordFields    = V.fromList
                 [ AvroField "a" (AvroPrimitive AvroInt) Nothing Nothing V.empty Nothing Map.empty
-                , AvroField "b" (AvroPrimitive AvroString) (Just AvroString) Nothing V.empty Nothing Map.empty
+                , AvroField "b" (AvroPrimitive AvroString) (Just (Aeson.String "default-b")) Nothing V.empty Nothing Map.empty
                 ]
             }
           writerVal = AV.Record (V.fromList [AV.Int 42])
@@ -124,7 +125,7 @@ avroContainerTests = testGroup "Avro Container"
       case decodeAvroResolved writerSchema readerSchema encoded of
         Left err -> assertFailure $ "decodeAvroResolved failed: " ++ err
         Right resolved ->
-          resolved @?= AV.Record (V.fromList [AV.Int 42, AV.String ""])
+          resolved @?= AV.Record (V.fromList [AV.Int 42, AV.String "default-b"])
 
   , testCase "deflate codec — write and read back" $ do
       let schema = AvroPrimitive AvroInt
@@ -177,7 +178,7 @@ avroContainerTests = testGroup "Avro Container"
             , avroRecordProps     = Map.empty
             , avroRecordFields    = V.fromList
                 [ AvroField "id"   (AvroPrimitive AvroInt) Nothing Nothing V.empty Nothing Map.empty
-                , AvroField "tag"  (AvroPrimitive AvroString) (Just AvroString) Nothing V.empty Nothing Map.empty
+                , AvroField "tag"  (AvroPrimitive AvroString) (Just (Aeson.String "x")) Nothing V.empty Nothing Map.empty
                 ]
             }
           vals = V.fromList
@@ -189,8 +190,8 @@ avroContainerTests = testGroup "Avro Container"
         Left err -> assertFailure $ "readContainerResolved failed: " ++ err
         Right resolved -> do
           V.length resolved @?= 2
-          resolved V.! 0 @?= AV.Record (V.fromList [AV.Int 1, AV.String ""])
-          resolved V.! 1 @?= AV.Record (V.fromList [AV.Int 2, AV.String ""])
+          resolved V.! 0 @?= AV.Record (V.fromList [AV.Int 1, AV.String "x"])
+          resolved V.! 1 @?= AV.Record (V.fromList [AV.Int 2, AV.String "x"])
 
   , testCase "readContainerResolved with deflate codec" $ do
       let writerSchema = AvroRecord
@@ -210,7 +211,7 @@ avroContainerTests = testGroup "Avro Container"
             , avroRecordProps     = Map.empty
             , avroRecordFields    = V.fromList
                 [ AvroField "x" (AvroPrimitive AvroInt) Nothing Nothing V.empty Nothing Map.empty
-                , AvroField "y" (AvroPrimitive AvroLong) (Just AvroLong) Nothing V.empty Nothing Map.empty
+                , AvroField "y" (AvroPrimitive AvroLong) (Just (Aeson.Number 7)) Nothing V.empty Nothing Map.empty
                 ]
             }
           vals = V.fromList [ AV.Record (V.fromList [AV.Int 5]) ]
@@ -219,7 +220,7 @@ avroContainerTests = testGroup "Avro Container"
         Left err -> assertFailure $ "readContainerResolved (deflate) failed: " ++ err
         Right resolved -> do
           V.length resolved @?= 1
-          resolved V.! 0 @?= AV.Record (V.fromList [AV.Int 5, AV.Long 0])
+          resolved V.! 0 @?= AV.Record (V.fromList [AV.Int 5, AV.Long 7])
 
   , testCase "unsupported codec returns error" $ do
       case decompressBlock "wireform-test-unknown-codec" "data" of

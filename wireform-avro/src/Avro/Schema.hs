@@ -20,6 +20,7 @@ import Data.Text (Text)
 import Data.Vector (Vector)
 import GHC.Generics (Generic)
 import Control.DeepSeq (NFData)
+import qualified Data.Aeson as Aeson
 
 -- | Sort order for record fields, used by Avro's sort-order comparison.
 data SortOrder
@@ -53,10 +54,17 @@ data LogicalType
   deriving anyclass (NFData)
 
 -- | A single field within an Avro record schema.
+--
+-- 'avroFieldDefault' is the field's declared default JSON value (Avro
+-- 1.11 \§schema-record), used by schema resolution when the writer
+-- omits this field. The previous representation was a useless
+-- @Maybe AvroSchema@ tag that always evaluated to a hard-coded zero;
+-- 'Maybe Aeson.Value' keeps the real JSON literal so the resolver can
+-- interpret it under the field's reader type.
 data AvroField = AvroField
   { avroFieldName    :: !Text
   , avroFieldType    :: !AvroType
-  , avroFieldDefault :: !(Maybe AvroSchema)
+  , avroFieldDefault :: !(Maybe Aeson.Value)
   , avroFieldOrder   :: !(Maybe SortOrder)
   , avroFieldAliases :: !(Vector Text)
   , avroFieldDoc     :: !(Maybe Text)
