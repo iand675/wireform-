@@ -13,6 +13,42 @@ grpcTests = testGroup "gRPC Framing"
   , multiMessageRoundtrip
   , errorCases
   , frameStructure
+  , compressedFrames
+  ]
+
+compressedFrames :: TestTree
+compressedFrames = testGroup "Compressed frames"
+  [ testCase "grpcFrameCompressed sets the flag byte" $ do
+      let framed = grpcFrameCompressed (BS.pack [0x12, 0x34, 0x56])
+      BS.index framed 0 @?= 0x01
+      BS.length framed @?= 8
+  , testCase "grpcUnframe rejects compressed frames without a codec" $ do
+      let framed = grpcFrameCompressed (BS.pack [0xCC, 0xDD])
+      case grpcUnframe framed of
+        Left _ -> return ()
+        Right _ -> assertFailure "expected error for unconfigured compressed frame"
+  , testCase "grpcUnframeWith invokes the codec" $ do
+      let payload = BS.pack [0xDE, 0xAD]
+          framed = grpcFrameCompressed payload
+          identity bs = Right bs
+      grpcUnframeWith identity framed @?= Right payload
+  , testCase "grpcUnframeWith accepts uncompressed frames untouched" $ do
+      let payload = BS.pack [0x01, 0x02, 0x03]
+          framed = grpcFrame payload
+          rotate bs = Right (BS.reverse bs)
+      grpcUnframeWith rotate framed @?= Right payload
+  , testCase "grpcUnframeManyWith mixes compressed and plain" $ do
+      let m1 = BS.pack [1, 2]
+          m2 = BS.pack [3, 4]
+          framed = grpcFrame m1 <> grpcFrameCompressed m2
+          decoder = Right
+      grpcUnframeManyWith decoder framed @?= Right [m1, m2]
+  , testCase "grpcUnframeWith propagates codec errors" $ do
+      let framed = grpcFrameCompressed (BS.pack [0xAB])
+          fail_ _ = Left "kaboom"
+      case grpcUnframeWith fail_ framed of
+        Left "kaboom" -> return ()
+        x -> assertFailure $ "expected codec error, got " <> show x
   ]
 
 singleMessageRoundtrip :: TestTree

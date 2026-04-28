@@ -10,6 +10,11 @@ module Proto.GRPC
   , grpcUnframe
   , grpcFrameMany
   , grpcUnframeMany
+    -- * Compressed frames
+  , grpcFrameCompressed
+  , grpcUnframeWith
+  , grpcUnframeManyWith
+  , GrpcDecompress
   ) where
 
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
@@ -19,15 +24,39 @@ import qualified Data.ByteString.Builder as B
 import qualified Data.ByteString.Lazy as BL
 import Data.Word (Word32)
 
+-- | A decompressor for gRPC compressed frames. The single argument is
+-- the compressed payload (after the 5-byte header). 'Left' values
+-- propagate as decode errors. Pass a function specific to the
+-- @grpc-encoding@ negotiated with the peer (typically @gzip@ for the
+-- wire defaults).
+type GrpcDecompress = ByteString -> Either String ByteString
+
 -- | Wrap a serialized message in a gRPC frame (compression=0).
 grpcFrame :: ByteString -> ByteString
 grpcFrame !msg = BL.toStrict $ B.toLazyByteString $
   B.word8 0x00 <> putBE32 (fromIntegral (BS.length msg)) <> B.byteString msg
 {-# INLINE grpcFrame #-}
 
--- | Extract the payload from a single gRPC frame.
+-- | Wrap an /already-compressed/ payload in a gRPC frame
+-- (compression=1). Callers run the compression themselves and pass the
+-- compressed bytes; this matches the spec exactly because the framing
+-- layer has no knowledge of which codec the peer negotiated.
+grpcFrameCompressed :: ByteString -> ByteString
+grpcFrameCompressed !msg = BL.toStrict $ B.toLazyByteString $
+  B.word8 0x01 <> putBE32 (fromIntegral (BS.length msg)) <> B.byteString msg
+{-# INLINE grpcFrameCompressed #-}
+
+-- | Extract the payload from a single gRPC frame, rejecting any frame
+-- with the compression flag set. Use 'grpcUnframeWith' to handle
+-- compressed frames.
 grpcUnframe :: ByteString -> Either String ByteString
-grpcUnframe !bs
+grpcUnframe = grpcUnframeWith
+  (\_ -> Left "grpcUnframe: compressed frame received but no codec configured")
+
+-- | Like 'grpcUnframe' but invokes @decomp@ on the payload of every
+-- frame whose compression flag is set.
+grpcUnframeWith :: GrpcDecompress -> ByteString -> Either String ByteString
+grpcUnframeWith decomp !bs
   | BS.length bs < 5 =
       Left "grpcUnframe: insufficient data for frame header"
   | otherwise =
@@ -36,13 +65,15 @@ grpcUnframe !bs
           !totalLen = 5 + fromIntegral len
       in if compFlag > 1
          then Left $ "grpcUnframe: invalid compression flag: " ++ show compFlag
-         else if compFlag == 1
-         then Left "grpcUnframe: compressed frames not supported"
          else if BS.length bs < totalLen
          then Left "grpcUnframe: payload shorter than declared length"
          else if BS.length bs > totalLen
          then Left "grpcUnframe: trailing data after frame"
-         else Right (BS.take (fromIntegral len) (BS.drop 5 bs))
+         else
+           let !payload = BS.take (fromIntegral len) (BS.drop 5 bs)
+           in if compFlag == 1
+                then decomp payload
+                else Right payload
 
 -- | Frame multiple messages (for streaming).
 grpcFrameMany :: [ByteString] -> ByteString
@@ -51,14 +82,21 @@ grpcFrameMany !msgs = BL.toStrict $ B.toLazyByteString $ mconcat
   | m <- msgs
   ]
 
--- | Extract multiple messages from a concatenated gRPC frame stream.
+-- | Extract multiple messages from a concatenated gRPC frame stream,
+-- rejecting any frame with the compression flag set. Use
+-- 'grpcUnframeManyWith' to handle compressed frames.
 grpcUnframeMany :: ByteString -> Either String [ByteString]
-grpcUnframeMany !bs = go bs 0 []
+grpcUnframeMany = grpcUnframeManyWith
+  (\_ -> Left "grpcUnframeMany: compressed frame received but no codec configured")
+
+-- | Like 'grpcUnframeMany' but invokes @decomp@ on the payload of every
+-- frame whose compression flag is set.
+grpcUnframeManyWith :: GrpcDecompress -> ByteString -> Either String [ByteString]
+grpcUnframeManyWith decomp !bs = go 0 []
   where
     !bsLen = BS.length bs
-    go _ !off !acc
+    go !off !acc
       | off >= bsLen = Right (reverse acc)
-    go _ !off !acc
       | off + 5 > bsLen =
           Left "grpcUnframeMany: truncated frame header"
       | otherwise =
@@ -68,12 +106,15 @@ grpcUnframeMany !bs = go bs 0 []
               !payloadEnd = payloadStart + fromIntegral len
           in if compFlag > 1
              then Left $ "grpcUnframeMany: invalid compression flag: " ++ show compFlag
-             else if compFlag == 1
-             then Left "grpcUnframeMany: compressed frames not supported"
              else if payloadEnd > bsLen
              then Left "grpcUnframeMany: payload shorter than declared length"
-             else go bs payloadEnd
-                    (BS.take (fromIntegral len) (BS.drop payloadStart bs) : acc)
+             else
+               let !payload = BS.take (fromIntegral len) (BS.drop payloadStart bs)
+               in if compFlag == 1
+                    then case decomp payload of
+                      Left e -> Left e
+                      Right decoded -> go payloadEnd (decoded : acc)
+                    else go payloadEnd (payload : acc)
 
 --------------------------------------------------------------------------------
 -- Internal helpers
