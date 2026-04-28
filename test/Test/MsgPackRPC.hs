@@ -103,6 +103,19 @@ errorTests = testGroup "Error cases"
       case decodeRPC (encode (MV.Array (V.fromList [MV.Word 0, MV.Word 1]))) of
         Left _ -> pure ()
         Right _ -> assertFailure "expected error on wrong array length"
+
+  , testCase "response with both error and result is rejected (msgpack-rpc spec)" $ do
+      -- Spec: exactly one of `error` / `result` may be non-Nil.
+      let bad = encode (MV.Array (V.fromList
+            [ MV.Word 1
+            , MV.Word 7
+            , MV.String "boom"
+            , MV.Word 42
+            ]))
+      case decodeRPC bad of
+        Left  _ -> pure ()
+        Right v -> assertFailure $
+          "expected rejection of both-error-and-result, got: " ++ show v
   ]
 
 genSimpleValue :: Gen MV.Value

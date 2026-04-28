@@ -72,6 +72,13 @@ decode4 arr = do
       msgid <- getWord32 (arr V.! 1) "msgid"
       let err = valueToMaybe (arr V.! 2)
           result = valueToMaybe (arr V.! 3)
+      -- msgpack-rpc spec: in a Response, exactly one of `error` and
+      -- `result` must be Nil. Both-nil is an error-success ambiguity;
+      -- both-non-nil is forbidden.
+      case (err, result) of
+        (Just _, Just _) ->
+          Left "MsgPack.RPC: response has both error and result populated"
+        _ -> Right ()
       Right $ RPCResponse msgid err result
     _ -> Left $ "MsgPack.RPC: unknown type in 4-element array: " ++ show ty
 
