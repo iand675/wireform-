@@ -66,6 +66,12 @@ decodeBooleanRLE numValues bs = do
 decodeRLEv1Int :: Int -> ByteString -> Either String (VP.Vector Int64)
 decodeRLEv1Int numValues bs
   | numValues <= 0 = Right VP.empty
+  -- ORC RLE delta runs encode up to 512 values from a tiny header.
+  -- Multiply by a generous cap so we still reject obvious DoS
+  -- attempts (a 9-byte stream that declares 4 GB values) without
+  -- false-positives on legitimate dense compression.
+  | numValues > BS.length bs * 1024 =
+      Left "ORC.RLE: numValues exceeds plausible RLE v1 capacity"
   | otherwise = runST $ do
       out <- MVP.unsafeNew numValues
       result <- rleV1Loop bs 0 out 0 numValues
@@ -80,6 +86,8 @@ decodeRLEv1Int numValues bs
 decodeRLEv2Int :: Bool -> Int -> ByteString -> Either String (VP.Vector Int64)
 decodeRLEv2Int _signed numValues bs
   | numValues <= 0 = Right VP.empty
+  | numValues > BS.length bs * 1024 =
+      Left "ORC.RLE: numValues exceeds plausible RLE v2 capacity"
   | otherwise = runST $ do
       out <- MVP.unsafeNew numValues
       result <- rleV2Loop _signed bs 0 out 0 numValues
