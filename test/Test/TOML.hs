@@ -289,6 +289,23 @@ roundtripTests = testGroup "Roundtrip"
             Just (TArray vs) -> V.toList vs @?= [TInteger 1, TInteger 2, TInteger 3]
             _ -> assertFailure "expected TArray"
         Left err -> assertFailure $ "decode failed: " ++ err
+
+  , testCase "encoder escapes control characters per TOML 1.0.0" $ do
+      -- Basic strings forbid raw control chars (U+0000..U+001F) other
+      -- than tab; the encoder must emit them as \\uXXXX escapes so the
+      -- result re-parses to the original value.
+      let raw = T.pack "ctrl: \x01 \x1F bell:\x07"
+          val = TTable (V.fromList [("s", TString raw)])
+          encoded = TOML.Encode.encode val
+      assertBool "uses \\u escape for U+0001"
+        (T.isInfixOf (T.pack "\\u0001") encoded)
+      assertBool "uses \\u escape for U+001F"
+        (T.isInfixOf (T.pack "\\u001F") encoded)
+      case decode encoded of
+        Right val2 -> case lookupKey "s" val2 of
+          Just (TString got) -> got @?= raw
+          _ -> assertFailure "expected TString"
+        Left err -> assertFailure $ "decode failed: " ++ err
   ]
 
 -- Helpers

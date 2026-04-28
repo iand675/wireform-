@@ -103,14 +103,30 @@ buildInlineTablePairs kvs
                    else acc <> fromText ", " <> pair
     ) mempty kvs
 
+-- | Escape a Text for embedding inside a TOML basic string. Per the
+-- TOML 1.0.0 spec, basic strings forbid raw control characters
+-- (U+0000–U+001F and U+007F) other than tab; emit them as @\\uXXXX@
+-- escapes so the encoder always produces well-formed TOML.
 escapeString :: Text -> Builder
 escapeString = foldMap escChar . T.unpack
   where
-    escChar '"'  = fromText "\\\""
-    escChar '\\' = fromText "\\\\"
-    escChar '\n' = fromText "\\n"
-    escChar '\t' = fromText "\\t"
-    escChar '\r' = fromText "\\r"
-    escChar '\b' = fromText "\\b"
-    escChar '\f' = fromText "\\f"
-    escChar c    = singleton c
+    escChar '"'   = fromText "\\\""
+    escChar '\\'  = fromText "\\\\"
+    escChar '\n'  = fromText "\\n"
+    escChar '\t'  = fromText "\\t"
+    escChar '\r'  = fromText "\\r"
+    escChar '\b'  = fromText "\\b"
+    escChar '\f'  = fromText "\\f"
+    escChar c
+      | cp < 0x20 || cp == 0x7F =
+          fromText (T.pack (printf4Hex cp))
+      | otherwise = singleton c
+      where
+        cp = fromEnum c
+
+    printf4Hex :: Int -> String
+    printf4Hex n =
+      let hex = "0123456789ABCDEF"
+          digit :: Int -> Char
+          digit i = hex !! ((n `div` (16 ^ i)) `mod` 16)
+      in "\\u" ++ [digit (3 :: Int), digit 2, digit 1, digit 0]
