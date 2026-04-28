@@ -451,7 +451,10 @@ tBinDecodeString :: ByteString -> Int -> Maybe (ByteString, Int)
 tBinDecodeString !bs !off = do
   (!lenW, !off1) <- getBE32 bs off
   let !len = fromIntegral lenW :: Int
-  if len < 0 || off1 + len > BS.length bs
+  -- Reject negative lengths (Word32 -> Int wrap on 32-bit hosts) and
+  -- impossibly-large lengths via 'len > BS.length bs - off1' so the
+  -- comparison cannot overflow.
+  if len < 0 || len > BS.length bs - off1
     then Nothing
     else Just (BS.take len (BS.drop off1 bs), off1 + len)
 {-# INLINE tBinDecodeString #-}
@@ -668,7 +671,7 @@ tCompDecodeString :: ByteString -> Int -> Maybe (ByteString, Int)
 tCompDecodeString !bs !off = do
   (!lenW, !off1) <- getVarint bs off
   let !len = fromIntegral lenW :: Int
-  if len < 0 || off1 + len > BS.length bs
+  if len < 0 || len > BS.length bs - off1
     then Nothing
     else Just (BS.take len (BS.drop off1 bs), off1 + len)
 {-# INLINE tCompDecodeString #-}
