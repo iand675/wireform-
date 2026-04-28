@@ -35,8 +35,12 @@ decode !bs
         else do
           let !segSizeWords = fromIntegral (readLE32 bs 4) :: Int
               !segStart = 8
-              !segEnd = segStart + segSizeWords * 8
-          if segEnd > BS.length bs
+              !available = BS.length bs - segStart
+          -- Avoid overflow: reject any declared segment size that
+          -- cannot possibly fit in the remaining input. This matches
+          -- 'segEnd > BS.length bs' without doing the multiplication
+          -- and silently wrapping for hostile inputs.
+          if segSizeWords < 0 || segSizeWords > available `div` 8
             then Left "CapnProto.Decode: segment truncated"
             else if segSizeWords == 0
               then Right C.Void
