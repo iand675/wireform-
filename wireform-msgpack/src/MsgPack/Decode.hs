@@ -277,8 +277,9 @@ dispatch p len off b origBs
 
 requireBytes :: Ptr Word8 -> Int -> Int -> Int -> DecResult -> DecResult
 requireBytes _ len off need action
-  | off + need > len = pure $ Left "MsgPack.Decode: unexpected end of input"
-  | otherwise        = action
+  | off < 0 || need < 0 = pure $ Left "MsgPack.Decode: negative offset/length"
+  | need > len - off    = pure $ Left "MsgPack.Decode: unexpected end of input"
+  | otherwise           = action
 {-# INLINE requireBytes #-}
 
 decodeStr :: Ptr Word8 -> Int -> Int -> Int -> ByteString -> DecResult
