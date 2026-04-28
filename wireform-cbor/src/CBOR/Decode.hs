@@ -132,7 +132,7 @@ decodeBStr bs off info
   | info == 31 = decodeIndefiniteBStr bs off
   | otherwise = do
       (len64, off') <- readArg bs off info
-      let !len = fromIntegral len64
+      len <- word64ToInt "byte string" len64
       ensureBytes bs off' len
       let !chunk = BSU.unsafeTake len (BSU.unsafeDrop off' bs)
       Right (C.ByteString chunk, off' + len)
@@ -142,12 +142,22 @@ decodeTStr bs off info
   | info == 31 = decodeIndefiniteTStr bs off
   | otherwise = do
       (len64, off') <- readArg bs off info
-      let !len = fromIntegral len64
+      len <- word64ToInt "text string" len64
       ensureBytes bs off' len
       let !raw = BSU.unsafeTake len (BSU.unsafeDrop off' bs)
       case decodeTextFast raw of
         Left _  -> Left "CBOR.Decode: invalid UTF-8 in text string"
         Right t -> Right (C.TextString t, off' + len)
+
+-- | Convert a CBOR-declared Word64 length into a host Int. On 64-bit
+-- hosts only impossibly large lengths fail; on 32-bit hosts this
+-- guards against silent Int wrap when a hostile encoder declares a
+-- length above 2^31.
+word64ToInt :: String -> Word64 -> Either String Int
+word64ToInt what n
+  | n <= fromIntegral (maxBound :: Int) = Right (fromIntegral n)
+  | otherwise = Left $
+      "CBOR.Decode: " ++ what ++ " length overflows host Int"
 
 decodeIndefiniteBStr :: ByteString -> Int -> Either String (C.Value, Int)
 decodeIndefiniteBStr bs off0 = go off0 []
@@ -202,9 +212,17 @@ decodeArray bs off info
 
 decodeNItems :: ByteString -> Int -> Int -> Either String (C.Value, Int)
 decodeNItems _bs !off 0 = Right (C.Array V.empty, off)
-decodeNItems bs !off !n = runST $ do
-  mv <- MV.new n
-  go mv 0 off
+decodeNItems bs !off !n
+  | n < 0 = Left "CBOR.Decode: array length overflows Int"
+  -- A CBOR data item is at least one byte. Reject up-front when the
+  -- declared count obviously cannot fit in the remaining input —
+  -- otherwise an attacker can cause a 4-billion-element MV.new with
+  -- a 5-byte payload.
+  | n > BS.length bs - off =
+      Left "CBOR.Decode: array length exceeds remaining input"
+  | otherwise = runST $ do
+      mv <- MV.new n
+      go mv 0 off
   where
     go :: MV.MVector s C.Value -> Int -> Int -> ST s (Either String (C.Value, Int))
     go !mv !i !o
@@ -250,9 +268,14 @@ decodeMap bs off info
 
 decodeNPairs :: ByteString -> Int -> Int -> Either String (C.Value, Int)
 decodeNPairs _bs !off 0 = Right (C.Map V.empty, off)
-decodeNPairs bs !off !n = runST $ do
-  mv <- MV.new n
-  go mv 0 off
+decodeNPairs bs !off !n
+  | n < 0 = Left "CBOR.Decode: map length overflows Int"
+  -- Each map pair is at least two bytes (one for key, one for value).
+  | n > (BS.length bs - off) `div` 2 =
+      Left "CBOR.Decode: map length exceeds remaining input"
+  | otherwise = runST $ do
+      mv <- MV.new n
+      go mv 0 off
   where
     go :: MV.MVector s (C.Value, C.Value) -> Int -> Int -> ST s (Either String (C.Value, Int))
     go !mv !i !o

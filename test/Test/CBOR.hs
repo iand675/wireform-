@@ -525,6 +525,28 @@ edgeCases = testGroup "Edge cases"
                   ])
       decode (encode val) @?= Right val
 
+  , testCase "decoder rejects array length larger than remaining bytes" $ do
+      -- 0x9b is array(8-byte length); 0xFF...FF declares ~2^64 elements.
+      -- Allocating that mutable vector blows up; decoder must reject.
+      let bs = BS.pack [ 0x9B
+                       , 0xFF, 0xFF, 0xFF, 0xFF
+                       , 0xFF, 0xFF, 0xFF, 0xFF
+                       ]
+      case decode bs of
+        Left _  -> pure ()
+        Right v -> assertFailure $
+          "expected rejection of impossible array, got: " ++ show v
+
+  , testCase "decoder rejects map length larger than remaining bytes" $ do
+      let bs = BS.pack [ 0xBB
+                       , 0xFF, 0xFF, 0xFF, 0xFF
+                       , 0xFF, 0xFF, 0xFF, 0xFF
+                       ]
+      case decode bs of
+        Left _  -> pure ()
+        Right v -> assertFailure $
+          "expected rejection of impossible map, got: " ++ show v
+
   , testCase "empty byte string" $ do
       let val = C.ByteString BS.empty
       decode (encode val) @?= Right val
