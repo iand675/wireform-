@@ -343,11 +343,15 @@ decodeSimpleOrFloat bs off info
   | info == 31 = Left "break at top level is not valid"
   | otherwise  = Left $ "reserved simple value info: " ++ show info
 
+-- See 'CBOR.Decode.halfToFloat' for the rationale; this is the same
+-- conversion duplicated for the streaming decoder so that both
+-- entry points produce the same Float for the same 2-byte input.
 halfToFloat :: Word16 -> Float
 halfToFloat !h =
-  let !sign = (fromIntegral h :: Word32) `shiftR` 15
-      !expo = (fromIntegral h :: Word32) `shiftR` 10 .&. 0x1f
-      !mant = fromIntegral h .&. 0x03ff :: Word32
+  let !w   = fromIntegral h :: Word32
+      !sign = w `shiftR` 15
+      !expo = (w `shiftR` 10) .&. 0x1f
+      !mant = w .&. 0x03ff
       !signBit = sign `shiftL` 31
   in if expo == 0
      then if mant == 0
@@ -355,8 +359,7 @@ halfToFloat !h =
           else let !f = (fromIntegral mant :: Float) / 1024.0 * (2 ** (-14))
                in if sign /= 0 then negate f else f
      else if expo == 0x1f
-     then if mant == 0
-          then castWord32ToFloat (signBit .|. 0x7f800000)
-          else castWord32ToFloat (signBit .|. 0x7fc00000)
+     then castWord32ToFloat
+            (signBit .|. 0x7f800000 .|. (mant `shiftL` 13))
      else castWord32ToFloat
             (signBit .|. ((expo + 112) `shiftL` 23) .|. (mant `shiftL` 13))

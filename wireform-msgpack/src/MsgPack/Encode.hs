@@ -118,10 +118,21 @@ extSize bs = case len of
     | otherwise     -> 6 + len   -- ext32
   where !len = BS.length bs
 
+-- | The spec-defined valid range for the @nanoseconds@ component of
+-- a MessagePack timestamp is @[0, 1_000_000_000)@. Both the
+-- size-prediction and the writer use this constant to stay in sync.
+maxValidNanos :: Word32
+maxValidNanos = 999_999_999
+
 timestampSize :: Int64 -> Word32 -> Int
 timestampSize s ns
-  | ns == 0 && s >= 0 && s <= 0xFFFFFFFF = 2 + 4    -- fixext4: 4 bytes data
-  | s >= 0 && s <= 0x3FFFFFFFF           = 2 + 8    -- fixext8: 8 bytes data
+  -- Timestamp 32 only fits when nanos == 0 and seconds in [0, 2^32).
+  | ns == 0 && s >= 0 && s <= 0xFFFFFFFF = 2 + 4
+  -- Timestamp 64 packs seconds in 34 bits and nanos in 30 bits, but
+  -- the spec also caps nanos at 999_999_999 — any larger value would
+  -- be truncated by the 30-bit field, so we must fall through to
+  -- timestamp 96 to preserve the full Word32 input range.
+  | s >= 0 && s <= 0x3FFFFFFFF && ns <= maxValidNanos = 2 + 8
   | otherwise                            = 3 + 12   -- ext8 with 12 bytes data
 
 --------------------------------------------------------------------------------
@@ -305,8 +316,11 @@ writeTimestamp p off s ns
       off1 <- dWord8 p off 0xd6      -- fixext4
       off2 <- dWord8 p off1 0xff     -- type = -1
       pokeBE32 p off2 (fromIntegral s)
-  -- Timestamp 64: 8 bytes, nanosec-adjustment(30) | seconds(34)
-  | s >= 0 && s <= 0x3FFFFFFFF = do
+  -- Timestamp 64: 8 bytes, nanosec-adjustment(30) | seconds(34).
+  -- The branch must match 'timestampSize' exactly: in particular
+  -- nanos must fit in 30 bits *and* be a valid spec-range value
+  -- (<= 999_999_999), otherwise we'd silently truncate.
+  | s >= 0 && s <= 0x3FFFFFFFF && ns <= maxValidNanos = do
       off1 <- dWord8 p off 0xd7      -- fixext8
       off2 <- dWord8 p off1 0xff     -- type = -1
       let !secHi = (fromIntegral s `shiftR` 32) .&. 0x3 :: Word64

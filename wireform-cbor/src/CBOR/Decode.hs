@@ -341,20 +341,37 @@ decodeSimpleOrFloat bs off info
   | info == 31 = Left "CBOR.Decode: break (0xff) at top level is not valid"
   | otherwise  = Left $ "CBOR.Decode: reserved simple value info: " ++ show info
 
+-- | IEEE 754 binary16 (half-float) to binary32 (single-float)
+-- conversion, following RFC 8949 \xC2\xA73.4.6 (the appendix C reference
+-- decoder).
+--
+-- For exponent 0 (subnormals or zero) we use the IEEE-correct
+-- formula @(\xC2\xB1)mant \xC3\x97 2^(-14) \xC3\x97 mant/1024@ to materialise the
+-- subnormal value as a regular float. For exponent 31 (NaN/Inf) we
+-- /preserve the mantissa payload/ by left-shifting it 13 bits into
+-- the binary32 mantissa rather than collapsing every NaN to the
+-- canonical quiet-NaN 0x7fc00000 — the RFC 8949 reference and the
+-- standard half-precision conversion both keep the payload.
 halfToFloat :: Word16 -> Float
 halfToFloat !h =
-  let !sign = (fromIntegral h :: Word32) `shiftR` 15
-      !expo = (fromIntegral h :: Word32) `shiftR` 10 .&. 0x1f
-      !mant = fromIntegral h .&. 0x03ff :: Word32
+  let !w   = fromIntegral h :: Word32
+      !sign = w `shiftR` 15
+      !expo = (w `shiftR` 10) .&. 0x1f
+      !mant = w .&. 0x03ff
       !signBit = sign `shiftL` 31
   in if expo == 0
      then if mant == 0
           then castWord32ToFloat signBit
-          else let !f = (fromIntegral mant :: Float) / 1024.0 * (2 ** (-14))
-               in if sign /= 0 then negate f else f
+          else
+            -- Subnormal: 2^-14 * (mant/1024). Build directly as Float
+            -- to keep the result exact for every encodable input.
+            let !f = (fromIntegral mant :: Float) / 1024.0 * (2 ** (-14))
+            in if sign /= 0 then negate f else f
      else if expo == 0x1f
-     then if mant == 0
-          then castWord32ToFloat (signBit .|. 0x7f800000)
-          else castWord32ToFloat (signBit .|. 0x7fc00000)
+     then
+       -- Inf or NaN: mirror exponent into binary32's exp = 0xff and
+       -- carry the mantissa payload (shifted from 10 bits to 23).
+       castWord32ToFloat
+         (signBit .|. 0x7f800000 .|. (mant `shiftL` 13))
      else castWord32ToFloat
             (signBit .|. ((expo + 112) `shiftL` 23) .|. (mant `shiftL` 13))
