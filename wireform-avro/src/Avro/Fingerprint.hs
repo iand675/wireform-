@@ -73,23 +73,39 @@ pcfField :: AvroField -> String
 pcfField fld =
   "{\"name\":\"" ++ T.unpack (avroFieldName fld) ++ "\",\"type\":" ++ pcf (avroFieldType fld) ++ "}"
 
--- CRC-64-AVRO implementation
--- Polynomial: 0xC96C5795D7870F42 (ECMA-182)
-
+-- | Avro CRC-64 (a 64-bit Rabin fingerprint as defined in the Avro
+-- specification, single-object encoding section). The algorithm uses
+-- the @EMPTY@ constant as both the initial value /and/ the
+-- polynomial; this is a deliberate departure from the ECMA-182 CRC-64.
+--
+-- > fp[0] = EMPTY
+-- > fp[i+1] = (fp[i] >>> 8) xor TABLE[(fp[i] xor buf[i]) & 0xff]
+-- > TABLE[k] = iterate (\\v -> (v >>> 1) xor (EMPTY .&. -(v .&. 1)))
+-- >                    8 (fromIntegral k)
 crc64Avro :: ByteString -> ByteString
 crc64Avro !bs =
-  let !crc = BS.foldl' crc64Update 0xC15D213AA4D7A795 bs
+  let !crc = BS.foldl' crc64Update emptyConst bs
   in word64ToBS crc
+
+emptyConst :: Word64
+emptyConst = 0xc15d213aa4d7a795
 
 crc64Update :: Word64 -> Word8 -> Word64
 crc64Update !crc !b =
-  let go !c 0 = c
-      go !c !i =
-        let !c' = if c .&. 1 == 1
-                  then (c `shiftR` 1) `xor` 0xC96C5795D7870F42
-                  else c `shiftR` 1
-        in go c' (i - 1 :: Int)
-  in go (crc `xor` fromIntegral b) 8
+  let !idx = (crc `xor` fromIntegral b) .&. 0xff
+      !tableEntry = crc64Step8 idx
+  in (crc `shiftR` 8) `xor` tableEntry
+
+-- | One @TABLE[k]@ entry computed inline (no static array). Following
+-- the spec literally: 8 iterations of @(v >>> 1) xor (EMPTY & -(v & 1))@.
+{-# INLINE crc64Step8 #-}
+crc64Step8 :: Word64 -> Word64
+crc64Step8 !k0 = step (step (step (step (step (step (step (step k0)))))))
+  where
+    step !v =
+      let !lsb = v .&. 1
+          !mask = negate lsb
+      in (v `shiftR` 1) `xor` (emptyConst .&. mask)
 
 word64ToBS :: Word64 -> ByteString
 word64ToBS !w = BS.pack

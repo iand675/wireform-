@@ -14,6 +14,7 @@ import Avro.Container
   , readContainer
   , writeContainerWith
   )
+import Avro.Fingerprint (avroFingerprint, parsingCanonicalForm)
 import qualified Avro.Value as AV
 import Avro.Schema
   ( AvroField (..)
@@ -23,6 +24,11 @@ import Avro.Schema
 
 main :: IO ()
 main = do
+  -- CRC-64-AVRO fingerprint, verified against the Java reference
+  -- implementation in the Avro 1.11 spec ('SchemaNormalization.fingerprint64'
+  -- with @"null"@ → @"null"@ PCF).
+  expectFingerprint (AvroPrimitive AvroNull) "\"null\"" "63dd24e7cc258f8a"
+
   codecRoundTrip "null"
   codecRoundTrip "deflate"
 #ifdef HAVE_SNAPPY
@@ -106,6 +112,37 @@ containerRoundTrip schema vals codec = do
           failTest ("OCF " ++ codec ++ " values mismatch")
       | otherwise ->
           putStrLn ("OK: container " ++ codec ++ " round-trip")
+
+expectFingerprint :: AvroType -> BS.ByteString -> String -> IO ()
+expectFingerprint sch expectedPcf expectedHex = do
+  let pcf = parsingCanonicalForm sch
+  if pcf /= expectedPcf
+    then failTest $
+      "PCF mismatch: expected " ++ show expectedPcf
+        ++ ", got " ++ show pcf
+    else do
+      let fpBytes = avroFingerprint sch
+          -- Reference values are the little-endian view of the 64-bit fingerprint.
+          asLE = sum [ fromIntegral (BS.index fpBytes i) * (256 :: Integer) ^ i
+                     | i <- [0 .. 7] ]
+          actualHex = pad16 (showHex' asLE)
+      if actualHex == expectedHex
+        then putStrLn ("OK: fingerprint " ++ show expectedPcf ++ " = " ++ actualHex)
+        else failTest $
+          "fingerprint " ++ show expectedPcf
+            ++ " expected " ++ expectedHex
+            ++ " got " ++ actualHex
+  where
+    showHex' :: Integer -> String
+    showHex' n =
+      let go 0 acc = acc
+          go x acc =
+            let (q, r) = x `divMod` 16
+                d = if r < 10 then toEnum (fromEnum '0' + fromIntegral r)
+                              else toEnum (fromEnum 'a' + fromIntegral (r - 10))
+            in go q (d : acc)
+      in if n == 0 then "0" else go n ""
+    pad16 s = replicate (16 - length s) '0' ++ s
 
 expect :: String -> Bool -> IO ()
 expect what ok =
