@@ -31,6 +31,7 @@ library
     CapnProto.CodeGen
     CapnProto.Decode
     CapnProto.Encode
+    CapnProto.Packed
     CapnProto.Parser
     CapnProto.QQ
     CapnProto.Registry
@@ -52,3 +53,13 @@ library
     deepseq >= 1.4 && < 1.6,
     scientific >= 0.3 && < 0.4,
     aeson >= 2.1 && < 2.3
+
+test-suite wireform-capnproto-test
+  import: defaults
+  type: exitcode-stdio-1.0
+  main-is: Main.hs
+  hs-source-dirs: test
+  build-depends:
+    base >= 4.16 && < 5,
+    wireform-capnproto,
+    bytestring >= 0.11 && < 0.13
