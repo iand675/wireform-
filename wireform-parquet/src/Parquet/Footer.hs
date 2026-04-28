@@ -24,10 +24,16 @@ import qualified Data.Text.Encoding
 import Data.Word (Word32)
 import qualified Data.Vector as V
 
+import Parquet.Footer.Build
+  ( buildFields
+  , pushField
+  , pushFieldMb
+  , pushFieldWhen
+  )
 import Parquet.Types
 import qualified Thrift.Value as TV
 import qualified Thrift.Wire as TW
-import Thrift.Encode (encodeCompact)
+import Thrift.Encode (encodeCompactSorted)
 import Thrift.Decode (decodeCompact)
 
 parquetMagic :: ByteString
@@ -36,7 +42,11 @@ parquetMagic = BS.pack [0x50, 0x41, 0x52, 0x31]
 writeFooter :: FileMetadata -> ByteString
 writeFooter fm =
   let !thriftVal = fileMetadataToThrift fm
-      !encoded = encodeCompact thriftVal
+      -- All Parquet *ToThrift builders emit fields in ascending
+      -- order, so we use the sorted-fast-path 'encodeCompactSorted'
+      -- to skip the encoder's two redundant 'sortBy . V.toList' walks
+      -- (one for the size pass, one for the write pass).
+      !encoded = encodeCompactSorted thriftVal
       !metaLen = BS.length encoded
   in BL.toStrict $ B.toLazyByteString $
        B.byteString encoded
@@ -77,92 +87,108 @@ readLE32 bs off =
 -- 1: version (i32), 2: schema (list<SchemaElement>), 3: num_rows (i64),
 -- 4: row_groups (list<RowGroup>), 5: created_by (string)
 
+-- ============================================================
+-- *ToThrift encoders
+--
+-- Every encoder in this module pushes its fields in ascending
+-- 'Int16' order, with no allocation per absent optional field.  The
+-- 'buildFields' / 'pushFieldMb' combinators in "Parquet.Footer.Build"
+-- write into a pre-sized mutable vector and freeze the populated
+-- prefix; downstream 'encodeCompactSorted' relies on that ordering
+-- to skip the redundant per-struct 'sortBy . V.toList' that
+-- 'encodeCompact' would otherwise perform twice.
+-- ============================================================
+
 fileMetadataToThrift :: FileMetadata -> TV.Value
-fileMetadataToThrift fm = TV.Struct $ V.fromList $
-  [ (1, TV.I32 (fmVersion fm))
-  , (2, TV.List TW.TT_STRUCT (V.map schemaElementToThrift (fmSchema fm)))
-  , (3, TV.I64 (fmNumRows fm))
-  , (4, TV.List TW.TT_STRUCT (V.map rowGroupToThrift (fmRowGroups fm)))
-  ] ++ maybe [] (\t -> [(5, TV.String t)]) (fmCreatedBy fm)
+fileMetadataToThrift fm = TV.Struct $ buildFields 5 $ \fb -> do
+  pushField fb 1 (TV.I32 (fmVersion fm))
+  pushField fb 2 (TV.List TW.TT_STRUCT
+                    (V.map schemaElementToThrift (fmSchema fm)))
+  pushField fb 3 (TV.I64 (fmNumRows fm))
+  pushField fb 4 (TV.List TW.TT_STRUCT
+                    (V.map rowGroupToThrift (fmRowGroups fm)))
+  pushFieldMb fb 5 TV.String (fmCreatedBy fm)
 
 schemaElementToThrift :: SchemaElement -> TV.Value
-schemaElementToThrift se = TV.Struct $ V.fromList $
-  [ (1, TV.String (seName se)) ]
-  ++ maybe [] (\r -> [(2, TV.I32 (fromIntegral (fromEnum r)))]) (seRepetition se)
-  ++ maybe [] (\t -> [(3, TV.I32 (parquetTypeToInt t))]) (seType se)
-  ++ maybe [] (\n -> [(4, TV.I32 n)]) (seNumChildren se)
-  ++ maybe [] (\c -> [(5, TV.I32 (fromIntegral (fromEnum c)))]) (seConvertedType se)
+schemaElementToThrift se = TV.Struct $ buildFields 5 $ \fb -> do
+  pushField fb 1 (TV.String (seName se))
+  pushFieldMb fb 2 (\r -> TV.I32 (fromIntegral (fromEnum r))) (seRepetition se)
+  pushFieldMb fb 3 (TV.I32 . parquetTypeToInt) (seType se)
+  pushFieldMb fb 4 TV.I32 (seNumChildren se)
+  pushFieldMb fb 5 (\c -> TV.I32 (fromIntegral (fromEnum c))) (seConvertedType se)
 
 rowGroupToThrift :: RowGroup -> TV.Value
-rowGroupToThrift rg = TV.Struct $ V.fromList
-  [ (1, TV.List TW.TT_STRUCT (V.map columnChunkToThrift (rgColumns rg)))
-  , (2, TV.I64 (rgTotalByteSize rg))
-  , (3, TV.I64 (rgNumRows rg))
-  ]
+rowGroupToThrift rg = TV.Struct $ buildFields 3 $ \fb -> do
+  pushField fb 1 (TV.List TW.TT_STRUCT
+                    (V.map columnChunkToThrift (rgColumns rg)))
+  pushField fb 2 (TV.I64 (rgTotalByteSize rg))
+  pushField fb 3 (TV.I64 (rgNumRows rg))
 
+-- | parquet.thrift @ColumnChunk@:
+--
+--   1: optional string  file_path
+--   2: required i64     file_offset
+--   3: optional ColumnMetaData  meta_data
+--   4: optional i64     offset_index_offset
+--   5: optional i32     offset_index_length
+--   6: optional i64     column_index_offset
+--   7: optional i32     column_index_length
 columnChunkToThrift :: ColumnChunk -> TV.Value
-columnChunkToThrift cc = TV.Struct $ V.fromList $
-  maybe [] (\fp -> [(1, TV.String fp)]) (ccFilePath cc)
-  ++ [ (2, TV.I64 (ccFileOffset cc)) ]
-  ++ maybe [] (\cm -> [(3, columnMetadataToThrift cm)]) (ccMetadata cc)
-  -- field 4 (offset_index_offset) - 6 are reserved by parquet.thrift for
-  -- offset_index_length / column_index_offset / column_index_length when
-  -- carried inline. We mirror the upstream layout:
-  --   4: optional i64 offset_index_offset
-  --   5: optional i32 offset_index_length
-  --   6: optional i64 column_index_offset
-  --   7: optional i32 column_index_length
-  -- Older wireform writers omitted these fields entirely, which decoders
-  -- treat as @Nothing@.
-  ++ maybe [] (\v -> [(4, TV.I64 v)]) (ccOffsetIndexOffset cc)
-  ++ maybe [] (\v -> [(5, TV.I32 v)]) (ccOffsetIndexLength cc)
-  ++ maybe [] (\v -> [(6, TV.I64 v)]) (ccColumnIndexOffset cc)
-  ++ maybe [] (\v -> [(7, TV.I32 v)]) (ccColumnIndexLength cc)
+columnChunkToThrift cc = TV.Struct $ buildFields 7 $ \fb -> do
+  pushFieldMb fb 1 TV.String                 (ccFilePath cc)
+  pushField   fb 2 (TV.I64 (ccFileOffset cc))
+  pushFieldMb fb 3 columnMetadataToThrift    (ccMetadata cc)
+  pushFieldMb fb 4 TV.I64                    (ccOffsetIndexOffset cc)
+  pushFieldMb fb 5 TV.I32                    (ccOffsetIndexLength cc)
+  pushFieldMb fb 6 TV.I64                    (ccColumnIndexOffset cc)
+  pushFieldMb fb 7 TV.I32                    (ccColumnIndexLength cc)
 
+-- | parquet.thrift @ColumnMetaData@: 8 mandatory + 7 optional fields.
 columnMetadataToThrift :: ColumnMetadata -> TV.Value
-columnMetadataToThrift cm = TV.Struct $ V.fromList $
-  [ (1, TV.I32 (parquetTypeToInt (cmType cm)))
-  , (2, TV.List TW.TT_I32 (V.map (TV.I32 . encodingToInt) (cmEncodings cm)))
-  , (3, TV.List TW.TT_STRING (V.map TV.String (cmPathInSchema cm)))
-  , (4, TV.I32 (compressionToInt (cmCodec cm)))
-  , (5, TV.I64 (cmNumValues cm))
-  , (6, TV.I64 (cmTotalUncompressedSize cm))
-  , (7, TV.I64 (cmTotalCompressedSize cm))
-  , (8, TV.I64 (cmDataPageOffset cm))
-  ] ++ maybe [] (\s -> [(9, statisticsToThrift s)]) (cmStatistics cm)
-  ++ maybe [] (\v -> [(10, TV.I64 v)]) (cmIndexPageOffset cm)
-  ++ maybe [] (\v -> [(11, TV.I64 v)]) (cmDictionaryPageOffset cm)
-  ++ (if V.null (cmKeyValueMetadata cm)
-        then []
-        else [(12, TV.List TW.TT_STRUCT (V.map keyValueToThrift (cmKeyValueMetadata cm)))])
-  ++ (if V.null (cmEncodingStats cm)
-        then []
-        else [(13, TV.List TW.TT_STRUCT (V.map pageEncodingStatsToThrift (cmEncodingStats cm)))])
-  ++ maybe [] (\v -> [(14, TV.I64 v)]) (cmBloomFilterOffset cm)
-  ++ maybe [] (\v -> [(15, TV.I32 v)]) (cmBloomFilterLength cm)
+columnMetadataToThrift cm = TV.Struct $ buildFields 15 $ \fb -> do
+  pushField   fb 1  (TV.I32 (parquetTypeToInt (cmType cm)))
+  pushField   fb 2  (TV.List TW.TT_I32
+                       (V.map (TV.I32 . encodingToInt) (cmEncodings cm)))
+  pushField   fb 3  (TV.List TW.TT_STRING
+                       (V.map TV.String (cmPathInSchema cm)))
+  pushField   fb 4  (TV.I32 (compressionToInt (cmCodec cm)))
+  pushField   fb 5  (TV.I64 (cmNumValues cm))
+  pushField   fb 6  (TV.I64 (cmTotalUncompressedSize cm))
+  pushField   fb 7  (TV.I64 (cmTotalCompressedSize cm))
+  pushField   fb 8  (TV.I64 (cmDataPageOffset cm))
+  pushFieldMb fb 9  statisticsToThrift (cmStatistics cm)
+  pushFieldMb fb 10 TV.I64             (cmIndexPageOffset cm)
+  pushFieldMb fb 11 TV.I64             (cmDictionaryPageOffset cm)
+  pushFieldWhen fb 12
+    (not (V.null (cmKeyValueMetadata cm)))
+    (TV.List TW.TT_STRUCT (V.map keyValueToThrift (cmKeyValueMetadata cm)))
+  pushFieldWhen fb 13
+    (not (V.null (cmEncodingStats cm)))
+    (TV.List TW.TT_STRUCT (V.map pageEncodingStatsToThrift (cmEncodingStats cm)))
+  pushFieldMb fb 14 TV.I64 (cmBloomFilterOffset cm)
+  pushFieldMb fb 15 TV.I32 (cmBloomFilterLength cm)
 
 keyValueToThrift :: KeyValue -> TV.Value
-keyValueToThrift kv = TV.Struct $ V.fromList $
-  (1, TV.String (kvKey kv))
-  : maybe [] (\v -> [(2, TV.String v)]) (kvValue kv)
+keyValueToThrift kv = TV.Struct $ buildFields 2 $ \fb -> do
+  pushField   fb 1 (TV.String (kvKey kv))
+  pushFieldMb fb 2 TV.String (kvValue kv)
 
 pageEncodingStatsToThrift :: PageEncodingStats -> TV.Value
-pageEncodingStatsToThrift pes = TV.Struct $ V.fromList
-  [ (1, TV.I32 (pesPageType pes))
-  , (2, TV.I32 (encodingToInt (pesEncoding pes)))
-  , (3, TV.I32 (pesCount pes))
-  ]
+pageEncodingStatsToThrift pes = TV.Struct $ buildFields 3 $ \fb -> do
+  pushField fb 1 (TV.I32 (pesPageType pes))
+  pushField fb 2 (TV.I32 (encodingToInt (pesEncoding pes)))
+  pushField fb 3 (TV.I32 (pesCount pes))
 
 statisticsToThrift :: Statistics -> TV.Value
-statisticsToThrift st = TV.Struct $ V.fromList $
-  maybe [] (\v -> [(1, TV.Binary v)]) (statMax st)
-  ++ maybe [] (\v -> [(2, TV.Binary v)]) (statMin st)
-  ++ maybe [] (\v -> [(3, TV.I64 v)]) (statNullCount st)
-  ++ maybe [] (\v -> [(4, TV.I64 v)]) (statDistinctCount st)
-  ++ maybe [] (\v -> [(5, TV.Binary v)]) (statMaxValue st)
-  ++ maybe [] (\v -> [(6, TV.Binary v)]) (statMinValue st)
-  ++ maybe [] (\v -> [(7, TV.Bool v)]) (statIsMaxValueExact st)
-  ++ maybe [] (\v -> [(8, TV.Bool v)]) (statIsMinValueExact st)
+statisticsToThrift st = TV.Struct $ buildFields 8 $ \fb -> do
+  pushFieldMb fb 1 TV.Binary (statMax st)
+  pushFieldMb fb 2 TV.Binary (statMin st)
+  pushFieldMb fb 3 TV.I64    (statNullCount st)
+  pushFieldMb fb 4 TV.I64    (statDistinctCount st)
+  pushFieldMb fb 5 TV.Binary (statMaxValue st)
+  pushFieldMb fb 6 TV.Binary (statMinValue st)
+  pushFieldMb fb 7 TV.Bool   (statIsMaxValueExact st)
+  pushFieldMb fb 8 TV.Bool   (statIsMinValueExact st)
 
 encodingToInt :: Encoding -> Int32
 encodingToInt = \case

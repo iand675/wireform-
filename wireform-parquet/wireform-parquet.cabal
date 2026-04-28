@@ -39,6 +39,7 @@ library
     Parquet.XXH64
   other-modules:
     Parquet.Delta
+    Parquet.Footer.Build
     Parquet.RLE
   build-depends:
     base >= 4.16 && < 5,
@@ -65,3 +66,16 @@ test-suite wireform-parquet-test
     bytestring >= 0.11 && < 0.13,
     vector >= 0.13 && < 0.14,
     primitive >= 0.7 && < 0.10
+
+benchmark wireform-parquet-footer-bench
+  import: defaults
+  type: exitcode-stdio-1.0
+  main-is: FooterBench.hs
+  hs-source-dirs: bench
+  build-depends:
+    base >= 4.16 && < 5,
+    wireform-parquet,
+    bytestring >= 0.11 && < 0.13,
+    text >= 2.0 && < 2.2,
+    vector >= 0.13 && < 0.14,
+    criterion >= 1.6 && < 1.7

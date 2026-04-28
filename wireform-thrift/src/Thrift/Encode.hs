@@ -17,6 +17,7 @@
 module Thrift.Encode
   ( encodeBinary
   , encodeCompact
+  , encodeCompactSorted
   ) where
 
 import Data.Bits (countLeadingZeros, shiftL, shiftR, xor, (.&.), (.|.))
@@ -134,15 +135,55 @@ encodeCompact :: TV.Value -> ByteString
 encodeCompact val = directEncode (compValueSize val) (writeComp val)
 {-# INLINE encodeCompact #-}
 
+-- | Like 'encodeCompact' but assumes that every 'TV.Struct' in the
+-- value tree (transitively) already has its fields stored in
+-- ascending @fid@ order. This skips the per-struct
+-- @sortBy . V.toList@ that 'encodeCompact' otherwise performs once
+-- for the size pass and once for the write pass.
+--
+-- Wireform's own @ColumnChunk@ / @ColumnMetaData@ / @Statistics@ /
+-- @KeyValue@ / @PageEncodingStats@ / @SchemaElement@ / @RowGroup@ /
+-- @FileMetaData@ encoders all build their field vectors in ascending
+-- order via "Parquet.Footer.Build", so the Parquet writer uses this
+-- entry point. Callers whose data may be unsorted should keep using
+-- 'encodeCompact'; passing unsorted fields here will produce
+-- malformed (but parseable) output because the delta-tag header
+-- relies on monotonically increasing @fid@.
+encodeCompactSorted :: TV.Value -> ByteString
+encodeCompactSorted val =
+  directEncode (compValueSizeSorted val) (writeCompSorted val)
+{-# INLINE encodeCompactSorted #-}
+
 compValueSize :: TV.Value -> Int
 compValueSize val = case val of
   TV.Struct fields -> compStructSize fields
   _                -> compPrimitiveSize val
 
+compValueSizeSorted :: TV.Value -> Int
+compValueSizeSorted val = case val of
+  TV.Struct fields -> compStructSizeSorted fields
+  _                -> compPrimitiveSizeSorted val
+
 compStructSize :: V.Vector (Int16, TV.Value) -> Int
 compStructSize fields =
   let sorted = sortBy (comparing fst) (V.toList fields)
   in goStructSize 0 sorted + 1
+
+-- | Sorted-fast-path: walk the 'Vector' in place, no list copy, no sort.
+compStructSizeSorted :: V.Vector (Int16, TV.Value) -> Int
+compStructSizeSorted fields = goSorted 0 0 (V.length fields) + 1
+  where
+    goSorted !lastFid !i !n
+      | i >= n = 0
+      | otherwise =
+          let (!fid, !v) = V.unsafeIndex fields i
+              !delta = fid - lastFid
+              !hdrSz = if delta > 0 && delta <= 15 then 1
+                       else 1 + compVarintSize (fromIntegral (zigZagEncode32 (fromIntegral fid)))
+              !valSz = case v of
+                         TV.Bool _ -> 0
+                         _         -> compPrimitiveSizeSorted v
+          in hdrSz + valSz + goSorted fid (i + 1) n
 
 goStructSize :: Int16 -> [(Int16, TV.Value)] -> Int
 goStructSize _ [] = 0
@@ -182,6 +223,32 @@ compPrimitiveSize = \case
         !hdrSz = if sz < 15 then 1 else 1 + compVarintSize (fromIntegral sz)
     in hdrSz + V.foldl' (\acc v -> acc + compPrimitiveSize v) 0 elems
 
+-- | Sorted-fast-path mirror of 'compPrimitiveSize'. Recurses through
+-- 'TV.Struct' via 'compStructSizeSorted' so nested structs also skip
+-- the sort.
+compPrimitiveSizeSorted :: TV.Value -> Int
+compPrimitiveSizeSorted = \case
+  TV.Struct fields -> compStructSizeSorted fields
+  TV.Map _kt _vt entries ->
+    if V.null entries
+    then 1
+    else compVarintSize (fromIntegral (V.length entries))
+         + 1
+         + V.foldl' (\acc (k, v) -> acc
+                       + compPrimitiveSizeSorted k
+                       + compPrimitiveSizeSorted v) 0 entries
+  TV.List _et elems ->
+    let !sz = V.length elems
+        !hdrSz = if sz < 15 then 1 else 1 + compVarintSize (fromIntegral sz)
+    in hdrSz + V.foldl' (\acc v -> acc + compPrimitiveSizeSorted v) 0 elems
+  TV.Set _et elems ->
+    let !sz = V.length elems
+        !hdrSz = if sz < 15 then 1 else 1 + compVarintSize (fromIntegral sz)
+    in hdrSz + V.foldl' (\acc v -> acc + compPrimitiveSizeSorted v) 0 elems
+  -- Leaf primitives don't carry sub-structs; reuse the existing
+  -- (already-no-sort) implementation.
+  v -> compPrimitiveSize v
+
 compVarintSize :: Word64 -> Int
 compVarintSize !n =
   let !bits = 64 - countLeadingZeros (n .|. 1)
@@ -202,12 +269,50 @@ writeComp val p off = case val of
   _                -> writeCompValue val p off
 {-# INLINE writeComp #-}
 
+-- | Sorted-fast-path mirror of 'writeComp'. Skips the
+-- 'sortBy . V.toList' that 'writeCompStruct' otherwise performs,
+-- assuming the caller built each 'TV.Struct' with ascending @fid@s.
+writeCompSorted :: TV.Value -> Ptr Word8 -> Int -> IO Int
+writeCompSorted val p off = case val of
+  TV.Struct fields -> writeCompStructSorted p off fields
+  _                -> writeCompValueSorted val p off
+{-# INLINE writeCompSorted #-}
+
 writeCompStruct :: Ptr Word8 -> Int -> V.Vector (Int16, TV.Value) -> IO Int
 writeCompStruct p off fields = do
   let sorted = sortBy (comparing fst) (V.toList fields)
   off1 <- goWriteCompStruct p off 0 sorted
   pokeByteOff p off1 (0x00 :: Word8)
   pure $! off1 + 1
+
+-- | Walk the 'Vector' directly, no copy, no sort. Recurses through
+-- nested structs via 'writeCompValueSorted'.
+writeCompStructSorted
+  :: Ptr Word8 -> Int -> V.Vector (Int16, TV.Value) -> IO Int
+writeCompStructSorted p off fields = do
+  off1 <- goSorted 0 0 (V.length fields) off
+  pokeByteOff p off1 (0x00 :: Word8)
+  pure $! off1 + 1
+  where
+    goSorted !lastFid !i !n !cursor
+      | i >= n = pure cursor
+      | otherwise = do
+          let (!fid, !v) = V.unsafeIndex fields i
+              !delta = fid - lastFid
+              !ctype = case v of
+                         TV.Bool b -> if b then 1 else 2
+                         _         -> thriftTypeToCompact (TV.thriftTypeOf v)
+          c1 <- if delta > 0 && delta <= 15
+            then do
+              pokeByteOff p cursor (fromIntegral delta `shiftL` 4 .|. ctype :: Word8)
+              pure $! cursor + 1
+            else do
+              pokeByteOff p cursor ctype
+              writeVarint p (cursor + 1) (fromIntegral (zigZagEncode32 (fromIntegral fid)))
+          c2 <- case v of
+            TV.Bool _ -> pure c1
+            _         -> writeCompValueSorted v p c1
+          goSorted fid (i + 1) n c2
 
 goWriteCompStruct :: Ptr Word8 -> Int -> Int16 -> [(Int16, TV.Value)] -> IO Int
 goWriteCompStruct _ off _ [] = pure off
@@ -259,6 +364,29 @@ writeCompValue val p off = case val of
   TV.Set et elems -> do
     off1 <- writeCompListHeader p off et (V.length elems)
     V.foldM' (\o v -> writeCompValue v p o) off1 elems
+
+-- | Sorted-fast-path mirror of 'writeCompValue'. Recurses into
+-- 'TV.Struct' / 'TV.List' / 'TV.Set' / 'TV.Map' via the sorted
+-- variants so nested structs also skip the sort.
+writeCompValueSorted :: TV.Value -> Ptr Word8 -> Int -> IO Int
+writeCompValueSorted val p off = case val of
+  TV.Struct fields -> writeCompStructSorted p off fields
+  TV.Map kt vt entries ->
+    if V.null entries
+    then do pokeByteOff p off (0x00 :: Word8); pure $! off + 1
+    else do
+      off1 <- writeVarint p off (fromIntegral (V.length entries))
+      pokeByteOff p off1 (thriftTypeToCompact kt `shiftL` 4 .|. thriftTypeToCompact vt :: Word8)
+      V.foldM' (\o (k, v) -> do o1 <- writeCompValueSorted k p o
+                                writeCompValueSorted v p o1) (off1 + 1) entries
+  TV.List et elems -> do
+    off1 <- writeCompListHeader p off et (V.length elems)
+    V.foldM' (\o v -> writeCompValueSorted v p o) off1 elems
+  TV.Set et elems -> do
+    off1 <- writeCompListHeader p off et (V.length elems)
+    V.foldM' (\o v -> writeCompValueSorted v p o) off1 elems
+  -- Leaf primitives are identical to the unsorted path.
+  v -> writeCompValue v p off
 
 writeCompBytes :: Ptr Word8 -> Int -> ByteString -> IO Int
 writeCompBytes p off bs = do
