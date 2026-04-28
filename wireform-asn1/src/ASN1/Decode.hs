@@ -193,14 +193,24 @@ decodeIntegerBytes bs
   | otherwise =
       BS.foldl' (\acc b -> acc `shiftL` 8 .|. fromIntegral b) (0 :: Integer) bs
 
+-- | Decode an OID content body.
+--
+-- The first sub-identifier on the wire is the base-128 encoding of
+-- @40*X1 + X2@. Per X.690 \xC2\xA78.19.4 the first arc value is in {0,1,2};
+-- if @combined < 80@ then @X1 = combined / 40@ and @X2 = combined mod 40@,
+-- otherwise @X1 = 2@ and @X2 = combined - 80@. Crucially the
+-- combined sub-identifier is /not/ restricted to one byte: a value
+-- like 2.999 packs as two base-128 bytes (0x88 0x37).
 decodeOID :: ByteString -> Either String [Word64]
 decodeOID bs
   | BS.null bs = Right []
   | otherwise = do
-      let !first = fromIntegral (BS.index bs 0) :: Word64
-          !c1 = first `div` 40
-          !c2 = first `mod` 40
-      rest <- decodeOIDComponents bs 1 (BS.length bs)
+      (combined, off1) <- decodeBase128 bs 0
+      let (!c1, !c2) =
+            if combined < 80
+              then (combined `div` 40, combined `mod` 40)
+              else (2, combined - 80)
+      rest <- decodeOIDComponents bs off1 (BS.length bs)
       Right (c1 : c2 : rest)
 
 decodeOIDComponents :: ByteString -> Int -> Int -> Either String [Word64]

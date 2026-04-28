@@ -236,15 +236,22 @@ integerToTwosComplement n
       | testBit b 7 = trimFF (b : rest)
     trimFF bs = bs
 
+-- | Encode an OID per X.690 \xC2\xA78.19.
+--
+-- The first sub-identifier is @40 \xC3\x97 X1 + X2@, encoded in the same
+-- base-128 form as every other component (NOT a raw byte: the
+-- combined value can exceed 255 if @X2 >= 80@, which is common in
+-- joint-iso-itu-t arcs).  Subsequent components encode independently.
 encodeOID :: V.Vector Word64 -> ByteString
 encodeOID components
   | V.length components < 2 = BS.empty
   | otherwise =
       let !first = V.unsafeIndex components 0
           !second = V.unsafeIndex components 1
-          !firstByte = fromIntegral (first * 40 + second) :: Word8
+          !combined = first * 40 + second
+          !firstEncoded = encodeOIDComponent combined
           !rest = V.toList (V.drop 2 components)
-      in BS.singleton firstByte <> mconcat (map encodeOIDComponent rest)
+      in firstEncoded <> mconcat (map encodeOIDComponent rest)
 
 encodeOIDComponent :: Word64 -> ByteString
 encodeOIDComponent n

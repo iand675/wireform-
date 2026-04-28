@@ -107,6 +107,30 @@ main = do
   expectBytes "Empty BIT STRING normalises unused to 0"
     encEmpty (BS.pack [0x03, 0x01, 0x00])
 
+  -- OID with first sub-identifier > 127: per X.690 §8.19, the
+  -- combined first sub-identifier (40*X1 + X2) is base-128 encoded,
+  -- so OID 2.999 has combined = 1079 = 0x437 = bytes 0x88 0x37.
+  -- Wireform's encoder previously truncated this to a single byte.
+  let oidBigSecond = OID (V.fromList [2, 999])
+      encOidBig = encode oidBigSecond
+  expectBytes "OID 2.999 base-128 first sub-identifier"
+    encOidBig (BS.pack [0x06, 0x02, 0x88, 0x37])
+  case decode encOidBig of
+    Left e -> failTest ("OID 2.999 round-trip: " ++ e)
+    Right (OID v)
+      | V.toList v == [2, 999] ->
+          putStrLn "OK: OID 2.999 round-trip"
+      | otherwise -> failTest $ "OID 2.999 mismatch: " ++ show v
+    Right v -> failTest $ "OID decoded as non-OID: " ++ show v
+
+  -- A multi-component OID with the joint-iso-itu-t arc:
+  -- 2.5.4.3 (commonName).
+  let oidCN = OID (V.fromList [2, 5, 4, 3])
+      encCN = encode oidCN
+  -- 40*2 + 5 = 85 < 128 so single byte 0x55, then 0x04, 0x03.
+  expectBytes "OID 2.5.4.3 single-byte first sub-identifier"
+    encCN (BS.pack [0x06, 0x03, 0x55, 0x04, 0x03])
+
   putStrLn "All ASN.1 BER indefinite-length tests passed."
 
 expectBytes :: String -> BS.ByteString -> BS.ByteString -> IO ()
