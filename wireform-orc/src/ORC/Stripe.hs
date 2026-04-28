@@ -7,6 +7,8 @@
 module ORC.Stripe
   ( Stream (..)
   , StripeFooter (..)
+  , ColumnEncoding (..)
+  , ColumnEncodingKind (..)
   , decodeStripeFooter
   , stripeFooterBytes
   , streamSlice
@@ -34,9 +36,28 @@ data Stream = Stream
   , stLength :: !Word64
   } deriving stock (Show, Eq)
 
--- | Parsed @StripeFooter@ (streams only; column encodings omitted for now).
-newtype StripeFooter = StripeFooter
-  { sfStreams :: V.Vector Stream
+-- | One per leaf column, matching the protobuf @ColumnEncoding@.
+data ColumnEncoding = ColumnEncoding
+  { ceKind           :: !ColumnEncodingKind
+  -- | Number of dictionary entries when 'ceKind' is 'CekDictionary' or
+  -- 'CekDictionaryV2'. Zero for non-dictionary encodings.
+  , ceDictionarySize :: !Word64
+  } deriving stock (Show, Eq)
+
+-- | ORC column-encoding kind (proto @ColumnEncoding.Kind@).
+data ColumnEncodingKind
+  = CekDirect          -- ^ 0
+  | CekDictionary      -- ^ 1
+  | CekDirectV2        -- ^ 2
+  | CekDictionaryV2    -- ^ 3
+  deriving stock (Show, Eq, Enum, Bounded)
+
+-- | Parsed @StripeFooter@ — streams (field 1) and column encodings (field 2).
+data StripeFooter = StripeFooter
+  { sfStreams         :: !(V.Vector Stream)
+  -- | One element per leaf column in pre-order. Empty when the stripe
+  -- footer omits the @columns@ list (some pre-1.7 writers).
+  , sfColumnEncodings :: !(V.Vector ColumnEncoding)
   } deriving stock (Show, Eq)
 
 -- | Take the stripe-footer protobuf bytes from a full stripe blob.
@@ -61,25 +82,32 @@ streamSlice stripeBs !offset !len =
 -- | Walk streams in @StripeFooter@ order and slice each payload from the start
 -- of @stripeBs@ (index + data region; caller supplies the full stripe blob).
 stripeStreamSlices :: ByteString -> StripeFooter -> Either String (V.Vector (Stream, ByteString))
-stripeStreamSlices stripeBs (StripeFooter streams) = go 0 0 V.empty
-  where
-    go !i !pos !acc
-      | i >= V.length streams = Right acc
-      | otherwise =
-          let st = V.unsafeIndex streams i
-              !l = stLength st
-          in case streamSlice stripeBs pos l of
-            Left e -> Left e
-            Right chunk ->
-              go (i + 1) (pos + l) (V.snoc acc (st, chunk))
+stripeStreamSlices stripeBs sf =
+  let streams = sfStreams sf
+      go !i !pos !acc
+        | i >= V.length streams = Right acc
+        | otherwise =
+            let st = V.unsafeIndex streams i
+                !l = stLength st
+            in case streamSlice stripeBs pos l of
+              Left e -> Left e
+              Right chunk ->
+                go (i + 1) (pos + l) (V.snoc acc (st, chunk))
+  in go 0 0 V.empty
 
--- | Parse protobuf @StripeFooter@ (field 1: repeated Stream).
+-- | Parse protobuf @StripeFooter@:
+--
+--   field 1: repeated 'Stream'
+--   field 2: repeated 'ColumnEncoding'
+--
+-- Other fields (@writerTimezone@, @encryption@) are skipped so older /
+-- newer writers round-trip cleanly.
 decodeStripeFooter :: ByteString -> Either String StripeFooter
-decodeStripeFooter bs = go 0 V.empty
+decodeStripeFooter bs = go 0 V.empty V.empty
   where
     !len = BS.length bs
-    go !off !acc
-      | off >= len = Right (StripeFooter acc)
+    go !off !accStreams !accEnc
+      | off >= len = Right (StripeFooter accStreams accEnc)
       | otherwise = do
           (tag, off1) <- getVarint bs off len
           let !fieldNum = fromIntegral (tag `shiftR` 3) :: Int
@@ -88,8 +116,42 @@ decodeStripeFooter bs = go 0 V.empty
             (1, 2) -> do
               (chunk, off2) <- getLenDelim bs off1 len
               st <- decodeStream chunk
-              go off2 (V.snoc acc st)
-            _ -> skipField wireType bs off1 len >>= \off2 -> go off2 acc
+              go off2 (V.snoc accStreams st) accEnc
+            (2, 2) -> do
+              (chunk, off2) <- getLenDelim bs off1 len
+              ce <- decodeColumnEncoding chunk
+              go off2 accStreams (V.snoc accEnc ce)
+            _ -> skipField wireType bs off1 len >>= \off2 -> go off2 accStreams accEnc
+
+-- | Parse one protobuf @ColumnEncoding@ entry (proto: kind=1, dictionarySize=2,
+-- bloomEncoding=3). Unknown fields are skipped.
+decodeColumnEncoding :: ByteString -> Either String ColumnEncoding
+decodeColumnEncoding bs = go 0 (ColumnEncoding CekDirect 0)
+  where
+    !len = BS.length bs
+    go !off !ce
+      | off >= len = Right ce
+      | otherwise = do
+          (tag, off') <- getVarint bs off len
+          let !fieldNum = fromIntegral (tag `shiftR` 3) :: Int
+              !wireType = tag .&. 7
+          case (fieldNum, wireType) of
+            (1, 0) -> do
+              (v, off'') <- getVarint bs off' len
+              k <- columnEncodingKindFromInt v
+              go off'' ce { ceKind = k }
+            (2, 0) -> do
+              (v, off'') <- getVarint bs off' len
+              go off'' ce { ceDictionarySize = v }
+            _ -> skipField wireType bs off' len >>= \off'' -> go off'' ce
+
+columnEncodingKindFromInt :: Word64 -> Either String ColumnEncodingKind
+columnEncodingKindFromInt = \case
+  0 -> Right CekDirect
+  1 -> Right CekDictionary
+  2 -> Right CekDirectV2
+  3 -> Right CekDictionaryV2
+  n -> Left $ "ORC.Stripe: unknown ColumnEncoding.Kind " ++ show n
 
 decodeStream :: ByteString -> Either String Stream
 decodeStream bs = go 0 (Stream 0 0 0)
@@ -142,9 +204,18 @@ skipField wireType bs !off !len = case wireType of
 
 -- | Encode a 'StripeFooter' as protobuf bytes.
 encodeStripeFooter :: StripeFooter -> ByteString
-encodeStripeFooter (StripeFooter streams) =
+encodeStripeFooter (StripeFooter streams encs) =
   BL.toStrict $ B.toLazyByteString $
-    V.foldl' (\acc s -> acc <> pbLenDelim 1 (encodeStream s)) mempty streams
+       V.foldl' (\acc s -> acc <> pbLenDelim 1 (encodeStream s)) mempty streams
+    <> V.foldl' (\acc e -> acc <> pbLenDelim 2 (encodeColumnEncoding e)) mempty encs
+
+encodeColumnEncoding :: ColumnEncoding -> B.Builder
+encodeColumnEncoding ce = mconcat
+  [ pbVarintField 1 (fromIntegral (fromEnum (ceKind ce)))
+  , if ceDictionarySize ce == 0
+      then mempty
+      else pbVarintField 2 (ceDictionarySize ce)
+  ]
 
 -- | Encode a single 'Stream' as protobuf bytes.
 encodeStream :: Stream -> B.Builder

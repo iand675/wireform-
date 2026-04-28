@@ -28,6 +28,7 @@ module ORC.Read
   , decodeBoolColumn
   , decodeStringColumn
   , decodeStringDictColumn
+  , decodeStringDictColumnSized
   , decodeFloatColumn
   , decodeDoubleColumn
   , decodeTimestampColumn
@@ -241,26 +242,33 @@ decodeBoolColumn numRows dataBs mPresentBs = case mPresentBs of
     vals <- decodeBooleanRLE numPresent dataBs
     Right $! interleaveBool present vals
 
--- | Decode a string column (DIRECT encoding only).
+-- | Decode a string column.
 --
--- Arguments: @numRows@, @data@ (UTF-8 bytes), @length stream@ (RLE v2
--- unsigned), @dictionary stream@ (empty for DIRECT), @present stream@.
+-- Arguments: @numRows@, @data@ stream, @length@ stream, @dictionary
+-- data@ stream (empty for @DIRECT@/@DIRECT_V2@), @present@ stream.
+--
+-- When the @dictionary data@ stream is non-empty the column is read as
+-- @DICTIONARY_V2@: the @data@ stream contains RLE-v2 unsigned indices,
+-- the @length@ stream contains the per-entry byte lengths of the
+-- dictionary, and the @dictionary data@ stream is the concatenated
+-- UTF-8 blob.
 decodeStringColumn
   :: Int -> ByteString -> ByteString -> ByteString -> Maybe ByteString
   -> Either String (V.Vector (Maybe T.Text))
-decodeStringColumn _numRows _dataBs _lengthBs dictBs _mPresentBs
-  | not (BS.null dictBs) = Left "ORC.Read: DICTIONARY_V2 string encoding not yet implemented"
-decodeStringColumn numRows dataBs lengthBs _dictBs mPresentBs = do
-  (numPresent, mPresent) <- case mPresentBs of
-    Nothing -> Right (numRows, Nothing)
-    Just pbs -> do
-      p <- decodePresentStream numRows pbs
-      Right (countTrue p, Just p)
-  lengths <- decodeRLEv2Int False numPresent lengthBs
-  strings <- splitByLengths dataBs lengths
-  case mPresent of
-    Nothing -> Right $! V.map Just strings
-    Just present -> Right $! interleaveText present strings
+decodeStringColumn numRows dataBs lengthBs dictBs mPresentBs
+  | not (BS.null dictBs) =
+      decodeStringDictColumn numRows dictBs lengthBs dataBs mPresentBs
+  | otherwise = do
+      (numPresent, mPresent) <- case mPresentBs of
+        Nothing -> Right (numRows, Nothing)
+        Just pbs -> do
+          p <- decodePresentStream numRows pbs
+          Right (countTrue p, Just p)
+      lengths <- decodeRLEv2Int False numPresent lengthBs
+      strings <- splitByLengths dataBs lengths
+      case mPresent of
+        Nothing -> Right $! V.map Just strings
+        Just present -> Right $! interleaveText present strings
 
 -- | Decode an IEEE 754 single-precision float column (little-endian).
 decodeFloatColumn
@@ -373,23 +381,76 @@ decodeDecimalColumn numRows _scale dataBs mPresentBs = do
     Nothing -> Right $! V.map Just ints
     Just present -> Right $! interleaveWith present ints
 
--- | Decode a DICTIONARY_V2-encoded string column.
+-- | Decode a @DICTIONARY_V2@-encoded string column.
 --
--- @numRows@, dictionary data bytes, length stream, index stream, present stream.
+-- @numRows@, dictionary data bytes, length stream, index stream, present
+-- stream. The dictionary length stream is decoded greedily — the
+-- dictionary size is inferred from the bytes available; supply it
+-- explicitly with 'decodeStringDictColumnSized' when the column's
+-- 'ColumnEncoding' provides a precise count.
 decodeStringDictColumn
   :: Int -> ByteString -> ByteString -> ByteString -> Maybe ByteString
   -> Either String (V.Vector (Maybe T.Text))
 decodeStringDictColumn numRows dictDataBs lengthBs indexBs mPresentBs = do
-  -- Decode dictionary
-  dictLengths <- decodeRLEv2Int False (estimateCount lengthBs) lengthBs
+  -- Walk the LENGTH stream by trying successively larger 'numValues'
+  -- counts until the totals add up to the dictionary blob's length.
+  -- This is O(dictSize) and only runs on the legacy code path; callers
+  -- that already know the dictionary size should prefer
+  -- 'decodeStringDictColumnSized'.
+  dictLengths <- inferDictLengths dictDataBs lengthBs
+  decodeStringDictColumnFromLengths
+    numRows dictDataBs dictLengths indexBs mPresentBs
+
+inferDictLengths :: ByteString -> ByteString -> Either String (VP.Vector Int64)
+inferDictLengths dictDataBs lengthBs =
+  let !target = fromIntegral (BS.length dictDataBs) :: Int64
+      bound = BS.length dictDataBs + 1
+      tryDecode !n
+        | n > bound =
+            Left "ORC.Read: could not infer dictionary size from LENGTH stream"
+        | otherwise = case decodeRLEv2Int False n lengthBs of
+            Left _ -> tryDecode (n + 1)
+            Right vs ->
+              if VP.sum vs == target
+                then Right vs
+                else tryDecode (n + 1)
+  in tryDecode 1
+
+-- | Decode a @DICTIONARY_V2@-encoded string column using the dictionary
+-- size from the column's @ColumnEncoding@ message. Prefer this overload
+-- when the count is known, since it avoids any over-read from the
+-- LENGTH stream and rejects truncated inputs precisely.
+decodeStringDictColumnSized
+  :: Int -- ^ numRows
+  -> Int -- ^ dictionarySize from ColumnEncoding
+  -> ByteString -- ^ DICTIONARY_DATA stream
+  -> ByteString -- ^ LENGTH stream
+  -> ByteString -- ^ DATA stream (RLE v2 unsigned indices)
+  -> Maybe ByteString -- ^ optional PRESENT stream
+  -> Either String (V.Vector (Maybe T.Text))
+decodeStringDictColumnSized numRows dictSize dictDataBs lengthBs indexBs mPresentBs = do
+  dictLengths <- decodeRLEv2Int False dictSize lengthBs
+  if VP.length dictLengths /= dictSize
+    then Left $ "ORC.Read: expected " ++ show dictSize
+                 ++ " dictionary lengths, got " ++ show (VP.length dictLengths)
+    else decodeStringDictColumnFromLengths
+           numRows dictDataBs dictLengths indexBs mPresentBs
+
+decodeStringDictColumnFromLengths
+  :: Int
+  -> ByteString
+  -> VP.Vector Int64
+  -> ByteString
+  -> Maybe ByteString
+  -> Either String (V.Vector (Maybe T.Text))
+decodeStringDictColumnFromLengths numRows dictDataBs dictLengths indexBs mPresentBs = do
   dictEntries <- splitByLengths dictDataBs dictLengths
-  -- Decode indices
   (numPresent, mPresent) <- resolvePresent numRows mPresentBs
   indices <- decodeRLEv2Int False numPresent indexBs
-  let !dictSize = V.length dictEntries
+  let !dictCount = V.length dictEntries
   strings <- V.generateM (VP.length indices) $ \i -> do
     let !idx = fromIntegral (VP.unsafeIndex indices i) :: Int
-    if idx < 0 || idx >= dictSize
+    if idx < 0 || idx >= dictCount
       then Left $ "ORC.Read: dictionary index " ++ show idx ++ " out of range"
       else Right (V.unsafeIndex dictEntries idx)
   case mPresent of

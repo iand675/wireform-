@@ -169,7 +169,7 @@ buildStripe :: V.Vector (Word64, Word64, ByteString) -> ByteString
 buildStripe streamInfos =
   let !streams = V.map (\(kind, col, bs) ->
         Stream { stKind = kind, stColumn = col, stLength = fromIntegral (BS.length bs) }) streamInfos
-      !footer = StripeFooter streams
+      !footer = StripeFooter streams V.empty
       !footerBs = encodeStripeFooter footer
       !dataParts = V.toList (V.map (\(_, _, bs) -> bs) streamInfos)
   in BS.concat (dataParts ++ [footerBs])
@@ -191,7 +191,7 @@ buildORCFile types stripeData =
             let !sdata = V.unsafeIndex stripeData i
                 !streams = V.map (\(kind, col, bs) ->
                   Stream { stKind = kind, stColumn = col, stLength = fromIntegral (BS.length bs) }) sdata
-                !footer = StripeFooter streams
+                !footer = StripeFooter streams V.empty
                 !footerBs = encodeStripeFooter footer
                 !dataLen = V.foldl' (\a (_, _, bs) -> a + fromIntegral (BS.length bs)) 0 sdata :: Word64
                 !ftrLen = fromIntegral (BS.length footerBs) :: Word64
