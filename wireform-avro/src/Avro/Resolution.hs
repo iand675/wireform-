@@ -15,6 +15,8 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding
 import qualified Data.Vector as V
 
+import qualified Data.Aeson as Aeson
+
 import Avro.Schema (AvroType(..), AvroSchema(..), AvroField(..))
 import Avro.JSON (avroFromJSON)
 import qualified Avro.Value as AV
@@ -120,12 +122,7 @@ resolveOneField wFields rField =
     Nothing ->
       case avroFieldDefault rField of
         Just dflt ->
-          -- The Avro spec interprets the JSON @default@ value under
-          -- the field's reader schema. For unions, the default is
-          -- always interpreted as the FIRST branch of the union (Avro
-          -- 1.11 §schema-record). 'avroFromJSON' implements both
-          -- rules.
-          case avroFromJSON (avroFieldType rField) dflt of
+          case interpretDefault (avroFieldType rField) dflt of
             Right v  -> Right (FieldDefault v)
             Left err -> Left $
               "reader field '" ++ T.unpack (avroFieldName rField)
@@ -133,6 +130,19 @@ resolveOneField wFields rField =
         Nothing -> Left $
           "reader field '" ++ T.unpack (avroFieldName rField)
           ++ "' not in writer and has no default"
+
+-- | Interpret a JSON default value under an Avro reader schema.
+-- Avro 1.11 §schema-record specifies a /special/ rule for unions:
+-- the default applies to the FIRST branch of the union, not the
+-- normal tagged-object union JSON form. Everywhere else the regular
+-- 'avroFromJSON' walk applies.
+interpretDefault :: AvroType -> Aeson.Value -> Either String AV.Value
+interpretDefault (AvroUnion {avroUnionBranches = branches}) dflt
+  | V.null branches = Left "interpretDefault: empty union"
+  | otherwise = do
+      val <- avroFromJSON (V.unsafeHead branches) dflt
+      Right (AV.Union 0 val)
+interpretDefault ty dflt = avroFromJSON ty dflt
 
 findFieldWithAliases :: V.Vector AvroField -> AvroField -> Maybe Int
 findFieldWithAliases wFields rField =

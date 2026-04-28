@@ -435,6 +435,30 @@ avroTests = testGroup "Avro Encode/Decode"
                   , AV.String "n/a"
                   ]))
 
+      , testCase "default for [String, Null] union applies to first branch" $ do
+          -- Avro 1.11 §schema-record: a default for a union is
+          -- interpreted as the FIRST branch of the union. For
+          -- [String, Null] that branch is String, so a JSON string
+          -- default like \"hello\" must be accepted (not rejected
+          -- as a bad union form).
+          let writerTy = mkRecordType "Rec" [ ("a", AvroPrimitive AvroInt) ]
+              readerTy = mkRecordTypeWithDefaults "Rec"
+                           [ ("a", AvroPrimitive AvroInt, Nothing)
+                           , ("opt",
+                              AvroUnion (V.fromList
+                                [ AvroPrimitive AvroString
+                                , AvroPrimitive AvroNull
+                                ]),
+                              Just (Aeson.String "hello"))
+                           ]
+              Right res = resolveSchema writerTy readerTy
+              writerVal = AV.Record (V.fromList [AV.Int 1])
+          resolveValue res writerVal
+            @?= Right (AV.Record (V.fromList
+                  [ AV.Int 1
+                  , AV.Union 0 (AV.String "hello")
+                  ]))
+
       , testCase "default mismatched against type is rejected" $ do
           let writerTy = mkRecordType "Rec" [ ("a", AvroPrimitive AvroInt) ]
               readerTy = mkRecordTypeWithDefaults "Rec"
