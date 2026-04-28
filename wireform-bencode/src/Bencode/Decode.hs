@@ -61,10 +61,13 @@ parseValueWith strict bs off
 parseString :: Parser B.Value
 parseString bs off = do
   (len, off1) <- parseLength bs off
-  let !off2 = off1 + len
-  if off2 > BS.length bs
-    then Left "Bencode.Decode: string length exceeds input"
-    else Right (B.BString (BSU.unsafeTake len (BSU.unsafeDrop off1 bs)), off2)
+  if len < 0
+    then Left "Bencode.Decode: negative string length"
+    else
+      let !off2 = off1 + len
+      in if off2 < off1 || off2 > BS.length bs
+           then Left "Bencode.Decode: string length exceeds input"
+           else Right (B.BString (BSU.unsafeTake len (BSU.unsafeDrop off1 bs)), off2)
 
 parseLength :: ByteString -> Int -> Either String (Int, Int)
 parseLength bs off = go off 0
