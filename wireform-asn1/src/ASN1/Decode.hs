@@ -96,12 +96,31 @@ decodePrimitive tagNum content = case tagNum of
     if BS.length content /= 1
       then Left "ASN1.Decode: BOOLEAN must be 1 byte"
       else Right (Boolean (BS.index content 0 /= 0))
-  2 -> Right (Integer (decodeIntegerBytes content)) -- INTEGER
+  2 -> -- INTEGER (X.690 §8.3.1: at least one content octet)
+    if BS.null content
+      then Left "ASN1.Decode: INTEGER content must be at least one octet"
+      else
+        -- DER §10.2 also requires minimal encoding: the first nine
+        -- bits must not all be the same. We enforce this in BER too
+        -- because non-minimal forms only ever come from broken or
+        -- adversarial encoders.
+        if BS.length content >= 2
+           && (let !b0 = BS.index content 0
+                   !b1 = BS.index content 1
+               in (b0 == 0x00 && not (testBit b1 7))
+                  || (b0 == 0xFF && testBit b1 7))
+          then Left "ASN1.Decode: non-minimal INTEGER encoding"
+          else Right (Integer (decodeIntegerBytes content))
   3 -> do -- BIT STRING
     if BS.null content
       then Left "ASN1.Decode: empty BIT STRING"
-      else let !unused = fromIntegral (BS.index content 0)
-           in Right (BitString unused (BS.drop 1 content))
+      else
+        let !unused = fromIntegral (BS.index content 0)
+        in if unused > 7
+             then Left "ASN1.Decode: BIT STRING unused-bits byte must be 0..7"
+             else if unused > 0 && BS.length content == 1
+             then Left "ASN1.Decode: BIT STRING declares unused bits with no content"
+             else Right (BitString unused (BS.drop 1 content))
   4 -> Right (OctetString content) -- OCTET STRING
   5 -> Right Null -- NULL
   6 -> do -- OID
@@ -153,7 +172,17 @@ decodeTag bs off b0 = do
     else decodeLongTag bs (off + 1) tc constructed
 
 decodeLongTag :: ByteString -> Int -> TagClass -> Bool -> Either String (TagClass, Bool, Int, Int)
-decodeLongTag bs off tc constructed = go off 0
+decodeLongTag bs off tc constructed = do
+  ensure bs off 1
+  -- X.690 §8.1.2.4.2c: in the high-tag-number form the leading octet
+  -- of the encoded tag-number must not be @0x80@ — that would
+  -- represent a 7-bit zero prefix of an otherwise valid number.
+  -- Likewise the encoded number itself must be ≥ 31; values 0..30
+  -- belong in the low-tag-number form.
+  let !b0 = rdByte bs off
+  if b0 == 0x80
+    then Left "ASN1.Decode: high-tag-number form must not start with 0x80"
+    else go off 0
   where
     go !o !acc = do
       ensure bs o 1
@@ -161,7 +190,9 @@ decodeLongTag bs off tc constructed = go off 0
           !val = acc `shiftL` 7 .|. fromIntegral (b .&. 0x7F)
       if testBit b 7
         then go (o + 1) val
-        else Right (tc, constructed, val, o + 1)
+        else if val < 31
+          then Left "ASN1.Decode: high-tag-number form used for low number"
+          else Right (tc, constructed, val, o + 1)
 
 -- | Decode a BER length octet sequence into 'Just' a definite length or
 -- 'Nothing' for the indefinite form. The reserved 0xFF byte

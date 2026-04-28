@@ -145,6 +145,49 @@ main = do
     Right v -> failTest $
       "expected rejection of non-minimal base-128 OID, got " ++ show v
 
+  -- X.690 §8.3.1: INTEGER content must be at least one octet.
+  let emptyInt = BS.pack [ 0x02, 0x00 ]
+  case decode emptyInt of
+    Left _  -> putStrLn "OK: zero-octet INTEGER rejected"
+    Right v -> failTest $
+      "expected rejection of zero-octet INTEGER, got " ++ show v
+
+  -- DER §10.2: INTEGER must be in minimal form. 0x00 0x01 redundantly
+  -- prefixes the value 1 with a sign byte; the canonical encoding
+  -- is just 0x01.
+  let nonMinInt = BS.pack [ 0x02, 0x02, 0x00, 0x01 ]
+  case decode nonMinInt of
+    Left _  -> putStrLn "OK: non-minimal INTEGER (00 01) rejected"
+    Right v -> failTest $
+      "expected rejection of non-minimal INTEGER, got " ++ show v
+
+  -- And the negative-side variant: 0xFF 0xFE redundantly prefixes
+  -- -2 with an all-ones extension byte.
+  let nonMinNeg = BS.pack [ 0x02, 0x02, 0xFF, 0xFE ]
+  case decode nonMinNeg of
+    Left _  -> putStrLn "OK: non-minimal negative INTEGER rejected"
+    Right v -> failTest $
+      "expected rejection of non-minimal negative INTEGER, got " ++ show v
+
+  -- BIT STRING unused-bits byte must be 0..7 (X.690 §8.6.2.2).
+  let badBitStr = BS.pack [ 0x03, 0x02, 0x09, 0x80 ]
+  case decode badBitStr of
+    Left _  -> putStrLn "OK: BIT STRING unused > 7 rejected"
+    Right v -> failTest $
+      "expected rejection of unused=9 BIT STRING, got " ++ show v
+
+  -- High-tag-number form (low-bits = 31) must encode a tag >= 31 and
+  -- the leading multi-octet byte must not be 0x80.
+  let lowNumHigh = BS.pack
+        [ 0x1F  -- universal, primitive, low bits = 31 -> high form
+        , 0x05  -- the encoded tag number is 5 (< 31): non-canonical
+        , 0x00  -- length 0
+        ]
+  case decode lowNumHigh of
+    Left _  -> putStrLn "OK: high-tag-number form with low number rejected"
+    Right v -> failTest $
+      "expected rejection of high-form low-number tag, got " ++ show v
+
   putStrLn "All ASN.1 BER indefinite-length tests passed."
 
 expectBytes :: String -> BS.ByteString -> BS.ByteString -> IO ()
