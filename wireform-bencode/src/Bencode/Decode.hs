@@ -65,6 +65,11 @@ parseLength bs off = go off 0
                then go (i + 1) (acc * 10 + fromIntegral (b - 0x30))
                else Left "Bencode.Decode: non-digit in string length"
 
+-- | Parse a Bencode integer (\"i...e\").
+--
+-- BEP-3 forbids leading zeros (except for \"i0e\" itself) and
+-- forbids the negative-zero literal \"i-0e\". This parser rejects
+-- both shapes.
 parseInteger :: Parser B.Value
 parseInteger bs off = go off []
   where
@@ -72,12 +77,26 @@ parseInteger bs off = go off []
     go !i !acc
       | i >= bsLen = Left "Bencode.Decode: unterminated integer"
       | rdByte bs i == 0x65 =  -- 'e'
-          case reads (reverse acc) :: [(Integer, String)] of
-            [(n, "")] -> Right (B.BInteger n, i + 1)
-            _ -> Left "Bencode.Decode: invalid integer"
+          let !s = reverse acc
+          in case validateIntLiteral s of
+               Left e   -> Left e
+               Right () -> case reads s :: [(Integer, String)] of
+                 [(n, "")] -> Right (B.BInteger n, i + 1)
+                 _ -> Left "Bencode.Decode: invalid integer"
       | otherwise =
           let !c = toEnum (fromIntegral (rdByte bs i)) :: Char
           in go (i + 1) (c : acc)
+
+-- | Reject the BEP-3-forbidden leading-zero / negative-zero shapes.
+validateIntLiteral :: String -> Either String ()
+validateIntLiteral s = case s of
+  ""        -> Left "Bencode.Decode: empty integer literal"
+  "-0"      -> Left "Bencode.Decode: negative zero is not allowed"
+  '-' : '0' : _ : _ ->
+      Left "Bencode.Decode: leading zeros after sign are not allowed"
+  '0' : _ : _ ->
+      Left "Bencode.Decode: leading zeros are not allowed"
+  _         -> Right ()
 
 parseList :: Parser B.Value
 parseList bs off0 = runST $ do

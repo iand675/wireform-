@@ -40,3 +40,13 @@ library
     vector >= 0.13 && < 0.14,
     containers >= 0.6 && < 0.8,
     deepseq >= 1.4 && < 1.6
+
+test-suite wireform-bencode-test
+  import: defaults
+  type: exitcode-stdio-1.0
+  main-is: Main.hs
+  hs-source-dirs: test
+  build-depends:
+    base >= 4.16 && < 5,
+    wireform-bencode,
+    bytestring >= 0.11 && < 0.13
