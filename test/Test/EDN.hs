@@ -132,6 +132,29 @@ parseTests = testGroup "Parse known EDN strings"
   , testCase "discard: [1 #_ 2 3]" $
       decode "[1 #_ 2 3]" @?= Right (E.Vector (V.fromList [E.Integer 1, E.Integer 3]))
 
+  , testCase "discard at start of vector: [#_ 1 2]" $
+      -- Previously the parser called parseValue after the discard
+      -- expected to find a value, but the next byte was the
+      -- container's data and the one after the discard. The
+      -- collection parser now treats #_ transparently.
+      decode "[#_ 1 2]" @?= Right (E.Vector (V.fromList [E.Integer 2]))
+
+  , testCase "discard at end of vector: [1 #_ 2]" $
+      decode "[1 #_ 2]" @?= Right (E.Vector (V.fromList [E.Integer 1]))
+
+  , testCase "discard at start of list: (#_ 1 2 3)" $
+      decode "(#_ 1 2 3)"
+        @?= Right (E.List (V.fromList [E.Integer 2, E.Integer 3]))
+
+  , testCase "double discard: [#_ #_ 1 2 3]" $
+      -- '#_ #_ 1 2' drops both '1' and '2'; '3' remains.
+      decode "[#_ #_ 1 2 3]"
+        @?= Right (E.Vector (V.fromList [E.Integer 3]))
+
+  , testCase "discard at start of set: #{#_ 1 2}" $
+      decode "#{#_ 1 2}"
+        @?= Right (E.Set (V.fromList [E.Integer 2]))
+
   , testCase "symbol" $
       decode "foo" @?= Right (E.Symbol Nothing "foo")
 

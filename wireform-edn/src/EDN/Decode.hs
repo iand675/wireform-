@@ -273,9 +273,29 @@ parseCollection close ctor = go []
            else let !b = BSU.unsafeIndex bs off'
                 in if b == close
                      then Right (ctor (V.fromList (reverse acc)), off' + 1)
-                     else do
-                       (val, off'') <- parseValue bs off'
-                       go (val:acc) bs off''
+                     -- @#_ X@ at the start of a position drops X and
+                     -- continues without contributing to the collection.
+                     else if b == 0x23
+                            && off' + 1 < BS.length bs
+                            && BSU.unsafeIndex bs (off' + 1) == 0x5F
+                            then case skipOneDiscard bs (off' + 2) of
+                                   Left e   -> Left e
+                                   Right o2 -> go acc bs o2
+                            else do
+                              (val, off'') <- parseValue bs off'
+                              go (val:acc) bs off''
+
+-- | Consume @#_@-followed-by-value-to-discard, returning the offset
+-- after the discarded value. Used by collection parsers so a leading
+-- or interior discard form doesn't yield a value to the container.
+skipOneDiscard :: ByteString -> Int -> Either String Int
+skipOneDiscard bs off =
+  let !off' = skipWS bs off
+  in if off' >= BS.length bs
+       then Left "EDN.Decode: #_ with no value to drop"
+       else do
+         (_, off'') <- parseValue bs off'
+         pure off''
 
 parseMap :: Parser E.Value
 parseMap = go []
@@ -286,14 +306,35 @@ parseMap = go []
            then Left "EDN.Decode: unterminated map"
            else if BSU.unsafeIndex bs off' == 0x7D  -- '}'
                   then Right (E.Map (V.fromList (reverse acc)), off' + 1)
-                  else do
-                    (k, off'') <- parseValue bs off'
-                    let !off''' = skipWS bs off''
-                    if off''' >= BS.length bs
-                      then Left "EDN.Decode: unterminated map, missing value"
-                      else do
-                        (v, off'''') <- parseValue bs off'''
-                        go ((k, v):acc) bs off''''
+                  -- Allow @#_ K@ or @#_ V@ before either the key or
+                  -- value slot; the discard is transparent and
+                  -- doesn't shift the alignment of the remaining
+                  -- key/value pairs.
+                  else if BSU.unsafeIndex bs off' == 0x23
+                       && off' + 1 < BS.length bs
+                       && BSU.unsafeIndex bs (off' + 1) == 0x5F
+                       then case skipOneDiscard bs (off' + 2) of
+                              Left e   -> Left e
+                              Right o2 -> go acc bs o2
+                       else do
+                         (k, off'')   <- parseValue bs off'
+                         (v, off'''') <- parseMapValueSlot bs off''
+                         go ((k, v) : acc) bs off''''
+
+-- | Parse the value slot of a map, transparently consuming any
+-- leading @#_ X@ discard forms.
+parseMapValueSlot :: Parser E.Value
+parseMapValueSlot bs off =
+  let !off' = skipWS bs off
+  in if off' >= BS.length bs
+       then Left "EDN.Decode: unterminated map, missing value"
+       else if BSU.unsafeIndex bs off' == 0x23
+            && off' + 1 < BS.length bs
+            && BSU.unsafeIndex bs (off' + 1) == 0x5F
+            then case skipOneDiscard bs (off' + 2) of
+                   Left e   -> Left e
+                   Right o2 -> parseMapValueSlot bs o2
+            else parseValue bs off'
 
 parseHash :: Parser E.Value
 parseHash bs off
@@ -315,10 +356,22 @@ parseSet = go []
            then Left "EDN.Decode: unterminated set"
            else if BSU.unsafeIndex bs off' == 0x7D  -- '}'
                   then Right (E.Set (V.fromList (reverse acc)), off' + 1)
-                  else do
-                    (val, off'') <- parseValue bs off'
-                    go (val:acc) bs off''
+                  else if BSU.unsafeIndex bs off' == 0x23
+                       && off' + 1 < BS.length bs
+                       && BSU.unsafeIndex bs (off' + 1) == 0x5F
+                       then case skipOneDiscard bs (off' + 2) of
+                              Left e   -> Left e
+                              Right o2 -> go acc bs o2
+                       else do
+                         (val, off'') <- parseValue bs off'
+                         go (val:acc) bs off''
 
+-- | Consume a @#_@ discard form at value position. The collection /
+-- map parsers handle their own discard skipping so that @#_@ at the
+-- start of a slot doesn't yield a value to the container; this
+-- handler is reached only from 'parseValue' (top-level or as part
+-- of a tagged value), where the caller does expect a real value
+-- after one or more discards.
 parseDiscard :: Parser E.Value
 parseDiscard bs off =
   let !off' = skipWS bs off
