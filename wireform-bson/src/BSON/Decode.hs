@@ -60,7 +60,9 @@ readLE64 bs off =
 
 ensure :: ByteString -> Int -> Int -> Either String ()
 ensure bs off n
-  | off + n > BS.length bs = Left "BSON.Decode: unexpected end of input"
+  | off < 0 || n < 0 = Left "BSON.Decode: negative offset/length"
+  | n > BS.length bs - off =
+      Left "BSON.Decode: unexpected end of input"
   | otherwise = Right ()
 {-# INLINE ensure #-}
 
