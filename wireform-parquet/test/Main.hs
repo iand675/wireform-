@@ -2,6 +2,7 @@
 module Main (main) where
 
 import Control.Monad (unless)
+import Data.Bits (shiftR, (.&.))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Vector as V
@@ -25,6 +26,7 @@ import Parquet.Read (loadParquetFile, pfFooter)
 import Parquet.Types
 import Parquet.Write
   ( buildParquetFile
+  , buildParquetFileWithBloom
   , statisticsForByteArray
   , statisticsForInt32
   , statisticsForInt64
@@ -230,7 +232,52 @@ main = do
           putStrLn "OK: materializeRepeatedDouble"
       | otherwise -> failTest $ "repeated DOUBLE shape: " ++ show got
 
+  -- buildParquetFileWithBloom: round-trip a file whose column chunk
+  -- carries a bloom filter, and verify that loading it back finds
+  -- every inserted value.
+  let schemaB = V.fromList
+        [ SchemaElement "schema" Nothing Nothing (Just 1) Nothing Nothing
+        , SchemaElement "x" (Just Required) (Just PTInt32) Nothing Nothing Nothing
+        ]
+      vsB = VP.fromList [(7 :: Int32), 11, 13, 17, 19, 23, 29]
+      bfile = buildParquetFileWithBloom 256 schemaB
+                (V.singleton (V.singleton vsB))
+  case loadParquetFile bfile of
+    Left e -> failTest ("loadParquetFile (with bloom): " ++ e)
+    Right pf -> do
+      let !rgs = fmRowGroups (pfFooter pf)
+          !cm = ccMetadata (V.unsafeIndex (rgColumns (V.unsafeIndex rgs 0)) 0)
+      case cm of
+        Nothing -> failTest "expected ColumnMetadata"
+        Just m -> case (cmBloomFilterOffset m, cmBloomFilterLength m) of
+          (Just bfOff, Just bfLen) -> do
+            let !sl = BS.take (fromIntegral bfLen) (BS.drop (fromIntegral bfOff) bfile)
+            case decodeBloomFilter sl of
+              Left e -> failTest ("decodeBloomFilter: " ++ e)
+              Right (_, sbbf) -> do
+                -- Every inserted value should report present.
+                let allPresent = VP.foldl' (\ok v ->
+                      ok && sbbfCheck (i32LE v) sbbf) True vsB
+                if allPresent
+                  then putStrLn "OK: buildParquetFileWithBloom + decodeBloomFilter"
+                  else failTest "bloom did not contain every inserted value"
+                -- Spot-check a value we did not insert.
+                if sbbfCheck (i32LE 12345) sbbf
+                  then putStrLn "Note: bloom false positive for 12345 (acceptable)"
+                  else putStrLn "OK: bloom does not falsely contain 12345"
+          _ -> failTest "writer did not populate bloom_filter_offset/length"
+
   putStrLn "All Parquet page-index / bloom-filter / statistics tests passed."
+
+-- | Helper: little-endian 4-byte encoding of an Int32, used to feed the
+-- bloom filter exactly the same way 'buildParquetFileWithBloom' does.
+i32LE :: Int32 -> BS.ByteString
+i32LE v = BS.pack
+  [ fromIntegral (v .&. 0xFF)
+  , fromIntegral ((v `shiftR` 8) .&. 0xFF)
+  , fromIntegral ((v `shiftR` 16) .&. 0xFF)
+  , fromIntegral ((v `shiftR` 24) .&. 0xFF)
+  ]
 
 expectHash :: String -> String -> IO ()
 expectHash s expected = expectHashBs (BSC.pack s) expected

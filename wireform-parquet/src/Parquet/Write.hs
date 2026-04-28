@@ -24,6 +24,7 @@ module Parquet.Write
   , encodePageHeader
   , assembleColumnChunk
   , buildParquetFile
+  , buildParquetFileWithBloom
     -- * Statistics
   , statisticsForInt32
   , statisticsForInt64
@@ -39,6 +40,11 @@ import Data.Maybe (fromMaybe)
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
 
+import Parquet.BloomFilter
+  ( encodeBloomFilter
+  , newSbbf
+  , sbbfInsert
+  )
 import Parquet.Footer (writeFooter, parquetMagic)
 import Parquet.Page
   ( DataPageHeader (..)
@@ -223,6 +229,155 @@ buildParquetFile schema rowGroupVecs =
             , ccColumnIndexLength = Nothing
             }
       in (V.snoc cs cc, cOff + sz)
+
+-- | Like 'buildParquetFile' but also emits a split-block bloom filter
+-- ("Parquet.BloomFilter") per Int32 column. Each column's
+-- 'ColumnMetadata' will carry @bloom_filter_offset@ and
+-- @bloom_filter_length@ pointing to the appended bloom-filter blob.
+--
+-- Column chunks remain at the head of the file (pages, then dictionary
+-- pages); bloom filters are concatenated in row-group / column order
+-- after the last page and before the file footer, as suggested by the
+-- parquet-format spec for newly written files.
+buildParquetFileWithBloom
+  :: Int                                                  -- ^ bloom filter bytes per column (rounded up to a multiple of 32)
+  -> V.Vector SchemaElement
+  -> V.Vector (V.Vector (VP.Vector Int32))
+  -> ByteString
+buildParquetFileWithBloom !bfBytes schema rowGroupVecs =
+  let !encodedRGs = V.map (V.map encodePlainInt32Page) rowGroupVecs
+
+      -- First pass: lay out the data pages, recording column-chunk
+      -- offsets exactly as 'buildParquetFile' does.
+      (!rgMetas0, !pagesEndOff) = V.ifoldl' buildRG' (V.empty, 4) encodedRGs
+
+      -- Build a bloom filter per column and concatenate the blobs.
+      (!blooms, !bloomBlobs, !_) = layoutBlooms pagesEndOff
+      !bloomConcat = mconcat bloomBlobs
+
+      -- Second pass: walk the row groups again, attaching the
+      -- bloom-filter pointer to each column metadata.
+      !rgMetas = applyBlooms rgMetas0 blooms
+
+      !totalRows = V.foldl' (\a rg -> a + rgNumRows rg) 0 rgMetas
+      !fm = FileMetadata
+        { fmVersion = 1
+        , fmSchema = schema
+        , fmNumRows = totalRows
+        , fmRowGroups = rgMetas
+        , fmCreatedBy = Just "wireform"
+        }
+  in writeParquetFileWithExtras fm encodedRGs bloomConcat
+  where
+    leaves :: V.Vector SchemaElement
+    !leaves = V.filter (maybe False (const True) . seType) schema
+
+    -- Build the bloom-filter blob for one column and the (offset, length)
+    -- pair to record on its ColumnMetaData.
+    buildOneBloom :: VP.Vector Int32 -> Int -> ((Int64, Int32), ByteString)
+    buildOneBloom colVec startOff =
+      let !sbbf0 = newSbbf bfBytes
+          !sbbf  = VP.foldl' (\acc v -> sbbfInsert (i32LE v) acc) sbbf0 colVec
+          !blob = encodeBloomFilter sbbf
+          !len  = BS.length blob
+      in ((fromIntegral startOff, fromIntegral len), blob)
+
+    layoutBlooms
+      :: Int
+      -> (V.Vector (V.Vector (Int64, Int32)), [ByteString], Int)
+    layoutBlooms startOff =
+      let go !rgIdx !off !accB !accBlobs
+            | rgIdx >= V.length rowGroupVecs =
+                (V.fromList (reverse accB), reverse accBlobs, off)
+            | otherwise =
+                let !cols = V.unsafeIndex rowGroupVecs rgIdx
+                    (colTuples, off', blobs') = layoutCols cols off
+                in go (rgIdx + 1) off' (colTuples : accB) (blobs' ++ accBlobs)
+          layoutCols
+            :: V.Vector (VP.Vector Int32)
+            -> Int
+            -> (V.Vector (Int64, Int32), Int, [ByteString])
+          layoutCols cols off =
+            let go2 !ci !cur !accT !accB
+                  | ci >= V.length cols =
+                      (V.fromList (reverse accT), cur, reverse accB)
+                  | otherwise =
+                      let ((o, l), b) = buildOneBloom (V.unsafeIndex cols ci) cur
+                      in go2 (ci + 1) (cur + fromIntegral l) ((o, l) : accT) (b : accB)
+            in go2 0 off [] []
+      in go 0 startOff [] []
+
+    applyBlooms
+      :: V.Vector RowGroup
+      -> V.Vector (V.Vector (Int64, Int32))
+      -> V.Vector RowGroup
+    applyBlooms = V.zipWith (\rg bs -> rg { rgColumns = V.zipWith attach (rgColumns rg) bs })
+      where
+        attach cc (off, len) = case ccMetadata cc of
+          Nothing -> cc
+          Just cm -> cc
+            { ccMetadata = Just cm
+                { cmBloomFilterOffset = Just off
+                , cmBloomFilterLength = Just len
+                }
+            }
+
+    buildRG' :: (V.Vector RowGroup, Int) -> Int -> V.Vector ByteString -> (V.Vector RowGroup, Int)
+    buildRG' (!rgs, !off) rgIdx encodedCols =
+      let !colVecs = V.unsafeIndex rowGroupVecs rgIdx
+          (!cols, !off2) = V.ifoldl' (buildCol colVecs) (V.empty, off) encodedCols
+          !nRows = if V.null colVecs then 0 else fromIntegral (VP.length (V.unsafeIndex colVecs 0))
+          !rg = RowGroup
+            { rgColumns = cols
+            , rgTotalByteSize = fromIntegral (off2 - off)
+            , rgNumRows = nRows
+            }
+      in (V.snoc rgs rg, off2)
+
+    buildCol :: V.Vector (VP.Vector Int32) -> (V.Vector ColumnChunk, Int) -> Int -> ByteString -> (V.Vector ColumnChunk, Int)
+    buildCol colVecs (!cs, !cOff) colIdx pageBs =
+      let !colVec = V.unsafeIndex colVecs colIdx
+          !leaf = V.unsafeIndex leaves colIdx
+          !sz = BS.length pageBs
+          !cc = ColumnChunk
+            { ccFilePath = Nothing
+            , ccFileOffset = fromIntegral cOff
+            , ccMetadata = Just ColumnMetadata
+                { cmType = fromMaybe PTInt32 (seType leaf)
+                , cmEncodings = V.singleton Plain
+                , cmPathInSchema = V.singleton (seName leaf)
+                , cmCodec = Uncompressed
+                , cmNumValues = fromIntegral (VP.length colVec)
+                , cmTotalUncompressedSize = fromIntegral sz
+                , cmTotalCompressedSize = fromIntegral sz
+                , cmDataPageOffset = fromIntegral cOff
+                , cmStatistics = Just (statisticsForInt32 colVec)
+                , cmIndexPageOffset = Nothing
+                , cmDictionaryPageOffset = Nothing
+                , cmKeyValueMetadata = V.empty
+                , cmEncodingStats = V.empty
+                , cmBloomFilterOffset = Nothing
+                , cmBloomFilterLength = Nothing
+                }
+            , ccOffsetIndexOffset = Nothing
+            , ccOffsetIndexLength = Nothing
+            , ccColumnIndexOffset = Nothing
+            , ccColumnIndexLength = Nothing
+            }
+      in (V.snoc cs cc, cOff + sz)
+
+-- | Writer that splices one extra blob between the page data and the
+-- footer. Used by 'buildParquetFileWithBloom' to lay out bloom filters.
+writeParquetFileWithExtras
+  :: FileMetadata
+  -> V.Vector (V.Vector ByteString)
+  -> ByteString
+  -> ByteString
+writeParquetFileWithExtras fm rowGroupData extras = BL.toStrict $ B.toLazyByteString $
+  B.byteString parquetMagic
+  <> V.foldl' (\b rg -> V.foldl' (\b2 col -> b2 <> B.byteString col) b rg) mempty rowGroupData
+  <> B.byteString extras
+  <> B.byteString (writeFooter fm)
 
 -- ============================================================
 -- Page / column statistics
