@@ -5,6 +5,21 @@ synopsis: Apache Avro schema resolution, JSON conversion, and protocol/IPC
 license: BSD-3-Clause
 build-type: Simple
 
+flag snappy
+  description: Enable snappy codec for Avro Object Container Files (adds 4-byte CRC32 trailer per block)
+  manual: True
+  default: False
+
+flag zstd
+  description: Enable zstandard codec for Avro Object Container Files
+  manual: True
+  default: False
+
+flag bzip2
+  description: Enable bzip2 codec for Avro Object Container Files
+  manual: True
+  default: False
+
 common defaults
   ghc-options:
     -Wall
@@ -61,4 +76,33 @@ library
     prettyprinter >= 1.7 && < 1.8,
     cryptohash-md5 >= 0.11 && < 0.12,
     zlib >= 0.6 && < 0.8,
-    deepseq >= 1.4 && < 1.6
+    deepseq >= 1.4 && < 1.6,
+    digest >= 0.0.1 && < 0.1
+  if flag(snappy)
+    cpp-options: -DHAVE_SNAPPY
+    build-depends: snappy >= 0.2 && < 0.3
+  if flag(zstd)
+    cpp-options: -DHAVE_ZSTD
+    build-depends: zstd >= 0.1.3 && < 0.2
+  if flag(bzip2)
+    cpp-options: -DHAVE_BZIP2
+    build-depends: bzlib >= 0.5 && < 0.6
+
+test-suite wireform-avro-test
+  import: defaults
+  type: exitcode-stdio-1.0
+  main-is: Main.hs
+  hs-source-dirs: test
+  build-depends:
+    base >= 4.16 && < 5,
+    wireform-avro,
+    bytestring >= 0.11 && < 0.13,
+    containers >= 0.6 && < 0.8,
+    text >= 2.0 && < 2.2,
+    vector >= 0.13 && < 0.14
+  if flag(snappy)
+    cpp-options: -DHAVE_SNAPPY
+  if flag(zstd)
+    cpp-options: -DHAVE_ZSTD
+  if flag(bzip2)
+    cpp-options: -DHAVE_BZIP2

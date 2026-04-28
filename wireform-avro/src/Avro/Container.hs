@@ -24,8 +24,19 @@ module Avro.Container
   ) where
 
 import qualified Codec.Compression.Zlib.Raw as ZlibRaw
+import Control.Exception (SomeException, evaluate, try)
+import Data.Bits (shiftL, shiftR, (.&.), (.|.))
+import Data.Digest.CRC32 (crc32)
+import Data.Word (Word32)
+import System.IO.Unsafe (unsafePerformIO)
 #ifdef HAVE_SNAPPY
 import qualified Codec.Compression.Snappy as Snappy
+#endif
+#ifdef HAVE_ZSTD
+import Codec.Compression.Zstd (Decompress (..), compress, decompress)
+#endif
+#ifdef HAVE_BZIP2
+import qualified Codec.Compression.BZip as BZip
 #endif
 import qualified Data.Aeson as Aeson
 import Data.ByteString (ByteString)
@@ -208,21 +219,117 @@ decodeNValues schema bs off n acc = do
   decodeNValues schema bs off' (n - 1) (val : acc)
 
 -- | Decompress a block of data using the given codec.
+--
+-- Supports the codecs listed in the Avro 1.11 specification:
+--
+--   * @null@      — required, identity passthrough.
+--   * @deflate@   — required, raw RFC 1951 deflate (no zlib header).
+--   * @snappy@    — optional, with the spec-required 4-byte big-endian
+--     CRC32-of-uncompressed trailer.
+--   * @zstandard@ — optional, Facebook Zstandard.
+--   * @bzip2@     — optional, the bzip2 block compressor.
+--
+-- Optional codecs require the corresponding cabal flag
+-- (@-fsnappy@, @-fzstd@, @-fbzip2@); without it the reader returns a
+-- helpful error rather than silently mis-decoding.
 decompressBlock :: T.Text -> ByteString -> Either String ByteString
 decompressBlock "null" bs = Right bs
 decompressBlock "deflate" bs = Right $ BL.toStrict $ ZlibRaw.decompress $ BL.fromStrict bs
 #ifdef HAVE_SNAPPY
-decompressBlock "snappy" bs = Right (Snappy.decompress bs)
+decompressBlock "snappy" bs = decompressSnappyWithCrc bs
 #else
 decompressBlock "snappy" _ = Left "Avro: snappy codec not available (build with -fsnappy)"
 #endif
+#ifdef HAVE_ZSTD
+decompressBlock "zstandard" bs = case decompress bs of
+  Decompress out -> Right out
+  Skip           -> Left "Avro.Container: zstd decompress skipped (empty frame)"
+  Error msg      -> Left $ "Avro.Container: zstd decompress failed: " ++ msg
+#else
+decompressBlock "zstandard" _ =
+  Left "Avro: zstandard codec not available (build with -fzstd)"
+#endif
+#ifdef HAVE_BZIP2
+decompressBlock "bzip2" bs =
+  Right $ BL.toStrict $ BZip.decompress $ BL.fromStrict bs
+#else
+decompressBlock "bzip2" _ =
+  Left "Avro: bzip2 codec not available (build with -fbzip2)"
+#endif
 decompressBlock codec _ = Left $ "Unsupported codec: " <> T.unpack codec
 
--- | Compress a block of data using the given codec.
+-- | Compress a block of data using the given codec. Symmetric with
+-- 'decompressBlock'. Falls back to identity when an unknown codec is
+-- requested so writers always succeed even with mismatched flags
+-- (the reader will reject the file with a clear error).
 compressBlock :: T.Text -> ByteString -> ByteString
 compressBlock "null" bs = bs
 compressBlock "deflate" bs = BL.toStrict $ ZlibRaw.compress $ BL.fromStrict bs
 #ifdef HAVE_SNAPPY
-compressBlock "snappy" bs = Snappy.compress bs
+compressBlock "snappy" bs = compressSnappyWithCrc bs
+#endif
+#ifdef HAVE_ZSTD
+compressBlock "zstandard" bs = compress 3 bs
+#endif
+#ifdef HAVE_BZIP2
+compressBlock "bzip2" bs = BL.toStrict $ BZip.compress $ BL.fromStrict bs
 #endif
 compressBlock _ bs = bs
+
+#ifdef HAVE_SNAPPY
+-- | Decompress an Avro snappy block. The compressed data is followed by
+-- a 4-byte big-endian CRC32 of the original uncompressed bytes (Avro
+-- spec, OCF / codecs section). Mismatched CRC and corrupt frames are
+-- both reported through 'Either'; the raw 'Snappy.decompress' otherwise
+-- raises an asynchronous-style 'IOError' on bad input which would crash
+-- the reader.
+decompressSnappyWithCrc :: ByteString -> Either String ByteString
+decompressSnappyWithCrc bs
+  | BS.length bs < 4 =
+      Left "Avro.Container: snappy block too short for CRC32 trailer"
+  | otherwise = unsafePerformIO $ do
+      let !payloadLen = BS.length bs - 4
+          !payload = BS.take payloadLen bs
+          !crcBytes = BS.drop payloadLen bs
+          !storedCrc = readBE32 crcBytes
+      er <- try @SomeException $ evaluate (Snappy.decompress payload)
+      case er of
+        Left e -> pure $ Left $
+          "Avro.Container: snappy decompress failed: " ++ show e
+        Right decoded ->
+          let !computed = crc32 decoded
+          in if computed /= storedCrc
+               then pure $ Left $
+                 "Avro.Container: snappy CRC32 mismatch (stored "
+                   ++ show storedCrc ++ ", computed " ++ show computed ++ ")"
+               else pure $ Right decoded
+
+-- | Compress a block with snappy and append the spec-required 4-byte
+-- big-endian CRC32 of the /uncompressed/ data.
+compressSnappyWithCrc :: ByteString -> ByteString
+compressSnappyWithCrc bs =
+  let !compressed = Snappy.compress bs
+      !c = crc32 bs
+      !crcBytes = beW32 c
+  in compressed <> crcBytes
+#endif
+
+-- | Read a big-endian 32-bit unsigned value out of the first 4 bytes.
+{-# INLINE readBE32 #-}
+readBE32 :: ByteString -> Word32
+readBE32 bs =
+  let b0 = fromIntegral (BS.index bs 0) :: Word32
+      b1 = fromIntegral (BS.index bs 1) :: Word32
+      b2 = fromIntegral (BS.index bs 2) :: Word32
+      b3 = fromIntegral (BS.index bs 3) :: Word32
+  in (b0 `shiftL` 24) .|. (b1 `shiftL` 16) .|. (b2 `shiftL` 8) .|. b3
+
+-- | 4-byte big-endian encoding of a 'Word32', as a strict 'ByteString'.
+{-# INLINE beW32 #-}
+beW32 :: Word32 -> ByteString
+beW32 w = BS.pack
+  [ fromIntegral ((w `shiftR` 24) .&. 0xFF)
+  , fromIntegral ((w `shiftR` 16) .&. 0xFF)
+  , fromIntegral ((w `shiftR` 8)  .&. 0xFF)
+  , fromIntegral (w               .&. 0xFF)
+  ]
