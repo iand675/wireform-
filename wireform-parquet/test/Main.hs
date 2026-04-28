@@ -27,9 +27,29 @@ import Parquet.Types
 import Parquet.Write
   ( buildParquetFile
   , buildParquetFileWithBloom
+  , encodePlainBoolPage
+  , encodePlainDoublePage
+  , encodePlainFloatPage
+  , encodePlainInt32Page
+  , encodePlainInt64Page
+  , encodePlainByteArrayPage
   , statisticsForByteArray
   , statisticsForInt32
   , statisticsForInt64
+  )
+import Parquet.Read
+  ( decodePlainBool
+  , decodePlainDouble
+  , decodePlainFloat
+  , decodePlainInt32
+  , decodePlainInt64
+  , decodePlainByteArray
+  , readPlainBoolColumnChunk
+  , readPlainByteArrayColumnChunk
+  , readPlainDoubleColumnChunk
+  , readPlainFloatColumnChunk
+  , readPlainInt32ColumnChunk
+  , readPlainInt64ColumnChunk
   )
 import Parquet.XXH64
 
@@ -266,6 +286,36 @@ main = do
                   then putStrLn "Note: bloom false positive for 12345 (acceptable)"
                   else putStrLn "OK: bloom does not falsely contain 12345"
           _ -> failTest "writer did not populate bloom_filter_offset/length"
+
+  -- New primitive page encoders: round-trip a single PLAIN page for each.
+  let i32Page = encodePlainInt32Page (VP.fromList [(1 :: Int32), -2, 3])
+  case readPlainInt32ColumnChunk Uncompressed i32Page of
+    Right v | v == VP.fromList [1, -2, 3] -> putStrLn "OK: PLAIN INT32 page round-trip"
+    other -> failTest $ "INT32 page: " ++ show other
+  let i64Page = encodePlainInt64Page (VP.fromList [(100 :: Int64), -200, 0])
+  case readPlainInt64ColumnChunk Uncompressed i64Page of
+    Right v | v == VP.fromList [100, -200, 0] -> putStrLn "OK: PLAIN INT64 page round-trip"
+    other -> failTest $ "INT64 page: " ++ show other
+  let fPage = encodePlainFloatPage (VP.fromList [1.5, -2.25, 0.0 :: Float])
+  case readPlainFloatColumnChunk Uncompressed fPage of
+    Right v | v == VP.fromList [1.5, -2.25, 0.0] -> putStrLn "OK: PLAIN FLOAT page round-trip"
+    other -> failTest $ "FLOAT page: " ++ show other
+  let dPage = encodePlainDoublePage (VP.fromList [1.5, -2.25, 0.0 :: Double])
+  case readPlainDoubleColumnChunk Uncompressed dPage of
+    Right v | v == VP.fromList [1.5, -2.25, 0.0] -> putStrLn "OK: PLAIN DOUBLE page round-trip"
+    other -> failTest $ "DOUBLE page: " ++ show other
+  let bPage = encodePlainBoolPage (V.fromList [True, False, True, False, True, True, False, False, True])
+  case readPlainBoolColumnChunk Uncompressed bPage of
+    Right v
+      | v == V.fromList [True, False, True, False, True, True, False, False, True] ->
+          putStrLn "OK: PLAIN BOOLEAN page round-trip"
+    other -> failTest $ "BOOLEAN page: " ++ show other
+  let baPage = encodePlainByteArrayPage
+        (V.fromList [BSC.pack "alpha", BSC.pack "beta", BSC.pack "gamma"])
+  case readPlainByteArrayColumnChunk Uncompressed baPage of
+    Right v | v == V.fromList [BSC.pack "alpha", BSC.pack "beta", BSC.pack "gamma"] ->
+        putStrLn "OK: PLAIN BYTE_ARRAY page round-trip"
+    other -> failTest $ "BYTE_ARRAY page: " ++ show other
 
   putStrLn "All Parquet page-index / bloom-filter / statistics tests passed."
 

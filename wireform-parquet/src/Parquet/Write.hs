@@ -20,6 +20,9 @@ module Parquet.Write
   ( writeParquetFile
   , encodePlainInt32Page
   , encodePlainInt64Page
+  , encodePlainFloatPage
+  , encodePlainDoublePage
+  , encodePlainBoolPage
   , encodePlainByteArrayPage
   , encodePageHeader
   , assembleColumnChunk
@@ -31,6 +34,7 @@ module Parquet.Write
   , statisticsForByteArray
   ) where
 
+import Data.Bits (shiftL, (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as B
@@ -39,6 +43,7 @@ import Data.Int (Int32, Int64)
 import Data.Maybe (fromMaybe)
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
+import Data.Word (Word8)
 
 import Parquet.BloomFilter
   ( encodeBloomFilter
@@ -97,6 +102,56 @@ encodePlainInt64Page vals =
         VP.foldl' (\b v -> b <> B.int64LE v) mempty vals
       !hdr = mkPlainDataPageHeader (fromIntegral n) (fromIntegral bodySize)
   in encodePageHeader hdr <> body
+
+-- | Encode a vector of @FLOAT@ values as a single uncompressed @PLAIN@
+-- @DATA_PAGE@ (IEEE little-endian, 4 bytes per value).
+encodePlainFloatPage :: VP.Vector Float -> ByteString
+encodePlainFloatPage vals =
+  let !n = VP.length vals
+      !bodySize = n * 4
+      !body = BL.toStrict $ B.toLazyByteString $
+        VP.foldl' (\b v -> b <> B.floatLE v) mempty vals
+      !hdr = mkPlainDataPageHeader (fromIntegral n) (fromIntegral bodySize)
+  in encodePageHeader hdr <> body
+
+-- | Encode a vector of @DOUBLE@ values as a single uncompressed @PLAIN@
+-- @DATA_PAGE@ (IEEE little-endian, 8 bytes per value).
+encodePlainDoublePage :: VP.Vector Double -> ByteString
+encodePlainDoublePage vals =
+  let !n = VP.length vals
+      !bodySize = n * 8
+      !body = BL.toStrict $ B.toLazyByteString $
+        VP.foldl' (\b v -> b <> B.doubleLE v) mempty vals
+      !hdr = mkPlainDataPageHeader (fromIntegral n) (fromIntegral bodySize)
+  in encodePageHeader hdr <> body
+
+-- | Encode a vector of @BOOLEAN@ values as a single uncompressed @PLAIN@
+-- @DATA_PAGE@ (LSB-first bit-packed; first value goes into the low bit
+-- of the first byte).
+encodePlainBoolPage :: V.Vector Bool -> ByteString
+encodePlainBoolPage vals =
+  let !n = V.length vals
+      !nBytes = (n + 7) `quot` 8
+      !body = BS.pack (packBitsLSB n vals)
+      !hdr = mkPlainDataPageHeader (fromIntegral n) (fromIntegral nBytes)
+  in encodePageHeader hdr <> body
+
+-- | Pack @n@ booleans into @ceil(n/8)@ bytes, LSB first.
+packBitsLSB :: Int -> V.Vector Bool -> [Word8]
+packBitsLSB n vs = go 0
+  where
+    go !byteIdx
+      | byteIdx * 8 >= n = []
+      | otherwise =
+          let !lo = byteIdx * 8
+              !hi = min (lo + 8) n
+              !b = foldr (\bit acc ->
+                     let !i = bit
+                         !v = if V.unsafeIndex vs (lo + i)
+                                then 1 `shiftL` i
+                                else 0 :: Word8
+                     in acc .|. v) 0 [0 .. hi - lo - 1]
+          in b : go (byteIdx + 1)
 
 -- | Encode a vector of @BYTE_ARRAY@ values as a single uncompressed @PLAIN@
 -- @DATA_PAGE@ (4-byte LE length prefix per value).
