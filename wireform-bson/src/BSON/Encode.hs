@@ -7,6 +7,8 @@
 -- include a leading 4-byte length prefix.
 module BSON.Encode
   ( encode
+  , encodeChecked
+  , validateKeys
   ) where
 
 import Data.ByteString (ByteString)
@@ -30,6 +32,44 @@ encode :: B.Value -> ByteString
 encode val = case val of
   B.Document fields -> encodeDocument fields
   _ -> encodeDocument (V.singleton (T.pack "0", val))
+
+-- | Like 'encode', but validates that no document or sub-document key
+-- contains a NUL byte. The BSON spec defines element keys as
+-- @cstring@ — a NUL-terminated UTF-8 byte sequence — so a NUL inside
+-- a key would silently truncate the document on parse. Returns
+-- @Left@ on the first offending key (along with a path-style hint).
+encodeChecked :: B.Value -> Either String ByteString
+encodeChecked val = case validateKeys val of
+  Left err -> Left err
+  Right () -> Right (encode val)
+
+-- | Walk a value tree and reject any document key that contains a
+-- NUL byte. Used by 'encodeChecked'; exported so callers can run the
+-- check separately.
+validateKeys :: B.Value -> Either String ()
+validateKeys = goValue ""
+  where
+    goValue path = \case
+      B.Document fs -> goFields path fs
+      B.Array vs    ->
+        let go i v = goValue (path ++ "[" ++ show i ++ "]") v
+        in V.ifoldr (\i v acc -> go i v >> acc) (Right ()) vs
+      B.JavaScriptScope _ scope -> goValue (path ++ ".$scope") scope
+      _ -> Right ()
+
+    goFields path fs =
+      V.foldr
+        (\(k, v) acc -> do
+           if T.any (== '\0') k
+             then Left $
+               "BSON.Encode: key " ++ show k
+                 ++ " at " ++ (if null path then "<root>" else path)
+                 ++ " contains a NUL byte (cstring would truncate)"
+             else pure ()
+           goValue (path ++ "." ++ T.unpack k) v
+           acc)
+        (Right ())
+        fs
 
 encodeDocument :: V.Vector (T.Text, B.Value) -> ByteString
 encodeDocument !fields =

@@ -6,7 +6,7 @@ import qualified Data.Vector as V
 import System.Exit (exitFailure)
 
 import BSON.Decode (decode)
-import BSON.Encode (encode)
+import BSON.Encode (encode, encodeChecked)
 import qualified BSON.Value as B
 
 main :: IO ()
@@ -40,6 +40,24 @@ main = do
     Right got
       | got == everything -> putStrLn "OK: primitives + DBPointer round-trip"
       | otherwise -> failTest $ "primitives mismatch: " ++ show got
+
+  -- BSON cstring keys cannot contain a NUL byte; the spec defines them
+  -- as NUL-terminated UTF-8 byte sequences, so a key with embedded NUL
+  -- silently truncates the document on parse. encodeChecked rejects it.
+  let badKey = B.Document (V.singleton ("a\0b", B.Int32 1))
+  case encodeChecked badKey of
+    Left _  -> putStrLn "OK: encodeChecked rejects NUL in key"
+    Right _ -> failTest "expected encodeChecked to reject NUL key"
+
+  let badNested = B.Document (V.singleton ("x",
+                    B.Document (V.singleton ("y\0", B.Int32 2))))
+  case encodeChecked badNested of
+    Left _  -> putStrLn "OK: encodeChecked rejects NUL in nested key"
+    Right _ -> failTest "expected encodeChecked to reject NUL nested key"
+
+  case encodeChecked everything of
+    Right _ -> putStrLn "OK: encodeChecked accepts NUL-free keys"
+    Left e  -> failTest ("encodeChecked false positive: " ++ e)
 
   putStrLn "All BSON tests passed."
 

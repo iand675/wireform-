@@ -12,6 +12,7 @@ module Bond.Encode
   ) where
 
 import Data.Bits (countLeadingZeros, shiftL, shiftR, xor, (.&.), (.|.))
+import qualified Data.List
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.Char as Char
@@ -77,16 +78,30 @@ bondSize (Enum n)     = zigZagVarintSize (fromIntegral n :: Int64)
 structSize :: V.Vector Value -> V.Vector (Word16, BondType, Value) -> Int
 structSize bases fields =
   let !baseSize = V.foldl' (\s baseVal -> s + basePartSize baseVal) 0 bases
-      !fieldSize = fieldsSizeFrom 0 fields 0
+      !fieldSize = fieldsSizeFrom 0 (sortFieldsForSize fields) 0
   in baseSize + fieldSize + 1
 {-# INLINE structSize #-}
 
 basePartSize :: Value -> Int
 basePartSize (Struct bases fields) =
   let !bs = V.foldl' (\s baseVal -> s + basePartSize baseVal) 0 bases
-      !fs = fieldsSizeFrom 0 fields 0
+      !fs = fieldsSizeFrom 0 (sortFieldsForSize fields) 0
   in bs + fs + 1
 basePartSize _ = 1
+
+-- | Local copy of 'sortFields' for the size pass: fieldsSizeFrom
+-- depends on the previous field ID (delta encoding), so we must walk
+-- in the same order as the writer.
+sortFieldsForSize
+  :: V.Vector (Word16, BondType, Value)
+  -> V.Vector (Word16, BondType, Value)
+sortFieldsForSize v
+  | V.length v <= 1 = v
+  | V.and (V.zipWith (\(a, _, _) (b, _, _) -> a <= b) v (V.tail v)) = v
+  | otherwise = V.fromList
+      (Data.List.sortBy
+         (\(a, _, _) (b, _, _) -> compare a b)
+         (V.toList v))
 
 fieldsSizeFrom :: Word16 -> V.Vector (Word16, BondType, Value) -> Int -> Int
 fieldsSizeFrom !_ fields !acc | V.null fields = acc
@@ -223,19 +238,36 @@ writeRawBytes p off (BSI.BS fp len) = do
 writeStruct :: Ptr Word8 -> Int -> V.Vector Value -> V.Vector (Word16, BondType, Value) -> IO Int
 writeStruct p off bases fields = do
   off1 <- V.foldM' (\o baseVal -> writeBase p o baseVal) off bases
-  off2 <- writeFields p off1 0 fields
+  off2 <- writeFields p off1 0 (sortFields fields)
   pokeByteOff p off2 btStop
   pure $! off2 + 1
 
 writeBase :: Ptr Word8 -> Int -> Value -> IO Int
 writeBase p off (Struct bases fields) = do
   off1 <- V.foldM' (\o baseVal -> writeBase p o baseVal) off bases
-  off2 <- writeFields p off1 0 fields
+  off2 <- writeFields p off1 0 (sortFields fields)
   pokeByteOff p off2 btStopBase
   pure $! off2 + 1
 writeBase p off _ = do
   pokeByteOff p off btStopBase
   pure $! off + 1
+
+-- | Bond compact-binary v1 uses delta-encoded field IDs and the
+-- decoder assumes ascending order. Sort by ID before emitting so
+-- callers don't have to care; duplicate IDs are kept in their
+-- original order (sortBy is stable enough — we use Vector
+-- modifyM-style sort via list).
+sortFields
+  :: V.Vector (Word16, BondType, Value)
+  -> V.Vector (Word16, BondType, Value)
+sortFields v
+  | V.length v <= 1 = v
+  | isSorted v      = v
+  | otherwise       = V.fromList (Data.List.sortBy
+                                    (\(a, _, _) (b, _, _) -> compare a b)
+                                    (V.toList v))
+  where
+    isSorted vs = V.and (V.zipWith (\(a, _, _) (b, _, _) -> a <= b) vs (V.tail vs))
 
 writeFields :: Ptr Word8 -> Int -> Word16 -> V.Vector (Word16, BondType, Value) -> IO Int
 writeFields _p off !_ fields | V.null fields = pure off

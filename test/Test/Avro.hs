@@ -9,6 +9,7 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import Data.Char (chr)
 import qualified Data.Vector as V
 import Hedgehog
 import qualified Hedgehog.Gen as Gen
@@ -286,6 +287,34 @@ avroTests = testGroup "Avro Encode/Decode"
           let ty = AvroPrimitive AvroDouble
           avroToJSON ty (AV.Double (1/0)) @?= Aeson.String "Infinity"
           avroToJSON ty (AV.Double (negate (1/0))) @?= Aeson.String "-Infinity"
+
+      , testCase "bytes JSON rejects code points above 0x00FF" $ do
+          -- Avro JSON spec: bytes/fixed values map each character to one
+          -- byte (code points 0..255). Higher code points must not
+          -- silently truncate.
+          let ty = AvroPrimitive AvroBytes
+          case avroFromJSON ty (Aeson.String (T.pack "\x100")) of
+            Left _ -> pure ()
+            Right v -> assertFailure $
+              "expected rejection of high code point, got: " ++ show v
+
+      , testCase "fixed JSON rejects code points above 0x00FF" $ do
+          let ty = AvroFixed
+                { avroFixedName      = "F"
+                , avroFixedNamespace = Nothing
+                , avroFixedAliases   = V.empty
+                , avroFixedSize      = 1
+                }
+          case avroFromJSON ty (Aeson.String (T.pack "\x100")) of
+            Left _ -> pure ()
+            Right v -> assertFailure $
+              "expected rejection of high code point, got: " ++ show v
+
+      , testCase "bytes JSON accepts full 0x00..0xFF range" $ do
+          let ty = AvroPrimitive AvroBytes
+              s  = T.pack [chr 0x00, chr 0xFF, chr 0x80]
+          avroFromJSON ty (Aeson.String s)
+            @?= Right (AV.Bytes (BS.pack [0x00, 0xFF, 0x80]))
       ]
 
   , testGroup "JSON record encode/decode"

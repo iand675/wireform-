@@ -70,9 +70,9 @@ avroFromJSON AvroArray{avroArrayItems = itemTy} (Aeson.Array arr) =
 avroFromJSON AvroMap{avroMapValues = valTy} (Aeson.Object obj) =
   AV.Map . V.fromList <$> mapM (\(k, v) -> (Key.toText k,) <$> avroFromJSON valTy v) (KM.toList obj)
 avroFromJSON AvroUnion{avroUnionBranches = branches} v = unionFromJSON branches v
-avroFromJSON AvroFixed{avroFixedSize = sz} (Aeson.String s) =
-  let bs = textToBytes s
-  in if BS.length bs == sz
+avroFromJSON AvroFixed{avroFixedSize = sz} (Aeson.String s) = do
+  bs <- textToBytesStrict s
+  if BS.length bs == sz
      then Right (AV.Fixed bs)
      else Left $ "fixed size mismatch: expected " ++ show sz ++ " got " ++ show (BS.length bs)
 avroFromJSON AvroLogical{avroLogicalBase = base} v = avroFromJSON base v
@@ -274,7 +274,8 @@ primFromJSON AvroDouble (Aeson.String s) = case s of
   "Infinity"  -> Right (AV.Double (1 / 0))
   "-Infinity" -> Right (AV.Double (negate (1 / 0)))
   _           -> Left "double: unrecognized string value"
-primFromJSON AvroBytes (Aeson.String s) = Right (AV.Bytes (textToBytes s))
+primFromJSON AvroBytes (Aeson.String s) =
+  AV.Bytes <$> textToBytesStrict s
 primFromJSON AvroString (Aeson.String s) = Right (AV.String s)
 primFromJSON _ _ = Left "primitive type/JSON mismatch"
 
@@ -297,6 +298,30 @@ bytesToJSON bs = Aeson.String $ T.pack [chr (fromIntegral b) | b <- BS.unpack bs
 
 textToBytes :: Text -> BS.ByteString
 textToBytes = BS.pack . map (fromIntegral . ord) . T.unpack
+
+-- | Avro JSON spec maps bytes/fixed values to a JSON string where each
+-- character is the Unicode code point of one byte (i.e. code points
+-- 0..255). Reject anything outside that range so we don't silently
+-- truncate.
+textToBytesStrict :: Text -> Either String BS.ByteString
+textToBytesStrict t = go (T.unpack t) []
+  where
+    go [] acc = Right (BS.pack (reverse acc))
+    go (c : rest) acc
+      | ord c <= 0xFF =
+          go rest (fromIntegral (ord c) : acc)
+      | otherwise =
+          Left $
+            "Avro.JSON: bytes/fixed JSON character U+"
+              ++ pad4Hex (ord c)
+              ++ " is outside [U+0000, U+00FF]"
+
+    pad4Hex :: Int -> String
+    pad4Hex n =
+      let hex = "0123456789ABCDEF"
+          d :: Int -> Char
+          d i = hex !! ((n `div` (16 ^ i)) `mod` 16)
+      in [d 3, d 2, d 1, d 0]
 
 -- ============================================================
 -- Internal helpers — union encoding

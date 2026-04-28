@@ -2,6 +2,7 @@
 module Main (main) where
 
 import qualified Data.ByteString as BS
+import qualified Data.Vector as V
 import System.Exit (exitFailure)
 
 import Bond.Decode (decode)
@@ -57,6 +58,28 @@ main = do
       "should have rejected orphan low surrogate, got " ++ show v
     Left _ -> putStrLn "OK: orphan low surrogate rejected"
 
+  -- Compact-binary v1 delta-encodes field IDs from the previously-emitted
+  -- field; the decoder assumes ascending IDs. Out-of-order input must
+  -- not silently underflow into a 64K-byte field-id varint. The encoder
+  -- now sorts before emitting and round-trips.
+  let unordered = Struct V.empty (V.fromList
+        [ (5, BT_INT32, Int32 5)
+        , (1, BT_INT32, Int32 1)
+        , (3, BT_INT32, Int32 3)
+        ])
+      sortedExp = Struct V.empty (V.fromList
+        [ (1, BT_INT32, Int32 1)
+        , (3, BT_INT32, Int32 3)
+        , (5, BT_INT32, Int32 5)
+        ])
+  case decode BT_STRUCT (encode unordered) of
+    Left e -> failTest ("unordered struct round-trip failed: " ++ e)
+    Right v
+      | v == sortedExp -> putStrLn "OK: encoder sorts struct fields by ID"
+      | otherwise -> failTest $
+          "unordered struct round-trip mismatch: got " ++ show v
+            ++ ", expected " ++ show sortedExp
+
   putStrLn "All Bond compact-binary wstring tests passed."
 
 expectRoundTrip :: String -> Value -> IO ()
@@ -64,6 +87,7 @@ expectRoundTrip label val = do
   let typeOf v = case v of
         WString _ -> BT_WSTRING
         String _  -> BT_STRING
+        Struct _ _ -> BT_STRUCT
         _ -> error "unsupported"
   case decode (typeOf val) (encode val) of
     Left e  -> failTest (label ++ ": decode failed: " ++ e)
