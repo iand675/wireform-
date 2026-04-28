@@ -210,6 +210,10 @@ buildParquetFile schema rowGroupVecs =
                 , cmTotalCompressedSize = fromIntegral sz
                 , cmDataPageOffset = fromIntegral cOff
                 , cmStatistics = Just (statisticsForInt32 colVec)
+                , cmIndexPageOffset = Nothing
+                , cmDictionaryPageOffset = Nothing
+                , cmKeyValueMetadata = V.empty
+                , cmEncodingStats = V.empty
                 , cmBloomFilterOffset = Nothing
                 , cmBloomFilterLength = Nothing
                 }

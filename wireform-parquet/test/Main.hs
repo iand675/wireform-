@@ -12,6 +12,7 @@ import qualified Data.Vector.Primitive as VP
 import Data.Int (Int32, Int64)
 
 import Parquet.BloomFilter
+import Parquet.Footer (readFooter, writeFooter)
 import Parquet.PageIndex
 import Parquet.Read (loadParquetFile, pfFooter)
 import Parquet.Types
@@ -138,6 +139,46 @@ main = do
               (statMinValue st == Just (BS.pack [0xFF, 0xFF, 0xFF, 0xFF]))
             expect "writer max == 7"
               (statMaxValue st == Just (BS.pack [0x07, 0x00, 0x00, 0x00]))
+
+  -- ColumnMetaData round-trip with index_page_offset, dictionary_page_offset,
+  -- key_value_metadata, encoding_stats (parquet.thrift fields 10-13).
+  let cm = ColumnMetadata
+        { cmType                  = PTByteArray
+        , cmEncodings             = V.fromList [Plain, RLEDictionary]
+        , cmPathInSchema          = V.singleton "name"
+        , cmCodec                 = GZip
+        , cmNumValues             = 4096
+        , cmTotalUncompressedSize = 12345
+        , cmTotalCompressedSize   = 6789
+        , cmDataPageOffset        = 1024
+        , cmStatistics            = Nothing
+        , cmIndexPageOffset       = Just 800
+        , cmDictionaryPageOffset  = Just 100
+        , cmKeyValueMetadata      = V.fromList
+            [ KeyValue "writer.version" (Just "wireform-1")
+            , KeyValue "comment" Nothing
+            ]
+        , cmEncodingStats         = V.fromList
+            [ PageEncodingStats { pesPageType = 2, pesEncoding = Plain, pesCount = 1 }
+            , PageEncodingStats { pesPageType = 0, pesEncoding = RLEDictionary, pesCount = 7 }
+            ]
+        , cmBloomFilterOffset     = Just 9001
+        , cmBloomFilterLength     = Just 256
+        }
+      ccF = ColumnChunk Nothing 1024 (Just cm) Nothing Nothing Nothing Nothing
+      rgF = RowGroup (V.singleton ccF) 6789 4096
+      fmF = FileMetadata 2
+              (V.fromList
+                [ SchemaElement "schema" Nothing Nothing (Just 1) Nothing Nothing
+                , SchemaElement "name" (Just Required) (Just PTByteArray) Nothing Nothing Nothing
+                ])
+              4096 (V.singleton rgF) Nothing
+  case readFooter (writeFooter fmF) of
+    Left e -> failTest ("ColumnMetaData fields 10-15 round-trip: " ++ e)
+    Right got
+      | got /= fmF -> failTest "ColumnMetaData fields 10-15 mismatch"
+      | otherwise ->
+          putStrLn "OK: ColumnMetaData fields 10-15 round-trip (index/dict/key-value/encoding-stats/bloom)"
 
   putStrLn "All Parquet page-index / bloom-filter / statistics tests passed."
 

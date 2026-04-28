@@ -9,6 +9,8 @@ module Parquet.Types
   , RowGroup(..)
   , ColumnChunk(..)
   , ColumnMetadata(..)
+  , KeyValue(..)
+  , PageEncodingStats(..)
   , ParquetType(..)
   , Repetition(..)
   , Encoding(..)
@@ -160,12 +162,40 @@ data ColumnMetadata = ColumnMetadata
   , cmTotalCompressedSize   :: !Int64
   , cmDataPageOffset        :: !Int64
   , cmStatistics            :: !(Maybe Statistics)
+  -- | parquet.thrift field 10: byte offset of the (deprecated) index
+  -- page within the column chunk.
+  , cmIndexPageOffset       :: !(Maybe Int64)
+  -- | parquet.thrift field 11: byte offset of the dictionary page (when
+  -- the column chunk is partly or fully dictionary-encoded).
+  , cmDictionaryPageOffset  :: !(Maybe Int64)
+  -- | parquet.thrift field 12: arbitrary user @key_value_metadata@.
+  , cmKeyValueMetadata      :: !(Vector KeyValue)
+  -- | parquet.thrift field 13: per page-type / encoding counters.
+  , cmEncodingStats         :: !(Vector PageEncodingStats)
   -- | Byte offset from beginning of file to the bloom filter for this
   -- column chunk, if a bloom filter is written. Field 14.
   , cmBloomFilterOffset     :: !(Maybe Int64)
   -- | Length of the bloom filter (header + bitset) in bytes. Field 15
   -- (added in parquet-format 2.10).
   , cmBloomFilterLength     :: !(Maybe Int32)
+  } deriving stock (Show, Eq, Generic)
+    deriving anyclass (NFData)
+
+-- | Parquet @KeyValue@ struct (used in @ColumnMetaData.key_value_metadata@
+-- and @FileMetaData.key_value_metadata@). The value is optional in the
+-- thrift definition.
+data KeyValue = KeyValue
+  { kvKey   :: !Text
+  , kvValue :: !(Maybe Text)
+  } deriving stock (Show, Eq, Generic)
+    deriving anyclass (NFData)
+
+-- | Parquet @PageEncodingStats@ struct (parquet.thrift). One entry per
+-- @(page_type, encoding)@ combination present in the column chunk.
+data PageEncodingStats = PageEncodingStats
+  { pesPageType :: !Int32   -- ^ 0=DATA_PAGE 2=DICTIONARY_PAGE 3=DATA_PAGE_V2
+  , pesEncoding :: !Encoding
+  , pesCount    :: !Int32
   } deriving stock (Show, Eq, Generic)
     deriving anyclass (NFData)
 

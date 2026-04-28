@@ -130,10 +130,28 @@ columnMetadataToThrift cm = TV.Struct $ V.fromList $
   , (7, TV.I64 (cmTotalCompressedSize cm))
   , (8, TV.I64 (cmDataPageOffset cm))
   ] ++ maybe [] (\s -> [(9, statisticsToThrift s)]) (cmStatistics cm)
-  -- Fields 10–13 (index_page_offset, dictionary_page_offset, key_value_metadata,
-  -- encoding_stats) are not yet round-tripped by wireform.
+  ++ maybe [] (\v -> [(10, TV.I64 v)]) (cmIndexPageOffset cm)
+  ++ maybe [] (\v -> [(11, TV.I64 v)]) (cmDictionaryPageOffset cm)
+  ++ (if V.null (cmKeyValueMetadata cm)
+        then []
+        else [(12, TV.List TW.TT_STRUCT (V.map keyValueToThrift (cmKeyValueMetadata cm)))])
+  ++ (if V.null (cmEncodingStats cm)
+        then []
+        else [(13, TV.List TW.TT_STRUCT (V.map pageEncodingStatsToThrift (cmEncodingStats cm)))])
   ++ maybe [] (\v -> [(14, TV.I64 v)]) (cmBloomFilterOffset cm)
   ++ maybe [] (\v -> [(15, TV.I32 v)]) (cmBloomFilterLength cm)
+
+keyValueToThrift :: KeyValue -> TV.Value
+keyValueToThrift kv = TV.Struct $ V.fromList $
+  (1, TV.String (kvKey kv))
+  : maybe [] (\v -> [(2, TV.String v)]) (kvValue kv)
+
+pageEncodingStatsToThrift :: PageEncodingStats -> TV.Value
+pageEncodingStatsToThrift pes = TV.Struct $ V.fromList
+  [ (1, TV.I32 (pesPageType pes))
+  , (2, TV.I32 (encodingToInt (pesEncoding pes)))
+  , (3, TV.I32 (pesCount pes))
+  ]
 
 statisticsToThrift :: Statistics -> TV.Value
 statisticsToThrift st = TV.Struct $ V.fromList $
@@ -301,7 +319,17 @@ thriftToColumnMetadata (TV.Struct fields) = do
           Right s -> Just s
           Left _  -> Nothing
         Nothing -> Nothing
-      bfo = getOptionalI64 fm 14
+      ipo = getOptionalI64 fm 10
+      dpo = getOptionalI64 fm 11
+  kvs <- case lookupField fm 12 of
+    Nothing -> Right V.empty
+    Just (TV.List _ vs) -> V.mapM thriftToKeyValue vs
+    Just _ -> Left "Parquet.Footer: key_value_metadata is not a list"
+  encStats <- case lookupField fm 13 of
+    Nothing -> Right V.empty
+    Just (TV.List _ vs) -> V.mapM thriftToPageEncodingStats vs
+    Just _ -> Left "Parquet.Footer: encoding_stats is not a list"
+  let bfo = getOptionalI64 fm 14
       bfl = getOptionalI32 fm 15
   Right ColumnMetadata
     { cmType = pt
@@ -313,10 +341,43 @@ thriftToColumnMetadata (TV.Struct fields) = do
     , cmTotalCompressedSize = compSz
     , cmDataPageOffset = dataOff
     , cmStatistics = stats
+    , cmIndexPageOffset = ipo
+    , cmDictionaryPageOffset = dpo
+    , cmKeyValueMetadata = kvs
+    , cmEncodingStats = encStats
     , cmBloomFilterOffset = bfo
     , cmBloomFilterLength = bfl
     }
 thriftToColumnMetadata _ = Left "Parquet.Footer: expected struct for ColumnMetadata"
+
+thriftToKeyValue :: TV.Value -> Either String KeyValue
+thriftToKeyValue (TV.Struct fields) = do
+  let fm = V.toList fields
+  k <- case lookupField fm 1 of
+    Just (TV.String t) -> Right t
+    _ -> Left "Parquet.Footer: KeyValue.key missing or not a string"
+  let v = case lookupField fm 2 of
+        Just (TV.String t) -> Just t
+        _ -> Nothing
+  Right (KeyValue k v)
+thriftToKeyValue _ = Left "Parquet.Footer: KeyValue is not a struct"
+
+thriftToPageEncodingStats :: TV.Value -> Either String PageEncodingStats
+thriftToPageEncodingStats (TV.Struct fields) = do
+  let fm = V.toList fields
+  pt <- case lookupField fm 1 of
+    Just (TV.I32 v) -> Right v
+    _ -> Left "Parquet.Footer: PageEncodingStats.page_type missing"
+  enc <- case lookupField fm 2 of
+    Just (TV.I32 v) -> case intToEncoding v of
+      Just e -> Right e
+      Nothing -> Left "Parquet.Footer: PageEncodingStats.encoding invalid"
+    _ -> Left "Parquet.Footer: PageEncodingStats.encoding missing"
+  cnt <- case lookupField fm 3 of
+    Just (TV.I32 v) -> Right v
+    _ -> Left "Parquet.Footer: PageEncodingStats.count missing"
+  Right (PageEncodingStats pt enc cnt)
+thriftToPageEncodingStats _ = Left "Parquet.Footer: PageEncodingStats is not a struct"
 
 thriftToStatistics :: TV.Value -> Either String Statistics
 thriftToStatistics (TV.Struct fields) = do
