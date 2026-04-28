@@ -18,6 +18,10 @@ module Parquet.Levels
   , materializePlainBoolOptional
   , materializePlainByteArrayOptional
   , materializeRepeatedInt32
+  , materializeRepeatedInt64
+  , materializeRepeatedFloat
+  , materializeRepeatedDouble
+  , materializeRepeatedBool
   , materializeRepeatedByteArray
   ) where
 
@@ -520,6 +524,116 @@ materializeRepeatedInt32 reps defs maxDef plain
                    else let !v = fromIntegral (readLE32 plain off) :: Int32
                         in goRepI32 rows' (Just v : row') (i + 1) (off + 4)
                else goRepI32 rows' (Nothing : row') (i + 1) off
+
+-- | Materialize a repeated @INT64@ column using repetition and definition levels.
+materializeRepeatedInt64 ::
+  VP.Vector Int32 ->
+  VP.Vector Int32 ->
+  Int ->
+  ByteString ->
+  Either String (V.Vector (V.Vector (Maybe Int64)))
+materializeRepeatedInt64 = materializeRepeatedFixed 8 readLE64I64
+  where
+    readLE64I64 plain o = fromIntegral (readLE64 plain o) :: Int64
+
+-- | Materialize a repeated @FLOAT@ column using repetition and definition levels.
+materializeRepeatedFloat ::
+  VP.Vector Int32 ->
+  VP.Vector Int32 ->
+  Int ->
+  ByteString ->
+  Either String (V.Vector (V.Vector (Maybe Float)))
+materializeRepeatedFloat = materializeRepeatedFixed 4 (\plain o -> castWord32ToFloat (readLE32 plain o))
+
+-- | Materialize a repeated @DOUBLE@ column using repetition and definition levels.
+materializeRepeatedDouble ::
+  VP.Vector Int32 ->
+  VP.Vector Int32 ->
+  Int ->
+  ByteString ->
+  Either String (V.Vector (V.Vector (Maybe Double)))
+materializeRepeatedDouble = materializeRepeatedFixed 8 (\plain o -> castWord64ToDouble (readLE64 plain o))
+
+-- | Generic backing helper for repeated /fixed-width/ primitive columns.
+materializeRepeatedFixed
+  :: Int                              -- ^ bytes per value
+  -> (ByteString -> Int -> a)          -- ^ reader
+  -> VP.Vector Int32                   -- ^ rep levels
+  -> VP.Vector Int32                   -- ^ def levels
+  -> Int                               -- ^ max def
+  -> ByteString                        -- ^ PLAIN payload
+  -> Either String (V.Vector (V.Vector (Maybe a)))
+materializeRepeatedFixed !bytesPer reader reps defs maxDef plain
+  | VP.length reps /= VP.length defs =
+      Left "Parquet.Levels: rep/def level count mismatch"
+  | otherwise = case go [] [] 0 0 of
+      Left e -> Left e
+      Right (rows, _) ->
+        Right $! V.fromList (reverse (map (V.fromList . reverse) rows))
+  where
+    !n = VP.length reps
+    !maxD = fromIntegral maxDef :: Int32
+
+    go !rows !curRow !i !off
+      | i >= n =
+          let !finalRows = if null curRow then rows else curRow : rows
+          in Right (finalRows, off)
+      | otherwise =
+          let !r = VP.unsafeIndex reps i
+              !d = VP.unsafeIndex defs i
+              !rows' = if r == 0
+                         then if null curRow then rows else curRow : rows
+                         else rows
+              !row' = if r == 0 then [] else curRow
+          in if d == maxD
+               then
+                 if off + bytesPer > BS.length plain
+                   then Left "Parquet.Levels: PLAIN buffer too small for repeated column"
+                   else let !v = reader plain off
+                        in go rows' (Just v : row') (i + 1) (off + bytesPer)
+               else go rows' (Nothing : row') (i + 1) off
+
+-- | Materialize a repeated @BOOLEAN@ column using repetition and
+-- definition levels.  Booleans are bit-packed (LSB-first) in the
+-- payload; only /defined/ rows consume bits.
+materializeRepeatedBool ::
+  VP.Vector Int32 ->
+  VP.Vector Int32 ->
+  Int ->
+  ByteString ->
+  Either String (V.Vector (V.Vector (Maybe Bool)))
+materializeRepeatedBool reps defs maxDef plain
+  | VP.length reps /= VP.length defs =
+      Left "Parquet.Levels: rep/def level count mismatch"
+  | otherwise = case goRepBool [] [] 0 0 of
+      Left e -> Left e
+      Right (rows, _) ->
+        Right $! V.fromList (reverse (map (V.fromList . reverse) rows))
+  where
+    !n = VP.length reps
+    !maxD = fromIntegral maxDef :: Int32
+
+    goRepBool :: [[Maybe Bool]] -> [Maybe Bool] -> Int -> Int
+              -> Either String ([[Maybe Bool]], Int)
+    goRepBool !rows !curRow !i !bitPos
+      | i >= n =
+          let !finalRows = if null curRow then rows else curRow : rows
+          in Right (finalRows, bitPos)
+      | otherwise =
+          let !r = VP.unsafeIndex reps i
+              !d = VP.unsafeIndex defs i
+              !rows' = if r == 0
+                         then if null curRow then rows else curRow : rows
+                         else rows
+              !row' = if r == 0 then [] else curRow
+          in if d == maxD
+               then
+                 let !bytePos = bitPos `quot` 8
+                 in if bytePos >= BS.length plain
+                      then Left "Parquet.Levels: PLAIN BOOLEAN buffer too small for repeated column"
+                      else let !b = readBitLsb plain bitPos
+                           in goRepBool rows' (Just b : row') (i + 1) (bitPos + 1)
+               else goRepBool rows' (Nothing : row') (i + 1) bitPos
 
 -- | Materialize a repeated @BYTE_ARRAY@ column using repetition and definition levels.
 materializeRepeatedByteArray ::

@@ -12,6 +12,13 @@ import qualified Data.Vector.Primitive as VP
 import Data.Int (Int32, Int64)
 
 import Parquet.BloomFilter
+import Parquet.Levels
+  ( materializeRepeatedBool
+  , materializeRepeatedDouble
+  , materializeRepeatedFloat
+  , materializeRepeatedInt32
+  , materializeRepeatedInt64
+  )
 import Parquet.Footer (readFooter, writeFooter)
 import Parquet.PageIndex
 import Parquet.Read (loadParquetFile, pfFooter)
@@ -179,6 +186,49 @@ main = do
       | got /= fmF -> failTest "ColumnMetaData fields 10-15 mismatch"
       | otherwise ->
           putStrLn "OK: ColumnMetaData fields 10-15 round-trip (index/dict/key-value/encoding-stats/bloom)"
+
+  -- Repeated-column materialization (A.9). rep=0 starts a new row,
+  -- rep>0 continues; def==maxDef means a defined element, def<maxDef
+  -- a null element in the same row.
+  let reps = VP.fromList [(0 :: Int32), 1, 1]
+      defs = VP.fromList [(2 :: Int32), 2, 1]
+      bodyBool = BS.pack [0x01]   -- bits 1 then 0 for the two defined rows
+  case materializeRepeatedBool reps defs 2 bodyBool of
+    Left e -> failTest ("repeated BOOL: " ++ e)
+    Right got
+      | got == V.singleton (V.fromList [Just True, Just False, Nothing]) ->
+          putStrLn "OK: materializeRepeatedBool"
+      | otherwise -> failTest $ "repeated BOOL mismatch: " ++ show got
+
+  -- Repeated INT64: two rows, second has one defined and one null element.
+  let reps64 = VP.fromList [(0 :: Int32), 0, 1]
+      defs64 = VP.fromList [(2 :: Int32), 2, 1]
+      body64 = BS.pack
+        [ 0x64, 0, 0, 0, 0, 0, 0, 0    -- 100
+        , 0x07, 0, 0, 0, 0, 0, 0, 0    -- 7
+        ]
+  case materializeRepeatedInt64 reps64 defs64 2 body64 of
+    Left e -> failTest ("repeated INT64: " ++ e)
+    Right got
+      | got == V.fromList
+          [ V.singleton (Just (100 :: Int64))
+          , V.fromList [Just 7, Nothing]
+          ] -> putStrLn "OK: materializeRepeatedInt64"
+      | otherwise -> failTest $ "repeated INT64 mismatch: " ++ show got
+
+  -- Repeated DOUBLE smoke test.
+  let repsD = VP.fromList [(0 :: Int32), 1]
+      defsD = VP.fromList [(2 :: Int32), 2]
+      bodyD = BS.pack
+        [ 0, 0, 0, 0, 0, 0, 0xF0, 0x3F   -- 1.0
+        , 0, 0, 0, 0, 0, 0, 0x00, 0x40   -- 2.0
+        ]
+  case materializeRepeatedDouble repsD defsD 2 bodyD of
+    Left e -> failTest ("repeated DOUBLE: " ++ e)
+    Right got
+      | V.length got == 1 && V.length (V.head got) == 2 ->
+          putStrLn "OK: materializeRepeatedDouble"
+      | otherwise -> failTest $ "repeated DOUBLE shape: " ++ show got
 
   putStrLn "All Parquet page-index / bloom-filter / statistics tests passed."
 
