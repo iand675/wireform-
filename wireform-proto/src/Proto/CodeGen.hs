@@ -185,7 +185,36 @@ defaultJsonOverrides = Map.fromList
           , "    Left  e -> fail e"
           ]
       })
+  , wrapperOverride "google.protobuf.DoubleValue" "doubleValueValue" "defaultDoubleValue"
+  , wrapperOverride "google.protobuf.FloatValue"  "floatValueValue"  "defaultFloatValue"
+  , wrapperOverride "google.protobuf.Int32Value"  "int32ValueValue"  "defaultInt32Value"
+  , wrapperOverride "google.protobuf.UInt32Value" "uInt32ValueValue" "defaultUInt32Value"
+  , wrapperOverride "google.protobuf.Int64Value"  "int64ValueValue"  "defaultInt64Value"
+  , wrapperOverride "google.protobuf.UInt64Value" "uInt64ValueValue" "defaultUInt64Value"
+  , wrapperOverride "google.protobuf.BoolValue"   "boolValueValue"   "defaultBoolValue"
+  , wrapperOverride "google.protobuf.StringValue" "stringValueValue" "defaultStringValue"
+  , wrapperOverride "google.protobuf.BytesValue"  "bytesValueValue"  "defaultBytesValue"
   ]
+  where
+    -- proto3 JSON: wrapper messages are encoded as the JSON value of
+    -- their inner @value@ field (e.g. Int32Value -> JSON number,
+    -- StringValue -> JSON string). \"null\" / absent -> wrapper absent.
+    -- The previous default-generated instances wrapped them in
+    -- @{\"value\": ...}@, which is not spec-compliant.
+    wrapperOverride :: Text -> Text -> Text -> (Text, JsonOverride)
+    wrapperOverride fqName innerField defName =
+      ( fqName
+      , JsonOverride
+          { joToJSON   = T.unlines
+              [ "  toJSON msg = Aeson.toJSON msg." <> innerField
+              ]
+          , joFromJSON = T.unlines
+              [ "  parseJSON v = do"
+              , "    inner <- Aeson.parseJSON v"
+              , "    pure $ " <> defName <> " { " <> innerField <> " = inner }"
+              ]
+          }
+      )
 
 -- ---------------------------------------------------------------------------
 -- Type registry: maps fully-qualified proto names to Haskell type info

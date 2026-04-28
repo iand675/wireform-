@@ -244,6 +244,42 @@ wellKnownTests = testGroup "Well-Known Types"
           v <- forAll $ Gen.float (Range.linearFrac (-1e30) 1e30)
           let msg = defaultFloatValue { floatValueValue = v }
           decodeMessage (encodeMessage msg) === Right msg
+
+      -- proto3 JSON canonical mapping for wrappers: the wrapper message
+      -- maps to the JSON value of its inner field (number / string /
+      -- bool / base64), NOT to a {"value": ...} object.
+      , testCase "Int32Value JSON is bare number" $
+          Aeson.toJSON (defaultInt32Value { int32ValueValue = 42 })
+            @?= Aeson.toJSON (42 :: Int)
+
+      , testCase "Int32Value JSON parses bare number" $
+          case Aeson.fromJSON (Aeson.Number 42) :: Aeson.Result Int32Value of
+            Aeson.Success v -> int32ValueValue v @?= 42
+            Aeson.Error e   -> assertFailure e
+
+      , testCase "Int64Value JSON is string-encoded number" $
+          Aeson.toJSON (defaultInt64Value { int64ValueValue = 9007199254740993 })
+            @?= Aeson.String "9007199254740993"
+
+      , testCase "Int64Value JSON parses string and number" $ do
+          case Aeson.fromJSON (Aeson.String "12345") :: Aeson.Result Int64Value of
+            Aeson.Success v -> int64ValueValue v @?= 12345
+            Aeson.Error e   -> assertFailure e
+          case Aeson.fromJSON (Aeson.Number 12345) :: Aeson.Result Int64Value of
+            Aeson.Success v -> int64ValueValue v @?= 12345
+            Aeson.Error e   -> assertFailure e
+
+      , testCase "BoolValue JSON is bare bool" $
+          Aeson.toJSON (defaultBoolValue { boolValueValue = True })
+            @?= Aeson.Bool True
+
+      , testCase "StringValue JSON is bare string" $
+          Aeson.toJSON (defaultStringValue { stringValueValue = "hello" })
+            @?= Aeson.String "hello"
+
+      , testCase "BytesValue JSON is base64 string" $ do
+          let msg = defaultBytesValue { bytesValueValue = BS.pack [0x00, 0xff, 0x10] }
+          Aeson.toJSON msg @?= Aeson.String "AP8Q"
       ]
 
   , testGroup "FieldMask"
