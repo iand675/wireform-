@@ -163,8 +163,9 @@ defaultJsonOverrides = Map.fromList
           , "         <> nanoStr <> T.pack \"Z\")"
           ]
       , joFromJSON = T.unlines
-          [ "  parseJSON (Aeson.String _) = pure defaultTimestamp"
-          , "  parseJSON _ = fail \"Expected RFC 3339 timestamp string\""
+          [ "  parseJSON v = case Proto.JSON.WellKnown.timestampFromJSON v of"
+          , "    Right ts -> pure ts"
+          , "    Left  e  -> fail e"
           ]
       })
   , ("google.protobuf.Duration", JsonOverride
@@ -179,8 +180,9 @@ defaultJsonOverrides = Map.fromList
           , "    in Aeson.String (sign <> T.pack (show (abs s)) <> nanoStr <> T.pack \"s\")"
           ]
       , joFromJSON = T.unlines
-          [ "  parseJSON (Aeson.String _) = pure defaultDuration"
-          , "  parseJSON _ = fail \"Expected duration string like \\\"3.5s\\\"\""
+          [ "  parseJSON v = case Proto.JSON.WellKnown.durationFromJSON v of"
+          , "    Right d -> pure d"
+          , "    Left  e -> fail e"
           ]
       })
   ]

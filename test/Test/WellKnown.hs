@@ -54,6 +54,33 @@ wellKnownTests = testGroup "Well-Known Types"
       , testCase "JSON nanos trailing zeros trimmed" $ do
           let msg = defaultTimestamp { timestampSeconds = 0, timestampNanos = 100000000 }
           Aeson.toJSON msg @?= Aeson.String "1970-01-01T00:00:00.1Z"
+
+      , testCase "JSON parses pre-epoch (negative) timestamps" $ do
+          -- 1969-12-31T23:59:00Z = -60 seconds.
+          case Aeson.fromJSON (Aeson.String "1969-12-31T23:59:00Z") :: Aeson.Result Timestamp of
+            Aeson.Success ts -> do
+              timestampSeconds ts @?= -60
+              timestampNanos   ts @?= 0
+            Aeson.Error e -> assertFailure e
+
+      , testCase "JSON parses RFC 3339 numeric timezone offset" $ do
+          -- 12:00:00+05:00 == 07:00:00Z
+          case Aeson.fromJSON (Aeson.String "2024-01-01T12:00:00+05:00") :: Aeson.Result Timestamp of
+            Aeson.Success ts -> do
+              -- 2024-01-01T07:00:00Z
+              case Aeson.fromJSON (Aeson.String "2024-01-01T07:00:00Z") :: Aeson.Result Timestamp of
+                Aeson.Success refTs -> timestampSeconds ts @?= timestampSeconds refTs
+                _ -> assertFailure "ref parse failed"
+            Aeson.Error e -> assertFailure e
+
+      , testCase "JSON parses RFC 3339 negative timezone offset" $ do
+          -- 02:00:00-03:00 == 05:00:00Z
+          case Aeson.fromJSON (Aeson.String "2024-01-01T02:00:00-03:00") :: Aeson.Result Timestamp of
+            Aeson.Success ts -> do
+              case Aeson.fromJSON (Aeson.String "2024-01-01T05:00:00Z") :: Aeson.Result Timestamp of
+                Aeson.Success refTs -> timestampSeconds ts @?= timestampSeconds refTs
+                _ -> assertFailure "ref parse failed"
+            Aeson.Error e -> assertFailure e
       ]
 
   , testGroup "Duration"

@@ -68,10 +68,13 @@ data CivilTime = CivilTime
 
 unixToCivil :: Int64 -> CivilTime
 unixToCivil totalSecs =
+  -- Use 'divMod', not 'quotRem': for negative seconds (timestamps before
+  -- the Unix epoch) we need the day to round /down/ and the time-of-day
+  -- to remain in [0, 86400) so the calendar fields are valid.
   let !s' = fromIntegral totalSecs :: Int
-      (!days, !dayRem) = s' `quotRem` 86400
-      (!h, !hmRem)     = dayRem `quotRem` 3600
-      (!mi, !sec)      = hmRem `quotRem` 60
+      (!days, !dayRem) = s' `divMod` 86400
+      (!h, !hmRem)     = dayRem `divMod` 3600
+      (!mi, !sec)      = hmRem `divMod` 60
       !date            = civilFromDays (days + 719468)
   in CivilTime (cdYear date) (cdMonth date) (cdDay date) h mi sec
 
@@ -129,17 +132,52 @@ parseRfc3339 t = do
       | T.null rest -> Left "Invalid RFC 3339 timestamp: missing T separator"
       | otherwise -> do
           let timePart' = T.drop 1 rest
-              timePart = T.dropWhileEnd (\c -> c == 'Z' || c == 'z') timePart'
+              (timePart, !offsetSecs) = stripOffset timePart'
           date <- parseDate datePart
           time <- parseTime timePart
           let !days = daysFromCivil (pdYear date) (pdMonth date) (pdDay date) - 719468
-              !totalSecs = fromIntegral days * 86400 + fromIntegral (ptHour time) * 3600 +
-                           fromIntegral (ptMinute time) * 60 + fromIntegral (ptSecond time)
+              !rawSecs = fromIntegral days * 86400 + fromIntegral (ptHour time) * 3600 +
+                         fromIntegral (ptMinute time) * 60 + fromIntegral (ptSecond time)
+              -- Convert local-time-with-offset to UTC: subtract the offset.
+              -- e.g. 12:00:00+05:00 == 07:00:00Z, so UTC = local - offset.
+              !utcSecs = rawSecs - fromIntegral offsetSecs
           Right Timestamp
-            { timestampSeconds = totalSecs
+            { timestampSeconds = utcSecs
             , timestampNanos = ptNanos time
             , timestampUnknownFields = []
             }
+  where
+    -- Strip the trailing time-zone designator, returning the time-only
+    -- text and the offset-from-UTC in seconds. Accepts "Z", "z", "+hh:mm",
+    -- "-hh:mm", "+hhmm", "-hhmm". An empty/missing designator is treated
+    -- as Z (offset 0); strict RFC 3339 requires it but proto3's JSON
+    -- mapping is lenient on parse.
+    stripOffset :: Text -> (Text, Int)
+    stripOffset s
+      | T.null s = (s, 0)
+      | T.last s == 'Z' || T.last s == 'z' = (T.init s, 0)
+      | otherwise = case findTzStart s of
+          Nothing      -> (s, 0)
+          Just (i, sg) ->
+            let (tt, tz) = T.splitAt i s
+                tzBody   = T.tail tz   -- drop the leading +/-
+                noColon  = T.replace ":" "" tzBody
+                hh       = either (const 0) id (readInt (T.take 2 noColon))
+                mm       = either (const 0) id (readInt (T.take 2 (T.drop 2 noColon)))
+                !off     = sg * (hh * 3600 + mm * 60)
+            in (tt, off)
+
+    -- Locate a trailing time-zone offset (last + or -). The seconds field
+    -- of the time itself never contains + or -, so the last occurrence
+    -- in the candidate text is the offset start.
+    findTzStart :: Text -> Maybe (Int, Int)
+    findTzStart = goLast Nothing 0 . T.unpack
+      where
+        goLast best _ []     = best
+        goLast best i (c:cs)
+          | c == '+'          = goLast (Just (i,  1)) (i+1) cs
+          | c == '-' && i > 0 = goLast (Just (i, -1)) (i+1) cs
+          | otherwise         = goLast best (i+1) cs
 
 data ParsedDate = ParsedDate
   { pdYear  :: {-# UNPACK #-} !Int

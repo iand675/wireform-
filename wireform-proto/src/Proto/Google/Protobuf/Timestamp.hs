@@ -183,8 +183,109 @@ instance Aeson.ToJSON Timestamp where
 
 
 instance Aeson.FromJSON Timestamp where
-  parseJSON (Aeson.String _) = pure defaultTimestamp
+  parseJSON (Aeson.String t) = case parseRfc3339Inline t of
+    Right ts -> pure ts
+    Left  e  -> fail e
   parseJSON _ = fail "Expected RFC 3339 timestamp string"
+
+-- | Parse an RFC 3339 timestamp into seconds + nanos. Spelled out here
+-- (rather than calling out to "Proto.JSON.WellKnown") because that
+-- module imports this one.
+parseRfc3339Inline :: T.Text -> Either String Timestamp
+parseRfc3339Inline raw =
+  let stripped = T.strip raw
+  in case T.breakOn (T.pack "T") stripped of
+       (datePart, rest)
+         | T.null rest -> Left "Invalid RFC 3339 timestamp: missing T separator"
+         | otherwise   ->
+             let timePart' = T.drop 1 rest
+                 (timePart, !offsetSecs) = stripOffset timePart'
+             in case (parseDate datePart, parseTime timePart) of
+                  (Right (yr, mo, dy), Right (hr, mn, se, ns)) ->
+                    let !days     = daysFromCivilT yr mo dy - 719468
+                        !rawSecs  = fromIntegral days * 86400
+                                  + fromIntegral hr * 3600
+                                  + fromIntegral mn * 60
+                                  + fromIntegral se
+                        !utcSecs  = rawSecs - fromIntegral offsetSecs
+                    in Right defaultTimestamp
+                         { timestampSeconds = utcSecs
+                         , timestampNanos   = ns
+                         }
+                  (Left e, _) -> Left e
+                  (_, Left e) -> Left e
+  where
+    stripOffset :: T.Text -> (T.Text, Int)
+    stripOffset s
+      | T.null s = (s, 0)
+      | T.last s == 'Z' || T.last s == 'z' = (T.init s, 0)
+      | otherwise = case findTzStart s of
+          Nothing      -> (s, 0)
+          Just (i, sg) ->
+            let (tt, tz) = T.splitAt i s
+                tzBody   = T.tail tz
+                noColon  = T.replace (T.pack ":") (T.pack "") tzBody
+                hh       = readIntDef (T.take 2 noColon)
+                mm       = readIntDef (T.take 2 (T.drop 2 noColon))
+                !off     = sg * (hh * 3600 + mm * 60)
+            in (tt, off)
+
+    findTzStart :: T.Text -> Maybe (Int, Int)
+    findTzStart = goLast Nothing 0 . T.unpack
+      where
+        goLast best _ []     = best
+        goLast best i (c:cs)
+          | c == '+'          = goLast (Just (i,  1)) (i+1) cs
+          | c == '-' && i > 0 = goLast (Just (i, -1)) (i+1) cs
+          | otherwise         = goLast best (i+1) cs
+
+    parseDate :: T.Text -> Either String (Int, Int, Int)
+    parseDate t = case T.splitOn (T.pack "-") t of
+      [ys, ms, ds] -> do
+        y <- readEither ys
+        m <- readEither ms
+        d <- readEither ds
+        Right (y, m, d)
+      _ -> Left "Invalid date format"
+
+    parseTime :: T.Text -> Either String (Int, Int, Int, Int32)
+    parseTime t =
+      let (wholePart, fracPart) = T.breakOn (T.pack ".") t
+      in case T.splitOn (T.pack ":") wholePart of
+           [hs, ms, ss] -> do
+             h  <- readEither hs
+             mn <- readEither ms
+             s  <- readEither ss
+             Right (h, mn, s, parseFracNanos fracPart)
+           _ -> Left "Invalid time format"
+
+    parseFracNanos :: T.Text -> Int32
+    parseFracNanos t
+      | T.null t = 0
+      | T.head t == '.' =
+          let digits = T.takeWhile (\c -> c >= '0' && c <= '9') (T.tail t)
+              padded = T.take 9 (digits <> T.replicate (9 - T.length digits) (T.pack "0"))
+          in case readEither padded of
+               Right n -> fromIntegral (n :: Int)
+               Left _  -> 0
+      | otherwise = 0
+
+    readEither :: T.Text -> Either String Int
+    readEither t = case reads (T.unpack t) of
+      [(n, "")] -> Right n
+      _         -> Left ("Bad integer: " <> T.unpack t)
+
+    readIntDef :: T.Text -> Int
+    readIntDef t = either (const 0) id (readEither t)
+
+    daysFromCivilT :: Int -> Int -> Int -> Int
+    daysFromCivilT y m d =
+      let !y'  = y - (if m <= 2 then 1 else 0)
+          !era = (if y' >= 0 then y' else y' - 399) `quot` 400
+          !yoe = y' - era * 400
+          !doy = (153 * (m + (if m > 2 then -3 else 9)) + 2) `quot` 5 + d - 1
+          !doe = yoe * 365 + yoe `quot` 4 - yoe `quot` 100 + doy
+      in era * 146097 + doe
 
 
 instance Hashable Timestamp where

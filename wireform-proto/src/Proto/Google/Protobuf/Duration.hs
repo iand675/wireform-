@@ -143,8 +143,49 @@ instance Aeson.ToJSON Duration where
 
 
 instance Aeson.FromJSON Duration where
-  parseJSON (Aeson.String _) = pure defaultDuration
+  parseJSON (Aeson.String t) = case parseDurationInline t of
+    Right d -> pure d
+    Left  e -> fail e
   parseJSON _ = fail "Expected duration string like \"3.5s\""
+
+-- | Parse a proto3 canonical Duration string ("12.345s", "-7s", "0s").
+-- Inlined here because "Proto.JSON.WellKnown" imports this module.
+parseDurationInline :: T.Text -> Either String Duration
+parseDurationInline raw = do
+  let stripped = T.strip raw
+  body <- case T.stripSuffix (T.pack "s") stripped of
+            Just b  -> Right b
+            Nothing -> Left "Duration must end with 's'"
+  let (signStr, rest) = case T.uncons body of
+                         Just ('-', xs) -> (T.pack "-", xs)
+                         Just ('+', xs) -> (T.pack "" , xs)
+                         _              -> (T.pack "" , body)
+      isNeg = signStr == T.pack "-"
+      (whole, fracD) = T.breakOn (T.pack ".") rest
+  secInt <- readEitherI whole
+  let !secs = fromIntegral (if isNeg then negate secInt else secInt) :: Int64
+      !nanos32 = parseDurNanos isNeg fracD
+  pure defaultDuration
+    { durationSeconds = secs
+    , durationNanos   = nanos32
+    }
+  where
+    readEitherI :: T.Text -> Either String Int
+    readEitherI t = case reads (T.unpack t) of
+      [(n, "")] -> Right n
+      _         -> Left ("Bad integer: " <> T.unpack t)
+
+    parseDurNanos :: Bool -> T.Text -> Int32
+    parseDurNanos isNeg t
+      | T.null t = 0
+      | T.head t == '.' =
+          let digits  = T.takeWhile (\c -> c >= '0' && c <= '9') (T.tail t)
+              padded  = T.take 9 (digits <> T.replicate (9 - T.length digits) (T.pack "0"))
+              n       = case reads (T.unpack padded) of
+                          [(x, "")] -> x :: Int
+                          _         -> 0
+          in fromIntegral (if isNeg then negate n else n)
+      | otherwise = 0
 
 
 instance Hashable Duration where
