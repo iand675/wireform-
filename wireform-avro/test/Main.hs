@@ -3,6 +3,7 @@
 module Main (main) where
 
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import qualified Data.Vector as V
@@ -14,6 +15,8 @@ import Avro.Container
   , readContainer
   , writeContainerWith
   )
+import Avro.Decode (decodeAvroResolved)
+import Avro.Encode (encodeAvro)
 import Avro.Fingerprint (avroFingerprint, parsingCanonicalForm)
 import qualified Avro.Value as AV
 import Avro.Schema
@@ -83,6 +86,32 @@ main = do
 #ifdef HAVE_BZIP2
   containerRoundTrip schema vals "bzip2"
 #endif
+
+  -- Schema resolution: string <-> bytes promotion (Avro 1.11 spec).
+  let strSchema   = AvroPrimitive AvroString
+      bytesSchema = AvroPrimitive AvroBytes
+      hello       = AV.String "hello"
+      helloBytes  = AV.Bytes (BSC.pack "hello")
+      strEncoded  = encodeAvro strSchema hello
+  case decodeAvroResolved strSchema bytesSchema strEncoded of
+    Right v
+      | v == helloBytes ->
+          putStrLn "OK: schema resolution string -> bytes"
+      | otherwise -> failTest $ "string -> bytes value mismatch: " ++ show v
+    Left e -> failTest ("string -> bytes resolution: " ++ e)
+  let bytesEncoded = encodeAvro bytesSchema helloBytes
+  case decodeAvroResolved bytesSchema strSchema bytesEncoded of
+    Right v
+      | v == hello ->
+          putStrLn "OK: schema resolution bytes -> string"
+      | otherwise -> failTest $ "bytes -> string value mismatch: " ++ show v
+    Left e -> failTest ("bytes -> string resolution: " ++ e)
+  -- bytes -> string promotion must reject invalid UTF-8.
+  let badBytes = AV.Bytes (BS.pack [0xff, 0xfe, 0xfd])
+      badEnc = encodeAvro bytesSchema badBytes
+  case decodeAvroResolved bytesSchema strSchema badEnc of
+    Right _ -> failTest "bytes -> string accepted invalid UTF-8"
+    Left _  -> putStrLn "OK: bytes -> string rejects invalid UTF-8"
 
   putStrLn "All Avro container codec tests passed."
 

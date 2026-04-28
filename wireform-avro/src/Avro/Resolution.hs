@@ -12,6 +12,7 @@ module Avro.Resolution
 
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding
 import qualified Data.Vector as V
 
 import Avro.Schema (AvroType(..), AvroSchema(..), AvroField(..))
@@ -32,6 +33,10 @@ data ResolvedSchema
   | ResolvedPromoteLongToFloat
   | ResolvedPromoteLongToDouble
   | ResolvedPromoteFloatToDouble
+  -- | @string@ → @bytes@: re-encode the UTF-8 string as raw bytes.
+  | ResolvedPromoteStringToBytes
+  -- | @bytes@ → @string@: decode the raw bytes as UTF-8.
+  | ResolvedPromoteBytesToString
   | ResolvedRecord !(V.Vector FieldResolution)
   | ResolvedEnum !Text !(V.Vector Int)
   | ResolvedArray !ResolvedSchema
@@ -74,6 +79,9 @@ resolvePrim AvroInt  AvroDouble = Right ResolvedPromoteIntToDouble
 resolvePrim AvroLong AvroFloat  = Right ResolvedPromoteLongToFloat
 resolvePrim AvroLong AvroDouble = Right ResolvedPromoteLongToDouble
 resolvePrim AvroFloat AvroDouble = Right ResolvedPromoteFloatToDouble
+-- Avro spec: "string is promotable to bytes" and vice-versa.
+resolvePrim AvroString AvroBytes = Right ResolvedPromoteStringToBytes
+resolvePrim AvroBytes  AvroString = Right ResolvedPromoteBytesToString
 resolvePrim w r
   | w == r    = Right ResolvedSame
   | otherwise = Left $ "incompatible primitives: " ++ show w ++ " vs " ++ show r
@@ -192,6 +200,16 @@ resolveValue ResolvedPromoteIntToDouble (AV.Int n) = Right (AV.Double (fromInteg
 resolveValue ResolvedPromoteLongToFloat (AV.Long n) = Right (AV.Float (fromIntegral n))
 resolveValue ResolvedPromoteLongToDouble (AV.Long n) = Right (AV.Double (fromIntegral n))
 resolveValue ResolvedPromoteFloatToDouble (AV.Float f) = Right (AV.Double (realToFrac f))
+-- Avro spec: 'string' and 'bytes' share their on-the-wire shape (a
+-- length prefix + raw bytes), so promotion is just a tag swap.
+-- string -> bytes: the bytes are exactly the UTF-8 encoding.
+resolveValue ResolvedPromoteStringToBytes (AV.String t) =
+  Right (AV.Bytes (Data.Text.Encoding.encodeUtf8 t))
+-- bytes -> string: validate UTF-8 just like a fresh decode would.
+resolveValue ResolvedPromoteBytesToString (AV.Bytes bs) =
+  case Data.Text.Encoding.decodeUtf8' bs of
+    Right t -> Right (AV.String t)
+    Left _  -> Left "bytes -> string promotion: invalid UTF-8"
 resolveValue (ResolvedRecord fieldRes) (AV.Record wFields) =
   AV.Record <$> V.mapM (resolveField wFields) fieldRes
 resolveValue (ResolvedEnum name mapping) (AV.Enum wIdx) =
