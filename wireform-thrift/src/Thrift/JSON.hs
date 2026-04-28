@@ -435,7 +435,11 @@ stringifyKey = \case
   TV.I16 v     -> Text.pack (show v)
   TV.I32 v     -> Text.pack (show v)
   TV.I64 v     -> Text.pack (show v)
-  TV.Double d  -> Text.pack (show d)
+  TV.Double d
+    | isNaN d                  -> "NaN"
+    | isInfinite d, d > 0      -> "Infinity"
+    | isInfinite d             -> "-Infinity"
+    | otherwise                -> Text.pack (show d)
   TV.Binary bs -> TE.decodeUtf8 (Base64.encode bs)
   TV.UUID bs   -> TE.decodeUtf8 (Base16.encode bs)
   _            -> "<complex>"
@@ -451,7 +455,20 @@ parseTypedKeyFromTag tag keyStr = case tag of
   "i16" -> readIntKey (\n -> TV.I16 (fromIntegral n)) keyStr
   "i32" -> readIntKey (\n -> TV.I32 (fromIntegral n)) keyStr
   "i64" -> readIntKey TV.I64 keyStr
+  -- 'dbl' is the TJSONProtocol type identifier for double values.
+  -- Apache Thrift renders NaN / Infinity as the JSON strings "NaN" /
+  -- "Infinity" / "-Infinity"; we accept the same shapes here.
+  "dbl" -> readDoubleKey keyStr
   _     -> Left ("Unsupported map key type: " <> Text.unpack tag)
+
+readDoubleKey :: Text -> Either String TV.Value
+readDoubleKey t
+  | t == "NaN"       = Right (TV.Double (0/0))
+  | t == "Infinity"  = Right (TV.Double (1/0))
+  | t == "-Infinity" = Right (TV.Double (negate (1/0)))
+  | otherwise = case TR.double t of
+      Right (d, "") -> Right (TV.Double d)
+      _ -> Left ("Invalid numeric key: " <> Text.unpack t)
 
 readIntKey :: (Int64 -> TV.Value) -> Text -> Either String TV.Value
 readIntKey f t = case (TR.signed TR.decimal t :: Either String (Int64, Text)) of
