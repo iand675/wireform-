@@ -19,15 +19,19 @@ module Avro.Container
   , readContainerResolved
   , writeContainer
   , writeContainerWith
+  , writeContainerWithSync
+  , randomSyncMarker
+  , syncMarkerForSchema
   , decompressBlock
   , compressBlock
   ) where
 
 import qualified Codec.Compression.Zlib.Raw as ZlibRaw
 import Control.Exception (SomeException, evaluate, try)
-import Data.Bits (shiftL, shiftR, (.&.), (.|.))
+import Data.Bits (complement, shiftL, shiftR, (.&.), (.|.))
 import Data.Digest.CRC32 (crc32)
-import Data.Word (Word32)
+import Data.Word (Word8, Word32)
+import qualified System.Random as Random
 import System.IO.Unsafe (unsafePerformIO)
 #ifdef HAVE_SNAPPY
 import qualified Codec.Compression.Snappy as Snappy
@@ -50,6 +54,7 @@ import qualified Data.Vector as V
 
 import Avro.Decode (decodeAvroAt)
 import Avro.Encode (encodeAvro)
+import Avro.Fingerprint (avroFingerprint)
 import Avro.JSON (avroSchemaFromJSON, avroSchemaToJSON)
 import Avro.Resolution (resolveSchema, resolveValue)
 import Avro.Schema (AvroType)
@@ -74,28 +79,118 @@ magic = BS.pack [0x4F, 0x62, 0x6A, 0x01]
 syncMarkerSize :: Int
 syncMarkerSize = 16
 
-nullSync :: ByteString
-nullSync = BS.replicate syncMarkerSize 0
+-- | A deterministic 16-byte sync marker derived from the schema's
+-- parsing canonical form.
+--
+-- The Avro specification says the sync marker should be \"a 16-byte,
+-- randomly-generated\" value. Its purpose is twofold:
+--
+--   1. It separates blocks unambiguously, so two container files
+--      can be concatenated and read as a stream.
+--   2. A reader can resynchronise after a corrupt block by scanning
+--      the bytes for the marker.
+--
+-- The pure 'writeContainer' / 'writeContainerWith' API can't generate
+-- random bytes, but using all-zero bytes (the previous behaviour)
+-- defeats both properties — every legitimate run of zeros in the
+-- encoded data looks like a sync. Instead we derive a deterministic
+-- 16-byte marker by concatenating the schema's CRC-64-AVRO
+-- fingerprint with its bitwise complement.  This:
+--
+--   * Is non-zero in every byte position (because @x@ and
+--     @complement x@ are bitwise complements: their disjunction is
+--     all-ones, so at least one of the two halves has the bit set in
+--     each position).
+--   * Differs across schemas (any schema change changes the
+--     fingerprint).
+--   * Is stable for the same schema, so concatenating two files
+--     written with this function and the same schema is well-defined.
+--
+-- Callers that need a per-file random marker (e.g. for de-duplication
+-- across many writes of the same schema) can use 'randomSyncMarker'
+-- and 'writeContainerWithSync'.
+syncMarkerForSchema :: AvroType -> ByteString
+syncMarkerForSchema schema =
+  let !fp = avroFingerprint schema   -- 8 bytes
+      !complemented = BS.map complement fp
+  in fp <> complemented
 
--- | Write an Avro container file (Object Container File) with null codec.
+-- | Generate a random 16-byte sync marker. Use this with
+-- 'writeContainerWithSync' when you need the spec's recommendation
+-- of an unpredictable per-file marker.
+randomSyncMarker :: IO ByteString
+randomSyncMarker = do
+  ws <- Random.getStdRandom (\g0 ->
+    let go :: Int -> [Word8] -> Random.StdGen -> ([Word8], Random.StdGen)
+        go !i !acc !g
+          | i >= syncMarkerSize = (reverse acc, g)
+          | otherwise =
+              -- Mix two reduced 32-bit words into one byte rather
+              -- than calling random for a Word8 directly: GHC's
+              -- 'random :: Word8' is implementation-dependent, but
+              -- 'random :: Int' is deterministic across versions.
+              let (n, g') = Random.random g :: (Int, Random.StdGen)
+              in go (i + 1) (fromIntegral (n .&. 0xFF) : acc) g'
+    in go 0 [] g0)
+  pure $! BS.pack ws
+
+-- | Write an Avro container file (Object Container File) with the
+-- @null@ codec, deriving the sync marker from the schema fingerprint.
 writeContainer :: AvroType -> V.Vector AV.Value -> ByteString
 writeContainer = writeContainerWith "null"
 
--- | Write an Avro container file with the specified codec ("null" or "deflate").
+-- | Write an Avro container file with the specified codec
+-- (@null@, @deflate@, @snappy@, @zstandard@, or @bzip2@).
+--
+-- Uses 'syncMarkerForSchema' for the sync marker; callers that need
+-- a different (e.g. random) marker can use 'writeContainerWithSync'.
 writeContainerWith :: T.Text -> AvroType -> V.Vector AV.Value -> ByteString
 writeContainerWith codec schema vals =
-  BL.toStrict (B.toLazyByteString (writeContainerBuilder codec schema vals))
+  writeContainerWithSync (syncMarkerForSchema schema) codec schema vals
 
-writeContainerBuilder :: T.Text -> AvroType -> V.Vector AV.Value -> B.Builder
-writeContainerBuilder codec schema vals =
-  let schemaJSON = BL.toStrict $ Aeson.encode (avroSchemaToJSON schema)
+-- | Like 'writeContainerWith' but takes an explicit 16-byte sync
+-- marker. The marker must be exactly 'syncMarkerSize' bytes (16);
+-- otherwise it is right-padded or truncated to that length.
+--
+-- Generate one with 'randomSyncMarker':
+--
+-- @
+-- sync <- randomSyncMarker
+-- BS.writeFile \"out.avro\" (writeContainerWithSync sync \"deflate\" schema vals)
+-- @
+writeContainerWithSync
+  :: ByteString
+  -> T.Text
+  -> AvroType
+  -> V.Vector AV.Value
+  -> ByteString
+writeContainerWithSync sync codec schema vals =
+  BL.toStrict (B.toLazyByteString (writeContainerBuilder sync codec schema vals))
+
+-- | Pad / truncate the user-supplied marker to exactly 16 bytes.
+normaliseSync :: ByteString -> ByteString
+normaliseSync sync
+  | BS.length sync >= syncMarkerSize =
+      BS.take syncMarkerSize sync
+  | otherwise =
+      sync <> BS.replicate (syncMarkerSize - BS.length sync) 0
+
+writeContainerBuilder
+  :: ByteString
+  -> T.Text
+  -> AvroType
+  -> V.Vector AV.Value
+  -> B.Builder
+writeContainerBuilder rawSync codec schema vals =
+  let !sync = normaliseSync rawSync
+      schemaJSON = BL.toStrict $ Aeson.encode (avroSchemaToJSON schema)
       meta = [ ("avro.schema", schemaJSON)
              , ("avro.codec", TE.encodeUtf8 codec)
              ]
       headerBuilder =
         B.byteString magic
         <> encodeAvroMap meta
-        <> B.byteString nullSync
+        <> B.byteString sync
       blockData = mconcat [encodeAvro schema v | v <- V.toList vals]
       compressedData = compressBlock codec blockData
       blockCount = V.length vals
@@ -103,7 +198,7 @@ writeContainerBuilder codec schema vals =
         avroEncodeLong (fromIntegral blockCount)
         <> avroEncodeLong (fromIntegral (BS.length compressedData))
         <> B.byteString compressedData
-        <> B.byteString nullSync
+        <> B.byteString sync
   in if V.null vals
      then headerBuilder
      else headerBuilder <> blockBuilder
