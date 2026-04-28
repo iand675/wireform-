@@ -895,6 +895,35 @@ fingerprintTests = testGroup "Schema fingerprinting"
       parsingCanonicalForm (AvroPrimitive AvroNull) @?= "\"null\""
       parsingCanonicalForm (AvroPrimitive AvroInt) @?= "\"int\""
       parsingCanonicalForm (AvroPrimitive AvroString) @?= "\"string\""
+
+  , testCase "PCF folds namespace into fully-qualified record name" $ do
+      -- Avro 1.11 PCF rule: "Replace short names with fullnames using
+      -- applicable namespaces". Otherwise two records with the same
+      -- short name but different namespaces would have identical
+      -- fingerprints, defeating registry lookups.
+      let ty = AvroRecord
+            { avroRecordName = "Foo"
+            , avroRecordNamespace = Just "com.example"
+            , avroRecordDoc = Nothing
+            , avroRecordAliases = V.empty
+            , avroRecordFields = V.empty
+            , avroRecordProps = Map.empty
+            }
+          pcf = parsingCanonicalForm ty
+      assertBool "PCF contains fully-qualified name"
+        (BS.isInfixOf "\"com.example.Foo\"" pcf)
+
+  , testCase "PCF differs for same record name with different namespaces" $ do
+      let mk ns = AvroRecord
+            { avroRecordName = "Foo"
+            , avroRecordNamespace = Just ns
+            , avroRecordDoc = Nothing
+            , avroRecordAliases = V.empty
+            , avroRecordFields = V.empty
+            , avroRecordProps = Map.empty
+            }
+      assertBool "fingerprints differ when namespaces differ"
+        (avroFingerprint (mk "a.b") /= avroFingerprint (mk "x.y"))
   ]
 
 aliasResolutionTests :: TestTree

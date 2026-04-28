@@ -40,12 +40,26 @@ parsingCanonicalForm ty = BSC.pack (pcf ty)
 
 pcf :: AvroType -> String
 pcf (AvroPrimitive s) = pcfSchema s
-pcf (AvroRecord{avroRecordName = name, avroRecordFields = fields}) =
-  "{\"name\":\"" ++ T.unpack name ++ "\",\"type\":\"record\",\"fields\":["
+pcf
+  AvroRecord
+    { avroRecordName = name
+    , avroRecordNamespace = ns
+    , avroRecordFields = fields
+    } =
+  "{\"name\":\"" ++ fullname ns name ++ "\","
+  ++ "\"type\":\"record\","
+  ++ "\"fields\":["
   ++ intercalate "," (map pcfField (V.toList fields))
   ++ "]}"
-pcf (AvroEnum{avroEnumName = name, avroEnumSymbols = syms}) =
-  "{\"name\":\"" ++ T.unpack name ++ "\",\"type\":\"enum\",\"symbols\":["
+pcf
+  AvroEnum
+    { avroEnumName = name
+    , avroEnumNamespace = ns
+    , avroEnumSymbols = syms
+    } =
+  "{\"name\":\"" ++ fullname ns name ++ "\","
+  ++ "\"type\":\"enum\","
+  ++ "\"symbols\":["
   ++ intercalate "," (map (\s -> "\"" ++ T.unpack s ++ "\"") (V.toList syms))
   ++ "]}"
 pcf (AvroArray{avroArrayItems = items}) =
@@ -54,9 +68,26 @@ pcf (AvroMap{avroMapValues = vals}) =
   "{\"type\":\"map\",\"values\":" ++ pcf vals ++ "}"
 pcf (AvroUnion{avroUnionBranches = branches}) =
   "[" ++ intercalate "," (map pcf (V.toList branches)) ++ "]"
-pcf (AvroFixed{avroFixedName = name, avroFixedSize = sz}) =
-  "{\"name\":\"" ++ T.unpack name ++ "\",\"type\":\"fixed\",\"size\":" ++ show sz ++ "}"
+pcf
+  AvroFixed
+    { avroFixedName = name
+    , avroFixedNamespace = ns
+    , avroFixedSize = sz
+    } =
+  "{\"name\":\"" ++ fullname ns name ++ "\","
+  ++ "\"type\":\"fixed\","
+  ++ "\"size\":" ++ show sz
+  ++ "}"
 pcf (AvroLogical{avroLogicalBase = base}) = pcf base
+
+-- | Per Avro 1.11 PCF rules, named types are normalised to their
+-- fully-qualified name (@namespace.name@ when a namespace is set,
+-- otherwise just @name@).
+fullname :: Maybe T.Text -> T.Text -> String
+fullname Nothing       n = T.unpack n
+fullname (Just ns)     n
+  | T.null ns           = T.unpack n
+  | otherwise           = T.unpack ns ++ "." ++ T.unpack n
 
 pcfSchema :: AvroSchema -> String
 pcfSchema AvroNull   = "\"null\""
