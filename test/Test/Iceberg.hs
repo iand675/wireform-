@@ -283,6 +283,7 @@ manifestAvroTests = testGroup "Manifest Avro"
                 , u0
                 , u0
                 , u0
+                , AV.Int 0  -- content: 0 = data file (Iceberg v2)
                 ]
           entry =
             AV.Record $
@@ -696,6 +697,7 @@ scanPlanDeleteTests = testGroup "ScanPlan with deletes"
             [ AV.String "s3://b/data.parquet", AV.String "parquet"
             , AV.Record V.empty, AV.Long 10, AV.Long 1024
             , AV.Long 67108864, u0, u0, u0, u0, u0
+            , AV.Int 0  -- content (Iceberg v2)
             ]
           entry = AV.Record $ V.fromList [AV.Int 1, u0, u0, u0, dataFile]
           manifestBs = writeContainer manifestEntrySchema (V.singleton entry)
