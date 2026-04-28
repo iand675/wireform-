@@ -27,6 +27,14 @@ module Proto.JSON
   , parseField
   , parseFieldMaybe
   , parseBytesFieldMaybe
+  , int64FieldToJSON
+  , uint64FieldToJSON
+  , parseInt64FieldMaybe
+  , parseUInt64FieldMaybe
+  , int64MapFieldToJSON
+  , uint64MapFieldToJSON
+  , parseInt64MapFieldMaybe
+  , parseUInt64MapFieldMaybe
 
     -- * Proto-specific scalar JSON encoding
   , protoInt64ToJSON
@@ -136,6 +144,66 @@ parseBytesFieldMaybe obj key = case AesonKM.lookup (AesonKey.fromText key) obj o
   Nothing        -> pure Nothing
   Just Aeson.Null -> pure Nothing
   Just v         -> Just <$> protoBytesFromJSON v
+
+-- proto3 JSON: 64-bit integer fields are emitted as JSON strings to
+-- preserve precision in JS consumers (which only have 53-bit
+-- integers). The parser also accepts numbers for compatibility.
+
+int64FieldToJSON :: Text -> Int64 -> (Text, Aeson.Value)
+int64FieldToJSON key n = (key, protoInt64ToJSON n)
+
+uint64FieldToJSON :: Text -> Word64 -> (Text, Aeson.Value)
+uint64FieldToJSON key n = (key, protoWord64ToJSON n)
+
+parseInt64FieldMaybe :: Aeson.Object -> Text -> Aeson.Parser (Maybe Int64)
+parseInt64FieldMaybe obj key = case AesonKM.lookup (AesonKey.fromText key) obj of
+  Nothing         -> pure Nothing
+  Just Aeson.Null -> pure Nothing
+  Just v          -> Just <$> protoInt64FromJSON v
+
+parseUInt64FieldMaybe :: Aeson.Object -> Text -> Aeson.Parser (Maybe Word64)
+parseUInt64FieldMaybe obj key = case AesonKM.lookup (AesonKey.fromText key) obj of
+  Nothing         -> pure Nothing
+  Just Aeson.Null -> pure Nothing
+  Just v          -> Just <$> protoWord64FromJSON v
+
+-- proto3 JSON: a map<K, int64> field is encoded as a JSON object whose
+-- VALUES are strings (the keys are always strings regardless of the
+-- proto key type).
+
+int64MapFieldToJSON :: Text -> Map.Map Text Int64 -> (Text, Aeson.Value)
+int64MapFieldToJSON key m =
+  (key, Aeson.Object $ AesonKM.fromList
+    (fmap (bimap AesonKey.fromText protoInt64ToJSON) (Map.toList m)))
+
+uint64MapFieldToJSON :: Text -> Map.Map Text Word64 -> (Text, Aeson.Value)
+uint64MapFieldToJSON key m =
+  (key, Aeson.Object $ AesonKM.fromList
+    (fmap (bimap AesonKey.fromText protoWord64ToJSON) (Map.toList m)))
+
+parseInt64MapFieldMaybe
+  :: Aeson.Object -> Text -> Aeson.Parser (Maybe (Map.Map Text Int64))
+parseInt64MapFieldMaybe obj key = case AesonKM.lookup (AesonKey.fromText key) obj of
+  Nothing         -> pure Nothing
+  Just Aeson.Null -> pure Nothing
+  Just (Aeson.Object o) -> do
+    pairs <- traverse
+      (\(k, v) -> (,) (AesonKey.toText k) <$> protoInt64FromJSON v)
+      (AesonKM.toList o)
+    pure (Just (Map.fromList pairs))
+  Just _ -> fail ("Expected JSON object for int64 map: " <> T.unpack key)
+
+parseUInt64MapFieldMaybe
+  :: Aeson.Object -> Text -> Aeson.Parser (Maybe (Map.Map Text Word64))
+parseUInt64MapFieldMaybe obj key = case AesonKM.lookup (AesonKey.fromText key) obj of
+  Nothing         -> pure Nothing
+  Just Aeson.Null -> pure Nothing
+  Just (Aeson.Object o) -> do
+    pairs <- traverse
+      (\(k, v) -> (,) (AesonKey.toText k) <$> protoWord64FromJSON v)
+      (AesonKM.toList o)
+    pure (Just (Map.fromList pairs))
+  Just _ -> fail ("Expected JSON object for uint64 map: " <> T.unpack key)
 
 -- Proto3 canonical JSON: 64-bit integers are encoded as strings.
 

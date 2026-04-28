@@ -587,7 +587,7 @@ genImports externalModules = vsep $
   , txt "import qualified Data.Aeson.Types as Aeson"
   , txt "import qualified Data.Aeson.Key as AesonKey"
   , txt "import qualified Data.Aeson.KeyMap as AesonKM"
-  , txt "import Proto.JSON (jsonObject, (.=:), parseFieldMaybe, bytesFieldToJSON, parseBytesFieldMaybe, bytesMapFieldToJSON, parseBytesMapFieldMaybe)"
+  , txt "import Proto.JSON (jsonObject, (.=:), parseFieldMaybe, bytesFieldToJSON, parseBytesFieldMaybe, bytesMapFieldToJSON, parseBytesMapFieldMaybe, int64FieldToJSON, uint64FieldToJSON, int64MapFieldToJSON, uint64MapFieldToJSON, parseInt64FieldMaybe, parseUInt64FieldMaybe, parseInt64MapFieldMaybe, parseUInt64MapFieldMaybe)"
   , txt "import Data.Proxy (Proxy(..))"
   , txt "import Proto.Message (IsMessage(..))"
   , txt "import Proto.Schema (ProtoMessage(..), SomeFieldDescriptor(..), FieldDescriptor(..), FieldTypeDescriptor(..), ScalarFieldType(..), FieldLabel'(..))"
@@ -1488,13 +1488,24 @@ genToJSONInstance ctx scope msg =
         ]
 
 genToJSONField :: GenCtx -> JSONFieldInfo -> Doc ann
-genToJSONField ctx jfi = case jfiKind jfi of
-  JFKBytes ->
-    txt "bytesFieldToJSON " <> pretty ("\"" :: Text) <> pretty (jfiJsonName jfi) <> pretty ("\"" :: Text) <+> txt "msg." <> pretty (jfiAccessor jfi)
-  JFKBytesMap ->
-    txt "bytesMapFieldToJSON " <> pretty ("\"" :: Text) <> pretty (jfiJsonName jfi) <> pretty ("\"" :: Text) <+> txt "msg." <> pretty (jfiAccessor jfi)
-  JFKNormal ->
-    pretty ("\"" :: Text) <> pretty (jfiJsonName jfi) <> pretty ("\" .=: msg." :: Text) <> pretty (jfiAccessor jfi)
+genToJSONField _ctx jfi =
+  let nameStr = pretty ("\"" :: Text) <> pretty (jfiJsonName jfi) <> pretty ("\"" :: Text)
+      accessor = txt "msg." <> pretty (jfiAccessor jfi)
+  in case jfiKind jfi of
+       JFKBytes ->
+         txt "bytesFieldToJSON " <> nameStr <+> accessor
+       JFKBytesMap ->
+         txt "bytesMapFieldToJSON " <> nameStr <+> accessor
+       JFKInt64 ->
+         txt "int64FieldToJSON " <> nameStr <+> accessor
+       JFKUInt64 ->
+         txt "uint64FieldToJSON " <> nameStr <+> accessor
+       JFKInt64Map ->
+         txt "int64MapFieldToJSON " <> nameStr <+> accessor
+       JFKUInt64Map ->
+         txt "uint64MapFieldToJSON " <> nameStr <+> accessor
+       JFKNormal ->
+         nameStr <> pretty (" .=: msg." :: Text) <> pretty (jfiAccessor jfi)
 
 genFromJSONInstance :: GenCtx -> [Text] -> MessageDef -> Doc ann
 genFromJSONInstance ctx scope msg =
@@ -1529,13 +1540,24 @@ genFromJSONInstance ctx scope msg =
           ]
 
 genFromJSONFieldBind :: JSONFieldInfo -> Doc ann
-genFromJSONFieldBind jfi = case jfiKind jfi of
-  JFKBytes ->
-    txt "fld_" <> pretty (jfiAccessor jfi) <+> txt "<- parseBytesFieldMaybe obj " <> pretty ("\"" :: Text) <> pretty (jfiJsonName jfi) <> pretty ("\"" :: Text)
-  JFKBytesMap ->
-    txt "fld_" <> pretty (jfiAccessor jfi) <+> txt "<- parseBytesMapFieldMaybe obj " <> pretty ("\"" :: Text) <> pretty (jfiJsonName jfi) <> pretty ("\"" :: Text)
-  JFKNormal ->
-    txt "fld_" <> pretty (jfiAccessor jfi) <+> txt "<- parseFieldMaybe obj " <> pretty ("\"" :: Text) <> pretty (jfiJsonName jfi) <> pretty ("\"" :: Text)
+genFromJSONFieldBind jfi =
+  let prefix = txt "fld_" <> pretty (jfiAccessor jfi)
+      nameStr = pretty ("\"" :: Text) <> pretty (jfiJsonName jfi) <> pretty ("\"" :: Text)
+  in case jfiKind jfi of
+       JFKBytes ->
+         prefix <+> txt "<- parseBytesFieldMaybe obj " <> nameStr
+       JFKBytesMap ->
+         prefix <+> txt "<- parseBytesMapFieldMaybe obj " <> nameStr
+       JFKInt64 ->
+         prefix <+> txt "<- parseInt64FieldMaybe obj " <> nameStr
+       JFKUInt64 ->
+         prefix <+> txt "<- parseUInt64FieldMaybe obj " <> nameStr
+       JFKInt64Map ->
+         prefix <+> txt "<- parseInt64MapFieldMaybe obj " <> nameStr
+       JFKUInt64Map ->
+         prefix <+> txt "<- parseUInt64MapFieldMaybe obj " <> nameStr
+       JFKNormal ->
+         prefix <+> txt "<- parseFieldMaybe obj " <> nameStr
 
 genFromJSONFieldAssign :: Text -> JSONFieldInfo -> Doc ann
 genFromJSONFieldAssign tyN jfi =
@@ -1686,7 +1708,19 @@ resolveTypeKindScoped :: GenCtx -> [Text] -> Text -> TypeKind
 resolveTypeKindScoped ctx scope name = maybe TKMessage tiKind (resolveTypeWithScope ctx scope name)
 
 -- JSON field info
-data JSONFieldKind = JFKNormal | JFKBytes | JFKBytesMap
+-- | Per-field JSON encoding strategy. The proto3 JSON spec encodes
+-- 64-bit integer fields as JSON STRINGS (not numbers) to avoid
+-- precision loss in JS. 'JFKInt64' / 'JFKUInt64' / 'JFKInt64Map' /
+-- 'JFKUInt64Map' route those fields through 'protoInt64ToJSON' /
+-- 'protoWord64ToJSON' so the generated instance is spec-compliant.
+data JSONFieldKind
+  = JFKNormal
+  | JFKBytes
+  | JFKBytesMap
+  | JFKInt64
+  | JFKUInt64
+  | JFKInt64Map
+  | JFKUInt64Map
   deriving stock (Show, Eq)
 
 data JSONFieldInfo = JSONFieldInfo
@@ -1703,12 +1737,26 @@ extractAllFieldsJSON ctx scope = concatMap go
       MEField fd ->
         let accessor = scopedFieldName scope (fieldName fd)
             jsonName = fromMaybe (snakeToCamel (fieldName fd)) (getJsonName (fieldOptions fd))
-            kind = case fieldType fd of { FTScalar SBytes -> JFKBytes; _ -> JFKNormal }
+            kind = case fieldType fd of
+              FTScalar SBytes   -> JFKBytes
+              FTScalar SInt64   -> JFKInt64
+              FTScalar SSInt64  -> JFKInt64
+              FTScalar SFixed64 -> JFKInt64
+              FTScalar SSFixed64 -> JFKInt64
+              FTScalar SUInt64  -> JFKUInt64
+              _                 -> JFKNormal
         in [JSONFieldInfo accessor jsonName True kind]
       MEMapField mf ->
         let accessor = scopedFieldName scope (mapFieldName mf)
             jsonName = fromMaybe (snakeToCamel (mapFieldName mf)) (getJsonName (mapOptions mf))
-            kind = case mapValueType mf of { FTScalar SBytes -> JFKBytesMap; _ -> JFKNormal }
+            kind = case mapValueType mf of
+              FTScalar SBytes   -> JFKBytesMap
+              FTScalar SInt64   -> JFKInt64Map
+              FTScalar SSInt64  -> JFKInt64Map
+              FTScalar SFixed64 -> JFKInt64Map
+              FTScalar SSFixed64 -> JFKInt64Map
+              FTScalar SUInt64  -> JFKUInt64Map
+              _                 -> JFKNormal
         in [JSONFieldInfo accessor jsonName True kind]
       MEOneof od ->
         let accessor = scopedFieldName scope (oneofName od)

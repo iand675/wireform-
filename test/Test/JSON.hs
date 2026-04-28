@@ -7,6 +7,8 @@ import qualified Data.Aeson.Types as AesonT
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Short as SBS
+import Data.Int (Int64)
+import Data.Word (Word64)
 import qualified Data.HashMap.Strict as HM
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -24,7 +26,42 @@ import Proto.JSON
 
 jsonTests :: TestTree
 jsonTests = testGroup "JSON representation helpers"
-  [ testGroup "Strict ByteString (base64)"
+  [ testGroup "Int64 / UInt64 (proto3 string-encoded)"
+      [ testCase "int64FieldToJSON emits string" $ do
+          let (_, v) = int64FieldToJSON "n" (9007199254740993 :: Int64)
+          v @?= Aeson.String "9007199254740993"
+
+      , testCase "uint64FieldToJSON emits string" $ do
+          let (_, v) = uint64FieldToJSON "n" (18446744073709551615 :: Word64)
+          v @?= Aeson.String "18446744073709551615"
+
+      , testCase "parseInt64FieldMaybe accepts string" $ do
+          let obj = mkObj [("n", Aeson.String "12345")]
+          AesonT.parseEither (parseInt64FieldMaybe obj) "n"
+            @?= Right (Just (12345 :: Int64))
+
+      , testCase "parseInt64FieldMaybe accepts number for compat" $ do
+          let obj = mkObj [("n", Aeson.Number 12345)]
+          AesonT.parseEither (parseInt64FieldMaybe obj) "n"
+            @?= Right (Just (12345 :: Int64))
+
+      , testCase "parseUInt64FieldMaybe rejects negative number" $ do
+          let obj = mkObj [("n", Aeson.String "-1")]
+          case AesonT.parseEither (parseUInt64FieldMaybe obj) "n" of
+            Left _  -> pure ()
+            Right v -> assertFailure $
+              "expected rejection of negative uint64, got " <> show v
+
+      , testCase "int64MapFieldToJSON emits map of strings" $ do
+          let (_, v) = int64MapFieldToJSON "m"
+                         (Map.fromList [("a", 1), ("b", -2)])
+          v @?= Aeson.Object (AesonKM.fromList
+                  [ ("a", Aeson.String "1")
+                  , ("b", Aeson.String "-2")
+                  ])
+      ]
+
+  , testGroup "Strict ByteString (base64)"
       [ testProperty "roundtrip via Value" $ property $ do
           bs <- forAll $ Gen.bytes (Range.linear 0 200)
           let val = protoBytesToJSON bs
