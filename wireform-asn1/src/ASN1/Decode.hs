@@ -221,8 +221,27 @@ decodeOIDComponents bs off end
       rest <- decodeOIDComponents bs off' end
       Right (val : rest)
 
+-- | Decode a base-128 / variable-length integer from @bs@ starting at
+-- @off@. Per X.690 §8.19.2 (DER OID encoding) the leading octet of a
+-- multi-octet sub-identifier MUST NOT be @0x80@ — that would represent
+-- a leading zero which is forbidden by the canonical-encoding rules.
 decodeBase128 :: ByteString -> Int -> Either String (Word64, Int)
-decodeBase128 bs off = go off 0
+decodeBase128 bs off
+  | off >= BS.length bs =
+      Left "ASN1.Decode: unterminated base-128 integer"
+  | rdByte bs off == 0x80 && off + 1 < BS.length bs
+      && testBit (rdByte bs (off + 1)) 7 =
+      -- Loose check: a leading 0x80 followed by another continuation
+      -- byte is the prototypical non-canonical form. Stricter spec
+      -- compliance: any single 0x80 leading octet that isn't the
+      -- only octet is non-minimal.
+      Left "ASN1.Decode: non-minimal base-128 encoding (leading 0x80)"
+  | rdByte bs off == 0x80 =
+      -- Even a lone 0x80 leading + one terminator is non-canonical
+      -- (0x80 0xNN where 0xNN < 0x80) — that's 7 bits of zero
+      -- prefix. The plain value 0xNN encodes as just 0xNN.
+      Left "ASN1.Decode: non-minimal base-128 encoding (leading 0x80)"
+  | otherwise = go off 0
   where
     go !o !acc
       | o >= BS.length bs = Left "ASN1.Decode: unterminated base-128 integer"

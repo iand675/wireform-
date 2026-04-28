@@ -131,6 +131,20 @@ main = do
   expectBytes "OID 2.5.4.3 single-byte first sub-identifier"
     encCN (BS.pack [0x06, 0x03, 0x55, 0x04, 0x03])
 
+  -- X.690 §8.19.2 forbids non-minimal base-128 sub-identifiers — i.e.
+  -- a leading @0x80@ octet that represents a useless seven-bit zero
+  -- prefix. The decoder must reject the ill-formed encoding rather
+  -- than silently parse it.
+  let nonMinimalOID = BS.pack
+        [ 0x06        -- OID tag
+        , 0x03        -- length 3
+        , 0x80, 0x80, 0x05  -- sub-identifier: 0x80 leading 0x80 -> non-minimal
+        ]
+  case decode nonMinimalOID of
+    Left _  -> putStrLn "OK: non-minimal base-128 OID rejected"
+    Right v -> failTest $
+      "expected rejection of non-minimal base-128 OID, got " ++ show v
+
   putStrLn "All ASN.1 BER indefinite-length tests passed."
 
 expectBytes :: String -> BS.ByteString -> BS.ByteString -> IO ()
