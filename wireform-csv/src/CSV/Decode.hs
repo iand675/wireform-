@@ -38,13 +38,28 @@ findByte bs off target = unsafeDupablePerformIO $
 {-# INLINE findByte #-}
 
 decode :: CSVConfig -> ByteString -> Either String CSVDocument
-decode cfg bs = do
-  let !rows = parseAllRows cfg bs
+decode cfg bs0 = do
+  let !bs = stripUtf8Bom bs0
+      !rows = parseAllRows cfg bs
   if csvHasHeader cfg
     then case V.uncons rows of
       Nothing -> Right (CSVDocument Nothing V.empty)
       Just (hdr, rest) -> Right (CSVDocument (Just hdr) rest)
     else Right (CSVDocument Nothing rows)
+
+-- | Strip a leading UTF-8 BOM (EF BB BF). Spreadsheet exports
+-- (notably from Excel) routinely prefix CSV with this marker; if it
+-- isn't stripped the first header field will appear with a phantom
+-- three-byte prefix on its name.
+stripUtf8Bom :: ByteString -> ByteString
+stripUtf8Bom bs
+  | BS.length bs >= 3
+      && BSU.unsafeIndex bs 0 == 0xEF
+      && BSU.unsafeIndex bs 1 == 0xBB
+      && BSU.unsafeIndex bs 2 == 0xBF =
+      BS.drop 3 bs
+  | otherwise = bs
+{-# INLINE stripUtf8Bom #-}
 
 decodeStream :: CSVConfig -> ByteString -> (Vector Text -> IO ()) -> IO (Either String ())
 decodeStream cfg bs callback = do

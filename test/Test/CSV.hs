@@ -128,6 +128,16 @@ emptyFieldTests = testGroup "Empty fields"
           cfg = defaultCSV { csvHasHeader = False }
           Right doc = decode cfg (BSC.pack input)
       csvRows doc @?= V.fromList [V.fromList ["", "", ""]]
+
+  , testCase "decoder strips a leading UTF-8 BOM (Excel export quirk)" $ do
+      -- 0xEF 0xBB 0xBF is the UTF-8 BOM, prepended by Excel and many
+      -- spreadsheet exporters. Without stripping, the first header
+      -- column shows up as "\xFEFFname" instead of "name".
+      let bs = BS.pack [0xEF, 0xBB, 0xBF]
+                <> BSC.pack "name,age\nAlice,30\n"
+          Right doc = decode defaultCSV bs
+      csvHeader doc @?= Just (V.fromList ["name", "age"])
+      csvRows doc @?= V.fromList [V.fromList ["Alice", "30"]]
   ]
 
 roundtripTests :: TestTree
