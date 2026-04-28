@@ -170,7 +170,8 @@ parseBasicString t =
   let !inner = T.drop 1 t
   in case T.breakOn "\"" inner of
        (content, rest)
-         | T.isPrefixOf "\"" rest -> Right (TV.TString (unescapeBasic content))
+         | T.isPrefixOf "\"" rest ->
+             TV.TString <$> unescapeBasicStrict content
          | otherwise -> Left "unterminated basic string"
 
 parseLiteralString :: Text -> Either String TV.Value
@@ -187,9 +188,17 @@ parseMultilineBasicString t =
   in case T.breakOn "\"\"\"" inner of
        (content, rest)
          | T.isPrefixOf "\"\"\"" rest ->
-             let !trimmed = if T.isPrefixOf "\n" content then T.drop 1 content else content
-             in Right (TV.TString (unescapeBasic trimmed))
+             -- TOML 1.0.0: trim a single immediately-following newline
+             -- (LF or CRLF) after the opening @"""@.
+             let !trimmed = stripLeadingNewline content
+             in TV.TString <$> unescapeMultilineBasic trimmed
          | otherwise -> Left "unterminated multi-line basic string"
+
+stripLeadingNewline :: Text -> Text
+stripLeadingNewline t
+  | T.isPrefixOf "\r\n" t = T.drop 2 t
+  | T.isPrefixOf "\n"   t = T.drop 1 t
+  | otherwise             = t
 
 parseMultilineLiteralString :: Text -> Either String TV.Value
 parseMultilineLiteralString t =
@@ -197,28 +206,79 @@ parseMultilineLiteralString t =
   in case T.breakOn "'''" inner of
        (content, rest)
          | T.isPrefixOf "'''" rest ->
-             let !trimmed = if T.isPrefixOf "\n" content then T.drop 1 content else content
+             let !trimmed = stripLeadingNewline content
              in Right (TV.TString trimmed)
          | otherwise -> Left "unterminated multi-line literal string"
 
-unescapeBasic :: Text -> Text
-unescapeBasic = T.pack . go . T.unpack
+-- | Strict basic-string unescaping per TOML 1.0.0. Invalid escape
+-- sequences (e.g. @\\x@) are rejected rather than passed through.
+unescapeBasicStrict :: Text -> Either String Text
+unescapeBasicStrict = fmap T.pack . go . T.unpack
   where
-    go [] = []
-    go ('\\':'n':rest) = '\n' : go rest
-    go ('\\':'t':rest) = '\t' : go rest
-    go ('\\':'r':rest) = '\r' : go rest
-    go ('\\':'\\':rest) = '\\' : go rest
-    go ('\\':'"':rest) = '"' : go rest
-    go ('\\':'b':rest) = '\b' : go rest
-    go ('\\':'f':rest) = '\f' : go rest
+    go [] = Right []
+    go ('\\':'n':rest)   = ('\n' :) <$> go rest
+    go ('\\':'t':rest)   = ('\t' :) <$> go rest
+    go ('\\':'r':rest)   = ('\r' :) <$> go rest
+    go ('\\':'\\':rest)  = ('\\' :) <$> go rest
+    go ('\\':'"':rest)   = ('"'  :) <$> go rest
+    go ('\\':'b':rest)   = ('\b' :) <$> go rest
+    go ('\\':'f':rest)   = ('\f' :) <$> go rest
     go ('\\':'u':a:b:c:d:rest)
-      | all isHexDigit [a,b,c,d] =
-          chr (foldl' (\acc x -> acc * 16 + digitToInt x) 0 [a,b,c,d]) : go rest
+      | all isHexDigit [a,b,c,d] = do
+          let !cp = foldl' (\acc x -> acc * 16 + digitToInt x) 0 [a,b,c,d]
+          rest' <- go rest
+          pure (chr cp : rest')
     go ('\\':'U':a:b:c:d:e:f:g:h:rest)
-      | all isHexDigit [a,b,c,d,e,f,g,h] =
-          chr (foldl' (\acc x -> acc * 16 + digitToInt x) 0 [a,b,c,d,e,f,g,h]) : go rest
-    go (c:rest) = c : go rest
+      | all isHexDigit [a,b,c,d,e,f,g,h] = do
+          let !cp = foldl' (\acc x -> acc * 16 + digitToInt x) 0 [a,b,c,d,e,f,g,h]
+          if cp > 0x10FFFF
+            then Left ("TOML: \\U escape out of Unicode range: " ++ [a,b,c,d,e,f,g,h])
+            else do
+              rest' <- go rest
+              pure (chr cp : rest')
+    go ('\\':c:_) = Left ("TOML: invalid escape sequence \\" ++ [c])
+    go ('\\':[])  = Left "TOML: trailing backslash in string"
+    go (c:rest)   = (c :) <$> go rest
+
+-- | Like 'unescapeBasicStrict' but also recognises the line-ending
+-- backslash (@\\<newline>@) used by multi-line basic strings to
+-- collapse the following whitespace.
+unescapeMultilineBasic :: Text -> Either String Text
+unescapeMultilineBasic = fmap T.pack . go . T.unpack
+  where
+    go [] = Right []
+    go ('\\':'\n':rest)   = go (dropSpaces rest)
+    go ('\\':'\r':'\n':rest) = go (dropSpaces rest)
+    go ('\\':'n':rest)    = ('\n' :) <$> go rest
+    go ('\\':'t':rest)    = ('\t' :) <$> go rest
+    go ('\\':'r':rest)    = ('\r' :) <$> go rest
+    go ('\\':'\\':rest)   = ('\\' :) <$> go rest
+    go ('\\':'"':rest)    = ('"'  :) <$> go rest
+    go ('\\':'b':rest)    = ('\b' :) <$> go rest
+    go ('\\':'f':rest)    = ('\f' :) <$> go rest
+    go ('\\':'u':a:b:c:d:rest)
+      | all isHexDigit [a,b,c,d] = do
+          let !cp = foldl' (\acc x -> acc * 16 + digitToInt x) 0 [a,b,c,d]
+          rest' <- go rest
+          pure (chr cp : rest')
+    go ('\\':'U':a:b:c:d:e:f:g:h:rest)
+      | all isHexDigit [a,b,c,d,e,f,g,h] = do
+          let !cp = foldl' (\acc x -> acc * 16 + digitToInt x) 0 [a,b,c,d,e,f,g,h]
+          if cp > 0x10FFFF
+            then Left ("TOML: \\U escape out of Unicode range: " ++ [a,b,c,d,e,f,g,h])
+            else do
+              rest' <- go rest
+              pure (chr cp : rest')
+    go ('\\':c:_) = Left ("TOML: invalid escape sequence \\" ++ [c])
+    go ('\\':[])  = Left "TOML: trailing backslash in string"
+    go (c:rest)   = (c :) <$> go rest
+
+    dropSpaces :: String -> String
+    dropSpaces (' ':rs)  = dropSpaces rs
+    dropSpaces ('\t':rs) = dropSpaces rs
+    dropSpaces ('\r':rs) = dropSpaces rs
+    dropSpaces ('\n':rs) = dropSpaces rs
+    dropSpaces rs        = rs
 
 parseArray :: Text -> Either String TV.Value
 parseArray t =

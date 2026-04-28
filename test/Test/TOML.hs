@@ -322,6 +322,16 @@ roundtripTests = testGroup "Roundtrip"
           other -> assertFailure $ "expected 1000000, got: " ++ show other
         Left e -> assertFailure e
 
+  , testCase "decoder rejects invalid backslash escape (\\x)" $ do
+      -- TOML 1.0.0 §basic-string allows only the documented escape
+      -- sequences; \\x is not one of them and previously slipped
+      -- through unchanged.
+      case decode "n = \"a\\xb\"" of
+        Left _  -> pure ()
+        Right v -> assertFailure $
+          "expected rejection of \\x escape, got: " ++ show v
+
+
   , testCase "encoder escapes control characters per TOML 1.0.0" $ do
       -- Basic strings forbid raw control chars (U+0000..U+001F) other
       -- than tab; the encoder must emit them as \\uXXXX escapes so the
