@@ -14,8 +14,10 @@ module Bond.Encode
 import Data.Bits (countLeadingZeros, shiftL, shiftR, xor, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import qualified Data.Char as Char
 import Data.Int (Int64)
 import Data.Text (Text)
+import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as V
 import Data.Word (Word8, Word16, Word64)
@@ -55,9 +57,13 @@ bondSize (Double _)   = 8
 bondSize (String t)   = let !bs = TE.encodeUtf8 t
                             !len = BS.length bs
                         in varintSize (fromIntegral len) + len
-bondSize (WString t)  = let !bs = TE.encodeUtf8 t
-                            !len = BS.length bs
-                        in varintSize (fromIntegral len) + len
+-- WString is UTF-16-LE per the Bond compact-binary spec ('count' is
+-- the number of 16-bit code units, /not/ bytes; 'characters' are
+-- 2-byte UTF-16-LE code units).  Encode via 'utf16BytesLength' so
+-- supplementary-plane code points expand to surrogate pairs.
+bondSize (WString t)  = let !codeUnits = utf16CodeUnits t
+                            !byteLen   = codeUnits * 2
+                        in varintSize (fromIntegral codeUnits) + byteLen
 bondSize (Blob bs)    = BS.length bs
 bondSize (List et vs) = containerHeaderSize et (V.length vs) + V.foldl' (\s v -> s + bondSize v) 0 vs
 bondSize (Set et vs)  = containerHeaderSize et (V.length vs) + V.foldl' (\s v -> s + bondSize v) 0 vs
@@ -140,7 +146,7 @@ writeValue (UInt64 n)   p off = writeVarint p off n
 writeValue (Float f)    p off = do pokeByteOff p off (castFloatToWord32 f); pure $! off + 4
 writeValue (Double d)   p off = do pokeByteOff p off (castDoubleToWord64 d); pure $! off + 8
 writeValue (String t)   p off = writeTextValue p off t
-writeValue (WString t)  p off = writeTextValue p off t
+writeValue (WString t)  p off = writeWStringValue p off t
 writeValue (Blob bs)    p off = writeRawBytes p off bs
 writeValue (List et vs) p off = do
   off1 <- writeContainerHeader p off et (V.length vs)
@@ -164,6 +170,49 @@ writeTextValue p off t = do
   off1 <- writeVarint p off (fromIntegral len :: Word64)
   writeRawBytes p off1 bs
 {-# INLINE writeTextValue #-}
+
+-- | Encode a Bond @wstring@: varint count of UTF-16 code units, then
+-- the code units themselves as 2-byte little-endian words.  BMP
+-- code points encode to one code unit; supplementary-plane code
+-- points (U+10000..U+10FFFF) encode to a high+low surrogate pair.
+writeWStringValue :: Ptr Word8 -> Int -> Text -> IO Int
+writeWStringValue p off t = do
+  let !codeUnits = utf16CodeUnits t
+  off1 <- writeVarint p off (fromIntegral codeUnits :: Word64)
+  writeUtf16LE p off1 t
+{-# INLINE writeWStringValue #-}
+
+-- | Number of UTF-16 code units required to encode @t@. Each BMP
+-- code point is one code unit; supplementary code points are two.
+utf16CodeUnits :: Text -> Int
+utf16CodeUnits = T.foldl' step 0
+  where
+    step !acc c = if Char.ord c < 0x10000 then acc + 1 else acc + 2
+{-# INLINE utf16CodeUnits #-}
+
+-- | Write @t@ as little-endian UTF-16 code units. Returns the
+-- updated offset.
+writeUtf16LE :: Ptr Word8 -> Int -> Text -> IO Int
+writeUtf16LE p off0 t = T.foldl' step (pure off0) t >>= \o -> pure o
+  where
+    step :: IO Int -> Char -> IO Int
+    step ioOff c = do
+      !o <- ioOff
+      let !cp = Char.ord c
+      if cp < 0x10000
+        then do
+          pokeByteOff p o       (fromIntegral (cp .&. 0xFF) :: Word8)
+          pokeByteOff p (o + 1) (fromIntegral ((cp `shiftR` 8) .&. 0xFF) :: Word8)
+          pure $! o + 2
+        else do
+          let !n  = cp - 0x10000
+              !hi = 0xD800 + (n `shiftR` 10)        -- 10 high bits of n
+              !lo = 0xDC00 + (n .&. 0x3FF)          -- 10 low bits of n
+          pokeByteOff p o       (fromIntegral (hi .&. 0xFF) :: Word8)
+          pokeByteOff p (o + 1) (fromIntegral ((hi `shiftR` 8) .&. 0xFF) :: Word8)
+          pokeByteOff p (o + 2) (fromIntegral (lo .&. 0xFF) :: Word8)
+          pokeByteOff p (o + 3) (fromIntegral ((lo `shiftR` 8) .&. 0xFF) :: Word8)
+          pure $! o + 4
 
 writeRawBytes :: Ptr Word8 -> Int -> ByteString -> IO Int
 writeRawBytes p off (BSI.BS fp len) = do

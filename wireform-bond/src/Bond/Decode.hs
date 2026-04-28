@@ -9,6 +9,7 @@ module Bond.Decode
   ) where
 
 import Data.Bits (shiftL, shiftR, xor, (.&.), (.|.))
+import qualified Data.Char as Char
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BSI
@@ -51,7 +52,7 @@ decodeValue BT_UINT64 bs off = do { (w, o) <- decodeVarint bs off; Right (UInt64
 decodeValue BT_FLOAT  bs off = decodeBondFloat bs off
 decodeValue BT_DOUBLE bs off = decodeBondDouble bs off
 decodeValue BT_STRING bs off = decodeBondString String bs off
-decodeValue BT_WSTRING bs off = decodeBondString WString bs off
+decodeValue BT_WSTRING bs off = decodeBondWString bs off
 decodeValue BT_LIST   bs off = decodeList bs off
 decodeValue BT_SET    bs off = decodeSet bs off
 decodeValue BT_MAP    bs off = decodeMap bs off
@@ -96,6 +97,52 @@ decodeBondString ctor bs off = do
   case decodeTextFast raw of
     Left e  -> Left $ "Bond.Decode: " ++ e
     Right t -> Right (ctor t, off' + n)
+
+-- | Bond compact-binary @wstring@: varint count of UTF-16 /code
+-- units/, followed by @count * 2@ bytes of little-endian UTF-16 code
+-- units.  Per the official Bond spec.  Surrogate pairs in the wire
+-- bytes are decoded back into supplementary-plane code points.
+decodeBondWString :: ByteString -> Offset -> Either String (Value, Offset)
+decodeBondWString bs off = do
+  (lenW, off') <- decodeVarint bs off
+  let !codeUnits = fromIntegral lenW :: Int
+      !byteLen   = codeUnits * 2
+  checkLen bs off' byteLen
+  case decodeUtf16LE bs off' codeUnits of
+    Left e  -> Left $ "Bond.Decode: " ++ e
+    Right t -> Right (WString t, off' + byteLen)
+
+-- | Decode @n@ UTF-16-LE code units starting at @off@ into 'Text'.
+decodeUtf16LE
+  :: ByteString -> Offset -> Int -> Either String T.Text
+decodeUtf16LE bs off0 n = go 0 off0 []
+  where
+    go !i !o !acc
+      | i >= n =
+          Right (T.pack (reverse acc))
+      | otherwise =
+          let !w = fromIntegral (BS.index bs o)
+                  .|.
+                  (fromIntegral (BS.index bs (o + 1)) `shiftL` 8)
+                  :: Int
+          in if w >= 0xD800 && w <= 0xDBFF
+               then if i + 1 >= n
+                      then Left "wstring: truncated surrogate pair"
+                      else
+                        let !lo = fromIntegral (BS.index bs (o + 2))
+                                  .|.
+                                  (fromIntegral (BS.index bs (o + 3)) `shiftL` 8)
+                                  :: Int
+                        in if lo < 0xDC00 || lo > 0xDFFF
+                             then Left "wstring: invalid low surrogate"
+                             else
+                               let !cp = 0x10000
+                                       + ((w - 0xD800) `shiftL` 10)
+                                       + (lo - 0xDC00)
+                               in go (i + 2) (o + 4) (Char.chr cp : acc)
+               else if w >= 0xDC00 && w <= 0xDFFF
+                 then Left "wstring: orphan low surrogate"
+                 else go (i + 1) (o + 2) (Char.chr w : acc)
 
 decodeList :: ByteString -> Offset -> Either String (Value, Offset)
 decodeList bs off = do
