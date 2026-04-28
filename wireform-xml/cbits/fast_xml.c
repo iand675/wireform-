@@ -268,7 +268,9 @@ int hs_html_find_text_end(const uint8_t *buf, int offset, int len)
  * HTML text escape: scan for '<', '>', '&' only (no quotes).
  * Returns offset of first match, or len if not found.
  */
-int hs_html_find_text_escape(const uint8_t *buf, int offset, int len)
+/* Renamed to avoid colliding with wireform-html when both packages
+ * are linked into the same executable. */
+int hs_xml_find_text_escape(const uint8_t *buf, int offset, int len)
 {
     int i = offset;
     simde__m128i v_lt  = simde_mm_set1_epi8('<');
@@ -301,7 +303,8 @@ int hs_html_find_text_escape(const uint8_t *buf, int offset, int len)
  * HTML attr escape: scan for '"', '&', '<', '>' in attribute values.
  * Returns offset of first match, or len if not found.
  */
-int hs_html_find_attr_escape(const uint8_t *buf, int offset, int len)
+/* Renamed to avoid colliding with wireform-html. */
+int hs_xml_find_attr_escape(const uint8_t *buf, int offset, int len)
 {
     int i = offset;
     simde__m128i v_dq  = simde_mm_set1_epi8('"');

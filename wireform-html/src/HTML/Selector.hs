@@ -65,11 +65,11 @@ module HTML.Selector (
   compoundSubsWithoutClass,
 ) where
 
-import Data.Array.Byte (ByteArray (..))
 import Data.Char (digitToInt, isAlpha, isAlphaNum, isDigit)
 import Data.Primitive.SmallArray (SmallArray, indexSmallArray, sizeofSmallArray)
 import Data.Text (Text)
 import Data.Text qualified as T
+import qualified Data.Text.Array as TArr
 import Data.Text.Internal (Text (..))
 import Data.Word (Word8)
 import GHC.Exts (Addr#, ByteArray#, Int#, compareByteArrays#, indexWord8Array#, indexWord8OffAddr#, isTrue#, (==#))
@@ -298,7 +298,7 @@ isClassOnlyCompound (CompoundSelector _ subs) = all isClassSub subs
 -- Checks if the needle Text word appears whitespace-delimited in the raw
 -- bytes at addr# starting at offset for len bytes.
 hasClassWord :: Text -> Addr# -> Int -> Int -> Bool
-hasClassWord (Text (ByteArray needleBA#) nOff nLen) addr# !off !len
+hasClassWord (Text (TArr.ByteArray needleBA#) nOff nLen) addr# !off !len
   | nLen == 0 = False
   | nLen > len = False
   | otherwise = scan off
@@ -452,7 +452,7 @@ attrExists name attrs = go 0
 -- | Check if a word appears in a space-separated list.
 -- Uses byte-level comparison to avoid allocating intermediate Text slices.
 hasWord :: Text -> Text -> Bool
-hasWord (Text (ByteArray needleBA#) nOff nLen) (Text (ByteArray hayBA#) hOff hLen)
+hasWord (Text (TArr.ByteArray needleBA#) nOff nLen) (Text (TArr.ByteArray hayBA#) hOff hLen)
   | nLen == 0 = False
   | otherwise = scan hOff
   where

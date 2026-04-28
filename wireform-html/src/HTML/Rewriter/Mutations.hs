@@ -18,6 +18,7 @@ import Data.Primitive.SmallArray (SmallArray, indexSmallArray, newSmallArray, si
 import Data.Text (Text)
 import Data.Text.Encoding qualified as TE
 import Data.Array.Byte (ByteArray (ByteArray))
+import qualified Data.Text.Array as TArr
 import Data.Text.Internal (Text (..))
 import GHC.Exts (ByteArray#, Int (..), RealWorld, indexWord8Array#)
 import GHC.ForeignPtr (ForeignPtr (ForeignPtr))
@@ -306,7 +307,7 @@ lookupPending name ((n, v) : rest)
 hasAttrNameInTag :: ByteString -> Int -> Int -> Text -> Bool
 hasAttrNameInTag (BS (ForeignPtr addr# _) _) !off !end name = go off
   where
-    !(Text (ByteArray nameBA#) nameOff nameLen) = name
+    !(Text (TArr.ByteArray nameBA#) nameOff nameLen) = name
     rd :: Int -> Word8
     rd = readByteOff addr#
     {-# INLINE rd #-}

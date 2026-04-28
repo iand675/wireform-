@@ -8,7 +8,7 @@ module Wireform.HTML
   ) where
 
 import HTML.Value
-import HTML.Parse
+import HTML.Parse hiding (buildDocument)
 import HTML.Encode
 import HTML.Class
 import HTML.DOM hiding (textContent)

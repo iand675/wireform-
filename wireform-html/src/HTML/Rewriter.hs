@@ -106,6 +106,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Array.Byte (ByteArray (ByteArray))
+import qualified Data.Text.Array as TArr
 import Data.ByteString.Internal (ByteString (BS))
 import Data.Text.Internal (Text (..))
 import GHC.Exts (Addr#, ByteArray#, Int (..), RealWorld, copyAddrToByteArray#, copyByteArray#, newByteArray#, plusAddr#, runRW#, unsafeFreezeByteArray#, writeWord8Array#)
@@ -375,7 +376,7 @@ cowWriteByte cow !b = do
 {-# INLINE cowWriteByte #-}
 
 cowWriteTextBytes :: CowOutput -> Text -> IO ()
-cowWriteTextBytes cow (Text (ByteArray ba#) off len) = do
+cowWriteTextBytes cow (Text (TArr.ByteArray ba#) off len) = do
   cowEnsure cow len
   pos <- cowReadPos cow
   buf <- readIORef (cowBuf cow)
@@ -385,7 +386,7 @@ cowWriteTextBytes cow (Text (ByteArray ba#) off len) = do
 
 cowWriteEndTag :: CowOutput -> Text -> IO ()
 cowWriteEndTag cow tag = do
-  let !(Text (ByteArray ba#) off len) = tag
+  let !(Text (TArr.ByteArray ba#) off len) = tag
       !total = len + 3
   cowEnsure cow total
   pos <- cowReadPos cow
@@ -404,7 +405,7 @@ writeBA (MutableByteArray mba#) (I# off#) (W8# w#) =
 
 cowWriteStartTag :: CowOutput -> Text -> SmallArray HTMLAttribute -> Bool -> IO ()
 cowWriteStartTag cow tag attrs selfClose = do
-  let !(Text (ByteArray tagBA#) tagOff tagLen) = tag
+  let !(Text (TArr.ByteArray tagBA#) tagOff tagLen) = tag
       !n = sizeofSmallArray attrs
   cowEnsure cow (tagLen + 3 + n * 40)
   pos0 <- cowReadPos cow
@@ -416,7 +417,7 @@ cowWriteStartTag cow tag attrs selfClose = do
         | i >= n = pure ()
         | otherwise = do
             let !(HTMLAttribute aName aVal) = indexSmallArray attrs i
-                !(Text (ByteArray nameBA#) nameOff nameLen) = aName
+                !(Text (TArr.ByteArray nameBA#) nameOff nameLen) = aName
             cowEnsure cow (4 + nameLen + 64)
             p <- cowReadPos cow
             b <- readIORef (cowBuf cow)
@@ -443,7 +444,7 @@ cowWriteStartTag cow tag attrs selfClose = do
 
 cowWriteStartTagList :: CowOutput -> Text -> [HTMLAttribute] -> Bool -> IO ()
 cowWriteStartTagList cow tag attrs selfClose = do
-  let !(Text (ByteArray tagBA#) tagOff tagLen) = tag
+  let !(Text (TArr.ByteArray tagBA#) tagOff tagLen) = tag
   cowEnsure cow (tagLen + 3)
   pos0 <- cowReadPos cow
   buf <- readIORef (cowBuf cow)
@@ -452,7 +453,7 @@ cowWriteStartTagList cow tag attrs selfClose = do
   cowWritePos cow (pos0 + 1 + tagLen)
   let go [] = pure ()
       go (HTMLAttribute aName aVal : rest) = do
-        let !(Text (ByteArray nameBA#) nameOff nameLen) = aName
+        let !(Text (TArr.ByteArray nameBA#) nameOff nameLen) = aName
         cowEnsure cow (4 + nameLen + 64)
         p <- cowReadPos cow
         b <- readIORef (cowBuf cow)
@@ -478,7 +479,7 @@ cowWriteStartTagList cow tag attrs selfClose = do
 {-# NOINLINE cowWriteStartTagList #-}
 
 cowEscapeAttrVal :: CowOutput -> Text -> IO ()
-cowEscapeAttrVal cow (Text (ByteArray ba#) off len) = go off off
+cowEscapeAttrVal cow (Text (TArr.ByteArray ba#) off len) = go off off
   where
     !end = off + len
     flushSeg !segStart !segEnd = do
@@ -500,7 +501,7 @@ cowEscapeAttrVal cow (Text (ByteArray ba#) off len) = go off off
 {-# INLINE cowEscapeAttrVal #-}
 
 cowEscapeText :: CowOutput -> Text -> IO ()
-cowEscapeText cow (Text (ByteArray ba#) off len) = go off off
+cowEscapeText cow (Text (TArr.ByteArray ba#) off len) = go off off
   where
     !end = off + len
     flushSeg !segStart !segEnd = do
@@ -1778,7 +1779,7 @@ resetElementRefDeferred er tag _selfClose !nameEnd = do
 {-# INLINE resetElementRefDeferred #-}
 cowWriteOneAttr :: CowOutput -> Text -> Text -> IO ()
 cowWriteOneAttr cow name val = do
-  let !(Text (ByteArray nameBA#) nameOff nameLen) = name
+  let !(Text (TArr.ByteArray nameBA#) nameOff nameLen) = name
   cowEnsure cow (4 + nameLen + 64)
   p <- cowReadPos cow
   b <- readIORef (cowBuf cow)

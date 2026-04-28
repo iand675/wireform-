@@ -104,6 +104,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.Internal (Text (Text))
+import qualified Data.Text.Array as TArr
 import Data.Word (Word8)
 import Foreign.C.Types (CInt (..), CPtrdiff (..))
 import Foreign.Marshal.Alloc (free, mallocBytes)
@@ -5594,17 +5595,17 @@ isAllASCIIFast addr# !off !sliceLen
 
 {-# INLINE decodeTextSlice #-}
 decodeTextSlice :: ByteArray -> Addr# -> Int -> Int -> ByteString -> Text
-decodeTextSlice !ba addr# !off !sliceLen !origBS
+decodeTextSlice !(ByteArray ba#) addr# !off !sliceLen !origBS
   | sliceLen == 0 = T.empty
-  | isAllASCIIFast addr# off sliceLen = Text ba off sliceLen
+  | isAllASCIIFast addr# off sliceLen = Text (TArr.ByteArray ba#) off sliceLen
   | otherwise = decodeTextSliceSlow origBS off sliceLen
 
 
 {-# INLINE decodeTextSliceKnown #-}
 decodeTextSliceKnown :: ByteArray -> Int -> Int -> ByteString -> Bool -> Text
-decodeTextSliceKnown !ba !off !sliceLen !origBS !isAscii
+decodeTextSliceKnown !(ByteArray ba#) !off !sliceLen !origBS !isAscii
   | sliceLen == 0 = T.empty
-  | isAscii = Text ba off sliceLen
+  | isAscii = Text (TArr.ByteArray ba#) off sliceLen
   | otherwise = decodeTextSliceSlow origBS off sliceLen
 
 
