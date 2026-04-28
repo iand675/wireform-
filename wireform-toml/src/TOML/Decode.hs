@@ -335,11 +335,13 @@ validateNoLeadingZero digits raw =
     _ -> Right ()
 
 parseFloat :: Text -> Either String TV.Value
-parseFloat t =
+parseFloat t = do
+  -- TOML 1.0.0 §float: same underscore-grouping rule as integers.
+  validateUnderscores t
   let !cleaned = T.unpack (T.filter (/= '_') t)
-  in case reads cleaned :: [(Double, String)] of
-       [(d, "")] -> Right (TV.TFloat d)
-       _ -> Left $ "invalid float: " ++ T.unpack t
+  case reads cleaned :: [(Double, String)] of
+    [(d, "")] -> Right (TV.TFloat d)
+    _         -> Left $ "invalid float: " ++ T.unpack t
 
 looksLikeFloat :: Text -> Bool
 looksLikeFloat t =
