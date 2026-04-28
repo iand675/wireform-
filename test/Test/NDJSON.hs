@@ -141,6 +141,21 @@ roundtripTests = testGroup "Roundtrip"
           failure
         Right decoded -> decoded === vals
 
+  , testCase "decoder accepts CRLF line terminators" $ do
+      -- Real-world streams (Windows tools, HTTP responses) often
+      -- ship NDJSON with CRLF line endings even though the spec
+      -- says LF. Each CR before the LF must be trimmed before the
+      -- JSON parser sees it, otherwise records ending in numbers
+      -- ('{"a":1}\\r') would parse with a trailing carriage return
+      -- and fail.
+      let bs = BSC.pack "{\"a\":1}\r\n{\"b\":2}\r\n"
+      case decode bs of
+        Right vs -> vs @?= V.fromList
+          [ Aeson.object [("a", Aeson.Number 1)]
+          , Aeson.object [("b", Aeson.Number 2)]
+          ]
+        Left err -> assertFailure $ "CRLF NDJSON should decode: " ++ err
+
   , testCase "encoder always terminates with LF (ndjson-spec)" $ do
       -- ndjson-spec: every record's trailing newline is required so
       -- consumers can append more records by byte concatenation.

@@ -35,6 +35,20 @@ findNewline bs off = unsafeDupablePerformIO $
     in pure $! if r < 0 then len else fromIntegral r
 {-# INLINE findNewline #-}
 
+-- | Trim a trailing '\\r' (0x0D) before the LF terminator. Strict
+-- ndjson-spec uses LF only, but real-world data routinely has CRLF
+-- line endings (Windows-authored streams, HTTP responses with
+-- preserved line endings). Without this trim Aeson sees a stray
+-- carriage return after each JSON value and either tolerates or
+-- rejects it depending on aeson version; trimming keeps behaviour
+-- identical to mainstream JSON-lines consumers.
+trimCR :: ByteString -> ByteString
+trimCR !bs
+  | BS.length bs > 0 && BSU.unsafeIndex bs (BS.length bs - 1) == 0x0D =
+      BSU.unsafeTake (BS.length bs - 1) bs
+  | otherwise = bs
+{-# INLINE trimCR #-}
+
 decode :: ByteString -> Either String (Vector Aeson.Value)
 decode bs = do
   let !lines_ = splitLines bs
@@ -53,7 +67,7 @@ decodeStream bs callback = do
           in if lineLen == 0
                then go (nlPos + 1) len
                else do
-                 let !line = BSU.unsafeTake lineLen (BSU.unsafeDrop off bs)
+                 let !line = trimCR (BSU.unsafeTake lineLen (BSU.unsafeDrop off bs))
                  case Aeson.eitherDecodeStrict' line of
                    Left err  -> pure (Left err)
                    Right val -> do
@@ -82,7 +96,7 @@ decodeConcurrent bs bufSize callback = do
               in if lineLen == 0
                    then produce (nlPos + 1)
                    else do
-                     let !line = BSU.unsafeTake lineLen (BSU.unsafeDrop off bs)
+                     let !line = trimCR (BSU.unsafeTake lineLen (BSU.unsafeDrop off bs))
                      case Aeson.eitherDecodeStrict' line of
                        Left err -> do
                          atomically $ do
@@ -115,7 +129,7 @@ splitLines bs = V.create $ do
             in if lineLen == 0
                  then go (nlPos + 1) count cap vec
                  else do
-                   let !line = BSU.unsafeTake lineLen (BSU.unsafeDrop off bs)
+                   let !line = trimCR (BSU.unsafeTake lineLen (BSU.unsafeDrop off bs))
                    vec' <- if count >= cap
                            then MV.grow vec cap
                            else pure vec
