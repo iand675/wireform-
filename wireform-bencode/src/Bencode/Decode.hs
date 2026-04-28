@@ -2,6 +2,7 @@
 -- | Bencode binary decoding using peekByteOff-based offset parsing.
 module Bencode.Decode
   ( decode
+  , decodeStrict
   ) where
 
 import Data.ByteString (ByteString)
@@ -17,9 +18,19 @@ import Data.Ord (comparing)
 import qualified Bencode.Value as B
 
 decode :: ByteString -> Either String B.Value
-decode !bs
+decode = decodeWith False
+
+-- | Like 'decode', but rejects non-canonical input: dictionary keys
+-- MUST appear in strictly ascending byte order and there MUST NOT
+-- be duplicate keys (BEP-3 §dictionaries). The lenient 'decode'
+-- silently sorts and deduplicates.
+decodeStrict :: ByteString -> Either String B.Value
+decodeStrict = decodeWith True
+
+decodeWith :: Bool -> ByteString -> Either String B.Value
+decodeWith strict !bs
   | BS.null bs = Left "Bencode.Decode: empty input"
-  | otherwise = case parseValue bs 0 of
+  | otherwise = case parseValueWith strict bs 0 of
       Left err -> Left err
       Right (val, off) ->
         if off == BS.length bs
@@ -33,14 +44,17 @@ rdByte !bs !off = BSU.unsafeIndex bs off
 {-# INLINE rdByte #-}
 
 parseValue :: Parser B.Value
-parseValue bs off
+parseValue = parseValueWith False
+
+parseValueWith :: Bool -> Parser B.Value
+parseValueWith strict bs off
   | off >= BS.length bs = Left "Bencode.Decode: unexpected end of input"
   | otherwise =
     let !b = rdByte bs off
     in case b of
       0x69 -> parseInteger bs (off + 1)  -- 'i'
-      0x6C -> parseList bs (off + 1)     -- 'l'
-      0x64 -> parseDict bs (off + 1)     -- 'd'
+      0x6C -> parseListWith strict bs (off + 1)     -- 'l'
+      0x64 -> parseDictWith strict bs (off + 1)     -- 'd'
       _ | b >= 0x30 && b <= 0x39 -> parseString bs off
         | otherwise -> Left $ "Bencode.Decode: unexpected byte " ++ show b
 
@@ -99,7 +113,10 @@ validateIntLiteral s = case s of
   _         -> Right ()
 
 parseList :: Parser B.Value
-parseList bs off0 = runST $ do
+parseList = parseListWith False
+
+parseListWith :: Bool -> Parser B.Value
+parseListWith strict bs off0 = runST $ do
   mv <- MV.new 8
   go mv 0 8 off0
   where
@@ -109,7 +126,7 @@ parseList bs off0 = runST $ do
       | rdByte bs off == 0x65 = do  -- 'e'
           vec <- V.unsafeFreeze (MV.take i mv)
           pure $! Right (B.BList vec, off + 1)
-      | otherwise = case parseValue bs off of
+      | otherwise = case parseValueWith strict bs off of
           Left e -> pure $! Left e
           Right (v, off') -> do
             mv' <- if i >= cap then MV.grow mv cap else pure mv
@@ -118,24 +135,38 @@ parseList bs off0 = runST $ do
             go mv' (i + 1) cap' off'
 
 parseDict :: Parser B.Value
-parseDict bs off0 = runST $ do
+parseDict = parseDictWith False
+
+parseDictWith :: Bool -> Parser B.Value
+parseDictWith strict bs off0 = runST $ do
   mv <- MV.new 8
-  go mv 0 8 off0
+  go mv 0 8 off0 Nothing
   where
-    go :: MV.MVector s (ByteString, B.Value) -> Int -> Int -> Int -> ST s (Either String (B.Value, Int))
-    go !mv !i !cap !off
+    go :: MV.MVector s (ByteString, B.Value)
+       -> Int -> Int -> Int -> Maybe ByteString
+       -> ST s (Either String (B.Value, Int))
+    go !mv !i !cap !off !prevKey
       | off >= BS.length bs = pure $! Left "Bencode.Decode: unterminated dict"
       | rdByte bs off == 0x65 = do  -- 'e'
           vec <- V.unsafeFreeze (MV.take i mv)
-          let !sorted = V.fromList (sortBy (comparing fst) (V.toList vec))
+          let !sorted = if strict
+                          then vec
+                          else V.fromList (sortBy (comparing fst) (V.toList vec))
           pure $! Right (B.BDict sorted, off + 1)
       | otherwise = case parseString bs off of
           Left e -> pure $! Left e
-          Right (B.BString key, off1) -> case parseValue bs off1 of
-            Left e -> pure $! Left e
-            Right (val, off2) -> do
-              mv' <- if i >= cap then MV.grow mv cap else pure mv
-              let !cap' = if i >= cap then cap * 2 else cap
-              MV.unsafeWrite mv' i (key, val)
-              go mv' (i + 1) cap' off2
+          Right (B.BString key, off1) ->
+            -- BEP-3 §dictionaries: keys must be sorted and unique.
+            -- The strict mode rejects any violation; the lenient
+            -- mode silently re-canonicalises in the trailing sort.
+            if strict && case prevKey of { Just pk -> pk >= key; Nothing -> False }
+              then pure $! Left
+                "Bencode.Decode: dictionary keys not in strictly ascending order"
+              else case parseValueWith strict bs off1 of
+                Left e -> pure $! Left e
+                Right (val, off2) -> do
+                  mv' <- if i >= cap then MV.grow mv cap else pure mv
+                  let !cap' = if i >= cap then cap * 2 else cap
+                  MV.unsafeWrite mv' i (key, val)
+                  go mv' (i + 1) cap' off2 (Just key)
           Right _ -> pure $! Left "Bencode.Decode: expected string key in dict"

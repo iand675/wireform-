@@ -4,7 +4,7 @@ module Main (main) where
 import qualified Data.ByteString as BS
 import System.Exit (exitFailure)
 
-import Bencode.Decode (decode)
+import Bencode.Decode (decode, decodeStrict)
 import Bencode.Encode (encode)
 import qualified Bencode.Value as B
 import qualified Data.Vector as V
@@ -67,6 +67,26 @@ main = do
         ]
   expectBytes "byte-order compare puts 'B' (0x42) before 'a' (0x61)"
     (encode asciiCase) "d1:Bi2e1:ai1ee"
+
+  -- Strict decoder: BEP-3 §dictionaries forbids unsorted or duplicate
+  -- keys. The lenient 'decode' silently sorts them; 'decodeStrict'
+  -- rejects any deviation so callers that need to verify
+  -- canonical-form input (e.g. infohash builders) can do so safely.
+  case decodeStrict "d1:zi1e1:ai2ee" of
+    Left _  -> putStrLn "OK: decodeStrict rejects unsorted dict keys"
+    Right v -> failTest $
+      "decodeStrict should reject unsorted, got: " ++ show v
+
+  case decodeStrict "d1:ai1e1:ai2ee" of
+    Left _  -> putStrLn "OK: decodeStrict rejects duplicate dict keys"
+    Right v -> failTest $
+      "decodeStrict should reject duplicates, got: " ++ show v
+
+  case decodeStrict "d1:ai1e1:zi2ee" of
+    Right (B.BDict kvs) | V.length kvs == 2 ->
+      putStrLn "OK: decodeStrict accepts sorted unique keys"
+    other -> failTest $
+      "decodeStrict should accept sorted unique keys, got: " ++ show other
 
   putStrLn "All Bencode integer-literal tests passed."
 
