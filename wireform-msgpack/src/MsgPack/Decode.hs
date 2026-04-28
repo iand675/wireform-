@@ -283,6 +283,7 @@ requireBytes _ len off need action
 
 decodeStr :: Ptr Word8 -> Int -> Int -> Int -> ByteString -> DecResult
 decodeStr _ len off slen origBs
+  | slen < 0 = pure $ Left "MsgPack.Decode: string length overflows Int"
   | off + slen > len = pure $ Left "MsgPack.Decode: string truncated"
   | otherwise = do
       let !slice = BSU.unsafeTake slen (BSU.unsafeDrop off origBs)
@@ -292,6 +293,7 @@ decodeStr _ len off slen origBs
 
 decodeBin :: Ptr Word8 -> Int -> Int -> Int -> ByteString -> DecResult
 decodeBin _ len off blen origBs
+  | blen < 0 = pure $ Left "MsgPack.Decode: binary length overflows Int"
   | off + blen > len = pure $ Left "MsgPack.Decode: binary truncated"
   | otherwise = do
       let !slice = BSU.unsafeTake blen (BSU.unsafeDrop off origBs)
@@ -299,7 +301,14 @@ decodeBin _ len off blen origBs
 
 decodeArrayN :: Ptr Word8 -> Int -> Int -> Int -> ByteString -> DecResult
 decodeArrayN p len off0 cnt origBs
+  | cnt < 0 = pure $ Left "MsgPack.Decode: array length overflows Int"
   | cnt == 0 = pure $ Right (MV'.Array V.empty, off0)
+  -- A msgpack value occupies at least one byte. If the declared array
+  -- count exceeds the bytes left in the input, allocating an MV.new of
+  -- that size is a denial-of-service vector. Cap by remaining-bytes
+  -- before trusting the declared length.
+  | cnt > len - off0 =
+      pure $ Left "MsgPack.Decode: array length exceeds remaining input"
   | otherwise = do
       mv <- stToIO $ MV.new cnt
       go mv 0 off0
@@ -319,7 +328,13 @@ decodeArrayN p len off0 cnt origBs
 
 decodeMapN :: Ptr Word8 -> Int -> Int -> Int -> ByteString -> DecResult
 decodeMapN p len off0 cnt origBs
+  | cnt < 0 = pure $ Left "MsgPack.Decode: map length overflows Int"
   | cnt == 0 = pure $ Right (MV'.Map V.empty, off0)
+  -- Two bytes minimum per (key, value) pair — guard against
+  -- allocation DoS when the declared count vastly exceeds the
+  -- bytes left in the input.
+  | cnt > (len - off0) `div` 2 =
+      pure $ Left "MsgPack.Decode: map length exceeds remaining input"
   | otherwise = do
       mv <- stToIO $ MV.new cnt
       go mv 0 off0

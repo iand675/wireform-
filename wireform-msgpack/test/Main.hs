@@ -65,6 +65,28 @@ main = do
   expectLen "ts96 over 34-bit boundary length" encOver 15
   expectRoundTrip "ts96 over 34-bit boundary" tsOverflow
 
+  -- Decoder DoS protection: declared array/map/string lengths must
+  -- not exceed the bytes left in the input. Without this guard a
+  -- 4-byte msg ("\xdd\xff\xff\xff\xff" — array32 with 4 GB count)
+  -- would happily allocate a 4-billion-element MV.
+  let arr32Huge = BS.pack [0xdd, 0xFF, 0xFF, 0xFF, 0xFF]
+  case decode arr32Huge of
+    Left _  -> putStrLn "OK: array32 with absurd count rejected"
+    Right v -> failTest $
+      "array32 huge-count must be rejected, got: " ++ show v
+
+  let map32Huge = BS.pack [0xdf, 0xFF, 0xFF, 0xFF, 0xFF]
+  case decode map32Huge of
+    Left _  -> putStrLn "OK: map32 with absurd count rejected"
+    Right v -> failTest $
+      "map32 huge-count must be rejected, got: " ++ show v
+
+  let str32Huge = BS.pack [0xdb, 0xFF, 0xFF, 0xFF, 0xFF]
+  case decode str32Huge of
+    Left _  -> putStrLn "OK: str32 with absurd length rejected"
+    Right v -> failTest $
+      "str32 huge-length must be rejected, got: " ++ show v
+
   putStrLn "All MsgPack timestamp encoding tests passed."
 
 expectRoundTrip :: String -> MV.Value -> IO ()
