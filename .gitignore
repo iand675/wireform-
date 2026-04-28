@@ -10,3 +10,4 @@ cabal.project.local
 cabal.project.local.*
 __pycache__/
 *.pyc
+test-data/xmlconf/
