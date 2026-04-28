@@ -194,6 +194,14 @@ defaultJsonOverrides = Map.fromList
   , wrapperOverride "google.protobuf.BoolValue"   "boolValueValue"   "defaultBoolValue"
   , wrapperOverride "google.protobuf.StringValue" "stringValueValue" "defaultStringValue"
   , wrapperOverride "google.protobuf.BytesValue"  "bytesValueValue"  "defaultBytesValue"
+  , ("google.protobuf.Empty", JsonOverride
+      { joToJSON   = T.unlines
+          [ "  toJSON _ = Aeson.Object AesonKM.empty"
+          ]
+      , joFromJSON = T.unlines
+          [ "  parseJSON _ = pure defaultEmpty"
+          ]
+      })
   ]
   where
     -- proto3 JSON: wrapper messages are encoded as the JSON value of

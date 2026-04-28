@@ -32,6 +32,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Types as Aeson
 import qualified Data.Aeson.Key as AesonKey
 import qualified Data.Aeson.KeyMap as AesonKM
+import qualified Data.Scientific as Sci
 import Proto.JSON (jsonObject, (.=:), parseFieldMaybe, bytesFieldToJSON, parseBytesFieldMaybe, bytesMapFieldToJSON, parseBytesMapFieldMaybe)
 import Data.Proxy (Proxy(..))
 import Proto.Message (IsMessage(..))
@@ -120,18 +121,23 @@ instance ProtoMessage Struct where
         })
     ]
 
+-- proto3 JSON: google.protobuf.Struct serialises to a JSON object where
+-- the keys are the field names and the values are the corresponding
+-- google.protobuf.Value renderings (which themselves render as the
+-- raw JSON value of their discriminated kind).
 instance Aeson.ToJSON Struct where
-  toJSON msg = jsonObject
-      [ "fields" .=: msg.structFields
-
-      ]
+  toJSON msg = Aeson.Object $ AesonKM.fromList
+    [ (AesonKey.fromText k, Aeson.toJSON v)
+    | (k, v) <- Map.toList msg.structFields ]
 
 instance Aeson.FromJSON Struct where
   parseJSON = Aeson.withObject "Struct" $ \obj -> do
-    fld_structFields <- parseFieldMaybe obj "fields"
-    pure defaultStruct
-      { structFields = maybe (structFields defaultStruct) id fld_structFields
-      }
+    pairs <- traverse
+      (\(k, v) -> do
+         val <- Aeson.parseJSON v
+         pure (AesonKey.toText k, val))
+      (AesonKM.toList obj)
+    pure defaultStruct { structFields = Map.fromList pairs }
 
 instance Hashable Struct where
   hashWithSalt salt msg = Map.foldlWithKey' (\s k v -> s `hashWithSalt` k `hashWithSalt` v) (salt) msg.structFields
@@ -241,18 +247,36 @@ instance ProtoMessage Value where
         })
     ]
 
+-- proto3 JSON: google.protobuf.Value serialises as the JSON value of its
+-- discriminated kind. Null -> JSON null, NumberValue -> JSON number,
+-- StringValue -> JSON string, BoolValue -> JSON bool, StructValue ->
+-- JSON object, ListValue -> JSON array. Conversely any JSON value
+-- parses back into the matching Value'Kind.
 instance Aeson.ToJSON Value where
-  toJSON msg = jsonObject
-      [ "kind" .=: msg.valueKind
-
-      ]
+  toJSON msg = case msg.valueKind of
+    Nothing                              -> Aeson.Null
+    Just (Value'Kind'NullValue _)        -> Aeson.Null
+    Just (Value'Kind'NumberValue d)      -> Aeson.toJSON d
+    Just (Value'Kind'StringValue t)      -> Aeson.String t
+    Just (Value'Kind'BoolValue   b)      -> Aeson.Bool   b
+    Just (Value'Kind'StructValue s)      -> Aeson.toJSON s
+    Just (Value'Kind'ListValue   l)      -> Aeson.toJSON l
 
 instance Aeson.FromJSON Value where
-  parseJSON = Aeson.withObject "Value" $ \obj -> do
-    fld_valueKind <- parseFieldMaybe obj "kind"
-    pure defaultValue
-      { valueKind = maybe (valueKind defaultValue) id fld_valueKind
-      }
+  parseJSON v = pure $ defaultValue { valueKind = Just (jsonKind v) }
+    where
+      jsonKind Aeson.Null        = Value'Kind'NullValue NullValue'NullValue
+      jsonKind (Aeson.Bool b)    = Value'Kind'BoolValue b
+      jsonKind (Aeson.Number n)  = Value'Kind'NumberValue (Sci.toRealFloat n)
+      jsonKind (Aeson.String t)  = Value'Kind'StringValue t
+      jsonKind arr@(Aeson.Array _) =
+        case Aeson.fromJSON arr :: Aeson.Result ListValue of
+          Aeson.Success l -> Value'Kind'ListValue l
+          Aeson.Error _   -> Value'Kind'NullValue NullValue'NullValue
+      jsonKind obj@(Aeson.Object _) =
+        case Aeson.fromJSON obj :: Aeson.Result Struct of
+          Aeson.Success s -> Value'Kind'StructValue s
+          Aeson.Error _   -> Value'Kind'NullValue NullValue'NullValue
 
 instance Hashable Value where
   hashWithSalt salt msg = hashWithSalt (salt) msg.valueKind
@@ -346,18 +370,15 @@ instance ProtoMessage ListValue where
         })
     ]
 
+-- proto3 JSON: google.protobuf.ListValue serialises as a JSON array
+-- (each element rendered as the corresponding Value).
 instance Aeson.ToJSON ListValue where
-  toJSON msg = jsonObject
-      [ "values" .=: msg.listValueValues
-
-      ]
+  toJSON msg = Aeson.Array (V.map Aeson.toJSON msg.listValueValues)
 
 instance Aeson.FromJSON ListValue where
-  parseJSON = Aeson.withObject "ListValue" $ \obj -> do
-    fld_listValueValues <- parseFieldMaybe obj "values"
-    pure defaultListValue
-      { listValueValues = maybe (listValueValues defaultListValue) id fld_listValueValues
-      }
+  parseJSON = Aeson.withArray "ListValue" $ \arr -> do
+    vs <- traverse Aeson.parseJSON arr
+    pure defaultListValue { listValueValues = vs }
 
 instance Hashable ListValue where
   hashWithSalt salt msg = V.foldl' hashWithSalt (salt) msg.listValueValues

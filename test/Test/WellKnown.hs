@@ -2,8 +2,10 @@ module Test.WellKnown (wellKnownTests) where
 
 import qualified Data.ByteString as BS
 import Data.Hashable (hash, hashWithSalt)
+import qualified Data.Map.Strict as Map
 import Data.Proxy (Proxy(..))
 import qualified Data.Vector as V
+import qualified Data.Aeson.KeyMap as AesonKM
 import Hedgehog
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
@@ -280,6 +282,63 @@ wellKnownTests = testGroup "Well-Known Types"
       , testCase "BytesValue JSON is base64 string" $ do
           let msg = defaultBytesValue { bytesValueValue = BS.pack [0x00, 0xff, 0x10] }
           Aeson.toJSON msg @?= Aeson.String "AP8Q"
+      ]
+
+  , testGroup "Struct / Value JSON canonical form"
+      -- proto3 JSON: Struct == JSON object, Value == raw JSON value of
+      -- its discriminated kind, ListValue == JSON array.
+      [ testCase "Empty serialises as {}" $
+          Aeson.toJSON defaultEmpty @?= Aeson.Object mempty
+
+      , testCase "Value(Number) serialises as bare JSON number" $ do
+          let v = defaultValue
+                    { valueKind = Just (Value'Kind'NumberValue 3.14) }
+          Aeson.toJSON v @?= Aeson.toJSON (3.14 :: Double)
+
+      , testCase "Value(Bool) serialises as bare JSON bool" $ do
+          let v = defaultValue
+                    { valueKind = Just (Value'Kind'BoolValue True) }
+          Aeson.toJSON v @?= Aeson.Bool True
+
+      , testCase "Value(String) serialises as bare JSON string" $ do
+          let v = defaultValue
+                    { valueKind = Just (Value'Kind'StringValue "hi") }
+          Aeson.toJSON v @?= Aeson.String "hi"
+
+      , testCase "Value(Null) serialises as JSON null" $ do
+          let v = defaultValue
+                    { valueKind = Just
+                                    (Value'Kind'NullValue
+                                       NullValue'NullValue) }
+          Aeson.toJSON v @?= Aeson.Null
+
+      , testCase "Value parses bare JSON number into NumberValue" $
+          case Aeson.fromJSON (Aeson.Number 7) :: Aeson.Result Value of
+            Aeson.Success v ->
+              valueKind v @?= Just (Value'Kind'NumberValue 7.0)
+            Aeson.Error e -> assertFailure e
+
+      , testCase "Struct serialises as JSON object of inner Values" $ do
+          let s = defaultStruct
+                    { structFields =
+                        Map.fromList
+                          [ ( "n"
+                            , defaultValue
+                                { valueKind =
+                                    Just (Value'Kind'NumberValue 1.0) }
+                            )
+                          , ( "s"
+                            , defaultValue
+                                { valueKind =
+                                    Just (Value'Kind'StringValue "x") }
+                            )
+                          ]
+                    }
+          Aeson.toJSON s
+            @?= Aeson.Object (AesonKM.fromList
+                  [ ("n", Aeson.toJSON (1.0 :: Double))
+                  , ("s", Aeson.String "x")
+                  ])
       ]
 
   , testGroup "FieldMask"

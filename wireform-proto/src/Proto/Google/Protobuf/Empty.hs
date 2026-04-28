@@ -102,9 +102,12 @@ instance ProtoMessage Empty where
   protoFieldDescriptors _ = Map.fromList
     []
 
+-- proto3 JSON: google.protobuf.Empty serialises as the JSON object @{}@.
+-- The parser is intentionally lenient and accepts any JSON value
+-- (matching the official proto3 JSON parsers, which ignore unknown
+-- fields on Empty).
 instance Aeson.ToJSON Empty where
-  toJSON msg = jsonObject
-      []
+  toJSON _ = Aeson.Object AesonKM.empty
 
 instance Aeson.FromJSON Empty where
   parseJSON _ = pure defaultEmpty
