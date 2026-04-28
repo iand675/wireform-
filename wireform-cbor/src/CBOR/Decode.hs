@@ -58,7 +58,9 @@ rdByte !bs !off = BSU.unsafeIndex bs off
 
 ensureBytes :: ByteString -> Int -> Int -> Either String ()
 ensureBytes !bs !off !n
-  | off + n > BS.length bs = Left "CBOR.Decode: unexpected end of input"
+  | off < 0 || n < 0 = Left "CBOR.Decode: negative offset/length"
+  | n > BS.length bs - off =
+      Left "CBOR.Decode: unexpected end of input"
   | otherwise = Right ()
 {-# INLINE ensureBytes #-}
 
