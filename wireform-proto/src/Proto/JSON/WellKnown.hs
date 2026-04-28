@@ -44,7 +44,19 @@ timestampToJSON :: Timestamp -> Aeson.Value
 timestampToJSON ts = Aeson.String (formatRfc3339 (timestampSeconds ts) (timestampNanos ts))
 
 timestampFromJSON :: Aeson.Value -> Either String Timestamp
-timestampFromJSON (Aeson.String t) = parseRfc3339 t
+timestampFromJSON (Aeson.String t) = do
+  ts <- parseRfc3339 t
+  -- proto3 JSON spec: Timestamp range is
+  -- 0001-01-01T00:00:00Z .. 9999-12-31T23:59:59.999999999Z
+  -- which is seconds in [-62135596800, 253402300799].
+  let !s = timestampSeconds ts
+      !n = timestampNanos ts
+  if s < -62135596800 || s > 253402300799
+    then Left "Timestamp: seconds out of proto3 JSON range \
+              \(0001..9999)"
+    else if n < 0 || n > 999999999
+            then Left "Timestamp: nanos out of [0, 999999999]"
+            else Right ts
 timestampFromJSON _ = Left "Expected RFC 3339 string for Timestamp"
 
 formatRfc3339 :: Int64 -> Int32 -> Text
@@ -254,12 +266,22 @@ parseDuration t = do
     Just numPart -> case T.breakOn "." numPart of
       (wholePart, fracPart) -> do
         secs <- readInt wholePart
-        let !nanos = parseFracNanos fracPart
-        Right Duration
-          { durationSeconds = fromIntegral secs
-          , durationNanos = nanos
-          , durationUnknownFields = []
-          }
+        let !rawNanos = parseFracNanos fracPart
+            -- Per proto3 JSON spec, both 'seconds' and 'nanos' must
+            -- have the same sign. A duration like "-1.5s" decodes to
+            -- (-1, -500000000), not (-1, +500000000).
+            !isNeg = wholePart == T.pack "-0" || secs < 0
+            !signedNanos = if isNeg then negate rawNanos else rawNanos
+            !secs64 = fromIntegral secs :: Int64
+        if abs secs64 > 315576000000
+          then Left "Duration: seconds out of range [-315576000000, 315576000000]"
+          else if abs signedNanos > 999999999
+                 then Left "Duration: nanos out of range"
+                 else Right Duration
+                   { durationSeconds = secs64
+                   , durationNanos = signedNanos
+                   , durationUnknownFields = []
+                   }
 
 -- FieldMask: comma-separated paths
 
