@@ -59,6 +59,30 @@ main = do
     Right _ -> putStrLn "OK: encodeChecked accepts NUL-free keys"
     Left e  -> failTest ("encodeChecked false positive: " ++ e)
 
+  -- BSON document size MUST be at least 5 (4-byte length + NUL
+  -- terminator). A declared size below that is malformed and must
+  -- be rejected.
+  let tinyDoc = BS.pack [0x04, 0x00, 0x00, 0x00]
+  case decode tinyDoc of
+    Left _  -> putStrLn "OK: document size < 5 rejected"
+    Right v -> failTest $
+      "expected rejection of tiny document, got " ++ show v
+
+  -- BSON string MUST end with a NUL terminator. A four-byte length
+  -- with a non-NUL final byte is malformed.
+  let badStr = BS.pack
+        [ 0x0E, 0x00, 0x00, 0x00     -- doc size
+        , 0x02                        -- type=String
+        , 0x73, 0x00                  -- key 's' + NUL
+        , 0x03, 0x00, 0x00, 0x00     -- string length = 3
+        , 0x68, 0x69, 0x21            -- 'h','i','!' (no NUL)
+        , 0x00                        -- doc terminator
+        ]
+  case decode badStr of
+    Left _  -> putStrLn "OK: string missing NUL terminator rejected"
+    Right v -> failTest $
+      "expected rejection of NUL-less string, got " ++ show v
+
   putStrLn "All BSON tests passed."
 
 failTest :: String -> IO ()

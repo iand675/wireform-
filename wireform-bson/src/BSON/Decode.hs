@@ -80,23 +80,38 @@ readBSONString :: ByteString -> Int -> Either String (Text, Int)
 readBSONString bs off = do
   ensure bs off 4
   let !len = fromIntegral (readLE32 bs off) :: Int
-  ensure bs (off + 4) len
-  let !raw = BSU.unsafeTake (len - 1) (BSU.unsafeDrop (off + 4) bs)
-  case decodeTextFast raw of
-    Left _  -> Left "BSON.Decode: invalid UTF-8 in string"
-    Right t -> Right (t, off + 4 + len)
+  -- BSON string layout: int32 length (incl. trailing NUL) + utf-8
+  -- bytes + 0x00. The length must therefore be ≥ 1, and the final
+  -- byte at off+4+(len-1) MUST be 0x00.
+  if len < 1
+    then Left "BSON.Decode: string length must be at least 1"
+    else do
+      ensure bs (off + 4) len
+      if rdByte bs (off + 4 + len - 1) /= 0x00
+        then Left "BSON.Decode: string missing trailing NUL"
+        else do
+          let !raw = BSU.unsafeTake (len - 1) (BSU.unsafeDrop (off + 4) bs)
+          case decodeTextFast raw of
+            Left _  -> Left "BSON.Decode: invalid UTF-8 in string"
+            Right t -> Right (t, off + 4 + len)
 
 decodeDocument :: ByteString -> Int -> Either String (B.Value, Int)
 decodeDocument bs off = do
   ensure bs off 4
   let !docSz = fromIntegral (readLE32 bs off) :: Int
-      !docEnd = off + docSz
-  ensure bs off docSz
-  if rdByte bs (docEnd - 1) /= 0x00
-    then Left "BSON.Decode: document missing terminator"
+  -- BSON document layout: int32 size (covers the size field itself,
+  -- the elements, and the trailing 0x00). Minimum is 5 (size + NUL),
+  -- and the size must not overflow into the rest of the buffer.
+  if docSz < 5
+    then Left "BSON.Decode: document size must be at least 5"
     else do
-      (vec, _) <- readElements bs (off + 4) (docEnd - 1)
-      Right (B.Document vec, docEnd)
+      ensure bs off docSz
+      let !docEnd = off + docSz
+      if rdByte bs (docEnd - 1) /= 0x00
+        then Left "BSON.Decode: document missing terminator"
+        else do
+          (vec, _) <- readElements bs (off + 4) (docEnd - 1)
+          Right (B.Document vec, docEnd)
 
 readElements :: ByteString -> Int -> Int -> Either String (V.Vector (Text, B.Value), Int)
 readElements bs off end = runST $ do
@@ -148,9 +163,12 @@ readValue bs off tag = case tag of
     let !len = fromIntegral (readLE32 bs off) :: Int
         !sub = rdByte bs (off + 4)
         !off1 = off + 4 + 1
-    ensure bs off1 len
-    let !dat = BSU.unsafeTake len (BSU.unsafeDrop off1 bs)
-    Right (B.Binary sub dat, off1 + len)
+    if len < 0
+      then Left "BSON.Decode: binary length is negative"
+      else do
+        ensure bs off1 len
+        let !dat = BSU.unsafeTake len (BSU.unsafeDrop off1 bs)
+        Right (B.Binary sub dat, off1 + len)
   0x06 -> Right (B.Undefined, off)
   0x07 -> do
     ensure bs off 12
