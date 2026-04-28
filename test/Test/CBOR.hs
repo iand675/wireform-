@@ -547,6 +547,31 @@ edgeCases = testGroup "Edge cases"
         Right v -> assertFailure $
           "expected rejection of impossible map, got: " ++ show v
 
+  , testCase "decoder rejects single-byte simple value below 24 (RFC 8949 §3.3)" $ do
+      -- 0xf8 0x05 declares "simple value 5" via the single-byte form,
+      -- which is non-canonical: simple 0..23 must use the in-band
+      -- form (e.g. 0xe5 for simple 5). The decoder must reject the
+      -- redundant form rather than silently parse it.
+      case decode (BS.pack [0xf8, 0x05]) of
+        Left _  -> pure ()
+        Right v -> assertFailure $
+          "expected rejection of non-canonical simple(5), got: " ++ show v
+      -- simple(24) is the smallest non-redundant value for this form;
+      -- it must continue to round-trip.
+      case decode (BS.pack [0xf8, 0x18]) of
+        Right v -> v @?= C.Simple 24
+        Left e  -> assertFailure ("simple(24) should decode: " ++ e)
+
+  , testCase "indefinite byte string rejects non-byte-string chunk" $ do
+      -- 0x5f opens an indefinite byte string; chunks must all be
+      -- definite byte strings (major 2). 0x60 (empty text string)
+      -- is major 3 and so must be rejected.
+      let bs = BS.pack [0x5f, 0x60, 0xff]
+      case decode bs of
+        Left _  -> pure ()
+        Right v -> assertFailure $
+          "expected rejection of mismatched chunk type, got: " ++ show v
+
   , testCase "empty byte string" $ do
       let val = C.ByteString BS.empty
       decode (encode val) @?= Right val

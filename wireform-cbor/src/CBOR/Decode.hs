@@ -330,9 +330,18 @@ decodeSimpleOrFloat bs off info
   | info == 22 = Right (C.Null, off)
   | info == 23 = Right (C.Undefined, off)
   | info == 24 = do
+      -- RFC 8949 §3.3 / Table 4: in the single-byte simple-value form
+      -- (additional info 24), values 0..23 are non-canonical because
+      -- they collide with the in-band form (false=20, true=21,
+      -- null=22, undefined=23, and Simple(0..19)). Reject those, but
+      -- allow 24..31 (formally reserved but emitted by many encoders
+      -- for round-trip safety) and 32..255 (the spec-mandated range
+      -- for this form).
       ensureBytes bs off 1
       let !sv = rdByte bs off
-      Right (C.Simple sv, off + 1)
+      if sv < 24
+        then Left "CBOR.Decode: simple value 0..23 must use in-band form"
+        else Right (C.Simple sv, off + 1)
   | info == 25 = do
       ensureBytes bs off 2
       let !b0 = rdByte bs off
