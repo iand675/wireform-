@@ -290,6 +290,38 @@ roundtripTests = testGroup "Roundtrip"
             _ -> assertFailure "expected TArray"
         Left err -> assertFailure $ "decode failed: " ++ err
 
+  , testCase "decoder rejects integer with leading zero (TOML 1.0.0)" $ do
+      case decode "n = 01" of
+        Left _  -> pure ()
+        Right v -> assertFailure $
+          "expected rejection of leading zero, got: " ++ show v
+
+  , testCase "decoder rejects consecutive underscores in integer" $ do
+      case decode "n = 1__000" of
+        Left _  -> pure ()
+        Right v -> assertFailure $
+          "expected rejection of consecutive underscores, got: " ++ show v
+
+  , testCase "decoder rejects trailing underscore in integer" $ do
+      case decode "n = 1000_" of
+        Left _  -> pure ()
+        Right v -> assertFailure $
+          "expected rejection of trailing underscore, got: " ++ show v
+
+  , testCase "decoder accepts plain 0" $ do
+      case decode "n = 0" of
+        Right v -> case lookupKey "n" v of
+          Just (TInteger 0) -> pure ()
+          other -> assertFailure $ "expected 0, got: " ++ show other
+        Left e -> assertFailure e
+
+  , testCase "decoder accepts proper underscores in integer" $ do
+      case decode "n = 1_000_000" of
+        Right v -> case lookupKey "n" v of
+          Just (TInteger 1000000) -> pure ()
+          other -> assertFailure $ "expected 1000000, got: " ++ show other
+        Left e -> assertFailure e
+
   , testCase "encoder escapes control characters per TOML 1.0.0" $ do
       -- Basic strings forbid raw control chars (U+0000..U+001F) other
       -- than tab; the encoder must emit them as \\uXXXX escapes so the

@@ -290,14 +290,49 @@ parseBinInt t =
        else Left $ "invalid binary integer: " ++ T.unpack t
 
 parseInt :: Text -> Either String TV.Value
-parseInt t =
+parseInt t = do
+  -- TOML 1.0.0 §integer: '_' cannot be leading, trailing, or
+  -- repeated; digits cannot have leading zeros except for the
+  -- integer 0 itself (and -0 / +0).
+  validateUnderscores t
   let !cleaned = T.unpack (T.filter (/= '_') t)
       !normalized = case cleaned of
         '+':rest -> rest
         other -> other
-  in case reads normalized :: [(Integer, String)] of
-       [(n, "")] -> Right (TV.TInteger n)
-       _ -> Left $ "invalid integer: " ++ T.unpack t
+      !digits = case normalized of
+        '-':rest -> rest
+        rest     -> rest
+  validateNoLeadingZero digits (T.unpack t)
+  case reads normalized :: [(Integer, String)] of
+    [(n, "")] -> Right (TV.TInteger n)
+    _         -> Left $ "invalid integer: " ++ T.unpack t
+
+-- | TOML §literals: @_@ is a digit-grouping separator and may not be
+-- adjacent to another @_@, leading, or trailing.
+validateUnderscores :: Text -> Either String ()
+validateUnderscores t =
+  let s = T.unpack t
+  in case s of
+       []         -> Right ()
+       _ | head s == '_' -> Left $ "leading underscore: " ++ s
+         | last s == '_' -> Left $ "trailing underscore: " ++ s
+         | otherwise     -> goPair s
+  where
+    goPair (a:b:rest)
+      | a == '_' && b == '_' = Left "consecutive underscores"
+      | otherwise            = goPair (b:rest)
+    goPair _ = Right ()
+
+-- | Reject decimal integer with a leading zero (other than the
+-- standalone @0@). TOML allows @0x@ / @0o@ / @0b@ prefixes via the
+-- separate parseHexInt / parseOctInt / parseBinInt helpers, so this
+-- check only fires on the decimal path.
+validateNoLeadingZero :: String -> String -> Either String ()
+validateNoLeadingZero digits raw =
+  case digits of
+    ('0':next:_) | next /= '.' && next /= 'e' && next /= 'E' ->
+      Left $ "TOML integer with leading zero: " ++ raw
+    _ -> Right ()
 
 parseFloat :: Text -> Either String TV.Value
 parseFloat t =
