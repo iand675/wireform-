@@ -57,6 +57,7 @@ import Test.ISLParser (islParserTests)
 import Test.AvroIDL (avroIDLTests)
 import Test.Registry (registryTests)
 import Test.XML (xmlTests)
+import Test.XMLSecurity (xmlSecurityTests)
 import Test.Bencode (bencodeTests)
 import Test.TOML (tomlTests)
 import Test.HTML (htmlTests)
@@ -121,6 +122,7 @@ main = defaultMain $ testGroup "wireform"
   , avroIDLTests
   , registryTests
   , xmlTests
+  , xmlSecurityTests
   , bencodeTests
   , tomlTests
   , htmlTests

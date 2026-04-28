@@ -439,6 +439,7 @@ test-suite wireform-test
       Test.AvroIDL
       Test.Registry
       Test.XML
+      Test.XMLSecurity
       Test.Bencode
       Test.TOML
       Test.HTML
@@ -1117,6 +1118,22 @@ test-suite interop-test
     default-extensions:
       StrictData
       DerivingStrategies
+      OverloadedStrings
+
+test-suite xml-conformance-test
+    import:           warnings
+    type:             exitcode-stdio-1.0
+    main-is:          XMLConfTest.hs
+    build-depends:
+        base             >= 4.16 && < 5
+      , wireform
+      , bytestring
+      , text
+      , directory
+      , filepath
+    hs-source-dirs:   test-interop
+    default-language: GHC2021
+    default-extensions:
       OverloadedStrings
 
 test-suite html5lib-test

@@ -1594,11 +1594,20 @@ genElement :: Int -> Gen Node
 genElement maxDepth = do
   name <- genName
   nAttrs <- Gen.int (Range.linear 0 4)
-  attrs <- V.fromList <$> Gen.list (Range.singleton nAttrs) genAttribute
+  rawAttrs <- Gen.list (Range.singleton nAttrs) genAttribute
+  let attrs = V.fromList (dedupeAttrs rawAttrs)
   nChildren <- Gen.int (Range.linear 0 5)
   rawChildren <- Gen.list (Range.singleton nChildren) (genNode (maxDepth - 1))
   let children_ = V.fromList (dedupeTexts rawChildren)
   pure (Element name attrs children_)
+
+dedupeAttrs :: [Attribute] -> [Attribute]
+dedupeAttrs = go []
+  where
+    go _ [] = []
+    go seen (Attribute n v : rest)
+      | nameLocal n `elem` seen = go seen rest
+      | otherwise = Attribute n v : go (nameLocal n : seen) rest
 
 dedupeTexts :: [Node] -> [Node]
 dedupeTexts [] = []

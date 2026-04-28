@@ -6,8 +6,11 @@
 module XML.SAX
   ( SAXEvent(..)
   , parseSAX
+  , parseSAXWith
   , parseSAXStream
   , foldSAX
+  , SAXConfig(..)
+  , defaultSAXConfig
   ) where
 
 import Control.DeepSeq (NFData(..))
@@ -52,6 +55,19 @@ instance NFData SAXEvent where
   rnf (PI t1 t2) = rnf t1 `seq` rnf t2
   rnf (StartDocument md) = rnf md
   rnf EndDocument = ()
+
+data SAXConfig = SAXConfig
+  { saxMaxEntityExpansion :: !Int
+  , saxAllowDTD :: !Bool
+  , saxAllowExternalEntities :: !Bool
+  }
+
+defaultSAXConfig :: SAXConfig
+defaultSAXConfig = SAXConfig
+  { saxMaxEntityExpansion = 10000
+  , saxAllowDTD = True
+  , saxAllowExternalEntities = False
+  }
 
 ------------------------------------------------------------------------
 -- FFI imports for SIMD scanning
@@ -115,6 +131,7 @@ data PState = PState
   , psLen    :: !Int
   , psNsStack :: ![(Text, Text)]
   , psEntities :: !(Map Text Text)
+  , psEntityBudget :: !(Maybe (IORef Int))
   }
 
 ------------------------------------------------------------------------
@@ -124,7 +141,11 @@ data PState = PState
 -- | Parse XML, emitting SAX events. Uses SIMD for character scanning.
 -- Accumulates events in a growing mutable vector (no list reverse).
 parseSAX :: ByteString -> Either String (Vector SAXEvent)
-parseSAX bs = unsafeDupablePerformIO $
+parseSAX = parseSAXWith defaultSAXConfig
+
+-- | Parse XML with explicit configuration.
+parseSAXWith :: SAXConfig -> ByteString -> Either String (Vector SAXEvent)
+parseSAXWith cfg bs = unsafeDupablePerformIO $
   BSU.unsafeUseAsCStringLen bs $ \(cstr, len) -> do
     let !ptr = castPtr cstr :: Ptr Word8
     mvRef <- newIORef =<< MV.unsafeNew 256
@@ -138,7 +159,7 @@ parseSAX bs = unsafeDupablePerformIO $
           MV.unsafeWrite mv' n ev
           writeIORef mvRef mv'
           writeIORef nRef (n + 1)
-    result <- parseSAXImpl bs ptr len emit
+    result <- parseSAXImplWith cfg bs ptr len emit
     case result of
       Left err -> pure (Left err)
       Right () -> do
@@ -170,13 +191,18 @@ foldSAX f z bs = unsafeDupablePerformIO $
 ------------------------------------------------------------------------
 
 parseSAXImpl :: ByteString -> Ptr Word8 -> Int -> (SAXEvent -> IO ()) -> IO (Either String ())
-parseSAXImpl bs ptr len emit = do
-  let initState = PState bs ptr 0 len [] Map.empty
-  result <- parseProlog initState emit
+parseSAXImpl = parseSAXImplWith defaultSAXConfig
+
+parseSAXImplWith :: SAXConfig -> ByteString -> Ptr Word8 -> Int -> (SAXEvent -> IO ()) -> IO (Either String ())
+parseSAXImplWith cfg bs ptr len emit = do
+  entityBudgetRef <- newIORef (saxMaxEntityExpansion cfg)
+  let initState = PState bs ptr 0 len [] Map.empty Nothing
+  result <- parsePrologWith cfg initState emit
   case result of
     Left err -> pure (Left err)
     Right (st', _mDecl) -> do
-      contentResult <- parseContent st' emit []
+      let st'' = st' { psEntityBudget = Just entityBudgetRef }
+      contentResult <- parseContent st'' emit []
       case contentResult of
         Left err -> pure (Left err)
         Right (_st, []) -> do
@@ -187,8 +213,8 @@ parseSAXImpl bs ptr len emit = do
 
 type TagStack = [Name]
 
-parseProlog :: PState -> (SAXEvent -> IO ()) -> IO (Either String (PState, Maybe XMLDecl))
-parseProlog !st emit = do
+parsePrologWith :: SAXConfig -> PState -> (SAXEvent -> IO ()) -> IO (Either String (PState, Maybe XMLDecl))
+parsePrologWith !cfg !st emit = do
   let !bs = psBS st
       !ptr = psPtr st
       !len = psLen st
@@ -208,16 +234,20 @@ parseProlog !st emit = do
         Right (decl, endOff) -> do
           emit (StartDocument (Just decl))
           let !st' = st { psOffset = skipSpaces bs endOff len }
-          st'' <- skipDoctypeIfPresent st' emit
-          pure (Right (st'', Just decl))
+          dtdResult <- skipDoctypeIfPresentWith cfg st' emit
+          case dtdResult of
+            Left err -> pure (Left err)
+            Right st'' -> pure (Right (st'', Just decl))
     else do
       emit (StartDocument Nothing)
       let !st' = st { psOffset = off }
-      st'' <- skipDoctypeIfPresent st' emit
-      pure (Right (st'', Nothing))
+      dtdResult <- skipDoctypeIfPresentWith cfg st' emit
+      case dtdResult of
+        Left err -> pure (Left err)
+        Right st'' -> pure (Right (st'', Nothing))
 
-skipDoctypeIfPresent :: PState -> (SAXEvent -> IO ()) -> IO PState
-skipDoctypeIfPresent !st _emit = do
+skipDoctypeIfPresentWith :: SAXConfig -> PState -> (SAXEvent -> IO ()) -> IO (Either String PState)
+skipDoctypeIfPresentWith cfg !st _emit = do
   let !bs = psBS st
       !len = psLen st
       !off = skipSpaces bs (psOffset st) len
@@ -226,25 +256,28 @@ skipDoctypeIfPresent !st _emit = do
      BSU.unsafeIndex bs (off+1) == 0x21 &&
      matchBytes bs (off + 2) [0x44, 0x4F, 0x43, 0x54, 0x59, 0x50, 0x45]
     then do
-      let findBracketOrGt !i
-            | i >= len = (i, False)
-            | BSU.unsafeIndex bs i == 0x5B = (i, True)
-            | BSU.unsafeIndex bs i == 0x3E = (i + 1, False)
-            | otherwise = findBracketOrGt (i + 1)
-          (!pos, !hasSubset) = findBracketOrGt (off + 9)
-      if hasSubset
-        then do
-          let (entities, endOff) = parseInternalSubset bs (pos + 1) len
-              closeBracket = skipSpaces bs endOff len
-              !finalOff = if closeBracket < len && BSU.unsafeIndex bs closeBracket == 0x5D
-                            then let !afterBracket = skipSpaces bs (closeBracket + 1) len
-                                 in if afterBracket < len && BSU.unsafeIndex bs afterBracket == 0x3E
-                                      then afterBracket + 1
-                                      else afterBracket
-                            else closeBracket
-          pure (st { psOffset = finalOff, psEntities = Map.union entities (psEntities st) })
-        else pure (st { psOffset = pos })
-    else pure (st { psOffset = off })
+      if not (saxAllowDTD cfg)
+        then pure (Left "DOCTYPE declarations are not allowed (pcAllowDTD=False)")
+        else do
+          let findBracketOrGt !i
+                | i >= len = (i, False)
+                | BSU.unsafeIndex bs i == 0x5B = (i, True)
+                | BSU.unsafeIndex bs i == 0x3E = (i + 1, False)
+                | otherwise = findBracketOrGt (i + 1)
+              (!pos, !hasSubset) = findBracketOrGt (off + 9)
+          if hasSubset
+            then do
+              let (entities, endOff) = parseInternalSubset bs (pos + 1) len
+                  closeBracket = skipSpaces bs endOff len
+                  !finalOff = if closeBracket < len && BSU.unsafeIndex bs closeBracket == 0x5D
+                                then let !afterBracket = skipSpaces bs (closeBracket + 1) len
+                                     in if afterBracket < len && BSU.unsafeIndex bs afterBracket == 0x3E
+                                          then afterBracket + 1
+                                          else afterBracket
+                                else closeBracket
+              pure (Right (st { psOffset = finalOff, psEntities = Map.union entities (psEntities st) }))
+            else pure (Right (st { psOffset = pos }))
+    else pure (Right (st { psOffset = off }))
 
 parseInternalSubset :: ByteString -> Int -> Int -> (Map Text Text, Int)
 parseInternalSubset !bs !off !len = go off Map.empty
@@ -367,7 +400,7 @@ parseTextContent !st emit !stack = do
       !ptr = psPtr st
       !len = psLen st
       !ents = psEntities st
-  result <- collectText ents bs ptr off len
+  result <- collectText ents (psEntityBudget st) bs ptr off len
   case result of
     Left err -> pure (Left err)
     Right (txt, newOff) -> do
@@ -375,8 +408,8 @@ parseTextContent !st emit !stack = do
         emit (Characters txt)
       parseContent (st { psOffset = newOff }) emit stack
 
-collectText :: Map Text Text -> ByteString -> Ptr Word8 -> Int -> Int -> IO (Either String (Text, Int))
-collectText !ents !bs !ptr !off !len
+collectText :: Map Text Text -> Maybe (IORef Int) -> ByteString -> Ptr Word8 -> Int -> Int -> IO (Either String (Text, Int))
+collectText !ents !budgetRef !bs !ptr !off !len
   | off >= len = pure (Right (T.empty, off))
   | BSU.unsafeIndex bs off == 0x3C = pure (Right (T.empty, off))
   | otherwise = do
@@ -401,12 +434,26 @@ collectText !ents !bs !ptr !off !len
               let !entityName = decodeSlice bs (i + 1) (semicPos - i - 1)
               case resolveEntityWith ents entityName of
                 Nothing -> pure (Left $ "Unknown entity: &" ++ T.unpack entityName ++ ";")
-                Just replacement ->
-                  goEntities (semicPos + 1) (replacement : acc)
+                Just replacement -> do
+                  budgetOk <- checkEntityBudget budgetRef (T.length replacement)
+                  if not budgetOk
+                    then pure (Left "Entity expansion limit exceeded")
+                    else goEntities (semicPos + 1) (replacement : acc)
       | otherwise = do
           endPos <- findTextEndP ptr i len
           let !chunk = decodeSlice bs i (endPos - i)
           goEntities endPos (chunk : acc)
+
+checkEntityBudget :: Maybe (IORef Int) -> Int -> IO Bool
+checkEntityBudget Nothing _ = pure True
+checkEntityBudget (Just ref) cost = do
+  remaining <- readIORef ref
+  let !remaining' = remaining - cost
+  if remaining' < 0
+    then pure False
+    else do
+      writeIORef ref remaining'
+      pure True
 
 ------------------------------------------------------------------------
 -- Markup parsing
@@ -513,24 +560,26 @@ parseStartTag !st emit !stack = do
       !ptr = psPtr st
       !len = psLen st
       !nameStart = off + 1
-      !nameEnd = skipNameChars bs nameStart len
-      !rawName = decodeSlice bs nameStart (nameEnd - nameStart)
-  attrResult <- parseAttributes (psEntities st) bs ptr nameEnd len
-  case attrResult of
-    Left err -> pure (Left err)
-    Right (attrs, endOff, selfClose) -> do
-      -- Fix 6: V.foldl' directly on Vector, no V.toList
-      let !nsStack' = V.foldl' addNs (psNsStack st) attrs
-          !st' = st { psOffset = endOff, psNsStack = nsStack' }
-          !resolvedName = resolveNameNs rawName nsStack'
-          !resolvedAttrs = V.map (resolveAttrNs nsStack') attrs
-      emit (StartElement resolvedName resolvedAttrs)
-      if selfClose
-        then do
-          emit (EndElement resolvedName)
-          parseContent st' emit stack
-        else
-          parseContent st' emit (resolvedName : stack)
+  if nameStart >= len || not (isNameStartByte (BSU.unsafeIndex bs nameStart))
+    then pure (Left "Invalid element name (must start with letter, underscore, or colon)")
+    else do
+      let !nameEnd = skipNameChars bs nameStart len
+          !rawName = decodeSlice bs nameStart (nameEnd - nameStart)
+      attrResult <- parseAttributes (psEntities st) bs ptr nameEnd len
+      case attrResult of
+        Left err -> pure (Left err)
+        Right (attrs, endOff, selfClose) -> do
+          let !nsStack' = V.foldl' addNs (psNsStack st) attrs
+              !st' = st { psOffset = endOff, psNsStack = nsStack' }
+              !resolvedName = resolveNameNs rawName nsStack'
+              !resolvedAttrs = V.map (resolveAttrNs nsStack') attrs
+          emit (StartElement resolvedName resolvedAttrs)
+          if selfClose
+            then do
+              emit (EndElement resolvedName)
+              parseContent st' emit stack
+            else
+              parseContent st' emit (resolvedName : stack)
 
 parseEndTag :: PState -> (SAXEvent -> IO ()) -> TagStack -> IO (Either String (PState, TagStack))
 parseEndTag !st emit !stack = do
@@ -602,17 +651,41 @@ parseAttributes !ents !bs !ptr !off !len = do
                             if valEnd < 0
                               then pure (Left "Unterminated attribute value")
                               else do
-                                valResult <- resolveAttrValue ents bs ptr valStart (valEnd - valStart)
-                                case valResult of
-                                  Left err -> pure (Left err)
-                                  Right val -> do
-                                    let !attrName = parseAttrName rawAttrName
-                                        !attr = Attribute attrName val
-                                    mv' <- if n >= MV.length mv
-                                             then MV.grow mv (MV.length mv)
-                                             else pure mv
-                                    MV.unsafeWrite mv' n attr
-                                    go mv' (valEnd + 1) (n + 1)
+                                if containsLtByte bs valStart valEnd
+                                  then pure (Left "Illegal '<' character in attribute value")
+                                  else do
+                                    valResult <- resolveAttrValue ents bs ptr valStart (valEnd - valStart)
+                                    case valResult of
+                                      Left err -> pure (Left err)
+                                      Right val -> do
+                                        let !attrName = parseAttrName rawAttrName
+                                            !attr = Attribute attrName val
+                                        if hasDuplicateAttr mv n attrName
+                                          then pure (Left $ "Duplicate attribute: " ++ T.unpack rawAttrName)
+                                          else do
+                                            mv' <- if n >= MV.length mv
+                                                     then MV.grow mv (MV.length mv)
+                                                     else pure mv
+                                            MV.unsafeWrite mv' n attr
+                                            go mv' (valEnd + 1) (n + 1)
+    hasDuplicateAttr !mv !n !attrName = unsafeDupablePerformIO $ do
+      let go_ !k
+            | k >= n = pure False
+            | otherwise = do
+                Attribute existingName _ <- MV.unsafeRead mv k
+                if nameLocal existingName == nameLocal attrName &&
+                   namePrefix existingName == namePrefix attrName
+                  then pure True
+                  else go_ (k + 1)
+      go_ 0
+
+containsLtByte :: ByteString -> Int -> Int -> Bool
+containsLtByte !bs !start !end = go start
+  where
+    go !i
+      | i >= end = False
+      | BSU.unsafeIndex bs i == 0x3C = True
+      | otherwise = go (i + 1)
 
 resolveAttrValue :: Map Text Text -> ByteString -> Ptr Word8 -> Int -> Int -> IO (Either String Text)
 resolveAttrValue !ents !bs !ptr !valStart !valLen = do
@@ -747,6 +820,14 @@ isNameByte !b =
   b == 0x3A || b == 0x5F || b == 0x2D || b == 0x2E ||
   b >= 0x80
 {-# INLINE isNameByte #-}
+
+isNameStartByte :: Word8 -> Bool
+isNameStartByte !b =
+  (b >= 0x61 && b <= 0x7A) ||
+  (b >= 0x41 && b <= 0x5A) ||
+  b == 0x3A || b == 0x5F ||
+  b >= 0x80
+{-# INLINE isNameStartByte #-}
 
 matchBytes :: ByteString -> Int -> [Word8] -> Bool
 matchBytes bs off expected = go off expected
