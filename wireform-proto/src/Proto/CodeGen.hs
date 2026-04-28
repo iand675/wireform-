@@ -202,6 +202,23 @@ defaultJsonOverrides = Map.fromList
           [ "  parseJSON _ = pure defaultEmpty"
           ]
       })
+  , ("google.protobuf.Any", JsonOverride
+      { joToJSON   = T.unlines
+          [ "  toJSON msg = Aeson.object"
+          , "    [ (AesonKey.fromText (T.pack \"@type\"), Aeson.toJSON msg.anyTypeUrl)"
+          , "    , (AesonKey.fromText (T.pack \"value\"), protoBytesToJSON msg.anyValue)"
+          , "    ]"
+          ]
+      , joFromJSON = T.unlines
+          [ "  parseJSON = Aeson.withObject \"Any\" $ \\obj -> do"
+          , "    fld_anyTypeUrl <- parseFieldMaybe obj (T.pack \"@type\")"
+          , "    fld_anyValue <- parseBytesFieldMaybe obj (T.pack \"value\")"
+          , "    pure defaultAny"
+          , "      { anyTypeUrl = maybe (anyTypeUrl defaultAny) id fld_anyTypeUrl"
+          , "      , anyValue   = maybe (anyValue defaultAny) id fld_anyValue"
+          , "      }"
+          ]
+      })
   , ("google.protobuf.FieldMask", JsonOverride
       { joToJSON   = T.unlines
           [ "  toJSON msg ="

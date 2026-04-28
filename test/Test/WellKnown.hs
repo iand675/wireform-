@@ -152,6 +152,37 @@ wellKnownTests = testGroup "Well-Known Types"
           isMessageType (Proxy :: Proxy Duration) packed @?= True
           isMessageType (Proxy :: Proxy Timestamp) packed @?= False
 
+      , testCase "JSON uses '@type' key (proto3 spec)" $ do
+          -- proto3 JSON: Any serialises with the special "@type" key
+          -- rather than "typeUrl". Without a runtime registry, the
+          -- payload appears as a base64 string under "value".
+          let msg = defaultAny
+                { anyTypeUrl = "type.googleapis.com/example.Foo"
+                , anyValue   = BS.pack [0x01, 0x02]
+                }
+              encoded = Aeson.toJSON msg
+          case encoded of
+            Aeson.Object obj -> do
+              case AesonKM.lookup "@type" obj of
+                Just (Aeson.String t) ->
+                  t @?= "type.googleapis.com/example.Foo"
+                _ -> assertFailure "missing @type key"
+              case AesonKM.lookup "value" obj of
+                Just (Aeson.String v) -> v @?= "AQI="  -- base64 of [01, 02]
+                _ -> assertFailure "missing value key"
+            _ -> assertFailure "Any did not serialise to JSON object"
+
+      , testCase "JSON parses '@type' back" $ do
+          let json = Aeson.object
+                [ ("@type", Aeson.String "type.googleapis.com/example.Foo")
+                , ("value", Aeson.String "AQI=")
+                ]
+          case Aeson.fromJSON json :: Aeson.Result Any of
+            Aeson.Success v -> do
+              anyTypeUrl v @?= "type.googleapis.com/example.Foo"
+              anyValue   v @?= BS.pack [0x01, 0x02]
+            Aeson.Error e -> assertFailure e
+
       , testCase "typeNameFromUrl strips prefix" $ do
           typeNameFromUrl "type.googleapis.com/google.protobuf.Timestamp"
             @?= "google.protobuf.Timestamp"

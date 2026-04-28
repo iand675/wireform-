@@ -32,7 +32,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Types as Aeson
 import qualified Data.Aeson.Key as AesonKey
 import qualified Data.Aeson.KeyMap as AesonKM
-import Proto.JSON (jsonObject, (.=:), parseFieldMaybe, bytesFieldToJSON, parseBytesFieldMaybe, bytesMapFieldToJSON, parseBytesMapFieldMaybe)
+import Proto.JSON (jsonObject, (.=:), parseFieldMaybe, bytesFieldToJSON, parseBytesFieldMaybe, bytesMapFieldToJSON, parseBytesMapFieldMaybe, protoBytesToJSON)
 import Data.Proxy (Proxy(..))
 import Proto.Message (IsMessage(..))
 import Proto.Schema (ProtoMessage(..), SomeFieldDescriptor(..), FieldDescriptor(..), FieldTypeDescriptor(..), ScalarFieldType(..), FieldLabel'(..))
@@ -131,15 +131,22 @@ instance ProtoMessage Any where
         })
     ]
 
+-- proto3 JSON: google.protobuf.Any uses a special @{\"@type\": ..., ...}@
+-- form. When the wrapped message type is registered with a JSON
+-- mapping the inner fields appear at the top level; otherwise it falls
+-- back to a @\"value\": <base64>@ entry. Without a runtime type
+-- registry we can only produce the generic fallback shape. This still
+-- uses the spec-mandated @\"@type\"@ key (was @\"typeUrl\"@) so
+-- consumers can identify the payload.
 instance Aeson.ToJSON Any where
-  toJSON msg = jsonObject
-      [ "typeUrl" .=: msg.anyTypeUrl
-      , bytesFieldToJSON "value" msg.anyValue
-      ]
+  toJSON msg = Aeson.object
+    [ ("@type", Aeson.toJSON msg.anyTypeUrl)
+    , ("value", protoBytesToJSON msg.anyValue)
+    ]
 
 instance Aeson.FromJSON Any where
   parseJSON = Aeson.withObject "Any" $ \obj -> do
-    fld_anyTypeUrl <- parseFieldMaybe obj "typeUrl"
+    fld_anyTypeUrl <- parseFieldMaybe obj "@type"
     fld_anyValue <- parseBytesFieldMaybe obj "value"
     pure defaultAny
       { anyTypeUrl = maybe (anyTypeUrl defaultAny) id fld_anyTypeUrl
