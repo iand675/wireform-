@@ -111,6 +111,9 @@ decodeBinMapEntries :: ThriftType -> ThriftType -> Int -> ByteString -> Int
                     -> Maybe (TV.Value, Int)
 decodeBinMapEntries kt vt !count bs !off
   | count <= 0 = Just (TV.Map kt vt V.empty, off)
+  -- Each entry needs at least two bytes (one for the key, one for
+  -- the value). Reject DoS-shaped counts up-front.
+  | count > (BS.length bs - off) `div` 2 = Nothing
   | otherwise = runST $ do
       mv <- MV.new count
       go mv 0 off
@@ -133,6 +136,7 @@ decodeBinListEntries :: ThriftType -> Int -> ByteString -> Int
                      -> Maybe (TV.Value, Int)
 decodeBinListEntries et !count bs !off
   | count <= 0 = Just (TV.List et V.empty, off)
+  | count > BS.length bs - off = Nothing
   | otherwise = runST $ do
       mv <- MV.new count
       go mv 0 off
@@ -153,6 +157,7 @@ decodeBinSetEntries :: ThriftType -> Int -> ByteString -> Int
                     -> Maybe (TV.Value, Int)
 decodeBinSetEntries et !count bs !off
   | count <= 0 = Just (TV.Set et V.empty, off)
+  | count > BS.length bs - off = Nothing
   | otherwise = runST $ do
       mv <- MV.new count
       go mv 0 off
@@ -264,6 +269,7 @@ decodeCompMapEntries :: ThriftType -> ThriftType -> Int -> ByteString -> Int
                      -> Maybe (TV.Value, Int)
 decodeCompMapEntries kt vt !count bs !off
   | count <= 0 = Just (TV.Map kt vt V.empty, off)
+  | count > (BS.length bs - off) `div` 2 = Nothing
   | otherwise = runST $ do
       mv <- MV.new count
       go mv 0 off
@@ -286,6 +292,7 @@ decodeCompListEntries :: ThriftType -> Int -> ByteString -> Int
                       -> Maybe (TV.Value, Int)
 decodeCompListEntries et !count bs !off
   | count <= 0 = Just (TV.List et V.empty, off)
+  | count > BS.length bs - off = Nothing
   | otherwise = runST $ do
       mv <- MV.new count
       go mv 0 off
@@ -306,6 +313,7 @@ decodeCompSetEntries :: ThriftType -> Int -> ByteString -> Int
                      -> Maybe (TV.Value, Int)
 decodeCompSetEntries et !count bs !off
   | count <= 0 = Just (TV.Set et V.empty, off)
+  | count > BS.length bs - off = Nothing
   | otherwise = runST $ do
       mv <- MV.new count
       go mv 0 off
