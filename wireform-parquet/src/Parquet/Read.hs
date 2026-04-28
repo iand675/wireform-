@@ -544,7 +544,9 @@ tryLZ4Raw uncompSize bs =
 
 decodePlainInt32 :: Int -> ByteString -> Either String (VP.Vector Int32)
 decodePlainInt32 n bs
-  | BS.length bs < n * 4 = Left "Parquet.Read: PLAIN INT32 buffer too small"
+  | n < 0 = Left "Parquet.Read: PLAIN INT32 negative count"
+  | n > BS.length bs `div` 4 =
+      Left "Parquet.Read: PLAIN INT32 buffer too small"
   | otherwise =
       Right $
         runST $ do
@@ -560,7 +562,9 @@ decodePlainInt32 n bs
 
 decodePlainInt64 :: Int -> ByteString -> Either String (VP.Vector Int64)
 decodePlainInt64 n bs
-  | BS.length bs < n * 8 = Left "Parquet.Read: PLAIN INT64 buffer too small"
+  | n < 0 = Left "Parquet.Read: PLAIN INT64 negative count"
+  | n > BS.length bs `div` 8 =
+      Left "Parquet.Read: PLAIN INT64 buffer too small"
   | otherwise =
       Right $
         runST $ do
@@ -576,7 +580,9 @@ decodePlainInt64 n bs
 
 decodePlainFloat :: Int -> ByteString -> Either String (VP.Vector Float)
 decodePlainFloat n bs
-  | BS.length bs < n * 4 = Left "Parquet.Read: PLAIN FLOAT buffer too small"
+  | n < 0 = Left "Parquet.Read: PLAIN FLOAT negative count"
+  | n > BS.length bs `div` 4 =
+      Left "Parquet.Read: PLAIN FLOAT buffer too small"
   | otherwise =
       Right $
         runST $ do
@@ -592,7 +598,9 @@ decodePlainFloat n bs
 
 decodePlainDouble :: Int -> ByteString -> Either String (VP.Vector Double)
 decodePlainDouble n bs
-  | BS.length bs < n * 8 = Left "Parquet.Read: PLAIN DOUBLE buffer too small"
+  | n < 0 = Left "Parquet.Read: PLAIN DOUBLE negative count"
+  | n > BS.length bs `div` 8 =
+      Left "Parquet.Read: PLAIN DOUBLE buffer too small"
   | otherwise =
       Right $
         runST $ do
