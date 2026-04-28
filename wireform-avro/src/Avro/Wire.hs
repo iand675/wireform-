@@ -309,7 +309,7 @@ avroDecodeBytes !bs !off =
       let !len = fromIntegral lenI64 :: Int
       in if len < 0
          then AvroDecodeFail "avroDecodeBytes: negative length"
-         else if off' + len > BS.length bs
+         else if len > BS.length bs - off'
          then AvroDecodeFail "avroDecodeBytes: unexpected end of input"
          else AvroDecodeOK (BSU.unsafeTake len (BSU.unsafeDrop off' bs)) (off' + len)
     AvroDecodeFail e -> AvroDecodeFail e
