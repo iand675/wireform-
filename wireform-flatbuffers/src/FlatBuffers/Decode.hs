@@ -53,7 +53,9 @@ readLE64 bs off = withBSPtrOff bs off $ \p -> peekByteOff p 0
 
 ensure :: ByteString -> Int -> Int -> Either String ()
 ensure bs off n
-  | off + n > BS.length bs = Left "FlatBuffers.Decode: unexpected end of input"
+  | off < 0 || n < 0 = Left "FlatBuffers.Decode: negative offset/length"
+  | n > BS.length bs - off =
+      Left "FlatBuffers.Decode: unexpected end of input"
   | otherwise = Right ()
 {-# INLINE ensure #-}
 
