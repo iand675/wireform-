@@ -165,10 +165,17 @@ decodeArray itemTy bs off0 = decodeArrayBlocks bs off0 []
         AvroDecodeFail e -> AvroDecodeFail e
 
     decodeArrayBlock :: ByteString -> Int -> Int -> [V.Vector AV.Value] -> AvroDecodeResult AV.Value
-    decodeArrayBlock bsI off blockCount blockAcc =
-      runST $ do
-        mv <- MV.new blockCount
-        goBlock mv 0 off
+    decodeArrayBlock bsI off blockCount blockAcc
+      -- Reject impossible block counts up-front; otherwise an Avro
+      -- input with a 9-byte header that declares a 9-quintillion
+      -- element block would MV.new before consuming any payload.
+      | blockCount < 0 =
+          AvroDecodeFail "Avro.Decode: array block count overflows Int"
+      | blockCount > BS.length bsI - off =
+          AvroDecodeFail "Avro.Decode: array block count exceeds remaining input"
+      | otherwise = runST $ do
+          mv <- MV.new blockCount
+          goBlock mv 0 off
       where
         goBlock :: MV.MVector s AV.Value -> Int -> Int -> ST s (AvroDecodeResult AV.Value)
         goBlock mv !i !o
@@ -201,10 +208,16 @@ decodeMap valTy bs off0 = decodeMapBlocks bs off0 []
         AvroDecodeFail e -> AvroDecodeFail e
 
     decodeMapBlock :: ByteString -> Int -> Int -> [V.Vector (Text, AV.Value)] -> AvroDecodeResult AV.Value
-    decodeMapBlock bsE off blockCount blockAcc =
-      runST $ do
-        mv <- MV.new blockCount
-        goBlock mv 0 off
+    decodeMapBlock bsE off blockCount blockAcc
+      | blockCount < 0 =
+          AvroDecodeFail "Avro.Decode: map block count overflows Int"
+      -- Each entry needs at least 1 byte for key length + 1 byte for
+      -- value tag.
+      | blockCount > (BS.length bsE - off) `div` 2 =
+          AvroDecodeFail "Avro.Decode: map block count exceeds remaining input"
+      | otherwise = runST $ do
+          mv <- MV.new blockCount
+          goBlock mv 0 off
       where
         goBlock :: MV.MVector s (Text, AV.Value) -> Int -> Int -> ST s (AvroDecodeResult AV.Value)
         goBlock mv !i !o
