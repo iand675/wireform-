@@ -202,6 +202,30 @@ defaultJsonOverrides = Map.fromList
           [ "  parseJSON _ = pure defaultEmpty"
           ]
       })
+  , ("google.protobuf.FieldMask", JsonOverride
+      { joToJSON   = T.unlines
+          [ "  toJSON msg ="
+          , "    let snakeToCamel s ="
+          , "          let parts = T.splitOn (T.pack \"_\") s"
+          , "              up t = case T.uncons t of"
+          , "                Just (c, rest)"
+          , "                  | c >= 'a' && c <= 'z' -> T.cons (toEnum (fromEnum c - 32)) rest"
+          , "                  | otherwise -> t"
+          , "                Nothing -> t"
+          , "          in case parts of"
+          , "               [] -> T.empty"
+          , "               (h:rs) -> h <> T.concat (fmap up rs)"
+          , "        snakeToCamelPath = T.intercalate (T.pack \".\") . fmap snakeToCamel . T.splitOn (T.pack \".\")"
+          , "    in Aeson.String (T.intercalate (T.pack \",\") (V.toList (V.map snakeToCamelPath msg.fieldMaskPaths)))"
+          ]
+      , joFromJSON = T.unlines
+          [ "  parseJSON = Aeson.withText \"FieldMask\" $ \\t ->"
+          , "    let camelToSnake = T.concatMap (\\c -> if c >= 'A' && c <= 'Z' then T.pack ['_', toEnum (fromEnum c + 32)] else T.singleton c)"
+          , "        camelToSnakePath = T.intercalate (T.pack \".\") . fmap camelToSnake . T.splitOn (T.pack \".\")"
+          , "        parts = if T.null t then [] else T.splitOn (T.pack \",\") t"
+          , "    in pure defaultFieldMask { fieldMaskPaths = V.fromList (fmap camelToSnakePath parts) }"
+          ]
+      })
   ]
   where
     -- proto3 JSON: wrapper messages are encoded as the JSON value of

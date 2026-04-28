@@ -117,18 +117,54 @@ instance ProtoMessage FieldMask where
         })
     ]
 
+-- proto3 JSON: google.protobuf.FieldMask serialises as a comma-separated
+-- string of dotted lower_with_underscores → lowerCamelCase paths.
+-- Empty FieldMask -> empty string.
 instance Aeson.ToJSON FieldMask where
-  toJSON msg = jsonObject
-      [ "paths" .=: msg.fieldMaskPaths
-
-      ]
+  toJSON msg =
+    Aeson.String $
+      T.intercalate (T.pack ",")
+        (V.toList (V.map snakeToCamelPath msg.fieldMaskPaths))
 
 instance Aeson.FromJSON FieldMask where
-  parseJSON = Aeson.withObject "FieldMask" $ \obj -> do
-    fld_fieldMaskPaths <- parseFieldMaybe obj "paths"
+  parseJSON = Aeson.withText "FieldMask" $ \t -> do
+    let parts = if T.null t then [] else T.splitOn (T.pack ",") t
     pure defaultFieldMask
-      { fieldMaskPaths = maybe (fieldMaskPaths defaultFieldMask) id fld_fieldMaskPaths
+      { fieldMaskPaths = V.fromList (fmap camelToSnakePath parts)
       }
+
+-- | Convert each segment of a dotted FieldMask path from
+-- @lower_with_underscores@ to @lowerCamelCase@.
+snakeToCamelPath :: Text -> Text
+snakeToCamelPath = T.intercalate (T.pack ".") . fmap snakeToCamel . T.splitOn (T.pack ".")
+  where
+    snakeToCamel :: Text -> Text
+    snakeToCamel s =
+      let parts = T.splitOn (T.pack "_") s
+      in case parts of
+           []     -> T.empty
+           (h:rs) -> h <> T.concat (fmap upperFirst rs)
+    upperFirst t = case T.uncons t of
+      Just (c, rest) -> T.cons (toUpperC c) rest
+      Nothing        -> t
+    toUpperC c
+      | c >= 'a' && c <= 'z' = toEnum (fromEnum c - 32)
+      | otherwise = c
+
+-- | Inverse of 'snakeToCamelPath' for parse-side. Per spec the parser
+-- MUST reject ill-formed FieldMasks; we accept canonical lowerCamelCase
+-- and translate it back to lower_with_underscores.
+camelToSnakePath :: Text -> Text
+camelToSnakePath = T.intercalate (T.pack ".") . fmap camelToSnake . T.splitOn (T.pack ".")
+  where
+    camelToSnake :: Text -> Text
+    camelToSnake = T.concatMap (\c ->
+      if c >= 'A' && c <= 'Z'
+        then T.pack ['_', toLowerC c]
+        else T.singleton c)
+    toLowerC c
+      | c >= 'A' && c <= 'Z' = toEnum (fromEnum c + 32)
+      | otherwise = c
 
 instance Hashable FieldMask where
   hashWithSalt salt msg = V.foldl' hashWithSalt (salt) msg.fieldMaskPaths

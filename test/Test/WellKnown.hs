@@ -346,6 +346,30 @@ wellKnownTests = testGroup "Well-Known Types"
           let msg = defaultFieldMask { fieldMaskPaths = V.fromList ["foo.bar", "baz"] }
               encoded = encodeMessage msg
           decodeMessage encoded @?= Right msg
+
+      , testCase "JSON canonical: comma-separated lowerCamelCase" $ do
+          -- proto3 JSON: snake_case path components convert to
+          -- lowerCamelCase, dotted segments stay dotted, commas join paths.
+          let msg = defaultFieldMask
+                { fieldMaskPaths =
+                    V.fromList ["user.display_name", "user.age", "user_age"] }
+          Aeson.toJSON msg
+            @?= Aeson.String "user.displayName,user.age,userAge"
+
+      , testCase "JSON parses comma-separated lowerCamelCase back" $ do
+          case Aeson.fromJSON (Aeson.String "fooBarBaz,quux.foo")
+                 :: Aeson.Result FieldMask of
+            Aeson.Success v ->
+              fieldMaskPaths v
+                @?= V.fromList ["foo_bar_baz", "quux.foo"]
+            Aeson.Error e -> assertFailure e
+
+      , testCase "JSON empty FieldMask roundtrips" $ do
+          let msg = defaultFieldMask
+          Aeson.toJSON msg @?= Aeson.String ""
+          case Aeson.fromJSON (Aeson.String "") :: Aeson.Result FieldMask of
+            Aeson.Success v -> fieldMaskPaths v @?= V.empty
+            Aeson.Error e   -> assertFailure e
       ]
 
   , testGroup "SourceContext"
