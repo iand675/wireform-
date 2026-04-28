@@ -62,15 +62,18 @@ grpcUnframeWith decomp !bs
   | otherwise =
       let !compFlag = BS.index bs 0
           !len = decodeBE32 bs 1
-          !totalLen = 5 + fromIntegral len
+          !lenI = fromIntegral len :: Int
+          !totalLen = 5 + lenI
       in if compFlag > 1
          then Left $ "grpcUnframe: invalid compression flag: " ++ show compFlag
+         else if lenI < 0
+         then Left "grpcUnframe: declared length overflows Int"
          else if BS.length bs < totalLen
          then Left "grpcUnframe: payload shorter than declared length"
          else if BS.length bs > totalLen
          then Left "grpcUnframe: trailing data after frame"
          else
-           let !payload = BS.take (fromIntegral len) (BS.drop 5 bs)
+           let !payload = BS.take lenI (BS.drop 5 bs)
            in if compFlag == 1
                 then decomp payload
                 else Right payload
@@ -102,14 +105,17 @@ grpcUnframeManyWith decomp !bs = go 0 []
       | otherwise =
           let !compFlag = BS.index bs off
               !len = decodeBE32 bs (off + 1)
+              !lenI = fromIntegral len :: Int
               !payloadStart = off + 5
-              !payloadEnd = payloadStart + fromIntegral len
+              !payloadEnd = payloadStart + lenI
           in if compFlag > 1
              then Left $ "grpcUnframeMany: invalid compression flag: " ++ show compFlag
+             else if lenI < 0
+             then Left "grpcUnframeMany: declared length overflows Int"
              else if payloadEnd > bsLen
              then Left "grpcUnframeMany: payload shorter than declared length"
              else
-               let !payload = BS.take (fromIntegral len) (BS.drop payloadStart bs)
+               let !payload = BS.take lenI (BS.drop payloadStart bs)
                in if compFlag == 1
                     then case decomp payload of
                       Left e -> Left e
