@@ -6,6 +6,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
+import Data.Maybe (mapMaybe)
 import qualified Data.Vector as V
 import System.Exit (exitFailure)
 
@@ -18,6 +19,10 @@ import Avro.Container
 import Avro.Decode (decodeAvroResolved)
 import Avro.Encode (encodeAvro)
 import Avro.Fingerprint (avroFingerprint, parsingCanonicalForm)
+import Avro.IDL (parseAvroIDL)
+import Avro.IDLConvert (idlToType)
+import qualified Avro.IDL as IDL
+import Avro.Schema (LogicalType (..))
 import qualified Avro.Value as AV
 import Avro.Schema
   ( AvroField (..)
@@ -113,7 +118,43 @@ main = do
     Right _ -> failTest "bytes -> string accepted invalid UTF-8"
     Left _  -> putStrLn "OK: bytes -> string rejects invalid UTF-8"
 
+  -- Avro IDL: logical-type keywords parse and convert to the right
+  -- AvroLogical wrappers.
+  let idlSrc = T.pack $ unlines
+        [ "protocol P {"
+        , "  record R {"
+        , "    date d;"
+        , "    time_ms t;"
+        , "    timestamp_ms ts;"
+        , "    uuid u;"
+        , "  }"
+        , "}"
+        ]
+  case parseAvroIDL idlSrc of
+    Left e -> failTest ("Avro IDL parse: " ++ show e)
+    Right idl ->
+      case V.toList (IDL.aidlDeclarations idl) of
+        [decl] -> do
+          let ty = idlToType decl
+          case ty of
+            AvroRecord{avroRecordFields = fs} -> do
+              let logicals = mapMaybe (asLogical . avroFieldType) (V.toList fs)
+              if logicals ==
+                   [ DateLogical
+                   , TimeMillisLogical
+                   , TimestampMillisLogical
+                   , UuidLogical
+                   ]
+                then putStrLn "OK: Avro IDL date/time_ms/timestamp_ms/uuid"
+                else failTest $ "IDL logicals mismatch: " ++ show logicals
+            _ -> failTest $ "expected record, got " ++ show ty
+        ds -> failTest $ "expected exactly one decl, got " ++ show (length ds)
+
   putStrLn "All Avro container codec tests passed."
+
+asLogical :: AvroType -> Maybe LogicalType
+asLogical AvroLogical{avroLogicalType = lt} = Just lt
+asLogical _ = Nothing
 
 codecRoundTrip :: String -> IO ()
 codecRoundTrip codec = do

@@ -69,6 +69,16 @@ data AvroIDLType
   | ITUnion   !(Vector AvroIDLType)
   | ITNamed   !Text
   | ITDecimal !Int !Int
+  -- | @date@ — int with logical type @date@.
+  | ITDate
+  -- | @time_ms@ — int with logical type @time-millis@.
+  | ITTimeMillis
+  -- | @timestamp_ms@ — long with logical type @timestamp-millis@.
+  | ITTimestampMillis
+  -- | @local_timestamp_ms@ — long with logical type @local-timestamp-millis@.
+  | ITLocalTimestampMillis
+  -- | @uuid@ — string with logical type @uuid@.
+  | ITUuid
   deriving stock (Show, Eq)
 
 data AvroIDLMessage = AvroIDLMessage
@@ -239,15 +249,21 @@ pPrimitiveOrNamedType :: Parser AvroIDLType
 pPrimitiveOrNamedType = do
   name <- pIdentifier
   pure $ case name of
-    "null"    -> ITNull
-    "boolean" -> ITBoolean
-    "int"     -> ITInt
-    "long"    -> ITLong
-    "float"   -> ITFloat
-    "double"  -> ITDouble
-    "bytes"   -> ITBytes
-    "string"  -> ITString
-    other     -> ITNamed other
+    "null"               -> ITNull
+    "boolean"            -> ITBoolean
+    "int"                -> ITInt
+    "long"               -> ITLong
+    "float"              -> ITFloat
+    "double"             -> ITDouble
+    "bytes"              -> ITBytes
+    "string"             -> ITString
+    -- Avro IDL 1.11 logical-type keywords.
+    "date"               -> ITDate
+    "time_ms"            -> ITTimeMillis
+    "timestamp_ms"       -> ITTimestampMillis
+    "local_timestamp_ms" -> ITLocalTimestampMillis
+    "uuid"               -> ITUuid
+    other                -> ITNamed other
 
 -- ---------------------------------------------------------------------------
 -- Protocol

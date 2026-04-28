@@ -100,6 +100,31 @@ convertType (ITDecimal prec scl) =
     { avroLogicalBase = AvroPrimitive AvroBytes
     , avroLogicalType = DecimalLogical prec scl
     }
+convertType ITDate =
+  AvroLogical
+    { avroLogicalBase = AvroPrimitive AvroInt
+    , avroLogicalType = DateLogical
+    }
+convertType ITTimeMillis =
+  AvroLogical
+    { avroLogicalBase = AvroPrimitive AvroInt
+    , avroLogicalType = TimeMillisLogical
+    }
+convertType ITTimestampMillis =
+  AvroLogical
+    { avroLogicalBase = AvroPrimitive AvroLong
+    , avroLogicalType = TimestampMillisLogical
+    }
+convertType ITLocalTimestampMillis =
+  AvroLogical
+    { avroLogicalBase = AvroPrimitive AvroLong
+    , avroLogicalType = CustomLogical "local-timestamp-millis"
+    }
+convertType ITUuid =
+  AvroLogical
+    { avroLogicalBase = AvroPrimitive AvroString
+    , avroLogicalType = UuidLogical
+    }
 
 convertDefault :: Maybe Text -> AvroIDLType -> Maybe AvroSchema
 convertDefault Nothing _       = Nothing
