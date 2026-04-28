@@ -73,13 +73,23 @@ parseLength :: ByteString -> Int -> Either String (Int, Int)
 parseLength bs off = go off 0
   where
     !bsLen = BS.length bs
+    -- Bound the accumulator below half of maxBound so 'acc * 10 +
+    -- digit' cannot overflow into a positive look-alike. We also
+    -- cap at the input size — a length larger than that is provably
+    -- truncated and lets us bail out early on 'foo:9999999999...'
+    -- payloads without ever calling 'BSU.unsafeTake' on them.
+    !maxLen = bsLen
     go !i !acc
       | i >= bsLen = Left "Bencode.Decode: unterminated string length"
       | rdByte bs i == 0x3A = Right (acc, i + 1)  -- ':'
       | otherwise =
           let !b = rdByte bs i
           in if b >= 0x30 && b <= 0x39
-               then go (i + 1) (acc * 10 + fromIntegral (b - 0x30))
+               then
+                 let !acc' = acc * 10 + fromIntegral (b - 0x30)
+                 in if acc' < 0 || acc' > maxLen
+                      then Left "Bencode.Decode: string length exceeds input"
+                      else go (i + 1) acc'
                else Left "Bencode.Decode: non-digit in string length"
 
 -- | Parse a Bencode integer (\"i...e\").
