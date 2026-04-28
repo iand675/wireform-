@@ -19,10 +19,14 @@ module Parquet.PageIndex
     encodeOffsetIndex
   , decodeOffsetIndex
   , readOffsetIndex
+  , validateOffsetIndex
     -- * ColumnIndex
   , encodeColumnIndex
   , decodeColumnIndex
   , readColumnIndex
+  , validateColumnIndex
+    -- * Cross-structure validation
+  , validatePageIndexes
     -- * Slicing
   , columnChunkOffsetIndexSlice
   , columnChunkColumnIndexSlice
@@ -59,8 +63,25 @@ encodeOffsetIndex :: OffsetIndex -> ByteString
 encodeOffsetIndex = encodeCompact . offsetIndexToThrift
 
 -- | Parse an 'OffsetIndex' from a Thrift Compact byte slice.
+--
+-- The parquet-format spec ties @unencoded_byte_array_data_bytes@ to
+-- the per-page @page_locations@ list: when the optional field is
+-- present, the two MUST have the same length.
 decodeOffsetIndex :: ByteString -> Either String OffsetIndex
-decodeOffsetIndex bs = decodeCompact bs >>= thriftToOffsetIndex
+decodeOffsetIndex bs = do
+  oi <- decodeCompact bs >>= thriftToOffsetIndex
+  validateOffsetIndex oi
+
+-- | Check the internal length invariant on an 'OffsetIndex'.
+validateOffsetIndex :: OffsetIndex -> Either String OffsetIndex
+validateOffsetIndex oi = do
+  case oiUnencodedByteArrayDataBytes oi of
+    Just v
+      | V.length v /= V.length (oiPageLocations oi) ->
+          Left "Parquet.PageIndex: unencoded_byte_array_data_bytes length \
+               \disagrees with page_locations length"
+    _ -> Right ()
+  Right oi
 
 -- | Look up the 'OffsetIndex' for the column chunk at @(rowGroupIdx, columnIdx)@
 -- if 'ccOffsetIndexOffset' / 'ccOffsetIndexLength' are populated and within
@@ -96,8 +117,55 @@ encodeColumnIndex :: ColumnIndex -> ByteString
 encodeColumnIndex = encodeCompact . columnIndexToThrift
 
 -- | Parse a 'ColumnIndex' from a Thrift Compact byte slice.
+--
+-- This enforces the parquet-format invariant that @null_pages@, @min_values@,
+-- @max_values@ — and, when present, @null_counts@ — all have the same
+-- length, equal to the number of pages described by the index.
 decodeColumnIndex :: ByteString -> Either String ColumnIndex
-decodeColumnIndex bs = decodeCompact bs >>= thriftToColumnIndex
+decodeColumnIndex bs = do
+  ci <- decodeCompact bs >>= thriftToColumnIndex
+  validateColumnIndex ci
+
+-- | Validate that all per-page vectors inside a 'ColumnIndex' agree on
+-- the page count. Returns the input unchanged if every length matches.
+validateColumnIndex :: ColumnIndex -> Either String ColumnIndex
+validateColumnIndex ci = do
+  let !nNullPages = V.length (ciNullPages ci)
+      !nMins      = V.length (ciMinValues ci)
+      !nMaxes     = V.length (ciMaxValues ci)
+  when' (nMins /= nNullPages)
+    "min_values length disagrees with null_pages length"
+  when' (nMaxes /= nNullPages)
+    "max_values length disagrees with null_pages length"
+  case ciNullCounts ci of
+    Just nc | V.length nc /= nNullPages ->
+      Left "Parquet.PageIndex: null_counts length disagrees with null_pages length"
+    _ -> Right ()
+  Right ci
+  where
+    when' True  msg = Left ("Parquet.PageIndex: " ++ msg)
+    when' False _   = Right ()
+
+-- | Validate that the @page_locations@ inside an 'OffsetIndex' line up
+-- with the per-page vectors in a paired 'ColumnIndex'. parquet-format
+-- ties these two structures together: the number of pages MUST be the
+-- same in both.
+validatePageIndexes
+  :: OffsetIndex
+  -> ColumnIndex
+  -> Either String ()
+validatePageIndexes oi ci =
+  let !nPages = V.length (oiPageLocations oi)
+      !nMeta  = V.length (ciNullPages ci)
+  in if nPages == nMeta
+       then case oiUnencodedByteArrayDataBytes oi of
+              Just v | V.length v /= nPages ->
+                Left "Parquet.PageIndex: unencoded_byte_array_data_bytes length \
+                     \disagrees with page_locations length"
+              _ -> Right ()
+       else Left $
+              "Parquet.PageIndex: ColumnIndex covers " ++ show nMeta
+              ++ " pages, OffsetIndex covers " ++ show nPages
 
 -- | Look up the 'ColumnIndex' for the column chunk at @(rowGroupIdx,
 -- columnIdx)@.

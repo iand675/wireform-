@@ -88,6 +88,40 @@ main = do
   expect "ColumnIndex round-trip"
     (decodeColumnIndex (encodeColumnIndex ci) == Right ci)
 
+  -- ColumnIndex length consistency: parquet-format requires that
+  -- null_pages / min_values / max_values / null_counts all share the
+  -- same per-page length. A mismatched value must be rejected by the
+  -- decoder rather than silently parsed.
+  let ciBad = ci { ciMaxValues = V.fromList [BSC.pack "z"] }
+  case validateColumnIndex ciBad of
+    Left _  -> putStrLn "OK: ColumnIndex max_values mismatch rejected"
+    Right _ -> failTest "ColumnIndex max_values mismatch should fail validation"
+  let ciBadNc = ci { ciNullCounts = Just (V.fromList [0]) }
+  case validateColumnIndex ciBadNc of
+    Left _  -> putStrLn "OK: ColumnIndex null_counts mismatch rejected"
+    Right _ -> failTest "ColumnIndex null_counts mismatch should fail validation"
+
+  -- OffsetIndex unencoded-byte-array length must agree with page count.
+  let oiBad = oi { oiUnencodedByteArrayDataBytes = Just (V.fromList [1, 2, 3]) }
+  case validateOffsetIndex oiBad of
+    Left _  -> putStrLn "OK: OffsetIndex unencoded length mismatch rejected"
+    Right _ -> failTest "OffsetIndex unencoded length mismatch should fail validation"
+
+  -- Cross-structure check: OffsetIndex page count must match ColumnIndex.
+  let oiThree = oi { oiPageLocations = V.fromList
+                       [ PageLocation 100 200 0
+                       , PageLocation 300 250 50
+                       , PageLocation 600 100 200
+                       ]
+                   , oiUnencodedByteArrayDataBytes = Just (V.fromList [42, 99, 7])
+                   }
+  case validatePageIndexes oiThree ci of
+    Left e  -> failTest ("validatePageIndexes (matching) failed: " ++ e)
+    Right _ -> putStrLn "OK: matching OffsetIndex/ColumnIndex pass cross-check"
+  case validatePageIndexes oi ci of
+    Left _  -> putStrLn "OK: page-count mismatch between OffsetIndex/ColumnIndex rejected"
+    Right _ -> failTest "page-count mismatch should fail cross-validation"
+
   -- Bloom filter membership.
   let sbbf0 = newSbbf 1024
       values = ["alpha", "beta", "gamma", "delta", "epsilon"]
