@@ -239,6 +239,15 @@ data Statistics = Statistics
   , statDistinctCount :: !(Maybe Int64)
   , statMinValue      :: !(Maybe ByteString)
   , statMaxValue      :: !(Maybe ByteString)
+  -- | parquet.thrift Statistics field 7. When 'Just' 'True', the
+  -- @max_value@ stored in the statistics is the actual maximum value
+  -- present in the page/column chunk; when 'Just' 'False', it is an
+  -- upper bound that may be larger than any value actually written
+  -- (writers may emit truncated bounds for variable-length types).
+  , statIsMaxValueExact :: !(Maybe Bool)
+  -- | parquet.thrift Statistics field 8. Mirror of
+  -- 'statIsMaxValueExact' for the lower bound.
+  , statIsMinValueExact :: !(Maybe Bool)
   } deriving stock (Show, Eq, Generic)
     deriving anyclass (NFData)
 

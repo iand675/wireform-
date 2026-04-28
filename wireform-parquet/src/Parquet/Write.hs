@@ -249,6 +249,8 @@ statisticsForInt32 vs
            , statDistinctCount = Nothing
            , statMinValue = Just encMin
            , statMaxValue = Just encMax
+           , statIsMinValueExact = Just True
+           , statIsMaxValueExact = Just True
            }
 
 -- | Compute Parquet 'Statistics' for an @INT64@ column (LE i64 min/max).
@@ -267,6 +269,8 @@ statisticsForInt64 vs
            , statDistinctCount = Nothing
            , statMinValue = Just encMin
            , statMaxValue = Just encMax
+           , statIsMinValueExact = Just True
+           , statIsMaxValueExact = Just True
            }
 
 -- | Compute Parquet 'Statistics' for a @BYTE_ARRAY@ column. Values are
@@ -285,13 +289,15 @@ statisticsForByteArray vs
            , statDistinctCount = Nothing
            , statMinValue = Just mn
            , statMaxValue = Just mx
+           , statIsMinValueExact = Just True
+           , statIsMaxValueExact = Just True
            }
   where
     minBS a b = if a <= b then a else b
     maxBS a b = if a >= b then a else b
 
 emptyStats :: Statistics
-emptyStats = Statistics Nothing Nothing (Just 0) Nothing Nothing Nothing
+emptyStats = Statistics Nothing Nothing (Just 0) Nothing Nothing Nothing Nothing Nothing
 
 i32LE :: Int32 -> ByteString
 i32LE v = BL.toStrict (B.toLazyByteString (B.int32LE v))

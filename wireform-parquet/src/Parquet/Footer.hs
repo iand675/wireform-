@@ -161,6 +161,8 @@ statisticsToThrift st = TV.Struct $ V.fromList $
   ++ maybe [] (\v -> [(4, TV.I64 v)]) (statDistinctCount st)
   ++ maybe [] (\v -> [(5, TV.Binary v)]) (statMaxValue st)
   ++ maybe [] (\v -> [(6, TV.Binary v)]) (statMinValue st)
+  ++ maybe [] (\v -> [(7, TV.Bool v)]) (statIsMaxValueExact st)
+  ++ maybe [] (\v -> [(8, TV.Bool v)]) (statIsMinValueExact st)
 
 encodingToInt :: Encoding -> Int32
 encodingToInt = \case
@@ -393,6 +395,9 @@ thriftToStatistics (TV.Struct fields) = do
       getOptI64 fid = case lookupField fm fid of
         Just (TV.I64 v) -> Just v
         _ -> Nothing
+      getOptBool fid = case lookupField fm fid of
+        Just (TV.Bool v) -> Just v
+        _ -> Nothing
   Right Statistics
     { statMax = getBinary 1
     , statMin = getBinary 2
@@ -400,6 +405,8 @@ thriftToStatistics (TV.Struct fields) = do
     , statDistinctCount = getOptI64 4
     , statMaxValue = getBinary 5
     , statMinValue = getBinary 6
+    , statIsMaxValueExact = getOptBool 7
+    , statIsMinValueExact = getOptBool 8
     }
 thriftToStatistics _ = Left "Parquet.Footer: expected struct for Statistics"
 
