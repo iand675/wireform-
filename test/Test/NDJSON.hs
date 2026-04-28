@@ -140,6 +140,22 @@ roundtripTests = testGroup "Roundtrip"
           annotate err
           failure
         Right decoded -> decoded === vals
+
+  , testCase "encoder always terminates with LF (ndjson-spec)" $ do
+      -- ndjson-spec: every record's trailing newline is required so
+      -- consumers can append more records by byte concatenation.
+      let vals = V.fromList
+            [ Aeson.object [("a", Aeson.Number 1)]
+            , Aeson.object [("b", Aeson.Number 2)]
+            ]
+          encoded = encode vals
+      assertBool "trailing LF present"
+        (BS.length encoded > 0 && BS.last encoded == 0x0A)
+      -- Concatenating two NDJSON streams yields a valid NDJSON stream.
+      let combined = encoded <> encoded
+      case decode combined of
+        Right decoded -> decoded @?= (vals V.++ vals)
+        Left err -> assertFailure $ "decode failed: " ++ err
   ]
 
 largeFileTests :: TestTree

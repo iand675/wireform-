@@ -18,8 +18,10 @@ encode vals = BL.toStrict $ B.toLazyByteString $ buildNDJSON vals
 encodeRecords :: Aeson.ToJSON a => Vector a -> ByteString
 encodeRecords = encode . V.map Aeson.toJSON
 
+-- | Build NDJSON output. Per the NDJSON spec
+-- (<https://github.com/ndjson/ndjson-spec>), each record is followed by
+-- a single LF (0x0A); the last record's trailing newline is REQUIRED so
+-- consumers can append more records by simple byte concatenation.
 buildNDJSON :: Vector Aeson.Value -> B.Builder
-buildNDJSON vals = V.ifoldl' (\acc i val ->
-  acc <> B.lazyByteString (Aeson.encode val) <>
-    (if i < V.length vals - 1 then B.word8 0x0A else mempty)
-  ) mempty vals
+buildNDJSON =
+  V.foldl' (\acc val -> acc <> B.lazyByteString (Aeson.encode val) <> B.word8 0x0A) mempty
