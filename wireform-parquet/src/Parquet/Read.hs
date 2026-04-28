@@ -810,7 +810,9 @@ readLE64 bs o =
 {-# INLINE decodePlainInt96 #-}
 decodePlainInt96 :: Int -> ByteString -> Either String (V.Vector ByteString)
 decodePlainInt96 n bs
-  | BS.length bs < n * 12 = Left "Parquet.Read: PLAIN INT96 buffer too small"
+  | n < 0 = Left "Parquet.Read: PLAIN INT96 negative count"
+  | n > BS.length bs `div` 12 =
+      Left "Parquet.Read: PLAIN INT96 buffer too small"
   | otherwise = Right $! V.generate n $ \i ->
       BS.take 12 (BS.drop (i * 12) bs)
 
@@ -819,7 +821,11 @@ decodePlainInt96 n bs
 decodePlainFixedLenByteArray :: Int -> Int -> ByteString -> Either String (V.Vector ByteString)
 decodePlainFixedLenByteArray typeLen n bs
   | typeLen <= 0 = Left "Parquet.Read: FIXED_LEN_BYTE_ARRAY type_length must be positive"
-  | BS.length bs < n * typeLen = Left "Parquet.Read: PLAIN FIXED_LEN_BYTE_ARRAY buffer too small"
+  | n < 0 = Left "Parquet.Read: FIXED_LEN_BYTE_ARRAY negative count"
+  -- Use 'div' on the larger side so the multiplication 'n * typeLen'
+  -- never happens (overflow-safe on hostile input).
+  | n > BS.length bs `div` typeLen =
+      Left "Parquet.Read: PLAIN FIXED_LEN_BYTE_ARRAY buffer too small"
   | otherwise = Right $! V.generate n $ \i ->
       BS.take typeLen (BS.drop (i * typeLen) bs)
 
