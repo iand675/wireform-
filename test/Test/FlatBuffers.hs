@@ -14,6 +14,9 @@ import Test.Tasty.Hedgehog
 import qualified FlatBuffers.Value as F
 import FlatBuffers.Encode (encode, encodeWithFileIdentifier)
 import FlatBuffers.Decode (decode, fileIdentifier, hasFileIdentifier)
+import qualified FlatBuffers.Parser as P
+import qualified FlatBuffers.Schema as FS
+import qualified FlatBuffers.Typed as FT
 
 flatBuffersTests :: TestTree
 flatBuffersTests = testGroup "FlatBuffers"
@@ -24,6 +27,7 @@ flatBuffersTests = testGroup "FlatBuffers"
   , fileIdentifierTests
   , vtableDedupTests
   , nestedTableTests
+  , schemaAwareTests
   ]
 
 unitTests :: TestTree
@@ -342,6 +346,118 @@ nestedTableTests = testGroup "Nested tables (decode)"
         Right v -> assertFailure $ "expected VTable, got " ++ show v
         Left e  -> assertFailure $ "decode failed: " ++ e
   ]
+
+schemaAwareTests :: TestTree
+schemaAwareTests = testGroup "Schema-aware encode/decode"
+  [ testCase "round-trip of a Monster table with defaults" $ do
+      let schema = parseOrFail monsterSchema
+          v = F.VTable (V.fromList
+                [ Just (F.VString "Goblin")
+                , Just (F.VInt16 50)
+                , Nothing
+                , Nothing
+                , Nothing
+                ])
+      bs <- expectRight "encode" (FT.encodeWithSchema schema v)
+      BS.take 4 (BS.drop 4 bs) @?= "MNST"
+      out <- expectRight "decode" (FT.decodeWithSchema schema bs)
+      case out of
+        F.VTable fs -> do
+          V.length fs @?= 5
+          fs V.! 0 @?= Just (F.VString "Goblin")
+          fs V.! 1 @?= Just (F.VInt16 50)
+          fs V.! 2 @?= Just (F.VInt32 150)
+          fs V.! 3 @?= Nothing
+          fs V.! 4 @?= Nothing
+        _ -> assertFailure $ "expected VTable, got " ++ show out
+
+  , testCase "vector<ubyte> round-trips through schema" $ do
+      let schema = parseOrFail monsterSchema
+          inv = F.VVector (V.fromList [F.VWord8 1, F.VWord8 2, F.VWord8 3])
+          v = F.VTable (V.fromList
+                [ Just (F.VString "Skeleton")
+                , Nothing, Nothing
+                , Just inv
+                , Nothing
+                ])
+      bs <- expectRight "encode" (FT.encodeWithSchema schema v)
+      out <- expectRight "decode" (FT.decodeWithSchema schema bs)
+      case out of
+        F.VTable fs -> do
+          fs V.! 1 @?= Just (F.VInt16 100)
+          fs V.! 2 @?= Just (F.VInt32 150)
+          fs V.! 3 @?= Just inv
+        _ -> assertFailure "expected VTable"
+
+  , testCase "self-referential nested table (friend)" $ do
+      let schema = parseOrFail monsterSchema
+          inner = F.VTable (V.fromList
+                [ Just (F.VString "Imp")
+                , Nothing, Nothing, Nothing, Nothing ])
+          v = F.VTable (V.fromList
+                [ Just (F.VString "Demon")
+                , Nothing, Nothing, Nothing
+                , Just inner ])
+      bs <- expectRight "encode" (FT.encodeWithSchema schema v)
+      out <- expectRight "decode" (FT.decodeWithSchema schema bs)
+      case out of
+        F.VTable fs -> case fs V.! 4 of
+          Just (F.VTable inner') -> inner' V.! 0 @?= Just (F.VString "Imp")
+          other -> assertFailure $ "expected nested table, got " ++ show other
+        _ -> assertFailure "expected VTable"
+
+  , testCase "file_identifier mismatch rejected on decode" $ do
+      let schema = parseOrFail monsterSchema
+          v = F.VTable (V.fromList
+                [ Just (F.VString "X"), Nothing, Nothing, Nothing, Nothing ])
+      bs <- expectRight "encode" (FT.encodeWithSchema schema v)
+      let badBs = BS.take 4 bs <> "XXXX" <> BS.drop 8 bs
+      case FT.decodeWithSchema schema badBs of
+        Left _  -> pure ()
+        Right _ -> assertFailure "expected file_identifier mismatch error"
+
+  , testCase "struct (Vec3) and enum default round-trip" $ do
+      let schema = parseOrFail extSchema
+          pos = F.VStruct (V.fromList [F.VFloat 1.5, F.VFloat 2.5, F.VFloat 3.5])
+          v = F.VTable (V.fromList
+                [ Just pos
+                , Nothing  -- tint defaults to Green = 2
+                ])
+      bs <- expectRight "encode" (FT.encodeWithSchema schema v)
+      out <- expectRight "decode" (FT.decodeWithSchema schema bs)
+      case out of
+        F.VTable fs -> do
+          fs V.! 0 @?= Just pos
+          fs V.! 1 @?= Just (F.VWord8 2)
+        _ -> assertFailure "expected VTable"
+  ]
+  where
+    monsterSchema = T.unlines
+      [ "table Monster {"
+      , "  name:string;"
+      , "  hp:short = 100;"
+      , "  mana:int = 150;"
+      , "  inventory:[ubyte];"
+      , "  friend:Monster;"
+      , "}"
+      , "root_type Monster;"
+      , "file_identifier \"MNST\";"
+      ]
+    extSchema = T.unlines
+      [ "enum Color : ubyte { Red = 1, Green = 2, Blue = 4 }"
+      , "struct Vec3 { x:float; y:float; z:float; }"
+      , "table Item { pos:Vec3; tint:Color = Green; }"
+      , "root_type Item;"
+      ]
+
+parseOrFail :: T.Text -> FS.FlatBuffersSchema
+parseOrFail t = case P.parseFlatBuffers t of
+  Right s -> s
+  Left e  -> error ("schema parse failed: " ++ e)
+
+expectRight :: String -> Either String a -> IO a
+expectRight ctx (Left e)  = assertFailure (ctx ++ ": " ++ e) >> error "unreachable"
+expectRight _   (Right v) = pure v
 
 readLE32 :: BS.ByteString -> Int -> Word32
 readLE32 bs off =
