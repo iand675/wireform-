@@ -1,10 +1,13 @@
+{-# LANGUAGE NumericUnderscores #-}
 module Test.ORC (orcTests) where
 
 import qualified Data.ByteString as BS
+import Data.Bits (shiftR, (.&.))
 import Data.Int (Int16, Int32, Int64, Int8)
 import qualified Data.Text as T
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
+import Data.Word (Word64)
 import Hedgehog
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
@@ -607,7 +610,64 @@ encoderTests = testGroup "Encoders"
       case decodeIntColumn True 5 encoded Nothing of
         Left e -> assertFailure e
         Right v -> V.toList v @?= fmap Just (VP.toList vals)
+
+  , testCase "Date column encode -> decode roundtrip" $ do
+      let days = VP.fromList [0, 1, -365, 18262, -10000 :: Int32]
+          encoded = encodeDateColumn days
+      case decodeDateColumn 5 encoded Nothing of
+        Left e -> assertFailure e
+        Right v -> V.toList v @?= fmap Just (VP.toList days)
+
+  , testCase "Decimal64 column encode -> decode roundtrip" $ do
+      let vals = VP.fromList [0, 12345, -9876543, 999999999999 :: Int64]
+          encoded = encodeDecimal64Column vals
+      case decodeDecimalColumn 4 2 encoded Nothing of
+        Left e -> assertFailure e
+        Right v -> V.toList v @?= fmap Just (VP.toList vals)
+
+  , testCase "ORC nano packing roundtrip (representative values)" $ do
+      let cases = [0, 1, 10, 100, 999_999_999, 123_456_789, 50_000, 700_000_000]
+      mapM_ (\n ->
+        let !packed = encodeORCNano n
+            !back   = decodeORCNanoForTest packed
+        in if back == n
+             then pure ()
+             else assertFailure $ "encodeORCNano " ++ show n
+                               ++ " round-tripped to " ++ show back) cases
+
+  , testCase "Timestamp column encode -> decode roundtrip" $ do
+      let secs  = VP.fromList [0, 1234567890, -1000, 86400 :: Int64]
+          nanos = VP.fromList [0, 123_456_789, 500_000_000, 1 :: Int64]
+          (secBs, nanoBs) = encodeTimestampColumn secs nanos
+      case decodeTimestampColumn 4 secBs nanoBs Nothing of
+        Left e -> assertFailure e
+        Right v -> do
+          V.length v @?= 4
+          let !ts = V.imap (\i mt -> (i, mt)) v
+          V.forM_ ts $ \(i, mt) -> case mt of
+            Just (ORCTimestamp s n) -> do
+              s @?= secs VP.! i
+              n @?= nanos VP.! i
+            Nothing -> assertFailure $ "expected Just at index " ++ show i
   ]
+  where
+    -- Minimal local copy of the read-side decoder so the test doesn't
+    -- have to import internal helpers.
+    decodeORCNanoForTest :: Word64 -> Int64
+    decodeORCNanoForTest raw =
+      let !zeros = fromIntegral (raw .&. 0x7) :: Int
+          !base  = fromIntegral (raw `shiftR` 3) :: Int64
+          pow10 :: Int -> Int64
+          pow10 0 = 1
+          pow10 1 = 10
+          pow10 2 = 100
+          pow10 3 = 1000
+          pow10 4 = 10_000
+          pow10 5 = 100_000
+          pow10 6 = 1_000_000
+          pow10 7 = 10_000_000
+          pow10 _ = 100_000_000
+      in base * pow10 zeros
 
 ------------------------------------------------------------------------
 -- Stripe footer encode tests
