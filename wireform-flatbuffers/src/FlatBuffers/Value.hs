@@ -46,6 +46,12 @@ data Value
   | VVector  !(Vector Value)
   | VTable   !(Vector (Maybe Value))
   | VStruct  !(Vector Value)
+  | VUnion   {-# UNPACK #-} !Word8 !Value
+    -- ^ A FlatBuffers union value: the 'Word8' is the union member
+    -- index (1-based; @0@ is the spec-defined @NONE@ marker), and the
+    -- 'Value' is the referenced table.  Encoded as the standard pair
+    -- of vtable cells (a @ubyte@ discriminator and a @uoffset_t@ to
+    -- the referenced table).
   deriving stock (Show, Eq, Generic)
   deriving anyclass (NFData)
 
@@ -65,3 +71,4 @@ instance Aeson.ToJSON Value where
   toJSON (VVector vs) = Aeson.Array (V.map Aeson.toJSON vs)
   toJSON (VTable vs)  = Aeson.Array (V.map (maybe Aeson.Null Aeson.toJSON) vs)
   toJSON (VStruct vs) = Aeson.Array (V.map Aeson.toJSON vs)
+  toJSON (VUnion d v) = Aeson.Array (V.fromList [Aeson.Number (fromIntegral d), Aeson.toJSON v])

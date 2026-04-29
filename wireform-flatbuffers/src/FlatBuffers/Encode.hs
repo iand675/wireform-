@@ -39,6 +39,7 @@ import qualified Data.IntMap.Strict as IM
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import qualified Data.Text as T
+import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as V
 import Data.Int (Int8, Int16, Int32, Int64)
@@ -145,19 +146,60 @@ alignFields td (F.VTable fields)
 alignFields td _ =
   Left $ "FlatBuffers.Encode: expected VTable for " ++ T.unpack (tdName td)
 
+-- | Plan one or more vtable cells for each schema field.  Most field
+-- types produce a single cell; union fields produce two (a @ubyte@
+-- discriminator followed by a @uoffset_t@).
 planFields
   :: Env -> [TableField] -> [Maybe F.Value] -> PlanSt
   -> Either String ([Maybe PField], PlanSt)
 planFields _ [] [] st = Right ([], st)
-planFields env (_ : tfs) (Nothing : mvs) st = do
-  (rest, st') <- planFields env tfs mvs st
-  Right (Nothing : rest, st')
-planFields env (tf : tfs) (Just v : mvs) st = do
-  (pf, st1) <- planField env (tfType tf) v st
-  (rest, st2) <- planFields env tfs mvs st1
-  Right (Just pf : rest, st2)
+planFields env (tf : tfs) (mv : mvs) st = do
+  (cells, st1) <- planFieldCells env (tfType tf) mv st
+  (rest, st2)  <- planFields env tfs mvs st1
+  Right (cells ++ rest, st2)
 planFields _ _ _ _ =
   Left "FlatBuffers.Encode: internal: planFields field/value list mismatch"
+
+-- | Produce the vtable cells for a single schema-level field, given an
+-- optional user-supplied value.  Returns either one cell (most types)
+-- or two (unions: discriminator + offset).
+planFieldCells
+  :: Env -> FBType -> Maybe F.Value -> PlanSt
+  -> Either String ([Maybe PField], PlanSt)
+planFieldCells env ty mv st = case (ty, mv) of
+  -- Union: two cells. NONE / Nothing → both absent.
+  (FTNamed name, Nothing) | isUnionType env name ->
+    Right ([Nothing, Nothing], st)
+  (FTNamed name, Just (F.VUnion 0 _)) | isUnionType env name ->
+    Right ([Nothing, Nothing], st)
+  (FTNamed name, Just (F.VUnion disc inner)) | Just udef <- Map.lookup name (envUnions env) -> do
+    -- Validate the discriminator against the union's member count.
+    let !nMembers = V.length (fudMembers udef)
+    if fromIntegral disc < 1 || fromIntegral disc > nMembers
+      then Left $ "FlatBuffers.Encode: union " ++ T.unpack name
+                ++ " discriminator " ++ show disc
+                ++ " out of range [1.." ++ show nMembers ++ "]"
+      else do
+        let !memberName = fudMembers udef V.! (fromIntegral disc - 1)
+        case Map.lookup memberName (envTables env) of
+          Just memberTd -> do
+            (cid, st') <- planTable env memberTd inner st
+            let !discCell = PInline (BS.singleton disc)
+                !offCell  = PRefChunk cid
+            Right ([Just discCell, Just offCell], st')
+          Nothing -> Left $ "FlatBuffers.Encode: union member "
+                         ++ T.unpack memberName ++ " is not a declared table"
+  (FTNamed name, Just _) | isUnionType env name ->
+    Left $ "FlatBuffers.Encode: union field " ++ T.unpack name
+        ++ " requires a VUnion value"
+  -- Any other field: one cell (possibly absent).
+  (_, Nothing) -> Right ([Nothing], st)
+  (_, Just v)  -> do
+    (pf, st') <- planField env ty v st
+    Right ([Just pf], st')
+
+isUnionType :: Env -> Text -> Bool
+isUnionType env name = Map.member name (envUnions env)
 
 planField :: Env -> FBType -> F.Value -> PlanSt -> Either String (PField, PlanSt)
 planField env ty v st = case ty of
@@ -194,8 +236,8 @@ planField env ty v st = case ty of
       Nothing -> case Map.lookup name (envEnums env) of
         Just ed -> planField env (fedUnderlyingType ed) v st
         Nothing -> case Map.lookup name (envUnions env) of
-          Just _  -> Left $ "FlatBuffers.Encode: union encoding requires \
-                            \both the discriminator and value field; not yet supported"
+          Just _  -> Left $ "FlatBuffers.Encode: union " ++ T.unpack name
+                         ++ " can only appear at the table-field level (not in vectors or as a referent)"
           Nothing -> Left $ "FlatBuffers.Encode: unknown named type "
                          ++ T.unpack name
 

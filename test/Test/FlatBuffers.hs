@@ -21,6 +21,7 @@ flatBuffersTests = testGroup "FlatBuffers"
   , vtableDedupTests
   , fileIdentifierTests
   , structAndEnumTests
+  , unionTests
   , errorReportingTests
   ]
 
@@ -74,6 +75,19 @@ extSchema = parseOrFail $ T.unlines
   , "struct Vec3 { x:float; y:float; z:float; }"
   , "table Item { pos:Vec3; tint:Color = Green; }"
   , "root_type Item;"
+  ]
+
+unionSchema :: FS.FlatBuffersSchema
+unionSchema = parseOrFail $ T.unlines
+  [ "table Sword { dmg:int; }"
+  , "table Bow   { range:int; dmg:int; }"
+  , "table Staff { spell:string; }"
+  , "union Equipment { Sword, Bow, Staff }"
+  , "table Hero {"
+  , "  name:string;"
+  , "  weapon:Equipment;"
+  , "}"
+  , "root_type Hero;"
   ]
 
 ------------------------------------------------------------------------
@@ -314,6 +328,75 @@ structAndEnumTests = testGroup "Structs and enums"
       out <- expectRight "decode" (decode extSchema bs)
       case out of
         F.VTable fs -> fs V.! 1 @?= Just (F.VWord8 4)
+        _ -> assertFailure "expected VTable"
+  ]
+
+unionTests :: TestTree
+unionTests = testGroup "Unions"
+  [ testCase "absent union round-trips as Nothing" $ do
+      let v = F.VTable (V.fromList
+            [ Just (F.VString "Alice"), Nothing ])
+      bs <- expectRight "encode" (encode unionSchema v)
+      out <- expectRight "decode" (decode unionSchema bs)
+      case out of
+        F.VTable fs -> do
+          V.length fs @?= 2
+          fs V.! 1 @?= Nothing
+        _ -> assertFailure "expected VTable"
+
+  , testCase "Sword (member 1) round-trips" $ do
+      let sword = F.VTable (V.fromList [Just (F.VInt32 12)])
+          v = F.VTable (V.fromList
+            [ Just (F.VString "Bob"), Just (F.VUnion 1 sword) ])
+      bs <- expectRight "encode" (encode unionSchema v)
+      out <- expectRight "decode" (decode unionSchema bs)
+      case out of
+        F.VTable fs -> do
+          fs V.! 0 @?= Just (F.VString "Bob")
+          fs V.! 1 @?= Just (F.VUnion 1 sword)
+        _ -> assertFailure "expected VTable"
+
+  , testCase "Bow (member 2) round-trips with multiple inner fields" $ do
+      let bow = F.VTable (V.fromList [Just (F.VInt32 50), Just (F.VInt32 7)])
+          v = F.VTable (V.fromList
+            [ Just (F.VString "Carol"), Just (F.VUnion 2 bow) ])
+      bs <- expectRight "encode" (encode unionSchema v)
+      out <- expectRight "decode" (decode unionSchema bs)
+      case out of
+        F.VTable fs -> fs V.! 1 @?= Just (F.VUnion 2 bow)
+        _ -> assertFailure "expected VTable"
+
+  , testCase "Staff (member 3, last in union) round-trips with a string field" $ do
+      let staff = F.VTable (V.fromList [Just (F.VString "Magic Missile")])
+          v = F.VTable (V.fromList
+            [ Just (F.VString "Dan"), Just (F.VUnion 3 staff) ])
+      bs <- expectRight "encode" (encode unionSchema v)
+      out <- expectRight "decode" (decode unionSchema bs)
+      case out of
+        F.VTable fs -> fs V.! 1 @?= Just (F.VUnion 3 staff)
+        _ -> assertFailure "expected VTable"
+
+  , testCase "discriminator out of range is rejected on encode" $ do
+      let v = F.VTable (V.fromList
+            [ Just (F.VString "x"), Just (F.VUnion 99 (F.VTable V.empty)) ])
+      case encode unionSchema v of
+        Left _ -> pure ()
+        Right _ -> assertFailure "expected discriminator-out-of-range error"
+
+  , testCase "non-VUnion value at union field is rejected on encode" $ do
+      let v = F.VTable (V.fromList
+            [ Just (F.VString "x"), Just (F.VInt32 42) ])
+      case encode unionSchema v of
+        Left _ -> pure ()
+        Right _ -> assertFailure "expected non-VUnion-at-union-field error"
+
+  , testCase "VUnion 0 (NONE) is the same as absent" $ do
+      let v = F.VTable (V.fromList
+            [ Just (F.VString "Eve"), Just (F.VUnion 0 (F.VTable V.empty)) ])
+      bs <- expectRight "encode" (encode unionSchema v)
+      out <- expectRight "decode" (decode unionSchema bs)
+      case out of
+        F.VTable fs -> fs V.! 1 @?= Nothing
         _ -> assertFailure "expected VTable"
   ]
 

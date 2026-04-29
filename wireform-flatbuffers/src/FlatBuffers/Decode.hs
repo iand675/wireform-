@@ -104,27 +104,80 @@ decodeTable env td bs tableOff = do
     else do
       let !nCellsAvail = (vtSize - 4) `div` 2
           fieldDefs    = V.toList (tdFields td)
-      cells <- traverseN (length fieldDefs) $ \i ->
-        if i < nCellsAvail
-          then do
-            ensure bs (vtOff + 4 + i * 2) 2
-            Right (fromIntegral (readLE16 bs (vtOff + 4 + i * 2)) :: Int)
-          else
-            -- Fields declared in the schema but absent from this older
-            -- vtable are treated as absent (forward-compatibility).
-            Right 0
-      fields <- traverseN (length fieldDefs) $ \i -> do
-        let !cell = cells !! i
-            !tf   = fieldDefs !! i
-        if cell == 0
-          then if isReferenceType env (tfType tf)
-                 then Right Nothing
-                 else Right (Just (defaultForField env tf))
-          else do
-            let !addr = tableOff + cell
-            v <- decodeFieldValue env (tfType tf) bs addr
-            Right (Just v)
+      let readCell i
+            | i < nCellsAvail = do
+                ensure bs (vtOff + 4 + i * 2) 2
+                Right (fromIntegral (readLE16 bs (vtOff + 4 + i * 2)) :: Int)
+            | otherwise = Right 0
+      fields <- decodeSchemaFields env tableOff bs readCell fieldDefs 0
       Right (F.VTable (V.fromList fields))
+
+-- | Walk the schema's field list, reading the matching vtable cells.
+-- Most fields take one cell; union fields take two (the discriminator
+-- followed by the value's @uoffset_t@).
+decodeSchemaFields
+  :: Env -> Int -> ByteString
+  -> (Int -> Either String Int)
+  -> [TableField]
+  -> Int
+  -> Either String [Maybe F.Value]
+decodeSchemaFields _ _ _ _ [] _ = Right []
+decodeSchemaFields env tableOff bs readCell (tf : tfs) !cellIdx =
+  case tfType tf of
+    FTNamed name | Map.member name (envUnions env) -> do
+      discCell <- readCell cellIdx
+      offCell  <- readCell (cellIdx + 1)
+      mUnion   <- decodeUnionField env tableOff bs (envUnions env Map.! name)
+                                   discCell offCell
+      rest <- decodeSchemaFields env tableOff bs readCell tfs (cellIdx + 2)
+      Right (mUnion : rest)
+    _ -> do
+      cell <- readCell cellIdx
+      mv <- if cell == 0
+              then if isReferenceType env (tfType tf)
+                     then Right Nothing
+                     else Right (Just (defaultForField env tf))
+              else do
+                let !addr = tableOff + cell
+                v <- decodeFieldValue env (tfType tf) bs addr
+                Right (Just v)
+      rest <- decodeSchemaFields env tableOff bs readCell tfs (cellIdx + 1)
+      Right (mv : rest)
+
+decodeUnionField
+  :: Env -> Int -> ByteString -> FBUnionDef
+  -> Int -> Int
+  -> Either String (Maybe F.Value)
+decodeUnionField env tableOff bs udef discCell offCell
+  | discCell == 0 = Right Nothing
+  | otherwise = do
+      let !discAddr = tableOff + discCell
+      ensure bs discAddr 1
+      let !disc = rdByte bs discAddr
+      if disc == 0
+        then Right Nothing
+        else if offCell == 0
+          then Left $ "FlatBuffers.Decode: union " ++ T.unpack (fudName udef)
+                   ++ " has discriminator " ++ show disc
+                   ++ " but no value offset"
+          else do
+            let !nMembers = V.length (fudMembers udef)
+            if fromIntegral disc < 1 || fromIntegral disc > nMembers
+              then Left $ "FlatBuffers.Decode: union " ++ T.unpack (fudName udef)
+                       ++ " discriminator " ++ show disc ++ " out of range"
+              else do
+                let !memberName = fudMembers udef V.! (fromIntegral disc - 1)
+                case Map.lookup memberName (envTables env) of
+                  Nothing -> Left $ "FlatBuffers.Decode: union member "
+                                 ++ T.unpack memberName
+                                 ++ " is not a declared table"
+                  Just memberTd -> do
+                    let !valAddr = tableOff + offCell
+                    ensure bs valAddr 4
+                    let !uoff = fromIntegral (readLE32 bs valAddr) :: Int
+                        !target = valAddr + uoff
+                    inner <- decodeTable env memberTd bs target
+                    Right (Just (F.VUnion disc inner))
 
 decodeFieldValue :: Env -> FBType -> ByteString -> Int -> Either String F.Value
 decodeFieldValue env ty bs addr = case ty of
