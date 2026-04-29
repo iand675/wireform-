@@ -66,7 +66,7 @@ import qualified Codec.Compression.Snappy as Snappy
 #endif
 
 import ORC.Footer (readORCCompression, readORCFooter)
-import ORC.RLE (decodeBooleanRLE, decodePresentStream, decodeRLEv1Int, decodeRLEv2Int)
+import ORC.RLE (decodeBooleanRLE, decodePresentStream, decodeRLEv1Int, decodeRLEv2Int, decodeRLEv2IntAll)
 import ORC.Stripe (Stream (..), StripeFooter, decodeStripeFooter, stripeFooterBytes, stripeStreamSlices)
 import ORC.Types
 
@@ -241,26 +241,36 @@ decodeBoolColumn numRows dataBs mPresentBs = case mPresentBs of
     vals <- decodeBooleanRLE numPresent dataBs
     Right $! interleaveBool present vals
 
--- | Decode a string column (DIRECT encoding only).
+-- | Decode a string column.  Routes to DIRECT decoding when the
+-- dictionary stream is empty, or DICTIONARY_V2 decoding otherwise.
 --
--- Arguments: @numRows@, @data@ (UTF-8 bytes), @length stream@ (RLE v2
--- unsigned), @dictionary stream@ (empty for DIRECT), @present stream@.
+-- Arguments: @numRows@, @data@ (DIRECT: UTF-8 bytes; DICTIONARY:
+-- dictionary entry bytes), @length stream@ (RLE v2 unsigned),
+-- @dictionary data stream@ (empty for DIRECT; for DICTIONARY this is
+-- the @data@ argument and the @data@ argument carries the index
+-- stream), @present stream@.
 decodeStringColumn
   :: Int -> ByteString -> ByteString -> ByteString -> Maybe ByteString
   -> Either String (V.Vector (Maybe T.Text))
-decodeStringColumn _numRows _dataBs _lengthBs dictBs _mPresentBs
-  | not (BS.null dictBs) = Left "ORC.Read: DICTIONARY_V2 string encoding not yet implemented"
-decodeStringColumn numRows dataBs lengthBs _dictBs mPresentBs = do
-  (numPresent, mPresent) <- case mPresentBs of
-    Nothing -> Right (numRows, Nothing)
-    Just pbs -> do
-      p <- decodePresentStream numRows pbs
-      Right (countTrue p, Just p)
-  lengths <- decodeRLEv2Int False numPresent lengthBs
-  strings <- splitByLengths dataBs lengths
-  case mPresent of
-    Nothing -> Right $! V.map Just strings
-    Just present -> Right $! interleaveText present strings
+decodeStringColumn numRows dataBs lengthBs dictBs mPresentBs
+  | not (BS.null dictBs) =
+      -- DICTIONARY_V2: dictBs is the dictionary's UTF-8 bytes; lengthBs
+      -- gives both dictionary entry lengths and (typically) the index
+      -- stream is in dataBs. The standard ORC layout splits these into
+      -- separate streams; callers that already know the layout should
+      -- prefer 'decodeStringDictColumn' directly.
+      decodeStringDictColumn numRows dictBs lengthBs dataBs mPresentBs
+  | otherwise = do
+      (numPresent, mPresent) <- case mPresentBs of
+        Nothing -> Right (numRows, Nothing)
+        Just pbs -> do
+          p <- decodePresentStream numRows pbs
+          Right (countTrue p, Just p)
+      lengths <- decodeRLEv2Int False numPresent lengthBs
+      strings <- splitByLengths dataBs lengths
+      case mPresent of
+        Nothing -> Right $! V.map Just strings
+        Just present -> Right $! interleaveText present strings
 
 -- | Decode an IEEE 754 single-precision float column (little-endian).
 decodeFloatColumn
@@ -380,8 +390,8 @@ decodeStringDictColumn
   :: Int -> ByteString -> ByteString -> ByteString -> Maybe ByteString
   -> Either String (V.Vector (Maybe T.Text))
 decodeStringDictColumn numRows dictDataBs lengthBs indexBs mPresentBs = do
-  -- Decode dictionary
-  dictLengths <- decodeRLEv2Int False (estimateCount lengthBs) lengthBs
+  -- Decode dictionary length stream (count is implicit — read all values).
+  dictLengths <- decodeRLEv2IntAll False lengthBs
   dictEntries <- splitByLengths dictDataBs dictLengths
   -- Decode indices
   (numPresent, mPresent) <- resolvePresent numRows mPresentBs
@@ -621,12 +631,6 @@ interleaveWith present vals = runST $ do
             go (i + 1) j
   go 0 0
   V.unsafeFreeze out
-
--- | Estimate the number of RLE-encoded values in a stream.
--- Used when the count isn't known ahead of time (dictionary lengths).
--- Decodes all available values.
-estimateCount :: ByteString -> Int
-estimateCount bs = max 1 (BS.length bs)
 
 splitByLengths :: ByteString -> VP.Vector Int64 -> Either String (V.Vector T.Text)
 splitByLengths dataBs lengths = runST $ do

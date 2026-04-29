@@ -29,7 +29,7 @@ import Proto.Wire.Decode (DecodeError(..), Decoder, DecodeResult(..), getVarint,
   getFixed32, getFixed64, getLengthDelimited, runDecoder, runDecoder',
   withTagM, skipWireType, getTag)
 import Proto.Wire.Encode
-import Proto.Wire.FFI (countPackedVarints, packedAllSingleByte, validateUtf8SWAR)
+import Wireform.FFI (countPackedVarints, packedAllSingleByte, validateUtf8SWAR)
 import qualified Data.Text.Encoding
 
 tdpTests :: TestTree
