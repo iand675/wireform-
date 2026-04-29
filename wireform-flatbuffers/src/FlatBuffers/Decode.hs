@@ -7,6 +7,8 @@
 -- reconstructs all scalar, string, vector, and nested table fields.
 module FlatBuffers.Decode
   ( decode
+  , fileIdentifier
+  , hasFileIdentifier
   ) where
 
 import Data.ByteString (ByteString)
@@ -29,6 +31,26 @@ decode !bs
   | otherwise = do
       let !rootOff = fromIntegral (readLE32 bs 0) :: Int
       decodeAt bs rootOff
+
+-- | Read the 4-byte file identifier embedded immediately after the root
+-- offset, if any. This always reads bytes 4..7 of the buffer; callers
+-- decide whether the buffer was written with a file identifier.
+fileIdentifier :: ByteString -> Maybe ByteString
+fileIdentifier !bs
+  | BS.length bs < 8 = Nothing
+  | otherwise = Just (BS.take 4 (BS.drop 4 bs))
+
+-- | @hasFileIdentifier expected bs@ is 'True' iff @bs@ has at least 8
+-- bytes and bytes 4..7 match @expected@ (which must be at most 4 bytes).
+hasFileIdentifier :: ByteString -> ByteString -> Bool
+hasFileIdentifier !expected !bs
+  | BS.length bs < 8 = False
+  | otherwise =
+      let !got = BS.take 4 (BS.drop 4 bs)
+          !want = if BS.length expected >= 4
+                    then BS.take 4 expected
+                    else expected <> BS.replicate (4 - BS.length expected) 0
+      in got == want
 
 rdByte :: ByteString -> Int -> Word8
 rdByte !bs !off = BSU.unsafeIndex bs off

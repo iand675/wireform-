@@ -192,6 +192,22 @@ entityTests = testGroup "Entity references"
   , testCase "&hellip;" $ do
       let doc = parseHTML "<p>&hellip;</p>"
       deepTextContent (htmlRoot doc) @?= "\x2026"
+
+  , testCase "&Cedilla; (extended HTML5 entity)" $ do
+      let doc = parseHTML "<p>&Cedilla;</p>"
+      deepTextContent (htmlRoot doc) @?= "\xB8"
+
+  , testCase "&CounterClockwiseContourIntegral; (long extended entity)" $ do
+      let doc = parseHTML "<p>&CounterClockwiseContourIntegral;</p>"
+      deepTextContent (htmlRoot doc) @?= "\x2233"
+
+  , testCase "&NotEqualTilde; (multi-codepoint entity)" $ do
+      let doc = parseHTML "<p>&NotEqualTilde;</p>"
+      deepTextContent (htmlRoot doc) @?= "\x2242\x0338"
+
+  , testCase "&bigcup; (extended HTML5 entity)" $ do
+      let doc = parseHTML "<p>&bigcup;</p>"
+      deepTextContent (htmlRoot doc) @?= "\x22C3"
   ]
 
 caseInsensitiveTests :: TestTree

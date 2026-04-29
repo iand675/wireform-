@@ -27,6 +27,8 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Unsafe as BSU
 import Data.Char (chr, isDigit, isHexDigit, digitToInt, ord)
 import Data.IORef
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -73,12 +75,17 @@ instance NFData FastAttr where
   rnf (FastAttr n v) = rnf n `seq` rnf v
 
 data FastDoc = FastDoc
-  { fdSource :: !ByteString
-  , fdRoot   :: !FastNode
+  { fdSource   :: !ByteString
+  , fdRoot     :: !FastNode
+  , fdEntities :: !(Map Text Text)
+    -- ^ Entities declared in the document's internal DTD subset.
+    -- These are applied (in addition to the predefined XML entities and
+    -- numeric character references) when materialising attribute values
+    -- and text nodes via 'toDocument'.
   } deriving stock (Show, Eq)
 
 instance NFData FastDoc where
-  rnf (FastDoc bs r) = rnf bs `seq` rnf r
+  rnf (FastDoc bs r ents) = rnf bs `seq` rnf r `seq` rnf ents
 
 ------------------------------------------------------------------------
 -- FFI imports
@@ -194,13 +201,13 @@ parseFast bs = unsafeDupablePerformIO $
     -- Skip XML declaration if present
     off1 <- skipXMLDecl bs ptr off0 len
     let !off2 = skipSpaces bs off1 len
-    -- Skip DOCTYPE if present
-    let !off3 = skipDoctype bs off2 len
+    -- Skip DOCTYPE if present, capturing internal-subset entities
+    let (!ents, !off3) = skipDoctype bs off2 len
     let !off4 = skipSpaces bs off3 len
     result <- parseNode bs ptr off4 len
     case result of
       Left err -> pure (Left err)
-      Right (node, _) -> pure (Right (FastDoc bs node))
+      Right (node, _) -> pure (Right (FastDoc bs node ents))
 
 skipXMLDecl :: ByteString -> Ptr Word8 -> Int -> Int -> IO Int
 skipXMLDecl !bs !_ptr !off !len
@@ -219,7 +226,12 @@ skipXMLDecl !bs !_ptr !off !len
     pure (go (off + 5))
   | otherwise = pure off
 
-skipDoctype :: ByteString -> Int -> Int -> Int
+-- | Skip a @<!DOCTYPE ... >@ declaration if one is present.  When the
+-- declaration contains an internal subset (the @[ ... ]@ block) the
+-- @<!ENTITY name "value">@ declarations within it are captured into the
+-- returned map so that later attribute/text materialisation can resolve
+-- references to those entities.
+skipDoctype :: ByteString -> Int -> Int -> (Map Text Text, Int)
 skipDoctype !bs !off !len
   | off + 8 < len
   , BSU.unsafeIndex bs off == 0x3C       -- <
@@ -231,15 +243,100 @@ skipDoctype !bs !off !len
   , BSU.unsafeIndex bs (off+6) == 0x59   -- Y
   , BSU.unsafeIndex bs (off+7) == 0x50   -- P
   , BSU.unsafeIndex bs (off+8) == 0x45   -- E
-  = go (off + 9) (0 :: Int)
-  | otherwise = off
+  =
+    let findBracketOrGt !i
+          | i >= len = (i, False)
+          | BSU.unsafeIndex bs i == 0x5B = (i, True)
+          | BSU.unsafeIndex bs i == 0x3E = (i + 1, False)
+          | otherwise = findBracketOrGt (i + 1)
+        (!startSubset, !hasSubset) = findBracketOrGt (off + 9)
+    in if hasSubset
+        then
+          let (ents, after) = parseInternalSubset bs (startSubset + 1) len
+              skippedBracket =
+                if after < len && BSU.unsafeIndex bs after == 0x5D
+                  then after + 1
+                  else after
+              afterSpace = skipSpaces bs skippedBracket len
+              !final = if afterSpace < len && BSU.unsafeIndex bs afterSpace == 0x3E
+                        then afterSpace + 1
+                        else afterSpace
+          in (ents, final)
+        else (Map.empty, startSubset)
+  | otherwise = (Map.empty, off)
+
+-- | Parse the @<!ENTITY ... >@ declarations within an internal DTD subset.
+parseInternalSubset :: ByteString -> Int -> Int -> (Map Text Text, Int)
+parseInternalSubset !bs !off !len = go off Map.empty
   where
-    go !i !depth
-      | i >= len = i
-      | BSU.unsafeIndex bs i == 0x3E && depth == 0 = i + 1
-      | BSU.unsafeIndex bs i == 0x5B = go (i + 1) (depth + 1)
-      | BSU.unsafeIndex bs i == 0x5D = go (i + 1) (depth - 1)
-      | otherwise = go (i + 1) depth
+    go !i !acc
+      | i >= len = (acc, i)
+      | BSU.unsafeIndex bs i == 0x5D = (acc, i)
+      | i + 8 < len &&
+        BSU.unsafeIndex bs i       == 0x3C &&  -- <
+        BSU.unsafeIndex bs (i+1)   == 0x21 &&  -- !
+        BSU.unsafeIndex bs (i+2)   == 0x45 &&  -- E
+        BSU.unsafeIndex bs (i+3)   == 0x4E &&  -- N
+        BSU.unsafeIndex bs (i+4)   == 0x54 &&  -- T
+        BSU.unsafeIndex bs (i+5)   == 0x49 &&  -- I
+        BSU.unsafeIndex bs (i+6)   == 0x54 &&  -- T
+        BSU.unsafeIndex bs (i+7)   == 0x59 &&  -- Y
+        isWS (BSU.unsafeIndex bs (i+8)) =
+          case parseEntityDecl bs (i + 9) len of
+            Just (k, v, next) -> go next (Map.insert k v acc)
+            Nothing -> skipMarkup i acc
+      | BSU.unsafeIndex bs i == 0x3C = skipMarkup i acc
+      | otherwise = go (i + 1) acc
+
+    skipMarkup !i !acc =
+      let findGt !j
+            | j >= len = j
+            | BSU.unsafeIndex bs j == 0x3E = j + 1
+            | otherwise = findGt (j + 1)
+      in go (findGt (i + 1)) acc
+
+    isWS w = w == 0x20 || w == 0x09 || w == 0x0A || w == 0x0D
+
+parseEntityDecl :: ByteString -> Int -> Int -> Maybe (Text, Text, Int)
+parseEntityDecl !bs !off !len =
+  let !nameStart = skipSpacesB bs off len
+      !nameEnd = takeName bs nameStart len
+  in if nameEnd <= nameStart
+       then Nothing
+       else
+         let !name = TE.decodeUtf8Lenient (sliceBS bs nameStart (nameEnd - nameStart))
+             !afterName = skipSpacesB bs nameEnd len
+         in if afterName >= len then Nothing else
+              let !q = BSU.unsafeIndex bs afterName
+              in if q == 0x22 || q == 0x27
+                   then
+                     let !valStart = afterName + 1
+                         findQ !j
+                           | j >= len = Nothing
+                           | BSU.unsafeIndex bs j == q = Just j
+                           | otherwise = findQ (j + 1)
+                     in case findQ valStart of
+                          Nothing -> Nothing
+                          Just valEnd ->
+                            let !val = TE.decodeUtf8Lenient (sliceBS bs valStart (valEnd - valStart))
+                                !afterVal = skipSpacesB bs (valEnd + 1) len
+                                !next = if afterVal < len && BSU.unsafeIndex bs afterVal == 0x3E
+                                          then afterVal + 1
+                                          else afterVal
+                            in Just (name, val, next)
+                   else Nothing
+
+skipSpacesB :: ByteString -> Int -> Int -> Int
+skipSpacesB !bs !off !len
+  | off >= len = off
+  | otherwise =
+      let !b = BSU.unsafeIndex bs off
+      in if b == 0x20 || b == 0x09 || b == 0x0A || b == 0x0D
+           then skipSpacesB bs (off + 1) len
+           else off
+
+takeName :: ByteString -> Int -> Int -> Int
+takeName !bs !off !len = skipNameChars bs off len
 
 ------------------------------------------------------------------------
 -- Core node parser
@@ -486,19 +583,19 @@ isNameByte !b =
 ------------------------------------------------------------------------
 
 toDocument :: FastDoc -> Document
-toDocument (FastDoc bs root) = Document Nothing (materializeNode bs root)
+toDocument (FastDoc bs root ents) = Document Nothing (materializeNode ents bs root)
 
-materializeNode :: ByteString -> FastNode -> Node
-materializeNode !bs = go
+materializeNode :: Map Text Text -> ByteString -> FastNode -> Node
+materializeNode !ents !bs = go
   where
     go (FElement nameSpan attrs children) =
       let !name = materializeName bs nameSpan
-          !as = V.map (materializeAttr bs) attrs
+          !as = V.map (materializeAttr ents bs) attrs
           !cs = V.map go children
       in Element name as cs
     go (FText (Span off len)) =
       let !raw = decodeSlice bs off len
-      in Text (resolveEntitiesText raw)
+      in Text (resolveEntitiesText ents raw)
     go (FCData (Span off len)) =
       CData (decodeSlice bs off len)
     go (FComment (Span off len)) =
@@ -514,23 +611,29 @@ materializeName !bs (Span off len) =
       | T.null rest -> simpleName local
       | otherwise -> qualifiedName local (T.drop 1 rest)
 
-materializeAttr :: ByteString -> FastAttr -> Attribute
-materializeAttr !bs (FastAttr (Span nOff nLen) (Span vOff vLen)) =
+-- | Materialise an attribute, resolving predefined XML entities,
+-- numeric character references, and any user-defined entities declared
+-- in the document's internal DTD subset within the value.
+materializeAttr :: Map Text Text -> ByteString -> FastAttr -> Attribute
+materializeAttr !ents !bs (FastAttr (Span nOff nLen) (Span vOff vLen)) =
   let !rawName = decodeSlice bs nOff nLen
       !rawVal = decodeSlice bs vOff vLen
       !name = case T.breakOn ":" rawName of
                 (local, rest)
                   | T.null rest -> simpleName local
                   | otherwise -> qualifiedName local (T.drop 1 rest)
-      !val = resolveEntitiesText rawVal
+      !val = resolveEntitiesText ents rawVal
   in Attribute name val
 
 ------------------------------------------------------------------------
 -- Entity resolution (for toDocument materialization)
 ------------------------------------------------------------------------
 
-resolveEntitiesText :: Text -> Text
-resolveEntitiesText txt
+-- | Resolve XML predefined entities, numeric character references, and
+-- the supplied DTD-declared entities within @txt@.  Unknown entities are
+-- kept verbatim (lenient — the strict path is in 'XML.SAX.resolveEntities').
+resolveEntitiesText :: Map Text Text -> Text -> Text
+resolveEntitiesText !ents !txt
   | not (T.any (== '&') txt) = txt
   | otherwise = case resolveLoop txt of
       Left _ -> txt
@@ -548,7 +651,10 @@ resolveEntitiesText txt
                   | otherwise ->
                       let !entityName = T.takeWhile (/= ';') afterAmp
                           !remaining = T.drop 1 (T.dropWhile (/= ';') afterAmp)
-                      in case resolveEntity entityName of
+                          !mResolved = case resolveEntity entityName of
+                            Just t' -> Just t'
+                            Nothing -> Map.lookup entityName ents
+                      in case mResolved of
                         Nothing -> do
                           rest' <- resolveLoop remaining
                           Right (before <> "&" <> entityName <> ";" <> rest')

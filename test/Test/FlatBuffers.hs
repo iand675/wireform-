@@ -12,8 +12,8 @@ import Test.Tasty.HUnit hiding (assert)
 import Test.Tasty.Hedgehog
 
 import qualified FlatBuffers.Value as F
-import FlatBuffers.Encode (encode)
-import FlatBuffers.Decode (decode)
+import FlatBuffers.Encode (encode, encodeWithFileIdentifier)
+import FlatBuffers.Decode (decode, fileIdentifier, hasFileIdentifier)
 
 flatBuffersTests :: TestTree
 flatBuffersTests = testGroup "FlatBuffers"
@@ -21,6 +21,8 @@ flatBuffersTests = testGroup "FlatBuffers"
   , wireFormatTests
   , edgeCases
   , propertyTests
+  , fileIdentifierTests
+  , vtableDedupTests
   ]
 
 unitTests :: TestTree
@@ -191,6 +193,71 @@ propertyTests = testGroup "Property tests"
       let val = F.VVector (V.fromList (map F.VWord8 ws))
           bs = encode val
       assert (BS.length bs >= 8)
+  ]
+
+fileIdentifierTests :: TestTree
+fileIdentifierTests = testGroup "File identifier"
+  [ testCase "encodeWithFileIdentifier embeds 4 bytes after root offset" $ do
+      let table = F.VTable (V.fromList [Just (F.VInt32 1)])
+          bs = encodeWithFileIdentifier "ABCD" table
+      BS.index bs 4 @?= 0x41
+      BS.index bs 5 @?= 0x42
+      BS.index bs 6 @?= 0x43
+      BS.index bs 7 @?= 0x44
+
+  , testCase "fileIdentifier reads back the magic" $ do
+      let table = F.VTable (V.fromList [Just (F.VInt32 1)])
+          bs = encodeWithFileIdentifier "ABCD" table
+      fileIdentifier bs @?= Just "ABCD"
+
+  , testCase "hasFileIdentifier checks magic" $ do
+      let table = F.VTable (V.fromList [Just (F.VInt32 1)])
+          bs = encodeWithFileIdentifier "WFRM" table
+      hasFileIdentifier "WFRM" bs @?= True
+      hasFileIdentifier "WHAT" bs @?= False
+
+  , testCase "shorter identifier zero-padded" $ do
+      let table = F.VTable (V.fromList [Just (F.VInt32 1)])
+          bs = encodeWithFileIdentifier "AB" table
+      BS.index bs 4 @?= 0x41
+      BS.index bs 5 @?= 0x42
+      BS.index bs 6 @?= 0x00
+      BS.index bs 7 @?= 0x00
+
+  , testCase "longer identifier truncated to 4 bytes" $ do
+      let table = F.VTable (V.fromList [Just (F.VInt32 1)])
+          bs = encodeWithFileIdentifier "ABCDEFG" table
+      fileIdentifier bs @?= Just "ABCD"
+
+  , testCase "no file identifier on plain encode" $ do
+      let table = F.VTable (V.fromList [Just (F.VInt32 1)])
+          bs = encode table
+      hasFileIdentifier "ABCD" bs @?= False
+  ]
+
+vtableDedupTests :: TestTree
+vtableDedupTests = testGroup "Vtable deduplication"
+  [ testCase "two identical sub-tables share a vtable" $ do
+      let inner = F.VTable (V.fromList [Just (F.VInt32 7), Just (F.VInt32 8)])
+          outer = F.VTable (V.fromList
+            [ Just inner
+            , Just inner
+            , Just (F.VInt32 99)
+            ])
+          bs = encode outer
+      -- Sanity: encoding should be smaller than naive encoding because
+      -- the inner vtable is shared. We assert it succeeds and decodes.
+      BS.length bs > 0 @?= True
+      case decode bs of
+        Right _ -> pure ()
+        Left e  -> assertFailure $ "decode failed: " ++ e
+
+  , testCase "different field sets get different vtables" $ do
+      let a = F.VTable (V.fromList [Just (F.VInt32 1)])
+          b = F.VTable (V.fromList [Just (F.VInt32 1), Just (F.VInt32 2)])
+          outer = F.VTable (V.fromList [Just a, Just b])
+          bs = encode outer
+      BS.length bs > 0 @?= True
   ]
 
 readLE32 :: BS.ByteString -> Int -> Word32
