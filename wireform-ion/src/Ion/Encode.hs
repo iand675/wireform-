@@ -46,7 +46,7 @@ encode !val =
        _ <- writeBVM p 0
        _ <- writeRawBytes p 4 ltsBs
        _ <- writeRawBytes p (4 + BS.length ltsBs) valBs
-       pure ()
+       pure sz
 {-# NOINLINE encode #-}
 
 ------------------------------------------------------------------------
@@ -152,8 +152,8 @@ encodeValue st = go
     go = \case
       I.Null         -> BS.singleton 0x0F
       I.Bool b       -> BS.singleton (if b then 0x11 else 0x10)
-      I.Int n        -> encodeInt n
-      I.Float d      -> encodeFloat d
+      I.Int n        -> encodeIonInt n
+      I.Float d      -> encodeIonFloat d
       I.String t     -> encodeString t
       I.Blob bs      -> tdBytes 0x0A (BS.length bs) <> bs
       I.Clob bs      -> tdBytes 0x09 (BS.length bs) <> bs
@@ -185,8 +185,8 @@ encodeValue st = go
               Nothing -> 0
         in encodeAnnotationWith sid (go inner)
 
-encodeInt :: (Integral a, Num a, Ord a) => a -> ByteString
-encodeInt n
+encodeIonInt :: Integral a => a -> ByteString
+encodeIonInt n
   | n == 0 = BS.singleton 0x20
   | n > 0  =
       let !mag = fromIntegral n :: Word64
@@ -197,8 +197,8 @@ encodeInt n
           !nb = magnitudeBytes mag
       in tdBytes 0x03 nb <> magnitudeBytes' mag nb
 
-encodeFloat :: Double -> ByteString
-encodeFloat d
+encodeIonFloat :: Double -> ByteString
+encodeIonFloat d
   | d == 0    = BS.singleton 0x40
   | otherwise =
       let !w = castDoubleToWord64 d

@@ -289,7 +289,8 @@ renderScalar !mIdent !payload =
        case mIdent of
          Nothing -> pure ()
          Just i  -> writeBytesAt p 4 i
-       writeBytesAt p headerSize payload)
+       writeBytesAt p headerSize payload
+       pure sz)
 
 renderRoot :: Maybe ByteString -> Int -> PlanSt -> ByteString
 renderRoot !mIdent !rootId !st =
@@ -310,7 +311,8 @@ renderRoot !mIdent !rootId !st =
        case mIdent of
          Nothing -> pure ()
          Just i  -> writeBytesAt p 4 i
-       emitChunks p offMap chunks order offsets)
+       emitChunks p offMap chunks order offsets
+       pure total)
 
 -- | DFS preorder traversal from the root over non-vtable dependents.
 dfsOrder :: IM.IntMap Chunk -> Int -> [Int]
