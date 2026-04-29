@@ -101,7 +101,6 @@ arrow-cpp, parquet-mr, and pyarrow are recognised on read.
 - Parquet encryption (modular encryption, footer key wrapping).
   Out of scope for the current sweep — needs a vetted AES-GCM
   implementation as a new dependency.
-- Iceberg REST catalog client (D.4).
 
 ### Closed in this iteration
 
@@ -115,3 +114,7 @@ arrow-cpp, parquet-mr, and pyarrow are recognised on read.
   exactly (dictionary length streams have implicit counts).
 - ORC writer paths for `timestamp` / `date` / `decimal64` columns,
   including the SECONDARY-stream nanosecond packing.
+- Iceberg REST catalog protocol layer (`Iceberg.RestCatalog`) with
+  request/response types, JSON codecs, atomic-commit
+  `TableUpdate` / `TableRequirement` algebras, and an abstract
+  `CatalogClient` that plugs in any HTTP transport.

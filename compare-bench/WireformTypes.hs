@@ -33,7 +33,7 @@ import Foreign.Ptr (castPtr)
 import System.IO.Unsafe (unsafeDupablePerformIO)
 import Proto.Decode
 import Proto.Encode.Archetype
-import Proto.Encode.Direct
+import Wireform.Encode.Direct
 import qualified Proto.SizedBuilder as SB
 import Proto.Wire.Encode (varintSize)
 import Proto.Wire.Decode (runDecoder', Decoder(..))

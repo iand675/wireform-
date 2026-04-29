@@ -51,7 +51,6 @@ library
     Proto.Dynamic
     Proto.Encode
     Proto.Encode.Archetype
-    Proto.Encode.Direct
     Proto.Encode.Lazy
     Proto.FieldPresence
     Proto.GRPC
