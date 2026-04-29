@@ -23,6 +23,7 @@ flatBuffersTests = testGroup "FlatBuffers"
   , propertyTests
   , fileIdentifierTests
   , vtableDedupTests
+  , nestedTableTests
   ]
 
 unitTests :: TestTree
@@ -258,6 +259,88 @@ vtableDedupTests = testGroup "Vtable deduplication"
           outer = F.VTable (V.fromList [Just a, Just b])
           bs = encode outer
       BS.length bs > 0 @?= True
+  ]
+
+nestedTableTests :: TestTree
+nestedTableTests = testGroup "Nested tables (decode)"
+  [ testCase "single nested table roundtrips" $ do
+      let inner = F.VTable (V.fromList [Just (F.VInt32 99)])
+          outer = F.VTable (V.fromList [Just inner])
+          bs = encode outer
+      case decode bs of
+        Right (F.VTable fields) -> case V.toList fields of
+          [Just (F.VTable inner')] -> case V.toList inner' of
+            [Just _] -> pure ()
+            _ -> assertFailure "inner table missing field"
+          _ -> assertFailure $ "expected single nested table, got: " ++ show fields
+        Left e  -> assertFailure $ "decode failed: " ++ e
+        Right v -> assertFailure $ "expected VTable, got " ++ show v
+
+  , testCase "two-deep nesting roundtrips" $ do
+      let leaf = F.VTable (V.fromList [Just (F.VInt32 1)])
+          mid  = F.VTable (V.fromList [Just leaf])
+          root = F.VTable (V.fromList [Just mid])
+          bs   = encode root
+      case decode bs of
+        Right (F.VTable rootFs) -> case V.toList rootFs of
+          [Just (F.VTable midFs)] -> case V.toList midFs of
+            [Just (F.VTable leafFs)] -> case V.toList leafFs of
+              [Just _] -> pure ()
+              other -> assertFailure $ "leaf shape: " ++ show other
+            other -> assertFailure $ "mid shape: " ++ show other
+          other -> assertFailure $ "root shape: " ++ show other
+        Right v -> assertFailure $ "expected VTable, got " ++ show v
+        Left e  -> assertFailure $ "decode failed: " ++ e
+
+  , testCase "absent fields preserved on decode" $ do
+      let table = F.VTable (V.fromList
+            [ Just (F.VInt32 7)
+            , Nothing
+            , Just (F.VInt32 9)
+            ])
+          bs = encode table
+      case decode bs of
+        Right (F.VTable fields) -> do
+          V.length fields @?= 3
+          case fields V.! 1 of
+            Nothing -> pure ()
+            Just _  -> assertFailure "middle field should be absent"
+        Right v -> assertFailure $ "expected VTable, got " ++ show v
+        Left e  -> assertFailure $ "decode failed: " ++ e
+
+  , testCase "string field roundtrips through nested table" $ do
+      let inner = F.VTable (V.fromList [Just (F.VString (T.pack "hi"))])
+          outer = F.VTable (V.fromList [Just inner])
+          bs = encode outer
+      case decode bs of
+        Right (F.VTable outerFs) -> case V.toList outerFs of
+          [Just (F.VTable innerFs)] -> case V.toList innerFs of
+            [Just (F.VString t)] -> t @?= T.pack "hi"
+            other -> assertFailure $ "inner shape: " ++ show other
+          other -> assertFailure $ "outer shape: " ++ show other
+        Right v -> assertFailure $ "expected VTable, got " ++ show v
+        Left e  -> assertFailure $ "decode failed: " ++ e
+
+  , testCase "shared vtable: two inner tables decode independently" $ do
+      let inner = F.VTable (V.fromList [Just (F.VInt32 1), Just (F.VInt32 2)])
+          outer = F.VTable (V.fromList [Just inner, Just inner])
+          bs = encode outer
+      case decode bs of
+        Right (F.VTable outerFs) -> case V.toList outerFs of
+          [Just (F.VTable a), Just (F.VTable b)] -> do
+            V.length a @?= 2
+            V.length b @?= 2
+          other -> assertFailure $ "outer shape: " ++ show other
+        Right v -> assertFailure $ "expected VTable, got " ++ show v
+        Left e  -> assertFailure $ "decode failed: " ++ e
+
+  , testCase "table with file identifier still decodes" $ do
+      let t = F.VTable (V.fromList [Just (F.VInt32 7)])
+          bs = encodeWithFileIdentifier "WFRM" t
+      case decode bs of
+        Right (F.VTable fields) -> V.length fields @?= 1
+        Right v -> assertFailure $ "expected VTable, got " ++ show v
+        Left e  -> assertFailure $ "decode failed: " ++ e
   ]
 
 readLE32 :: BS.ByteString -> Int -> Word32
