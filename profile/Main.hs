@@ -67,7 +67,7 @@ data HWithRepeated = HWithRepeated
 instance H.MessageEncode HWithRepeated where
   buildMessage m =
     (let vs = hwrValues m in if V.null vs then mempty
-       else H.encodePackedVarint 1 (VU.convert (V.map fromIntegral vs))) <>
+       else H.encodePackedWord64 1 (VU.convert (V.map fromIntegral vs))) <>
     V.foldl' (\acc s -> acc <> H.encodeFieldString 2 s) mempty (hwrTags m) <>
     V.foldl' (\acc item -> acc <> H.encodeFieldMessage 3 item) mempty (hwrItems m)
   {-# INLINE buildMessage #-}

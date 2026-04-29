@@ -114,7 +114,9 @@ instance NFData DecodeError where
   rnf (SubMessageError e) = rnf e
   rnf (CustomError s) = rnf s
 
--- | Legacy result type, kept for compatibility with runDecoder'.
+-- | Boxed result type returned by 'runDecoder''.  Used by callers that
+-- need to thread the post-decode offset through their own decoders
+-- (TDP, packed-field decoding, RLE, profile harness).
 data DecodeResult a
   = DecodeOK !a {-# UNPACK #-} !Int
   | DecodeFail !DecodeError
@@ -159,7 +161,9 @@ runDecoder (Decoder f) bs =
     (# | e #) -> Left e
 {-# INLINE runDecoder #-}
 
--- | Run a decoder returning the legacy DecodeResult (for internal use).
+-- | Run a decoder starting from a caller-supplied offset, returning a
+-- 'DecodeResult' that carries the post-decode offset.  Used by callers
+-- (TDP, packed-field readers, RLE) that thread offsets manually.
 runDecoder' :: Decoder a -> ByteString -> Int -> DecodeResult a
 runDecoder' (Decoder f) bs (I# off) =
   case f bs off of

@@ -20,8 +20,6 @@ import Proto.Wire.Decode
 import Proto.Encode
 import Proto.Decode
 import qualified Proto.SizedBuilder as SB
-import Proto.Church
-
 roundtripTests :: TestTree
 roundtripTests = testGroup "Roundtrip Encoding/Decoding"
   [ testGroup "Hand-crafted message roundtrip"
@@ -159,7 +157,7 @@ roundtripTests = testGroup "Roundtrip Encoding/Decoding"
       [ testProperty "packed varint roundtrip" $ property $ do
           vals <- forAll $ Gen.list (Range.linear 0 50) (Gen.word64 (Range.linear 0 maxBound))
           let vec = VU.fromList vals
-              encoded = buildToBS (encodePackedVarint 1 vec)
+              encoded = buildToBS (encodePackedWord64 1 vec)
           if VU.null vec
             then assert (BS.null encoded)
             else case runDecoder (getTag >> decodePackedVarint) encoded of
@@ -337,20 +335,6 @@ roundtripTests = testGroup "Roundtrip Encoding/Decoding"
           BS.length bs === SB.size sb
       ]
 
-  , testGroup "Church-encoded accumulation"
-      [ testCase "DList accumulation" $ do
-          let dl = foldl snocDList emptyDList [1 :: Int, 2, 3, 4, 5]
-          dlistToList dl @?= [1, 2, 3, 4, 5]
-
-      , testCase "ChurchList accumulation" $ do
-          let cl = foldl snocChurchList emptyChurchList [1 :: Int, 2, 3, 4, 5]
-          churchListToList cl @?= [1, 2, 3, 4, 5]
-
-      , testProperty "DList preserves order" $ property $ do
-          xs <- forAll $ Gen.list (Range.linear 0 100) (Gen.int (Range.linear 0 1000))
-          let dl = foldl snocDList emptyDList xs
-          dlistToList dl === xs
-      ]
   ]
 
 -- Test message type using the encode/decode typeclasses

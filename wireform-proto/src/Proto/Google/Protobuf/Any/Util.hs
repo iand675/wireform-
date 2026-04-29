@@ -20,13 +20,8 @@ module Proto.Google.Protobuf.Any.Util
   , typeUrlPrefix
   , typeUrlOf
   , typeNameFromUrl
-
-    -- * Legacy aliases
-  , AnyTypeRegistry
-  , lookupType
   ) where
 
-import Data.ByteString (ByteString)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -36,13 +31,6 @@ import Proto.Decode (DecodeError, decodeMessage)
 import Proto.Message (IsMessage (..))
 import Proto.Google.Protobuf.Any (Any(..))
 import Proto.Registry (MessageRegistry, emptyRegistry, registerType, lookupDecoder, DynamicMessage(..))
-
--- | Legacy alias.
-type AnyTypeRegistry = MessageRegistry
-
--- | Legacy alias.
-lookupType :: Text -> MessageRegistry -> Maybe (ByteString -> Either DecodeError DynamicMessage)
-lookupType = lookupDecoder
 
 typeUrlPrefix :: Text
 typeUrlPrefix = "type.googleapis.com/"

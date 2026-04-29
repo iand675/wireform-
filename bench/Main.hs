@@ -112,7 +112,7 @@ benchPackedEncode = do
   putStrLn "\nPacked varint encode (10k values):"
 
   t1 <- getCPUTime
-  let !bs = BL.toStrict $ B.toLazyByteString $ encodePackedVarint 1 vals
+  let !bs = BL.toStrict $ B.toLazyByteString $ encodePackedWord64 1 vals
   t2 <- getCPUTime
 
   putStrLn $ "  Time: " <> show ((t2 - t1) `div` 1000000000) <> " ms"
@@ -121,7 +121,7 @@ benchPackedEncode = do
 benchPackedDecode :: IO ()
 benchPackedDecode = do
   let vals = VU.fromList [1..10000 :: Word64]
-      encoded = BL.toStrict $ B.toLazyByteString $ encodePackedVarint 1 vals
+      encoded = BL.toStrict $ B.toLazyByteString $ encodePackedWord64 1 vals
 
   putStrLn "\nPacked varint decode (10k values):"
 

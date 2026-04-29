@@ -1545,7 +1545,7 @@ collectLocalMessageNames scope = concatMap go
       _ -> []
 
 -- | Generate a @registerModuleTypes@ function that registers all message
--- types in this module with an 'AnyTypeRegistry'.
+-- types in this module with a 'MessageRegistry'.
 genRegisterModuleTypes :: [Text] -> Doc ann
 genRegisterModuleTypes msgNames = case msgNames of
   [] -> mempty
