@@ -7,6 +7,19 @@
 module Iceberg.JSON
   ( metadataToJSON
   , metadataFromJSON
+    -- * Subcomponent codecs
+    --
+    -- These are exported so 'Iceberg.RestCatalog' (and other callers
+    -- that work with table metadata fragments) don't have to duplicate
+    -- the JSON shape conventions.
+  , schemaToJSON
+  , schemaFromJSON
+  , snapshotToJSON
+  , snapshotFromJSON
+  , partitionSpecToJSON
+  , partitionSpecFromJSON
+  , sortOrderToJSON
+  , sortOrderFromJSON
   ) where
 
 import qualified Data.Aeson as Aeson
