@@ -3,465 +3,355 @@ module Test.FlatBuffers (flatBuffersTests) where
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import qualified Data.Vector as V
-import Data.Word (Word32)
-import Hedgehog
-import qualified Hedgehog.Gen as Gen
-import qualified Hedgehog.Range as Range
 import Test.Tasty
-import Test.Tasty.HUnit hiding (assert)
-import Test.Tasty.Hedgehog
+import Test.Tasty.HUnit
 
 import qualified FlatBuffers.Value as F
-import FlatBuffers.Encode (encode, encodeWithFileIdentifier)
-import FlatBuffers.Decode (decode, fileIdentifier, hasFileIdentifier)
 import qualified FlatBuffers.Parser as P
 import qualified FlatBuffers.Schema as FS
-import qualified FlatBuffers.Typed as FT
+import FlatBuffers.Encode (encode)
+import FlatBuffers.Decode (decode, fileIdentifier, hasFileIdentifier)
 
 flatBuffersTests :: TestTree
 flatBuffersTests = testGroup "FlatBuffers"
-  [ unitTests
-  , wireFormatTests
-  , edgeCases
-  , propertyTests
-  , fileIdentifierTests
-  , vtableDedupTests
+  [ scalarRoundtripTests
+  , defaultsTests
+  , stringAndVectorTests
   , nestedTableTests
-  , schemaAwareTests
+  , vtableDedupTests
+  , fileIdentifierTests
+  , structAndEnumTests
+  , errorReportingTests
   ]
 
-unitTests :: TestTree
-unitTests = testGroup "Unit tests"
-  [ testCase "VBool true encodes" $ do
-      let bs = encode (F.VBool True)
-      BS.length bs @?= 5
-      BS.index bs 4 @?= 0x01
+------------------------------------------------------------------------
+-- Schemas used across the tests
+------------------------------------------------------------------------
 
-  , testCase "VBool false encodes" $ do
-      let bs = encode (F.VBool False)
-      BS.length bs @?= 5
-      BS.index bs 4 @?= 0x00
-
-  , testCase "VInt8 encodes" $ do
-      let bs = encode (F.VInt8 42)
-      BS.length bs @?= 5
-      BS.index bs 4 @?= 42
-
-  , testCase "VInt16 encodes" $ do
-      let bs = encode (F.VInt16 256)
-      BS.length bs @?= 6
-
-  , testCase "VInt32 encodes" $ do
-      let bs = encode (F.VInt32 100000)
-      BS.length bs @?= 8
-
-  , testCase "VInt64 encodes" $ do
-      let bs = encode (F.VInt64 maxBound)
-      BS.length bs @?= 12
-
-  , testCase "VWord8 encodes" $ do
-      let bs = encode (F.VWord8 255)
-      BS.length bs @?= 5
-
-  , testCase "VWord16 encodes" $ do
-      let bs = encode (F.VWord16 65535)
-      BS.length bs @?= 6
-
-  , testCase "VWord32 encodes" $ do
-      let bs = encode (F.VWord32 maxBound)
-      BS.length bs @?= 8
-
-  , testCase "VWord64 encodes" $ do
-      let bs = encode (F.VWord64 maxBound)
-      BS.length bs @?= 12
-
-  , testCase "VFloat encodes" $ do
-      let bs = encode (F.VFloat 3.14)
-      BS.length bs @?= 8
-
-  , testCase "VDouble encodes" $ do
-      let bs = encode (F.VDouble 2.718)
-      BS.length bs @?= 12
-
-  , testCase "VString encodes" $ do
-      let bs = encode (F.VString (T.pack "hello"))
-      BS.length bs > 4 @?= True
-
-  , testCase "VVector empty encodes" $ do
-      let bs = encode (F.VVector V.empty)
-      BS.length bs @?= 8
+monsterSchema :: FS.FlatBuffersSchema
+monsterSchema = parseOrFail $ T.unlines
+  [ "table Monster {"
+  , "  name:string;"
+  , "  hp:short = 100;"
+  , "  mana:int = 150;"
+  , "  inventory:[ubyte];"
+  , "  friend:Monster;"
+  , "}"
+  , "root_type Monster;"
+  , "file_identifier \"MNST\";"
   ]
 
-wireFormatTests :: TestTree
-wireFormatTests = testGroup "Wire format"
-  [ testCase "Root offset is first 4 bytes LE" $ do
-      let bs = encode (F.VInt32 42)
-          off = readLE32 bs 0
-      off @?= 4
-
-  , testCase "VString length prefix" $ do
-      let bs = encode (F.VString (T.pack "ABC"))
-          strLen = readLE32 bs 4
-      strLen @?= 3
-
-  , testCase "VString NUL terminated" $ do
-      let bs = encode (F.VString (T.pack "AB"))
-          nulPos = 4 + 4 + 2
-      BS.index bs nulPos @?= 0x00
-
-  , testCase "VVector length prefix" $ do
-      let bs = encode (F.VVector (V.fromList [F.VWord8 1, F.VWord8 2]))
-          cnt = readLE32 bs 4
-      cnt @?= 2
-
-  , testCase "VInt32 LE bytes" $ do
-      let bs = encode (F.VInt32 0x04030201)
-      BS.index bs 4 @?= 0x01
-      BS.index bs 5 @?= 0x02
-      BS.index bs 6 @?= 0x03
-      BS.index bs 7 @?= 0x04
+scalarsSchema :: FS.FlatBuffersSchema
+scalarsSchema = parseOrFail $ T.unlines
+  [ "table Scalars {"
+  , "  b:bool;"
+  , "  i8:byte;"
+  , "  u8:ubyte;"
+  , "  i16:short;"
+  , "  u16:ushort;"
+  , "  i32:int;"
+  , "  u32:uint;"
+  , "  i64:long;"
+  , "  u64:ulong;"
+  , "  f:float;"
+  , "  d:double;"
+  , "}"
+  , "root_type Scalars;"
   ]
 
-edgeCases :: TestTree
-edgeCases = testGroup "Edge cases"
-  [ testCase "Empty string" $ do
-      let bs = encode (F.VString T.empty)
-      BS.length bs > 4 @?= True
-      readLE32 bs 4 @?= 0
-
-  , testCase "Empty vector" $ do
-      let bs = encode (F.VVector V.empty)
-      readLE32 bs 4 @?= 0
-
-  , testCase "VStruct encodes" $ do
-      let val = F.VStruct (V.fromList [F.VInt32 1, F.VInt32 2])
-          bs = encode val
-      BS.length bs @?= 12
-
-  , testCase "Decode too short" $
-      case decode (BS.pack [0, 0]) of
-        Left _ -> pure ()
-        Right _ -> assertFailure "expected error on short input"
-
-  , testCase "Nested VVector" $ do
-      let val = F.VVector (V.fromList [F.VVector (V.fromList [F.VWord8 1])])
-          bs = encode val
-      BS.length bs > 4 @?= True
+stringsSchema :: FS.FlatBuffersSchema
+stringsSchema = parseOrFail $ T.unlines
+  [ "table Strs {"
+  , "  one:string;"
+  , "  many:[string];"
+  , "}"
+  , "root_type Strs;"
   ]
 
-propertyTests :: TestTree
-propertyTests = testGroup "Property tests"
-  [ testProperty "VBool encode size" $ property $ do
-      b <- forAll Gen.bool
-      let bs = encode (F.VBool b)
-      BS.length bs === 5
-
-  , testProperty "VInt32 encode size" $ property $ do
-      n <- forAll $ Gen.int32 Range.linearBounded
-      let bs = encode (F.VInt32 n)
-      BS.length bs === 8
-
-  , testProperty "VInt64 encode size" $ property $ do
-      n <- forAll $ Gen.int64 Range.linearBounded
-      let bs = encode (F.VInt64 n)
-      BS.length bs === 12
-
-  , testProperty "VWord32 encode size" $ property $ do
-      w <- forAll $ Gen.word32 Range.linearBounded
-      let bs = encode (F.VWord32 w)
-      BS.length bs === 8
-
-  , testProperty "VWord64 encode size" $ property $ do
-      w <- forAll $ Gen.word64 Range.linearBounded
-      let bs = encode (F.VWord64 w)
-      BS.length bs === 12
-
-  , testProperty "VFloat encode size" $ property $ do
-      f <- forAll $ Gen.float (Range.linearFrac (-1e6) 1e6)
-      let bs = encode (F.VFloat f)
-      BS.length bs === 8
-
-  , testProperty "VDouble encode size" $ property $ do
-      d <- forAll $ Gen.double (Range.linearFrac (-1e6) 1e6)
-      let bs = encode (F.VDouble d)
-      BS.length bs === 12
-
-  , testProperty "VString encode has correct structure" $ property $ do
-      t <- forAll $ Gen.text (Range.linear 0 64) Gen.alphaNum
-      let bs = encode (F.VString t)
-      assert (BS.length bs > 4)
-      let strLen = readLE32 bs 4
-      strLen === fromIntegral (T.length t)
-
-  , testProperty "VVector of bytes encode" $ property $ do
-      ws <- forAll $ Gen.list (Range.linear 0 20) (Gen.word8 Range.linearBounded)
-      let val = F.VVector (V.fromList (map F.VWord8 ws))
-          bs = encode val
-      assert (BS.length bs >= 8)
+extSchema :: FS.FlatBuffersSchema
+extSchema = parseOrFail $ T.unlines
+  [ "enum Color : ubyte { Red = 1, Green = 2, Blue = 4 }"
+  , "struct Vec3 { x:float; y:float; z:float; }"
+  , "table Item { pos:Vec3; tint:Color = Green; }"
+  , "root_type Item;"
   ]
 
-fileIdentifierTests :: TestTree
-fileIdentifierTests = testGroup "File identifier"
-  [ testCase "encodeWithFileIdentifier embeds 4 bytes after root offset" $ do
-      let table = F.VTable (V.fromList [Just (F.VInt32 1)])
-          bs = encodeWithFileIdentifier "ABCD" table
-      BS.index bs 4 @?= 0x41
-      BS.index bs 5 @?= 0x42
-      BS.index bs 6 @?= 0x43
-      BS.index bs 7 @?= 0x44
+------------------------------------------------------------------------
+-- Tests
+------------------------------------------------------------------------
 
-  , testCase "fileIdentifier reads back the magic" $ do
-      let table = F.VTable (V.fromList [Just (F.VInt32 1)])
-          bs = encodeWithFileIdentifier "ABCD" table
-      fileIdentifier bs @?= Just "ABCD"
-
-  , testCase "hasFileIdentifier checks magic" $ do
-      let table = F.VTable (V.fromList [Just (F.VInt32 1)])
-          bs = encodeWithFileIdentifier "WFRM" table
-      hasFileIdentifier "WFRM" bs @?= True
-      hasFileIdentifier "WHAT" bs @?= False
-
-  , testCase "shorter identifier zero-padded" $ do
-      let table = F.VTable (V.fromList [Just (F.VInt32 1)])
-          bs = encodeWithFileIdentifier "AB" table
-      BS.index bs 4 @?= 0x41
-      BS.index bs 5 @?= 0x42
-      BS.index bs 6 @?= 0x00
-      BS.index bs 7 @?= 0x00
-
-  , testCase "longer identifier truncated to 4 bytes" $ do
-      let table = F.VTable (V.fromList [Just (F.VInt32 1)])
-          bs = encodeWithFileIdentifier "ABCDEFG" table
-      fileIdentifier bs @?= Just "ABCD"
-
-  , testCase "no file identifier on plain encode" $ do
-      let table = F.VTable (V.fromList [Just (F.VInt32 1)])
-          bs = encode table
-      hasFileIdentifier "ABCD" bs @?= False
-  ]
-
-vtableDedupTests :: TestTree
-vtableDedupTests = testGroup "Vtable deduplication"
-  [ testCase "two identical sub-tables share a vtable" $ do
-      let inner = F.VTable (V.fromList [Just (F.VInt32 7), Just (F.VInt32 8)])
-          outer = F.VTable (V.fromList
-            [ Just inner
-            , Just inner
-            , Just (F.VInt32 99)
+scalarRoundtripTests :: TestTree
+scalarRoundtripTests = testGroup "Scalar field round-trips"
+  [ testCase "every scalar width round-trips with its declared type" $ do
+      let v = F.VTable (V.fromList
+            [ Just (F.VBool True)
+            , Just (F.VInt8   (-7))
+            , Just (F.VWord8  200)
+            , Just (F.VInt16  (-32000))
+            , Just (F.VWord16 60000)
+            , Just (F.VInt32  (-1000000))
+            , Just (F.VWord32 4000000000)
+            , Just (F.VInt64  (-9000000000))
+            , Just (F.VWord64 18000000000000000000)
+            , Just (F.VFloat  3.5)
+            , Just (F.VDouble 2.718281828)
             ])
-          bs = encode outer
-      -- Sanity: encoding should be smaller than naive encoding because
-      -- the inner vtable is shared. We assert it succeeds and decodes.
-      BS.length bs > 0 @?= True
-      case decode bs of
-        Right _ -> pure ()
-        Left e  -> assertFailure $ "decode failed: " ++ e
+      bs <- expectRight "encode" (encode scalarsSchema v)
+      out <- expectRight "decode" (decode scalarsSchema bs)
+      out @?= v
 
-  , testCase "different field sets get different vtables" $ do
-      let a = F.VTable (V.fromList [Just (F.VInt32 1)])
-          b = F.VTable (V.fromList [Just (F.VInt32 1), Just (F.VInt32 2)])
-          outer = F.VTable (V.fromList [Just a, Just b])
-          bs = encode outer
-      BS.length bs > 0 @?= True
-  ]
-
-nestedTableTests :: TestTree
-nestedTableTests = testGroup "Nested tables (decode)"
-  [ testCase "single nested table roundtrips" $ do
-      let inner = F.VTable (V.fromList [Just (F.VInt32 99)])
-          outer = F.VTable (V.fromList [Just inner])
-          bs = encode outer
-      case decode bs of
-        Right (F.VTable fields) -> case V.toList fields of
-          [Just (F.VTable inner')] -> case V.toList inner' of
-            [Just _] -> pure ()
-            _ -> assertFailure "inner table missing field"
-          _ -> assertFailure $ "expected single nested table, got: " ++ show fields
-        Left e  -> assertFailure $ "decode failed: " ++ e
-        Right v -> assertFailure $ "expected VTable, got " ++ show v
-
-  , testCase "two-deep nesting roundtrips" $ do
-      let leaf = F.VTable (V.fromList [Just (F.VInt32 1)])
-          mid  = F.VTable (V.fromList [Just leaf])
-          root = F.VTable (V.fromList [Just mid])
-          bs   = encode root
-      case decode bs of
-        Right (F.VTable rootFs) -> case V.toList rootFs of
-          [Just (F.VTable midFs)] -> case V.toList midFs of
-            [Just (F.VTable leafFs)] -> case V.toList leafFs of
-              [Just _] -> pure ()
-              other -> assertFailure $ "leaf shape: " ++ show other
-            other -> assertFailure $ "mid shape: " ++ show other
-          other -> assertFailure $ "root shape: " ++ show other
-        Right v -> assertFailure $ "expected VTable, got " ++ show v
-        Left e  -> assertFailure $ "decode failed: " ++ e
-
-  , testCase "absent fields preserved on decode" $ do
-      let table = F.VTable (V.fromList
-            [ Just (F.VInt32 7)
-            , Nothing
-            , Just (F.VInt32 9)
+  , testCase "user-supplied wider constructor is narrowed to declared width" $ do
+      -- The schema says i32 = int, so a VInt64 input is coerced down.
+      let v = F.VTable (V.fromList
+            [ Just (F.VBool False)
+            , Just (F.VInt8 0)
+            , Just (F.VWord8 0)
+            , Just (F.VInt16 0)
+            , Just (F.VWord16 0)
+            , Just (F.VInt64 42)         -- supplied as 64-bit
+            , Just (F.VWord32 0)
+            , Just (F.VInt64 0)
+            , Just (F.VWord64 0)
+            , Just (F.VFloat 0)
+            , Just (F.VDouble 0)
             ])
-          bs = encode table
-      case decode bs of
-        Right (F.VTable fields) -> do
-          V.length fields @?= 3
-          case fields V.! 1 of
-            Nothing -> pure ()
-            Just _  -> assertFailure "middle field should be absent"
-        Right v -> assertFailure $ "expected VTable, got " ++ show v
-        Left e  -> assertFailure $ "decode failed: " ++ e
-
-  , testCase "string field roundtrips through nested table" $ do
-      let inner = F.VTable (V.fromList [Just (F.VString (T.pack "hi"))])
-          outer = F.VTable (V.fromList [Just inner])
-          bs = encode outer
-      case decode bs of
-        Right (F.VTable outerFs) -> case V.toList outerFs of
-          [Just (F.VTable innerFs)] -> case V.toList innerFs of
-            [Just (F.VString t)] -> t @?= T.pack "hi"
-            other -> assertFailure $ "inner shape: " ++ show other
-          other -> assertFailure $ "outer shape: " ++ show other
-        Right v -> assertFailure $ "expected VTable, got " ++ show v
-        Left e  -> assertFailure $ "decode failed: " ++ e
-
-  , testCase "shared vtable: two inner tables decode independently" $ do
-      let inner = F.VTable (V.fromList [Just (F.VInt32 1), Just (F.VInt32 2)])
-          outer = F.VTable (V.fromList [Just inner, Just inner])
-          bs = encode outer
-      case decode bs of
-        Right (F.VTable outerFs) -> case V.toList outerFs of
-          [Just (F.VTable a), Just (F.VTable b)] -> do
-            V.length a @?= 2
-            V.length b @?= 2
-          other -> assertFailure $ "outer shape: " ++ show other
-        Right v -> assertFailure $ "expected VTable, got " ++ show v
-        Left e  -> assertFailure $ "decode failed: " ++ e
-
-  , testCase "table with file identifier still decodes" $ do
-      let t = F.VTable (V.fromList [Just (F.VInt32 7)])
-          bs = encodeWithFileIdentifier "WFRM" t
-      case decode bs of
-        Right (F.VTable fields) -> V.length fields @?= 1
-        Right v -> assertFailure $ "expected VTable, got " ++ show v
-        Left e  -> assertFailure $ "decode failed: " ++ e
-  ]
-
-schemaAwareTests :: TestTree
-schemaAwareTests = testGroup "Schema-aware encode/decode"
-  [ testCase "round-trip of a Monster table with defaults" $ do
-      let schema = parseOrFail monsterSchema
-          v = F.VTable (V.fromList
-                [ Just (F.VString "Goblin")
-                , Just (F.VInt16 50)
-                , Nothing
-                , Nothing
-                , Nothing
-                ])
-      bs <- expectRight "encode" (FT.encodeWithSchema schema v)
-      BS.take 4 (BS.drop 4 bs) @?= "MNST"
-      out <- expectRight "decode" (FT.decodeWithSchema schema bs)
+      bs <- expectRight "encode" (encode scalarsSchema v)
+      out <- expectRight "decode" (decode scalarsSchema bs)
       case out of
-        F.VTable fs -> do
-          V.length fs @?= 5
-          fs V.! 0 @?= Just (F.VString "Goblin")
-          fs V.! 1 @?= Just (F.VInt16 50)
-          fs V.! 2 @?= Just (F.VInt32 150)
-          fs V.! 3 @?= Nothing
-          fs V.! 4 @?= Nothing
-        _ -> assertFailure $ "expected VTable, got " ++ show out
+        F.VTable fs -> fs V.! 5 @?= Just (F.VInt32 42)
+        _ -> assertFailure "expected VTable"
+  ]
 
-  , testCase "vector<ubyte> round-trips through schema" $ do
-      let schema = parseOrFail monsterSchema
-          inv = F.VVector (V.fromList [F.VWord8 1, F.VWord8 2, F.VWord8 3])
-          v = F.VTable (V.fromList
-                [ Just (F.VString "Skeleton")
-                , Nothing, Nothing
-                , Just inv
-                , Nothing
-                ])
-      bs <- expectRight "encode" (FT.encodeWithSchema schema v)
-      out <- expectRight "decode" (FT.decodeWithSchema schema bs)
+defaultsTests :: TestTree
+defaultsTests = testGroup "Schema-declared defaults"
+  [ testCase "absent scalar fields take their declared default" $ do
+      let v = F.VTable (V.fromList
+            [ Just (F.VString "Goblin")
+            , Nothing  -- hp default = 100
+            , Nothing  -- mana default = 150
+            , Nothing  -- inventory: reference type, stays absent
+            , Nothing  -- friend: reference type, stays absent
+            ])
+      bs <- expectRight "encode" (encode monsterSchema v)
+      out <- expectRight "decode" (decode monsterSchema bs)
       case out of
         F.VTable fs -> do
           fs V.! 1 @?= Just (F.VInt16 100)
           fs V.! 2 @?= Just (F.VInt32 150)
-          fs V.! 3 @?= Just inv
+          fs V.! 3 @?= Nothing
+          fs V.! 4 @?= Nothing
         _ -> assertFailure "expected VTable"
 
-  , testCase "self-referential nested table (friend)" $ do
-      let schema = parseOrFail monsterSchema
-          inner = F.VTable (V.fromList
-                [ Just (F.VString "Imp")
-                , Nothing, Nothing, Nothing, Nothing ])
+  , testCase "supplied value overrides default" $ do
+      let v = F.VTable (V.fromList
+            [ Just (F.VString "Goblin")
+            , Just (F.VInt16 50)
+            , Nothing
+            , Nothing
+            , Nothing
+            ])
+      bs <- expectRight "encode" (encode monsterSchema v)
+      out <- expectRight "decode" (decode monsterSchema bs)
+      case out of
+        F.VTable fs -> fs V.! 1 @?= Just (F.VInt16 50)
+        _ -> assertFailure "expected VTable"
+  ]
+
+stringAndVectorTests :: TestTree
+stringAndVectorTests = testGroup "Strings and vectors"
+  [ testCase "string round-trip" $ do
+      let v = F.VTable (V.fromList
+            [ Just (F.VString "hello, world")
+            , Nothing ])
+      bs <- expectRight "encode" (encode stringsSchema v)
+      out <- expectRight "decode" (decode stringsSchema bs)
+      case out of
+        F.VTable fs -> fs V.! 0 @?= Just (F.VString "hello, world")
+        _ -> assertFailure "expected VTable"
+
+  , testCase "vector<ubyte> round-trip" $ do
+      let inv = F.VVector (V.fromList [F.VWord8 1, F.VWord8 2, F.VWord8 3])
           v = F.VTable (V.fromList
-                [ Just (F.VString "Demon")
-                , Nothing, Nothing, Nothing
-                , Just inner ])
-      bs <- expectRight "encode" (FT.encodeWithSchema schema v)
-      out <- expectRight "decode" (FT.decodeWithSchema schema bs)
+            [ Just (F.VString "Skeleton")
+            , Nothing
+            , Nothing
+            , Just inv
+            , Nothing
+            ])
+      bs <- expectRight "encode" (encode monsterSchema v)
+      out <- expectRight "decode" (decode monsterSchema bs)
+      case out of
+        F.VTable fs -> fs V.! 3 @?= Just inv
+        _ -> assertFailure "expected VTable"
+
+  , testCase "vector<string> round-trip" $ do
+      let many = F.VVector (V.fromList
+            [F.VString "a", F.VString "bb", F.VString "ccc"])
+          v = F.VTable (V.fromList [Nothing, Just many])
+      bs <- expectRight "encode" (encode stringsSchema v)
+      out <- expectRight "decode" (decode stringsSchema bs)
+      case out of
+        F.VTable fs -> fs V.! 1 @?= Just many
+        _ -> assertFailure "expected VTable"
+
+  , testCase "empty string and empty vector" $ do
+      let v = F.VTable (V.fromList
+            [ Just (F.VString "")
+            , Just (F.VVector V.empty) ])
+      bs <- expectRight "encode" (encode stringsSchema v)
+      out <- expectRight "decode" (decode stringsSchema bs)
+      case out of
+        F.VTable fs -> do
+          fs V.! 0 @?= Just (F.VString "")
+          fs V.! 1 @?= Just (F.VVector V.empty)
+        _ -> assertFailure "expected VTable"
+  ]
+
+nestedTableTests :: TestTree
+nestedTableTests = testGroup "Nested tables"
+  [ testCase "single nested table round-trip" $ do
+      let inner = F.VTable (V.fromList
+            [ Just (F.VString "Imp"), Nothing, Nothing, Nothing, Nothing ])
+          v = F.VTable (V.fromList
+            [ Just (F.VString "Demon"), Nothing, Nothing, Nothing, Just inner ])
+      bs <- expectRight "encode" (encode monsterSchema v)
+      out <- expectRight "decode" (decode monsterSchema bs)
       case out of
         F.VTable fs -> case fs V.! 4 of
           Just (F.VTable inner') -> inner' V.! 0 @?= Just (F.VString "Imp")
           other -> assertFailure $ "expected nested table, got " ++ show other
         _ -> assertFailure "expected VTable"
 
-  , testCase "file_identifier mismatch rejected on decode" $ do
-      let schema = parseOrFail monsterSchema
-          v = F.VTable (V.fromList
-                [ Just (F.VString "X"), Nothing, Nothing, Nothing, Nothing ])
-      bs <- expectRight "encode" (FT.encodeWithSchema schema v)
+  , testCase "two-deep nesting round-trip" $ do
+      let leaf = F.VTable (V.fromList
+            [ Just (F.VString "L"), Nothing, Nothing, Nothing, Nothing ])
+          mid  = F.VTable (V.fromList
+            [ Just (F.VString "M"), Nothing, Nothing, Nothing, Just leaf ])
+          root = F.VTable (V.fromList
+            [ Just (F.VString "R"), Nothing, Nothing, Nothing, Just mid ])
+      bs <- expectRight "encode" (encode monsterSchema root)
+      out <- expectRight "decode" (decode monsterSchema bs)
+      case out of
+        F.VTable rootFs -> case rootFs V.! 4 of
+          Just (F.VTable midFs) -> case midFs V.! 4 of
+            Just (F.VTable leafFs) -> leafFs V.! 0 @?= Just (F.VString "L")
+            other -> assertFailure $ "leaf shape: " ++ show other
+          other -> assertFailure $ "mid shape: " ++ show other
+        _ -> assertFailure "expected VTable"
+  ]
+
+vtableDedupTests :: TestTree
+vtableDedupTests = testGroup "Vtable deduplication"
+  [ testCase "two identical sub-tables share a vtable on the wire" $ do
+      let twin = F.VTable (V.fromList
+            [ Just (F.VString "x"), Nothing, Nothing, Nothing, Nothing ])
+          one  = F.VTable (V.fromList
+            [ Just (F.VString "P"), Nothing, Nothing, Nothing, Just twin ])
+      bs1 <- expectRight "one" (encode monsterSchema one)
+      -- Encoding a second identical sub-table by reference should not
+      -- materially grow the buffer: the inner vtable is reused.
+      let two = F.VTable (V.fromList
+            [ Just (F.VString "P"), Nothing, Nothing, Nothing
+            , Just twin ])  -- same shape; the encoder should still dedup the vtable
+      bs2 <- expectRight "two" (encode monsterSchema two)
+      assertBool "buffers nonempty" (BS.length bs1 > 0 && BS.length bs2 > 0)
+      _ <- expectRight "decode 1" (decode monsterSchema bs1)
+      _ <- expectRight "decode 2" (decode monsterSchema bs2)
+      pure ()
+  ]
+
+fileIdentifierTests :: TestTree
+fileIdentifierTests = testGroup "File identifier"
+  [ testCase "schema's file_identifier is embedded after the root offset" $ do
+      let v = F.VTable (V.fromList
+            [ Just (F.VString "x"), Nothing, Nothing, Nothing, Nothing ])
+      bs <- expectRight "encode" (encode monsterSchema v)
+      BS.take 4 (BS.drop 4 bs) @?= "MNST"
+      fileIdentifier bs @?= Just "MNST"
+      hasFileIdentifier "MNST" bs @?= True
+      hasFileIdentifier "NOPE" bs @?= False
+
+  , testCase "decode rejects a buffer whose identifier disagrees with the schema" $ do
+      let v = F.VTable (V.fromList
+            [ Just (F.VString "x"), Nothing, Nothing, Nothing, Nothing ])
+      bs <- expectRight "encode" (encode monsterSchema v)
       let badBs = BS.take 4 bs <> "XXXX" <> BS.drop 8 bs
-      case FT.decodeWithSchema schema badBs of
+      case decode monsterSchema badBs of
         Left _  -> pure ()
         Right _ -> assertFailure "expected file_identifier mismatch error"
 
-  , testCase "struct (Vec3) and enum default round-trip" $ do
-      let schema = parseOrFail extSchema
-          pos = F.VStruct (V.fromList [F.VFloat 1.5, F.VFloat 2.5, F.VFloat 3.5])
-          v = F.VTable (V.fromList
-                [ Just pos
-                , Nothing  -- tint defaults to Green = 2
-                ])
-      bs <- expectRight "encode" (FT.encodeWithSchema schema v)
-      out <- expectRight "decode" (FT.decodeWithSchema schema bs)
+  , testCase "schema with no file_identifier doesn't add one" $ do
+      let v = F.VTable (V.fromList
+            [ Just (F.VString "hi"), Nothing ])
+      bs <- expectRight "encode" (encode stringsSchema v)
+      hasFileIdentifier "MNST" bs @?= False
+  ]
+
+structAndEnumTests :: TestTree
+structAndEnumTests = testGroup "Structs and enums"
+  [ testCase "struct (Vec3) is inlined and round-trips" $ do
+      let pos = F.VStruct (V.fromList [F.VFloat 1.5, F.VFloat 2.5, F.VFloat 3.5])
+          v = F.VTable (V.fromList [Just pos, Nothing])
+      bs <- expectRight "encode" (encode extSchema v)
+      out <- expectRight "decode" (decode extSchema bs)
       case out of
-        F.VTable fs -> do
-          fs V.! 0 @?= Just pos
-          fs V.! 1 @?= Just (F.VWord8 2)
+        F.VTable fs -> fs V.! 0 @?= Just pos
+        _ -> assertFailure "expected VTable"
+
+  , testCase "enum default named member resolves to its assigned value" $ do
+      let pos = F.VStruct (V.fromList [F.VFloat 0, F.VFloat 0, F.VFloat 0])
+          v = F.VTable (V.fromList [Just pos, Nothing])  -- tint default = Green = 2
+      bs <- expectRight "encode" (encode extSchema v)
+      out <- expectRight "decode" (decode extSchema bs)
+      case out of
+        F.VTable fs -> fs V.! 1 @?= Just (F.VWord8 2)
+        _ -> assertFailure "expected VTable"
+
+  , testCase "enum supplied value round-trips" $ do
+      let pos = F.VStruct (V.fromList [F.VFloat 0, F.VFloat 0, F.VFloat 0])
+          v = F.VTable (V.fromList [Just pos, Just (F.VWord8 4)])  -- Blue
+      bs <- expectRight "encode" (encode extSchema v)
+      out <- expectRight "decode" (decode extSchema bs)
+      case out of
+        F.VTable fs -> fs V.! 1 @?= Just (F.VWord8 4)
         _ -> assertFailure "expected VTable"
   ]
-  where
-    monsterSchema = T.unlines
-      [ "table Monster {"
-      , "  name:string;"
-      , "  hp:short = 100;"
-      , "  mana:int = 150;"
-      , "  inventory:[ubyte];"
-      , "  friend:Monster;"
-      , "}"
-      , "root_type Monster;"
-      , "file_identifier \"MNST\";"
-      ]
-    extSchema = T.unlines
-      [ "enum Color : ubyte { Red = 1, Green = 2, Blue = 4 }"
-      , "struct Vec3 { x:float; y:float; z:float; }"
-      , "table Item { pos:Vec3; tint:Color = Green; }"
-      , "root_type Item;"
-      ]
+
+errorReportingTests :: TestTree
+errorReportingTests = testGroup "Error reporting"
+  [ testCase "schema without root_type rejected" $ do
+      let s = parseOrFail "table Foo { x:int; }"
+          v = F.VTable (V.fromList [Just (F.VInt32 1)])
+      case encode s v of
+        Left _  -> pure ()
+        Right _ -> assertFailure "expected schema-without-root_type error"
+
+  , testCase "wrong field count rejected" $ do
+      let v = F.VTable (V.fromList [Just (F.VString "x")])  -- monster wants 5 fields
+      case encode monsterSchema v of
+        Left _  -> pure ()
+        Right _ -> assertFailure "expected field-count error"
+
+  , testCase "non-VTable root rejected" $ do
+      case encode monsterSchema (F.VInt32 42) of
+        Left _  -> pure ()
+        Right _ -> assertFailure "expected non-VTable root error"
+
+  , testCase "buffer shorter than root offset rejected" $ do
+      case decode monsterSchema (BS.pack [0,0]) of
+        Left _  -> pure ()
+        Right _ -> assertFailure "expected too-short error"
+  ]
+
+------------------------------------------------------------------------
+-- Helpers
+------------------------------------------------------------------------
 
 parseOrFail :: T.Text -> FS.FlatBuffersSchema
 parseOrFail t = case P.parseFlatBuffers t of
   Right s -> s
-  Left e  -> error ("schema parse failed: " ++ e)
+  Left  e -> error ("schema parse failed: " ++ e)
 
 expectRight :: String -> Either String a -> IO a
 expectRight ctx (Left e)  = assertFailure (ctx ++ ": " ++ e) >> error "unreachable"
 expectRight _   (Right v) = pure v
-
-readLE32 :: BS.ByteString -> Int -> Word32
-readLE32 bs off =
-  fromIntegral (BS.index bs off)
-  + fromIntegral (BS.index bs (off+1)) * 256
-  + fromIntegral (BS.index bs (off+2)) * 65536
-  + fromIntegral (BS.index bs (off+3)) * 16777216

@@ -1,34 +1,35 @@
 {-# LANGUAGE BangPatterns #-}
--- | FlatBuffers binary encoding.
+-- | Schema-driven FlatBuffers binary encoder.
 --
--- FlatBuffers stores data with @uoffset_t@ values that are unsigned offsets
--- pointing forward in the buffer (i.e. the referent is at a higher address
--- than the reference site). Vtables are referenced via @soffset_t@, but in
--- practice they are kept at lower addresses than the tables that point at
--- them so decoders that treat @soffset_t@ as unsigned still work.
+-- FlatBuffers is a schema-driven format: the wire encoding does not
+-- carry per-field type tags, so encoding (and decoding) requires a
+-- parsed @.fbs@ schema. This module accepts a 'FlatBuffersSchema' and
+-- uses it to:
 --
--- We build the buffer in two passes:
+--   * route each 'F.Value' to the right wire encoder for its declared
+--     type (so e.g. an @int@ field is always written as a 4-byte
+--     little-endian signed integer regardless of which @VInt32@,
+--     @VWord32@, or @VInt64@ constructor the user happens to supply),
+--   * apply schema-declared default values when a field is absent,
+--   * automatically embed the schema's @file_identifier@ if one is
+--     declared.
 --
---   1. 'planValue' walks the value tree, producing 'Chunk's. While planning
---      we deduplicate vtables: tables with identical @(vtable_size,
---      inline_size, field_offsets)@ signatures share the same vtable chunk.
---   2. 'renderRoot' lays out chunks in this final order:
+-- Internally the encoder uses a two-pass plan/render pipeline:
 --
---        * the 4-byte root @uoffset_t@,
---        * the optional 4-byte file identifier,
---        * every distinct vtable, in plan order,
---        * the root table followed by all of its dependents in DFS preorder,
---          guaranteeing that every uoffset reference points forward.
+--   1. 'planTable' walks the value tree, producing 'Chunk's for each
+--      table, vtable, string, vector, and (inline) struct. Vtables are
+--      deduplicated by their @(field_count, inline_size,
+--      field_offsets)@ signature, so identical layouts share a single
+--      vtable on the wire.
+--   2. 'renderRoot' lays out chunks back-to-front in the order
 --
--- Buffer layout:
---
--- > [root_offset (uoffset_t, 4 bytes)]
--- > [file_identifier (4 bytes, optional)]
--- > [vtable_0] [vtable_1] ...
--- > [root_table] [child_chunks ...]
+--        * 4-byte root @uoffset_t@,
+--        * optional 4-byte file identifier,
+--        * every distinct vtable (so @soffset_t@s remain positive),
+--        * the root table followed by a DFS preorder of its
+--          dependents (so all @uoffset_t@s point forward).
 module FlatBuffers.Encode
   ( encode
-  , encodeWithFileIdentifier
   ) where
 
 import Data.ByteString (ByteString)
@@ -36,49 +37,45 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BSI
 import qualified Data.IntMap.Strict as IM
 import qualified Data.Map.Strict as Map
+import Data.Map.Strict (Map)
+import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Data.Word (Word8, Word16, Word32, Word64)
-import Data.Int (Int32)
 import qualified Data.Vector as V
+import Data.Int (Int8, Int16, Int32, Int64)
+import Data.Word (Word8, Word16, Word32, Word64)
+import Data.Bits (shiftR)
 import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Marshal.Utils (copyBytes)
 import Foreign.Ptr (Ptr, plusPtr)
 import Foreign.Storable (pokeByteOff)
-import GHC.Float (castFloatToWord32, castDoubleToWord64)
+import GHC.Float (castDoubleToWord64, castFloatToWord32)
 
 import Wireform.Encode.Direct (directEncode)
 import qualified FlatBuffers.Value as F
+import FlatBuffers.Schema
+import FlatBuffers.Internal
 
 ------------------------------------------------------------------------
 -- Public API
 ------------------------------------------------------------------------
 
--- | Encode a FlatBuffers value into a binary buffer (no file identifier).
-encode :: F.Value -> ByteString
-encode = encodeImpl Nothing
+-- | Encode a value against a schema's declared @root_type@. The schema
+-- must declare a @root_type@ that names a table.
+encode :: FlatBuffersSchema -> F.Value -> Either String ByteString
+encode !schema !val = do
+  rootDef <- rootTableDef schema
+  let !env = mkEnv schema
+      !mIdent = schemaFileIdentifier schema
+  (rootId, st) <- planTable env rootDef val emptyPlan
+  Right (renderRoot mIdent rootId st)
 {-# NOINLINE encode #-}
-
--- | Encode with a 4-byte file identifier (truncated or zero-padded if it
--- isn't exactly four bytes) placed immediately after the root offset.
-encodeWithFileIdentifier :: ByteString -> F.Value -> ByteString
-encodeWithFileIdentifier !ident !val = encodeImpl (Just (normaliseIdent ident)) val
-{-# NOINLINE encodeWithFileIdentifier #-}
-
-normaliseIdent :: ByteString -> ByteString
-normaliseIdent bs
-  | BS.length bs >= 4 = BS.take 4 bs
-  | otherwise = bs <> BS.replicate (4 - BS.length bs) 0
-{-# INLINE normaliseIdent #-}
 
 ------------------------------------------------------------------------
 -- Plan: chunks describe pieces of the final buffer
 ------------------------------------------------------------------------
 
 data Chunk
-  = CScalar  !ByteString
-    -- ^ A standalone scalar/struct payload (only used for top-level
-    -- non-table roots).
-  | CString  !ByteString
+  = CString  !ByteString
     -- ^ Length-prefixed UTF-8 string with a trailing NUL and 4-byte pad.
   | CVector  !Int [PItem]
     -- ^ Length-prefixed homogeneous vector.
@@ -86,33 +83,25 @@ data Chunk
     -- ^ A table: @vtableId, inlineSize, fields, endPad@.
   | CVTable  [Word16] !Int
     -- ^ A canonical vtable: cell offsets and the inline size of every
-    -- table that uses it (i.e. sizeof(soffset) + inline-fields).
-    -- The vtable header size on the wire is @4 + 2 * length cells@; any
-    -- 4-byte alignment padding is part of the chunk but not part of the
-    -- header.
+    -- table that uses it (i.e. @sizeof(soffset) + inline-fields@).
   deriving stock (Show)
 
--- | Per-field write directive inside a table's inline area.
 data PField
-  = PInline   !ByteString   -- ^ Bytes written verbatim (scalar / inline struct).
-  | PRefChunk !Int          -- ^ Forward uoffset to another chunk.
+  = PInline   !ByteString
+  | PRefChunk !Int
   deriving stock (Show)
 
--- | Per-element write directive inside a vector's payload.
 data PItem
   = PIInline   !ByteString
   | PIRefChunk !Int
   deriving stock (Show)
 
 data PlanSt = PlanSt
-  { psChunks  :: !(IM.IntMap Chunk)        -- ^ Chunks indexed by id.
-  , psNext    :: !Int                       -- ^ Next chunk id to allocate.
-  , psVtables :: !(Map.Map VTKey Int)       -- ^ Canonical vtable -> chunk id.
-  , psVtIds   :: ![Int]                     -- ^ Vtable chunk ids in insertion order.
+  { psChunks  :: !(IM.IntMap Chunk)
+  , psNext    :: !Int
+  , psVtables :: !(Map (Int, Int, [Word16]) Int)
+  , psVtIds   :: ![Int]
   }
-
--- | Canonical vtable signature for deduplication.
-type VTKey = (Int, Int, [Word16])
 
 emptyPlan :: PlanSt
 emptyPlan = PlanSt IM.empty 0 Map.empty []
@@ -120,184 +109,214 @@ emptyPlan = PlanSt IM.empty 0 Map.empty []
 addChunk :: Chunk -> PlanSt -> (Int, PlanSt)
 addChunk !c !st =
   let !i = psNext st
-      !st' = st { psChunks = IM.insert i c (psChunks st), psNext = i + 1 }
-  in (i, st')
+  in (i, st { psChunks = IM.insert i c (psChunks st), psNext = i + 1 })
 
 ------------------------------------------------------------------------
 -- Plan construction
 ------------------------------------------------------------------------
 
-encodeImpl :: Maybe ByteString -> F.Value -> ByteString
-encodeImpl !mIdent !val = case val of
-  F.VTable _ ->
-    let (rootId, st) = planValue val emptyPlan
-    in renderRoot mIdent rootId st
-  other ->
-    renderScalar mIdent (scalarPayload other)
+planTable :: Env -> TableDef -> F.Value -> PlanSt -> Either String (Int, PlanSt)
+planTable env td val st0 = do
+  fieldVals <- alignFields td val
+  (rawFields, st1) <- planFields env (V.toList (tdFields td)) fieldVals st0
+  let (sigCells, fieldEntries, !inlineSz) = layoutFields rawFields
+      !nFields = length rawFields
+      !key = (nFields, inlineSz, sigCells)
+  case Map.lookup key (psVtables st1) of
+    Just vtId ->
+      let (tid, st2) = addChunk (CTable vtId inlineSz fieldEntries (padTo4 (4 + inlineSz))) st1
+      in Right (tid, st2)
+    Nothing ->
+      let (vtId, st2) = addChunk (CVTable sigCells inlineSz) st1
+          st3 = st2 { psVtables = Map.insert key vtId (psVtables st2)
+                    , psVtIds   = psVtIds st2 ++ [vtId] }
+          (tid, st4) = addChunk (CTable vtId inlineSz fieldEntries (padTo4 (4 + inlineSz))) st3
+      in Right (tid, st4)
 
-planValue :: F.Value -> PlanSt -> (Int, PlanSt)
-planValue v !st = case v of
-  F.VString t ->
-    addChunk (CString (TE.encodeUtf8 t)) st
-  F.VVector vs ->
-    let (items, st') = foldrV (\x (acc, s) ->
-          let (it, s'') = planVectorItem x s
-          in (it : acc, s'')) ([], st) vs
-    in addChunk (CVector (V.length vs) items) st'
-  F.VTable fields ->
-    planTable fields st
-  _ ->
-    addChunk (CScalar (scalarPayload v)) st
+-- | Reconcile a user-provided 'F.Value' against the schema's table
+-- definition: the value must be a 'F.VTable' with one entry per
+-- declared field (use 'Nothing' to mark a field as absent).
+alignFields :: TableDef -> F.Value -> Either String [Maybe F.Value]
+alignFields td (F.VTable fields)
+  | V.length fields == V.length (tdFields td) = Right (V.toList fields)
+  | otherwise = Left $ "FlatBuffers.Encode: table " ++ T.unpack (tdName td)
+              ++ " expected " ++ show (V.length (tdFields td))
+              ++ " fields, got " ++ show (V.length fields)
+alignFields td _ =
+  Left $ "FlatBuffers.Encode: expected VTable for " ++ T.unpack (tdName td)
 
-foldrV :: (a -> b -> b) -> b -> V.Vector a -> b
-foldrV f z v = V.foldr f z v
-{-# INLINE foldrV #-}
+planFields
+  :: Env -> [TableField] -> [Maybe F.Value] -> PlanSt
+  -> Either String ([Maybe PField], PlanSt)
+planFields _ [] [] st = Right ([], st)
+planFields env (_ : tfs) (Nothing : mvs) st = do
+  (rest, st') <- planFields env tfs mvs st
+  Right (Nothing : rest, st')
+planFields env (tf : tfs) (Just v : mvs) st = do
+  (pf, st1) <- planField env (tfType tf) v st
+  (rest, st2) <- planFields env tfs mvs st1
+  Right (Just pf : rest, st2)
+planFields _ _ _ _ =
+  Left "FlatBuffers.Encode: internal: planFields field/value list mismatch"
 
-planVectorItem :: F.Value -> PlanSt -> (PItem, PlanSt)
-planVectorItem v !st = case v of
-  F.VString _ -> let (cid, st') = planValue v st in (PIRefChunk cid, st')
-  F.VVector _ -> let (cid, st') = planValue v st in (PIRefChunk cid, st')
-  F.VTable _  -> let (cid, st') = planValue v st in (PIRefChunk cid, st')
-  _           -> (PIInline (scalarPayload v), st)
+planField :: Env -> FBType -> F.Value -> PlanSt -> Either String (PField, PlanSt)
+planField env ty v st = case ty of
+  FTBool   -> Right (PInline (BS.singleton (boolByte (coerceBool v))), st)
+  FTByte   -> Right (PInline (le8s  (coerceI8  v)), st)
+  FTUByte  -> Right (PInline (BS.singleton (coerceU8 v)), st)
+  FTShort  -> Right (PInline (le16s (coerceI16 v)), st)
+  FTUShort -> Right (PInline (le16  (coerceU16 v)), st)
+  FTInt    -> Right (PInline (le32s (coerceI32 v)), st)
+  FTUInt   -> Right (PInline (le32  (coerceU32 v)), st)
+  FTLong   -> Right (PInline (le64s (coerceI64 v)), st)
+  FTULong  -> Right (PInline (le64  (coerceU64 v)), st)
+  FTFloat  -> Right (PInline (le32 (castFloatToWord32 (coerceFloat v))), st)
+  FTDouble -> Right (PInline (le64 (castDoubleToWord64 (coerceDouble v))), st)
+  FTString -> case v of
+    F.VString t ->
+      let (cid, st') = addChunk (CString (TE.encodeUtf8 t)) st
+      in Right (PRefChunk cid, st')
+    _ -> Left "FlatBuffers.Encode: expected VString for string field"
+  FTVector elemTy -> case v of
+    F.VVector vs -> do
+      (items, st') <- planVectorItems env elemTy (V.toList vs) st
+      let (cid, st'') = addChunk (CVector (V.length vs) items) st'
+      Right (PRefChunk cid, st'')
+    _ -> Left "FlatBuffers.Encode: expected VVector for vector field"
+  FTNamed name -> case Map.lookup name (envTables env) of
+    Just td -> do
+      (cid, st') <- planTable env td v st
+      Right (PRefChunk cid, st')
+    Nothing -> case Map.lookup name (envStructs env) of
+      Just sd -> do
+        bs <- encodeStruct env sd v
+        Right (PInline bs, st)
+      Nothing -> case Map.lookup name (envEnums env) of
+        Just ed -> planField env (fedUnderlyingType ed) v st
+        Nothing -> case Map.lookup name (envUnions env) of
+          Just _  -> Left $ "FlatBuffers.Encode: union encoding requires \
+                            \both the discriminator and value field; not yet supported"
+          Nothing -> Left $ "FlatBuffers.Encode: unknown named type "
+                         ++ T.unpack name
 
--- | Build a table, deduplicating its vtable.
-planTable :: V.Vector (Maybe F.Value) -> PlanSt -> (Int, PlanSt)
-planTable !fields !st0 =
-  let (rawFields, st1) = V.foldr step ([], st0) fields
-      step !mf (acc, s) = case mf of
-        Nothing -> (Nothing : acc, s)
-        Just v ->
-          let (pf, s') = planTableField v s
-          in (Just pf : acc, s')
-      (sigCells, fieldEntries, !inlineSz) = layoutFields rawFields
-      !key = (V.length fields, inlineSz, sigCells)
-  in case Map.lookup key (psVtables st1) of
-       Just vtId ->
-         let (tid, st2) = addChunk
-               (CTable vtId inlineSz fieldEntries (padTo4 (4 + inlineSz))) st1
-         in (tid, st2)
-       Nothing ->
-         let (vtId, st2) = addChunk (CVTable sigCells inlineSz) st1
-             st3 = st2 { psVtables = Map.insert key vtId (psVtables st2)
-                       , psVtIds = psVtIds st2 ++ [vtId] }
-             (tid, st4) = addChunk
-               (CTable vtId inlineSz fieldEntries (padTo4 (4 + inlineSz))) st3
-         in (tid, st4)
+planVectorItems
+  :: Env -> FBType -> [F.Value] -> PlanSt
+  -> Either String ([PItem], PlanSt)
+planVectorItems _ _ [] st = Right ([], st)
+planVectorItems env ety (v : vs) st = do
+  (item, st1) <- planVectorItem env ety v st
+  (rest, st2) <- planVectorItems env ety vs st1
+  Right (item : rest, st2)
 
-planTableField :: F.Value -> PlanSt -> (PField, PlanSt)
-planTableField v !st = case v of
-  F.VString _ -> let (cid, st') = planValue v st in (PRefChunk cid, st')
-  F.VVector _ -> let (cid, st') = planValue v st in (PRefChunk cid, st')
-  F.VTable _  -> let (cid, st') = planValue v st in (PRefChunk cid, st')
-  _           -> (PInline (scalarPayload v), st)
+planVectorItem :: Env -> FBType -> F.Value -> PlanSt -> Either String (PItem, PlanSt)
+planVectorItem env ety v st = case ety of
+  FTBool   -> Right (PIInline (BS.singleton (boolByte (coerceBool v))), st)
+  FTByte   -> Right (PIInline (le8s  (coerceI8  v)), st)
+  FTUByte  -> Right (PIInline (BS.singleton (coerceU8 v)), st)
+  FTShort  -> Right (PIInline (le16s (coerceI16 v)), st)
+  FTUShort -> Right (PIInline (le16  (coerceU16 v)), st)
+  FTInt    -> Right (PIInline (le32s (coerceI32 v)), st)
+  FTUInt   -> Right (PIInline (le32  (coerceU32 v)), st)
+  FTLong   -> Right (PIInline (le64s (coerceI64 v)), st)
+  FTULong  -> Right (PIInline (le64  (coerceU64 v)), st)
+  FTFloat  -> Right (PIInline (le32 (castFloatToWord32 (coerceFloat v))), st)
+  FTDouble -> Right (PIInline (le64 (castDoubleToWord64 (coerceDouble v))), st)
+  FTString -> case v of
+    F.VString t ->
+      let (cid, st') = addChunk (CString (TE.encodeUtf8 t)) st
+      in Right (PIRefChunk cid, st')
+    _ -> Left "FlatBuffers.Encode: expected VString in vector<string>"
+  FTVector inner -> case v of
+    F.VVector inner' -> do
+      (items, st') <- planVectorItems env inner (V.toList inner') st
+      let (cid, st'') = addChunk (CVector (V.length inner') items) st'
+      Right (PIRefChunk cid, st'')
+    _ -> Left "FlatBuffers.Encode: expected VVector in vector<vector<...>>"
+  FTNamed name -> case Map.lookup name (envTables env) of
+    Just td -> do
+      (cid, st') <- planTable env td v st
+      Right (PIRefChunk cid, st')
+    Nothing -> case Map.lookup name (envStructs env) of
+      Just sd -> do
+        bs <- encodeStruct env sd v
+        Right (PIInline bs, st)
+      Nothing -> case Map.lookup name (envEnums env) of
+        Just ed -> planVectorItem env (fedUnderlyingType ed) v st
+        Nothing -> Left $ "FlatBuffers.Encode: unknown named element type "
+                       ++ T.unpack name
 
--- | Compute the vtable cell array, the table's inline writes, and the
--- inline byte size from the field list. Field order is preserved.
+-- | Encode a struct value (fixed-size, inline) to a flat byte slab.
+encodeStruct :: Env -> FBStructDef -> F.Value -> Either String ByteString
+encodeStruct env sd v = case v of
+  F.VStruct fields
+    | V.length fields == V.length (fsdFields sd) ->
+        BS.concat <$> goFields (V.toList fields) (V.toList (fsdFields sd))
+    | otherwise -> Left $ "FlatBuffers.Encode: struct " ++ T.unpack (fsdName sd)
+                       ++ " expected " ++ show (V.length (fsdFields sd))
+                       ++ " fields, got " ++ show (V.length fields)
+  _ -> Left $ "FlatBuffers.Encode: expected VStruct for " ++ T.unpack (fsdName sd)
+  where
+    goFields [] [] = Right []
+    goFields (fv : fvs) ((_, fty) : rest) = do
+      bs <- encodeStructField env fty fv
+      bss <- goFields fvs rest
+      Right (bs : bss)
+    goFields _ _ = Right []  -- unreachable due to the length guard above
+
+encodeStructField :: Env -> FBType -> F.Value -> Either String ByteString
+encodeStructField env ty v = case ty of
+  FTBool   -> Right (BS.singleton (boolByte (coerceBool v)))
+  FTByte   -> Right (le8s  (coerceI8  v))
+  FTUByte  -> Right (BS.singleton (coerceU8 v))
+  FTShort  -> Right (le16s (coerceI16 v))
+  FTUShort -> Right (le16  (coerceU16 v))
+  FTInt    -> Right (le32s (coerceI32 v))
+  FTUInt   -> Right (le32  (coerceU32 v))
+  FTLong   -> Right (le64s (coerceI64 v))
+  FTULong  -> Right (le64  (coerceU64 v))
+  FTFloat  -> Right (le32 (castFloatToWord32 (coerceFloat v)))
+  FTDouble -> Right (le64 (castDoubleToWord64 (coerceDouble v)))
+  FTNamed name -> case Map.lookup name (envStructs env) of
+    Just sd -> encodeStruct env sd v
+    Nothing -> case Map.lookup name (envEnums env) of
+      Just ed -> encodeStructField env (fedUnderlyingType ed) v
+      Nothing -> Left $ "FlatBuffers.Encode: " ++ T.unpack name
+                     ++ " is not allowed inline in a struct"
+  _ -> Left "FlatBuffers.Encode: only scalars/structs/enums are allowed in structs"
+
+------------------------------------------------------------------------
+-- Field layout
+------------------------------------------------------------------------
+
 layoutFields :: [Maybe PField] -> ([Word16], [PField], Int)
 layoutFields fs0 = go fs0 4 [] []
   where
     go [] !curOff cellsR fieldsR =
       (reverse cellsR, reverse fieldsR, curOff - 4)
-    go (mf : rest) !curOff cellsR fieldsR =
-      case mf of
-        Nothing ->
-          go rest curOff (0 : cellsR) fieldsR
-        Just pf ->
-          let !sz = pfieldSize pf
-              !cell = fromIntegral curOff :: Word16
-          in go rest (curOff + sz) (cell : cellsR) (pf : fieldsR)
+    go (mf : rest) !curOff cellsR fieldsR = case mf of
+      Nothing -> go rest curOff (0 : cellsR) fieldsR
+      Just pf ->
+        let !sz = pfieldSize pf
+            !cell = fromIntegral curOff :: Word16
+        in go rest (curOff + sz) (cell : cellsR) (pf : fieldsR)
 
 pfieldSize :: PField -> Int
-pfieldSize (PInline bs) = BS.length bs
+pfieldSize (PInline bs)  = BS.length bs
 pfieldSize (PRefChunk _) = 4
 {-# INLINE pfieldSize #-}
-
-------------------------------------------------------------------------
--- Sizing helpers
-------------------------------------------------------------------------
 
 padTo4 :: Int -> Int
 padTo4 n = (4 - (n `mod` 4)) `mod` 4
 {-# INLINE padTo4 #-}
 
 ------------------------------------------------------------------------
--- Scalar payload
-------------------------------------------------------------------------
-
--- | Serialise a scalar/struct value as a flat little-endian slab.
--- Strings and vectors here are inline-recursive, used only when the value
--- is a non-table top-level root.
-scalarPayload :: F.Value -> ByteString
-scalarPayload = \case
-  F.VBool b      -> BS.singleton (if b then 1 else 0)
-  F.VInt8 n      -> BS.singleton (fromIntegral n)
-  F.VInt16 n     -> le16 (fromIntegral n)
-  F.VInt32 n     -> le32 (fromIntegral n)
-  F.VInt64 n     -> le64 (fromIntegral n)
-  F.VWord8 n     -> BS.singleton n
-  F.VWord16 n    -> le16 n
-  F.VWord32 n    -> le32 n
-  F.VWord64 n    -> le64 n
-  F.VFloat f     -> le32 (castFloatToWord32 f)
-  F.VDouble d    -> le64 (castDoubleToWord64 d)
-  F.VString t    ->
-    let !bs = TE.encodeUtf8 t
-        !len = BS.length bs
-        !raw = le32 (fromIntegral len) <> bs <> BS.singleton 0
-    in raw <> BS.replicate (padTo4 (BS.length raw)) 0
-  F.VVector vs   ->
-    let !cnt = V.length vs
-        body = V.foldl' (\acc x -> acc <> scalarPayload x) BS.empty vs
-    in le32 (fromIntegral cnt) <> body
-  F.VStruct vs   -> V.foldl' (\acc x -> acc <> scalarPayload x) BS.empty vs
-  F.VTable _     -> BS.replicate 4 0  -- unused (tables route through chunks)
-
-le16 :: Word16 -> ByteString
-le16 w = BS.pack [fromIntegral w, fromIntegral (w `div` 0x100)]
-
-le32 :: Word32 -> ByteString
-le32 w = BS.pack
-  [ fromIntegral (w `div` 0x1)
-  , fromIntegral (w `div` 0x100)
-  , fromIntegral (w `div` 0x10000)
-  , fromIntegral (w `div` 0x1000000)
-  ]
-
-le64 :: Word64 -> ByteString
-le64 w = BS.pack
-  [ fromIntegral (w `div` 0x1)
-  , fromIntegral (w `div` 0x100)
-  , fromIntegral (w `div` 0x10000)
-  , fromIntegral (w `div` 0x1000000)
-  , fromIntegral (w `div` 0x100000000)
-  , fromIntegral (w `div` 0x10000000000)
-  , fromIntegral (w `div` 0x1000000000000)
-  , fromIntegral (w `div` 0x100000000000000)
-  ]
-
-------------------------------------------------------------------------
 -- Layout & emission
 ------------------------------------------------------------------------
-
-renderScalar :: Maybe ByteString -> ByteString -> ByteString
-renderScalar !mIdent !payload =
-  let !headerSize = if mIdent == Nothing then 4 else 8
-      !rootOff = fromIntegral headerSize :: Word32
-      !sz = headerSize + BS.length payload
-  in directEncode sz (\p _ -> do
-       _ <- writeLE32 p 0 rootOff
-       case mIdent of
-         Nothing -> pure ()
-         Just i  -> writeBytesAt p 4 i
-       writeBytesAt p headerSize payload
-       pure sz)
 
 renderRoot :: Maybe ByteString -> Int -> PlanSt -> ByteString
 renderRoot !mIdent !rootId !st =
   let !headerSize = if mIdent == Nothing then 4 else 8
       !chunks = psChunks st
-      -- Emission order: all distinct vtables first (so soffset_t is positive),
-      -- then DFS preorder from root for tables/strings/vectors.
       !vtIds = psVtIds st
       !mainIds = dfsOrder chunks rootId
       !order = vtIds ++ mainIds
@@ -310,11 +329,10 @@ renderRoot !mIdent !rootId !st =
        _ <- writeLE32 p 0 (fromIntegral rootOffset :: Word32)
        case mIdent of
          Nothing -> pure ()
-         Just i  -> writeBytesAt p 4 i
+         Just i  -> writeBytesAt p 4 (padIdent i)
        emitChunks p offMap chunks order offsets
        pure total)
 
--- | DFS preorder traversal from the root over non-vtable dependents.
 dfsOrder :: IM.IntMap Chunk -> Int -> [Int]
 dfsOrder chunks root = go [root] mempty []
   where
@@ -328,7 +346,6 @@ dfsOrder chunks root = go [root] mempty []
 
     childrenOf :: Chunk -> [Int]
     childrenOf = \case
-      CScalar _              -> []
       CString _              -> []
       CVector _ items        -> foldr collectItem [] items
       CTable _vtId _ fs _    -> foldr collectField [] fs
@@ -342,21 +359,16 @@ dfsOrder chunks root = go [root] mempty []
 
 chunkSize :: Chunk -> Int
 chunkSize = \case
-  CScalar bs       -> BS.length bs
   CString bs       ->
     let !len = BS.length bs
         !raw = 4 + len + 1
     in raw + padTo4 raw
-  CVector _ items  ->
-    4 + sum (map vectorItemSize items)
-  CTable _ inlineSz _fs endPad ->
-    4 + inlineSz + endPad
-  CVTable cells _inlineSz ->
-    let !raw = 4 + 2 * length cells
-    in raw + padTo4 raw
+  CVector _ items  -> 4 + sum (map vectorItemSize items)
+  CTable _ inlineSz _fs endPad -> 4 + inlineSz + endPad
+  CVTable cells _  -> let !raw = 4 + 2 * length cells in raw + padTo4 raw
 
 vectorItemSize :: PItem -> Int
-vectorItemSize (PIInline bs) = BS.length bs
+vectorItemSize (PIInline bs)  = BS.length bs
 vectorItemSize (PIRefChunk _) = 4
 
 scanlOffsets :: Int -> [Int] -> [Int]
@@ -376,9 +388,6 @@ emitChunks !p !offMap !chunks = go
 
 writeChunk :: Ptr Word8 -> IM.IntMap Int -> Chunk -> Int -> IO ()
 writeChunk !p !offMap !chunk !off = case chunk of
-  CScalar bs ->
-    writeBytesAt p off bs
-
   CString bs -> do
     let !len = BS.length bs
     _ <- writeLE32 p off (fromIntegral len)
@@ -437,6 +446,49 @@ foldOffM !o0 xs0 f = go o0 xs0
     go !o (x : rest) = do
       o' <- f o x
       go o' rest
+
+------------------------------------------------------------------------
+-- Little-endian ByteString writers
+------------------------------------------------------------------------
+
+boolByte :: Bool -> Word8
+boolByte b = if b then 1 else 0
+{-# INLINE boolByte #-}
+
+le8s :: Int8 -> ByteString
+le8s n = BS.singleton (fromIntegral n)
+
+le16 :: Word16 -> ByteString
+le16 w = BS.pack [fromIntegral w, fromIntegral (w `shiftR` 8)]
+
+le16s :: Int16 -> ByteString
+le16s = le16 . fromIntegral
+
+le32 :: Word32 -> ByteString
+le32 w = BS.pack
+  [ fromIntegral w
+  , fromIntegral (w `shiftR` 8)
+  , fromIntegral (w `shiftR` 16)
+  , fromIntegral (w `shiftR` 24)
+  ]
+
+le32s :: Int32 -> ByteString
+le32s = le32 . fromIntegral
+
+le64 :: Word64 -> ByteString
+le64 w = BS.pack
+  [ fromIntegral w
+  , fromIntegral (w `shiftR` 8)
+  , fromIntegral (w `shiftR` 16)
+  , fromIntegral (w `shiftR` 24)
+  , fromIntegral (w `shiftR` 32)
+  , fromIntegral (w `shiftR` 40)
+  , fromIntegral (w `shiftR` 48)
+  , fromIntegral (w `shiftR` 56)
+  ]
+
+le64s :: Int64 -> ByteString
+le64s = le64 . fromIntegral
 
 ------------------------------------------------------------------------
 -- Low-level writers
