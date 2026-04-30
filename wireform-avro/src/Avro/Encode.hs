@@ -2,7 +2,7 @@
 -- | High-level Avro binary encoding.
 --
 -- Encodes an 'Avro.Value.Value' according to an 'AvroType' schema using
--- direct buffer writes via 'Proto.Encode.Direct.directEncode'.
+-- direct buffer writes via 'Wireform.Encode.Direct.directEncode'.
 --
 -- @
 -- import Avro.Encode (encodeAvro)

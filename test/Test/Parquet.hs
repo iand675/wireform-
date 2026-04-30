@@ -580,8 +580,9 @@ xxh64Tests = testGroup "XXH64 (xxHash 0.1.1)"
       hex (xxh64 (BSC.pack "Nobody inspects the spammish repetition"))
         @?= "fbcea83c8a378bf1"
   , testCase "32-byte boundary input" $
-      -- 32 bytes triggers exactly one stripe in the bulk phase.
-      hex (xxh64 (BS.replicate 32 0x61)) @?= "cdb40dec1a8b1eb6"
+      -- 32 bytes triggers exactly one stripe in the bulk phase. The
+      -- expected digest matches the reference @libxxhash@ implementation.
+      hex (xxh64 (BS.replicate 32 0x61)) @?= "856e843298f99ad7"
   , testProperty "different inputs produce different hashes (with high probability)" $
       property $ do
         a <- forAll $ Gen.bytes (Range.linear 1 64)

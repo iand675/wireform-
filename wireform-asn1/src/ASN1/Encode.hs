@@ -6,7 +6,7 @@
 -- encoding for each value. Tag-length-value (TLV) triplets are emitted
 -- with definite-length encoding.
 --
--- Uses direct buffer writes via 'Proto.Encode.Direct.directEncode'.
+-- Uses direct buffer writes via 'Wireform.Encode.Direct.directEncode'.
 module ASN1.Encode
   ( encode
   ) where

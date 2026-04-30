@@ -237,6 +237,33 @@ entityTests = testGroup "Entity References"
       let xml = "<root attr=\"a&amp;b\"/>"
           Right doc = decode (TE.encodeUtf8 xml)
       attr "attr" (docRoot doc) @?= Just "a&b"
+
+  , testCase "numeric entities in attributes" $ do
+      let xml = "<root attr=\"&#65;&#x42;C\"/>"
+          Right doc = decode (TE.encodeUtf8 xml)
+      attr "attr" (docRoot doc) @?= Just "ABC"
+
+  , testCase "DTD entities in attributes (SAX path)" $ do
+      let xml = "<!DOCTYPE root [<!ENTITY hi \"hello\">]>\n<root attr=\"&hi; world\"/>"
+          Right doc = decode (TE.encodeUtf8 xml)
+      attr "attr" (docRoot doc) @?= Just "hello world"
+
+  , testCase "DTD entities in attributes (FastDOM path)" $ do
+      let xml = "<!DOCTYPE root [<!ENTITY hi \"hello\">]>\n<root attr=\"&hi; world\"/>"
+          Right fastDoc = FD.parseFast (TE.encodeUtf8 xml)
+          doc = FD.toDocument fastDoc
+      attr "attr" (docRoot doc) @?= Just "hello world"
+
+  , testCase "Multiple entities in single attribute (SAX path)" $ do
+      let xml = "<root attr=\"&amp;&lt;&gt;&apos;&quot;\"/>"
+          Right doc = decode (TE.encodeUtf8 xml)
+      attr "attr" (docRoot doc) @?= Just "&<>'\""
+
+  , testCase "Multiple entities in single attribute (FastDOM path)" $ do
+      let xml = "<root attr=\"&amp;&lt;&gt;&apos;&quot;\"/>"
+          Right fastDoc = FD.parseFast (TE.encodeUtf8 xml)
+          doc = FD.toDocument fastDoc
+      attr "attr" (docRoot doc) @?= Just "&<>'\""
   ]
 
 -- CDATA tests

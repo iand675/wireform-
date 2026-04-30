@@ -3,7 +3,7 @@
 --
 -- Encodes a 'MsgPack.Value.Value' tree into its wire-format 'ByteString'
 -- using a two-pass strategy: compute the exact size, then direct-write into
--- a pre-allocated buffer via 'Proto.Encode.Direct.directEncode'.
+-- a pre-allocated buffer via 'Wireform.Encode.Direct.directEncode'.
 --
 -- @
 -- import qualified MsgPack.Encode as MPE

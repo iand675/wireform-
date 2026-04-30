@@ -35,7 +35,6 @@ library
   exposed-modules:
     Proto.AST
     Proto.Annotations
-    Proto.Church
     Proto.CodeGen
     Proto.CodeGen.Combinators
     Proto.CodeGen.Decode
@@ -48,12 +47,10 @@ library
     Proto.Decode
     Proto.Decode.Fast
     Proto.Decode.Stream
-    Proto.Decode.Streaming
     Proto.Descriptor.Convert
     Proto.Dynamic
     Proto.Encode
     Proto.Encode.Archetype
-    Proto.Encode.Direct
     Proto.Encode.Lazy
     Proto.FieldPresence
     Proto.GRPC

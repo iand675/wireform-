@@ -13,3 +13,9 @@ __pycache__/
 .direnv/
 result
 result-*
+
+# Stray criterion output sometimes left at the repo root
+bench-*.csv
+bench-*.html
+optimized*.csv
+final.csv

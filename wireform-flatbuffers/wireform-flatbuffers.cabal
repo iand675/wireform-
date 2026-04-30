@@ -36,6 +36,8 @@ library
     FlatBuffers.Registry
     FlatBuffers.Schema
     FlatBuffers.Value
+  other-modules:
+    FlatBuffers.Internal
   build-depends:
     base >= 4.16 && < 5,
     wireform-core,

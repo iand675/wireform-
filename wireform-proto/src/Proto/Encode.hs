@@ -44,9 +44,6 @@ module Proto.Encode
   , encodePackedSVarint32
   , encodePackedSVarint64
 
-    -- * Legacy alias
-  , encodePackedVarint
-
     -- * Map field encoding
   , encodeMapField
 
@@ -268,11 +265,6 @@ encodePackedBool fn vals
          putVarint (fromIntegral sz) <>
          VU.foldl' (\acc v -> acc <> B.word8 (if v then 1 else 0)) mempty vals
 {-# INLINE encodePackedBool #-}
-
--- | Legacy alias. Prefer the type-specific variants.
-encodePackedVarint :: Int -> VU.Vector Word64 -> B.Builder
-encodePackedVarint = encodePackedWord64
-{-# INLINE encodePackedVarint #-}
 
 -- | Encode a packed repeated fixed32 field.
 -- On LE platforms: the vector's backing store is already the wire bytes.

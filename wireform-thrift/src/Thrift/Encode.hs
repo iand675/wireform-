@@ -2,7 +2,7 @@
 -- | High-level Thrift encoding for Binary and Compact protocols.
 --
 -- Converts a 'Thrift.Value.Value' tree into a wire-format 'ByteString'.
--- Uses direct buffer writes via 'Proto.Encode.Direct.directEncode' to
+-- Uses direct buffer writes via 'Wireform.Encode.Direct.directEncode' to
 -- avoid Builder allocation overhead.
 --
 -- @

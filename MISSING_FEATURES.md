@@ -99,8 +99,22 @@ arrow-cpp, parquet-mr, and pyarrow are recognised on read.
 ### Still planned
 
 - Parquet encryption (modular encryption, footer key wrapping).
-- Parquet writer integration that emits page-index + bloom-filter footers
-  alongside row groups (the encoders are in place; the writer will be
-  wired in a follow-up so existing benchmarks remain stable).
-- ORC writer (C.6) and timestamp/decimal/date column write path (C.5).
-- Iceberg REST catalog client (D.4).
+  Out of scope for the current sweep — needs a vetted AES-GCM
+  implementation as a new dependency.
+
+### Closed in this iteration
+
+- Parquet `buildParquetFileWithIndex` writer that splits each column
+  into pages, builds `OffsetIndex` + `ColumnIndex` + split-block bloom
+  filter footers, and populates the metadata pointers
+  (`cm_bloom_filter_offset`, `cc_offset_index_offset`,
+  `cc_column_index_offset`) so existing readers see them.
+- ORC `DICTIONARY_V2` string column decoding wired up via a new
+  `decodeRLEv2IntAll` that walks RLE-v2 run headers to count values
+  exactly (dictionary length streams have implicit counts).
+- ORC writer paths for `timestamp` / `date` / `decimal64` columns,
+  including the SECONDARY-stream nanosecond packing.
+- Iceberg REST catalog protocol layer (`Iceberg.RestCatalog`) with
+  request/response types, JSON codecs, atomic-commit
+  `TableUpdate` / `TableRequirement` algebras, and an abstract
+  `CatalogClient` that plugs in any HTTP transport.

@@ -35,6 +35,7 @@ library
     Ion.ISLSchema
     Ion.QQ
     Ion.SchemaLang
+    Ion.SymbolTable
     Ion.Value
   build-depends:
     base >= 4.16 && < 5,

@@ -37,6 +37,7 @@ library
     HTML.Rewriter.Mutations
     HTML.Rewriter.Config
   exposed-modules:
+    HTML.Entities
     HTML.Value
     HTML.Parse
     HTML.Encode

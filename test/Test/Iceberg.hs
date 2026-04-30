@@ -10,7 +10,10 @@ import Test.Tasty.HUnit
 import Avro.Container (writeContainer)
 import Avro.Schema (AvroType (..))
 import qualified Avro.Value as AV
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as AKM
 import Iceberg.JSON (metadataFromJSON, metadataToJSON)
+import qualified Iceberg.RestCatalog as Rest
 import Iceberg.Manifest (manifestEntrySchema, manifestFileSchema)
 import Iceberg.Read
   ( applyPositionDeletes
@@ -48,6 +51,7 @@ icebergTests = testGroup "Iceberg"
   , manifestPathFilterTests
   , sequenceNumberTests
   , scanPlanDeleteTests
+  , restCatalogTests
   , snapshotRefTests
   ]
 
@@ -813,3 +817,77 @@ minimalMetadata = TableMetadata
   , tmSnapshotLog        = V.empty
   , tmSnapshotRefs       = Map.empty
   }
+
+-- ============================================================
+-- REST catalog protocol tests
+-- ============================================================
+
+restCatalogTests :: TestTree
+restCatalogTests = testGroup "REST catalog protocol"
+  [ testCase "namespacePath / tablePath" $ do
+      let ns = Rest.Namespace (V.fromList ["accounting", "tax"])
+          ti = Rest.TableIdentifier ns "ledger"
+      Rest.namespacePath ns @?= "/v1/namespaces/accounting%1Ftax"
+      Rest.tablePath ti     @?= "/v1/namespaces/accounting%1Ftax/tables/ledger"
+      Rest.tablesPath ns    @?= "/v1/namespaces/accounting%1Ftax/tables"
+
+  , testCase "ListNamespacesResp parses page-token form" $ do
+      let body = "{\"namespaces\":[[\"a\"],[\"b\",\"c\"]],\"next-page-token\":\"tok\"}"
+      case Aeson.eitherDecodeStrict body of
+        Left e -> assertFailure e
+        Right r -> do
+          V.length (Rest.lnpNamespaces r) @?= 2
+          Rest.lnpNextToken r @?= Just "tok"
+
+  , testCase "createNamespace request body shape" $ do
+      let req = Rest.CreateNamespaceReq
+                  { Rest.cnrNamespace  = Rest.Namespace (V.singleton "books")
+                  , Rest.cnrProperties = Map.fromList [("owner","alice")]
+                  }
+          body = Aeson.encode req
+      case Aeson.eitherDecode body of
+        Left e -> assertFailure ("decode: " ++ e)
+        Right (Aeson.Object o) -> do
+          AKM.lookup "namespace"  o /= Nothing @? "namespace field present"
+          AKM.lookup "properties" o /= Nothing @? "properties field present"
+        Right _ -> assertFailure "expected object"
+
+  , testCase "TableUpdate.AddSchema serializes with action tag" $ do
+      let upd = Rest.AddSchema
+                  (Schema 7 (V.singleton (StructField 1 "x" True TInt Nothing)))
+                  (Just 1)
+          body = Aeson.encode upd
+      case Aeson.eitherDecode body of
+        Left e -> assertFailure ("decode: " ++ e)
+        Right (Aeson.Object o) ->
+          (AKM.lookup "action" o == Just (Aeson.String "add-schema"))
+            @? "action == add-schema"
+        Right _ -> assertFailure "expected object"
+
+  , testCase "TableRequirement.AssertCreate serializes with type tag" $ do
+      let body = Aeson.encode Rest.AssertCreate
+      case Aeson.eitherDecode body of
+        Left e -> assertFailure ("decode: " ++ e)
+        Right (Aeson.Object o) ->
+          (AKM.lookup "type" o == Just (Aeson.String "assert-create"))
+            @? "type == assert-create"
+        Right _ -> assertFailure "expected object"
+
+  , testCase "Pure-IO mock: dropTable round-trips through CatalogClient" $ do
+      let mockPerform req
+            | Rest.reqMethod req == Rest.DELETE
+            , Rest.reqPath req == "/v1/namespaces/foo/tables/bar"
+            = pure (Rest.Response 204 "")
+            | otherwise
+            = pure (Rest.Response 500 "{\"error\":{\"message\":\"unexpected\",\"type\":\"x\",\"code\":500}}")
+          cc = Rest.CatalogClient
+                 { Rest.ccBaseUrl = "https://example/"
+                 , Rest.ccAuth    = Rest.AuthBearer "abc"
+                 , Rest.ccPerform = mockPerform
+                 }
+          ti = Rest.TableIdentifier (Rest.Namespace (V.singleton "foo")) "bar"
+      result <- Rest.dropTable cc ti
+      case result of
+        Right () -> pure ()
+        Left e -> assertFailure ("dropTable failed: " ++ show e)
+  ]

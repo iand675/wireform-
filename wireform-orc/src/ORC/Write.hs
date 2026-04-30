@@ -13,6 +13,11 @@ module ORC.Write
   , encodeStringDirectColumn
   , encodeFloatColumn
   , encodeDoubleColumn
+    -- * Typed columns: timestamp / date / decimal
+  , encodeTimestampColumn
+  , encodeDateColumn
+  , encodeDecimal64Column
+  , encodeORCNano
     -- * File assembly
   , buildStripe
   , buildORCFile
@@ -23,7 +28,7 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as B
 import qualified Data.ByteString.Lazy as BL
-import Data.Int (Int64)
+import Data.Int (Int32, Int64)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as V
@@ -135,6 +140,58 @@ encodeFloatColumn vals =
 encodeDoubleColumn :: VP.Vector Double -> ByteString
 encodeDoubleColumn vals =
   BL.toStrict $ B.toLazyByteString $ VP.foldl' (\acc v -> acc <> writeDoubleLE v) mempty vals
+
+-- | Encode a timestamp column.
+--
+-- Returns @(DATA stream, SECONDARY stream)@:
+--
+-- * DATA — signed RLE v2 of the seconds-since-epoch value (the ORC
+--   spec uses the @ORC_TIMESTAMP_BASE@ of 2015-01-01 UTC, but readers
+--   that don't apply the base offset will get 1970-based values; the
+--   value here is whatever the caller supplies).
+-- * SECONDARY — unsigned RLE v2 of the nano value, packed via
+--   'encodeORCNano' (top bits = nano value with trailing zeros stripped,
+--   bottom 3 bits = the trailing-zero scale).
+encodeTimestampColumn
+  :: VP.Vector Int64       -- ^ seconds (signed)
+  -> VP.Vector Int64       -- ^ nanoseconds in [0, 999_999_999]
+  -> (ByteString, ByteString)
+encodeTimestampColumn !secs !nanos =
+  let !secBs = encodeRLEv2Direct secs True
+      !packedNanos = VP.map encodeORCNano nanos
+      !nanoBs = encodeRLEv2Direct (VP.map (fromIntegral :: Word64 -> Int64) packedNanos) False
+  in (secBs, nanoBs)
+
+-- | Encode a date column (signed days since 1970-01-01) as a single
+-- RLE v2 signed stream.
+encodeDateColumn :: VP.Vector Int32 -> ByteString
+encodeDateColumn !days =
+  let !widened = VP.map (fromIntegral :: Int32 -> Int64) days
+  in encodeRLEv2Direct widened True
+
+-- | Encode a DECIMAL64 column (precision @<=@ 18) as a signed RLE v2
+-- stream of unscaled values.  The scale is metadata; this function
+-- writes only the DATA stream.
+encodeDecimal64Column :: VP.Vector Int64 -> ByteString
+encodeDecimal64Column !vals = encodeRLEv2Direct vals True
+
+-- | Pack an unsigned nanosecond value into the ORC SECONDARY-stream
+-- representation: trailing zeros are factored out into a 3-bit scale
+-- in the bottom three bits, with the (de-zeroed) nano value in the
+-- bits above.  The dual is 'ORC.Read.decodeORCNano'.
+{-# INLINE encodeORCNano #-}
+encodeORCNano :: Int64 -> Word64
+encodeORCNano !n
+  | n <= 0 = 0
+  | otherwise =
+      let !(stripped, !zeros) = stripTrailingZeros (fromIntegral n :: Word64) 0
+      in (stripped `shiftL` 3) .|. fromIntegral zeros
+
+stripTrailingZeros :: Word64 -> Int -> (Word64, Int)
+stripTrailingZeros !v !z
+  | z >= 7              = (v, z)
+  | v `mod` 10 == 0 && v > 0 = stripTrailingZeros (v `div` 10) (z + 1)
+  | otherwise           = (v, z)
 
 {-# INLINE writeFloatLE #-}
 writeFloatLE :: Float -> B.Builder

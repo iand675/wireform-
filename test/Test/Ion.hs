@@ -211,4 +211,21 @@ wireFormatTests = testGroup "Wire format"
       let bs = encode (I.Int (-1))
       let td = BS.index bs 4
       (td `div` 16) @?= 3
+
+  , testCase "Symbol-bearing payload emits a local symbol table" $ do
+      let bs = encode (I.Symbol (T.pack "foo"))
+      -- BVM, then the LST envelope (annotation TD = 0xE0 nibble),
+      -- then the value (symbol TD = 0x70 nibble).
+      BS.index bs 4 @?= 0xE9
+      BS.index bs 5 @?= 0x81  -- annot length VarUInt = 1
+      BS.index bs 6 @?= 0x83  -- annot SID = 3 ($ion_symbol_table)
+
+  , testCase "Symbol value uses SID 10 for first user symbol" $ do
+      let bs = encode (I.Symbol (T.pack "foo"))
+      -- After the 10-byte LST envelope (annotation header + struct +
+      -- list + string) the payload begins with the symbol TD 0x71 then
+      -- VarUInt 10 = 0x0A.
+      let n = BS.length bs
+      BS.index bs (n - 2) @?= 0x71
+      BS.index bs (n - 1) @?= 0x0A
   ]

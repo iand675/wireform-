@@ -17,6 +17,7 @@ import Parquet.Read (loadParquetFile, pfFooter)
 import Parquet.Types
 import Parquet.Write
   ( buildParquetFile
+  , buildParquetFileWithIndex
   , statisticsForByteArray
   , statisticsForInt32
   , statisticsForInt64
@@ -139,7 +140,77 @@ main = do
             expect "writer max == 7"
               (statMaxValue st == Just (BS.pack [0x07, 0x00, 0x00, 0x00]))
 
+  -- buildParquetFileWithIndex: produces files with OffsetIndex,
+  -- ColumnIndex, and bloom filter footers populated.
+  let schemaWI = V.fromList
+        [ SchemaElement "schema" Nothing Nothing (Just 2) Nothing Nothing
+        , SchemaElement "x" (Just Required) (Just PTInt32) Nothing Nothing Nothing
+        , SchemaElement "y" (Just Required) (Just PTInt32) Nothing Nothing Nothing
+        ]
+      colX = VP.fromList [(0 :: Int32) .. 9]
+      colY = VP.fromList [(100 :: Int32) .. 109]
+      fbsWI = buildParquetFileWithIndex 4 schemaWI
+                (V.singleton (V.fromList [colX, colY]))
+  case loadParquetFile fbsWI of
+    Left e -> failTest ("loadParquetFile (with index): " ++ e)
+    Right pfWI -> do
+      let !rgs = fmRowGroups (pfFooter pfWI)
+          !rg = V.unsafeIndex rgs 0
+          !cc0 = V.unsafeIndex (rgColumns rg) 0
+          !cc1 = V.unsafeIndex (rgColumns rg) 1
+      expect "with-index writer: 2 columns" (V.length (rgColumns rg) == 2)
+      expect "with-index col 0: OffsetIndex pointer set"
+        (ccOffsetIndexOffset cc0 /= Nothing && ccOffsetIndexLength cc0 /= Nothing)
+      expect "with-index col 0: ColumnIndex pointer set"
+        (ccColumnIndexOffset cc0 /= Nothing && ccColumnIndexLength cc0 /= Nothing)
+      case ccMetadata cc0 of
+        Nothing -> failTest "with-index col 0: ColumnMetadata missing"
+        Just m  -> do
+          expect "with-index col 0: bloom_filter_offset set"
+            (cmBloomFilterOffset m /= Nothing && cmBloomFilterLength m /= Nothing)
+      case readOffsetIndex pfWI 0 0 of
+        Left e -> failTest ("readOffsetIndex col 0: " ++ e)
+        Right Nothing -> failTest "readOffsetIndex col 0: Nothing"
+        Right (Just oi0) -> do
+          -- 10 values / 4 per page = 3 pages (4 + 4 + 2)
+          expect "with-index col 0: 3 pages"
+            (V.length (oiPageLocations oi0) == 3)
+          expect "with-index col 0: page 0 starts at row 0"
+            (plFirstRowIndex (V.head (oiPageLocations oi0)) == 0)
+      case readColumnIndex pfWI 0 0 of
+        Left e -> failTest ("readColumnIndex col 0: " ++ e)
+        Right Nothing -> failTest "readColumnIndex col 0: Nothing"
+        Right (Just ci0) -> do
+          expect "with-index col 0: ColumnIndex has 3 entries"
+            (V.length (ciMinValues ci0) == 3 && V.length (ciMaxValues ci0) == 3)
+      case readOffsetIndex pfWI 0 1 of
+        Left e -> failTest ("readOffsetIndex col 1: " ++ e)
+        Right Nothing -> failTest "readOffsetIndex col 1: Nothing"
+        Right (Just _)  -> putStrLn "OK: with-index col 1: OffsetIndex parsed"
+      -- The bloom filter slice should be parseable as a BloomFilter.
+      case ccMetadata cc1 of
+        Nothing -> pure ()
+        Just m  -> case (cmBloomFilterOffset m, cmBloomFilterLength m) of
+          (Just o, Just l) -> do
+            let slice = BS.take (fromIntegral l) (BS.drop (fromIntegral o) fbsWI)
+            case decodeBloomFilter slice of
+              Left e -> failTest ("decodeBloomFilter col 1: " ++ e)
+              Right (_, sbbf) -> do
+                expect "with-index col 1: bloom contains a known value"
+                  (sbbfCheck (i32LEBs (105 :: Int32)) sbbf)
+                expect "with-index col 1: bloom does not contain a far value"
+                  (not (sbbfCheck (i32LEBs (999999 :: Int32)) sbbf))
+          _ -> failTest "with-index col 1: bloom pointers missing"
+
   putStrLn "All Parquet page-index / bloom-filter / statistics tests passed."
+
+i32LEBs :: Int32 -> BS.ByteString
+i32LEBs n = BS.pack
+  [ fromIntegral n
+  , fromIntegral (n `div` 256)
+  , fromIntegral (n `div` 65536)
+  , fromIntegral (n `div` 16777216)
+  ]
 
 expectHash :: String -> String -> IO ()
 expectHash s expected = expectHashBs (BSC.pack s) expected

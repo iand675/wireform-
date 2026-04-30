@@ -97,7 +97,6 @@ Derive encode/decode from `GHC.Generics` for schema-less formats:
 | Module | What it does |
 |--------|-------------|
 | `Proto.Decode.Stream` | Lazy stream of varint-length-delimited messages; incremental `IDecode` with `feedChunk` |
-| `Proto.Decode.Streaming` | Step-based `DecodeStep` / `feedMore` for length-delimited protobuf streams |
 | `MsgPack.Stream` | Incremental one-value-at-a-time MessagePack (handles Timestamp extension) |
 | `CBOR.Stream` | Incremental CBOR value decoding |
 

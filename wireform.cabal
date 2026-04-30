@@ -675,7 +675,7 @@ executable example-flatbuffers
   import: defaults
   main-is: FlatBuffersExample.hs
   hs-source-dirs: examples
-  build-depends: base, wireform-flatbuffers, bytestring, vector
+  build-depends: base, wireform-flatbuffers, bytestring, vector, text
 
 executable example-iceberg
   import: defaults

@@ -12,6 +12,7 @@
 module ORC.RLE
   ( decodeRLEv1Int
   , decodeRLEv2Int
+  , decodeRLEv2IntAll
   , decodeBooleanRLE
   , decodePresentStream
     -- * Encoding helpers (used by ORC.Write)
@@ -86,6 +87,98 @@ decodeRLEv2Int _signed numValues bs
       case result of
         Left e  -> return (Left e)
         Right _ -> Right <$> VP.unsafeFreeze out
+
+-- | Decode an RLE v2 integer stream when the decoder should consume the
+-- whole input (count not known in advance — used for dictionary length
+-- streams).  Uses a two-pass strategy: scan the headers to count the
+-- values, then run the regular decoder.
+decodeRLEv2IntAll :: Bool -> ByteString -> Either String (VP.Vector Int64)
+decodeRLEv2IntAll signed bs = do
+  n <- countRLEv2 bs
+  decodeRLEv2Int signed n bs
+
+-- | Walk an RLE v2 stream's run headers to total up the number of
+-- values it contains, without decoding the payload bytes.
+countRLEv2 :: ByteString -> Either String Int
+countRLEv2 bs = go 0 0
+  where
+    !bsLen = BS.length bs
+    go !off !acc
+      | off >= bsLen = Right acc
+      | otherwise =
+          let !firstByte = fromIntegral (BS.index bs off) :: Int
+              !enc       = (firstByte `shiftR` 6) .&. 3
+          in case enc of
+               0 -> -- Short Repeat: count = (firstByte & 7) + 3
+                    let !widthBytes = ((firstByte `shiftR` 3) .&. 7) + 1
+                        !count      = (firstByte .&. 7) + 3
+                        !next       = off + 1 + widthBytes
+                    in if next > bsLen
+                         then Left "ORC.RLE: truncated SHORT_REPEAT during count scan"
+                         else go next (acc + count)
+               1 -> -- Direct
+                    if off + 2 > bsLen
+                      then Left "ORC.RLE: truncated DIRECT header during count scan"
+                      else
+                        let !encodedW   = (firstByte `shiftR` 1) .&. 0x1F
+                            !w          = decodeWidth encodedW
+                            !lenHigh    = firstByte .&. 1
+                            !secondByte = fromIntegral (BS.index bs (off + 1)) :: Int
+                            !len        = (lenHigh `shiftL` 8) .|. secondByte + 1
+                            !totalBytes = (len * w + 7) `quot` 8
+                            !next       = off + 2 + totalBytes
+                        in if next > bsLen
+                             then Left "ORC.RLE: truncated DIRECT data during count scan"
+                             else go next (acc + len)
+               2 -> -- Patched Base
+                    if off + 4 > bsLen
+                      then Left "ORC.RLE: truncated PATCHED_BASE header during count scan"
+                      else
+                        let !encodedW   = (firstByte `shiftR` 1) .&. 0x1F
+                            !w          = decodeWidth encodedW
+                            !lenHigh    = firstByte .&. 1
+                            !secondByte = fromIntegral (BS.index bs (off + 1)) :: Int
+                            !len        = (lenHigh `shiftL` 8) .|. secondByte + 1
+                            !thirdByte  = fromIntegral (BS.index bs (off + 2)) :: Int
+                            !fourthByte = fromIntegral (BS.index bs (off + 3)) :: Int
+                            !baseWidth  = ((thirdByte `shiftR` 5) .&. 7) + 1
+                            !patchWidth = decodeWidth (thirdByte .&. 0x1F)
+                            !patchGapWidth = ((fourthByte `shiftR` 5) .&. 7) + 1
+                            !patchListLen  = fourthByte .&. 0x1F
+                            !baseBytes  = baseWidth
+                            !dataBytes  = (len * w + 7) `quot` 8
+                            !patchBytes = (patchListLen * (patchWidth + patchGapWidth) + 7) `quot` 8
+                            !next       = off + 4 + baseBytes + dataBytes + patchBytes
+                        in if next > bsLen
+                             then Left "ORC.RLE: truncated PATCHED_BASE during count scan"
+                             else go next (acc + len)
+               3 -> -- Delta
+                    if off + 2 > bsLen
+                      then Left "ORC.RLE: truncated DELTA header during count scan"
+                      else
+                        let !encodedW   = (firstByte `shiftR` 1) .&. 0x1F
+                            !w          = decodeWidth encodedW
+                            !lenHigh    = firstByte .&. 1
+                            !secondByte = fromIntegral (BS.index bs (off + 1)) :: Int
+                            !len        = ((lenHigh `shiftL` 8) .|. secondByte) + 1
+                            !readBase   = readVulongAsInt64 bs (off + 2)
+                        in case readBase of
+                             Left e -> Left e
+                             Right (_baseVal, off1)
+                               | len <= 1 -> go off1 (acc + len)
+                               | otherwise ->
+                                   case readVslong bs off1 of
+                                     Left e -> Left e
+                                     Right (_deltaBase, off2)
+                                       | w == 0 -> go off2 (acc + len)
+                                       | otherwise ->
+                                           let !numDeltas  = len - 2
+                                               !deltaBytes = (numDeltas * w + 7) `quot` 8
+                                               !next       = off2 + deltaBytes
+                                           in if next > bsLen
+                                                then Left "ORC.RLE: truncated DELTA packed data during count scan"
+                                                else go next (acc + len)
+               _ -> Left "ORC.RLE: invalid RLE v2 encoding during count scan"
 
 ------------------------------------------------------------------------
 -- Byte RLE (used by boolean streams)
