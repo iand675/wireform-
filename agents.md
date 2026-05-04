@@ -289,3 +289,51 @@ constructor to `Wireform.Derive.Modifier.Modifier`:
 Backend-specific payloads that should not pollute the core ADT use
 the `Wireform.Derive.Extension.BackendModifier` typeclass — see
 `XmlFieldOpt`, `HtmlFieldOpt`, and `Asn1Tag` for examples.
+
+## Cursor Cloud specific instructions
+
+The update script installs apt packages, ghcup, GHC 9.6.4, and cabal 3.10.3.0
+into the base image, then runs `cabal update`. After the update script finishes
+the toolchain is ready at `/root/.ghcup/bin` (already on `$PATH` via
+`/root/.ghcup/env`).
+
+### Building
+
+- `cabal build all -j4 --ghc-options="-j4"` — first build after a fresh
+  image takes ~8–12 min (dependency compilation). Incremental rebuilds after
+  code changes are fast (~seconds).
+- The project must be configured with `--enable-tests --enable-benchmarks`
+  before test binaries are available: `cabal configure --enable-tests --enable-benchmarks`.
+- Compression flags `+snappy`, `+zstd`, `+lz4` are enabled in `cabal.project`;
+  the matching `-dev` packages (`libsnappy-dev`, `libzstd-dev`, `liblz4-dev`)
+  are installed by the update script.
+
+### Testing
+
+- `cabal test wireform-test --test-show-details=streaming` — main suite (2500+ tests).
+- `cabal test conformance-self-test --test-show-details=streaming` — proto conformance.
+- `cabal test temporal-codegen-test --test-show-details=streaming` — temporal codegen.
+- See `README.md` → Testing and CI workflow (`.github/workflows/ci.yml`) for the
+  full CI matrix.
+
+### Linting
+
+- `hlint wireform-core/src/` — CI runs HLint on `wireform-core/src` with
+  `fail-on: warning`. `hlint` is installed via `cabal install hlint`.
+
+### Running examples
+
+- `cabal run example-derive` — the hello-world for the annotation-driven
+  deriver (one record → proto + CBOR + MsgPack + JSON).
+- See the full examples table in `README.md` → Examples.
+
+### Gotchas
+
+- Ubuntu archive mirrors (`archive.ubuntu.com`) are unreachable from Cloud
+  Agent VMs. The update script switches APT to `mirrors.edge.kernel.org`
+  before installing packages.
+- The ghcup bootstrap installs the latest GHC by default; the update script
+  explicitly installs and sets GHC 9.6.4 and cabal 3.10.3.0 afterwards.
+- `cabal build all` without `--enable-tests` will succeed but test binaries
+  won't be linked, so `cabal test` will fail with a solver error. Always
+  configure with tests enabled first.
