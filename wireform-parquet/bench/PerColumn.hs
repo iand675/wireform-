@@ -63,6 +63,11 @@ writeF cols = PHL.encodeParquet
   PHL.defaultWriteOptions { PHL.writeCompression = P.Uncompressed }
   mkSchema [cols]
 
+writeSnappyF :: V.Vector ColumnData -> BS.ByteString
+writeSnappyF cols = PHL.encodeParquet
+  PHL.defaultWriteOptions { PHL.writeCompression = P.Snappy }
+  mkSchema [cols]
+
 time :: String -> Int -> IO Int -> IO ()
 time label iters act = do
   -- Warm up
@@ -130,6 +135,20 @@ main = do
             case PR.readGenericInt64ColumnChunk codec chunkBs of
               Right v -> pure (VP.length v)
               Left _  -> pure 0
+        Left _ -> pure ()
+
+      -- Repeat with snappy data so we can isolate decompression cost.
+      let !bsSnappy = writeSnappyF dataset
+      case PHL.decodeParquet PHL.defaultReadOptions bsSnappy of
+        Right pfS -> case PR.columnChunkSlice pfS 0 0 of
+          Right snappyChunk -> do
+            putStrLn ""
+            putStrLn "=== Snappy stage breakdown for one Int64 column ==="
+            time "  readGenericInt64ColumnChunk (Snappy)" 100 $
+              case PR.readGenericInt64ColumnChunk P.Snappy snappyChunk of
+                Right v -> pure (VP.length v)
+                Left _  -> pure 0
+          Left _ -> pure ()
         Left _ -> pure ()
       putStrLn ""
       putStrLn "=== End-to-end (decodeParquet + 4 cols, fresh bs each iter) ==="

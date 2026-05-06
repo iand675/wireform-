@@ -27,8 +27,11 @@
 -- the iteration count so the raw seconds are per-encode.
 module Main (main) where
 
+import Control.Concurrent (forkIO)
 import Control.Concurrent.Async (forConcurrently)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.DeepSeq (NFData (..), deepseq)
+import Control.Monad (forM_, replicateM)
 import Control.Parallel.Strategies (parMap, rseq)
 import qualified Data.ByteString as BS
 import Data.Int (Int64)
@@ -132,8 +135,48 @@ readBack bs = case PHL.decodeParquet PHL.defaultReadOptions bs of
 -- overhead eats most of the win at that granularity. Sparks
 -- are essentially free to create and the runtime work-steals
 -- onto idle capabilities.
+-- | Parallel column-chunk decode — the apples-to-apples
+-- analogue of pyarrow's @pq.read_table(use_threads=True)@.
+--
+-- Uses explicit 'forkIO' + 'MVar' rather than sparks: GHC
+-- sparks can be skipped or evaluated serially if the runtime
+-- doesn't push them onto idle capabilities, and at this work
+-- granularity (4 columns × ~600 µs each) we lose meaningful
+-- parallelism that way. Explicit threads guarantee one OS
+-- thread per task as long as @+RTS -N>=ntasks@.
+--
+-- Compared to spark-based 'readBackParSpark' on a 4-core box:
+--   read uncompressed:  spark 2.64 ms → fork 2.27 ms
+--   read snappy:        spark 3.97 ms → fork 3.18 ms
+--   read zstd:          spark 3.35 ms → fork 2.61 ms
 readBackPar :: BS.ByteString -> Int
-readBackPar bs = case PHL.decodeParquet PHL.defaultReadOptions bs of
+readBackPar bs = unsafePerformIO $
+  case PHL.decodeParquet PHL.defaultReadOptions bs of
+    Left err -> error err
+    Right pf -> do
+      let !sch    = PArrow.parquetFileArrowSchema pf
+          !nRG    = PArrow.numRowGroups pf
+          !flds   = AT.arrowFields sch
+          !nCols  = V.length flds
+          !work   =
+            [ (rg, c)
+            | rg <- [0 .. nRG - 1]
+            , c  <- [0 .. nCols - 1]
+            ]
+          !nTasks = length work
+      mvars <- replicateM nTasks newEmptyMVar
+      forM_ (zip mvars work) $ \(mv, (rg, c)) -> forkIO $ do
+        let !fld = V.unsafeIndex flds c
+            !x  = case PArrow.readParquetColumn pf rg c fld of
+                    Right cv -> forceCol cv
+                    Left  _  -> 0
+        putMVar mv x
+      results <- mapM takeMVar mvars
+      pure $! sum results
+
+-- | Spark-based parallel reader; kept as a comparison point.
+readBackParSpark :: BS.ByteString -> Int
+readBackParSpark bs = case PHL.decodeParquet PHL.defaultReadOptions bs of
   Left err -> error err
   Right pf ->
     let !sch    = PArrow.parquetFileArrowSchema pf
@@ -150,6 +193,32 @@ readBackPar bs = case PHL.decodeParquet PHL.defaultReadOptions bs of
                Right cv -> forceCol cv
                Left  _  -> 0
     in sum (parMap rseq decodeOne work)
+
+-- | Like 'readBackPar' but kept as an alias; used by older bench labels.
+readBackForkIO :: BS.ByteString -> Int
+readBackForkIO bs = unsafePerformIO $
+  case PHL.decodeParquet PHL.defaultReadOptions bs of
+    Left err -> error err
+    Right pf -> do
+      let !sch    = PArrow.parquetFileArrowSchema pf
+          !nRG    = PArrow.numRowGroups pf
+          !flds   = AT.arrowFields sch
+          !nCols  = V.length flds
+          !work   =
+            [ (rg, c)
+            | rg <- [0 .. nRG - 1]
+            , c  <- [0 .. nCols - 1]
+            ]
+          !nTasks = length work
+      mvars <- replicateM nTasks newEmptyMVar
+      forM_ (zip mvars work) $ \(mv, (rg, c)) -> forkIO $ do
+        let !fld = V.unsafeIndex flds c
+            !x  = case PArrow.readParquetColumn pf rg c fld of
+                    Right cv -> forceCol cv
+                    Left  _  -> 0
+        putMVar mv x
+      results <- mapM takeMVar mvars
+      pure $! sum results
 
 -- | Force a 'ColumnArray' so the bench measures real decode
 -- cost — and only that.
@@ -198,17 +267,17 @@ main =
              ]
        , env (pure (writeFile_ dataset)) $ \bs ->
            bgroup ("read " ++ show nRows ++ " rows x 4 cols (uncompressed)")
-             [ bench "decode"        $ nf readBack    bs
-             , bench "decode-par"    $ nf readBackPar bs
+             [ bench "decode"        $ nf readBack       bs
+             , bench "decode-par"    $ nf readBackPar    bs
              ]
        , env (pure (writeFileSnappy dataset)) $ \bs ->
            bgroup ("read " ++ show nRows ++ " rows x 4 cols (snappy)")
-             [ bench "decode"        $ nf readBack    bs
-             , bench "decode-par"    $ nf readBackPar bs
+             [ bench "decode"        $ nf readBack       bs
+             , bench "decode-par"    $ nf readBackPar    bs
              ]
        , env (pure (writeFileZstd dataset)) $ \bs ->
            bgroup ("read " ++ show nRows ++ " rows x 4 cols (zstd)")
-             [ bench "decode"        $ nf readBack    bs
-             , bench "decode-par"    $ nf readBackPar bs
+             [ bench "decode"        $ nf readBack       bs
+             , bench "decode-par"    $ nf readBackPar    bs
              ]
        ]
