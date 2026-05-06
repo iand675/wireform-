@@ -11,49 +11,60 @@ pyarrow on the same shape, on a 4-core x86_64 machine, GHC
 
 |                 | wireform | pyarrow | ratio                              |
 |-----------------|---------:|--------:|-----------------------------------:|
-| write none      |   4.2 ms |  9.1 ms | **2.17× faster** than pyarrow      |
-| write snappy    |   5.7 ms | 10.5 ms | **1.85× faster**                   |
-| write zstd      |   7.7 ms | 12.6 ms | **1.64× faster**                   |
-| read none       |   1.4 ms |  2.6 ms | **1.82× faster**                   |
-| read snappy     |   3.8 ms |  4.3 ms | **1.15× faster**                   |
-| read zstd       |   2.9 ms |  4.8 ms | **1.67× faster**                   |
+| write none      |   2.9 ms |  8.6 ms | **2.96× faster** than pyarrow      |
+| write snappy    |   4.5 ms | 10.0 ms | **2.21× faster**                   |
+| write zstd      |   6.6 ms | 12.1 ms | **1.85× faster**                   |
+| read none       |   1.5 ms |  2.6 ms | **1.71× faster**                   |
+| read snappy     |   3.7 ms |  4.5 ms | **1.20× faster**                   |
+| read zstd       |   2.8 ms |  4.5 ms | **1.59× faster**                   |
 
 ### Multi-threaded (`+RTS -N` vs `pq.read_table(use_threads=True)`)
 
 |                 | wireform | pyarrow | ratio                              |
 |-----------------|---------:|--------:|-----------------------------------:|
-| write none      |   5.2 ms |  9.1 ms | **1.72× faster**                   |
-| write snappy    |   6.4 ms | 10.5 ms | **1.64× faster**                   |
-| write zstd      |   8.7 ms | 12.6 ms | **1.45× faster**                   |
-| read none       |   1.4 ms |  2.0 ms | **1.39× faster**                   |
-| read snappy     |   2.1 ms |  2.2 ms | **1.04× faster**                   |
-| read zstd       |   1.7 ms |  2.1 ms | **1.28× faster**                   |
+| write none      |   3.5 ms |  8.6 ms | **2.43× faster**                   |
+| write snappy    |   4.7 ms | 10.0 ms | **2.13× faster**                   |
+| write zstd      |   7.0 ms | 12.1 ms | **1.74× faster**                   |
+| read none       |   1.4 ms |  2.1 ms | **1.49× faster**                   |
+| read snappy     |   2.2 ms |  2.1 ms | 1.05× slower (within noise)        |
+| read zstd       |   1.8 ms |  2.0 ms | **1.11× faster**                   |
 
-**wireform-parquet beats pyarrow on every dimension in both single- and multi-threaded modes.**
+**wireform-parquet beats pyarrow on every dimension single-threaded, and on 5/6 multi-threaded (snappy reads are tied within noise).**
 
-In rows/second (multi-threaded):
+In rows/second (single-threaded):
 
 | workload              | wireform     | pyarrow         |
 |-----------------------|-------------:|----------------:|
-| write uncompressed    | 19.2M rows/s | 11.0M rows/s    |
-| read  uncompressed    | 71.4M rows/s | 50.0M rows/s    |
-| read  zstd            | 58.8M rows/s | 47.6M rows/s    |
+| write uncompressed    | 34.5M rows/s | 11.6M rows/s    |
+| read  uncompressed    | 66.7M rows/s | 38.5M rows/s    |
+| read  zstd            | 35.7M rows/s | 22.2M rows/s    |
 
 File sizes (bytes): uncompressed=2,157,279 · snappy=1,212,588 · zstd=585,180.
+
+## Arrow IPC numbers (same dataset, single-threaded)
+
+| | wireform | pyarrow* |
+|---|---:|---:|
+| write encode | 1.94 ms | 0.4 ms |
+| read decode | 1.10 ms | 0.01 ms |
+
+\* pyarrow's Arrow IPC implementation is essentially zero-copy: the in-memory representation matches the wire format, so `read_table` just points an Arrow Array at the source buffer with no allocation. Our `ColumnArray` carries its own `VP.Vector` (which has its own `ByteArray`), so we always pay one memcpy per column. This is a fundamental representation difference that no amount of micro-optimisation will close. Our 1.10 ms read is still within 1× of cache-warm memcpy at this size.
 
 ## History (read uncompressed)
 
 | version | wireform | vs pyarrow |
 |---|---:|---:|
-| pre-perf-pass | 4522 ms | 2086× slower |
-| + O(n²) BYTE_ARRAY decode fix | 6.5 ms | 2.8× slower |
-| + fast PLAIN encoder | 6.6 ms | 2.5× slower |
-| + memcpy plain primitives | 4.4 ms | 1.6× slower |
-| + Utf8 fast path | 4.5 ms | 1.7× slower\* |
+| pre-perf-pass                              | 4522 ms | 2086× slower |
+| + O(n²) BYTE_ARRAY decode fix              |  6.5 ms | 2.8× slower  |
+| + fast PLAIN encoder                       |  6.6 ms | 2.5× slower  |
+| + memcpy plain primitives                  |  4.4 ms | 1.6× slower  |
+| + Utf8 fast path (shared ByteArray)        |  4.5 ms | 1.7× slower\* |
 | + corrected bench labels + first-page accumulator | 2.7 ms | 1.02× tied |
 | + forkIO scheduling + zero-copy Bool unpack | 2.3 ms | 1.16× faster |
-| + tuned -A8m nursery | 1.8 ms | 1.45× faster |
-| + tuned -A32m nursery (current) | **1.4 ms** | **1.82× faster** |
+| + tuned -A8m nursery                       |  1.8 ms | 1.45× faster |
+| + tuned -A32m nursery                      |  1.4 ms | 1.82× faster |
+| + write-side double-encode fix             |  1.5 ms | 1.71× faster |
+| + SIMDe ASCII / bswap memcpy               |  1.5 ms | 1.71× faster |
 
 \* The Utf8 fast path looked neutral until the bench was fixed
 to actually force the values; the previous numbers were
@@ -62,58 +73,68 @@ measured.
 
 ## The optimisation passes
 
-1. **`Parquet.Read.decodePlainByteArray`** was using `V.snoc`
-   in a tight loop, making the decode O(n²). Replaced with
-   a mutable boxed vector. **~700× speedup on PLAIN BYTE_ARRAY columns.**
-2. **`Parquet.Write.encodeColumnDataPagePayload`** went
-   through `ByteString.Builder` + `BL.toStrict` for every
-   element. Replaced with one up-front `BSI.unsafeCreate`
-   allocation + direct `pokeByteOff` for primitives,
-   LSB-first bit-packed loop for booleans, and a single-pass
-   `memcpy` for byte arrays. **8× write speedup.**
-3. **`Parquet.Read.decodePlain{Int,Float,Double}`** was
-   reading each value byte-by-byte through `readLE32`/`readLE64`.
-   Replaced with one `memcpy` from the page body's foreign
-   pointer into the destination primitive vector's mutable
-   byte array.
-4. **`Parquet.Read.dispatchUtf8`** + **`decodePlainByteArrayAsText`**
-   added a Utf8-aware decode path: precheck ASCII-ness via a
-   `Word64`-chunked scan, single bulk `memcpy` of the page
-   body into one `Data.Text.Array.Array`, then construct N
-   `Text` values that all point into that one `Array` via
-   the unsafe `TI.text` constructor.
-5. **`Parquet.Read.genericReadColumnChunk`** stopped doing
-   `ppEmpty pp ++ pageVec` for the first page (which
-   memcpy'd 800 KB into a fresh Int64 vector for nothing).
-   Track the accumulator as `Maybe a`; the first page
-   becomes the accumulator directly.
-6. **Parallel column-chunk reader** (`bench/Throughput.hs:readBackPar`).
-   Uses `forkIO` + `MVar` rather than sparks: at this work
-   granularity (4 columns × ~600 µs each) sparks weren't
-   eagerly scheduled enough; explicit threads give one OS
-   thread per task as long as `+RTS -N>=ntasks`.
-7. **`Columnar.SIMD.unpackBitsLsbUnsafe`** rewrite. The
-   previous shape went Storable Word8 → Unboxed Word8 →
-   Unboxed Bool → Boxed Bool with three intermediate
-   allocations + traversals. New shape allocates one boxed
-   mutable vector and walks the source one byte at a time,
-   writing all 8 bits in a straight-line inner block. Cuts
-   ~300 µs off every Bool column read.
-8. **`-with-rtsopts=-A32m`** on the bench. GHC's default 1 MB
-   per-capability nursery is much too small for our parallel
-   read workload (1.2 MB Utf8 + Bool buffers per thread
-   immediately overflow). Bumping to 32 MB removes most of
-   the GC pressure and is the single biggest win after the
-   correctness fixes.
-
-The same `V.snoc`-in-loop bug existed in
-`ORC.Read.decodeDecimal128Stream` and was fixed alongside.
+1. **`Parquet.Read.decodePlainByteArray`** — `V.snoc` in a
+   loop made decode O(n²). Fixed with a mutable boxed vector.
+2. **`Parquet.Write.encodeColumnDataPagePayload`** — `Builder` +
+   `BL.toStrict` per element → pre-allocated strict ByteString +
+   direct `pokeByteOff`. **8× write speedup.**
+3. **`Parquet.Read.decodePlain{Int,Float,Double}`** — byte-by-byte
+   `BS.index` + shifts → single `memcpy` from page body to
+   primitive vector's underlying byte array.
+4. **`Parquet.Read.dispatchUtf8`** + **`decodePlainByteArrayAsText`** —
+   100k tiny `decodeUtf8` allocations → ASCII-precheck + one
+   bulk `memcpy` of the page body into one shared
+   `Data.Text.Array.Array`.
+5. **`Parquet.Read.genericReadColumnChunk`** — first-page no-copy
+   (avoid `ppEmpty ++ pageVec` allocating + memcpy'ing 800 KB
+   for nothing). Plus `ppConcat` so multi-page columns don't
+   pay O(pages²) memcpy.
+6. **`bench/Throughput.hs:readBackPar`** with `forkIO + MVar` —
+   guaranteed parallelism per task, vs sparks which weren't
+   eagerly scheduled at this work granularity.
+7. **`Columnar.SIMD.unpackBitsLsbUnsafe`** — Storable Word8 →
+   Unboxed Word8 → Unboxed Bool → Boxed Bool (3 intermediate
+   allocations) → one boxed mutable vector with an inline
+   8-bits-per-byte unpacker.
+8. **`-with-rtsopts=-A32m`** on the bench — GHC's default
+   1 MB per-capability nursery overflows on parallel reads.
+   Single biggest win after the correctness fixes.
+9. **V2 page write double-encode fix** — `encodeColumnDataPage`
+   was being called just to compute the uncompressed size,
+   then `encodeColumnDataPageV2Parts` was called for the
+   actual output (encoding the column twice). Replaced with
+   `columnDataPlainEncodedSize` which is O(1) for primitives.
+   **~30-40% write speedup.**
+10. **Single-pass min/max stats** — `VP.foldl1' min` +
+    `VP.foldl1' max` was two passes per column; new `MinMax`
+    strict-pair fold does one pass.
+11. **Arrow read primitive columns** — same byte-by-byte issue
+    as Parquet had. Fixed with the same `memcpyPrimVecLE`
+    helper. **9.6× total Arrow IPC read speedup.**
+12. **Arrow Utf8 read** — same shared-ByteArray fast path as
+    Parquet. **4× speedup on the Utf8 column.**
+13. **Arrow + ORC write encoders** — same Builder-per-element
+    issue. Fixed with `pokePrimVecLE` / direct allocation.
+14. **Arrow Utf8 write** — was calling `TE.encodeUtf8` per
+    Text (100 k tiny ByteString allocations). New path copies
+    bytes straight from each `Text`'s underlying `ByteArray`
+    into the destination buffer via `PBA.copyByteArrayToAddr`.
+    **~2.3× Arrow write speedup.**
+15. **ORC `encodeStringDictColumn`** — same `V.snoc`-in-loop
+    O(n²) bug as Parquet's BYTE_ARRAY decode. Fixed with a
+    mutable primitive vector.
+16. **SIMDe-accelerated kernels** in `Columnar.SIMD`:
+    * `hs_columnar_is_ascii` — SSE2 OR + movemask, ~2-3×
+      faster than the Word64-chunked Haskell loop.
+    * `hs_columnar_bswap{16,32,64}_copy` — SSSE3 `pshufb`-based
+      byte-swap memcpy for the rare Arrow big-endian path.
+      Replaces a per-element scalar loop.
 
 ## Bench fairness
 
 * `Throughput.hs`'s `writeFile_` was using `defaultWriteOptions`
-  (Snappy), so the "read uncompressed" criterion bench was
-  actually decoding a Snappy file. Fixed.
+  (Snappy), so the "read uncompressed" benchmark was actually
+  decoding a Snappy file. Fixed.
 * `readBack` returned a constant `Int` and never forced the
   per-element decode work. New `forceCol` walks every element:
   for primitive columns the data is already strict in a
@@ -124,22 +145,16 @@ The same `V.snoc`-in-loop bug existed in
   `use_threads=True` and prints both comparison tables.
 * The Haskell bench has both serial (`decode`) and parallel
   (`decode-par`) read variants. The cabal benchmark target
-  uses `-threaded -rtsopts -with-rtsopts=-A32m` so the
-  default GHC nursery doesn't dominate; the user picks
-  `+RTS -N1` or `+RTS -N` at the command line.
+  uses `-threaded -rtsopts -with-rtsopts=-A32m`; the user
+  picks `+RTS -N1` or `+RTS -N` at the command line.
 
 ## Reproduce
 
 ```bash
-# Single-threaded numbers
 cabal bench --enable-benchmarks wireform-parquet:parquet-throughput \
   --benchmark-options='--csv /tmp/wf_n1.csv --time-limit 4'
-
-# Multi-threaded numbers
 cabal bench --enable-benchmarks wireform-parquet:parquet-throughput \
   --benchmark-options='--csv /tmp/wf_n4.csv --time-limit 4 +RTS -N -RTS'
-
-# Compare against pyarrow (both use_threads modes)
 python3 wireform-parquet/scripts/parquet_bench_compare.py
 ```
 
@@ -149,12 +164,27 @@ For per-column timing (no criterion harness):
 cabal run wireform-parquet:parquet-percol
 ```
 
+For Arrow IPC comparison:
+
+```bash
+cabal bench --enable-benchmarks wireform-arrow:arrow-ipc-throughput \
+  --benchmark-options='--csv /tmp/wf_arrow.csv --time-limit 4'
+python3 wireform-arrow/scripts/arrow_ipc_bench_compare.py
+```
+
+Wide-schema and large-row scaling:
+
+```bash
+cabal bench --enable-benchmarks wireform-parquet:parquet-scale \
+  --benchmark-options='--time-limit 3'
+```
+
 ## Notes for downstream users
 
-If you are using `wireform-parquet` in a long-running
-process, GHC's default `-A1m` nursery is small for any
-realistic columnar workload. Set at least `-A8m`
-(per-capability) in your link options:
+If you are using `wireform-parquet` in a long-running process,
+GHC's default `-A1m` nursery is small for any realistic
+columnar workload. Set at least `-A8m` (per-capability) in
+your link options:
 
 ```
 ghc-options: -threaded -rtsopts "-with-rtsopts=-N -A8m"
