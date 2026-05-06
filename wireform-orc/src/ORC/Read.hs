@@ -401,16 +401,28 @@ decodeDecimal128Stream
   :: Int        -- ^ expected number of present values
   -> ByteString -- ^ DATA stream bytes
   -> Either String (V.Vector Integer)
-decodeDecimal128Stream n bs = go 0 0 V.empty
-  where
-    !len = BS.length bs
-    go !i !off !acc
-      | i >= n = if off /= len
-                   then Left "ORC.Read.decodeDecimal128Stream: trailing bytes"
-                   else Right $! acc
-      | otherwise = do
-          (v, off') <- readVarSigned bs off
-          go (i + 1) off' (V.snoc acc v)
+decodeDecimal128Stream n bs
+  | n <= 0    = if BS.null bs
+                  then Right V.empty
+                  else Left "ORC.Read.decodeDecimal128Stream: trailing bytes"
+  | otherwise = runST $ do
+      mv <- MV.unsafeNew n
+      let !len = BS.length bs
+          go !i !off
+            | i >= n =
+                if off /= len
+                  then pure (Left "ORC.Read.decodeDecimal128Stream: trailing bytes")
+                  else pure (Right ())
+            | otherwise =
+                case readVarSigned bs off of
+                  Left err     -> pure (Left err)
+                  Right (v, off') -> do
+                    MV.unsafeWrite mv i v
+                    go (i + 1) off'
+      r <- go 0 0
+      case r of
+        Left err -> pure (Left err)
+        Right () -> Right <$> V.unsafeFreeze mv
 
 readVarSigned :: ByteString -> Int -> Either String (Integer, Int)
 readVarSigned bs off0 = do
