@@ -8,6 +8,12 @@ module Columnar.SIMD
   ( bitmapPopCount
   , unpackBitsLsbUnsafe
   , memcpyFast
+    -- * SIMD ASCII validation + endian-swap copies
+  , isAsciiPtr
+  , isAsciiBS
+  , bswap16Copy
+  , bswap32Copy
+  , bswap64Copy
   ) where
 
 import Data.Bits (shiftR, (.&.))
@@ -16,8 +22,7 @@ import Data.Word (Word8)
 import Foreign.C.Types (CInt (..))
 import Foreign.Ptr (Ptr, castPtr)
 import Foreign.Storable (peekByteOff)
-
-import Data.ByteString qualified as BS
+import qualified Data.ByteString as BS
 import Data.ByteString.Unsafe (unsafeUseAsCStringLen)
 import Data.Vector qualified as V
 import qualified Data.Vector.Mutable as VM
@@ -31,6 +36,18 @@ foreign import ccall unsafe "hs_columnar_unpack_bits_lsb"
 
 foreign import ccall unsafe "hs_columnar_memcpy_fast"
   c_memcpy_fast :: Ptr Word8 -> Ptr Word8 -> CInt -> IO ()
+
+foreign import ccall unsafe "hs_columnar_is_ascii"
+  c_is_ascii :: Ptr Word8 -> Int32 -> Int32
+
+foreign import ccall unsafe "hs_columnar_bswap16_copy"
+  c_bswap16_copy :: Ptr Word8 -> Ptr Word8 -> Int32 -> IO ()
+
+foreign import ccall unsafe "hs_columnar_bswap32_copy"
+  c_bswap32_copy :: Ptr Word8 -> Ptr Word8 -> Int32 -> IO ()
+
+foreign import ccall unsafe "hs_columnar_bswap64_copy"
+  c_bswap64_copy :: Ptr Word8 -> Ptr Word8 -> Int32 -> IO ()
 
 -- | Count set bits in a byte range (entire bytes).
 bitmapPopCount :: BS.ByteString -> Int
@@ -95,3 +112,36 @@ unpackBitsLsbUnsafe !n bs = unsafePerformIO $ do
 memcpyFast :: Ptr Word8 -> Ptr Word8 -> Int -> IO ()
 memcpyFast !dst !src !len =
   c_memcpy_fast dst src (fromIntegral len)
+
+-- | True iff every byte in @[ptr, ptr+len)@ is < 0x80. SSE2-accelerated
+-- via SIMDe: 64 bytes per loop iteration with 4 16-byte vector ORs and
+-- a final movemask test of the high-bit accumulator.
+isAsciiPtr :: Ptr Word8 -> Int -> Bool
+isAsciiPtr !ptr !len = c_is_ascii ptr (fromIntegral len) /= 0
+
+-- | True iff every byte of the bytestring is < 0x80. Convenience
+-- wrapper around 'isAsciiPtr'.
+isAsciiBS :: BS.ByteString -> Bool
+isAsciiBS bs = unsafePerformIO $
+  unsafeUseAsCStringLen bs $ \(cstr, len) ->
+    pure $! isAsciiPtr (castPtr cstr) len
+
+-- | SIMD byte-swap memcpy at 16-bit lane width: copy @nElems@ 2-byte
+-- words from @src@ to @dst@, byte-swapping each one. Used for the
+-- BE↔LE conversion path on Arrow / Parquet reads when host and wire
+-- endianness disagree (which is rare in practice — most Arrow / Parquet
+-- producers emit little-endian).
+--
+-- Implemented in C via SSSE3 'pshufb' through SIMDe (so we get an ARM
+-- NEON path on Apple Silicon for free). Tail handled scalarly with
+-- @__builtin_bswap16@.
+bswap16Copy :: Ptr Word8 -> Ptr Word8 -> Int -> IO ()
+bswap16Copy !dst !src !nElems = c_bswap16_copy src dst (fromIntegral nElems)
+
+-- | Like 'bswap16Copy' but at 32-bit lane width.
+bswap32Copy :: Ptr Word8 -> Ptr Word8 -> Int -> IO ()
+bswap32Copy !dst !src !nElems = c_bswap32_copy src dst (fromIntegral nElems)
+
+-- | Like 'bswap16Copy' but at 64-bit lane width.
+bswap64Copy :: Ptr Word8 -> Ptr Word8 -> Int -> IO ()
+bswap64Copy !dst !src !nElems = c_bswap64_copy src dst (fromIntegral nElems)

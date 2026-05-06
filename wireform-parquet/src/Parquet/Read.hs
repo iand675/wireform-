@@ -135,6 +135,7 @@ import GHC.Float (castWord32ToFloat, castWord64ToDouble)
 import qualified Data.Primitive.ByteArray as PBA
 import System.IO.Unsafe (unsafePerformIO)
 
+import qualified Columnar.SIMD as SIMD
 import Columnar.SIMD (unpackBitsLsbUnsafe)
 
 import Parquet.Delta
@@ -889,36 +890,17 @@ decodePlainByteArray n bs0
 -- correctness is unaffected.)
 decodePlainByteArrayAsText :: Int -> ByteString -> Either String (V.Vector Text)
 decodePlainByteArrayAsText n bs0
-  | n <= 0          = Right V.empty
-  | isAsciiPage bs0 = decodePlainByteArrayAsTextAscii n bs0
-  | otherwise       = do
+  | n <= 0           = Right V.empty
+  | SIMD.isAsciiBS bs0 = decodePlainByteArrayAsTextAscii n bs0
+  | otherwise        = do
       bs <- decodePlainByteArray n bs0
       Right $! V.map decodeUtf8LossyTextRead bs
 
--- | Scan a page body for any byte ≥ 0x80 in 8-byte chunks. Reads
--- 'Word64's at a time and OR's them, then masks against the
--- repeated-MSB pattern @0x80808080_80808080@. ~10× faster than
--- @BS.all (< 0x80)@ in microbenchmarks.
+-- | Scan a page body for any byte ≥ 0x80. Delegates to the
+-- SIMDe-accelerated 'SIMD.isAsciiBS' (SSE2 OR-then-movemask;
+-- portable to ARM NEON via SIMDe).
 isAsciiPage :: ByteString -> Bool
-isAsciiPage bs = unsafePerformIO $
-  BSU.unsafeUseAsCStringLen bs $ \(cstr, totalLen) -> do
-    let !pBase   = castPtr cstr :: Ptr Word8
-        !nWords  = totalLen `quot` 8
-        !tailLen = totalLen - nWords * 8
-        goWord !i !acc
-          | i >= nWords = pure acc
-          | otherwise = do
-              !w <- peekByteOff pBase (i * 8) :: IO Word64
-              goWord (i + 1) (acc .|. w)
-        goByte !i !acc
-          | i >= tailLen = pure acc
-          | otherwise = do
-              !b <- peekByteOff pBase (nWords * 8 + i) :: IO Word8
-              goByte (i + 1) (acc .|. fromIntegral b)
-    !acc8 <- goWord 0 (0 :: Word64)
-    !acc1 <- goByte 0 (0 :: Word8)
-    pure (acc8 .&. 0x8080808080808080 == 0
-            && acc1 .&. 0x80                == 0)
+isAsciiPage = SIMD.isAsciiBS
 
 -- | Lossy UTF-8 decoder used as the fallback. Kept here (rather
 -- than imported from @Parquet.Arrow@) so 'Parquet.Read' has no
