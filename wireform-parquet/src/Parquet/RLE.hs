@@ -63,129 +63,134 @@ decodeHybridRleUnsigned32 bw need bs
   | bw == 0 = Right $ VP.replicate need 0
   | otherwise = fillHybrid bw need bs
 
+-- | Hybrid RLE / bit-packed unsigned decoder (Parquet
+-- @Encodings.md@). Hot path for both dictionary indices and
+-- definition / repetition levels.
+--
+-- Was previously written with four 'STRef's holding the
+-- run-state (written count, source offset, current RLE run,
+-- pending bit-packed group). Each 'readSTRef' is an indirect
+-- load through a heap cell + read barrier, which the GC has
+-- to track; for a 100k-row dict-encoded column with thousands
+-- of value emissions per page that adds up.
+--
+-- Now a flat tail-recursive driver that threads the state
+-- through arguments. No 'STRef' allocations, no
+-- read/write-barrier cost; GHC will keep the state in
+-- registers across the loop in 'ST'.
 fillHybrid :: Int -> Int -> ByteString -> Either String (VP.Vector Int32)
 fillHybrid bw need bs = runST $ do
   out <- MVP.unsafeNew need
-  wref <- newSTRef 0
-  oref <- newSTRef 0
-  rref <- newSTRef Nothing
-  pref <- newSTRef Nothing
-  let len = BS.length bs
-      loop =
-        readSTRef wref >>= \written ->
-          if written >= need
-            then return (Right ())
-            else do
-              p <- readSTRef pref
-              case p of
-                Just (vec, ix)
-                  | ix < VP.length vec -> do
-                      let v = VP.unsafeIndex vec ix
-                      MVP.unsafeWrite out written (fromIntegral v :: Int32)
-                      writeSTRef wref (written + 1)
-                      writeSTRef pref (Just (vec, ix + 1))
-                      loop
-                  | otherwise -> do
-                      writeSTRef pref Nothing
-                      loop
-                Nothing -> drainRle
-      drainRle =
-        readSTRef wref >>= \written ->
-          if written >= need
-            then return (Right ())
-            else do
-              r <- readSTRef rref
-              case r of
-                Just (val, cnt)
-                  | cnt > 0 -> do
-                      let takeN = min cnt (need - written)
-                      let goR !i
-                            | i >= takeN = pure ()
-                            | otherwise = do
-                                MVP.unsafeWrite out (written + i) val
-                                goR (i + 1)
-                      goR 0
-                      writeSTRef wref (written + takeN)
-                      let cnt' = cnt - takeN
-                      if cnt' > 0
-                        then writeSTRef rref (Just (val, cnt'))
-                        else writeSTRef rref Nothing
-                      loop
-                  | otherwise -> do
-                      writeSTRef rref Nothing
-                      readHeader
-                Nothing -> readHeader
-      readHeader =
-        readSTRef wref >>= \written ->
-          if written >= need
-            then return (Right ())
-            else do
-              o <- readSTRef oref
-              if o >= len
-                then
-                  if written == need
-                    then return (Right ())
-                    else return (Left "Parquet.RLE: truncated hybrid stream")
-                else case runDecoder' getVarint bs o of
-                  DecodeFail _ -> return (Left "Parquet.RLE: invalid varint header")
-                  DecodeOK header o1 ->
-                    if odd header
-                      then do
-                        let !numGroups = fromIntegral (header `shiftR` 1) :: Int
-                            !nbytes = numGroups * bw
-                        if numGroups < 0 || o1 + nbytes > len
-                          then return (Left "Parquet.RLE: truncated bit-packed run")
-                          else case unpackAllGroups bw bs o1 numGroups of
-                            Left e -> return (Left e)
-                            Right flat -> do
-                              writeSTRef oref (o1 + nbytes)
-                              readSTRef wref >>= \w0 ->
-                                let !needMore = need - w0
-                                    !nFlat = VP.length flat
-                                    !takeN = min nFlat needMore
-                                    goP !i
-                                      | i >= takeN = pure ()
-                                      | otherwise = do
-                                          let v = VP.unsafeIndex flat i
-                                          MVP.unsafeWrite out (w0 + i) (fromIntegral v :: Int32)
-                                          goP (i + 1)
-                                 in do
-                                      goP 0
-                                      writeSTRef wref (w0 + takeN)
-                                      if takeN < nFlat
-                                        then writeSTRef pref (Just (flat, takeN))
-                                        else writeSTRef pref Nothing
-                                      loop
-                      else do
-                        let !runLen = fromIntegral (header `shiftR` 1) :: Int64
-                        if runLen <= 0
-                          then return (Left "Parquet.RLE: invalid RLE run length")
-                          else case readPaddedLE bw bs o1 of
-                            Left e -> return (Left e)
-                            Right (rawVal, o2) -> do
-                              let !val = fromIntegral rawVal :: Int32
-                              writeSTRef oref o2
-                              readSTRef wref >>= \w0 ->
-                                let !needMore = need - w0
-                                    !emit64 = min (fromIntegral needMore :: Int64) runLen
-                                    !emit = fromIntegral emit64 :: Int
-                                    goE !i
-                                      | i >= emit = pure ()
-                                      | otherwise = do
-                                          MVP.unsafeWrite out (w0 + i) val
-                                          goE (i + 1)
-                                 in do
-                                      goE 0
-                                      writeSTRef wref (w0 + emit)
-                                      let !left = runLen - emit64
-                                      if left > 0
-                                        then writeSTRef rref (Just (val, fromIntegral left))
-                                        else writeSTRef rref Nothing
-                                      loop
-  er <- loop
+  -- driver: written count, source offset, pending bit-packed
+  -- block (Maybe), pending RLE run (Maybe).
+  let !len = BS.length bs
+
+      -- Split the state machine into three phases that mirror
+      -- the original three loops, each tail-calling the next
+      -- when its slice of state has drained.
+      drainPacked !written !off !packed !runState =
+        case packed of
+          Nothing  -> drainRle written off runState
+          Just (!vec, !ix)
+            | written >= need -> pure (Right ())
+            | ix >= VP.length vec ->
+                drainPacked written off Nothing runState
+            | otherwise -> do
+                let !v = VP.unsafeIndex vec ix
+                MVP.unsafeWrite out written (fromIntegral v :: Int32)
+                drainPacked (written + 1) off
+                  (Just (vec, ix + 1)) runState
+
+      drainRle !written !off !runState =
+        case runState of
+          Nothing -> readHeader written off
+          Just (!val, !cnt)
+            | written >= need -> pure (Right ())
+            | cnt <= 0 -> readHeader written off
+            | otherwise -> do
+                let !takeN = min cnt (need - written)
+                fillRun out written val takeN
+                let !cnt' = cnt - takeN
+                drainRle (written + takeN) off
+                  (if cnt' > 0 then Just (val, cnt') else Nothing)
+
+      readHeader !written !off
+        | written >= need = pure (Right ())
+        | off >= len =
+            if written == need
+              then pure (Right ())
+              else pure (Left "Parquet.RLE: truncated hybrid stream")
+        | otherwise = case runDecoder' getVarint bs off of
+            DecodeFail _ ->
+              pure (Left "Parquet.RLE: invalid varint header")
+            DecodeOK header o1
+              | odd header ->
+                  let !numGroups = fromIntegral (header `shiftR` 1) :: Int
+                      !nbytes    = numGroups * bw
+                  in if numGroups < 0 || o1 + nbytes > len
+                       then pure (Left "Parquet.RLE: truncated bit-packed run")
+                       else case unpackAllGroups bw bs o1 numGroups of
+                         Left e -> pure (Left e)
+                         Right flat ->
+                           let !nFlat = VP.length flat
+                               !needMore = need - written
+                               !takeN = min nFlat needMore
+                           in do
+                                fillFromFlat out written flat takeN
+                                let written' = written + takeN
+                                    pending  = if takeN < nFlat
+                                                 then Just (flat, takeN)
+                                                 else Nothing
+                                drainPacked written' (o1 + nbytes)
+                                  pending Nothing
+              | otherwise ->
+                  let !runLen = fromIntegral (header `shiftR` 1) :: Int64
+                  in if runLen <= 0
+                       then pure (Left "Parquet.RLE: invalid RLE run length")
+                       else case readPaddedLE bw bs o1 of
+                         Left e -> pure (Left e)
+                         Right (rawVal, o2) ->
+                           let !val = fromIntegral rawVal :: Int32
+                               !needMore = need - written
+                               !emit64 = min (fromIntegral needMore :: Int64) runLen
+                               !emit = fromIntegral emit64 :: Int
+                           in do
+                                fillRun out written val emit
+                                let written' = written + emit
+                                    !leftR = runLen - emit64
+                                    runSt' = if leftR > 0
+                                               then Just (val, fromIntegral leftR)
+                                               else Nothing
+                                drainRle written' o2 runSt'
+
+  er <- drainPacked 0 0 Nothing Nothing
   case er of
-    Left e -> return (Left e)
+    Left e -> pure (Left e)
     Right () -> Right <$> VP.unsafeFreeze out
+
+-- | Write @n@ copies of @val@ into @out@ starting at @start@.
+fillRun
+  :: MVP.MVector s Int32 -> Int -> Int32 -> Int -> ST s ()
+fillRun !out !start !val !n
+  | n <= 0    = pure ()
+  | otherwise = do
+      MVP.unsafeWrite out start val
+      fillRun out (start + 1) val (n - 1)
+{-# INLINE fillRun #-}
+
+-- | Copy @n@ Word32 values from @src@ into @out[dstStart..]@,
+-- narrowing each to Int32.
+fillFromFlat
+  :: MVP.MVector s Int32 -> Int -> VP.Vector Word32 -> Int -> ST s ()
+fillFromFlat !out !dstStart !src !n = goF 0
+  where
+    goF !i
+      | i >= n = pure ()
+      | otherwise = do
+          let !v = VP.unsafeIndex src i
+          MVP.unsafeWrite out (dstStart + i) (fromIntegral v :: Int32)
+          goF (i + 1)
+{-# INLINE fillFromFlat #-}
 
 -- | Decode @numGroups@ bit-packed groups (each holding 8 unsigned
 -- @bw@-bit values) into one flat 'VP.Vector'.

@@ -143,6 +143,12 @@ import Parquet.Types
   )
 import Thrift.Encode (encodeCompact)
 import qualified Thrift.Value as TV
+import Thrift.Wire
+  ( ThriftType (..)
+  , tCompEncodeFieldBegin
+  , tCompEncodeFieldStop
+  , tCompEncodeI32
+  )
 
 -- | Assemble a complete Parquet file from pre-computed metadata and encoded
 -- column chunk data. Each inner vector is one row group's column chunks
@@ -169,54 +175,91 @@ mkPlainDataPageHeader numValues bodySize = PageHeader
   , phCompressedPageSize = Just bodySize
   }
 
--- | Thrift compact-encode a 'PageHeader'.
+-- | Thrift compact-encode a 'PageHeader' directly into a
+-- 'ByteString'.
+--
+-- Was previously @encodeCompact (pageHeaderToThrift hdr)@,
+-- which built an intermediate 'TV.Value' AST (one
+-- @V.fromList@ for the outer struct + a boxed 'TV.Value' for
+-- each scalar field + a nested @V.fromList@ for the body
+-- struct) and then walked it. For files with many pages this
+-- showed up in profiles. This direct encoder writes straight
+-- through a 'Builder' (so no AST allocation, no per-field
+-- boxed 'TV.Value's), then materialises one 'ByteString'.
 encodePageHeader :: PageHeader -> ByteString
-encodePageHeader hdr = encodeCompact (pageHeaderToThrift hdr)
+encodePageHeader hdr =
+  BL.toStrict $ B.toLazyByteString $ encodePageHeaderBuilder hdr
 
-pageHeaderToThrift :: PageHeader -> TV.Value
-pageHeaderToThrift hdr = TV.Struct $ V.fromList $ concat
-  [ [ PageHeader_Type (pageTypeTag (phType hdr)) ]
-  , optField (phUncompressedPageSize hdr) PageHeader_UncompressedSize
-  , optField (phCompressedPageSize hdr)   PageHeader_CompressedSize
-  , case phType hdr of
-      PtDataPage dph      -> [ PageHeader_DataPageHeader
-                                 (dataPageHeaderFields dph) ]
-      PtDictionaryPage dk -> [ PageHeader_DictionaryPageHeader
-                                 (dictPageHeaderFields dk) ]
-      PtDataPageV2 v2     -> [ PageHeader_DataPageHeaderV2
-                                 (dataPageHeaderV2Fields v2) ]
-      PtIndexPage         -> []
-  ]
+encodePageHeaderBuilder :: PageHeader -> B.Builder
+encodePageHeaderBuilder hdr =
+  let !ty = pageTypeTag (phType hdr)
+      step1 = encodeI32Field 0 1 ty
+      (!_, !step2) = case phUncompressedPageSize hdr of
+        Just v  -> (1 :: Int16, encodeI32Field 1 2 v)
+        Nothing -> (1, mempty)
+      (!_, !step3) = case phCompressedPageSize hdr of
+        Just v  -> (2 :: Int16, encodeI32Field 2 3 v)
+        Nothing -> (2, mempty)
+      step4 = case phType hdr of
+        PtDataPage dph      -> encodeStructField 3 5 (encodeDataPageHeaderBody dph)
+        PtDictionaryPage dk -> encodeStructField 3 7 (encodeDictPageHeaderBody dk)
+        PtDataPageV2 v2     -> encodeStructField 3 8 (encodeDataPageHeaderV2Body v2)
+        PtIndexPage         -> mempty
+  in step1 <> step2 <> step3 <> step4 <> tCompEncodeFieldStop
 
-dataPageHeaderFields :: DataPageHeader -> V.Vector (Int16, TV.Value)
-dataPageHeaderFields dph = V.fromList
-  [ DataPageHeader_NumValues                   (dphNumValues dph)
-  , DataPageHeader_Encoding                    (dphEncoding  dph)
-    -- Both fields are /required/ in parquet.thrift's DataPageHeader.
-    -- For required (max-def-level=0) columns the encoded level data
-    -- is zero bytes, but the encoding still has to be declared or
-    -- strict readers reject the page header. RLE (3) is what
-    -- parquet-mr / arrow-cpp stamp here, so we mirror that.
-  , DataPageHeader_DefinitionLevelEncoding     3
-  , DataPageHeader_RepetitionLevelEncoding     3
-  ]
+encodeDataPageHeaderBody :: DataPageHeader -> B.Builder
+encodeDataPageHeaderBody dph =
+     encodeI32Field 0 1 (dphNumValues dph)
+  <> encodeI32Field 1 2 (dphEncoding  dph)
+  -- Both encoding fields are /required/ in parquet.thrift's
+  -- DataPageHeader. For required (max-def-level=0) columns the
+  -- encoded level data is zero bytes, but the encoding still
+  -- has to be declared or strict readers reject the page
+  -- header. RLE (3) is what parquet-mr / arrow-cpp stamp here.
+  <> encodeI32Field 2 3 3
+  <> encodeI32Field 3 4 3
+  <> tCompEncodeFieldStop
 
-dictPageHeaderFields :: DictionaryPageHeader -> V.Vector (Int16, TV.Value)
-dictPageHeaderFields dk = V.fromList
-  [ DictionaryPageHeader_NumValues (dictNumValues dk)
-  , DictionaryPageHeader_Encoding  (dictEncoding  dk)
-  ]
+encodeDictPageHeaderBody :: DictionaryPageHeader -> B.Builder
+encodeDictPageHeaderBody dk =
+     encodeI32Field 0 1 (dictNumValues dk)
+  <> encodeI32Field 1 2 (dictEncoding  dk)
+  <> tCompEncodeFieldStop
 
-dataPageHeaderV2Fields :: DataPageHeaderV2 -> V.Vector (Int16, TV.Value)
-dataPageHeaderV2Fields v2 = V.fromList
-  [ DataPageHeaderV2_NumValues (dph2NumValues v2)
-  , DataPageHeaderV2_NumNulls  (dph2NumNulls  v2)
-  , DataPageHeaderV2_NumRows   (dph2NumRows   v2)
-  , DataPageHeaderV2_Encoding  (dph2Encoding  v2)
-  , DataPageHeaderV2_DefinitionLevelsByteLength (dph2DefLevelsLen v2)
-  , DataPageHeaderV2_RepetitionLevelsByteLength (dph2RepLevelsLen v2)
-  , DataPageHeaderV2_IsCompressed (dph2IsCompressed v2)
-  ]
+encodeDataPageHeaderV2Body :: DataPageHeaderV2 -> B.Builder
+encodeDataPageHeaderV2Body v2 =
+     encodeI32Field 0 1 (dph2NumValues v2)
+  <> encodeI32Field 1 2 (dph2NumNulls  v2)
+  <> encodeI32Field 2 3 (dph2NumRows   v2)
+  <> encodeI32Field 3 4 (dph2Encoding  v2)
+  <> encodeI32Field 4 5 (dph2DefLevelsLen v2)
+  <> encodeI32Field 5 6 (dph2RepLevelsLen v2)
+  <> encodeBoolField 6 7 (dph2IsCompressed v2)
+  <> tCompEncodeFieldStop
+
+-- Compact-protocol field with i32 payload. @prevFid@ is the
+-- field id /preceding/ this one in the struct (0 for the first
+-- field in a struct); the wire format uses delta encoding.
+encodeI32Field :: Int16 -> Int16 -> Int32 -> B.Builder
+encodeI32Field !prevFid !fid !v =
+  tCompEncodeFieldBegin TT_I32 fid prevFid False
+  <> tCompEncodeI32 v
+{-# INLINE encodeI32Field #-}
+
+encodeBoolField :: Int16 -> Int16 -> Bool -> B.Builder
+encodeBoolField !prevFid !fid !v =
+  -- tCompEncodeFieldBegin has a 4th 'boolVal' parameter that
+  -- the compact protocol packs into the field header tag
+  -- (TT_BOOL_TRUE = 1, TT_BOOL_FALSE = 2). When the type is
+  -- TT_BOOL and we go through the field-header-with-bool path,
+  -- no separate value byte follows.
+  tCompEncodeFieldBegin TT_BOOL fid prevFid v
+{-# INLINE encodeBoolField #-}
+
+encodeStructField :: Int16 -> Int16 -> B.Builder -> B.Builder
+encodeStructField !prevFid !fid body =
+  tCompEncodeFieldBegin TT_STRUCT fid prevFid False <> body
+{-# INLINE encodeStructField #-}
 
 -- | Concatenate pre-encoded pages into a single column chunk. Currently only
 -- @Uncompressed@ is supported for writing; pages must already be encoded with
@@ -259,10 +302,13 @@ encodeOptionalColumnPageV2Parts
   -> OptionalColumn
   -> Either String (ByteString, ByteString, ByteString, ByteString)
 encodeOptionalColumnPageV2Parts codec oc = do
-  let !defs = VP.fromList
-        [ if isJust v then 1 else 0
-        | v <- presenceList oc
-        ]
+  -- Build the definition-levels vector directly from the
+  -- column's underlying boxed vector. Was previously
+  -- VP.fromList [1 if isJust v else 0 | v <- presenceList oc]
+  -- which allocated 3 intermediate lists ([Maybe ()] from
+  -- V.toList, the comprehension result, then VP.fromList).
+  let !defs   = optionalColumnDefLevels oc
+      !nNulls = optionalColumnNullCount oc
       !defStream = LE.encodeRLEHybrid 1 defs
       !defLen = BS.length defStream
       !repStream = BS.empty
@@ -273,7 +319,6 @@ encodeOptionalColumnPageV2Parts codec oc = do
         Right cb -> Right (cb, codec)
         Left  e  -> Left e
   let !nVals = optionalColumnLength oc
-      !nNulls = sum (map (\v -> if isJust v then 0 else 1) (presenceList oc)) :: Int
       !nRows = nVals  -- non-repeated => num_rows == num_values
       !uncompPageSize = repLen + defLen + uncompValuesLen
       !compPageSize   = repLen + defLen + BS.length valuesBs
@@ -291,21 +336,15 @@ encodeOptionalColumnPageV2Parts codec oc = do
         , phCompressedPageSize   = Just (fromIntegral compPageSize)
         }
   Right (hdrBytes, repStream, defStream, valuesBs)
-  where
-    isJust (Just _) = True
-    isJust Nothing  = False
 
-    presenceList :: OptionalColumn -> [Maybe ()]
-    presenceList = \case
-      OptInt32 v     -> map void' (V.toList v)
-      OptInt64 v     -> map void' (V.toList v)
-      OptFloat v     -> map void' (V.toList v)
-      OptDouble v    -> map void' (V.toList v)
-      OptBool v      -> map void' (V.toList v)
-      OptByteArray v -> map void' (V.toList v)
-
-    void' Nothing  = Nothing
-    void' (Just _) = Just ()
+-- | Definition-levels (1 = present, 0 = null) for an
+-- 'OptionalColumn', built directly into a primitive vector.
+-- Alias for 'presenceVector' kept so the V2 caller reads as
+-- "def levels" and the V1 caller reads as "presence vector",
+-- which match how the spec talks about the same data.
+optionalColumnDefLevels :: OptionalColumn -> VP.Vector Int32
+optionalColumnDefLevels = presenceVector
+{-# INLINE optionalColumnDefLevels #-}
 
 -- | Concatenate a @V2 parts tuple@ in spec order.
 concatV2Parts :: (ByteString, ByteString, ByteString, ByteString) -> ByteString
