@@ -59,8 +59,11 @@ module Parquet.HighLevel
   ) where
 
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as B
+import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Lazy as BL
+import Foreign.Storable (pokeByteOff)
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
@@ -298,21 +301,42 @@ columnDistinctEstimate = \case
 -- | PLAIN encodings used for bloom-filter inserts. These must
 -- match 'Parquet.Predicate.encodePlain' byte-for-byte so a
 -- @PEq@ predicate hashes to the same key.
+--
+-- Implementation note (perf): the bloom-filter path inserts
+-- one of these per column value, so on a 100k-row column with
+-- a bloom filter requested the encoder is hit 100k times.
+-- The previous shape went through @ByteString.Builder@ +
+-- @BL.toStrict@ for each call — three heap allocations per
+-- value. The new shape pre-allocates the strict ByteString
+-- to its exact size and pokes the bit pattern in directly.
+{-# INLINE i32LE #-}
 i32LE :: Int32 -> ByteString
-i32LE = BL.toStrict . B.toLazyByteString . B.int32LE
+i32LE !v = BSI.unsafeCreate 4 $ \p -> pokeByteOff p 0 v
 
+{-# INLINE i64LE #-}
 i64LE :: Int64 -> ByteString
-i64LE = BL.toStrict . B.toLazyByteString . B.int64LE
+i64LE !v = BSI.unsafeCreate 8 $ \p -> pokeByteOff p 0 v
 
+{-# INLINE f32LE #-}
 f32LE :: Float -> ByteString
-f32LE f = BL.toStrict (B.toLazyByteString (B.word32LE (castFloatToWord32 f)))
+f32LE !v = BSI.unsafeCreate 4 $ \p ->
+  pokeByteOff p 0 (castFloatToWord32 v)
 
+{-# INLINE f64LE #-}
 f64LE :: Double -> ByteString
-f64LE d = BL.toStrict (B.toLazyByteString (B.word64LE (castDoubleToWord64 d)))
+f64LE !v = BSI.unsafeCreate 8 $ \p ->
+  pokeByteOff p 0 (castDoubleToWord64 v)
 
+-- Bool payload is one byte; precompute both static
+-- ByteStrings so each insert is a constant pointer rather
+-- than a fresh allocation.
 boolPayload :: Bool -> ByteString
-boolPayload True  = TE.encodeUtf8 "\x01"
-boolPayload False = TE.encodeUtf8 "\x00"
+boolPayload True  = boolTrueBs
+boolPayload False = boolFalseBs
+
+boolTrueBs, boolFalseBs :: ByteString
+boolTrueBs  = BS.singleton 1
+boolFalseBs = BS.singleton 0
 
 -- ============================================================
 -- Decoding

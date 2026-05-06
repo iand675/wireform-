@@ -75,6 +75,8 @@ import Columnar.Predicate
 import Data.Bits (shiftL, (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Internal as BSI
+import Foreign.Storable (pokeByteOff)
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
@@ -322,6 +324,12 @@ bloomCheckVal _ sbbf v =
 
 -- | Encode a value as its PLAIN payload — matches what
 -- 'Parquet.Write' inserts into the bloom filter at write time.
+--
+-- Uses direct 'BSI.unsafeCreate' + 'pokeByteOff' rather than
+-- @BS.pack [bytes]@ so each call avoids the cons-list
+-- intermediate. (Predicate evaluation isn't per-row in our
+-- read path, but this gets called from the writer's
+-- statistics + bloom path on every value.)
 encodePlain :: PValue -> ByteString
 encodePlain = \case
   PVInt32 n  -> word32LE (fromIntegral n)
@@ -332,24 +340,10 @@ encodePlain = \case
   PVText  t  -> TE.encodeUtf8 t
   PVBinary b -> b
 
+{-# INLINE word32LE #-}
 word32LE :: Word32 -> ByteString
-word32LE w =
-  BS.pack
-    [ fromIntegral  w
-    , fromIntegral (w `quot` 0x100)
-    , fromIntegral (w `quot` 0x10000)
-    , fromIntegral (w `quot` 0x1000000)
-    ]
+word32LE !w = BSI.unsafeCreate 4 $ \p -> pokeByteOff p 0 w
 
+{-# INLINE word64LE #-}
 word64LE :: Word64 -> ByteString
-word64LE w =
-  BS.pack
-    [ fromIntegral  w
-    , fromIntegral (w `quot` 0x100)
-    , fromIntegral (w `quot` 0x10000)
-    , fromIntegral (w `quot` 0x1000000)
-    , fromIntegral (w `quot` 0x100000000)
-    , fromIntegral (w `quot` 0x10000000000)
-    , fromIntegral (w `quot` 0x1000000000000)
-    , fromIntegral (w `quot` 0x100000000000000)
-    ]
+word64LE !w = BSI.unsafeCreate 8 $ \p -> pokeByteOff p 0 w
