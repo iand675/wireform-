@@ -9,6 +9,8 @@ import Data.Int (Int64)
 import Data.IORef
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Storable as VS
+import qualified Data.Vector.Unboxed as VU
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text as T
 import Data.Time.Clock (getCurrentTime, diffUTCTime)
@@ -28,11 +30,11 @@ import Parquet.Write (ColumnData (..))
 -- never runs and the bench misreports.)
 forceCol :: AC.ColumnArray -> Int
 forceCol = \case
-  AC.ColInt32  v -> VP.length v
-  AC.ColInt64  v -> VP.length v
-  AC.ColFloat  v -> VP.length v
-  AC.ColDouble v -> VP.length v
-  AC.ColBool   v -> V.foldl'  (\a !_ -> a + 1) 0 v
+  AC.ColInt32  v -> VS.length v
+  AC.ColInt64  v -> VS.length v
+  AC.ColFloat  v -> VS.length v
+  AC.ColDouble v -> VS.length v
+  AC.ColBool   v -> VU.length v
   AC.ColUtf8   v -> V.foldl'  (\a !_ -> a + 1) 0 v
   AC.ColBinary v -> V.foldl'  (\a !_ -> a + 1) 0 v
   c              -> AC.columnLength c

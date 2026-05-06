@@ -18,6 +18,7 @@ import Data.Int (Int64)
 import Data.IORef
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Storable as VS
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text as T
 

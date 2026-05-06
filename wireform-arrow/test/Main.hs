@@ -25,6 +25,10 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Storable as VS
+import qualified Data.Vector.Unboxed as VU
+import Columnar.Bit (Bit (..))
+import qualified Arrow.Column as AC
 import Data.Word (Word8, Word16, Word32, Word64)
 import System.Exit (exitFailure)
 
@@ -94,36 +98,36 @@ main = do
   -- that column, serialise it, parse it, materialise, and assert
   -- the recovered ColumnArray equals the one we put in.
 
-  roundTripPrim "Int8"   (ColInt8   (VP.fromList [0, 1, -1, 100, -128, 127]))
-  roundTripPrim "Int16"  (ColInt16  (VP.fromList [0, 1, -1, 32767, -32768]))
-  roundTripPrim "Int32"  (ColInt32  (VP.fromList [0, 1, -1, maxBound, minBound]))
-  roundTripPrim "Int64"  (ColInt64  (VP.fromList [0, 1, -1, maxBound, minBound]))
-  roundTripPrim "UInt8"  (ColUInt8  (VP.fromList ([0, 255] :: [Word8])))
-  roundTripPrim "UInt16" (ColUInt16 (VP.fromList ([0, 65535] :: [Word16])))
-  roundTripPrim "UInt32" (ColUInt32 (VP.fromList ([0, maxBound] :: [Word32])))
-  roundTripPrim "UInt64" (ColUInt64 (VP.fromList ([0, maxBound] :: [Word64])))
-  roundTripPrim "Float16" (ColFloat16 (VP.fromList ([0, 0x3C00, 0xBC00] :: [Word16])))
-  roundTripPrim "Float"  (ColFloat  (VP.fromList [0.0, 1.5, -2.25, 3.14 :: Float]))
-  roundTripPrim "Double" (ColDouble (VP.fromList [0.0, 1.5, -2.25, 3.14159265 :: Double]))
-  roundTripPrim "Bool"   (ColBool   (V.fromList [True, False, True, False, True]))
+  roundTripPrim "Int8"   (ColInt8   (VS.fromList [0, 1, -1, 100, -128, 127]))
+  roundTripPrim "Int16"  (ColInt16  (VS.fromList [0, 1, -1, 32767, -32768]))
+  roundTripPrim "Int32"  (ColInt32  (VS.fromList [0, 1, -1, maxBound, minBound]))
+  roundTripPrim "Int64"  (ColInt64  (VS.fromList [0, 1, -1, maxBound, minBound]))
+  roundTripPrim "UInt8"  (ColUInt8  (VS.fromList ([0, 255] :: [Word8])))
+  roundTripPrim "UInt16" (ColUInt16 (VS.fromList ([0, 65535] :: [Word16])))
+  roundTripPrim "UInt32" (ColUInt32 (VS.fromList ([0, maxBound] :: [Word32])))
+  roundTripPrim "UInt64" (ColUInt64 (VS.fromList ([0, maxBound] :: [Word64])))
+  roundTripPrim "Float16" (ColFloat16 (VS.fromList ([0, 0x3C00, 0xBC00] :: [Word16])))
+  roundTripPrim "Float"  (ColFloat  (VS.fromList [0.0, 1.5, -2.25, 3.14 :: Float]))
+  roundTripPrim "Double" (ColDouble (VS.fromList [0.0, 1.5, -2.25, 3.14159265 :: Double]))
+  roundTripPrim "Bool"   (ColBool   (VU.fromList (map Bit [True, False, True, False, True])))
 
-  roundTripPrim "Date32" (ColDate32 (VP.fromList [0 :: Int32, 18000, -1]))
-  roundTripPrim "Date64" (ColDate64 (VP.fromList [0 :: Int64, 1700000000000]))
-  roundTripPrim "Time32" (ColTime32 (VP.fromList [0 :: Int32, 12345]))
-  roundTripPrim "Time64" (ColTime64 (VP.fromList [0 :: Int64, 12345000000]))
+  roundTripPrim "Date32" (ColDate32 (VS.fromList [0 :: Int32, 18000, -1]))
+  roundTripPrim "Date64" (ColDate64 (VS.fromList [0 :: Int64, 1700000000000]))
+  roundTripPrim "Time32" (ColTime32 (VS.fromList [0 :: Int32, 12345]))
+  roundTripPrim "Time64" (ColTime64 (VS.fromList [0 :: Int64, 12345000000]))
   roundTripPrim "Timestamp"
-    (ColTimestamp (VP.fromList [0 :: Int64, 1700000000_000_000_000]))
-  roundTripPrim "Duration" (ColDuration (VP.fromList [0 :: Int64, 60_000_000_000]))
+    (ColTimestamp (VS.fromList [0 :: Int64, 1700000000_000_000_000]))
+  roundTripPrim "Duration" (ColDuration (VS.fromList [0 :: Int64, 60_000_000_000]))
 
   roundTripPrim "IntervalYearMonth"
-    (ColIntervalYearMonth (VP.fromList [0 :: Int32, 12, -6, 100]))
+    (ColIntervalYearMonth (VS.fromList [0 :: Int32, 12, -6, 100]))
   roundTripPrim "IntervalDayTime"
-    (ColIntervalDayTime (VP.fromList [1 :: Int32, 2, 30]) (VP.fromList [500, -1, 0]))
+    (ColIntervalDayTime (VS.fromList [1 :: Int32, 2, 30]) (VS.fromList [500, -1, 0]))
   roundTripPrim "IntervalMonthDayNano"
     (ColIntervalMonthDayNano
-        (VP.fromList [1 :: Int32, 2])
-        (VP.fromList [3 :: Int32, 4])
-        (VP.fromList [1000 :: Int64, -500]))
+        (VS.fromList [1 :: Int32, 2])
+        (VS.fromList [3 :: Int32, 4])
+        (VS.fromList [1000 :: Int64, -500]))
 
   roundTripPrim "Decimal128" (ColDecimal128 18 2 (V.fromList
     [ BS.replicate 16 0
@@ -145,27 +149,27 @@ main = do
 
   -- Nullable variants.
   roundTripPrim "Int8Maybe"
-    (ColInt8Maybe (V.fromList [Just 1, Nothing, Just (-1), Just 42]))
+    (ColInt8Maybe (AC.nvFromMaybeList 0 [Just 1, Nothing, Just (-1), Just 42]))
   roundTripPrim "Int16Maybe"
-    (ColInt16Maybe (V.fromList [Just 100, Nothing, Just (-200)]))
+    (ColInt16Maybe (AC.nvFromMaybeList 0 [Just 100, Nothing, Just (-200)]))
   roundTripPrim "Int32Maybe"
-    (ColInt32Maybe (V.fromList [Nothing, Just 0, Just maxBound]))
+    (ColInt32Maybe (AC.nvFromMaybeList 0 [Nothing, Just 0, Just maxBound]))
   roundTripPrim "Int64Maybe"
-    (ColInt64Maybe (V.fromList [Just 0, Nothing, Just (-1)]))
+    (ColInt64Maybe (AC.nvFromMaybeList 0 [Just 0, Nothing, Just (-1)]))
   roundTripPrim "UInt8Maybe"
-    (ColUInt8Maybe (V.fromList [Just (0 :: Word8), Just 255, Nothing]))
+    (ColUInt8Maybe (AC.nvFromMaybeList 0 [Just (0 :: Word8), Just 255, Nothing]))
   roundTripPrim "UInt16Maybe"
-    (ColUInt16Maybe (V.fromList [Just (0 :: Word16), Nothing]))
+    (ColUInt16Maybe (AC.nvFromMaybeList 0 [Just (0 :: Word16), Nothing]))
   roundTripPrim "UInt32Maybe"
-    (ColUInt32Maybe (V.fromList [Just (0 :: Word32), Nothing, Just maxBound]))
+    (ColUInt32Maybe (AC.nvFromMaybeList 0 [Just (0 :: Word32), Nothing, Just maxBound]))
   roundTripPrim "UInt64Maybe"
-    (ColUInt64Maybe (V.fromList [Just (0 :: Word64), Nothing]))
+    (ColUInt64Maybe (AC.nvFromMaybeList 0 [Just (0 :: Word64), Nothing]))
   roundTripPrim "Float16Maybe"
-    (ColFloat16Maybe (V.fromList [Just (0 :: Word16), Just 0x3C00, Nothing]))
+    (ColFloat16Maybe (AC.nvFromMaybeList 0 [Just (0 :: Word16), Just 0x3C00, Nothing]))
   roundTripPrim "FloatMaybe"
-    (ColFloatMaybe (V.fromList [Just 1.5, Nothing, Just (-2.25 :: Float)]))
+    (ColFloatMaybe (AC.nvFromMaybeList 0 [Just 1.5, Nothing, Just (-2.25 :: Float)]))
   roundTripPrim "DoubleMaybe"
-    (ColDoubleMaybe (V.fromList [Just 1.5, Nothing]))
+    (ColDoubleMaybe (AC.nvFromMaybeList 0 [Just 1.5, Nothing]))
   roundTripPrim "BoolMaybe"
     (ColBoolMaybe (V.fromList [Just True, Nothing, Just False, Just True]))
 
@@ -181,12 +185,12 @@ main = do
     (ColFixedSizeBinaryMaybe 3
       (V.fromList [Just (BS.pack [1, 2, 3]), Nothing, Just (BS.pack [4, 5, 6])]))
 
-  roundTripPrim "Date32Maybe" (ColDate32Maybe (V.fromList [Just (0 :: Int32), Nothing]))
-  roundTripPrim "Date64Maybe" (ColDate64Maybe (V.fromList [Just (0 :: Int64), Nothing]))
-  roundTripPrim "Time32Maybe" (ColTime32Maybe (V.fromList [Just (0 :: Int32), Nothing]))
-  roundTripPrim "Time64Maybe" (ColTime64Maybe (V.fromList [Just (0 :: Int64), Nothing]))
-  roundTripPrim "TimestampMaybe" (ColTimestampMaybe (V.fromList [Just (0 :: Int64), Nothing]))
-  roundTripPrim "DurationMaybe" (ColDurationMaybe (V.fromList [Just (0 :: Int64), Nothing]))
+  roundTripPrim "Date32Maybe" (ColDate32Maybe (AC.nvFromMaybeList 0 [Just (0 :: Int32), Nothing]))
+  roundTripPrim "Date64Maybe" (ColDate64Maybe (AC.nvFromMaybeList 0 [Just (0 :: Int64), Nothing]))
+  roundTripPrim "Time32Maybe" (ColTime32Maybe (AC.nvFromMaybeList 0 [Just (0 :: Int32), Nothing]))
+  roundTripPrim "Time64Maybe" (ColTime64Maybe (AC.nvFromMaybeList 0 [Just (0 :: Int64), Nothing]))
+  roundTripPrim "TimestampMaybe" (ColTimestampMaybe (AC.nvFromMaybeList 0 [Just (0 :: Int64), Nothing]))
+  roundTripPrim "DurationMaybe" (ColDurationMaybe (AC.nvFromMaybeList 0 [Just (0 :: Int64), Nothing]))
 
   -- ============================================================
   -- Nested columns
@@ -199,7 +203,7 @@ main = do
        , plainField "name" False AUtf8
        ])
     (ColStruct $ V.fromList
-       [ ("id",   ColInt64 (VP.fromList [1, 2, 3]))
+       [ ("id",   ColInt64 (VS.fromList [1, 2, 3]))
        , ("name", ColUtf8  (V.fromList ["a", "b", "c"]))
        ])
 
@@ -209,52 +213,52 @@ main = do
        , plainField "flag" False ABool
        ])
     (ColStructMaybe
-       (V.fromList [True, False, True])
+       (VU.fromList (map Bit [True, False, True]))
        (V.fromList
-         [ ("id",   ColInt32 (VP.fromList [1, 2, 3]))
-         , ("flag", ColBool  (V.fromList [True, False, True]))
+         [ ("id",   ColInt32 (VS.fromList [1, 2, 3]))
+         , ("flag", ColBool  (VU.fromList (map Bit [True, False, True])))
          ]))
 
   roundTripNested "List<int32>"
     (nestedField "l" False AList $ V.fromList
       [ plainField "item" False (AInt 32 True) ])
-    (ColList (VP.fromList [0, 2, 2, 5])
-       (ColInt32 (VP.fromList [10, 20, 30, 40, 50])))
+    (ColList (VS.fromList [0, 2, 2, 5])
+       (ColInt32 (VS.fromList [10, 20, 30, 40, 50])))
 
   roundTripNested "ListMaybe<int32>"
     (nestedField "l" True AList $ V.fromList
       [ plainField "item" False (AInt 32 True) ])
     (ColListMaybe
-       (V.fromList [True, False, True])
-       (VP.fromList [0, 2, 2, 5])
-       (ColInt32 (VP.fromList [10, 20, 30, 40, 50])))
+       (VU.fromList (map Bit [True, False, True]))
+       (VS.fromList [0, 2, 2, 5])
+       (ColInt32 (VS.fromList [10, 20, 30, 40, 50])))
 
   roundTripNested "LargeList<int32>"
     (nestedField "l" False ALargeList $ V.fromList
       [ plainField "item" False (AInt 32 True) ])
-    (ColLargeList (VP.fromList [0, 2, 2, 5])
-       (ColInt32 (VP.fromList [1, 2, 3, 4, 5])))
+    (ColLargeList (VS.fromList [0, 2, 2, 5])
+       (ColInt32 (VS.fromList [1, 2, 3, 4, 5])))
 
   roundTripNested "LargeListMaybe<int32>"
     (nestedField "l" True ALargeList $ V.fromList
       [ plainField "item" False (AInt 32 True) ])
     (ColLargeListMaybe
-       (V.fromList [True, False, True])
-       (VP.fromList [0, 2, 2, 5])
-       (ColInt32 (VP.fromList [1, 2, 3, 4, 5])))
+       (VU.fromList (map Bit [True, False, True]))
+       (VS.fromList [0, 2, 2, 5])
+       (ColInt32 (VS.fromList [1, 2, 3, 4, 5])))
 
   roundTripNested "FixedSizeList<3 of int32>"
     (nestedField "l" False (AFixedSizeList 3) $ V.fromList
       [ plainField "item" False (AInt 32 True) ])
     (ColFixedSizeList 3
-       (ColInt32 (VP.fromList [1, 2, 3, 4, 5, 6])))
+       (ColInt32 (VS.fromList [1, 2, 3, 4, 5, 6])))
 
   roundTripNested "FixedSizeListMaybe<2 of int32>"
     (nestedField "l" True (AFixedSizeList 2) $ V.fromList
       [ plainField "item" False (AInt 32 True) ])
     (ColFixedSizeListMaybe 2
-       (V.fromList [True, False, True])
-       (ColInt32 (VP.fromList [1, 2, 3, 4, 5, 6])))
+       (VU.fromList (map Bit [True, False, True]))
+       (ColInt32 (VS.fromList [1, 2, 3, 4, 5, 6])))
 
   -- Map<string, int32>. Arrow encodes maps as a list of struct
   -- <key, value> pairs; the map field has one child (the struct).
@@ -266,9 +270,9 @@ main = do
           ]
       ])
     (ColMap
-       (VP.fromList [0, 2, 2, 3])
+       (VS.fromList [0, 2, 2, 3])
        (ColUtf8 (V.fromList ["a", "b", "c"]))
-       (ColInt32 (VP.fromList [1, 2, 3])))
+       (ColInt32 (VS.fromList [1, 2, 3])))
 
   -- Dense union over (int32, utf8).
   roundTripNested "DenseUnion<int32, utf8>"
@@ -277,10 +281,10 @@ main = do
       , plainField "v_text" False AUtf8
       ])
     (ColDenseUnion
-       (VP.fromList [0, 1, 0])
-       (VP.fromList [0, 0, 1])
+       (VS.fromList [0, 1, 0])
+       (VS.fromList [0, 0, 1])
        (V.fromList
-         [ ColInt32 (VP.fromList [100, 200])
+         [ ColInt32 (VS.fromList [100, 200])
          , ColUtf8  (V.fromList ["hello"])
          ]))
 
@@ -291,10 +295,10 @@ main = do
       , plainField "value" False (AInt 32 True)
       ])
     (ColSparseUnion
-       (VP.fromList [0, 1, 0])
+       (VS.fromList [0, 1, 0])
        (V.fromList
-         [ ColBool  (V.fromList [True,  False, False])
-         , ColInt32 (VP.fromList [0, 42, 0])
+         [ ColBool  (VU.fromList (map Bit [True,  False, False]))
+         , ColInt32 (VS.fromList [0, 42, 0])
          ]))
 
   -- FlatBuffers reader / writer round-trip: build a typical
@@ -368,7 +372,7 @@ flatBufRoundTrip = do
        , arrowFeatures = V.empty
        })
     (V.fromList
-       [ ColInt32      (VP.fromList ([1, 2, 3] :: [Int32]))
+       [ ColInt32      (VS.fromList ([1, 2, 3] :: [Int32]))
        , ColUtf8Maybe  (V.fromList [Just "x", Nothing, Just "z"])
        ])
 
@@ -388,9 +392,9 @@ flatBufRoundTrip = do
              (plainField "item" False (AInt 32 True)))))
        Little V.empty V.empty)
     (V.singleton (ColListView
-       (VP.fromList ([0, 2, 5] :: [Int32]))
-       (VP.fromList ([2, 3, 1] :: [Int32]))
-       (ColInt32 (VP.fromList ([10,20,30,40,50,60] :: [Int32])))))
+       (VS.fromList ([0, 2, 5] :: [Int32]))
+       (VS.fromList ([2, 3, 1] :: [Int32]))
+       (ColInt32 (VS.fromList ([10,20,30,40,50,60] :: [Int32])))))
 
   highLevelRoundTrip "RunEndEncoded(int32, int64?)"
     (Schema
@@ -401,8 +405,8 @@ flatBufRoundTrip = do
              ]))
        Little V.empty V.empty)
     (V.singleton (ColRunEndEncoded
-       (ColInt32 (VP.fromList ([3, 5, 8] :: [Int32])))
-       (ColInt64Maybe (V.fromList [Just 100, Nothing, Just 300]))))
+       (ColInt32 (VS.fromList ([3, 5, 8] :: [Int32])))
+       (ColInt64Maybe (AC.nvFromMaybeList 0 [Just 100, Nothing, Just 300]))))
 
   -- Dictionary-encoded utf8 — the high-level API auto-extracts
   -- the dictionary batch and auto-resolves on read.
@@ -412,7 +416,7 @@ flatBufRoundTrip = do
   highLevelRoundTrip "Dictionary<utf8>"
     (Schema (V.singleton dictField) Little V.empty V.empty)
     (V.singleton (ColDictionary 0
-        (VP.fromList ([0, 1, 0, 2, 1] :: [Int32]))
+        (VS.fromList ([0, 1, 0, 2, 1] :: [Int32]))
         (ColUtf8 (V.fromList ["a", "b", "c"]))))
 
   -- ANull column: schema metadata round-trip + ColNull row count
@@ -440,9 +444,9 @@ flatBufRoundTrip = do
   -- Streaming reader: pull batches one at a time, then drain.
   streamingRoundTrip
     (Schema (V.fromList [plainField "n" False (AInt 32 True)]) Little V.empty V.empty)
-    [ V.singleton (ColInt32 (VP.fromList ([1, 2] :: [Int32])))
-    , V.singleton (ColInt32 (VP.fromList ([3] :: [Int32])))
-    , V.singleton (ColInt32 (VP.fromList ([4, 5, 6, 7] :: [Int32])))
+    [ V.singleton (ColInt32 (VS.fromList ([1, 2] :: [Int32])))
+    , V.singleton (ColInt32 (VS.fromList ([3] :: [Int32])))
+    , V.singleton (ColInt32 (VS.fromList ([4, 5, 6, 7] :: [Int32])))
     ]
 
   -- Column projection on a multi-column stream: a 3-column
@@ -459,7 +463,7 @@ flatBufRoundTrip = do
        , plainField "s" False AUtf8
        ]) Little V.empty V.empty)
     (V.fromList
-       [ ColInt64 (VP.fromList
+       [ ColInt64 (VS.fromList
             ([1..1000] :: [Int64]))   -- enough bytes that ZSTD shrinks
        , ColUtf8 (V.replicate 1000 "highly-compressible-payload")
        ])
@@ -475,7 +479,7 @@ flatBufRoundTrip = do
        , plainField "s" False AUtf8
        ]) Little V.empty V.empty)
     (V.fromList
-       [ ColInt64 (VP.fromList ([1..1000] :: [Int64]))
+       [ ColInt64 (VS.fromList ([1..1000] :: [Int64]))
        , ColUtf8 (V.replicate 1000 "highly-compressible-payload")
        ])
 
@@ -503,11 +507,11 @@ flatBufRoundTrip = do
 pyarrowGoldenRoundTrip :: IO ()
 pyarrowGoldenRoundTrip = do
   goldenCheck "pa_int32.arrows"
-    (V.singleton (ColInt32 (VP.fromList [1, 2, 3, 4, 5 :: Int32])))
+    (V.singleton (ColInt32 (VS.fromList [1, 2, 3, 4, 5 :: Int32])))
 
   goldenCheck "pa_mixed.arrows"
     (V.fromList
-       [ ColInt64 (VP.fromList [10, 20, 30 :: Int64])
+       [ ColInt64 (VS.fromList [10, 20, 30 :: Int64])
        , ColUtf8Maybe (V.fromList [Just "alpha", Nothing, Just "gamma"])
        , ColBoolMaybe (V.fromList [Just True, Just False, Nothing])
        ])
@@ -544,12 +548,12 @@ goldenDictCheck name expectedIndices expectedValues = do
     Right (_sch, batches) -> case batches of
       [b] | V.length b == 1 -> case V.head b of
         ColDictionary _ idx vals
-          | VP.toList idx == expectedIndices
+          | VS.toList idx == expectedIndices
           , vals == expectedValues ->
               putStrLn $ "OK: pyarrow golden " <> name
           | otherwise ->
               failTest $ "golden " <> name
-                        <> " dict mismatch:\n idx=" <> show (VP.toList idx)
+                        <> " dict mismatch:\n idx=" <> show (VS.toList idx)
                         <> " vals=" <> show vals
         other ->
           failTest $ "golden " <> name <> " expected ColDictionary, got " <> show other
@@ -629,10 +633,10 @@ dictReplacementRoundTrip = do
               V.empty))
         Little V.empty V.empty
       !batch1 = V.singleton $ ColDictionary 0
-        (VP.fromList [0, 1, 0])
+        (VS.fromList [0, 1, 0])
         (ColUtf8 (V.fromList ["a", "b"]))
       !batch2 = V.singleton $ ColDictionary 0
-        (VP.fromList [0, 1, 0])
+        (VS.fromList [0, 1, 0])
         (ColUtf8 (V.fromList ["x", "y"]))
       !opts  = defaultWriteOptions { writeDictHandling = DictReplaceOnChange }
       !bytes = encodeArrowStream opts sch [batch1, batch2]
@@ -648,8 +652,8 @@ dictReplacementRoundTrip = do
                (ColDictionary _ ix1 v1, ColDictionary _ ix2 v2)
                  | V.toList (valuesToList v1) == ["a", "b"]
                  , V.toList (valuesToList v2) == ["x", "y"]
-                 , VP.toList ix1 == [0, 1, 0]
-                 , VP.toList ix2 == [0, 1, 0] ->
+                 , VS.toList ix1 == [0, 1, 0]
+                 , VS.toList ix2 == [0, 1, 0] ->
                      putStrLn "OK: dictionary replacement across batches"
                _ -> failTest $ "dict-replace mismatch:\n got "
                                 ++ show batches
@@ -730,7 +734,7 @@ customMetadataRoundTrip = do
             ]
         , arrowFeatures   = V.empty
         }
-      !batch = V.singleton (ColInt32 (VP.fromList ([1, 2, 3] :: [Int32])))
+      !batch = V.singleton (ColInt32 (VS.fromList ([1, 2, 3] :: [Int32])))
       !bytes = encodeArrowStream defaultWriteOptions sch [batch]
   case decodeArrowStream bytes of
     Left e -> failTest $ "customMetadata roundtrip: " ++ e
@@ -886,8 +890,8 @@ recordHelperTests = do
   -- Build a ColMap with sorted keys vs unsorted keys.
   let !sortedKeys = ColUtf8 (V.fromList ["a", "b", "c"])
       !unsortedKeys = ColUtf8 (V.fromList ["b", "a", "c"])
-      !vals     = ColInt32 (VP.fromList [1, 2, 3 :: Int32])
-      !offsets  = VP.fromList [0, 3 :: Int32]
+      !vals     = ColInt32 (VS.fromList [1, 2, 3 :: Int32])
+      !offsets  = VS.fromList [0, 3 :: Int32]
       !sortedMap   = ColMap offsets sortedKeys vals
       !unsortedMap = ColMap offsets unsortedKeys vals
   case validateMapKeysSorted sortedMap of
@@ -984,8 +988,8 @@ projectionRoundTrip = do
            ])
         Little V.empty V.empty
       !batch = V.fromList
-        [ ColInt32 (VP.fromList ([1, 2, 3] :: [Int32]))
-        , ColInt64 (VP.fromList ([10, 20, 30] :: [Int64]))
+        [ ColInt32 (VS.fromList ([1, 2, 3] :: [Int32]))
+        , ColInt64 (VS.fromList ([10, 20, 30] :: [Int64]))
         , ColUtf8  (V.fromList ["x", "y", "z"])
         ]
       !bytes = encodeArrowStream defaultWriteOptions sch [batch]

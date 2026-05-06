@@ -11,6 +11,7 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Bits ((.|.), shiftL, shiftR)
 import Data.Word (Word8, Word32)
 import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Storable as VS
 
 import Criterion.Main (defaultMain, bench, bgroup, env, nf, whnf)
 

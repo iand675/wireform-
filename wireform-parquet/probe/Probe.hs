@@ -21,6 +21,7 @@ import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Storable as VS
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.FilePath ((</>))

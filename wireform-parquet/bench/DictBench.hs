@@ -7,6 +7,7 @@ module Main (main) where
 
 import Control.DeepSeq (NFData (..))
 import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Storable as VS
 import Data.Int (Int64)
 
 import Criterion.Main (defaultMain, bench, bgroup, env, nf)
