@@ -90,7 +90,9 @@ import Data.Bits (shiftL, shiftR, complement, xor, (.|.), (.&.), setBit, testBit
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as B
+import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Lazy as BL
+import Foreign.Storable (pokeByteOff)
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
@@ -411,10 +413,21 @@ encodeBloomFilterIndex = encodeBloomFilterIndexAs BloomFilterUtf8
 -- | Pack the backing bit-set into the @utf8bitset@ byte run: 8 bytes
 -- per backing word, little-endian, no length prefix
 -- ('encodeLengthDelimBytes' adds the outer one).
+--
+-- Pre-allocates the destination ByteString and pokes each
+-- Word64 directly. Replaces the previous Builder-fold shape
+-- which built an N-deep thunk chain per encode.
 bitsetToLEBytes :: VU.Vector Word64 -> ByteString
 bitsetToLEBytes bits =
-  BL.toStrict $ B.toLazyByteString $
-    VU.foldl' (\b w -> b <> B.word64LE w) mempty bits
+  let !n     = VU.length bits
+      !nByte = n * 8
+  in BSI.unsafeCreate nByte $ \p -> do
+       let go !i
+             | i >= n    = pure ()
+             | otherwise = do
+                 pokeByteOff p (i * 8) (VU.unsafeIndex bits i)
+                 go (i + 1)
+       go 0
 
 -- ============================================================
 -- Decoders + membership probes

@@ -55,8 +55,12 @@ import Data.Bits (shiftL, shiftR, unsafeShiftL, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as B
+import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Unsafe as BSU
+import Foreign.Ptr (plusPtr)
+import Foreign.Storable (peekByteOff, pokeByteOff)
+import System.IO.Unsafe (unsafePerformIO)
 import Data.Int (Int16, Int32)
 import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as VU
@@ -440,35 +444,37 @@ requireUnionVariant1 fm missingLabel probe variant unionName =
                       ++ unionName ++ " union variant"
     Nothing -> Left $ "Parquet.BloomFilter: missing " ++ missingLabel
 
+-- | Serialise the bit-set as @nb@ raw little-endian Word64 bytes.
+--
+-- Pre-allocates the strict ByteString to its exact size and pokes
+-- the words straight in. Replaces the previous
+-- @BL.toStrict . B.toLazyByteString . foldl (<>) mempty@ shape
+-- which built an N-deep Builder thunk + lazy chunk list per
+-- write.
 serializeBitset :: VU.Vector Word64 -> Int -> ByteString
 serializeBitset ws nb =
-  BL.toStrict $ B.toLazyByteString $ goWords 0
-  where
-    !nWords = nb `quot` 8
-    goWords !i
-      | i >= nWords = mempty
-      | otherwise =
-          let !w = VU.unsafeIndex ws i
-          in B.word64LE w <> goWords (i + 1)
+  let !nWords = nb `quot` 8
+  in BSI.unsafeCreate nb $ \p -> do
+       let go !i
+             | i >= nWords = pure ()
+             | otherwise = do
+                 pokeByteOff p (i * 8) (VU.unsafeIndex ws i)
+                 go (i + 1)
+       go 0
 
+-- | Parse @nb / 8@ Word64s from @bs@ (LE) into a primitive
+-- vector. Single 'peekByteOff' per word; the source bit
+-- pattern matches the host on little-endian platforms.
 parseBitset :: ByteString -> VU.Vector Word64
 parseBitset bs =
   let !n = BS.length bs `quot` 8
-  in VU.generate n $ \i ->
-       readLE64 bs (i * 8)
+  in VU.generate n (readLE64 bs . (* 8))
 
 {-# INLINE readLE64 #-}
 readLE64 :: ByteString -> Int -> Word64
-readLE64 bs !off =
-  let rd i = fromIntegral (BSU.unsafeIndex bs (off + i)) :: Word64
-  in rd 0
-   .|. (rd 1 `unsafeShiftL` 8)
-   .|. (rd 2 `unsafeShiftL` 16)
-   .|. (rd 3 `unsafeShiftL` 24)
-   .|. (rd 4 `unsafeShiftL` 32)
-   .|. (rd 5 `unsafeShiftL` 40)
-   .|. (rd 6 `unsafeShiftL` 48)
-   .|. (rd 7 `unsafeShiftL` 56)
+readLE64 bs !off = unsafePerformIO $
+  BSU.unsafeUseAsCStringLen bs $ \(cstr, _) ->
+    peekByteOff (cstr `plusPtr` off) 0
 
 -- ============================================================
 -- Sizing
