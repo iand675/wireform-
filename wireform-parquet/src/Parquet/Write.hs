@@ -153,11 +153,19 @@ import Thrift.Wire
 -- | Assemble a complete Parquet file from pre-computed metadata and encoded
 -- column chunk data. Each inner vector is one row group's column chunks
 -- (already-encoded pages).
+--
+-- Single allocation: flatten the (RowGroups -> Cols ->
+-- ByteString) tree into a list, then 'BS.concat' which calls
+-- one mallocByteString. Beats the previous 'Builder' chain
+-- because we already have all the bytestrings in hand —
+-- there's nothing to incrementally build.
 writeParquetFile :: FileMetadata -> V.Vector (V.Vector ByteString) -> ByteString
-writeParquetFile fm rowGroupData = BL.toStrict $ B.toLazyByteString $
-  B.byteString parquetMagic
-  <> V.foldl' (\b rg -> V.foldl' (\b2 col -> b2 <> B.byteString col) b rg) mempty rowGroupData
-  <> B.byteString (writeFooter fm)
+writeParquetFile fm rowGroupData =
+  let !pages = V.foldr
+        (\rg acc -> V.foldr (:) acc rg)
+        []
+        rowGroupData
+  in BS.concat (parquetMagic : pages ++ [writeFooter fm])
 
 writeFloatLE :: Float -> B.Builder
 writeFloatLE = B.word32LE . castFloatToWord32
@@ -1565,13 +1573,12 @@ buildParquetFileWithIndex' mFootEnc schema rowGroups auxes =
                   writeRawFooter parquetEncryptedMagic
                     (cryptoMeta <> encModule)
                 Left _ -> writeFooter fm
-   in BL.toStrict $ B.toLazyByteString $
-        B.byteString parquetMagic
-        <> mconcat (map B.byteString rowGroupBytes)
-        <> mconcat (map B.byteString bloomBytes)
-        <> mconcat (map B.byteString offBytes)
-        <> mconcat (map B.byteString colBytes)
-        <> B.byteString footerBytes
+   in BS.concat $ parquetMagic
+        : rowGroupBytes
+       ++ bloomBytes
+       ++ offBytes
+       ++ colBytes
+       ++ [footerBytes]
   where
     !leaves = V.filter (maybe False (const True) . seType) schema
 

@@ -16,7 +16,7 @@ module Columnar.SIMD
   , bswap64Copy
   ) where
 
-import Data.Bits (shiftR, (.&.))
+import Data.Bits (shiftL, shiftR, (.&.))
 import Data.Int (Int32)
 import Data.Word (Word8)
 import Foreign.C.Types (CInt (..))
@@ -88,23 +88,44 @@ unpackBitsLsbUnsafe !n bs = unsafePerformIO $ do
   mv <- VM.unsafeNew n
   unsafeUseAsCStringLen bs $ \(src, _) -> do
     let !srcPtr = castPtr src :: Ptr Word8
-        -- Walk one source byte at a time and write up to 8 bits
-        -- into the destination. Avoids the per-bit byteIdx /
-        -- bitIdx division in a 100 k-iter loop.
-        outer !srcOff !i
-          | i >= n = pure ()
+        -- Whole-byte stride: read one source byte, write 8
+        -- destination cells, jump 8. The per-cell branch
+        -- ((b >> bit) .&. 1 /= 0) compiles to a tight
+        -- shift+test+conditional-move; GHC's True/False
+        -- constructors are static singletons so each write
+        -- is just a pointer store into the V.Vector spine.
+        --
+        -- Tail (last partial byte, if n isn't a multiple of
+        -- 8) handled by the slow path with explicit bit
+        -- count.
+        !nFull = n `shiftR` 3
+        !nTail = n .&. 7
+
+        whole !srcOff !i
+          | srcOff >= nFull = pure ()
           | otherwise = do
               !b <- peekByteOff srcPtr srcOff :: IO Word8
-              let !nThisByte = min 8 (n - i)
-                  inner !bit
-                    | bit >= nThisByte = pure ()
-                    | otherwise = do
-                        VM.unsafeWrite mv (i + bit)
-                          ((b `shiftR` bit) .&. 1 /= 0)
-                        inner (bit + 1)
-              inner 0
-              outer (srcOff + 1) (i + 8)
-    outer 0 0
+              VM.unsafeWrite mv  i      (b               .&. 1 /= 0)
+              VM.unsafeWrite mv (i + 1) ((b `shiftR` 1)  .&. 1 /= 0)
+              VM.unsafeWrite mv (i + 2) ((b `shiftR` 2)  .&. 1 /= 0)
+              VM.unsafeWrite mv (i + 3) ((b `shiftR` 3)  .&. 1 /= 0)
+              VM.unsafeWrite mv (i + 4) ((b `shiftR` 4)  .&. 1 /= 0)
+              VM.unsafeWrite mv (i + 5) ((b `shiftR` 5)  .&. 1 /= 0)
+              VM.unsafeWrite mv (i + 6) ((b `shiftR` 6)  .&. 1 /= 0)
+              VM.unsafeWrite mv (i + 7) ((b `shiftR` 7)  .&. 1 /= 0)
+              whole (srcOff + 1) (i + 8)
+
+        partial !i !b !bit
+          | bit >= nTail = pure ()
+          | otherwise = do
+              VM.unsafeWrite mv (i + bit) ((b `shiftR` bit) .&. 1 /= 0)
+              partial i b (bit + 1)
+    whole 0 0
+    if nTail > 0
+      then do
+        !b <- peekByteOff srcPtr nFull :: IO Word8
+        partial (nFull `shiftL` 3) b 0
+      else pure ()
   V.unsafeFreeze mv
 
 -- | Bulk copy (SIMDe 16-byte chunks inside C). @dst@ must be at least @len@
