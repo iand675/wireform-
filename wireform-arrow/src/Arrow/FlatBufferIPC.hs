@@ -956,16 +956,11 @@ buildRecordBatchBytesWith mCodec sch cols =
       !(!bufs, !body) = case mCodec of
         Nothing    -> (bufs0, rawBody)
         Just codec ->
-          -- compressBody may fail at runtime when a codec is
-          -- requested that wasn't compiled in (e.g. BodyZstd
-          -- without -fzstd). The historical signature returned
-          -- ByteString unconditionally and called 'error' on
-          -- the codec branch, which is a hard crash. Keep the
-          -- 'error' behaviour for back-compat (existing callers
-          -- check the codec / flag combination before calling
-          -- this helper), but the lower-level
-          -- 'compressBufferEnvelopeEither' below now exposes a
-          -- proper Either-shaped path for new callers.
+          -- compressBody calls 'error' if the codec isn't
+          -- compiled in. Callers should use
+          -- 'bodyCompressionAvailable' to gate on this — the
+          -- whole 'mCodec' choice is a writer-side selection
+          -- so checking once at callsite is enough.
           compressBody codec bufs0 rawBody
       !rb = RecordBatchDef
               { rbLength  = fromIntegral numRows
@@ -1022,7 +1017,9 @@ compressBufferEnvelope :: BodyCompressionCodec -> ByteString -> ByteString
 compressBufferEnvelope codec raw
   | BS.null raw = raw
   | otherwise =
-      let !compressed = compressBuffer codec raw
+      let !compressed = case compressBufferEither codec raw of
+            Right out -> out
+            Left e    -> error e
           !rawLen     = BS.length raw
           !compLen    = BS.length compressed
       in  if compLen >= rawLen
@@ -1069,13 +1066,8 @@ decodeBodyLen bs =
 
 -- | Compress a single buffer's bytes. Routes to the right
 -- codec backend; @-fzstd@ / @-flz4@ Cabal flags select
--- availability.
---
--- Returns 'Left' when the requested codec wasn't compiled in.
--- Callers that don't want to handle the error can ignore the
--- 'Left' branch (the historical 'compressBuffer' that fired
--- 'error' is preserved as 'compressBuffer'); new code should
--- prefer 'compressBufferEither'.
+-- availability. Returns 'Left' when the requested codec
+-- wasn't compiled in.
 compressBufferEither
   :: BodyCompressionCodec -> ByteString
   -> Either String ByteString
@@ -1097,13 +1089,6 @@ compressBufferEither codec bs = case codec of
 #else
   LZ4Frame -> Left "Arrow.FlatBufferIPC: LZ4 body compression requires building wireform-arrow with -flz4"
 #endif
-
--- | Back-compat wrapper that fires 'error' on the unavailable
--- codec; new code should reach for 'compressBufferEither'.
-compressBuffer :: BodyCompressionCodec -> ByteString -> ByteString
-compressBuffer codec bs = case compressBufferEither codec bs of
-  Right out -> out
-  Left e    -> error e
 
 -- | Predicate the caller can use to fail-fast before invoking
 -- the writer on a codec that isn't compiled in.
