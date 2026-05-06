@@ -11,25 +11,25 @@ pyarrow on the same shape, on a 4-core x86_64 machine, GHC
 
 |                 | wireform | pyarrow | ratio                              |
 |-----------------|---------:|--------:|-----------------------------------:|
-| write none      |   3.2 ms |  9.4 ms | **2.94× faster** than pyarrow      |
+| write none      |   3.2 ms |  8.6 ms | **2.69× faster** than pyarrow      |
 | write snappy    |   4.8 ms | 10.0 ms | **2.08× faster**                   |
 | write zstd      |   7.6 ms | 12.1 ms | **1.59× faster**                   |
-| read none       |   1.7 ms |  2.5 ms | **1.47× faster**                   |
-| read snappy     |   4.0 ms |  4.4 ms | **1.10× faster**                   |
-| read zstd       |   3.1 ms |  4.8 ms | **1.55× faster**                   |
+| read none       |   1.7 ms |  2.6 ms | **1.53× faster**                   |
+| read snappy     |   4.0 ms |  4.5 ms | **1.13× faster**                   |
+| read zstd       |   3.1 ms |  4.6 ms | **1.48× faster**                   |
 
 ### Multi-threaded (`+RTS -N` vs `pq.read_table(use_threads=True)`)
 
 |                 | wireform | pyarrow | ratio                              |
 |-----------------|---------:|--------:|-----------------------------------:|
-| write none      |   3.5 ms |  9.4 ms | **2.69× faster**                   |
+| write none      |   3.5 ms |  8.6 ms | **2.46× faster**                   |
 | write snappy    |   4.7 ms | 10.0 ms | **2.13× faster**                   |
 | write zstd      |   7.0 ms | 12.1 ms | **1.73× faster**                   |
-| read none       |   1.4 ms |  2.3 ms | **1.64× faster**                   |
-| read snappy     |   2.2 ms |  2.8 ms | **1.27× faster**                   |
-| read zstd       |   1.8 ms |  2.4 ms | **1.33× faster**                   |
+| read none       |   1.4 ms |  2.0 ms | **1.43× faster**                   |
+| read snappy     |   2.2 ms |  2.3 ms | **1.05× faster**                   |
+| read zstd       |   1.8 ms |  2.1 ms | **1.17× faster**                   |
 
-**wireform-parquet beats pyarrow on every workload, single- and multi-threaded.** The previous 1.05× slower snappy-reads regression is gone — the most recent set of `acc V.++ pageVec` and `V.snoc acc rg` removals brings reads back ahead of pyarrow's threaded snappy path too.
+**wireform-parquet beats pyarrow on every workload, single- and multi-threaded.**
 
 In rows/second (single-threaded):
 
@@ -220,6 +220,52 @@ measured.
   `Parquet.NullPagesBitmap.nonNullPages` now returns a
   `VP.Vector Int` built by mutable-write loop instead of
   `V.Vector Int` from a list. **API break.**
+* **Pass 31 — direct PageHeader Thrift codec.**
+  Both reader and writer were going through the generic
+  Thrift Compact `TV.Value` AST for the per-page header
+  struct. Read path now decodes straight into the
+  `PageHeader` record with a hand-rolled walker
+  (`Parquet.Page.readPageHeaderAt`); write path emits
+  straight to `Builder` through `tCompEncode*` primitives
+  (`Parquet.Write.encodePageHeaderBuilder`). Eliminates
+  one `V.fromList` + 5+ boxed `Value`s per page.
+  Also: `i32LE` / `i64LE` / `fLE` / `dLE` (4-byte / 8-byte
+  primitive serializers used by every column statistic)
+  switched from `BL.toStrict (toLazyByteString (B.intXXLE v))`
+  to direct `BSI.unsafeCreate` + `pokeByteOff`.
+* **Pass 32 — RLE/Hybrid decoder: STRef -> ST tail recursion.**
+  The hybrid-RLE inner loop (`Parquet.RLE.fillHybrid` —
+  hot path for dictionary indices and definition /
+  repetition levels) was using four `STRef`s to hold its
+  state. Each `readSTRef` / `writeSTRef` is an indirect
+  heap load + write barrier. Refactored to a flat
+  tail-recursive driver that threads the state through
+  arguments. GHC keeps it in registers; ~2x speedup on
+  bit-packed pages in the microbench.
+* **Pass 33 — Bool unpack/pack: 8-way unrolling.**
+  `Columnar.SIMD.unpackBitsLsbUnsafe` (BOOL reader) and
+  `Parquet.Write.plainBoolVecBytes` (BOOL writer) had
+  inner per-bit loops that GHC kept stuck on the stack.
+  Unrolled to 8 explicit reads / writes per source byte
+  for the whole-byte case so GHC keeps the byte in a
+  register across the eight stores.
+* **Pass 34 — V2 def-levels: drop list intermediate.**
+  `encodeOptionalColumnPageV2Parts` built the def-levels
+  vector via `VP.fromList [if isJust v then 1 else 0 |
+  v <- presenceList oc]` where `presenceList` walked the
+  `V.Vector` twice (`V.toList` -> `[Maybe ()]` -> filter).
+  Now shares the existing `presenceVector` helper (single
+  `VP.generate`) and `optionalColumnNullCount` (single
+  fold).
+* **Pass 35 — `writeParquetFile`: `Builder` -> `BS.concat`.**
+  Same `Builder` -> single-allocation refactor as
+  `buildParquetFileMixedRaw` from an earlier pass — the
+  page bytestrings are already in hand, so the temporary
+  lazy chain is wasted work.
+* **Pass 36 — `statisticsForBool`: short-circuit pass.**
+  Was `V.any not vs >> V.any id vs`, two passes over the
+  column. Now a single short-circuiting fold that bails as
+  soon as both `True` and `False` have been observed.
 
 ## Bench fairness
 
