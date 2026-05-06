@@ -401,9 +401,66 @@ decompressDataPageBody codec chunk off = do
           let !nextOff = bodyStart + compSz
           Right (hdr, dph, raw, nextOff)
 
--- | Read every @DATA_PAGE@ with @PLAIN@ @INT32@ in order until the chunk ends.
-readPlainInt32ColumnChunk :: Compression -> ByteString -> Either String (VP.Vector Int32)
-readPlainInt32ColumnChunk codec chunk = go 0 VP.empty
+-- | Walk every DATA_PAGE in a chunk, decode each one with the
+-- supplied per-page decoder, and collect the results as a
+-- /reverse/-cons list of pages. Caller is expected to call
+-- 'VP.concat (reverse pages)' or similar.
+--
+-- Was previously fused into each per-type readPlain*ColumnChunk
+-- as 'go nextOff (acc VP.++ pageVec)' which was O(K^2) in
+-- page count K — copying the whole accumulator each step. The
+-- reverse-cons + single concat at the end is O(K + total
+-- elements).
+{-# INLINE collectPagesPrim #-}
+collectPagesPrim
+  :: VP.Prim a
+  => ByteString
+  -> Compression
+  -> Int32                         -- ^ Required PLAIN-style encoding tag
+  -> (Int -> ByteString -> Either String (VP.Vector a))
+  -> Either String [VP.Vector a]
+collectPagesPrim chunk codec wantedEnc decode = go 0 []
+  where
+    go !off !acc
+      | off >= BS.length chunk = Right acc
+      | otherwise = do
+          (_hdr, dph, raw, nextOff) <- decompressDataPageBody codec chunk off
+          if dphEncoding dph /= wantedEnc
+            then Left "Parquet.Read: encoding is not PLAIN (0)"
+            else do
+              let !n = fromIntegral (dphNumValues dph) :: Int
+              page <- decode n raw
+              go nextOff (page : acc)
+
+{-# INLINE collectPagesBoxed #-}
+collectPagesBoxed
+  :: ByteString
+  -> Compression
+  -> Int32
+  -> (Int -> ByteString -> Either String (V.Vector a))
+  -> Either String [V.Vector a]
+collectPagesBoxed chunk codec wantedEnc decode = go 0 []
+  where
+    go !off !acc
+      | off >= BS.length chunk = Right acc
+      | otherwise = do
+          (_hdr, dph, raw, nextOff) <- decompressDataPageBody codec chunk off
+          if dphEncoding dph /= wantedEnc
+            then Left "Parquet.Read: encoding is not PLAIN (0)"
+            else do
+              let !n = fromIntegral (dphNumValues dph) :: Int
+              page <- decode n raw
+              go nextOff (page : acc)
+
+{-# INLINE collectOptionalPagesBoxed #-}
+collectOptionalPagesBoxed
+  :: ByteString
+  -> Compression
+  -> Int
+  -> Int
+  -> (VP.Vector Int32 -> Int -> ByteString -> Either String (V.Vector (Maybe a)))
+  -> Either String [V.Vector (Maybe a)]
+collectOptionalPagesBoxed chunk codec maxRep maxDef mat = go 0 []
   where
     go !off !acc
       | off >= BS.length chunk = Right acc
@@ -413,8 +470,15 @@ readPlainInt32ColumnChunk codec chunk = go 0 VP.empty
             then Left "Parquet.Read: encoding is not PLAIN (0)"
             else do
               let !n = fromIntegral (dphNumValues dph) :: Int
-              pageVec <- decodePlainInt32 n raw
-              go nextOff (acc VP.++ pageVec)
+              (_rep, def, rest) <- parseDataPageV1Levels maxRep maxDef n raw
+              page <- mat def maxDef rest
+              go nextOff (page : acc)
+
+-- | Read every @DATA_PAGE@ with @PLAIN@ @INT32@ in order until the chunk ends.
+readPlainInt32ColumnChunk :: Compression -> ByteString -> Either String (VP.Vector Int32)
+readPlainInt32ColumnChunk codec chunk = do
+  pages <- collectPagesPrim chunk codec encPlain decodePlainInt32
+  Right (VP.concat (reverse pages))
 
 -- | Read the first data page of a chunk as @PLAIN@ @INT32@ values.
 readPlainInt32FirstPage :: Compression -> ByteString -> Either String (VP.Vector Int32)
@@ -449,19 +513,9 @@ readPlainOptionalColumnChunkWith ::
   ByteString ->
   (VP.Vector Int32 -> Int -> ByteString -> Either String (V.Vector (Maybe a))) ->
   Either String (V.Vector (Maybe a))
-readPlainOptionalColumnChunkWith codec maxRep maxDef chunk mat = go 0 V.empty
-  where
-    go !off !acc
-      | off >= BS.length chunk = Right acc
-      | otherwise = do
-          (_hdr, dph, raw, nextOff) <- decompressDataPageBody codec chunk off
-          if dphEncoding dph /= encPlain
-            then Left "Parquet.Read: encoding is not PLAIN (0)"
-            else do
-              let !n = fromIntegral (dphNumValues dph) :: Int
-              (_rep, def, rest) <- parseDataPageV1Levels maxRep maxDef n raw
-              page <- mat def maxDef rest
-              go nextOff (acc V.++ page)
+readPlainOptionalColumnChunkWith codec maxRep maxDef chunk mat = do
+  pages <- collectOptionalPagesBoxed chunk codec maxRep maxDef mat
+  Right (V.concat (reverse pages))
 
 -- | First @DATA_PAGE@ as @PLAIN@ @INT32@ with levels.
 readPlainInt32OptionalFirstPage ::
@@ -527,90 +581,51 @@ readPlainByteArrayOptionalColumnChunk codec mr md ch =
 
 -- | @PLAIN@ @INT64@ (little-endian), all @DATA_PAGE@s concatenated.
 readPlainInt64ColumnChunk :: Compression -> ByteString -> Either String (VP.Vector Int64)
-readPlainInt64ColumnChunk codec chunk = go 0 VP.empty
-  where
-    go !off !acc
-      | off >= BS.length chunk = Right acc
-      | otherwise = do
-          (_hdr, dph, raw, nextOff) <- decompressDataPageBody codec chunk off
-          if dphEncoding dph /= encPlain
-            then Left "Parquet.Read: encoding is not PLAIN (0)"
-            else do
-              let !n = fromIntegral (dphNumValues dph) :: Int
-              pageVec <- decodePlainInt64 n raw
-              go nextOff (acc VP.++ pageVec)
+readPlainInt64ColumnChunk codec chunk = do
+  pages <- collectPagesPrim chunk codec encPlain decodePlainInt64
+  Right (VP.concat (reverse pages))
 
 -- | @PLAIN@ @FLOAT@ (IEEE little-endian).
 readPlainFloatColumnChunk :: Compression -> ByteString -> Either String (VP.Vector Float)
-readPlainFloatColumnChunk codec chunk = go 0 VP.empty
-  where
-    go !off !acc
-      | off >= BS.length chunk = Right acc
-      | otherwise = do
-          (_hdr, dph, raw, nextOff) <- decompressDataPageBody codec chunk off
-          if dphEncoding dph /= encPlain
-            then Left "Parquet.Read: encoding is not PLAIN (0)"
-            else do
-              let !n = fromIntegral (dphNumValues dph) :: Int
-              pageVec <- decodePlainFloat n raw
-              go nextOff (acc VP.++ pageVec)
+readPlainFloatColumnChunk codec chunk = do
+  pages <- collectPagesPrim chunk codec encPlain decodePlainFloat
+  Right (VP.concat (reverse pages))
 
 -- | @PLAIN@ @DOUBLE@ (IEEE little-endian).
 readPlainDoubleColumnChunk :: Compression -> ByteString -> Either String (VP.Vector Double)
-readPlainDoubleColumnChunk codec chunk = go 0 VP.empty
-  where
-    go !off !acc
-      | off >= BS.length chunk = Right acc
-      | otherwise = do
-          (_hdr, dph, raw, nextOff) <- decompressDataPageBody codec chunk off
-          if dphEncoding dph /= encPlain
-            then Left "Parquet.Read: encoding is not PLAIN (0)"
-            else do
-              let !n = fromIntegral (dphNumValues dph) :: Int
-              pageVec <- decodePlainDouble n raw
-              go nextOff (acc VP.++ pageVec)
+readPlainDoubleColumnChunk codec chunk = do
+  pages <- collectPagesPrim chunk codec encPlain decodePlainDouble
+  Right (VP.concat (reverse pages))
 
 -- | @PLAIN@ @BOOLEAN@ (packed bits, LSB of first byte is first value).
 readPlainBoolColumnChunk :: Compression -> ByteString -> Either String (V.Vector Bool)
-readPlainBoolColumnChunk codec chunk = go 0 V.empty
-  where
-    go !off !acc
-      | off >= BS.length chunk = Right acc
-      | otherwise = do
-          (_hdr, dph, raw, nextOff) <- decompressDataPageBody codec chunk off
-          if dphEncoding dph /= encPlain
-            then Left "Parquet.Read: encoding is not PLAIN (0)"
-            else do
-              let !n = fromIntegral (dphNumValues dph) :: Int
-              pageVec <- decodePlainBool n raw
-              go nextOff (acc V.++ pageVec)
+readPlainBoolColumnChunk codec chunk = do
+  pages <- collectPagesBoxed chunk codec encPlain decodePlainBool
+  Right (V.concat (reverse pages))
 
 -- | @PLAIN@ @BYTE_ARRAY@ (length-prefixed 4-byte LE + bytes per value).
 readPlainByteArrayColumnChunk :: Compression -> ByteString -> Either String (V.Vector ByteString)
-readPlainByteArrayColumnChunk codec chunk = go 0 V.empty
-  where
-    go !off !acc
-      | off >= BS.length chunk = Right acc
-      | otherwise = do
-          (_hdr, dph, raw, nextOff) <- decompressDataPageBody codec chunk off
-          if dphEncoding dph /= encPlain
-            then Left "Parquet.Read: encoding is not PLAIN (0)"
-            else do
-              let !n = fromIntegral (dphNumValues dph) :: Int
-              pageVec <- decodePlainByteArray n raw
-              go nextOff (acc V.++ pageVec)
+readPlainByteArrayColumnChunk codec chunk = do
+  pages <- collectPagesBoxed chunk codec encPlain decodePlainByteArray
+  Right (V.concat (reverse pages))
 
 -- | Dictionary page (@PLAIN@ @INT32@ values) followed by @DATA_PAGE@s with
 -- @PLAIN_DICTIONARY@ (indices as @PLAIN@ @INT32@). Plain @DATA_PAGE@s without
 -- a dictionary are also accepted.
 readPlainDictionaryInt32ColumnChunk :: Compression -> ByteString -> Either String (VP.Vector Int32)
-readPlainDictionaryInt32ColumnChunk codec chunk = go 0 Nothing VP.empty
+readPlainDictionaryInt32ColumnChunk codec chunk = do
+  -- Reverse-cons of pages, concat once at end. O(K + total
+  -- elements) instead of O(K^2 + total elements) for K data
+  -- pages.
+  (mDict, pagesRev) <- go 0 Nothing []
+  if null pagesRev && case mDict of { Just _ -> True; Nothing -> False }
+    then Left "Parquet.Read: empty dictionary column chunk"
+    else if null pagesRev
+           then Left "Parquet.Read: empty dictionary column chunk"
+           else Right (VP.concat (reverse pagesRev))
   where
-    go !off !mDict !acc
-      | off >= BS.length chunk =
-          if VP.null acc
-            then Left "Parquet.Read: empty dictionary column chunk"
-            else Right acc
+    go !off !mDict !pagesRev
+      | off >= BS.length chunk = Right (mDict, pagesRev)
       | otherwise = do
           (hdr, afterHdr) <- readPageHeaderAt chunk off
           compSz <- case phCompressedPageSize hdr of
@@ -630,13 +645,13 @@ readPlainDictionaryInt32ColumnChunk codec chunk = go 0 Nothing VP.empty
                   | otherwise -> do
                       let !nDict = fromIntegral (dictNumValues dk) :: Int
                       dict <- decodePlainInt32 nDict raw
-                      go nextOff (Just dict) acc
+                      go nextOff (Just dict) pagesRev
                 PtDataPage dph -> case dphEncoding dph of
                   e
                     | e == encPlain -> do
                         let !n = fromIntegral (dphNumValues dph) :: Int
                         pageVec <- decodePlainInt32 n raw
-                        go nextOff mDict (acc VP.++ pageVec)
+                        go nextOff mDict (pageVec : pagesRev)
                     | isDictionaryEncoding e -> do
                         dict0 <- case mDict of
                           Nothing ->
@@ -658,8 +673,8 @@ readPlainDictionaryInt32ColumnChunk codec chunk = go 0 Nothing VP.empty
                         if not ok
                           then Left "Parquet.Read: dictionary index out of range"
                           else do
-                            let pageVec = VP.map (\k -> dict0 VP.! fromIntegral k) ix
-                            go nextOff mDict (acc VP.++ pageVec)
+                            let !pageVec = VP.map (\k -> dict0 VP.! fromIntegral k) ix
+                            go nextOff mDict (pageVec : pagesRev)
                   e ->
                     Left $
                       "Parquet.Read: unsupported data page encoding "
@@ -992,8 +1007,9 @@ readDictionaryOptionalColumnChunk ::
   (dict -> Int32 -> Maybe a) ->
   Compression -> Int -> Int -> ByteString ->
   Either String (V.Vector (Maybe a))
-readDictionaryOptionalColumnChunk decodeDictValues lookupDict codec maxRep maxDef chunk =
-  go 0 Nothing V.empty
+readDictionaryOptionalColumnChunk decodeDictValues lookupDict codec maxRep maxDef chunk = do
+  pagesRev <- go 0 Nothing []
+  Right (V.concat (reverse pagesRev))
   where
     go !off !mDict !acc
       | off >= BS.length chunk = Right acc
@@ -1031,7 +1047,7 @@ readDictionaryOptionalColumnChunk decodeDictValues lookupDict codec maxRep maxDe
                           !nDefined = VP.foldl' (\a d -> if d == maxD then a + 1 else a) 0 def
                       ix <- decodeDictionaryIndices nDefined rest
                       page <- materializeDictOptional def maxDef ix dict0 lookupDict
-                      go nextOff mDict (acc V.++ page)
+                      go nextOff mDict (page : acc)
                 _ -> Left "Parquet.Read: expected DICTIONARY_PAGE or DATA_PAGE"
 
 materializeDictOptional ::
@@ -1165,10 +1181,10 @@ decodePlainFixedLenByteArray typeLen n bs
 
 -- | All @DATA_PAGE@s as @PLAIN@ @INT96@.
 readPlainInt96ColumnChunk :: Compression -> ByteString -> Either String (V.Vector ByteString)
-readPlainInt96ColumnChunk codec chunk = go 0 V.empty
+readPlainInt96ColumnChunk codec chunk = go 0 []
   where
     go !off !acc
-      | off >= BS.length chunk = Right acc
+      | off >= BS.length chunk = Right (V.concat (reverse acc))
       | otherwise = do
           (_hdr, dph, raw, nextOff) <- decompressDataPageBody codec chunk off
           if dphEncoding dph /= encPlain
@@ -1176,14 +1192,14 @@ readPlainInt96ColumnChunk codec chunk = go 0 V.empty
             else do
               let !n = fromIntegral (dphNumValues dph) :: Int
               pageVec <- decodePlainInt96 n raw
-              go nextOff (acc V.++ pageVec)
+              go nextOff (pageVec : acc)
 
 -- | All @DATA_PAGE@s as @PLAIN@ @FIXED_LEN_BYTE_ARRAY@ with given type length.
 readPlainFixedLenByteArrayColumnChunk :: Int -> Compression -> ByteString -> Either String (V.Vector ByteString)
-readPlainFixedLenByteArrayColumnChunk typeLen codec chunk = go 0 V.empty
+readPlainFixedLenByteArrayColumnChunk typeLen codec chunk = go 0 []
   where
     go !off !acc
-      | off >= BS.length chunk = Right acc
+      | off >= BS.length chunk = Right (V.concat (reverse acc))
       | otherwise = do
           (_hdr, dph, raw, nextOff) <- decompressDataPageBody codec chunk off
           if dphEncoding dph /= encPlain
@@ -1191,7 +1207,7 @@ readPlainFixedLenByteArrayColumnChunk typeLen codec chunk = go 0 V.empty
             else do
               let !n = fromIntegral (dphNumValues dph) :: Int
               pageVec <- decodePlainFixedLenByteArray typeLen n raw
-              go nextOff (acc V.++ pageVec)
+              go nextOff (pageVec : acc)
 
 -- | @BYTE_STREAM_SPLIT@ for @FLOAT@: bytes are transposed into 4 runs of N bytes.
 {-# INLINE decodeByteStreamSplitFloat #-}
@@ -1317,17 +1333,14 @@ data PerPage a = PerPage
     -- ^ Encoding-specific decoders (delta / byte-stream-split).
     -- @ppExtended encoding numValues body@ — return Left if the
     -- encoding is genuinely unsupported for this physical type.
-  , ppAppend :: !(a -> a -> a)
-    -- ^ Two-arg concatenation. Used as a fallback; prefer
-    -- 'ppConcat' which is O(total bytes) regardless of how many
-    -- pages are concatenated.
   , ppConcat :: !([a] -> a)
-    -- ^ N-way concatenation of page chunks in order. Should be
-    -- O(total bytes), NOT O(pages × total) which a naive left
-    -- fold of 'ppAppend' would give. (For 'VP.Vector' / 'V.Vector'
-    -- this is what 'VP.concat' / 'V.concat' provide out of the
-    -- box: one allocation of the final length + one pass of
-    -- per-page memcpy.)
+    -- ^ N-way concatenation of page chunks in order. Must be
+    -- O(total bytes) (= 'VP.concat' / 'V.concat' — one
+    -- allocation of the final length + one pass of per-page
+    -- memcpy). The reverse-cons + single 'ppConcat' shape that
+    -- every caller uses below relies on this; do NOT supply
+    -- a left-fold of (++) here, that would re-introduce the
+    -- O(K^2) bug we just removed.
   , ppEmpty :: !a
   }
 
@@ -1427,7 +1440,6 @@ dispatchInt32 = PerPage
       if enc == encDeltaBinaryPacked
         then decodeDeltaBinaryPackedInt32 n raw
         else Left $ unsupportedEncoding "INT32" enc
-  , ppAppend = (VP.++)
   , ppConcat = VP.concat
   , ppEmpty = VP.empty
   }
@@ -1440,7 +1452,6 @@ dispatchInt64 = PerPage
       if enc == encDeltaBinaryPacked
         then decodeDeltaBinaryPackedInt64 n raw
         else Left $ unsupportedEncoding "INT64" enc
-  , ppAppend = (VP.++)
   , ppConcat = VP.concat
   , ppEmpty = VP.empty
   }
@@ -1453,7 +1464,6 @@ dispatchFloat = PerPage
       if enc == encByteStreamSplit
         then decodeByteStreamSplitFloat n raw
         else Left $ unsupportedEncoding "FLOAT" enc
-  , ppAppend = (VP.++)
   , ppConcat = VP.concat
   , ppEmpty = VP.empty
   }
@@ -1466,7 +1476,6 @@ dispatchDouble = PerPage
       if enc == encByteStreamSplit
         then decodeByteStreamSplitDouble n raw
         else Left $ unsupportedEncoding "DOUBLE" enc
-  , ppAppend = (VP.++)
   , ppConcat = VP.concat
   , ppEmpty = VP.empty
   }
@@ -1489,7 +1498,6 @@ dispatchBool = PerPage
           ws <- decodeHybridRleLengthPrefixed 1 n raw
           Right $! V.generate n (\i -> VP.unsafeIndex ws i /= 0)
         else Left $ unsupportedEncoding "BOOLEAN" enc
-  , ppAppend = (V.++)
   , ppConcat = V.concat
   , ppEmpty = V.empty
   }
@@ -1505,7 +1513,6 @@ dispatchByteArray = PerPage
         else if enc == encDeltaByteArray
           then decodeDeltaByteArray n raw
           else Left $ unsupportedEncoding "BYTE_ARRAY" enc
-  , ppAppend = (V.++)
   , ppConcat = V.concat
   , ppEmpty = V.empty
   }
@@ -1546,7 +1553,6 @@ dispatchUtf8 = PerPage
           then do bs <- decodeDeltaByteArray n raw
                   Right $! V.map decodeUtf8LossyTextRead bs
           else Left $ unsupportedEncoding "BYTE_ARRAY (Utf8)" enc
-  , ppAppend = (V.++)
   , ppConcat = V.concat
   , ppEmpty = V.empty
   }
@@ -1681,8 +1687,9 @@ readGenericOptionalColumnChunk
   -> Int  -- ^ max_definition_level (typically 1 for flat optional)
   -> ByteString
   -> Either String (V.Vector (Maybe a))
-readGenericOptionalColumnChunk pp toBoxed codec maxRep maxDef chunk0 =
-  go 0 Nothing V.empty
+readGenericOptionalColumnChunk pp toBoxed codec maxRep maxDef chunk0 = do
+  pagesRev <- go 0 Nothing []
+  Right (V.concat (reverse pagesRev))
   where
     go !off !mDict !acc
       | off >= BS.length chunk0 = Right acc
@@ -1715,7 +1722,7 @@ readGenericOptionalColumnChunk pp toBoxed codec maxRep maxDef chunk0 =
                     parseDataPageV1Levels maxRep maxDef nVals raw
                   page <- materialiseOptionalPage pp toBoxed mDict
                             (dphEncoding dph) maxDef def valBytes
-                  go nextOff mDict (acc V.++ page)
+                  go nextOff mDict (page : acc)
                 PtDataPageV2 dph2 -> do
                   let !repLen = fromIntegral (dph2RepLevelsLen dph2) :: Int
                       !defLen = fromIntegral (dph2DefLevelsLen dph2) :: Int
@@ -1737,7 +1744,7 @@ readGenericOptionalColumnChunk pp toBoxed codec maxRep maxDef chunk0 =
                         else decodeHybridRleUnsigned32 bwDef nVals defBs
                       page <- materialiseOptionalPage pp toBoxed mDict
                                 (dph2Encoding dph2) maxDef def values
-                      go nextOff mDict (acc V.++ page)
+                      go nextOff mDict (page : acc)
                 _ -> Left "Parquet.Read: expected DATA_PAGE / DATA_PAGE_V2 / DICTIONARY_PAGE"
 
 -- | Decode a /defined/ values block in any encoding the
@@ -1862,7 +1869,9 @@ readSelectedPages pp codec fileBs locs keep
               ++ show (V.length keep)
               ++ " doesn't match page-location count "
               ++ show (V.length locs)
-  | otherwise = walk 0 Nothing (ppEmpty pp)
+  | otherwise = do
+      pagesRev <- walk 0 Nothing []
+      Right $! ppConcat pp (reverse pagesRev)
   where
     !nLocs = V.length locs
 
@@ -1903,7 +1912,7 @@ readSelectedPages pp codec fileBs locs keep
                                    (phUncompressedPageSize hdr) compBody
                           let !n = fromIntegral (dphNumValues dph) :: Int
                           page <- decodeSelectedDataPage pp mDict (dphEncoding dph) n raw
-                          walk (i + 1) mDict (ppAppend pp acc page)
+                          walk (i + 1) mDict (page : acc)
                     PtDataPageV2 dph2 -> do
                       if not (V.unsafeIndex keep i)
                         then walk (i + 1) mDict acc
@@ -1922,7 +1931,7 @@ readSelectedPages pp codec fileBs locs keep
                                 else Right valuesSection
                               let !n = fromIntegral (dph2NumValues dph2) :: Int
                               page <- decodeSelectedDataPage pp mDict (dph2Encoding dph2) n values
-                              walk (i + 1) mDict (ppAppend pp acc page)
+                              walk (i + 1) mDict (page : acc)
                     _ -> Left "Parquet.Read: expected DATA_PAGE / DATA_PAGE_V2 / DICTIONARY_PAGE in selection"
 
     decodeSelectedDataPage pp' mDict !enc !n !raw
@@ -2017,7 +2026,9 @@ readGenericOptionalSelectedPages pp toBoxed codec maxRep maxDef
               ++ show (V.length keep)
               ++ " doesn't match page-location count "
               ++ show (V.length locs)
-  | otherwise = walk 0 Nothing V.empty
+  | otherwise = do
+      pagesRev <- walk 0 Nothing []
+      Right (V.concat (reverse pagesRev))
   where
     !nLocs = V.length locs
 
@@ -2059,7 +2070,7 @@ readGenericOptionalSelectedPages pp toBoxed codec maxRep maxDef
                             parseDataPageV1Levels maxRep maxDef nVals raw
                           page <- materialiseOptionalPage pp toBoxed mDict
                                     (dphEncoding dph) maxDef def valBytes
-                          walk (i + 1) mDict (acc V.++ page)
+                          walk (i + 1) mDict (page : acc)
                     PtDataPageV2 dph2 ->
                       if not (V.unsafeIndex keep i)
                         then walk (i + 1) mDict acc
@@ -2084,5 +2095,5 @@ readGenericOptionalSelectedPages pp toBoxed codec maxRep maxDef
                                 else decodeHybridRleUnsigned32 bwDef nVals defBs
                               page <- materialiseOptionalPage pp toBoxed mDict
                                         (dph2Encoding dph2) maxDef def values
-                              walk (i + 1) mDict (acc V.++ page)
+                              walk (i + 1) mDict (page : acc)
                     _ -> Left "Parquet.Read: expected DATA_PAGE / DATA_PAGE_V2 / DICTIONARY_PAGE in selection"
