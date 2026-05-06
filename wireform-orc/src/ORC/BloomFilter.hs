@@ -58,11 +58,16 @@ module ORC.BloomFilter
   , emptyBloom
   , optimalNumBits
   , optimalNumHashFunctions
-    -- * Inserts
+    -- * Inserts (single-value; thaws on every call — prefer the bulk
+    -- 'insertMany*' variants for builds)
   , insertBytes
   , insertString
   , insertStringWith
   , insertInt64
+    -- * Bulk inserts (thaw once, write all, freeze once)
+  , insertManyHashes
+  , insertManyBytes
+  , insertManyInt64
     -- * Membership
   , containsBytes
   , containsString
@@ -89,10 +94,11 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
+import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as VU
 import qualified Data.Vector.Unboxed.Mutable as MVU
 import Data.Word (Word32, Word64)
-import Control.Monad.ST (runST)
+import Control.Monad.ST (ST, runST)
 import Control.Monad (forM_)
 
 import qualified Wireform.Hash as Hash
@@ -212,19 +218,80 @@ containsInt64 v = checkBitOps (longHash v)
 
 -- | Apply the @k@ probe positions for a precomputed 64-bit hash and
 -- @setBit@ each of them in the underlying mutable copy of the bit-set.
+--
+-- /Performance note:/ this entry point thaws the entire bit-set on
+-- every call (O(|bfBits|) per insert). For bulk loads, prefer
+-- 'insertManyHashes' / 'insertManyBytes' / 'insertManyInt64' which
+-- thaw once and apply all probes in a single ST pass.
 applyBitOps :: Word64 -> BloomFilter -> BloomFilter
 applyBitOps !hash64 bf =
   let !nb = numBits bf
       !k  = bfNumHashFunctions bf
       bits' = runST $ do
         mv <- VU.thaw (bfBits bf)
-        forM_ [1 .. fromIntegral k :: Int] $ \i ->
-          let !pos     = bitPosition hash64 i nb
-              !wordIdx = pos `shiftR` 6
-              !bitIdx  = pos .&. 63
-          in MVU.modify mv (\w -> w `setBit` bitIdx) wordIdx
+        applyBitOpsM mv nb k hash64
         VU.unsafeFreeze mv
    in bf { bfBits = bits' }
+
+-- | In-place probe-and-set for a single 64-bit hash.
+{-# INLINE applyBitOpsM #-}
+applyBitOpsM :: MVU.MVector s Word64 -> Int -> Word32 -> Word64 -> ST s ()
+applyBitOpsM mv !nb !k !hash64 =
+  forM_ [1 .. fromIntegral k :: Int] $ \i ->
+    let !pos     = bitPosition hash64 i nb
+        !wordIdx = pos `shiftR` 6
+        !bitIdx  = pos .&. 63
+    in MVU.modify mv (\w -> w `setBit` bitIdx) wordIdx
+
+-- | Bulk insert: thaw once, apply all probe sets, freeze once.
+-- Replaces the per-value 'foldl' (.) over 'applyBitOps' shape
+-- which copied the whole bitset on every call (O(values × bits)
+-- — pathological for any non-tiny filter).
+insertManyHashes :: [Word64] -> BloomFilter -> BloomFilter
+insertManyHashes hashes bf =
+  let !nb = numBits bf
+      !k  = bfNumHashFunctions bf
+      bits' = runST $ do
+        mv <- VU.thaw (bfBits bf)
+        mapM_ (applyBitOpsM mv nb k) hashes
+        VU.unsafeFreeze mv
+  in bf { bfBits = bits' }
+
+-- | Bulk insert from a primitive vector of 'Int64' values
+-- (uses ORC's Thomas-Wang 'longHash').
+insertManyInt64 :: VU.Vector Int64 -> BloomFilter -> BloomFilter
+insertManyInt64 vs bf =
+  let !nb = numBits bf
+      !k  = bfNumHashFunctions bf
+      bits' = runST $ do
+        mv <- VU.thaw (bfBits bf)
+        let !n = VU.length vs
+            go !i
+              | i >= n = pure ()
+              | otherwise = do
+                  applyBitOpsM mv nb k (longHash (VU.unsafeIndex vs i))
+                  go (i + 1)
+        go 0
+        VU.unsafeFreeze mv
+  in bf { bfBits = bits' }
+
+-- | Bulk insert from a vector of 'ByteString' values
+-- (uses MurmurHash3 64-bit).
+insertManyBytes :: V.Vector ByteString -> BloomFilter -> BloomFilter
+insertManyBytes vs bf =
+  let !nb = numBits bf
+      !k  = bfNumHashFunctions bf
+      bits' = runST $ do
+        mv <- VU.thaw (bfBits bf)
+        let !n = V.length vs
+            go !i
+              | i >= n = pure ()
+              | otherwise = do
+                  applyBitOpsM mv nb k (murmur3_64 (V.unsafeIndex vs i))
+                  go (i + 1)
+        go 0
+        VU.unsafeFreeze mv
+  in bf { bfBits = bits' }
 
 checkBitOps :: Word64 -> BloomFilter -> Bool
 checkBitOps !hash64 bf =
