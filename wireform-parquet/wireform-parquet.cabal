@@ -206,7 +206,7 @@ benchmark parquet-throughput
   type: exitcode-stdio-1.0
   hs-source-dirs: bench
   main-is: Throughput.hs
-  ghc-options: -O2 -threaded -rtsopts
+  ghc-options: -O2 -threaded -rtsopts "-with-rtsopts=-A32m"
   build-depends:
     base >= 4.16 && < 5,
     async >= 2.2 && < 2.3,
