@@ -25,3 +25,5 @@ result-*
 /*.tsv
 /bench-*.html
 /bench-*.json
+# GHC profiling reports written to the cwd by '+RTS -p'.
+*.prof
