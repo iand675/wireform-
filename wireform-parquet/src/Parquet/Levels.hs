@@ -26,16 +26,22 @@ module Parquet.Levels
   , NestedValue (..)
   ) where
 
+import Control.Monad.ST (ST, runST)
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Unsafe as BSU
 import Data.Int (Int32, Int64)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Vector as V
+import qualified Data.Vector.Mutable as VM
 import qualified Data.Vector.Primitive as VP
 import Data.Word (Word32, Word64)
+import Foreign.Ptr (plusPtr)
+import Foreign.Storable (peekByteOff)
 import GHC.Float (castWord32ToFloat, castWord64ToDouble)
+import System.IO.Unsafe (unsafePerformIO)
 
 import Parquet.RLE (decodeHybridRleUnsigned32)
 import Parquet.Types (Repetition (..), SchemaElement (..))
@@ -51,27 +57,79 @@ levelBitWidth maxLevel
       | bound > maxLevel = w
       | otherwise = go (bound * 2) (w + 1)
 
+-- | LE 'Word32' read via a single unsafe 'peekByteOff'. Replaces
+-- the byte-by-byte BS.index + shifts shape used here previously.
+{-# INLINE readLE32 #-}
 readLE32 :: ByteString -> Int -> Word32
-readLE32 bs o =
-  let b0 = fromIntegral (BS.index bs o) :: Word32
-      b1 = fromIntegral (BS.index bs (o + 1)) :: Word32
-      b2 = fromIntegral (BS.index bs (o + 2)) :: Word32
-      b3 = fromIntegral (BS.index bs (o + 3)) :: Word32
-  in b0 .|. (b1 `shiftL` 8) .|. (b2 `shiftL` 16) .|. (b3 `shiftL` 24)
+readLE32 bs o = unsafePerformIO $
+  BSU.unsafeUseAsCStringLen bs $ \(cstr, _) ->
+    peekByteOff (cstr `plusPtr` o) 0
 
+{-# INLINE readLE64 #-}
 readLE64 :: ByteString -> Int -> Word64
-readLE64 bs o =
-  let w0 = fromIntegral (readLE32 bs o) :: Word64
-      w1 = fromIntegral (readLE32 bs (o + 4)) :: Word64
-  in w0 .|. (w1 `shiftL` 32)
+readLE64 bs o = unsafePerformIO $
+  BSU.unsafeUseAsCStringLen bs $ \(cstr, _) ->
+    peekByteOff (cstr `plusPtr` o) 0
 
 {-# INLINE readBitLsb #-}
 readBitLsb :: ByteString -> Int -> Bool
 readBitLsb bs bitIdx =
   let bi = bitIdx `quot` 8
       ii = bitIdx `rem` 8
-      b = BS.index bs bi
+      b = BSU.unsafeIndex bs bi
   in (b `shiftR` ii) .&. 1 /= 0
+
+-- | Generic engine for the @materializePlain*Optional@
+-- family. Walks the @defs@ vector once and writes
+-- @Just (reader off)@ for present entries and @Nothing@ for
+-- nulls into a freshly-allocated boxed mutable vector. No
+-- list intermediates, no @reverse@, no @V.fromList@.
+--
+-- The previous shape was
+--
+--     case go [] 0 0 of                    -- builds a [Maybe a] in reverse
+--       Right xs -> Right $! V.fromList (reverse xs)
+--
+-- which allocated 3·n cells (cons cells in @go@'s acc, cons
+-- cells produced by 'reverse', and the boxed vector's spine).
+-- The new shape allocates one mutable vector + one freeze.
+{-# INLINE materializePlainOptionalGeneric #-}
+materializePlainOptionalGeneric
+  :: forall a.
+     String                                     -- ^ type name (used in error msgs)
+  -> Int                                        -- ^ stride (bytes per present value)
+  -> (ByteString -> Int -> a)                   -- ^ value reader
+  -> VP.Vector Int32 -> Int -> ByteString
+  -> Either String (V.Vector (Maybe a))
+materializePlainOptionalGeneric ty stride reader defs maxDef plain
+  | maxDef < 0 = Left "Parquet.Levels: negative max definition level"
+  | otherwise = runST $ do
+      let !n     = VP.length defs
+          !maxD  = fromIntegral maxDef :: Int32
+          !bsLen = BS.length plain
+      mv <- VM.unsafeNew n
+      let go !i !off
+            | i >= n =
+                if off <= bsLen
+                  then pure (Right ())
+                  else pure (Left ("Parquet.Levels: PLAIN " ++ ty ++ " buffer overrun"))
+            | otherwise = do
+                let !d = VP.unsafeIndex defs i
+                if d > maxD || d < 0
+                  then pure (Left ("Parquet.Levels: definition level out of range: " ++ show d))
+                  else if d == maxD
+                    then if off + stride > bsLen
+                      then pure (Left ("Parquet.Levels: PLAIN " ++ ty ++ " buffer too small"))
+                      else do
+                        VM.unsafeWrite mv i (Just (reader plain off))
+                        go (i + 1) (off + stride)
+                    else do
+                      VM.unsafeWrite mv i Nothing
+                      go (i + 1) off
+      r <- go 0 0
+      case r of
+        Left e   -> pure (Left e)
+        Right () -> Right <$> V.unsafeFreeze mv
 
 -- | Decode one length-prefixed hybrid level stream starting at @off@.
 -- Returns decoded levels and the offset immediately after this stream.
@@ -118,206 +176,36 @@ parseDataPageV1Levels maxRep maxDef numValues raw = do
 
 -- | Map @PLAIN@ packed @INT32@ values using Parquet definition levels: rows with
 -- @def == maxDef@ consume the next four bytes; nulls use @def \< maxDef@.
-materializePlainInt32Optional ::
-  VP.Vector Int32 ->
-  Int ->
-  ByteString ->
-  Either String (V.Vector (Maybe Int32))
-materializePlainInt32Optional defs maxDef plain
-  | maxDef < 0 = Left "Parquet.Levels: negative max definition level"
-  | otherwise =
-      let n = VP.length defs
-          needPresent =
-            VP.foldl'
-              ( \a v ->
-                  if v == fromIntegral maxDef then a + 1 else a
-              )
-              0
-              defs
-          needBytes = needPresent * 4
-          go !acc !i !off
-            | i >= n =
-                if off == needBytes
-                  then Right acc
-                  else
-                    Left $
-                      "Parquet.Levels: unconsumed PLAIN bytes: "
-                        ++ show (needBytes - off)
-            | otherwise =
-                let !d = VP.unsafeIndex defs i
-                    !maxD = fromIntegral maxDef :: Int32
-                 in if d > maxD || d < 0
-                      then
-                        Left $
-                          "Parquet.Levels: definition level out of range: "
-                            ++ show d
-                      else
-                        if d == maxD
-                          then
-                            let !v = fromIntegral (readLE32 plain off) :: Int32
-                             in go (Just v : acc) (i + 1) (off + 4)
-                          else go (Nothing : acc) (i + 1) off
-       in if BS.length plain < needBytes
-            then
-              Left $
-                "Parquet.Levels: PLAIN INT32 buffer too small for "
-                  ++ show needPresent
-                  ++ " defined values"
-            else case go [] 0 0 of
-              Left e -> Left e
-              Right xs -> Right $! V.fromList (reverse xs)
+materializePlainInt32Optional
+  :: VP.Vector Int32 -> Int -> ByteString
+  -> Either String (V.Vector (Maybe Int32))
+materializePlainInt32Optional =
+  materializePlainOptionalGeneric "INT32" 4
+    (\bs o -> fromIntegral (readLE32 bs o) :: Int32)
 
 -- | @PLAIN@ @INT64@ (8-byte LE per defined value).
-materializePlainInt64Optional ::
-  VP.Vector Int32 ->
-  Int ->
-  ByteString ->
-  Either String (V.Vector (Maybe Int64))
-materializePlainInt64Optional defs maxDef plain
-  | maxDef < 0 = Left "Parquet.Levels: negative max definition level"
-  | otherwise =
-      let n = VP.length defs
-          needPresent =
-            VP.foldl'
-              ( \a v ->
-                  if v == fromIntegral maxDef then a + 1 else a
-              )
-              0
-              defs
-          needBytes = needPresent * 8
-          go !acc !i !off
-            | i >= n =
-                if off == needBytes
-                  then Right acc
-                  else
-                    Left $
-                      "Parquet.Levels: unconsumed PLAIN bytes: "
-                        ++ show (needBytes - off)
-            | otherwise =
-                let !d = VP.unsafeIndex defs i
-                    !maxD = fromIntegral maxDef :: Int32
-                 in if d > maxD || d < 0
-                      then
-                        Left $
-                          "Parquet.Levels: definition level out of range: "
-                            ++ show d
-                      else
-                        if d == maxD
-                          then
-                            let !v = fromIntegral (readLE64 plain off) :: Int64
-                             in go (Just v : acc) (i + 1) (off + 8)
-                          else go (Nothing : acc) (i + 1) off
-       in if BS.length plain < needBytes
-            then
-              Left $
-                "Parquet.Levels: PLAIN INT64 buffer too small for "
-                  ++ show needPresent
-                  ++ " defined values"
-            else case go [] 0 0 of
-              Left e -> Left e
-              Right xs -> Right $! V.fromList (reverse xs)
+materializePlainInt64Optional
+  :: VP.Vector Int32 -> Int -> ByteString
+  -> Either String (V.Vector (Maybe Int64))
+materializePlainInt64Optional =
+  materializePlainOptionalGeneric "INT64" 8
+    (\bs o -> fromIntegral (readLE64 bs o) :: Int64)
 
 -- | @PLAIN@ @FLOAT@ (4-byte IEEE LE per defined value).
-materializePlainFloatOptional ::
-  VP.Vector Int32 ->
-  Int ->
-  ByteString ->
-  Either String (V.Vector (Maybe Float))
-materializePlainFloatOptional defs maxDef plain
-  | maxDef < 0 = Left "Parquet.Levels: negative max definition level"
-  | otherwise =
-      let n = VP.length defs
-          needPresent =
-            VP.foldl'
-              ( \a v ->
-                  if v == fromIntegral maxDef then a + 1 else a
-              )
-              0
-              defs
-          needBytes = needPresent * 4
-          go !acc !i !off
-            | i >= n =
-                if off == needBytes
-                  then Right acc
-                  else
-                    Left $
-                      "Parquet.Levels: unconsumed PLAIN bytes: "
-                        ++ show (needBytes - off)
-            | otherwise =
-                let !d = VP.unsafeIndex defs i
-                    !maxD = fromIntegral maxDef :: Int32
-                 in if d > maxD || d < 0
-                      then
-                        Left $
-                          "Parquet.Levels: definition level out of range: "
-                            ++ show d
-                      else
-                        if d == maxD
-                          then
-                            let !w = readLE32 plain off
-                                !v = castWord32ToFloat w
-                             in go (Just v : acc) (i + 1) (off + 4)
-                          else go (Nothing : acc) (i + 1) off
-       in if BS.length plain < needBytes
-            then
-              Left $
-                "Parquet.Levels: PLAIN FLOAT buffer too small for "
-                  ++ show needPresent
-                  ++ " defined values"
-            else case go [] 0 0 of
-              Left e -> Left e
-              Right xs -> Right $! V.fromList (reverse xs)
+materializePlainFloatOptional
+  :: VP.Vector Int32 -> Int -> ByteString
+  -> Either String (V.Vector (Maybe Float))
+materializePlainFloatOptional =
+  materializePlainOptionalGeneric "FLOAT" 4
+    (\bs o -> castWord32ToFloat (readLE32 bs o))
 
 -- | @PLAIN@ @DOUBLE@ (8-byte IEEE LE per defined value).
-materializePlainDoubleOptional ::
-  VP.Vector Int32 ->
-  Int ->
-  ByteString ->
-  Either String (V.Vector (Maybe Double))
-materializePlainDoubleOptional defs maxDef plain
-  | maxDef < 0 = Left "Parquet.Levels: negative max definition level"
-  | otherwise =
-      let n = VP.length defs
-          needPresent =
-            VP.foldl'
-              ( \a v ->
-                  if v == fromIntegral maxDef then a + 1 else a
-              )
-              0
-              defs
-          needBytes = needPresent * 8
-          go !acc !i !off
-            | i >= n =
-                if off == needBytes
-                  then Right acc
-                  else
-                    Left $
-                      "Parquet.Levels: unconsumed PLAIN bytes: "
-                        ++ show (needBytes - off)
-            | otherwise =
-                let !d = VP.unsafeIndex defs i
-                    !maxD = fromIntegral maxDef :: Int32
-                 in if d > maxD || d < 0
-                      then
-                        Left $
-                          "Parquet.Levels: definition level out of range: "
-                            ++ show d
-                      else
-                        if d == maxD
-                          then
-                            let !w = readLE64 plain off
-                                !v = castWord64ToDouble w
-                             in go (Just v : acc) (i + 1) (off + 8)
-                          else go (Nothing : acc) (i + 1) off
-       in if BS.length plain < needBytes
-            then
-              Left $
-                "Parquet.Levels: PLAIN DOUBLE buffer too small for "
-                  ++ show needPresent
-                  ++ " defined values"
-            else case go [] 0 0 of
-              Left e -> Left e
-              Right xs -> Right $! V.fromList (reverse xs)
+materializePlainDoubleOptional
+  :: VP.Vector Int32 -> Int -> ByteString
+  -> Either String (V.Vector (Maybe Double))
+materializePlainDoubleOptional =
+  materializePlainOptionalGeneric "DOUBLE" 8
+    (\bs o -> castWord64ToDouble (readLE64 bs o))
 
 -- | @PLAIN@ @BOOLEAN@ — packed bits in definition order; only defined values
 -- occupy bits (LSB of first byte is first defined value).
@@ -329,46 +217,32 @@ materializePlainBoolOptional ::
 materializePlainBoolOptional defs maxDef plain
   | maxDef < 0 = Left "Parquet.Levels: negative max definition level"
   | otherwise =
-      let n = VP.length defs
-          needBits =
-            VP.foldl'
-              ( \a v ->
-                  if v == fromIntegral maxDef then a + 1 else a
-              )
-              0
-              defs
-          needBytes = (needBits + 7) `quot` 8
-          go !acc !i !bitPos
-            | i >= n =
-                if bitPos == needBits
-                  then Right acc
-                  else
-                    Left $
-                      "Parquet.Levels: BOOLEAN bit stream incomplete: "
-                        ++ show (needBits - bitPos)
-            | otherwise =
-                let !d = VP.unsafeIndex defs i
-                    !maxD = fromIntegral maxDef :: Int32
-                 in if d > maxD || d < 0
-                      then
-                        Left $
-                          "Parquet.Levels: definition level out of range: "
-                            ++ show d
-                      else
-                        if d == maxD
-                          then
-                            let !b = readBitLsb plain bitPos
-                             in go (Just b : acc) (i + 1) (bitPos + 1)
-                          else go (Nothing : acc) (i + 1) bitPos
-       in if BS.length plain < needBytes
-            then
-              Left $
-                "Parquet.Levels: PLAIN BOOLEAN buffer too small for "
-                  ++ show needBits
-                  ++ " defined bits"
-            else case go [] 0 0 of
-              Left e -> Left e
-              Right xs -> Right $! V.fromList (reverse xs)
+      let !n      = VP.length defs
+          !maxDi  = fromIntegral maxDef :: Int32
+          !needBits = VP.foldl' (\a v -> if v == maxDi then a + 1 else a) 0 defs
+          !needBytes = (needBits + 7) `quot` 8
+      in if BS.length plain < needBytes
+           then Left $ "Parquet.Levels: PLAIN BOOLEAN buffer too small for "
+                         ++ show needBits ++ " defined bits"
+           else runST $ do
+             mv <- VM.unsafeNew n
+             let go !i !bitPos
+                   | i >= n = pure (Right ())
+                   | otherwise = do
+                       let !d = VP.unsafeIndex defs i
+                       if d > maxDi || d < 0
+                         then pure (Left ("Parquet.Levels: definition level out of range: " ++ show d))
+                         else if d == maxDi
+                           then do
+                             VM.unsafeWrite mv i (Just (readBitLsb plain bitPos))
+                             go (i + 1) (bitPos + 1)
+                           else do
+                             VM.unsafeWrite mv i Nothing
+                             go (i + 1) bitPos
+             r <- go 0 0
+             case r of
+               Left e   -> pure (Left e)
+               Right () -> Right <$> V.unsafeFreeze mv
 
 -- | @PLAIN@ @BYTE_ARRAY@ — per defined value: 4-byte LE length + payload.
 materializePlainByteArrayOptional ::
@@ -378,42 +252,36 @@ materializePlainByteArrayOptional ::
   Either String (V.Vector (Maybe ByteString))
 materializePlainByteArrayOptional defs maxDef plain
   | maxDef < 0 = Left "Parquet.Levels: negative max definition level"
-  | otherwise =
-      let n = VP.length defs
-          go !acc !i !off
-            | i >= n =
-                if off == BS.length plain
-                  then Right acc
-                  else
-                    Left $
-                      "Parquet.Levels: trailing PLAIN BYTE_ARRAY bytes: "
-                        ++ show (BS.length plain - off)
-            | otherwise =
+  | otherwise = runST $ do
+      let !n     = VP.length defs
+          !maxDi = fromIntegral maxDef :: Int32
+          !bsLen = BS.length plain
+      mv <- VM.unsafeNew n
+      let go !i !off
+            | i >= n = pure (Right ())
+            | otherwise = do
                 let !d = VP.unsafeIndex defs i
-                    !maxD = fromIntegral maxDef :: Int32
-                 in if d > maxD || d < 0
-                      then
-                        Left $
-                          "Parquet.Levels: definition level out of range: "
-                            ++ show d
-                      else
-                        if d == maxD
-                          then
-                            if off + 4 > BS.length plain
-                              then Left "Parquet.Levels: PLAIN BYTE_ARRAY truncated length"
-                              else
-                                let !len = fromIntegral (readLE32 plain off) :: Int
-                                    !off2 = off + 4
-                                 in if len < 0 || off2 + len > BS.length plain
-                                      then
-                                        Left "Parquet.Levels: PLAIN BYTE_ARRAY payload out of bounds"
-                                      else
-                                        let !payload = BS.take len (BS.drop off2 plain)
-                                         in go (Just payload : acc) (i + 1) (off2 + len)
-                          else go (Nothing : acc) (i + 1) off
-       in case go [] 0 0 of
-        Left e -> Left e
-        Right xs -> Right $! V.fromList (reverse xs)
+                if d > maxDi || d < 0
+                  then pure (Left ("Parquet.Levels: definition level out of range: " ++ show d))
+                  else if d == maxDi
+                    then if off + 4 > bsLen
+                      then pure (Left "Parquet.Levels: PLAIN BYTE_ARRAY truncated length")
+                      else do
+                        let !len  = fromIntegral (readLE32 plain off) :: Int
+                            !off2 = off + 4
+                        if len < 0 || off2 + len > bsLen
+                          then pure (Left "Parquet.Levels: PLAIN BYTE_ARRAY payload out of bounds")
+                          else do
+                            let !payload = BS.take len (BS.drop off2 plain)
+                            VM.unsafeWrite mv i (Just payload)
+                            go (i + 1) (off2 + len)
+                    else do
+                      VM.unsafeWrite mv i Nothing
+                      go (i + 1) off
+      r <- go 0 0
+      case r of
+        Left e   -> pure (Left e)
+        Right () -> Right <$> V.unsafeFreeze mv
 
 -- | Maximum repetition and definition levels for a leaf column identified by
 -- @path@ (same as 'Parquet.Types.ColumnMetadata' @path_in_schema@), from a
