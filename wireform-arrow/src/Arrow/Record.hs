@@ -111,6 +111,9 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Storable as VS
+import qualified Data.Vector.Unboxed as VU
+import Columnar.Bit (Bit (..))
 import Data.Word (Word8, Word16, Word32, Word64)
 
 import qualified Arrow.Column as AC
@@ -189,38 +192,45 @@ mkE ty req opt = Encoder ty False req opt
 -- Primitive encoders
 -- ============================================================
 
+-- All primitive encoders convert from a boxed @V.Vector a@
+-- (the input shape every Encoder works with) into a packed
+-- 'VS.Vector' for the constructor data, and into a
+-- 'NullableView' for the nullable variant. The conversion
+-- is one O(n) walk; the underlying storage is then
+-- view-friendly (see 'docs/columnar-views-design.md').
+
 int8E :: Encoder Int8
-int8E = mkE (AInt 8 True) (ColInt8 . VP.convert) ColInt8Maybe
+int8E = mkE (AInt 8 True) (ColInt8 . VS.convert) (ColInt8Maybe . AC.nvFromMaybeVector 0)
 
 int16E :: Encoder Int16
-int16E = mkE (AInt 16 True) (ColInt16 . VP.convert) ColInt16Maybe
+int16E = mkE (AInt 16 True) (ColInt16 . VS.convert) (ColInt16Maybe . AC.nvFromMaybeVector 0)
 
 int32E :: Encoder Int32
-int32E = mkE (AInt 32 True) (ColInt32 . VP.convert) ColInt32Maybe
+int32E = mkE (AInt 32 True) (ColInt32 . VS.convert) (ColInt32Maybe . AC.nvFromMaybeVector 0)
 
 int64E :: Encoder Int64
-int64E = mkE (AInt 64 True) (ColInt64 . VP.convert) ColInt64Maybe
+int64E = mkE (AInt 64 True) (ColInt64 . VS.convert) (ColInt64Maybe . AC.nvFromMaybeVector 0)
 
 word8E :: Encoder Word8
-word8E = mkE (AInt 8 False) (ColUInt8 . VP.convert) ColUInt8Maybe
+word8E = mkE (AInt 8 False) (ColUInt8 . VS.convert) (ColUInt8Maybe . AC.nvFromMaybeVector 0)
 
 word16E :: Encoder Word16
-word16E = mkE (AInt 16 False) (ColUInt16 . VP.convert) ColUInt16Maybe
+word16E = mkE (AInt 16 False) (ColUInt16 . VS.convert) (ColUInt16Maybe . AC.nvFromMaybeVector 0)
 
 word32E :: Encoder Word32
-word32E = mkE (AInt 32 False) (ColUInt32 . VP.convert) ColUInt32Maybe
+word32E = mkE (AInt 32 False) (ColUInt32 . VS.convert) (ColUInt32Maybe . AC.nvFromMaybeVector 0)
 
 word64E :: Encoder Word64
-word64E = mkE (AInt 64 False) (ColUInt64 . VP.convert) ColUInt64Maybe
+word64E = mkE (AInt 64 False) (ColUInt64 . VS.convert) (ColUInt64Maybe . AC.nvFromMaybeVector 0)
 
 floatE :: Encoder Float
-floatE = mkE (AFloatingPoint Single) (ColFloat . VP.convert) ColFloatMaybe
+floatE = mkE (AFloatingPoint Single) (ColFloat . VS.convert) (ColFloatMaybe . AC.nvFromMaybeVector 0)
 
 doubleE :: Encoder Double
-doubleE = mkE (AFloatingPoint DoublePrecision) (ColDouble . VP.convert) ColDoubleMaybe
+doubleE = mkE (AFloatingPoint DoublePrecision) (ColDouble . VS.convert) (ColDoubleMaybe . AC.nvFromMaybeVector 0)
 
 boolE :: Encoder Bool
-boolE = mkE ABool ColBool ColBoolMaybe
+boolE = mkE ABool (ColBool . boolVecToBitVec) ColBoolMaybe
 
 utf8E :: Encoder Text
 utf8E = mkE AUtf8 ColUtf8 ColUtf8Maybe
@@ -230,12 +240,17 @@ binaryE = mkE ABinary ColBinary ColBinaryMaybe
 
 -- | Days since Unix epoch (INT32). Arrow logical @Date(DateDay)@.
 date32E :: Encoder Int32
-date32E = mkE (ADate DateDay) (ColDate32 . VP.convert) ColDate32Maybe
+date32E = mkE (ADate DateDay) (ColDate32 . VS.convert) (ColDate32Maybe . AC.nvFromMaybeVector 0)
 
 -- | Microseconds since Unix epoch (INT64, no timezone). Arrow
 -- logical @Timestamp(Microsecond, None)@.
 timestampE :: Encoder Int64
-timestampE = mkE (ATimestamp Microsecond Nothing) (ColTimestamp . VP.convert) ColTimestampMaybe
+timestampE = mkE (ATimestamp Microsecond Nothing) (ColTimestamp . VS.convert) (ColTimestampMaybe . AC.nvFromMaybeVector 0)
+
+-- | Convert a boxed @V.Vector Bool@ into the packed
+-- @VU.Vector Bit@ representation 'ColBool' now uses.
+boolVecToBitVec :: V.Vector Bool -> VU.Vector Bit
+boolVecToBitVec v = VU.generate (V.length v) (\i -> Bit (V.unsafeIndex v i))
 
 -- ============================================================
 -- Decoder
@@ -288,60 +303,71 @@ mkD = Decoder
 -- Primitive decoders
 -- ============================================================
 
+-- Each primitive decoder converts the packed VS.Vector
+-- back to a boxed V.Vector for the consumer (the Decoder
+-- API still hands out boxed vectors to consumers). The
+-- nullable variant materialises the NullableView through
+-- 'nvToMaybeVector'.
+
 int8D :: Decoder Int8
 int8D = mkD (AInt 8 True)
-  (expectCol "ColInt8"      $ \case ColInt8      v -> Right (VP.convert v); o -> expectErr "ColInt8" o)
-  (expectCol "ColInt8Maybe" $ \case ColInt8Maybe v -> Right v;              o -> expectErr "ColInt8Maybe" o)
+  (expectCol "ColInt8"      $ \case ColInt8      v -> Right (VS.convert v); o -> expectErr "ColInt8" o)
+  (expectCol "ColInt8Maybe" $ \case ColInt8Maybe v -> Right (AC.nvToMaybeVector v); o -> expectErr "ColInt8Maybe" o)
 
 int16D :: Decoder Int16
 int16D = mkD (AInt 16 True)
-  (expectCol "ColInt16"      $ \case ColInt16      v -> Right (VP.convert v); o -> expectErr "ColInt16" o)
-  (expectCol "ColInt16Maybe" $ \case ColInt16Maybe v -> Right v;               o -> expectErr "ColInt16Maybe" o)
+  (expectCol "ColInt16"      $ \case ColInt16      v -> Right (VS.convert v); o -> expectErr "ColInt16" o)
+  (expectCol "ColInt16Maybe" $ \case ColInt16Maybe v -> Right (AC.nvToMaybeVector v); o -> expectErr "ColInt16Maybe" o)
 
 int32D :: Decoder Int32
 int32D = mkD (AInt 32 True)
-  (expectCol "ColInt32"      $ \case ColInt32      v -> Right (VP.convert v); o -> expectErr "ColInt32" o)
-  (expectCol "ColInt32Maybe" $ \case ColInt32Maybe v -> Right v;               o -> expectErr "ColInt32Maybe" o)
+  (expectCol "ColInt32"      $ \case ColInt32      v -> Right (VS.convert v); o -> expectErr "ColInt32" o)
+  (expectCol "ColInt32Maybe" $ \case ColInt32Maybe v -> Right (AC.nvToMaybeVector v); o -> expectErr "ColInt32Maybe" o)
 
 int64D :: Decoder Int64
 int64D = mkD (AInt 64 True)
-  (expectCol "ColInt64"      $ \case ColInt64      v -> Right (VP.convert v); o -> expectErr "ColInt64" o)
-  (expectCol "ColInt64Maybe" $ \case ColInt64Maybe v -> Right v;               o -> expectErr "ColInt64Maybe" o)
+  (expectCol "ColInt64"      $ \case ColInt64      v -> Right (VS.convert v); o -> expectErr "ColInt64" o)
+  (expectCol "ColInt64Maybe" $ \case ColInt64Maybe v -> Right (AC.nvToMaybeVector v); o -> expectErr "ColInt64Maybe" o)
 
 word8D :: Decoder Word8
 word8D = mkD (AInt 8 False)
-  (expectCol "ColUInt8"      $ \case ColUInt8      v -> Right (VP.convert v); o -> expectErr "ColUInt8" o)
-  (expectCol "ColUInt8Maybe" $ \case ColUInt8Maybe v -> Right v;               o -> expectErr "ColUInt8Maybe" o)
+  (expectCol "ColUInt8"      $ \case ColUInt8      v -> Right (VS.convert v); o -> expectErr "ColUInt8" o)
+  (expectCol "ColUInt8Maybe" $ \case ColUInt8Maybe v -> Right (AC.nvToMaybeVector v); o -> expectErr "ColUInt8Maybe" o)
 
 word16D :: Decoder Word16
 word16D = mkD (AInt 16 False)
-  (expectCol "ColUInt16"      $ \case ColUInt16      v -> Right (VP.convert v); o -> expectErr "ColUInt16" o)
-  (expectCol "ColUInt16Maybe" $ \case ColUInt16Maybe v -> Right v;               o -> expectErr "ColUInt16Maybe" o)
+  (expectCol "ColUInt16"      $ \case ColUInt16      v -> Right (VS.convert v); o -> expectErr "ColUInt16" o)
+  (expectCol "ColUInt16Maybe" $ \case ColUInt16Maybe v -> Right (AC.nvToMaybeVector v); o -> expectErr "ColUInt16Maybe" o)
 
 word32D :: Decoder Word32
 word32D = mkD (AInt 32 False)
-  (expectCol "ColUInt32"      $ \case ColUInt32      v -> Right (VP.convert v); o -> expectErr "ColUInt32" o)
-  (expectCol "ColUInt32Maybe" $ \case ColUInt32Maybe v -> Right v;               o -> expectErr "ColUInt32Maybe" o)
+  (expectCol "ColUInt32"      $ \case ColUInt32      v -> Right (VS.convert v); o -> expectErr "ColUInt32" o)
+  (expectCol "ColUInt32Maybe" $ \case ColUInt32Maybe v -> Right (AC.nvToMaybeVector v); o -> expectErr "ColUInt32Maybe" o)
 
 word64D :: Decoder Word64
 word64D = mkD (AInt 64 False)
-  (expectCol "ColUInt64"      $ \case ColUInt64      v -> Right (VP.convert v); o -> expectErr "ColUInt64" o)
-  (expectCol "ColUInt64Maybe" $ \case ColUInt64Maybe v -> Right v;               o -> expectErr "ColUInt64Maybe" o)
+  (expectCol "ColUInt64"      $ \case ColUInt64      v -> Right (VS.convert v); o -> expectErr "ColUInt64" o)
+  (expectCol "ColUInt64Maybe" $ \case ColUInt64Maybe v -> Right (AC.nvToMaybeVector v); o -> expectErr "ColUInt64Maybe" o)
 
 floatD :: Decoder Float
 floatD = mkD (AFloatingPoint Single)
-  (expectCol "ColFloat"      $ \case ColFloat      v -> Right (VP.convert v); o -> expectErr "ColFloat" o)
-  (expectCol "ColFloatMaybe" $ \case ColFloatMaybe v -> Right v;               o -> expectErr "ColFloatMaybe" o)
+  (expectCol "ColFloat"      $ \case ColFloat      v -> Right (VS.convert v); o -> expectErr "ColFloat" o)
+  (expectCol "ColFloatMaybe" $ \case ColFloatMaybe v -> Right (AC.nvToMaybeVector v); o -> expectErr "ColFloatMaybe" o)
 
 doubleD :: Decoder Double
 doubleD = mkD (AFloatingPoint DoublePrecision)
-  (expectCol "ColDouble"      $ \case ColDouble      v -> Right (VP.convert v); o -> expectErr "ColDouble" o)
-  (expectCol "ColDoubleMaybe" $ \case ColDoubleMaybe v -> Right v;               o -> expectErr "ColDoubleMaybe" o)
+  (expectCol "ColDouble"      $ \case ColDouble      v -> Right (VS.convert v); o -> expectErr "ColDouble" o)
+  (expectCol "ColDoubleMaybe" $ \case ColDoubleMaybe v -> Right (AC.nvToMaybeVector v); o -> expectErr "ColDoubleMaybe" o)
 
 boolD :: Decoder Bool
 boolD = mkD ABool
-  (expectCol "ColBool"      $ \case ColBool      v -> Right v; o -> expectErr "ColBool" o)
-  (expectCol "ColBoolMaybe" $ \case ColBoolMaybe v -> Right v; o -> expectErr "ColBoolMaybe" o)
+  (expectCol "ColBool"      $ \case ColBool      v -> Right (bitVecToBoolVec v); o -> expectErr "ColBool" o)
+  (expectCol "ColBoolMaybe" $ \case ColBoolMaybe v -> Right v;                    o -> expectErr "ColBoolMaybe" o)
+
+-- | Convert a packed @VU.Vector Bit@ back to the boxed
+-- @V.Vector Bool@ representation the Decoder API exposes.
+bitVecToBoolVec :: VU.Vector Bit -> V.Vector Bool
+bitVecToBoolVec v = V.generate (VU.length v) (\i -> unBit (VU.unsafeIndex v i))
 
 utf8D :: Decoder Text
 utf8D = mkD AUtf8
@@ -355,13 +381,13 @@ binaryD = mkD ABinary
 
 date32D :: Decoder Int32
 date32D = mkD (ADate DateDay)
-  (expectCol "ColDate32"      $ \case ColDate32      v -> Right (VP.convert v); o -> expectErr "ColDate32" o)
-  (expectCol "ColDate32Maybe" $ \case ColDate32Maybe v -> Right v;               o -> expectErr "ColDate32Maybe" o)
+  (expectCol "ColDate32"      $ \case ColDate32      v -> Right (VS.convert v); o -> expectErr "ColDate32" o)
+  (expectCol "ColDate32Maybe" $ \case ColDate32Maybe v -> Right (AC.nvToMaybeVector v); o -> expectErr "ColDate32Maybe" o)
 
 timestampD :: Decoder Int64
 timestampD = mkD (ATimestamp Microsecond Nothing)
-  (expectCol "ColTimestamp"      $ \case ColTimestamp      v -> Right (VP.convert v); o -> expectErr "ColTimestamp" o)
-  (expectCol "ColTimestampMaybe" $ \case ColTimestampMaybe v -> Right v;               o -> expectErr "ColTimestampMaybe" o)
+  (expectCol "ColTimestamp"      $ \case ColTimestamp      v -> Right (VS.convert v); o -> expectErr "ColTimestamp" o)
+  (expectCol "ColTimestampMaybe" $ \case ColTimestampMaybe v -> Right (AC.nvToMaybeVector v); o -> expectErr "ColTimestampMaybe" o)
 
 -- Internal helpers shared by every primitive decoder.
 expectCol :: String -> (ColumnArray -> Either String b) -> ColumnArray -> Either String b
@@ -486,7 +512,7 @@ structEMaybe name sel inner = RowEncoder
       }]
   , runRowEncoder = \rs ->
       let !mvs   = V.map sel rs
-          !valid = V.map isJust mvs
+          !valid = boolVecToBitVec (V.map isJust mvs)
           !cs    = case V.find isJust mvs of
                      Just (Just present) -> V.map (fromMaybe present) mvs
                      _                   -> V.empty
@@ -679,12 +705,13 @@ structDMaybe name inner = RowDecoder [name] $ \fs cs -> do
       !col         = V.unsafeIndex cs idx
       !childFields = fieldChildren parentField
       mask vs valid =
-        if V.length vs /= V.length valid
-          then Left $ "Arrow.Record.structDMaybe " ++ show name
-                ++ ": child length " ++ show (V.length vs)
-                ++ " /= validity length " ++ show (V.length valid)
-          else Right $ V.zipWith
-                 (\b v -> if b then Just v else Nothing) valid vs
+        let !validBoxed = bitVecToBoolVec valid
+        in if V.length vs /= V.length validBoxed
+             then Left $ "Arrow.Record.structDMaybe " ++ show name
+                   ++ ": child length " ++ show (V.length vs)
+                   ++ " /= validity length " ++ show (V.length validBoxed)
+             else Right $ V.zipWith
+                    (\b v -> if b then Just v else Nothing) validBoxed vs
   case col of
     ColStruct childCols -> do
       let !childCols' = V.map snd childCols

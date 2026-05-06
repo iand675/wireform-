@@ -12,6 +12,9 @@ import qualified Data.ByteString as BS
 import Data.Int (Int32, Int64)
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Storable as VS
+import qualified Data.Vector.Unboxed as VU
+import Columnar.Bit (Bit (..))
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.FilePath ((</>))
@@ -72,7 +75,7 @@ int64Sch = AT.defaultSchema (V.singleton
 
 int64Batches :: [V.Vector AC.ColumnArray]
 int64Batches =
-  [ V.singleton (AC.ColInt64 (VP.fromList [10, 20, 30, 40, 50 :: Int64])) ]
+  [ V.singleton (AC.ColInt64 (VS.fromList [10, 20, 30, 40, 50 :: Int64])) ]
 
 doubleSch :: AT.Schema
 doubleSch = AT.defaultSchema (V.singleton
@@ -80,7 +83,7 @@ doubleSch = AT.defaultSchema (V.singleton
 
 doubleBatches :: [V.Vector AC.ColumnArray]
 doubleBatches =
-  [ V.singleton (AC.ColDouble (VP.fromList [1.5, -2.5, 3.14159 :: Double])) ]
+  [ V.singleton (AC.ColDouble (VS.fromList [1.5, -2.5, 3.14159 :: Double])) ]
 
 stringSch :: AT.Schema
 stringSch = AT.defaultSchema (V.singleton
@@ -96,7 +99,7 @@ boolSch = AT.defaultSchema (V.singleton
 
 boolBatches :: [V.Vector AC.ColumnArray]
 boolBatches =
-  [ V.singleton (AC.ColBool (V.fromList [True, False, True, True, False])) ]
+  [ V.singleton (AC.ColBool (VU.fromList (map Bit [True, False, True, True, False]))) ]
 
 mixedSch :: AT.Schema
 mixedSch = AT.defaultSchema (V.fromList
@@ -108,9 +111,9 @@ mixedSch = AT.defaultSchema (V.fromList
 mixedBatches :: [V.Vector AC.ColumnArray]
 mixedBatches =
   [ V.fromList
-      [ AC.ColInt64 (VP.fromList [10, 20, 30 :: Int64])
+      [ AC.ColInt64 (VS.fromList [10, 20, 30 :: Int64])
       , AC.ColUtf8 (V.fromList ["alice", "bob", "carol"])
-      , AC.ColDouble (VP.fromList [1.5, 2.5, 3.5 :: Double])
+      , AC.ColDouble (VS.fromList [1.5, 2.5, 3.5 :: Double])
       ]
   ]
 
@@ -134,7 +137,7 @@ structSch = AT.defaultSchema $ V.singleton $ AT.Field
 structBatches :: [V.Vector AC.ColumnArray]
 structBatches =
   [ V.singleton (AC.ColStruct (V.fromList
-      [ ("i", AC.ColInt64 (VP.fromList [1, 2, 3 :: Int64]))
+      [ ("i", AC.ColInt64 (VS.fromList [1, 2, 3 :: Int64]))
       , ("n", AC.ColUtf8  (V.fromList ["a", "b", "c"]))
       ]))
   ]
@@ -153,8 +156,8 @@ listSch = AT.defaultSchema $ V.singleton $ AT.Field
 listBatches :: [V.Vector AC.ColumnArray]
 listBatches =
   [ V.singleton (AC.ColList
-      (VP.fromList ([0, 2, 5, 7] :: [Int32]))
-      (AC.ColInt64 (VP.fromList ([10,20,30,40,50,60,70] :: [Int64]))))
+      (VS.fromList ([0, 2, 5, 7] :: [Int32]))
+      (AC.ColInt64 (VS.fromList ([10,20,30,40,50,60,70] :: [Int64]))))
   ]
 
 int32Sch :: AT.Schema
@@ -163,7 +166,7 @@ int32Sch = AT.defaultSchema (V.singleton
 
 int32Batches :: [V.Vector AC.ColumnArray]
 int32Batches =
-  [ V.singleton (AC.ColInt32 (VP.fromList [1, 2, 3, 4, 5 :: Int32])) ]
+  [ V.singleton (AC.ColInt32 (VS.fromList [1, 2, 3, 4, 5 :: Int32])) ]
 
 floatSch :: AT.Schema
 floatSch = AT.defaultSchema (V.singleton
@@ -171,7 +174,7 @@ floatSch = AT.defaultSchema (V.singleton
 
 floatBatches :: [V.Vector AC.ColumnArray]
 floatBatches =
-  [ V.singleton (AC.ColFloat (VP.fromList [1.5, 2.5, 3.5 :: Float])) ]
+  [ V.singleton (AC.ColFloat (VS.fromList [1.5, 2.5, 3.5 :: Float])) ]
 
 tsSch :: AT.Schema
 tsSch = AT.defaultSchema (V.singleton
@@ -180,5 +183,5 @@ tsSch = AT.defaultSchema (V.singleton
 
 tsBatches :: [V.Vector AC.ColumnArray]
 tsBatches =
-  [ V.singleton (AC.ColTimestamp (VP.fromList
+  [ V.singleton (AC.ColTimestamp (VS.fromList
       [0, 1700000000_000_000_000 :: Int64])) ]

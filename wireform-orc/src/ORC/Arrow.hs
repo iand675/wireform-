@@ -55,8 +55,14 @@ import Data.Word (Word8, Word16, Word32, Word64)
 import qualified Arrow.Column as AC
 import qualified Arrow.Types as AT
 
+import Columnar.Bit (Bit (..))
+import qualified Columnar.Bit as Bit
 import qualified Columnar.NullableBuild as NB
 import qualified Columnar.Stream as IS
+import qualified Data.Vector.Storable as VS
+import qualified Data.Vector.Storable.Mutable as MVS
+import qualified Data.Vector.Unboxed as VU
+import Foreign.Storable (Storable)
 
 import qualified ORC.Read   as OR
 import qualified ORC.Statistics as OStats
@@ -335,9 +341,9 @@ columnArrayToORCStreamsNested cid col = case col of
     -- generator stresses it.
     Right (V.concat (V.toList childStreams))
 
-  AC.ColList offsets child -> encodeList cid (VP.toList offsets) child
-  AC.ColLargeList offsets child -> encodeList cid (VP.toList offsets) child
-  AC.ColMap offsets keys values -> encodeMap cid (VP.toList offsets) keys values
+  AC.ColList offsets child -> encodeList cid (VS.toList offsets) child
+  AC.ColLargeList offsets child -> encodeList cid (VS.toList offsets) child
+  AC.ColMap offsets keys values -> encodeMap cid (VS.toList offsets) keys values
   _ -> columnArrayToORCStreams cid col
   where
     -- Given a starting cid and a vector of child columns, pair
@@ -358,7 +364,7 @@ columnArrayToORCStreamsNested cid col = case col of
     -- the parent (per-row child counts) + recursive child
     -- streams.
     encodeList
-      :: (Integral a, VP.Prim a)
+      :: Integral a
       => Word64 -> [a] -> AC.ColumnArray
       -> Either String (V.Vector (Word64, Word64, ByteString))
     encodeList parentCid offs child = do
@@ -369,7 +375,7 @@ columnArrayToORCStreamsNested cid col = case col of
       Right (lenStream <> childStreams)
 
     encodeMap
-      :: (Integral a, VP.Prim a)
+      :: Integral a
       => Word64 -> [a] -> AC.ColumnArray -> AC.ColumnArray
       -> Either String (V.Vector (Word64, Word64, ByteString))
     encodeMap parentCid offs keys values = do
@@ -414,12 +420,12 @@ columnArrayToORCStreams !cid = go
       AC.ColInt16 v -> Right (intStreams Nothing cid (signedI16 v))
       AC.ColInt32 v -> Right (intStreams Nothing cid (signedI32 v))
       AC.ColInt64 v -> Right (intStreams Nothing cid v)
-      AC.ColUInt8  v -> Right (intStreams Nothing cid (VP.map fromIntegral v))
-      AC.ColUInt16 v -> Right (intStreams Nothing cid (VP.map fromIntegral v))
-      AC.ColUInt32 v -> Right (intStreams Nothing cid (VP.map fromIntegral v))
-      AC.ColUInt64 v -> Right (intStreams Nothing cid (VP.map fromIntegral v))
+      AC.ColUInt8  v -> Right (intStreams Nothing cid (VS.map fromIntegral v))
+      AC.ColUInt16 v -> Right (intStreams Nothing cid (VS.map fromIntegral v))
+      AC.ColUInt32 v -> Right (intStreams Nothing cid (VS.map fromIntegral v))
+      AC.ColUInt64 v -> Right (intStreams Nothing cid (VS.map fromIntegral v))
 
-      AC.ColBool   v -> Right (boolStreams Nothing cid v)
+      AC.ColBool   v -> Right (boolStreams Nothing cid (bitVecToBoolVec v))
       AC.ColFloat  v -> Right (floatStreams Nothing cid v)
       AC.ColDouble v -> Right (doubleStreams Nothing cid v)
 
@@ -452,10 +458,10 @@ columnArrayToORCStreams !cid = go
         let (pres, present) = presentBits v
         in Right (boolStreams (Just pres) cid present)
       AC.ColFloatMaybe  v ->
-        let (pres, present) = presentFloat v
+        let (pres, present) = presentNVPrim v
         in Right (floatStreams (Just pres) cid present)
       AC.ColDoubleMaybe v ->
-        let (pres, present) = presentDouble v
+        let (pres, present) = presentNVPrim v
         in Right (doubleStreams (Just pres) cid present)
 
       AC.ColUtf8Maybe   v ->
@@ -488,74 +494,67 @@ columnArrayToORCStreams !cid = go
                        ++ "(nested types, dictionary, view, REE)"
 
     -- Build PRESENT stream + present-only Int64 payload for a
-    -- nullable integer column. We materialise the entire payload
-    -- at the requested signed width.
+    -- nullable integer column. New shape: NullableView with a
+    -- packed validity bitmap + dense storable values buffer.
     intMaybe
-      :: V.Vector (Maybe a)
-      -> Word64
-      -> (a -> Int64)
+      :: Storable a
+      => AC.NullableView a -> Word64 -> (a -> Int64)
       -> V.Vector (Word64, Word64, ByteString)
-    intMaybe vmb c cast =
-      let !pres = OW.encodeBooleanRLE (V.map maybeToBool vmb)
-          !xs   = NB.presentValuesPMap cast vmb
+    intMaybe nv c cast =
+      let !pres = nvValidityToBytes nv
+          !xs   = nvPresentVS cast nv
       in  intStreams (Just pres) c xs
 
-    maybeToBool :: Maybe a -> Bool
-    maybeToBool (Just _) = True
-    maybeToBool Nothing  = False
-
+    -- Boolean nullable still uses V.Vector (Maybe Bool); the
+    -- views migration's NullableView Bool variant is deferred.
     presentBits v =
       let !pres = OW.encodeBooleanRLE (V.map maybeToBool v)
           !vs   = NB.presentValuesV v
       in (pres, vs)
-    presentFloat v =
-      let !pres = OW.encodeBooleanRLE (V.map maybeToBool v)
-          !vs   = NB.presentValuesP v
-      in (pres, vs)
-    presentDouble v =
-      let !pres = OW.encodeBooleanRLE (V.map maybeToBool v)
-          !vs   = NB.presentValuesP v
-      in (pres, vs)
+
+    -- Float / Double nullable now hold a 'NullableView a'.
+    presentNVPrim :: Storable a => AC.NullableView a -> (ByteString, VS.Vector a)
+    presentNVPrim nv = (nvValidityToBytes nv, nvPresentVS id nv)
+
+    -- ColBinaryMaybe still uses V.Vector (Maybe ByteString); the
+    -- BinaryView piece of the views migration is deferred.
     presentBytes v =
       let !pres = OW.encodeBooleanRLE (V.map maybeToBool v)
           !vs   = NB.presentValuesV v
       in (pres, vs)
 
+    maybeToBool :: Maybe a -> Bool
+    maybeToBool (Just _) = True
+    maybeToBool Nothing  = False
+
     -- ORC's RLE-v2 integer encoders take (Int64 vector, signed?).
-    -- Each emitter optionally prepends a PRESENT stream.
+    -- Each emitter optionally prepends a PRESENT stream. We
+    -- accept VS.Vector and convert to VP at the boundary
+    -- (ORC's internal API still uses VP).
     intStreams mPres !c xs =
       presentPrefix mPres c <>
-        V.singleton (streamData, c, OW.encodeIntColumn xs True)
+        V.singleton (streamData, c, OW.encodeIntColumn (VS.convert xs) True)
 
-    -- ORC timestamps need both a DATA stream (signed seconds
-    -- with the SPEC-defined epoch of 2015-01-01 GMT, NOT
-    -- 1970-01-01 — the famous ORC epoch gotcha) and a
-    -- SECONDARY stream (nanoseconds with the 3-bit
-    -- trailing-zero encoding ORC defines). The Arrow
-    -- 'ColTimestamp' payload is whole nanoseconds since
-    -- 1970-01-01; convert to ORC's epoch by subtracting
-    -- 'orcEpochSecondsFromUnix' from the seconds part. Negative
-    -- timestamps are fine since the seconds field is signed.
-    timestampStreams mPres !c (nsVec :: VP.Vector Int64) =
-      let !secsUnix = VP.map (\ns -> ns `quot` 1_000_000_000) nsVec
-          !secs     = VP.map (\s -> s - orcEpochSecondsFromUnix) secsUnix
-          !nanos    = VP.map (\ns -> ns `rem`  1_000_000_000) nsVec
-          !(secBs, nanoBs) = OW.encodeTimestampColumn secs nanos
+    timestampStreams mPres !c (nsVec :: VS.Vector Int64) =
+      let !secsUnix = VS.map (\ns -> ns `quot` 1_000_000_000) nsVec
+          !secs     = VS.map (\s -> s - orcEpochSecondsFromUnix) secsUnix
+          !nanos    = VS.map (\ns -> ns `rem`  1_000_000_000) nsVec
+          !(secBs, nanoBs) = OW.encodeTimestampColumn (VS.convert secs)
+                                                     (VS.convert nanos)
       in  presentPrefix mPres c <>
             V.fromList
               [ (streamData,      c, secBs)
               , (streamSecondary, c, nanoBs)
               ]
 
-    -- Nullable timestamp: PRESENT mask + per-present timestamp
-    -- pair (DATA + SECONDARY).
-    timestampMaybe v !c =
-      let (!pres, !justs) = presentBytes v
-          !nsVec    = VP.fromList (V.toList justs)
-          !secsUnix = VP.map (\ns -> ns `quot` 1_000_000_000) nsVec
-          !secs     = VP.map (\s -> s - orcEpochSecondsFromUnix) secsUnix
-          !nanos    = VP.map (\ns -> ns `rem`  1_000_000_000) nsVec
-          !(secBs, nanoBs) = OW.encodeTimestampColumn secs nanos
+    timestampMaybe nv !c =
+      let !pres   = nvValidityToBytes nv
+          !nsVec  = nvPresentVS id nv
+          !secsUnix = VS.map (\ns -> ns `quot` 1_000_000_000) nsVec
+          !secs     = VS.map (\s -> s - orcEpochSecondsFromUnix) secsUnix
+          !nanos    = VS.map (\ns -> ns `rem`  1_000_000_000) nsVec
+          !(secBs, nanoBs) = OW.encodeTimestampColumn (VS.convert secs)
+                                                     (VS.convert nanos)
       in  V.fromList
             [ (streamPresent,   c, pres)
             , (streamData,      c, secBs)
@@ -566,10 +565,10 @@ columnArrayToORCStreams !cid = go
         V.singleton (streamData, c, OW.encodeBooleanRLE xs)
     floatStreams mPres !c xs =
       presentPrefix mPres c <>
-        V.singleton (streamData, c, OW.encodeFloatColumn xs)
+        V.singleton (streamData, c, OW.encodeFloatColumn (VS.convert xs))
     doubleStreams mPres !c xs =
       presentPrefix mPres c <>
-        V.singleton (streamData, c, OW.encodeDoubleColumn xs)
+        V.singleton (streamData, c, OW.encodeDoubleColumn (VS.convert xs))
     stringStreams mPres !c bytesVec =
       let !(dataBs, lengthBs) = OW.encodeStringDirectColumn (V.map decodeBytesAsText bytesVec)
       in presentPrefix mPres c <>
@@ -591,18 +590,60 @@ columnArrayToORCStreams !cid = go
       Left  _ -> T.pack (map (toEnum . fromIntegral) (BS.unpack bs))
 
 -- Type-directed signed-cast helpers (for signed Arrow integers).
-signedI8 :: VP.Vector Int8 -> VP.Vector Int64
-signedI8 = VP.map fromIntegral
-signedI16 :: VP.Vector Int16 -> VP.Vector Int64
-signedI16 = VP.map fromIntegral
-signedI32 :: VP.Vector Int32 -> VP.Vector Int64
-signedI32 = VP.map fromIntegral
+signedI8 :: VS.Vector Int8 -> VS.Vector Int64
+signedI8 = VS.map fromIntegral
+signedI16 :: VS.Vector Int16 -> VS.Vector Int64
+signedI16 = VS.map fromIntegral
+signedI32 :: VS.Vector Int32 -> VS.Vector Int64
+signedI32 = VS.map fromIntegral
 signedI8' :: Int8 -> Int64
 signedI8' = fromIntegral
 signedI16' :: Int16 -> Int64
 signedI16' = fromIntegral
 signedI32' :: Int32 -> Int64
 signedI32' = fromIntegral
+
+{-# INLINE bitVecToBoolVec #-}
+bitVecToBoolVec :: VU.Vector Bit -> V.Vector Bool
+bitVecToBoolVec v = V.generate (VU.length v) (\i -> unBit (VU.unsafeIndex v i))
+
+-- | Encode a 'NullableView'-style validity bitmap as the
+-- Boolean RLE-encoded PRESENT stream that ORC expects.
+{-# INLINE nvValidityToBytes #-}
+nvValidityToBytes :: Storable a => AC.NullableView a -> ByteString
+nvValidityToBytes nv =
+  let !validity = AC.nvValidity nv
+      !n        = AC.nvLength nv
+      !boxedBs  = if VU.null validity
+                    then V.replicate n True
+                    else V.generate n (\i -> unBit (VU.unsafeIndex validity i))
+  in OW.encodeBooleanRLE boxedBs
+
+-- | Project the present-only values of a 'NullableView' into a
+-- dense 'VS.Vector' with optional element transformation.
+{-# INLINE nvPresentVS #-}
+nvPresentVS
+  :: (Storable a, Storable b)
+  => (a -> b) -> AC.NullableView a -> VS.Vector b
+nvPresentVS f nv =
+  let !values   = AC.nvValues nv
+      !validity = AC.nvValidity nv
+      !n        = VS.length values
+      collect !i !w buf =
+        if i >= n
+          then VS.unsafeFreeze (MVS.unsafeSlice 0 w buf)
+          else
+            let !present = VU.null validity
+                          || unBit (VU.unsafeIndex validity i)
+            in if present
+                 then do
+                   MVS.unsafeWrite buf w (f (VS.unsafeIndex values i))
+                   collect (i + 1) (w + 1) buf
+                 else collect (i + 1) w buf
+  in VS.create $ do
+       buf <- MVS.unsafeNew n
+       _ <- collect 0 0 buf
+       pure buf
 
 -- ============================================================
 -- ORC → Arrow
@@ -676,7 +717,7 @@ decodeColumnNested cid fld numRows stripeBs streams =
 -- The parent's LENGTH stream gives per-row child counts;
 -- we materialise the full child column then build offsets.
 decodeListLike
-  :: (VP.Vector Int32 -> AC.ColumnArray -> AC.ColumnArray)
+  :: (VS.Vector Int32 -> AC.ColumnArray -> AC.ColumnArray)
   -> Word64 -> AT.Field -> Int -> ByteString -> V.Vector OSt.Stream
   -> Either String AC.ColumnArray
 decodeListLike wrap cid fld numRows stripeBs streams = do
@@ -685,7 +726,7 @@ decodeListLike wrap cid fld numRows stripeBs streams = do
       lengths <- readLengthStream cid numRows stripeBs streams
       let !childCount = sum (map fromIntegral lengths) :: Int
       childCol <- decodeColumnNested (cid + 1) childFld childCount stripeBs streams
-      let !offsets = VP.fromList (scanl (\a n -> a + fromIntegral n) (0 :: Int32) lengths)
+      let !offsets = VS.fromList (scanl (\a n -> a + fromIntegral n) (0 :: Int32) lengths)
       Right (wrap offsets childCol)
     _ -> Left "ORC.Arrow: AList must have exactly one child"
 
@@ -698,7 +739,7 @@ decodeListLikeLarge cid fld numRows stripeBs streams = do
       lengths <- readLengthStream cid numRows stripeBs streams
       let !childCount = sum (map fromIntegral lengths) :: Int
       childCol <- decodeColumnNested (cid + 1) childFld childCount stripeBs streams
-      let !offsets = VP.fromList (scanl (\a n -> a + fromIntegral n) (0 :: Int64) lengths)
+      let !offsets = VS.fromList (scanl (\a n -> a + fromIntegral n) (0 :: Int64) lengths)
       Right (AC.ColLargeList offsets childCol)
     _ -> Left "ORC.Arrow: ALargeList must have exactly one child"
 
@@ -722,7 +763,7 @@ decodeMap cid fld numRows stripeBs streams = do
   keys <- decodeColumnNested kCid kf childCount stripeBs streams
   let !vCid = kCid + fieldSpan kf
   vals <- decodeColumnNested vCid vf childCount stripeBs streams
-  let !offsets = VP.fromList (scanl (\a n -> a + fromIntegral n) (0 :: Int32) lengths)
+  let !offsets = VS.fromList (scanl (\a n -> a + fromIntegral n) (0 :: Int32) lengths)
   Right (AC.ColMap offsets keys vals)
 
 -- | Load a LENGTH stream for @cid@ and decode @n@ per-row
@@ -819,19 +860,21 @@ decodeOneColumn cid fld numRows stripeBs streams = do
       xs <- OR.decodeBoolColumn numRows dataBs mPresentBs
       if AT.fieldNullable fld
         then Right (AC.ColBoolMaybe xs)
-        else Right (AC.ColBool (V.map (maybe False id) xs))
+        else Right (AC.ColBool
+               (VU.generate (V.length xs)
+                  (\i -> Bit (maybe False id (V.unsafeIndex xs i)))))
     AT.AFloatingPoint AT.Single -> do
       dataBs <- sliceFor streamData
       xs <- OR.decodeFloatColumn numRows dataBs mPresentBs
       if AT.fieldNullable fld
-        then Right (AC.ColFloatMaybe xs)
-        else Right (AC.ColFloat (VP.fromList (map (maybe 0 id) (V.toList xs))))
+        then Right (AC.ColFloatMaybe (AC.nvFromMaybeVector 0 xs))
+        else Right (AC.ColFloat (VS.fromList (map (maybe 0 id) (V.toList xs))))
     AT.AFloatingPoint AT.DoublePrecision -> do
       dataBs <- sliceFor streamData
       xs <- OR.decodeDoubleColumn numRows dataBs mPresentBs
       if AT.fieldNullable fld
-        then Right (AC.ColDoubleMaybe xs)
-        else Right (AC.ColDouble (VP.fromList (map (maybe 0 id) (V.toList xs))))
+        then Right (AC.ColDoubleMaybe (AC.nvFromMaybeVector 0 xs))
+        else Right (AC.ColDouble (VS.fromList (map (maybe 0 id) (V.toList xs))))
     AT.AUtf8        -> stringColumn mPresentBs AT.AUtf8
     AT.ALargeUtf8   -> stringColumn mPresentBs AT.ALargeUtf8
     AT.ABinary      -> stringColumn mPresentBs AT.ABinary
@@ -916,22 +959,22 @@ intToArrow
   :: AT.ArrowType -> Bool -> V.Vector (Maybe Int64)
   -> Either String AC.ColumnArray
 intToArrow ty nullable xs = case (ty, nullable) of
-  (AT.AInt 8  True,  False) -> Right $! AC.ColInt8   (NB.presentValuesPMap narrow8  xs)
-  (AT.AInt 16 True,  False) -> Right $! AC.ColInt16  (NB.presentValuesPMap narrow16 xs)
-  (AT.AInt 32 True,  False) -> Right $! AC.ColInt32  (NB.presentValuesPMap narrow32 xs)
-  (AT.AInt 64 True,  False) -> Right $! AC.ColInt64  (NB.presentValuesP xs)
-  (AT.AInt 8  False, False) -> Right $! AC.ColUInt8  (NB.presentValuesPMap (fromIntegral :: Int64 -> Word8)  xs)
-  (AT.AInt 16 False, False) -> Right $! AC.ColUInt16 (NB.presentValuesPMap (fromIntegral :: Int64 -> Word16) xs)
-  (AT.AInt 32 False, False) -> Right $! AC.ColUInt32 (NB.presentValuesPMap (fromIntegral :: Int64 -> Word32) xs)
-  (AT.AInt 64 False, False) -> Right $! AC.ColUInt64 (NB.presentValuesPMap (fromIntegral :: Int64 -> Word64) xs)
-  (AT.AInt 8  True,  True)  -> Right $! AC.ColInt8Maybe   (V.map (fmap narrow8)  xs)
-  (AT.AInt 16 True,  True)  -> Right $! AC.ColInt16Maybe  (V.map (fmap narrow16) xs)
-  (AT.AInt 32 True,  True)  -> Right $! AC.ColInt32Maybe  (V.map (fmap narrow32) xs)
-  (AT.AInt 64 True,  True)  -> Right $! AC.ColInt64Maybe  xs
-  (AT.AInt 8  False, True)  -> Right $! AC.ColUInt8Maybe  (V.map (fmap fromIntegral) xs)
-  (AT.AInt 16 False, True)  -> Right $! AC.ColUInt16Maybe (V.map (fmap fromIntegral) xs)
-  (AT.AInt 32 False, True)  -> Right $! AC.ColUInt32Maybe (V.map (fmap fromIntegral) xs)
-  (AT.AInt 64 False, True)  -> Right $! AC.ColUInt64Maybe (V.map (fmap fromIntegral) xs)
+  (AT.AInt 8  True,  False) -> Right $! AC.ColInt8   (presentVS narrow8  xs)
+  (AT.AInt 16 True,  False) -> Right $! AC.ColInt16  (presentVS narrow16 xs)
+  (AT.AInt 32 True,  False) -> Right $! AC.ColInt32  (presentVS narrow32 xs)
+  (AT.AInt 64 True,  False) -> Right $! AC.ColInt64  (presentVS id xs)
+  (AT.AInt 8  False, False) -> Right $! AC.ColUInt8  (presentVS (fromIntegral :: Int64 -> Word8)  xs)
+  (AT.AInt 16 False, False) -> Right $! AC.ColUInt16 (presentVS (fromIntegral :: Int64 -> Word16) xs)
+  (AT.AInt 32 False, False) -> Right $! AC.ColUInt32 (presentVS (fromIntegral :: Int64 -> Word32) xs)
+  (AT.AInt 64 False, False) -> Right $! AC.ColUInt64 (presentVS (fromIntegral :: Int64 -> Word64) xs)
+  (AT.AInt 8  True,  True)  -> Right $! AC.ColInt8Maybe   (AC.nvFromMaybeVector 0 (V.map (fmap narrow8)  xs))
+  (AT.AInt 16 True,  True)  -> Right $! AC.ColInt16Maybe  (AC.nvFromMaybeVector 0 (V.map (fmap narrow16) xs))
+  (AT.AInt 32 True,  True)  -> Right $! AC.ColInt32Maybe  (AC.nvFromMaybeVector 0 (V.map (fmap narrow32) xs))
+  (AT.AInt 64 True,  True)  -> Right $! AC.ColInt64Maybe  (AC.nvFromMaybeVector 0 xs)
+  (AT.AInt 8  False, True)  -> Right $! AC.ColUInt8Maybe  (AC.nvFromMaybeVector 0 (V.map (fmap fromIntegral) xs))
+  (AT.AInt 16 False, True)  -> Right $! AC.ColUInt16Maybe (AC.nvFromMaybeVector 0 (V.map (fmap fromIntegral) xs))
+  (AT.AInt 32 False, True)  -> Right $! AC.ColUInt32Maybe (AC.nvFromMaybeVector 0 (V.map (fmap fromIntegral) xs))
+  (AT.AInt 64 False, True)  -> Right $! AC.ColUInt64Maybe (AC.nvFromMaybeVector 0 (V.map (fmap fromIntegral) xs))
   _ -> Left $ "ORC.Arrow: unexpected type/null combo " ++ show (ty, nullable)
   where
     narrow8 :: Int64 -> Int8
@@ -940,6 +983,24 @@ intToArrow ty nullable xs = case (ty, nullable) of
     narrow16 = fromIntegral
     narrow32 :: Int64 -> Int32
     narrow32 = fromIntegral
+
+-- | Drop nulls from @V.Vector (Maybe a)@ into a dense
+-- 'VS.Vector' of present values.
+{-# INLINE presentVS #-}
+presentVS :: Storable b => (a -> b) -> V.Vector (Maybe a) -> VS.Vector b
+presentVS f v =
+  let !n = V.length v
+  in VS.create $ do
+       buf <- MVS.unsafeNew n
+       let go !i !w
+             | i >= n = pure (MVS.unsafeSlice 0 w buf)
+             | otherwise = case V.unsafeIndex v i of
+                 Nothing -> go (i + 1) w
+                 Just x  -> do
+                   MVS.unsafeWrite buf w (f x)
+                   go (i + 1) (w + 1)
+       _ <- go 0 0
+       pure buf
 
 
 -- | Lift a decoded ORC integer stream into one of Arrow's temporal
@@ -950,30 +1011,30 @@ temporalToArrow
   -> Either String AC.ColumnArray
 temporalToArrow ty nullable xs = case (ty, nullable) of
   (AT.ADate AT.DateDay, False) ->
-    Right $! AC.ColDate32 (NB.presentValuesPMap narrow32 xs)
+    Right $! AC.ColDate32 (presentVS narrow32 xs)
   (AT.ADate AT.DateMillisecond, False) ->
-    Right $! AC.ColDate64 (NB.presentValuesP xs)
+    Right $! AC.ColDate64 (presentVS id xs)
   (AT.ATime _ 32, False) ->
-    Right $! AC.ColTime32 (NB.presentValuesPMap narrow32 xs)
+    Right $! AC.ColTime32 (presentVS narrow32 xs)
   (AT.ATime _ 64, False) ->
-    Right $! AC.ColTime64 (NB.presentValuesP xs)
+    Right $! AC.ColTime64 (presentVS id xs)
   (AT.ATimestamp _ _, False) ->
-    Right $! AC.ColTimestamp (NB.presentValuesP xs)
+    Right $! AC.ColTimestamp (presentVS id xs)
   (AT.ADuration _, False) ->
-    Right $! AC.ColDuration (NB.presentValuesP xs)
+    Right $! AC.ColDuration (presentVS id xs)
 
   (AT.ADate AT.DateDay, True) ->
-    Right $! AC.ColDate32Maybe (V.map (fmap narrow32) xs)
+    Right $! AC.ColDate32Maybe (AC.nvFromMaybeVector 0 (V.map (fmap narrow32) xs))
   (AT.ADate AT.DateMillisecond, True) ->
-    Right $! AC.ColDate64Maybe xs
+    Right $! AC.ColDate64Maybe (AC.nvFromMaybeVector 0 xs)
   (AT.ATime _ 32, True) ->
-    Right $! AC.ColTime32Maybe (V.map (fmap narrow32) xs)
+    Right $! AC.ColTime32Maybe (AC.nvFromMaybeVector 0 (V.map (fmap narrow32) xs))
   (AT.ATime _ 64, True) ->
-    Right $! AC.ColTime64Maybe xs
+    Right $! AC.ColTime64Maybe (AC.nvFromMaybeVector 0 xs)
   (AT.ATimestamp _ _, True) ->
-    Right $! AC.ColTimestampMaybe xs
+    Right $! AC.ColTimestampMaybe (AC.nvFromMaybeVector 0 xs)
   (AT.ADuration _, True) ->
-    Right $! AC.ColDurationMaybe xs
+    Right $! AC.ColDurationMaybe (AC.nvFromMaybeVector 0 xs)
 
   _ -> Left $ "ORC.Arrow.temporalToArrow: unexpected type/null combo "
                 ++ show (ty, nullable)

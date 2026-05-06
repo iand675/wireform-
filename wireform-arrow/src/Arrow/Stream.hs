@@ -66,6 +66,7 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Storable as VS
 
 import qualified Columnar.Stream as IS
 
@@ -413,16 +414,16 @@ decodeInterleavedFrames sch = go Map.empty []
       (ColUtf8Maybe n, ColUtf8Maybe o)     -> ColUtf8Maybe (o V.++ n)
       (ColBinaryMaybe n, ColBinaryMaybe o) -> ColBinaryMaybe (o V.++ n)
       -- Primitive numeric vectors concatenate trivially.
-      (ColInt32 n, ColInt32 o)             -> ColInt32 (o VP.++ n)
-      (ColInt64 n, ColInt64 o)             -> ColInt64 (o VP.++ n)
-      (ColUInt32 n, ColUInt32 o)           -> ColUInt32 (o VP.++ n)
-      (ColUInt64 n, ColUInt64 o)           -> ColUInt64 (o VP.++ n)
-      (ColFloat n, ColFloat o)             -> ColFloat (o VP.++ n)
-      (ColDouble n, ColDouble o)           -> ColDouble (o VP.++ n)
-      (ColInt8 n, ColInt8 o)               -> ColInt8 (o VP.++ n)
-      (ColInt16 n, ColInt16 o)             -> ColInt16 (o VP.++ n)
-      (ColUInt8 n, ColUInt8 o)             -> ColUInt8 (o VP.++ n)
-      (ColUInt16 n, ColUInt16 o)           -> ColUInt16 (o VP.++ n)
+      (ColInt32 n, ColInt32 o)             -> ColInt32 (o VS.++ n)
+      (ColInt64 n, ColInt64 o)             -> ColInt64 (o VS.++ n)
+      (ColUInt32 n, ColUInt32 o)           -> ColUInt32 (o VS.++ n)
+      (ColUInt64 n, ColUInt64 o)           -> ColUInt64 (o VS.++ n)
+      (ColFloat n, ColFloat o)             -> ColFloat (o VS.++ n)
+      (ColDouble n, ColDouble o)           -> ColDouble (o VS.++ n)
+      (ColInt8 n, ColInt8 o)               -> ColInt8 (o VS.++ n)
+      (ColInt16 n, ColInt16 o)             -> ColInt16 (o VS.++ n)
+      (ColUInt8 n, ColUInt8 o)             -> ColUInt8 (o VS.++ n)
+      (ColUInt16 n, ColUInt16 o)           -> ColUInt16 (o VS.++ n)
       -- Fixed-size binary concatenates if widths match.
       (ColFixedSizeBinary wN n, ColFixedSizeBinary wO o)
         | wN == wO -> ColFixedSizeBinary wN (o V.++ n)

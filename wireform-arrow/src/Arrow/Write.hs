@@ -34,7 +34,7 @@ import qualified Data.Text.Array as TA
 import qualified Data.Text.Internal as TI
 import qualified Foreign.Ptr
 import Foreign.Ptr (Ptr)
-import Foreign.Storable (pokeByteOff)
+import Foreign.Storable (Storable, pokeByteOff)
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
 import System.IO.Unsafe (unsafePerformIO)
 import Data.Int (Int8, Int16, Int32, Int64)
@@ -45,10 +45,15 @@ import qualified Data.Text.Encoding as TE
 import Data.Word (Word8, Word16, Word32, Word64)
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Storable as VS
+import qualified Data.Vector.Unboxed as VU
+import Columnar.Bit (Bit (..))
+import qualified Columnar.Bit as Bit
 
 import Arrow.Types
 import Arrow.IPC (encodeIPCMessage)
 import Arrow.Column (ColumnArray (..), columnLength)
+import qualified Arrow.Column as AC
 
 -- * Plain column encoders
 --
@@ -71,32 +76,32 @@ import Arrow.Column (ColumnArray (..), columnLength)
 -- | Encode a primitive vector as a contiguous LE byte buffer.
 {-# INLINE pokePrimVecLE #-}
 pokePrimVecLE
-  :: forall a. VP.Prim a
+  :: forall a. Storable a
   => Int                                 -- ^ element size in bytes
   -> (Ptr Word8 -> Int -> a -> IO ())    -- ^ poker (base, byte off, value)
-  -> VP.Vector a
+  -> VS.Vector a
   -> ByteString
 pokePrimVecLE !elemBytes poker vec =
-  let !n = VP.length vec
+  let !n = VS.length vec
   in BSI.unsafeCreate (n * elemBytes) $ \ptr -> do
        let go !i !off
              | i >= n    = pure ()
              | otherwise = do
-                 poker ptr off (VP.unsafeIndex vec i)
+                 poker ptr off (VS.unsafeIndex vec i)
                  go (i + 1) (off + elemBytes)
        go 0 0
 
-encodePlainInt32Column :: VP.Vector Int32 -> ByteString
+encodePlainInt32Column :: VS.Vector Int32 -> ByteString
 encodePlainInt32Column = pokePrimVecLE 4 (\p o v -> pokeByteOff p o v)
 
-encodePlainInt64Column :: VP.Vector Int64 -> ByteString
+encodePlainInt64Column :: VS.Vector Int64 -> ByteString
 encodePlainInt64Column = pokePrimVecLE 8 (\p o v -> pokeByteOff p o v)
 
-encodePlainFloat :: VP.Vector Float -> ByteString
+encodePlainFloat :: VS.Vector Float -> ByteString
 encodePlainFloat = pokePrimVecLE 4
   (\p o v -> pokeByteOff p o (castFloatToWord32 v))
 
-encodePlainDouble :: VP.Vector Double -> ByteString
+encodePlainDouble :: VS.Vector Double -> ByteString
 encodePlainDouble = pokePrimVecLE 8
   (\p o v -> pokeByteOff p o (castDoubleToWord64 v))
 
@@ -168,8 +173,13 @@ encodePlainUtf8 vec =
         go 0 0
   in (offsetsBs, dataBs)
 
-encodeNullBitmap :: V.Vector Bool -> ByteString
-encodeNullBitmap = encodePlainBool
+-- | Pack a packed validity bitmap to its on-the-wire bytes.
+-- Identity-ish (the 'VU.Vector Bit' is already byte-packed
+-- internally) — emits the literal storage when the slice is
+-- byte-aligned and rebuilds it via Bit.toByteString
+-- otherwise.
+encodeNullBitmap :: VU.Vector Bit -> ByteString
+encodeNullBitmap = Bit.toByteString
 
 -- * Internal column encoders
 
@@ -204,39 +214,39 @@ encodePlainBinaryInternal !n encVec =
         go 0 0
   in (offsetsBs, dataBs)
 
-encodeInt8s :: VP.Vector Int8 -> ByteString
+encodeInt8s :: VS.Vector Int8 -> ByteString
 encodeInt8s = pokePrimVecLE 1 (\p o v -> pokeByteOff p o v)
 
-encodeInt16s :: VP.Vector Int16 -> ByteString
+encodeInt16s :: VS.Vector Int16 -> ByteString
 encodeInt16s = pokePrimVecLE 2 (\p o v -> pokeByteOff p o v)
 
 -- Unsigned integer encoders.
-encodeUInt8s :: VP.Vector Word8 -> ByteString
+encodeUInt8s :: VS.Vector Word8 -> ByteString
 encodeUInt8s = pokePrimVecLE 1 (\p o v -> pokeByteOff p o v)
 
-encodeUInt16s :: VP.Vector Word16 -> ByteString
+encodeUInt16s :: VS.Vector Word16 -> ByteString
 encodeUInt16s = pokePrimVecLE 2 (\p o v -> pokeByteOff p o v)
 
-encodeUInt32s :: VP.Vector Word32 -> ByteString
+encodeUInt32s :: VS.Vector Word32 -> ByteString
 encodeUInt32s = pokePrimVecLE 4 (\p o v -> pokeByteOff p o v)
 
-encodeUInt64s :: VP.Vector Word64 -> ByteString
+encodeUInt64s :: VS.Vector Word64 -> ByteString
 encodeUInt64s = pokePrimVecLE 8 (\p o v -> pokeByteOff p o v)
 
 -- Half-precision floats are just raw 16-bit words.
-encodeFloat16s :: VP.Vector Word16 -> ByteString
+encodeFloat16s :: VS.Vector Word16 -> ByteString
 encodeFloat16s = encodeUInt16s
 
 -- Int64 encoder for LargeList / LargeBinary / LargeUtf8 offsets.
-encodePlainInt64Offsets :: VP.Vector Int64 -> ByteString
+encodePlainInt64Offsets :: VS.Vector Int64 -> ByteString
 encodePlainInt64Offsets = pokePrimVecLE 8 (\p o v -> pokeByteOff p o v)
 
 -- Int32 array encoder that accepts the same shape as 'encodeInt16s'.
 -- (Left as an alias for discoverability from the encodeCol site.)
-encodeInt32s :: VP.Vector Int32 -> ByteString
+encodeInt32s :: VS.Vector Int32 -> ByteString
 encodeInt32s = encodePlainInt32Column
 
-encodeInt64s :: VP.Vector Int64 -> ByteString
+encodeInt64s :: VS.Vector Int64 -> ByteString
 encodeInt64s = encodePlainInt64Column
 
 -- Large variable-length (Int64 offsets) encoders. Two-pass:
@@ -321,34 +331,34 @@ encodePlainFixedSizeBinary !w vec
            in go 0 0
 
 -- Interval encoders (YearMonth / DayTime / MonthDayNano).
-encodeIntervalYearMonth :: VP.Vector Int32 -> ByteString
+encodeIntervalYearMonth :: VS.Vector Int32 -> ByteString
 encodeIntervalYearMonth = encodePlainInt32Column
 
-encodeIntervalDayTime :: VP.Vector Int32 -> VP.Vector Int32 -> ByteString
+encodeIntervalDayTime :: VS.Vector Int32 -> VS.Vector Int32 -> ByteString
 encodeIntervalDayTime days millis =
-  let !n = min (VP.length days) (VP.length millis)
+  let !n = min (VS.length days) (VS.length millis)
       !sz = n * 8
   in BSI.unsafeCreate sz $ \p ->
        let go !i !off
              | i >= n = pure ()
              | otherwise = do
-                 pokeByteOff p off       (VP.unsafeIndex days i  :: Int32)
-                 pokeByteOff p (off + 4) (VP.unsafeIndex millis i :: Int32)
+                 pokeByteOff p off       (VS.unsafeIndex days i  :: Int32)
+                 pokeByteOff p (off + 4) (VS.unsafeIndex millis i :: Int32)
                  go (i + 1) (off + 8)
        in go 0 0
 
 encodeIntervalMonthDayNano
-  :: VP.Vector Int32 -> VP.Vector Int32 -> VP.Vector Int64 -> ByteString
+  :: VS.Vector Int32 -> VS.Vector Int32 -> VS.Vector Int64 -> ByteString
 encodeIntervalMonthDayNano months days nanos =
-  let !n = min (VP.length months) (min (VP.length days) (VP.length nanos))
+  let !n = min (VS.length months) (min (VS.length days) (VS.length nanos))
       !sz = n * 16
   in BSI.unsafeCreate sz $ \p ->
        let go !i !off
              | i >= n = pure ()
              | otherwise = do
-                 pokeByteOff p off       (VP.unsafeIndex months i :: Int32)
-                 pokeByteOff p (off + 4) (VP.unsafeIndex days i   :: Int32)
-                 pokeByteOff p (off + 8) (VP.unsafeIndex nanos i  :: Int64)
+                 pokeByteOff p off       (VS.unsafeIndex months i :: Int32)
+                 pokeByteOff p (off + 4) (VS.unsafeIndex days i   :: Int32)
+                 pokeByteOff p (off + 8) (VS.unsafeIndex nanos i  :: Int64)
                  go (i + 1) (off + 16)
        in go 0 0
 
@@ -470,36 +480,36 @@ encodeCol f col acc = case col of
   -- ============================================================
   -- Non-null primitives
   -- ============================================================
-  ColInt8  v -> primFlat (encodeInt8s  v) (VP.length v) acc
-  ColInt16 v -> primFlat (encodeInt16s v) (VP.length v) acc
-  ColInt32 v -> primFlat (encodeInt32s v) (VP.length v) acc
-  ColInt64 v -> primFlat (encodeInt64s v) (VP.length v) acc
-  ColUInt8  v -> primFlat (encodeUInt8s  v) (VP.length v) acc
-  ColUInt16 v -> primFlat (encodeUInt16s v) (VP.length v) acc
-  ColUInt32 v -> primFlat (encodeUInt32s v) (VP.length v) acc
-  ColUInt64 v -> primFlat (encodeUInt64s v) (VP.length v) acc
-  ColFloat16 v -> primFlat (encodeFloat16s v) (VP.length v) acc
-  ColFloat   v -> primFlat (encodePlainFloat  v) (VP.length v) acc
-  ColDouble  v -> primFlat (encodePlainDouble v) (VP.length v) acc
-  ColBool    v -> primFlat (encodePlainBool   v) (V.length  v) acc
+  ColInt8  v -> primFlat (encodeInt8s  v) (VS.length v) acc
+  ColInt16 v -> primFlat (encodeInt16s v) (VS.length v) acc
+  ColInt32 v -> primFlat (encodeInt32s v) (VS.length v) acc
+  ColInt64 v -> primFlat (encodeInt64s v) (VS.length v) acc
+  ColUInt8  v -> primFlat (encodeUInt8s  v) (VS.length v) acc
+  ColUInt16 v -> primFlat (encodeUInt16s v) (VS.length v) acc
+  ColUInt32 v -> primFlat (encodeUInt32s v) (VS.length v) acc
+  ColUInt64 v -> primFlat (encodeUInt64s v) (VS.length v) acc
+  ColFloat16 v -> primFlat (encodeFloat16s v) (VS.length v) acc
+  ColFloat   v -> primFlat (encodePlainFloat  v) (VS.length v) acc
+  ColDouble  v -> primFlat (encodePlainDouble v) (VS.length v) acc
+  ColBool    v -> primFlat (Bit.toByteString  v) (VU.length v) acc
 
   -- Date / time / timestamp / duration are all fixed-width integer
   -- payloads under the hood.
-  ColDate32    v -> primFlat (encodeInt32s v) (VP.length v) acc
-  ColDate64    v -> primFlat (encodeInt64s v) (VP.length v) acc
-  ColTime32    v -> primFlat (encodeInt32s v) (VP.length v) acc
-  ColTime64    v -> primFlat (encodeInt64s v) (VP.length v) acc
-  ColTimestamp v -> primFlat (encodeInt64s v) (VP.length v) acc
-  ColDuration  v -> primFlat (encodeInt64s v) (VP.length v) acc
+  ColDate32    v -> primFlat (encodeInt32s v) (VS.length v) acc
+  ColDate64    v -> primFlat (encodeInt64s v) (VS.length v) acc
+  ColTime32    v -> primFlat (encodeInt32s v) (VS.length v) acc
+  ColTime64    v -> primFlat (encodeInt64s v) (VS.length v) acc
+  ColTimestamp v -> primFlat (encodeInt64s v) (VS.length v) acc
+  ColDuration  v -> primFlat (encodeInt64s v) (VS.length v) acc
 
   -- Interval / decimal / fixed-size binary: fixed-width payloads
   -- with unit-specific strides.
   ColIntervalYearMonth v ->
-    primFlat (encodeIntervalYearMonth v) (VP.length v) acc
+    primFlat (encodeIntervalYearMonth v) (VS.length v) acc
   ColIntervalDayTime days millis ->
-    primFlat (encodeIntervalDayTime days millis) (VP.length days) acc
+    primFlat (encodeIntervalDayTime days millis) (VS.length days) acc
   ColIntervalMonthDayNano months days nanos ->
-    primFlat (encodeIntervalMonthDayNano months days nanos) (VP.length months) acc
+    primFlat (encodeIntervalMonthDayNano months days nanos) (VS.length months) acc
   ColDecimal128 _ _ v ->
     primFlat (encodePlainFixedSizeBinary 16 v) (V.length v) acc
   ColDecimal256 _ _ v ->
@@ -569,20 +579,20 @@ encodeCol f col acc = case col of
     in V.ifoldl' (\a i (_, cc) -> encodeCol (V.unsafeIndex childFields i) cc a) acc1 children
 
   ColStructMaybe validity children ->
-    let !n = fromIntegral (V.length validity) :: Int64
+    let !n = fromIntegral (VU.length validity) :: Int64
         !nc = validityNullCount validity
         acc1 = addBufData (encodeNullBitmap validity) $ addFieldNode n nc acc
         childFields = fieldChildren f
     in V.ifoldl' (\a i (_, cc) -> encodeCol (V.unsafeIndex childFields i) cc a) acc1 children
 
   ColList offsets child ->
-    let !n = fromIntegral (max 0 (VP.length offsets - 1)) :: Int64
+    let !n = fromIntegral (max 0 (VS.length offsets - 1)) :: Int64
         acc1 = addBufData (encodePlainInt32Column offsets) $ addFieldNode n 0 acc
         childField = childFieldAt f 0
     in encodeCol childField child acc1
 
   ColListMaybe validity offsets child ->
-    let !n = fromIntegral (V.length validity) :: Int64
+    let !n = fromIntegral (VU.length validity) :: Int64
         !nc = validityNullCount validity
         acc1 = addBufData (encodePlainInt32Column offsets)
              $ addBufData (encodeNullBitmap validity)
@@ -591,13 +601,13 @@ encodeCol f col acc = case col of
     in encodeCol childField child acc1
 
   ColLargeList offsets child ->
-    let !n = fromIntegral (max 0 (VP.length offsets - 1)) :: Int64
+    let !n = fromIntegral (max 0 (VS.length offsets - 1)) :: Int64
         acc1 = addBufData (encodePlainInt64Offsets offsets) $ addFieldNode n 0 acc
         childField = childFieldAt f 0
     in encodeCol childField child acc1
 
   ColLargeListMaybe validity offsets child ->
-    let !n = fromIntegral (V.length validity) :: Int64
+    let !n = fromIntegral (VU.length validity) :: Int64
         !nc = validityNullCount validity
         acc1 = addBufData (encodePlainInt64Offsets offsets)
              $ addBufData (encodeNullBitmap validity)
@@ -617,14 +627,14 @@ encodeCol f col acc = case col of
     in encodeCol childField child acc1
 
   ColFixedSizeListMaybe _ validity child ->
-    let !n = fromIntegral (V.length validity) :: Int64
+    let !n = fromIntegral (VU.length validity) :: Int64
         !nc = validityNullCount validity
         acc1 = addBufData (encodeNullBitmap validity) $ addFieldNode n nc acc
         childField = childFieldAt f 0
     in encodeCol childField child acc1
 
   ColMap offsets keyChild valChild ->
-    let !n = fromIntegral (max 0 (VP.length offsets - 1)) :: Int64
+    let !n = fromIntegral (max 0 (VS.length offsets - 1)) :: Int64
         acc1 = addBufData (encodePlainInt32Column offsets) $ addFieldNode n 0 acc
         -- Map child is a single struct field; the struct itself has
         -- one FieldNode + (keys, values) sub-fields.
@@ -637,7 +647,7 @@ encodeCol f col acc = case col of
     in encodeCol valField valChild acc3
 
   ColMapMaybe validity offsets keyChild valChild ->
-    let !n = fromIntegral (V.length validity) :: Int64
+    let !n = fromIntegral (VU.length validity) :: Int64
         !nc = validityNullCount validity
         acc1 = addBufData (encodePlainInt32Column offsets)
              $ addBufData (encodeNullBitmap validity)
@@ -653,7 +663,7 @@ encodeCol f col acc = case col of
   -- Union columns don't carry a top-level validity bitmap (nulls are
   -- represented via the child arrays + the type_ids buffer).
   ColDenseUnion typeIds offsets children ->
-    let !n = fromIntegral (VP.length typeIds) :: Int64
+    let !n = fromIntegral (VS.length typeIds) :: Int64
         acc1 = addBufData (encodePlainInt32Column offsets)
              $ addBufData (encodeInt8s typeIds)
              $ addFieldNode n 0 acc
@@ -661,7 +671,7 @@ encodeCol f col acc = case col of
     in V.ifoldl' (\a i cc -> encodeCol (V.unsafeIndex childFields i) cc a) acc1 children
 
   ColSparseUnion typeIds children ->
-    let !n = fromIntegral (VP.length typeIds) :: Int64
+    let !n = fromIntegral (VS.length typeIds) :: Int64
         acc1 = addBufData (encodeInt8s typeIds) $ addFieldNode n 0 acc
         childFields = fieldChildren f
     in V.ifoldl' (\a i cc -> encodeCol (V.unsafeIndex childFields i) cc a) acc1 children
@@ -671,7 +681,7 @@ encodeCol f col acc = case col of
   -- IPC message (handled at the stream-writer level, out of scope for
   -- this per-column encoder).
   ColDictionary _dictId indices _dictValues ->
-    primFlat (encodePlainInt32Column indices) (VP.length indices) acc
+    primFlat (encodePlainInt32Column indices) (VS.length indices) acc
 
   -- RunEndEncoded: parent emits ZERO buffers (no validity, no data)
   -- and one FieldNode for itself; the run_ends and values children
@@ -687,14 +697,14 @@ encodeCol f col acc = case col of
   -- ListView: validity (when nullable), offsets (i32), sizes (i32),
   -- then the child column.
   ColListView offsets sizes child ->
-    let !n = fromIntegral (VP.length offsets) :: Int64
+    let !n = fromIntegral (VS.length offsets) :: Int64
         acc1 = addBufData (encodePlainInt32Column sizes)
              $ addBufData (encodePlainInt32Column offsets)
              $ addFieldNode n 0 acc
         childField = childFieldAt f 0
     in encodeCol childField child acc1
   ColListViewMaybe validity offsets sizes child ->
-    let !n  = fromIntegral (V.length validity) :: Int64
+    let !n  = fromIntegral (VU.length validity) :: Int64
         !nc = validityNullCount validity
         acc1 = addBufData (encodePlainInt32Column sizes)
              $ addBufData (encodePlainInt32Column offsets)
@@ -703,14 +713,14 @@ encodeCol f col acc = case col of
         childField = childFieldAt f 0
     in encodeCol childField child acc1
   ColLargeListView offsets sizes child ->
-    let !n = fromIntegral (VP.length offsets) :: Int64
+    let !n = fromIntegral (VS.length offsets) :: Int64
         acc1 = addBufData (encodePlainInt64Offsets sizes)
              $ addBufData (encodePlainInt64Offsets offsets)
              $ addFieldNode n 0 acc
         childField = childFieldAt f 0
     in encodeCol childField child acc1
   ColLargeListViewMaybe validity offsets sizes child ->
-    let !n  = fromIntegral (V.length validity) :: Int64
+    let !n  = fromIntegral (VU.length validity) :: Int64
         !nc = validityNullCount validity
         acc1 = addBufData (encodePlainInt64Offsets sizes)
              $ addBufData (encodePlainInt64Offsets offsets)
@@ -774,7 +784,7 @@ encodeViewColumn vs nullable acc =
   let !n = V.length vs
       (variadicLen, viewBytes) = buildViews vs
       hasVariadic = variadicLen > 0
-      validity = V.map (maybe False (const True)) vs
+      validity = boxedToBitVec (V.map (maybe False (const True)) vs)
       !nc = if nullable
               then fromIntegral (V.foldl' (\c m -> if isJust m then c else c + 1) (0 :: Int) vs) :: Int64
               else 0
@@ -857,18 +867,26 @@ varFlat offBs datBs n acc =
 -- 'encodeMaybeNullBitmap' that packs bits straight from the
 -- source @V.Vector (Maybe a)@ and returns the null count
 -- alongside, so the boxed-Bool intermediate is gone.
+-- | Encode a primitive nullable column from a 'NullableView'.
+-- The validity bitmap is already in the right shape (one
+-- bit per row, LSB-first); the values buffer is already
+-- dense and storable. So this is one Bit.toByteString call
+-- plus one encoder call — no per-element walk required.
 primNullable
-  :: VP.Prim a
-  => (VP.Vector a -> ByteString) -> a
-  -> V.Vector (Maybe a) -> BuildAcc -> BuildAcc
-primNullable enc zero vec acc =
-  let !n  = fromIntegral (V.length vec) :: Int64
-      !(validityBs, !nc) = encodeMaybeNullBitmap vec
-      vals = VP.generate (V.length vec) $ \i ->
-               fromMaybe zero (V.unsafeIndex vec i)
+  :: Storable a
+  => (VS.Vector a -> ByteString) -> a
+  -> AC.NullableView a -> BuildAcc -> BuildAcc
+primNullable enc _zero nv acc =
+  let !vals       = AC.nvValues nv
+      !n          = fromIntegral (VS.length vals) :: Int64
+      !validity   = AC.nvValidity nv
+      !validityBs = if VU.null validity
+                      then BS.empty   -- "all valid" — Arrow allows omitting the buffer
+                      else Bit.toByteString validity
+      !nc         = fromIntegral (AC.nvNullCount nv)
   in addBufData (enc vals)
      $ addBufData validityBs
-     $ addFieldNode n (fromIntegral nc) acc
+     $ addFieldNode n nc acc
 
 -- | Encode a @V.Vector (Maybe a)@ backed by 'V.Vector' (i.e. not
 -- primitive — 'Bool' / 'ByteString' / 'Text'). The 'V.Vector'-side
@@ -948,8 +966,16 @@ encodeMaybeNullBitmap v =
   in (resBs, ncOut)
 
 -- | Count @False@ entries in a validity bitmap.
-validityNullCount :: V.Vector Bool -> Int64
-validityNullCount = V.foldl' (\c v -> if v then c else c + 1) 0
+-- | Count nulls (0-bits) in a validity bitmap.
+validityNullCount :: VU.Vector Bit -> Int64
+validityNullCount v = fromIntegral (VU.length v - Bit.countOnes v)
+
+-- | Internal helper: pack a boxed @V.Vector Bool@ into the
+-- @VU.Vector Bit@ representation the writer's view-builder
+-- now expects.
+{-# INLINE boxedToBitVec #-}
+boxedToBitVec :: V.Vector Bool -> VU.Vector Bit
+boxedToBitVec v = VU.generate (V.length v) (\i -> Bit (V.unsafeIndex v i))
 
 -- * Stream / File writers
 

@@ -103,6 +103,7 @@ executable wireform-orc-interop-probe
   build-depends:
     base >= 4.16 && < 5,
     wireform-arrow,
+    wireform-columnar,
     wireform-orc,
     bytestring >= 0.11 && < 0.13,
     filepath >= 1.4 && < 1.6,

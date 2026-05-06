@@ -9,6 +9,8 @@ import Data.ByteString (ByteString)
 import Data.Text (Text)
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Storable as VS
+import qualified Arrow.Column as AC
 import Data.Int (Int8, Int16, Int32, Int64)
 import Data.Word (Word8, Word16, Word32, Word64)
 import System.Environment (getArgs)
@@ -83,7 +85,7 @@ writeMode outDir = do
       , arrowMetadata = V.empty
       , arrowFeatures = V.empty
       }
-    [V.singleton (ColInt32 (VP.fromList ([1,2,3,4,5] :: [Int32])))]
+    [V.singleton (ColInt32 (VS.fromList ([1,2,3,4,5] :: [Int32])))]
 
   -- 2) Mixed primitives + variable-length + nullable.
   writeSample "mixed"
@@ -98,7 +100,7 @@ writeMode outDir = do
       , arrowFeatures = V.empty
       }
     [V.fromList
-       [ ColInt64 (VP.fromList ([10,20,30] :: [Int64]))
+       [ ColInt64 (VS.fromList ([10,20,30] :: [Int64]))
        , ColUtf8  (V.fromList ["hello","world","!"])
        , ColBoolMaybe (V.fromList [Just True, Nothing, Just False])
        ]]
@@ -128,9 +130,9 @@ writeMode outDir = do
       , arrowFeatures = V.empty
       }
     [V.singleton (ColListView
-        (VP.fromList ([0,2,5] :: [Int32]))
-        (VP.fromList ([2,3,1] :: [Int32]))
-        (ColInt32 (VP.fromList ([10,20,30,40,50,60] :: [Int32]))))]
+        (VS.fromList ([0,2,5] :: [Int32]))
+        (VS.fromList ([2,3,1] :: [Int32]))
+        (ColInt32 (VS.fromList ([10,20,30,40,50,60] :: [Int32]))))]
 
   -- 5) Post-V5: RunEndEncoded.
   writeSample "ree"
@@ -145,8 +147,8 @@ writeMode outDir = do
       , arrowFeatures = V.empty
       }
     [V.singleton (ColRunEndEncoded
-        (ColInt32 (VP.fromList ([3,5,8] :: [Int32])))
-        (ColInt64Maybe (V.fromList [Just 100, Nothing, Just 300])))]
+        (ColInt32 (VS.fromList ([3,5,8] :: [Int32])))
+        (ColInt64Maybe (AC.nvFromMaybeList 0 [Just 100, Nothing, Just 300])))]
 
   -- 6) Dictionary-encoded utf8 — handled automatically by the
   --    high-level API: no manual DictBatch construction.
@@ -158,7 +160,7 @@ writeMode outDir = do
       , arrowFeatures = V.empty
       }
     [V.singleton (ColDictionary 0
-        (VP.fromList ([0,1,0,2,1] :: [Int32]))
+        (VS.fromList ([0,1,0,2,1] :: [Int32]))
         (ColUtf8 (V.fromList ["a","b","c"])))]
 
   -- ZSTD body compression: a 500-row int64 column compressed
@@ -166,7 +168,7 @@ writeMode outDir = do
   let zstdOpts    = defaultWriteOptions { writeBodyCompression = Just BodyZstd }
       zstdSchema  = Schema
         (V.singleton (pField "n" False (AInt 64 True) V.empty)) Little V.empty V.empty
-      zstdBatch   = V.singleton (ColInt64 (VP.fromList ([1..500] :: [Int64])))
+      zstdBatch   = V.singleton (ColInt64 (VS.fromList ([1..500] :: [Int64])))
   BS.writeFile (outDir <> "/ours_zstd_compressed.arrows")
     (encodeArrowStream zstdOpts zstdSchema [zstdBatch])
 
@@ -177,7 +179,7 @@ writeMode outDir = do
         , arrowMetadata = V.empty
         , arrowFeatures = V.empty
         }
-      intBatch = V.singleton (ColInt32 (VP.fromList ([1,2,3,4,5] :: [Int32])))
+      intBatch = V.singleton (ColInt32 (VS.fromList ([1,2,3,4,5] :: [Int32])))
   BS.writeFile (outDir <> "/ours_int32_batch.arrow")
     (encodeArrowFile defaultWriteOptions intSchema [intBatch])
 
@@ -190,19 +192,19 @@ writeMode outDir = do
         , arrowFeatures = V.empty
         }
       dictBatch = V.singleton (ColDictionary 0
-        (VP.fromList ([0,1,0,2,1] :: [Int32]))
+        (VS.fromList ([0,1,0,2,1] :: [Int32]))
         (ColUtf8 (V.fromList ["a","b","c"])))
   BS.writeFile (outDir <> "/ours_dict.arrow")
     (encodeArrowFile defaultWriteOptions dictSchema [dictBatch])
 
   -- 7) Every primitive integer width (signed + unsigned).
   let intWidths =
-        [ ("int8",  ColInt8  (VP.fromList ([0, 1, -1, 127, -128] :: [Int8])))
-        , ("int16", ColInt16 (VP.fromList ([0, 1, -1, 32767, -32768] :: [Int16])))
-        , ("uint8",  ColUInt8  (VP.fromList ([0, 1, 255] :: [Word8])))
-        , ("uint16", ColUInt16 (VP.fromList ([0, 1, 65535] :: [Word16])))
-        , ("uint32", ColUInt32 (VP.fromList ([0, 1, maxBound] :: [Word32])))
-        , ("uint64", ColUInt64 (VP.fromList ([0, 1, maxBound] :: [Word64])))
+        [ ("int8",  ColInt8  (VS.fromList ([0, 1, -1, 127, -128] :: [Int8])))
+        , ("int16", ColInt16 (VS.fromList ([0, 1, -1, 32767, -32768] :: [Int16])))
+        , ("uint8",  ColUInt8  (VS.fromList ([0, 1, 255] :: [Word8])))
+        , ("uint16", ColUInt16 (VS.fromList ([0, 1, 65535] :: [Word16])))
+        , ("uint32", ColUInt32 (VS.fromList ([0, 1, maxBound] :: [Word32])))
+        , ("uint64", ColUInt64 (VS.fromList ([0, 1, maxBound] :: [Word64])))
         ]
   mapM_
     (\(nm, col) ->
@@ -219,11 +221,11 @@ writeMode outDir = do
   writeSample "float"
     (Schema (V.singleton (pField "x" False (AFloatingPoint Single) V.empty))
             Little V.empty V.empty)
-    [V.singleton (ColFloat (VP.fromList [1.5, -2.5, 3.5]))]
+    [V.singleton (ColFloat (VS.fromList [1.5, -2.5, 3.5]))]
   writeSample "double"
     (Schema (V.singleton (pField "x" False (AFloatingPoint DoublePrecision) V.empty))
             Little V.empty V.empty)
-    [V.singleton (ColDouble (VP.fromList [1.5, -2.5, 3.14159]))]
+    [V.singleton (ColDouble (VS.fromList [1.5, -2.5, 3.14159]))]
 
   -- 9) Binary (raw bytes) + FixedSizeBinary.
   writeSample "binary"
@@ -245,21 +247,21 @@ writeMode outDir = do
   writeSample "date32"
     (Schema (V.singleton (pField "d" False (ADate DateDay) V.empty))
             Little V.empty V.empty)
-    [V.singleton (ColDate32 (VP.fromList [0, 18000, -1]))]
+    [V.singleton (ColDate32 (VS.fromList [0, 18000, -1]))]
   writeSample "time64_us"
     (Schema (V.singleton (pField "t" False (ATime Microsecond 64) V.empty))
             Little V.empty V.empty)
-    [V.singleton (ColTime64 (VP.fromList [0, 12345000000]))]
+    [V.singleton (ColTime64 (VS.fromList [0, 12345000000]))]
   writeSample "timestamp_ns_utc"
     (Schema (V.singleton (pField "ts" False
                             (ATimestamp Nanosecond (Just "UTC")) V.empty))
             Little V.empty V.empty)
-    [V.singleton (ColTimestamp (VP.fromList
+    [V.singleton (ColTimestamp (VS.fromList
        [0, 1700000000_000_000_000]))]
   writeSample "duration_ns"
     (Schema (V.singleton (pField "d" False (ADuration Nanosecond) V.empty))
             Little V.empty V.empty)
-    [V.singleton (ColDuration (VP.fromList [0, 60_000_000_000]))]
+    [V.singleton (ColDuration (VS.fromList [0, 60_000_000_000]))]
 
   -- 11) Decimal128.
   writeSample "decimal128"
@@ -277,8 +279,8 @@ writeMode outDir = do
           (V.singleton (pField "item" False (AInt 32 True) V.empty)))
        Little V.empty V.empty)
     [V.singleton (ColList
-       (VP.fromList ([0,2,5,7] :: [Int32]))
-       (ColInt32 (VP.fromList [10,20,30,40,50,60,70])))]
+       (VS.fromList ([0,2,5,7] :: [Int32]))
+       (ColInt32 (VS.fromList [10,20,30,40,50,60,70])))]
 
   -- 13) Struct<int32, utf8>.
   writeSample "struct"
@@ -289,7 +291,7 @@ writeMode outDir = do
           ])
        Little V.empty V.empty)
     [V.singleton (ColStruct (V.fromList
-       [ ("i", ColInt32 (VP.fromList ([1, 2, 3] :: [Int32])))
+       [ ("i", ColInt32 (VS.fromList ([1, 2, 3] :: [Int32])))
        , ("n", ColUtf8  (V.fromList ["a", "b", "c"]))
        ]))]
 
@@ -306,9 +308,9 @@ writeMode outDir = do
             ])
        Little V.empty V.empty)
     [V.singleton (ColMap
-        (VP.fromList ([0, 2, 5] :: [Int32]))
+        (VS.fromList ([0, 2, 5] :: [Int32]))
         (ColUtf8 (V.fromList ["k1", "k2", "k3", "k4", "k5"]))
-        (ColInt32 (VP.fromList ([10, 20, 30, 40, 50] :: [Int32]))))]
+        (ColInt32 (VS.fromList ([10, 20, 30, 40, 50] :: [Int32]))))]
 
   -- 15) LargeList<int32> — 64-bit offsets.
   writeSample "large_list_int32"
@@ -317,8 +319,8 @@ writeMode outDir = do
           (V.singleton (pField "item" False (AInt 32 True) V.empty)))
        Little V.empty V.empty)
     [V.singleton (ColLargeList
-        (VP.fromList ([0, 2, 5, 7] :: [Int64]))
-        (ColInt32 (VP.fromList ([10,20,30,40,50,60,70] :: [Int32]))))]
+        (VS.fromList ([0, 2, 5, 7] :: [Int64]))
+        (ColInt32 (VS.fromList ([10,20,30,40,50,60,70] :: [Int32]))))]
 
   -- 16) FixedSizeList<int32, 3>.
   writeSample "fixed_size_list3_int32"
@@ -327,7 +329,7 @@ writeMode outDir = do
           (V.singleton (pField "item" False (AInt 32 True) V.empty)))
        Little V.empty V.empty)
     [V.singleton (ColFixedSizeList 3
-        (ColInt32 (VP.fromList ([1, 2, 3, 4, 5, 6] :: [Int32]))))]
+        (ColInt32 (VS.fromList ([1, 2, 3, 4, 5, 6] :: [Int32]))))]
 
   -- 17) LargeUtf8.
   writeSample "large_utf8"
@@ -348,10 +350,10 @@ writeMode outDir = do
           ])
        Little V.empty V.empty)
     [V.singleton (ColDenseUnion
-        (VP.fromList ([0, 1, 0, 1, 0] :: [Int8]))    -- type ids
-        (VP.fromList ([0, 0, 1, 1, 2] :: [Int32]))   -- per-child offsets
+        (VS.fromList ([0, 1, 0, 1, 0] :: [Int8]))    -- type ids
+        (VS.fromList ([0, 0, 1, 1, 2] :: [Int32]))   -- per-child offsets
         (V.fromList
-           [ ColInt32 (VP.fromList ([10, 20, 30] :: [Int32]))
+           [ ColInt32 (VS.fromList ([10, 20, 30] :: [Int32]))
            , ColUtf8  (V.fromList ["a", "b"])
            ]))]
 
