@@ -45,10 +45,23 @@ File sizes (bytes): uncompressed=2,157,279 · snappy=1,212,588 · zstd=585,180.
 
 | | wireform | pyarrow* |
 |---|---:|---:|
-| write encode | 1.94 ms | 0.4 ms |
-| read decode | 1.10 ms | 0.01 ms |
+| write encode | 4.4 ms | 0.4 ms |
+| read decode | 1.2 ms | 0.01 ms |
 
-\* pyarrow's Arrow IPC implementation is essentially zero-copy: the in-memory representation matches the wire format, so `read_table` just points an Arrow Array at the source buffer with no allocation. Our `ColumnArray` carries its own `VP.Vector` (which has its own `ByteArray`), so we always pay one memcpy per column. This is a fundamental representation difference that no amount of micro-optimisation will close. Our 1.10 ms read is still within 1× of cache-warm memcpy at this size.
+\* pyarrow's Arrow IPC implementation is essentially zero-copy: the in-memory representation matches the wire format, so `read_table` just points an Arrow Array at the source buffer with no allocation. Our `ColumnArray` carries its own `VP.Vector` (which has its own `ByteArray`), so we always pay one memcpy per column on the read side and one memcpy on the write side. This is a fundamental representation difference: closing it requires a "view" type that holds a `ForeignPtr` slice into the source buffer rather than its own copy — a much larger architectural change than the per-encoder optimisations the rest of this doc covers.
+
+In other words the Arrow IPC numbers are bounded by Haskell's strict-data semantics, not by encoder/decoder cleverness; the 1.2 ms read is already very close to cache-warm memcpy speed for the dataset size.
+
+## Why we're not at C/Rust speed
+
+The Parquet end-to-end numbers above are 1.05x–2.7x faster than pyarrow but the ratio against a hand-written C/Rust implementation is closer to 4-6x slower for the in-cache primitive paths. The remaining gap is structural rather than algorithmic:
+
+* **GC pressure** — every column read allocates a fresh `V.Vector` (boxed) or `VP.Vector` (with its own `ByteArray`) which gets handed to the caller and eventually has to be collected. C/Rust returns a slice into the source buffer.
+* **`V.Vector Bool` / `V.Vector Text`** — these are spines of pointers to `True`/`False` singletons or `Text` constructors; even though each individual write is a single pointer store, the cache footprint of the spine itself is N pointers vs N bits (Bool) or 4-byte slice triples (Text in arrow-rs).
+* **No bit-packed in-memory `Bool`** — Arrow's wire format already packs `Bool`s into bits, but our `ColBool` un-packs them to `V.Vector Bool` on read. Keeping the bit-packed form end-to-end would close 8× of the cache pressure.
+* **Per-`Text` validation** — non-ASCII pages still go through `TE.decodeUtf8'` per slice. arrow-rs validates the whole buffer once and exposes views.
+
+The first three would require changing the `ColumnArray` constructor types (`ColBool`, `ColUtf8`, …) to a slice/view representation. That's a separate workstream; everything in the "History" section below stays inside the existing in-memory representation.
 
 ## History (read uncompressed)
 
@@ -266,6 +279,17 @@ measured.
   Was `V.any not vs >> V.any id vs`, two passes over the
   column. Now a single short-circuiting fold that bails as
   soon as both `True` and `False` have been observed.
+* **Pass 37 — Arrow.Write: drop Builder.<> per-element loops.**
+  Four encoders (`encodePlainLargeUtf8`,
+  `encodePlainLargeBinary`, `encodePlainFixedSizeBinary`,
+  `encodeIntervalDayTime`, `encodeIntervalMonthDayNano`)
+  were `Builder.<>`-ing once per row. Now compute the
+  output size up front, allocate one `BSI.unsafeCreate`
+  buffer, and `pokeByteOff` / `BSI.memcpy` straight into
+  it. For LargeUtf8 / LargeBinary there's a parallel
+  `V.Vector ByteString` of pre-encoded values shared
+  between the offsets pass and the payload pass so
+  `TE.encodeUtf8` only runs once per `Text`.
 
 ## Bench fairness
 
