@@ -75,8 +75,8 @@ library
     Parquet.Thrift.Schema
     Parquet.Types
     Parquet.Write
-  other-modules:
     Parquet.RLE
+  other-modules:
   build-depends:
     base >= 4.16 && < 5,
     wireform-core,
@@ -231,6 +231,19 @@ executable parquet-profile
     bytestring >= 0.11 && < 0.13,
     deepseq >= 1.4 && < 1.6,
     text >= 2.0 && < 2.2,
+    vector >= 0.13 && < 0.14
+
+benchmark parquet-rle
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: bench
+  main-is: RleBench.hs
+  ghc-options: -O2 -threaded -rtsopts "-with-rtsopts=-A32m"
+  build-depends:
+    base >= 4.16 && < 5,
+    wireform-parquet,
+    bytestring >= 0.11 && < 0.13,
+    criterion >= 1.5 && < 1.7,
     vector >= 0.13 && < 0.14
 
 benchmark parquet-scale
