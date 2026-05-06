@@ -25,6 +25,8 @@
 module ORC.Compress
   ( decompressORCStream
   , decompressORCStreamSized
+  , compressORCStream
+  , compressORCStreamSized
   , defaultORCCompressionBlockSize
   ) where
 
@@ -34,11 +36,11 @@ import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
-import Data.Word (Word64)
+import Data.Word (Word8, Word64)
 import System.IO.Unsafe (unsafePerformIO)
 
 #ifdef HAVE_ZSTD
-import Codec.Compression.Zstd (Decompress (..), decompress)
+import Codec.Compression.Zstd (Decompress (..), compress, decompress)
 #endif
 
 #ifdef HAVE_SNAPPY
@@ -164,3 +166,97 @@ tryLZ4 !blockSize bs = case LZ4.decompress blockSize bs of
       ++ " bytes, max output " ++ show blockSize ++ " bytes); "
       ++ e
 #endif
+
+-- ============================================================
+-- Compression (writer side)
+-- ============================================================
+
+-- | Wrap @bs@ in ORC's compression envelope using the default
+-- block size. Each block of up to 'defaultORCCompressionBlockSize'
+-- input bytes becomes a 3-byte header + (compressed or
+-- original, whichever is smaller) block bytes. When the codec
+-- is 'CompressionNone' the input is returned verbatim.
+{-# INLINE compressORCStream #-}
+compressORCStream :: CompressionKind -> ByteString -> Either String ByteString
+compressORCStream =
+  compressORCStreamSized defaultORCCompressionBlockSize
+
+-- | Like 'compressORCStream' but the caller picks the block
+-- size. Block size matters for two reasons: it bounds the
+-- decompressor's per-chunk buffer (some codecs need this for
+-- output sizing), and it's the unit of the per-chunk
+-- 'isOriginal' fallback (so smaller blocks let the writer
+-- choose 'isOriginal' more often when compression doesn't
+-- pay).
+compressORCStreamSized
+  :: Int -> CompressionKind -> ByteString -> Either String ByteString
+compressORCStreamSized _   CompressionNone bs = Right bs
+compressORCStreamSized blk kind            bs
+  | blk <= 0  = Left "ORC.Compress: non-positive compression block size"
+  | otherwise = compressChunks blk kind bs 0 []
+
+compressChunks
+  :: Int -> CompressionKind -> ByteString -> Int -> [ByteString]
+  -> Either String ByteString
+compressChunks !blk !kind !bs !off !acc
+  | off >= BS.length bs = Right $! BS.concat (reverse acc)
+  | otherwise = do
+      let !remaining = BS.length bs - off
+          !take_     = min blk remaining
+          !chunk     = BS.take take_ (BS.drop off bs)
+      compressedM <- compressBlock kind chunk
+      let !packed = packChunkEnvelope chunk compressedM
+      compressChunks blk kind bs (off + take_) (packed : acc)
+
+-- | Build the 3-byte header + payload for one chunk. Falls
+-- back to @isOriginal=1@ when compression doesn't shrink the
+-- block (writers typically check this; otherwise readers
+-- decompress only to discover the block was the same size).
+packChunkEnvelope :: ByteString -> Maybe ByteString -> ByteString
+packChunkEnvelope original mCompressed =
+  let !use = case mCompressed of
+        Just cBs | BS.length cBs < BS.length original -> Right cBs
+        _                                             -> Left  original
+      !payloadLen = case use of
+        Right cBs -> BS.length cBs
+        Left  o   -> BS.length o
+      !isOrig    = case use of
+        Right _ -> 0 :: Int
+        Left  _ -> 1
+      !header = (payloadLen `shiftL` 1) .|. isOrig
+      !h0     = fromIntegral (header .&. 0xFF)        :: Word8
+      !h1     = fromIntegral ((header `shiftR` 8)  .&. 0xFF) :: Word8
+      !h2     = fromIntegral ((header `shiftR` 16) .&. 0xFF) :: Word8
+      !payload = either id id use
+  in  BS.pack [h0, h1, h2] <> payload
+
+-- | Compress a single block under the given codec. Returns
+-- 'Nothing' if the codec isn't enabled or fails — the caller
+-- then falls back to @isOriginal=1@ (the block goes through
+-- raw).
+compressBlock :: CompressionKind -> ByteString -> Either String (Maybe ByteString)
+compressBlock CompressionNone _ = Right Nothing
+compressBlock CompressionZlib bs =
+  Right (Just (BL.toStrict (ZlibRaw.compress (BL.fromStrict bs))))
+#ifdef HAVE_SNAPPY
+compressBlock CompressionSnappy bs = Right (Just (Snappy.compress bs))
+#else
+compressBlock CompressionSnappy _ =
+  Left "ORC.Compress: Snappy requires building wireform with -fsnappy"
+#endif
+#ifdef HAVE_ZSTD
+compressBlock CompressionZstd bs = Right (Just (compress 3 bs))
+#endif
+#ifdef HAVE_LZ4
+compressBlock CompressionLZ4 bs = Right (Just (LZ4.compress bs))
+#endif
+compressBlock c _ = Left $
+  "ORC.Compress: codec " ++ show c
+    ++ " not supported by the writer (use None, Zlib, Snappy/-fsnappy"
+#ifdef HAVE_ZSTD
+    ++ ", Zstandard/-fzstd"
+#endif
+#ifdef HAVE_LZ4
+    ++ ", LZ4/-flz4"
+#endif
+    ++ ")"
