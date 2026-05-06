@@ -1247,6 +1247,57 @@ encByteStreamSplit       = 9
 
 -- | Dispatcher type: per-page decoder produces a chunk of values
 -- of the type the caller asked for.
+--
+-- /Inlining contract — please don't break it./
+--
+-- A record of functions is normally a GHC inlining hazard:
+-- field projections look like ordinary calls and don't get
+-- specialised at use sites unless the compiler can see the
+-- literal record. We've verified by Core dump
+-- (@-ddump-simpl@) that GHC fully erases the abstraction in
+-- our case — the dispatch records turn into worker functions
+-- like
+--
+-- @
+-- $wdispatchInt2 = \\ ww ww1 ww2 ww3 ww4 ww5 -> ...
+-- @
+--
+-- with all six 'PerPage' fields unboxed to separate primitive
+-- arguments, and the hot inner loops use 'indexInt64Array#' /
+-- 'copyByteArray#' / 'writeArray#' primops directly — no
+-- record projections, no function-pointer indirection, no
+-- allocation in the steady state.
+--
+-- /Why it works:/
+--
+--   1. The @dispatch*@ values below are top-level CAFs whose
+--      RHS is a literal 'PerPage' constructor application
+--      with all strict fields. GHC unboxes the record via
+--      worker-wrapper.
+--   2. Each @readGeneric*ColumnChunk@ is a partial
+--      application of 'genericReadColumnChunk' to one of
+--      those CAFs. Both are small enough to be auto-inlined
+--      under @-O@ even without explicit pragmas — empirical
+--      check: removing every @INLINE@ pragma in this module
+--      didn't change criterion numbers, and all
+--      @$wdispatch*@ workers still appeared in the Core
+--      dump.
+--   3. Once both are inlined, case-of-known-constructor
+--      reduces every @ppDecodePlain pp@ / @ppConcat pp@ /
+--      etc. to the underlying function, and worker-wrapper
+--      cleans up the record entirely.
+--
+-- /What would break this:/
+--
+--   * Constructing a @dispatch*@ via a helper instead of a
+--     literal @PerPage { ... }@ — the CAF would no longer be
+--     a known constructor.
+--   * Adding many more dispatchers and triggering GHC's
+--     unfolding-size threshold so the page walker stops
+--     getting auto-inlined. The explicit @INLINE@ pragmas
+--     below are belt-and-suspenders against that.
+--   * Replacing the strict @!@ fields with lazy ones — GHC
+--     would keep the record around to preserve thunks.
 data PerPage a = PerPage
   { ppDecodePlain :: !(Int -> ByteString -> Either String a)
     -- ^ Decode a PLAIN-encoded page body into a chunk of length n.
