@@ -1,4 +1,5 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE MagicHash #-}
 -- | Apache Arrow IPC column encoders and stream\/file writers.
 module Arrow.Write
   ( encodePlainInt32Column
@@ -25,6 +26,9 @@ import qualified Data.ByteString.Builder as B
 import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Unsafe as BSU
+import qualified Data.Primitive.ByteArray as PBA
+import qualified Data.Text.Array as TA
+import qualified Data.Text.Internal as TI
 import qualified Foreign.Ptr
 import Foreign.Ptr (Ptr)
 import Foreign.Storable (pokeByteOff)
@@ -118,19 +122,47 @@ encodePlainBool vec =
                  goByte (b + 1)
        goByte 0
 
--- | Encode an Arrow Utf8 column as @(offsets, data)@. Two
--- passes: walk once to compute total content size and the
--- per-row utf8-encoded ByteStrings, then allocate both output
--- buffers exactly and fill them.
+-- | Encode an Arrow Utf8 column as @(offsets, data)@.
 --
--- Cuts ~3-4× off the per-row cost vs the previous Builder
--- shape, which built two N-deep Builder thunks and copied
--- everything through a lazy chunk list.
+-- Implementation note (perf): a 'Text' in text-2.x already
+-- stores its bytes as UTF-8 in a 'TA.Array' (a 'ByteArray')
+-- with O(1) access to the byte length and offset. The
+-- previous shape called 'TE.encodeUtf8' on every value
+-- (~100 k tiny ByteString allocations) and then did a
+-- second pass to memcpy them into the output buffer. We can
+-- skip the intermediate ByteStrings entirely: walk the
+-- vector twice, once to size the output (using the Text's
+-- stored byte length) and once to copy bytes straight from
+-- each Text's ByteArray into the destination via
+-- 'PBA.copyByteArrayToAddr'.
 encodePlainUtf8 :: V.Vector Text -> (ByteString, ByteString)
 encodePlainUtf8 vec =
-  let !n      = V.length vec
-      !encVec = V.map TE.encodeUtf8 vec
-  in encodePlainBinaryInternal n encVec
+  let !n          = V.length vec
+      -- Total byte count: 'TI.Text' stores byte length
+      -- directly (third field) so this is O(n) reads with
+      -- no per-Text allocation.
+      !totalBytes = V.foldl' (\a t -> case t of
+                                 TI.Text _ _ l -> a + l) 0 vec
+      !offsetsBs  = BSI.unsafeCreate ((n + 1) * 4) $ \ptr -> do
+        let go !i !off
+              | i >= n = pokeByteOff ptr (i * 4) (fromIntegral off :: Int32)
+              | otherwise = do
+                  pokeByteOff ptr (i * 4) (fromIntegral off :: Int32)
+                  case V.unsafeIndex vec i of
+                    TI.Text _ _ l -> go (i + 1) (off + l)
+        go 0 0
+      !dataBs = BSI.unsafeCreate totalBytes $ \ptr -> do
+        let go !i !off
+              | i >= n = pure ()
+              | otherwise = do
+                  case V.unsafeIndex vec i of
+                    TI.Text (TA.ByteArray src#) srcOff lx -> do
+                      let !srcBA = PBA.ByteArray src#
+                      PBA.copyByteArrayToAddr
+                        (ptr `Foreign.Ptr.plusPtr` off) srcBA srcOff lx
+                      go (i + 1) (off + lx)
+        go 0 0
+  in (offsetsBs, dataBs)
 
 encodeNullBitmap :: V.Vector Bool -> ByteString
 encodeNullBitmap = encodePlainBool
