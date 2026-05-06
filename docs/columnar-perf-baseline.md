@@ -129,6 +129,54 @@ measured.
     * `hs_columnar_bswap{16,32,64}_copy` — SSSE3 `pshufb`-based
       byte-swap memcpy for the rare Arrow big-endian path.
       Replaces a per-element scalar loop.
+17. **Direct Thrift compact encoder for `FileMetadata`** —
+    walks the record tree straight to bytes; no `TV.Value`
+    intermediate. **1.65× faster on 256-column writes**
+    (the wider the schema, the bigger the win).
+18. **`Parquet.RLE.unpackAllGroups` O(n²) fix** — bit-packed
+    groups were being concatenated with `acc VP.++ grp`
+    per group; ~78 M wasted Word32 writes for a 100k-row
+    dict-encoded column. Fixed with one up-front
+    `MVP.unsafeNew` and an `unpackGroup8Into` helper.
+19. **`materializePlain*Optional` family in `Parquet.Levels`** —
+    cons + reverse + V.fromList per nullable column read
+    replaced with a single mutable boxed vector + freeze
+    via a shared `materializePlainOptionalGeneric` helper.
+20. **`materializeDictOptional` in `Parquet.Read`** — same
+    cons + reverse + fromList anti-pattern, fixed the same
+    way.
+21. **Iter fusion rules** in `Columnar.Stream` — chained
+    `iterMap` / `iterMapMaybe` / `iterFilter` collapse to
+    one specialised loop.
+22. **`Parquet.BloomFilter` O(n²) thaw-per-insert fix** —
+    `sbbfInsert` was copying the entire bitset on every
+    value (435 ms for 100k inserts). New
+    `buildSbbfFromHashes` + `buildSbbfFromBytes` thaw once,
+    write all, freeze once: **454× speedup** on 100k inserts
+    (0.96 ms). Same fix ported to `ORC.BloomFilter`.
+23. **`buildDictionary` O(n² + n×|uniques|) → O(n log u)** —
+    `orderedUniq`'s `elem` per row + `lookup` per index
+    assignment replaced with a `Data.Map.Strict` lookup
+    written straight into a mutable `VP.Vector`. ~500×
+    speedup at 100k rows / 1k distinct.
+24. **ORC float/double readers** — same memcpy primitive
+    fix as Parquet; replaces byte-by-byte `BS.index +
+    shifts`. Also tightened `readVulong` / `readBigEndian`
+    in the RLE-v2 inner loop.
+25. **`Arrow.Write.encodeMaybeNullBitmap`** — fused null
+    bitmap pack + null count into one ST pass; skips the
+    boxed-Bool intermediate.
+26. **`encodeOptionalColumnPage` + `optionalColumnPresentValues`** —
+    nullable Parquet writer no longer goes through Haskell
+    list intermediates. One `VP.generate` for def levels +
+    one mutable-vector pass for the present-values
+    sub-vector.
+27. **Direct-poke `i32LE` / `i64LE` / `f32LE` / `f64LE` /
+    `word32LE` / `word64LE`** — bloom filter inserts and
+    predicate evaluation no longer go through
+    `BL.toStrict . B.toLazyByteString . B.intXXLE`. Same
+    fix in `Parquet.BloomFilter.serializeBitset` /
+    `ORC.BloomFilter.bitsetToLEBytes`.
 
 ## Bench fairness
 
