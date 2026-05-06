@@ -820,20 +820,42 @@ decodePlainBool n bs =
     then Left "Parquet.Read: PLAIN BOOLEAN buffer too small"
     else Right $! unpackBitsLsbUnsafe n bs
 
+-- | Decode a PLAIN-encoded BYTE_ARRAY page body into a vector
+-- of @n@ slices into @bs0@.
+--
+-- Implementation note: the previous version of this function
+-- accumulated values via @V.snoc acc payload@ in a tight loop,
+-- which is O(n²) — for a 100k-row page that meant ~5 billion
+-- copies and dominated the entire read path (~4.5 s on a 4-col
+-- benchmark; 99% of total read time). We now allocate a
+-- mutable boxed vector once and write each slice in O(1), for
+-- O(n) total work. Each payload is a slice into @bs0@ (no
+-- copy), matching the old behaviour.
 decodePlainByteArray :: Int -> ByteString -> Either String (V.Vector ByteString)
-decodePlainByteArray n bs0 = go 0 0 V.empty
-  where
-    go !i !off !acc
-      | i >= n = Right acc
-      | off + 4 > BS.length bs0 = Left "Parquet.Read: PLAIN BYTE_ARRAY truncated length"
-      | otherwise =
-          let !len = fromIntegral (readLE32 bs0 off) :: Int
-              !off2 = off + 4
-          in if len < 0 || off2 + len > BS.length bs0
-            then Left "Parquet.Read: PLAIN BYTE_ARRAY payload out of bounds"
-            else
-              let !payload = BS.take len (BS.drop off2 bs0)
-              in go (i + 1) (off2 + len) (V.snoc acc payload)
+decodePlainByteArray n bs0
+  | n <= 0    = Right V.empty
+  | otherwise = runST $ do
+      mv <- VM.unsafeNew n
+      let totalLen = BS.length bs0
+          go !i !off
+            | i >= n    = pure (Right ())
+            | off + 4 > totalLen =
+                pure (Left "Parquet.Read: PLAIN BYTE_ARRAY truncated length")
+            | otherwise =
+                let !len  = fromIntegral (readLE32 bs0 off) :: Int
+                    !off2 = off + 4
+                in  if len < 0 || off2 + len > totalLen
+                      then pure (Left "Parquet.Read: PLAIN BYTE_ARRAY payload out of bounds")
+                      else do
+                        let !payload = BS.take len (BS.drop off2 bs0)
+                        VM.unsafeWrite mv i payload
+                        go (i + 1) (off2 + len)
+      r <- go 0 0
+      case r of
+        Left err -> pure (Left err)
+        Right () -> do
+          v <- V.unsafeFreeze mv
+          pure (Right v)
 
 -- | Read a column chunk with optional @DICTIONARY_PAGE@ + @PLAIN_DICTIONARY@
 -- data pages, supporting definition\/repetition levels.

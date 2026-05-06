@@ -216,3 +216,31 @@ benchmark parquet-throughput
     deepseq >= 1.4 && < 1.6,
     text >= 2.0 && < 2.2,
     vector >= 0.13 && < 0.14
+
+executable parquet-profile
+  import: defaults
+  hs-source-dirs: bench
+  main-is: Profile.hs
+  ghc-options: -O2 -fprof-auto -rtsopts
+  build-depends:
+    base >= 4.16 && < 5,
+    wireform-arrow,
+    wireform-parquet,
+    bytestring >= 0.11 && < 0.13,
+    deepseq >= 1.4 && < 1.6,
+    text >= 2.0 && < 2.2,
+    vector >= 0.13 && < 0.14
+
+executable parquet-percol
+  import: defaults
+  hs-source-dirs: bench
+  main-is: PerColumn.hs
+  ghc-options: -O2 -rtsopts
+  build-depends:
+    base >= 4.16 && < 5,
+    wireform-arrow,
+    wireform-parquet,
+    bytestring >= 0.11 && < 0.13,
+    text >= 2.0 && < 2.2,
+    time >= 1.12 && < 1.16,
+    vector >= 0.13 && < 0.14
