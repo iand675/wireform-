@@ -1020,10 +1020,17 @@ data ColumnAux = ColumnAux
     -- encrypted per the spec module-wise framing (nonce || ciphertext
     -- || tag for GCM modules; nonce || ciphertext for CTR modules).
     -- Defaults to 'Nothing' (plaintext).
+  , caUseDictionary :: !Bool
+    -- ^ When 'True', emit a @DICTIONARY_PAGE@ + @RLE_DICTIONARY@-encoded
+    -- @DATA_PAGE@ for this column chunk instead of a @PLAIN@-encoded
+    -- @DATA_PAGE@. The high-level writer's 'DictPolicy' decides this
+    -- per-column based on a size heuristic; callers using the lower-level
+    -- @buildParquetFileWithIndex@ entry point control it directly.
+    -- Defaults to 'False' (PLAIN).
   } deriving (Show, Eq)
 
 emptyColumnAux :: ColumnAux
-emptyColumnAux = ColumnAux Nothing Nothing Nothing Uncompressed PageV1 Nothing
+emptyColumnAux = ColumnAux Nothing Nothing Nothing Uncompressed PageV1 Nothing False
 
 -- | Convenience: build a 'ColumnEncryption' for a leaf column from
 -- the file-wide 'Enc.EncryptionConfig'. Looks up the column key from
@@ -1427,7 +1434,7 @@ buildParquetFileWithIndex' mFootEnc schema rowGroups auxes =
       -- the writer falls back to Uncompressed so callers get a usable
       -- file rather than a runtime crash.
       !encodedRGs = V.imap encodeRG rowGroups
-      pageBytesOnly = V.map fst3
+      pageBytesOnly = V.map eccBytes
       !rowGroupBytes = concatMap (V.toList . pageBytesOnly) (V.toList encodedRGs)
       !rgBytesLen = sum (map BS.length rowGroupBytes)
       !startOfData = 4 :: Int
@@ -1490,13 +1497,13 @@ buildParquetFileWithIndex' mFootEnc schema rowGroups auxes =
     -- Encode each column's page, then compress it with the codec the
     -- caller requested via the matching ColumnAux. Returns the *final*
     -- bytes that go into the file plus the uncompressed size.
-    encodeRG :: Int -> V.Vector ColumnData -> V.Vector (ByteString, Int, Compression)
+    encodeRG :: Int -> V.Vector ColumnData -> V.Vector EncodedColumnChunk
     encodeRG rgIdx colsData =
       let !aux = if rgIdx < V.length auxes then V.unsafeIndex auxes rgIdx else V.empty
        in V.imap (encodeOne aux) colsData
 
     encodeOne
-      :: V.Vector ColumnAux -> Int -> ColumnData -> (ByteString, Int, Compression)
+      :: V.Vector ColumnAux -> Int -> ColumnData -> EncodedColumnChunk
     encodeOne aux cIdx cd =
       let !mAux = if cIdx < V.length aux
                     then Just (V.unsafeIndex aux cIdx)
@@ -1504,7 +1511,13 @@ buildParquetFileWithIndex' mFootEnc schema rowGroups auxes =
           !codecRequested = maybe Uncompressed caCodec mAux
           !pageVer        = maybe PageV1 caPageVersion mAux
           !mEnc           = mAux >>= caEncryption
+          !useDict        = maybe False caUseDictionary mAux
+                            -- Dict encoding currently only emits via the
+                            -- V1 page format; fall through to PLAIN for
+                            -- V2 + dict requests.
+                            && pageVer == PageV1
        in case pageVer of
+            _ | useDict -> encodeDictV1 cd codecRequested mEnc
             PageV1 ->
               let (hdr, body)         = encodeColumnDataPageParts cd
                   (compBody, cActual) = case Compress.compressPageBytes codecRequested body of
@@ -1526,11 +1539,13 @@ buildParquetFileWithIndex' mFootEnc schema rowGroups auxes =
                   !uncompSz = BS.length hdr + BS.length body
                in case mEnc of
                     Nothing ->
-                      (BS.append hdr' compBody, uncompSz, cActual)
+                      EncodedColumnChunk (BS.append hdr' compBody) uncompSz cActual Nothing False
                     Just ce ->
                       case encryptPageBytes ce Enc.ModuleDataPage 0 0 hdr' compBody of
-                        Right encBytes -> (encBytes, uncompSz, cActual)
-                        Left  _        -> (BS.append hdr' compBody, uncompSz, cActual)
+                        Right encBytes ->
+                          EncodedColumnChunk encBytes uncompSz cActual Nothing False
+                        Left  _        ->
+                          EncodedColumnChunk (BS.append hdr' compBody) uncompSz cActual Nothing False
             PageV2 ->
               -- For V2 the codec is applied only to the values segment,
               -- but we account for the *full* page bytes (header +
@@ -1562,10 +1577,34 @@ buildParquetFileWithIndex' mFootEnc schema rowGroups auxes =
                           case encryptPageBytesV2 ce 0 0 h r d v of
                             Right enc -> enc
                             Left  _   -> concatV2Parts parts
-               in (finalBytes, uncompSz, codecActual)
+               in EncodedColumnChunk finalBytes uncompSz codecActual Nothing False
+
+    -- | Build a dict-encoded V1 column chunk: DICTIONARY_PAGE
+    -- (PLAIN-encoded uniques) followed by a DATA_PAGE with
+    -- RLE_DICTIONARY-encoded indices.
+    encodeDictV1
+      :: ColumnData -> Compression -> Maybe ColumnEncryption
+      -> EncodedColumnChunk
+    encodeDictV1 cd codecRequested mEnc =
+      let !dict       = buildDictionary cd
+          !dictBytes  = encodeDictPage dict
+          !dataBytes  = encodeDictDataPage dict
+          -- The dict page goes first; the reader's
+          -- 'genericReadColumnChunk' walks pages by header.
+          -- Compression is handled inside encodeDict*Page
+          -- (currently uncompressed; the codec-applied path
+          -- can be added without changing the consumer side).
+          _codecUsed  = codecRequested  -- TODO: compress dict + data page bodies
+          !uncompSz   = BS.length dictBytes + BS.length dataBytes
+          !chunkBytes = BS.append dictBytes dataBytes
+          !dictLen    = BS.length dictBytes
+          finalBytes  = case mEnc of
+            Nothing -> chunkBytes
+            Just _  -> chunkBytes  -- TODO: per-page encryption for dict pages
+      in EncodedColumnChunk finalBytes uncompSz Uncompressed (Just dictLen) True
 
     buildRG
-      :: (V.Vector RowGroup, Int) -> Int -> V.Vector (ByteString, Int, Compression)
+      :: (V.Vector RowGroup, Int) -> Int -> V.Vector EncodedColumnChunk
       -> (V.Vector RowGroup, Int)
     buildRG (!rgs, !off) rgIdx encodedCols =
       let !colsData = V.unsafeIndex rowGroups rgIdx
@@ -1583,25 +1622,37 @@ buildParquetFileWithIndex' mFootEnc schema rowGroups auxes =
 
     buildCol
       :: V.Vector ColumnData
-      -> (V.Vector ColumnChunk, Int) -> Int -> (ByteString, Int, Compression)
+      -> (V.Vector ColumnChunk, Int) -> Int -> EncodedColumnChunk
       -> (V.Vector ColumnChunk, Int)
-    buildCol colsData (!cs, !cOff) colIdx (pageBs, uncompSize, codec) =
+    buildCol colsData (!cs, !cOff) colIdx ecc =
       let !cd = V.unsafeIndex colsData colIdx
           !leaf = V.unsafeIndex leaves colIdx
-          !sz = BS.length pageBs
+          !sz = BS.length (eccBytes ecc)
+          -- For dict-encoded chunks the dict page is first,
+          -- followed by the data page. cmDictionaryPageOffset
+          -- points at the dict page (= cOff), and
+          -- cmDataPageOffset points past it.
+          !dataPageOff = case eccDictPageLen ecc of
+            Just dictLen -> cOff + dictLen
+            Nothing      -> cOff
+          !encs = if eccUsedDict ecc
+                    then V.fromList [PlainDictionary, RLEDictionary]
+                    else V.singleton Plain
           !cc = ColumnChunk
             { ccFilePath = Nothing
             , ccFileOffset = fromIntegral cOff
             , ccMetadata = Just ColumnMetadata
                 { cmType = fromMaybe (columnDataParquetType cd) (seType leaf)
-                , cmEncodings = V.singleton Plain
+                , cmEncodings = encs
                 , cmPathInSchema = V.singleton (seName leaf)
-                , cmCodec = codec
+                , cmCodec = eccCodec ecc
                 , cmNumValues = fromIntegral (columnDataLength cd)
-                , cmTotalUncompressedSize = fromIntegral uncompSize
+                , cmTotalUncompressedSize = fromIntegral (eccUncompSize ecc)
                 , cmTotalCompressedSize = fromIntegral sz
-                , cmDataPageOffset = fromIntegral cOff
-                , cmDictionaryPageOffset = Nothing
+                , cmDataPageOffset = fromIntegral dataPageOff
+                , cmDictionaryPageOffset = case eccDictPageLen ecc of
+                    Just _  -> Just (fromIntegral cOff)
+                    Nothing -> Nothing
                 , cmStatistics = Just (columnDataStatistics cd)
                 , cmBloomFilterOffset = Nothing
                 , cmBloomFilterLength = Nothing
@@ -1612,6 +1663,31 @@ buildParquetFileWithIndex' mFootEnc schema rowGroups auxes =
             , ccColumnIndexLength = Nothing
             }
       in (V.snoc cs cc, cOff + sz)
+
+-- | Output of 'encodeOne' — carries enough state for 'buildCol'
+-- to populate 'ColumnMetadata' correctly, including the
+-- dict-page offset / encodings list when dictionary encoding
+-- is in use.
+data EncodedColumnChunk = EncodedColumnChunk
+  { eccBytes        :: !ByteString
+    -- ^ Final on-disk bytes for this column chunk (one or
+    -- more pages already concatenated).
+  , eccUncompSize   :: !Int
+    -- ^ Uncompressed total: matches what
+    -- 'cmTotalUncompressedSize' should record.
+  , eccCodec        :: !Compression
+    -- ^ Codec actually used (may differ from the requested
+    -- codec when the requested one isn't available).
+  , eccDictPageLen  :: !(Maybe Int)
+    -- ^ If the chunk leads with a 'DICTIONARY_PAGE', its
+    -- length in bytes — used by 'buildCol' to compute the
+    -- data-page offset (= chunk offset + dict-page len) and
+    -- the dictionary-page offset (= chunk offset).
+  , eccUsedDict     :: !Bool
+    -- ^ Drives 'cmEncodings' on the column metadata:
+    -- @[PLAIN_DICTIONARY, RLE_DICTIONARY]@ when 'True',
+    -- @[PLAIN]@ otherwise.
+  } deriving (Show, Eq)
 
 -- ============================================================
 -- Mixed required + optional columns

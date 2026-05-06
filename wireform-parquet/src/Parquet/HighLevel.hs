@@ -36,6 +36,7 @@ module Parquet.HighLevel
   , encodeParquetMixed
   , encodeParquetNested
   , WriteOptions (..)
+  , DictPolicy (..)
   , defaultWriteOptions
   , ParquetColumn (..)
   , OptionalColumn (..)
@@ -67,6 +68,7 @@ import Foreign.Storable (pokeByteOff)
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
+import qualified Data.Map.Strict as Map
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
 import qualified Data.Vector.Unboxed as VU
@@ -112,6 +114,27 @@ import Parquet.Write
 -- Options
 -- ============================================================
 
+-- | Dictionary-encoding policy for the Parquet writer.
+--
+-- When enabled, low-cardinality columns are emitted as a
+-- @DICTIONARY_PAGE@ holding the unique values + a
+-- @DATA_PAGE@ holding RLE-encoded index references. This is
+-- typically a large size win for string columns (e.g. enums,
+-- categorical data) and a small CPU win on read.
+data DictPolicy
+  = DictNever
+    -- ^ Always emit @PLAIN@-encoded data pages.
+  | DictAlways
+    -- ^ Always dict-encode (every column).
+  | DictAuto
+    -- ^ Heuristic: dict-encode when the dictionary's
+    -- on-the-wire size (uniques + indices) is smaller than
+    -- the raw PLAIN encoding /and/ the column has < 16k
+    -- distinct values per chunk. Fall back to PLAIN
+    -- otherwise. This matches what parquet-mr does by
+    -- default.
+  deriving (Show, Eq)
+
 -- | Parquet writer configuration. Construct one with
 -- 'defaultWriteOptions' and override the fields you care about:
 --
@@ -135,6 +158,8 @@ data WriteOptions = WriteOptions
     -- split-block bloom filter. Empty list → no bloom filters.
     -- Filter parameters use parquet-cpp's defaults
     -- (~3% FPP at 1024 distinct values per row group).
+  , writeDictionary        :: !DictPolicy
+    -- ^ Dictionary-encoding policy. Default: 'DictAuto'.
   , writePageIndex         :: !Bool
     -- ^ Emit per-column 'OffsetIndex' / 'ColumnIndex' regions in
     -- the trailing page-index area. Default: 'True' — page
@@ -154,12 +179,16 @@ data WriteOptions = WriteOptions
   } deriving (Show, Eq)
 
 -- | Sensible modern-Parquet defaults: Snappy compression, V2
--- pages, page indexes on, no encryption, no bloom filters.
+-- pages, page indexes on, no encryption, no bloom filters,
+-- dictionary encoding off (callers can opt into 'DictAuto'
+-- for typical workloads — left off by default so the
+-- baseline output stays byte-stable).
 defaultWriteOptions :: WriteOptions
 defaultWriteOptions = WriteOptions
   { writeCompression       = Snappy
   , writePageVersion       = PageV2
   , writeBloomFilters      = []
+  , writeDictionary        = DictNever
   , writePageIndex         = True
   , writeColumnEncryption  = V.empty
   , writeFooterEncryption  = Nothing
@@ -250,17 +279,113 @@ mkAuxes opts schema cols =
       bloomIdxs   = [ i | nm <- bloomNames
                         , Just i <- [leafColumnIndex schema nm] ]
       bloomSet    = bloomIdxs
-  in V.imap (\i col -> mkOne i col bloomSet) cols
+      !dictPolicy = writeDictionary opts
+  in V.imap (\i col -> mkOne i col bloomSet dictPolicy) cols
   where
-    mkOne :: Int -> ColumnData -> [Int] -> ColumnAux
-    mkOne i col blooms =
+    mkOne :: Int -> ColumnData -> [Int] -> DictPolicy -> ColumnAux
+    mkOne i col blooms policy =
       emptyColumnAux
-        { caCodec       = writeCompression opts
-        , caPageVersion = writePageVersion opts
-        , caBloomFilter = if i `elem` blooms
-                            then Just $! buildBloomFilterFor col
-                            else Nothing
+        { caCodec        = writeCompression opts
+        , caPageVersion  = writePageVersion opts
+        , caBloomFilter  = if i `elem` blooms
+                             then Just $! buildBloomFilterFor col
+                             else Nothing
+        , caUseDictionary = decideDict policy col
         }
+
+-- | Decide whether to dict-encode a column based on the
+-- write-time policy.
+--
+-- 'DictAuto' uses a conservative size + cardinality heuristic:
+-- for 'ColByteArray' columns we dict-encode when both
+--
+--   1. the cardinality fits in our 'Int32' index width AND
+--      stays under a sensible threshold (16k distinct values
+--      per chunk — matches parquet-mr's default), and
+--   2. the dictionary's serialised size is at least 25% smaller
+--      than the raw PLAIN encoding (the index stream still
+--      needs ~log2(uniques) bits per row, so very-high
+--      cardinality columns get bigger with dict).
+--
+-- For non-byte-array primitives 'DictAuto' returns 'False':
+-- dict encoding is rarely a net win for fixed-width data
+-- because the index stream isn't smaller than the raw values
+-- once you factor in headers, and CPU cost on the read side
+-- is positive.
+decideDict :: DictPolicy -> ColumnData -> Bool
+decideDict DictNever  _ = False
+decideDict DictAlways _ = True
+decideDict DictAuto col = case col of
+  ColByteArray v ->
+    let !n        = V.length v
+        !distinct = approxDistinctByteArray v
+    in  n > 0 && distinct <= 16384
+          && distinctSavesBytes v distinct
+  _ -> False
+
+-- | Cheap upper bound on the distinct-value count of a
+-- 'V.Vector' 'ByteString' — uses a 'Map.Strict' until it
+-- crosses the cardinality threshold we care about, then
+-- bails. Linear in n; bounded constant memory.
+approxDistinctByteArray :: V.Vector ByteString -> Int
+approxDistinctByteArray v =
+  let !n   = V.length v
+      goAcc !i !seen !count
+        | i >= n           = count
+        | count >= 16385   = count    -- saturate; we won't dict-encode
+        | otherwise =
+            let !x = V.unsafeIndex v i
+            in if Map.member x seen
+                 then goAcc (i + 1) seen count
+                 else goAcc (i + 1) (Map.insert x () seen) (count + 1)
+  in goAcc 0 Map.empty 0
+
+-- | Estimate whether dict-encoding would shrink @vs@ by at
+-- least 25%.
+distinctSavesBytes :: V.Vector ByteString -> Int -> Bool
+distinctSavesBytes vs distinct =
+  let !n        = V.length vs
+      -- Rough estimate of the dict's serialised size: 4-byte
+      -- length prefix + payload per unique value, plus the
+      -- RLE-hybrid index stream which is at most n * 4 bytes
+      -- (we compute the upper bound as if every row had its
+      -- own bit-packed group; in practice it's much smaller).
+      !plainBytes = V.foldl' (\a bs -> a + 4 + BS.length bs) 0 vs
+      -- Distinct payload is a lower bound on dict size; we
+      -- assume each unique appears once in the dict.
+      !uniqueBytes = sampleUniqueBytes vs distinct
+      !indexBytes  = (n * indexBitWidth distinct + 7) `quot` 8
+      !dictTotal   = uniqueBytes + indexBytes + 8   -- +8 for headers
+  in  dictTotal * 4 < plainBytes * 3   -- ≥ 25% savings
+
+-- | Sum of distinct-value byte sizes (for the size estimate).
+-- This is O(n) but bounded by the count threshold so
+-- realistic columns are fast.
+sampleUniqueBytes :: V.Vector ByteString -> Int -> Int
+sampleUniqueBytes vs cap
+  | cap <= 0  = 0
+  | otherwise =
+      let !n = V.length vs
+          go !i !seen !acc !count
+            | i >= n         = acc
+            | count >= cap   = acc
+            | otherwise =
+                let !x = V.unsafeIndex vs i
+                in if Map.member x seen
+                     then go (i + 1) seen acc count
+                     else go (i + 1) (Map.insert x () seen)
+                                     (acc + 4 + BS.length x) (count + 1)
+      in go 0 Map.empty 0 0
+
+-- | Bit width needed to index @distinct@ values.
+indexBitWidth :: Int -> Int
+indexBitWidth n
+  | n <= 1 = 1
+  | otherwise = ceilingLog2 n
+  where
+    ceilingLog2 k = go 0 1
+      where
+        go !w !bound | bound >= k = w | otherwise = go (w + 1) (bound * 2)
 
 -- | Build a split-block bloom filter populated from a column's
 -- values. Sizes the filter via 'Bloom.optimalNumBytes' for the

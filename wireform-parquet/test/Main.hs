@@ -231,7 +231,7 @@ main = do
                 , ciRepetitionLevelHistograms = Nothing
                 , ciDefinitionLevelHistograms = Nothing
                 }
-      aux   = ColumnAux (Just bf) (Just oi) (Just ci) Uncompressed PageV1 Nothing
+      aux   = ColumnAux (Just bf) (Just oi) (Just ci) Uncompressed PageV1 Nothing False
       fIdx  = buildParquetFileWithIndex schemaIdx
                 (V.singleton (V.singleton vsIdx))
                 (V.singleton (V.singleton aux))
@@ -306,12 +306,12 @@ main = do
   -- Per-column compression: GZip is always available; round-trip a column
   -- through the writer and confirm the metadata records the codec.
   let auxesGzip = V.singleton (V.fromList
-        [ ColumnAux Nothing Nothing Nothing GZip PageV1 Nothing
-        , ColumnAux Nothing Nothing Nothing GZip PageV1 Nothing
-        , ColumnAux Nothing Nothing Nothing Uncompressed PageV1 Nothing  -- floats stay raw
-        , ColumnAux Nothing Nothing Nothing GZip PageV1 Nothing
-        , ColumnAux Nothing Nothing Nothing Uncompressed PageV1 Nothing
-        , ColumnAux Nothing Nothing Nothing GZip PageV1 Nothing
+        [ ColumnAux Nothing Nothing Nothing GZip PageV1 Nothing False
+        , ColumnAux Nothing Nothing Nothing GZip PageV1 Nothing False
+        , ColumnAux Nothing Nothing Nothing Uncompressed PageV1 Nothing False  -- floats stay raw
+        , ColumnAux Nothing Nothing Nothing GZip PageV1 Nothing False
+        , ColumnAux Nothing Nothing Nothing Uncompressed PageV1 Nothing False
+        , ColumnAux Nothing Nothing Nothing GZip PageV1 Nothing False
         ])
       fGz = buildParquetFileWithIndex schemaTyped (V.singleton cols) auxesGzip
   case loadParquetFile fGz of
@@ -349,7 +349,7 @@ main = do
         , SchemaElement "x" (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing
         ]
       v2Vals = ColInt32 (VP.fromList [(11 :: Int32), 22, 33, 44])
-      v2Aux  = ColumnAux Nothing Nothing Nothing Uncompressed PageV2 Nothing
+      v2Aux  = ColumnAux Nothing Nothing Nothing Uncompressed PageV2 Nothing False
       v2File = buildParquetFileWithIndex v2Schema
                  (V.singleton (V.singleton v2Vals))
                  (V.singleton (V.singleton v2Aux))
@@ -417,7 +417,7 @@ main = do
         [ SchemaElement "schema" Nothing Nothing (Just 1) Nothing Nothing Nothing
         , SchemaElement "v" (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing
         ]
-      encAux alg = ColumnAux Nothing Nothing Nothing Uncompressed PageV1 (Just (ce alg))
+      encAux alg = ColumnAux Nothing Nothing Nothing Uncompressed PageV1 (Just (ce alg)) False
       encFile alg = buildParquetFileWithIndex encSchema
                       (V.singleton (V.singleton encVals))
                       (V.singleton (V.singleton (encAux alg)))
@@ -584,9 +584,9 @@ main = do
     -- index aux must produce a different file from the same build
     -- without the encryption (i.e. the auxes really got encrypted).
     let auxEnc = ColumnAux (Just bfx) (Just oix) (Just cix)
-                           Uncompressed PageV1 (Just (ce Enc.AesGcmV1))
+                           Uncompressed PageV1 (Just (ce Enc.AesGcmV1)) False
         auxPlain = ColumnAux (Just bfx) (Just oix) (Just cix)
-                             Uncompressed PageV1 Nothing
+                             Uncompressed PageV1 Nothing False
         encFileEnc = buildParquetFileWithIndex encSchema
                        (V.singleton (V.singleton encVals))
                        (V.singleton (V.singleton auxEnc))
@@ -648,7 +648,7 @@ main = do
   -- Whole-file V2 + encryption: ColumnAux carries both PageV2 and
   -- ColumnEncryption, so buildParquetFileWithIndex must dispatch
   -- through encryptPageBytesV2 internally.
-  let v2EncAux alg = ColumnAux Nothing Nothing Nothing Uncompressed PageV2 (Just (ce alg))
+  let v2EncAux alg = ColumnAux Nothing Nothing Nothing Uncompressed PageV2 (Just (ce alg)) False
       v2EncFile alg = buildParquetFileWithIndex encSchema
                         (V.singleton (V.singleton encVals))
                         (V.singleton (V.singleton (v2EncAux alg)))
@@ -661,7 +661,7 @@ main = do
        /= buildParquetFileWithIndex encSchema
             (V.singleton (V.singleton encVals))
             (V.singleton (V.singleton
-              (ColumnAux Nothing Nothing Nothing Uncompressed PageV2 Nothing))))
+              (ColumnAux Nothing Nothing Nothing Uncompressed PageV2 Nothing False))))
 
   -- Optional column page: definition levels + present-only PLAIN values.
   let optCol = OptInt32 (V.fromList [Just 1, Nothing, Just 3, Nothing, Just 5])
