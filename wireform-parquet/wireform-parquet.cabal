@@ -234,6 +234,19 @@ executable parquet-profile
     text >= 2.0 && < 2.2,
     vector >= 0.13 && < 0.14
 
+benchmark parquet-dict
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: bench
+  main-is: DictBench.hs
+  ghc-options: -O2 -threaded -rtsopts "-with-rtsopts=-A32m"
+  build-depends:
+    base >= 4.16 && < 5,
+    wireform-parquet,
+    criterion >= 1.5 && < 1.7,
+    deepseq >= 1.4 && < 1.6,
+    vector >= 0.13 && < 0.14
+
 benchmark parquet-bloom
   import: defaults
   type: exitcode-stdio-1.0

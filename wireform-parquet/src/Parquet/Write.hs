@@ -86,6 +86,7 @@ import Foreign.Ptr (castPtr)
 import Data.Bits (setBit, zeroBits)
 import Data.Int (Int16, Int32, Int64)
 import qualified Data.Map.Strict as Map
+import Control.Monad.ST (runST)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Vector as V
@@ -819,37 +820,95 @@ data Dictionary = Dictionary
 
 -- | Compute a dictionary for a 'ColumnData' by deduplicating the input.
 -- Order of unique values follows their first appearance.
+--
+-- Implementation note (perf): the previous version went
+--
+--   orderedUniq xs0 = V.fromList (go (V.toList xs0) [])
+--     where go (x:xs) acc | x \`elem\` acc = go xs acc | ...
+--
+-- which is O(n²) in the column length (each row scans the
+-- accumulator), then walked the uniques again with
+-- @lookup x (zip uniques [0 ..])@ per row to assign indices —
+-- another O(n × |uniques|). For a 100k-row column with 1000
+-- unique values the dictionary build was ~100 M comparisons.
+--
+-- Plus the original wrapped each primitive vector through
+-- @V.fromList (VP.toList v)@ — a full primitive-to-list and
+-- list-to-boxed conversion just to feed the generic helper.
+--
+-- The new shape uses a Data.Map.Strict for lookup
+-- (O(log |uniques|) per row → O(n log u) total), writes the
+-- index stream directly into a mutable VP.Vector, and works
+-- on the source vector type without round-tripping through a
+-- list.
 buildDictionary :: ColumnData -> Dictionary
 buildDictionary = \case
-  ColInt32 v     -> generic (V.fromList (VP.toList v)) (\xs -> ColInt32 (VP.fromList xs))
-  ColInt64 v     -> generic (V.fromList (VP.toList v)) (\xs -> ColInt64 (VP.fromList xs))
-  ColFloat v     -> generic (V.fromList (VP.toList v)) (\xs -> ColFloat (VP.fromList xs))
-  ColDouble v    -> generic (V.fromList (VP.toList v)) (\xs -> ColDouble (VP.fromList xs))
-  ColBool v      -> generic (V.fromList (V.toList v))  (\xs -> ColBool  (V.fromList xs))
-  ColByteArray v -> generic v                          (\xs -> ColByteArray (V.fromList xs))
-  where
-    generic
-      :: (Eq a)
-      => V.Vector a
-      -> ([a] -> ColumnData)
-      -> Dictionary
-    generic xs reify =
-      let !uniques = V.toList (V.uniq (V.fromList (V.toList (orderedUniq xs))))
-          !lookupIdx = \x ->
-            case lookup x (zip uniques [0 ..]) of
-              Just i  -> fromIntegral (i :: Int) :: Int32
-              Nothing -> 0
-          !indices = VP.fromList (map lookupIdx (V.toList xs))
-       in Dictionary { dictUniques = reify uniques, dictIndices = indices }
+  ColInt32 v     -> primDict  v   ColInt32
+  ColInt64 v     -> primDict  v   ColInt64
+  ColFloat v     -> primDict  v   ColFloat
+  ColDouble v    -> primDict  v   ColDouble
+  ColBool v      -> boxedDict v   ColBool
+  ColByteArray v -> boxedDict v   ColByteArray
 
-    -- Stable order-of-first-appearance unique extraction.
-    orderedUniq :: Eq a => V.Vector a -> V.Vector a
-    orderedUniq xs0 = V.fromList (go (V.toList xs0) [])
-      where
-        go [] acc = reverse acc
-        go (x:xs) acc
-          | x `elem` acc = go xs acc
-          | otherwise    = go xs (x : acc)
+-- | Dictionary builder for primitive vectors.
+{-# INLINE primDict #-}
+primDict
+  :: (VP.Prim a, Ord a)
+  => VP.Vector a
+  -> (VP.Vector a -> ColumnData)
+  -> Dictionary
+primDict xs reify =
+  let !n = VP.length xs
+      (uniqRev, indices) = runST $ do
+        mv <- MVP.unsafeNew n
+        let go !i !dict !rev !next
+              | i >= n = pure (rev, next)
+              | otherwise = do
+                  let !x = VP.unsafeIndex xs i
+                  case Map.lookup x dict of
+                    Just k  -> do
+                      MVP.unsafeWrite mv i (fromIntegral k :: Int32)
+                      go (i + 1) dict rev next
+                    Nothing -> do
+                      MVP.unsafeWrite mv i (fromIntegral next :: Int32)
+                      go (i + 1) (Map.insert x next dict) (x : rev) (next + 1)
+        (revFinal, _) <- go 0 Map.empty [] (0 :: Int)
+        idx <- VP.unsafeFreeze mv
+        pure (revFinal, idx)
+  in Dictionary
+       { dictUniques = reify (VP.fromList (reverse uniqRev))
+       , dictIndices = indices
+       }
+
+-- | Dictionary builder for boxed vectors (Bool, ByteString).
+{-# INLINE boxedDict #-}
+boxedDict
+  :: Ord a
+  => V.Vector a
+  -> (V.Vector a -> ColumnData)
+  -> Dictionary
+boxedDict xs reify =
+  let !n = V.length xs
+      (uniqRev, indices) = runST $ do
+        mv <- MVP.unsafeNew n
+        let go !i !dict !rev !next
+              | i >= n = pure (rev, next)
+              | otherwise = do
+                  let !x = V.unsafeIndex xs i
+                  case Map.lookup x dict of
+                    Just k  -> do
+                      MVP.unsafeWrite mv i (fromIntegral k :: Int32)
+                      go (i + 1) dict rev next
+                    Nothing -> do
+                      MVP.unsafeWrite mv i (fromIntegral next :: Int32)
+                      go (i + 1) (Map.insert x next dict) (x : rev) (next + 1)
+        (revFinal, _) <- go 0 Map.empty [] (0 :: Int)
+        idx <- VP.unsafeFreeze mv
+        pure (revFinal, idx)
+  in Dictionary
+       { dictUniques = reify (V.fromList (reverse uniqRev))
+       , dictIndices = indices
+       }
 
 -- | Encode a 'Dictionary' as a @DICTIONARY_PAGE@.
 encodeDictPage :: Dictionary -> ByteString
