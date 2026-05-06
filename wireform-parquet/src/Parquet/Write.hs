@@ -945,6 +945,34 @@ encodeDictDataPage d =
         }
    in encodePageHeader hdr <> body
 
+-- | V2 variant of 'encodeDictDataPage'. Same body layout
+-- (1 byte bit-width + RLE-hybrid indices) but wrapped in a
+-- 'DATA_PAGE_V2' header with explicit (zero) rep/def lengths
+-- so V2-only readers (parquet-mr's default since 2.0) accept
+-- the dict-encoded data page.
+encodeDictDataPageV2 :: Dictionary -> ByteString
+encodeDictDataPageV2 d =
+  let !indices = dictIndices d
+      !numIndices = VP.length indices
+      !uniqueCount = columnDataLength (dictUniques d)
+      !bw = LE.bitWidthFor (max 0 (uniqueCount - 1))
+      !indexStream = LE.encodeRLEHybrid bw indices
+      !body = BS.singleton (fromIntegral bw) <> indexStream
+      !hdr = PageHeader
+        { phType = PtDataPageV2 DataPageHeaderV2
+            { dph2NumValues    = fromIntegral numIndices
+            , dph2NumNulls     = 0
+            , dph2NumRows      = fromIntegral numIndices
+            , dph2Encoding     = parquetEncodingRleDictionary
+            , dph2DefLevelsLen = 0
+            , dph2RepLevelsLen = 0
+            , dph2IsCompressed = False
+            }
+        , phUncompressedPageSize = Just (fromIntegral (BS.length body))
+        , phCompressedPageSize   = Just (fromIntegral (BS.length body))
+        }
+   in encodePageHeader hdr <> body
+
 parquetEncodingPlainDictionary :: Int32
 parquetEncodingPlainDictionary = 2
 
@@ -1512,12 +1540,9 @@ buildParquetFileWithIndex' mFootEnc schema rowGroups auxes =
           !pageVer        = maybe PageV1 caPageVersion mAux
           !mEnc           = mAux >>= caEncryption
           !useDict        = maybe False caUseDictionary mAux
-                            -- Dict encoding currently only emits via the
-                            -- V1 page format; fall through to PLAIN for
-                            -- V2 + dict requests.
-                            && pageVer == PageV1
        in case pageVer of
-            _ | useDict -> encodeDictV1 cd codecRequested mEnc
+            _ | useDict ->
+                  encodeDictPageVer pageVer cd codecRequested mEnc
             PageV1 ->
               let (hdr, body)         = encodeColumnDataPageParts cd
                   (compBody, cActual) = case Compress.compressPageBytes codecRequested body of
@@ -1579,16 +1604,19 @@ buildParquetFileWithIndex' mFootEnc schema rowGroups auxes =
                             Left  _   -> concatV2Parts parts
                in EncodedColumnChunk finalBytes uncompSz codecActual Nothing False
 
-    -- | Build a dict-encoded V1 column chunk: DICTIONARY_PAGE
-    -- (PLAIN-encoded uniques) followed by a DATA_PAGE with
-    -- RLE_DICTIONARY-encoded indices.
-    encodeDictV1
-      :: ColumnData -> Compression -> Maybe ColumnEncryption
+    -- | Build a dict-encoded column chunk: DICTIONARY_PAGE
+    -- (PLAIN-encoded uniques) followed by a DATA_PAGE / V2
+    -- with RLE_DICTIONARY-encoded indices, depending on the
+    -- requested page version.
+    encodeDictPageVer
+      :: PageVersion -> ColumnData -> Compression -> Maybe ColumnEncryption
       -> EncodedColumnChunk
-    encodeDictV1 cd codecRequested mEnc =
+    encodeDictPageVer pageVer cd codecRequested mEnc =
       let !dict       = buildDictionary cd
           !dictBytes  = encodeDictPage dict
-          !dataBytes  = encodeDictDataPage dict
+          !dataBytes  = case pageVer of
+                          PageV1 -> encodeDictDataPage dict
+                          PageV2 -> encodeDictDataPageV2 dict
           -- The dict page goes first; the reader's
           -- 'genericReadColumnChunk' walks pages by header.
           -- Compression is handled inside encodeDict*Page
