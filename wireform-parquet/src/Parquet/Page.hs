@@ -20,12 +20,10 @@ module Parquet.Page
   ) where
 
 import Data.ByteString (ByteString)
-import Data.Int (Int16, Int32)
-import qualified Data.Vector as V
+import qualified Data.ByteString as BS
+import Data.Int (Int32)
 
-import Parquet.Thrift.Schema
-import qualified Thrift.Value as TV
-import Thrift.Decode (decodeCompactFrom)
+import Thrift.Wire
 
 -- | Discriminated union over Parquet page types. Mirrors the
 -- @PageType@ enum in @parquet.thrift@ (DATA_PAGE=0, INDEX_PAGE=1,
@@ -90,118 +88,227 @@ data DataPageHeaderV2 = DataPageHeaderV2
   , dph2IsCompressed :: !Bool
   } deriving stock (Show, Eq)
 
+-- | Direct Thrift-Compact decoder for 'PageHeader'.
+--
+-- Was previously a generic @decodeCompactFrom@ that built a full
+-- @TV.Value@ AST then walked it. For files with many pages
+-- (column chunks with K data pages → K calls per chunk) the
+-- per-call AST cost (V.fromList, ~20 fields × allocation) was
+-- a measurable slice of the read path.
+--
+-- This direct decoder walks the wire bytes once and writes
+-- straight into a 'PageHeader' record. No 'TV.Value' is ever
+-- allocated; nested @DataPageHeader@ / @DictionaryPageHeader@
+-- / @DataPageHeaderV2@ sub-structs decode the same way.
+-- Unknown / spec-optional fields (CRC, statistics) are
+-- skipped via 'skipCompactValue'.
 readPageHeaderAt :: ByteString -> Int -> Either String (PageHeader, Int)
-readPageHeaderAt bs off = do
-  (v, endOff) <- decodeCompactFrom bs off
-  ph <- pageHeaderFromThrift v
-  pure (ph, endOff)
+readPageHeaderAt !bs !off0 =
+  go off0 0 (-1) Nothing Nothing initialPayload
+  where
+    -- Sentinel for an as-yet-undecoded page-type tag. Final
+    -- assembly fails if no PageType_Type field appeared.
+    !initialPayload = NoBody
 
-pageHeaderFromThrift :: TV.Value -> Either String PageHeader
-pageHeaderFromThrift (TV.Struct fields) = do
-  let fm = V.toList fields
-  ty <- requireI32 fm "PageHeader.type" $ \case
-    PageHeader_Type v -> Just v
-    _                 -> Nothing
-  let unc = findField fm $ \case
-        PageHeader_UncompressedSize v -> Just v
-        _                             -> Nothing
-      comp = findField fm $ \case
-        PageHeader_CompressedSize v -> Just v
-        _                           -> Nothing
-  pageType <- case ty of
-    0 -> case findField fm (\case
-           PageHeader_DataPageHeader fs -> Just fs
-           _                            -> Nothing) of
-      Just fs -> PtDataPage <$> dataPageHeaderFromThrift (TV.Struct fs)
-      Nothing -> Left
-        "Parquet.Page: DATA_PAGE without DataPageHeader (field 5)"
-    1 -> Right PtIndexPage
-    2 -> case findField fm (\case
-           PageHeader_DictionaryPageHeader fs -> Just fs
-           _                                  -> Nothing) of
-      Just fs -> PtDictionaryPage <$> dictionaryPageHeaderFromThrift (TV.Struct fs)
-      Nothing -> Left
-        "Parquet.Page: DICTIONARY_PAGE without DictionaryPageHeader (field 7)"
-    3 -> case findField fm (\case
-           PageHeader_DataPageHeaderV2 fs -> Just fs
-           _                              -> Nothing) of
-      Just fs -> PtDataPageV2 <$> dataPageHeaderV2FromThrift (TV.Struct fs)
-      Nothing -> Left
-        "Parquet.Page: DATA_PAGE_V2 without DataPageHeaderV2 (field 8)"
-    _ -> Left ("Parquet.Page: unknown PageType tag " ++ show ty)
-  pure PageHeader
-    { phType = pageType
-    , phUncompressedPageSize = unc
-    , phCompressedPageSize = comp
-    }
-pageHeaderFromThrift _ = Left "Parquet.Page: expected PageHeader struct"
+    go !off !lastFid !ty !mUnc !mComp !pld =
+      case tCompDecodeFieldBegin bs off lastFid of
+        Nothing -> Left "Parquet.Page: malformed PageHeader field header"
+        Just (TT_STOP, _, off', _) -> assemble off' ty mUnc mComp pld
+        Just (tt, fid, off', boolVal) -> case (fid, tt) of
+          (1, TT_I32) -> step32 off' $ \v o' -> go o' fid v mUnc mComp pld
+          (2, TT_I32) -> step32 off' $ \v o' -> go o' fid ty (Just v) mComp pld
+          (3, TT_I32) -> step32 off' $ \v o' -> go o' fid ty mUnc (Just v) pld
+          (5, TT_STRUCT) -> case decodeDataPageHeader bs off' of
+            Left e -> Left e
+            Right (dph, o') -> go o' fid ty mUnc mComp (DataBody dph)
+          (7, TT_STRUCT) -> case decodeDictionaryPageHeader bs off' of
+            Left e -> Left e
+            Right (dph, o') -> go o' fid ty mUnc mComp (DictBody dph)
+          (8, TT_STRUCT) -> case decodeDataPageHeaderV2 bs off' of
+            Left e -> Left e
+            Right (dph, o') -> go o' fid ty mUnc mComp (V2Body dph)
+          _ -> case skipCompactValue tt boolVal bs off' of
+            Nothing -> Left "Parquet.Page: failed to skip unknown PageHeader field"
+            Just o' -> go o' fid ty mUnc mComp pld
 
-dataPageHeaderFromThrift :: TV.Value -> Either String DataPageHeader
-dataPageHeaderFromThrift (TV.Struct fields) = do
-  let fm = V.toList fields
-  n <- requireI32 fm "DataPageHeader.num_values" $ \case
-    DataPageHeader_NumValues v -> Just v
-    _                          -> Nothing
-  -- encoding defaults to 0 (PLAIN) when absent, per historic writers.
-  let enc = maybe 0 id $ findField fm $ \case
-        DataPageHeader_Encoding v -> Just v
-        _                         -> Nothing
-  pure DataPageHeader {dphNumValues = n, dphEncoding = enc}
-dataPageHeaderFromThrift _ = Left "Parquet.Page: expected DataPageHeader struct"
+    step32 off' cont = case tCompDecodeI32 bs off' of
+      Nothing -> Left "Parquet.Page: malformed I32 field in PageHeader"
+      Just (v, o') -> cont v o'
 
-dictionaryPageHeaderFromThrift :: TV.Value -> Either String DictionaryPageHeader
-dictionaryPageHeaderFromThrift (TV.Struct fields) = do
-  let fm = V.toList fields
-  n <- requireI32 fm "DictionaryPageHeader.num_values" $ \case
-    DictionaryPageHeader_NumValues v -> Just v
-    _                                -> Nothing
-  let enc = maybe 0 id $ findField fm $ \case
-        DictionaryPageHeader_Encoding v -> Just v
-        _                               -> Nothing
-  pure DictionaryPageHeader {dictNumValues = n, dictEncoding = enc}
-dictionaryPageHeaderFromThrift _ = Left "Parquet.Page: expected DictionaryPageHeader struct"
+    assemble !endOff !ty !mUnc !mComp !pld
+      | ty < 0 = Left "Parquet.Page: missing or invalid field PageHeader.type"
+      | otherwise = do
+          pageType <- case ty of
+            0 -> case pld of
+              DataBody dph -> Right (PtDataPage dph)
+              _ -> Left "Parquet.Page: DATA_PAGE without DataPageHeader (field 5)"
+            1 -> Right PtIndexPage
+            2 -> case pld of
+              DictBody dph -> Right (PtDictionaryPage dph)
+              _ -> Left "Parquet.Page: DICTIONARY_PAGE without DictionaryPageHeader (field 7)"
+            3 -> case pld of
+              V2Body dph -> Right (PtDataPageV2 dph)
+              _ -> Left "Parquet.Page: DATA_PAGE_V2 without DataPageHeaderV2 (field 8)"
+            _ -> Left ("Parquet.Page: unknown PageType tag " ++ show ty)
+          Right ( PageHeader
+                    { phType = pageType
+                    , phUncompressedPageSize = mUnc
+                    , phCompressedPageSize = mComp
+                    }
+                , endOff
+                )
 
-dataPageHeaderV2FromThrift :: TV.Value -> Either String DataPageHeaderV2
-dataPageHeaderV2FromThrift (TV.Struct fields) = do
-  let fm = V.toList fields
-  nv <- requireI32 fm "DataPageHeaderV2.num_values" $ \case
-    DataPageHeaderV2_NumValues v -> Just v
-    _                            -> Nothing
-  nn <- requireI32 fm "DataPageHeaderV2.num_nulls" $ \case
-    DataPageHeaderV2_NumNulls v -> Just v
-    _                           -> Nothing
-  nr <- requireI32 fm "DataPageHeaderV2.num_rows" $ \case
-    DataPageHeaderV2_NumRows v -> Just v
-    _                          -> Nothing
-  enc <- requireI32 fm "DataPageHeaderV2.encoding" $ \case
-    DataPageHeaderV2_Encoding v -> Just v
-    _                           -> Nothing
-  dl <- requireI32 fm "DataPageHeaderV2.definition_levels_byte_length" $ \case
-    DataPageHeaderV2_DefinitionLevelsByteLength v -> Just v
-    _                                             -> Nothing
-  rl <- requireI32 fm "DataPageHeaderV2.repetition_levels_byte_length" $ \case
-    DataPageHeaderV2_RepetitionLevelsByteLength v -> Just v
-    _                                             -> Nothing
-  -- is_compressed is optional; spec default is true.
-  let isComp = maybe True id $ findField fm $ \case
-        DataPageHeaderV2_IsCompressed b -> Just b
-        _                               -> Nothing
-  pure DataPageHeaderV2
-    { dph2NumValues    = nv
-    , dph2NumNulls     = nn
-    , dph2NumRows      = nr
-    , dph2Encoding     = enc
-    , dph2DefLevelsLen = dl
-    , dph2RepLevelsLen = rl
-    , dph2IsCompressed = isComp
-    }
-dataPageHeaderV2FromThrift _ = Left "Parquet.Page: expected DataPageHeaderV2 struct"
+-- Internal sum to track which (if any) sub-struct body has been
+-- decoded so far. Avoids the boxed 'Maybe (Either ...)' shape.
+data BodyAcc
+  = NoBody
+  | DataBody {-# UNPACK #-} !DataPageHeader
+  | DictBody {-# UNPACK #-} !DictionaryPageHeader
+  | V2Body   {-# UNPACK #-} !DataPageHeaderV2
 
--- | Specialised @require@ for @Int32@ fields, producing a
--- @Parquet.Page@-flavoured error message.
-requireI32
-  :: [(Int16, TV.Value)] -> String
-  -> ((Int16, TV.Value) -> Maybe Int32) -> Either String Int32
-requireI32 fm name probe = case findField fm probe of
-  Just v  -> Right v
-  Nothing -> Left $ "Parquet.Page: missing or invalid field " ++ name
+decodeDataPageHeader :: ByteString -> Int -> Either String (DataPageHeader, Int)
+decodeDataPageHeader !bs !off0 = go off0 0 (-1) 0
+  where
+    go !off !lastFid !nv !enc =
+      case tCompDecodeFieldBegin bs off lastFid of
+        Nothing -> Left "Parquet.Page: malformed DataPageHeader field header"
+        Just (TT_STOP, _, off', _) ->
+          if nv < 0
+            then Left "Parquet.Page: missing field DataPageHeader.num_values"
+            else Right (DataPageHeader { dphNumValues = nv, dphEncoding = enc }, off')
+        Just (tt, fid, off', boolVal) -> case (fid, tt) of
+          (1, TT_I32) -> case tCompDecodeI32 bs off' of
+            Nothing -> Left "Parquet.Page: malformed DataPageHeader.num_values"
+            Just (v, o') -> go o' fid v enc
+          (2, TT_I32) -> case tCompDecodeI32 bs off' of
+            Nothing -> Left "Parquet.Page: malformed DataPageHeader.encoding"
+            Just (v, o') -> go o' fid nv v
+          _ -> case skipCompactValue tt boolVal bs off' of
+            Nothing -> Left "Parquet.Page: failed to skip unknown DataPageHeader field"
+            Just o' -> go o' fid nv enc
+
+decodeDictionaryPageHeader :: ByteString -> Int -> Either String (DictionaryPageHeader, Int)
+decodeDictionaryPageHeader !bs !off0 = go off0 0 (-1) 0
+  where
+    go !off !lastFid !nv !enc =
+      case tCompDecodeFieldBegin bs off lastFid of
+        Nothing -> Left "Parquet.Page: malformed DictionaryPageHeader field header"
+        Just (TT_STOP, _, off', _) ->
+          if nv < 0
+            then Left "Parquet.Page: missing field DictionaryPageHeader.num_values"
+            else Right (DictionaryPageHeader { dictNumValues = nv, dictEncoding = enc }, off')
+        Just (tt, fid, off', boolVal) -> case (fid, tt) of
+          (1, TT_I32) -> case tCompDecodeI32 bs off' of
+            Nothing -> Left "Parquet.Page: malformed DictionaryPageHeader.num_values"
+            Just (v, o') -> go o' fid v enc
+          (2, TT_I32) -> case tCompDecodeI32 bs off' of
+            Nothing -> Left "Parquet.Page: malformed DictionaryPageHeader.encoding"
+            Just (v, o') -> go o' fid nv v
+          _ -> case skipCompactValue tt boolVal bs off' of
+            Nothing -> Left "Parquet.Page: failed to skip unknown DictionaryPageHeader field"
+            Just o' -> go o' fid nv enc
+
+decodeDataPageHeaderV2 :: ByteString -> Int -> Either String (DataPageHeaderV2, Int)
+decodeDataPageHeaderV2 !bs !off0 = go off0 0 (-1) (-1) (-1) (-1) (-1) (-1) True
+  where
+    -- Mandatory fields are -1-sentinelled; checked at STOP.
+    go !off !lastFid !nv !nn !nr !enc !dl !rl !comp =
+      case tCompDecodeFieldBegin bs off lastFid of
+        Nothing -> Left "Parquet.Page: malformed DataPageHeaderV2 field header"
+        Just (TT_STOP, _, off', _) ->
+          let need x m =
+                if x < 0
+                  then Left ("Parquet.Page: missing field DataPageHeaderV2." ++ m)
+                  else Right ()
+          in do
+            need nv  "num_values"
+            need nn  "num_nulls"
+            need nr  "num_rows"
+            need enc "encoding"
+            need dl  "definition_levels_byte_length"
+            need rl  "repetition_levels_byte_length"
+            Right ( DataPageHeaderV2
+                      { dph2NumValues    = nv
+                      , dph2NumNulls     = nn
+                      , dph2NumRows      = nr
+                      , dph2Encoding     = enc
+                      , dph2DefLevelsLen = dl
+                      , dph2RepLevelsLen = rl
+                      , dph2IsCompressed = comp
+                      }
+                  , off'
+                  )
+        Just (tt, fid, off', boolVal) -> case (fid, tt) of
+          (1, TT_I32) -> step32 off' fid (\v o -> go o fid v nn nr enc dl rl comp)
+          (2, TT_I32) -> step32 off' fid (\v o -> go o fid nv v nr enc dl rl comp)
+          (3, TT_I32) -> step32 off' fid (\v o -> go o fid nv nn v enc dl rl comp)
+          (4, TT_I32) -> step32 off' fid (\v o -> go o fid nv nn nr v dl rl comp)
+          (5, TT_I32) -> step32 off' fid (\v o -> go o fid nv nn nr enc v rl comp)
+          (6, TT_I32) -> step32 off' fid (\v o -> go o fid nv nn nr enc dl v comp)
+          (7, TT_BOOL) -> go off' fid nv nn nr enc dl rl boolVal
+          _ -> case skipCompactValue tt boolVal bs off' of
+            Nothing -> Left "Parquet.Page: failed to skip unknown DataPageHeaderV2 field"
+            Just o' -> go o' fid nv nn nr enc dl rl comp
+
+    step32 off' _ cont = case tCompDecodeI32 bs off' of
+      Nothing -> Left "Parquet.Page: malformed I32 field in DataPageHeaderV2"
+      Just (v, o') -> cont v o'
+
+-- | Skip one compact-protocol value of the given type. Used to
+-- step over fields the consumer doesn't need (CRC, Statistics).
+-- Mirrors the @skipField@ helpers in @Thrift.Decode@ but
+-- returns @Maybe Int@ instead of allocating a 'TV.Value'.
+skipCompactValue :: ThriftType -> Bool -> ByteString -> Int -> Maybe Int
+skipCompactValue !tt !_boolVal !bs !off = case tt of
+  TT_STOP   -> Just off
+  TT_BOOL   -> Just off  -- bool is encoded into the field header
+  TT_BYTE   -> Just (off + 1)
+  TT_I16    -> snd <$> tCompDecodeVarint bs off
+  TT_I32    -> snd <$> tCompDecodeVarint bs off
+  TT_I64    -> snd <$> tCompDecodeVarint bs off
+  TT_DOUBLE -> Just (off + 8)
+  TT_STRING -> case tCompDecodeVarint bs off of
+    Nothing -> Nothing
+    Just (lenW, o1) ->
+      let !len = fromIntegral lenW :: Int
+      in if len < 0 || o1 + len > BS.length bs
+           then Nothing
+           else Just (o1 + len)
+  TT_STRUCT -> skipStruct bs off 0
+  TT_LIST   -> case tCompDecodeListBegin bs off of
+    Nothing -> Nothing
+    Just (et, sz, o1) -> skipNValues et (fromIntegral sz) bs o1
+  TT_SET    -> case tCompDecodeSetBegin bs off of
+    Nothing -> Nothing
+    Just (et, sz, o1) -> skipNValues et (fromIntegral sz) bs o1
+  TT_MAP    -> case tCompDecodeMapBegin bs off of
+    Nothing -> Nothing
+    Just (kt, vt, sz, o1)
+      | sz <= 0 -> Just o1
+      | otherwise -> skipMapEntries kt vt (fromIntegral sz) bs o1
+  TT_UUID   -> Just (off + 16)
+
+skipStruct :: ByteString -> Int -> Int -> Maybe Int
+skipStruct !bs !off !lastFidI =
+  case tCompDecodeFieldBegin bs off (fromIntegral lastFidI) of
+    Nothing -> Nothing
+    Just (TT_STOP, _, off', _) -> Just off'
+    Just (tt, fid, off', boolVal) -> case skipCompactValue tt boolVal bs off' of
+      Nothing -> Nothing
+      Just o' -> skipStruct bs o' (fromIntegral fid)
+
+skipNValues :: ThriftType -> Int -> ByteString -> Int -> Maybe Int
+skipNValues !tt !n !bs !off
+  | n <= 0    = Just off
+  | otherwise = case skipCompactValue tt False bs off of
+      Nothing -> Nothing
+      Just o' -> skipNValues tt (n - 1) bs o'
+
+skipMapEntries :: ThriftType -> ThriftType -> Int -> ByteString -> Int -> Maybe Int
+skipMapEntries !kt !vt !n !bs !off
+  | n <= 0    = Just off
+  | otherwise = case skipCompactValue kt False bs off of
+      Nothing -> Nothing
+      Just o1 -> case skipCompactValue vt False bs o1 of
+        Nothing -> Nothing
+        Just o2 -> skipMapEntries kt vt (n - 1) bs o2

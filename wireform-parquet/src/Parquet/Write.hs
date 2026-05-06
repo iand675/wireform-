@@ -439,10 +439,10 @@ emptyStats :: Statistics
 emptyStats = Statistics Nothing Nothing (Just 0) Nothing Nothing Nothing
 
 i32LE :: Int32 -> ByteString
-i32LE v = BL.toStrict (B.toLazyByteString (B.int32LE v))
+i32LE v = BSI.unsafeCreate 4 $ \p -> pokeByteOff p 0 v
 
 i64LE :: Int64 -> ByteString
-i64LE v = BL.toStrict (B.toLazyByteString (B.int64LE v))
+i64LE v = BSI.unsafeCreate 8 $ \p -> pokeByteOff p 0 v
 
 -- | Compute Parquet 'Statistics' for a @FLOAT@ column. Min/max are
 -- compared as IEEE 754 floats then encoded as 4-byte little-endian.
@@ -482,10 +482,12 @@ statisticsForBool vs
                    (Just encMin) (Just encMax)
 
 fLE :: Float -> ByteString
-fLE v = BL.toStrict (B.toLazyByteString (B.word32LE (castFloatToWord32 v)))
+fLE v = BSI.unsafeCreate 4 $ \p ->
+  pokeByteOff p 0 (castFloatToWord32 v)
 
 dLE :: Double -> ByteString
-dLE v = BL.toStrict (B.toLazyByteString (B.word64LE (castDoubleToWord64 v)))
+dLE v = BSI.unsafeCreate 8 $ \p ->
+  pokeByteOff p 0 (castDoubleToWord64 v)
 
 -- ============================================================
 -- Heterogeneous column data
