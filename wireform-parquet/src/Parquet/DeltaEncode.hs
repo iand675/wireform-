@@ -31,7 +31,9 @@ import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as B
+import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Lazy as BL
+import Foreign.Storable (pokeByteOff)
 import Data.Int (Int32, Int64)
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
@@ -133,10 +135,14 @@ encodeMiniblockPayload _minDelta _miniblockSize 0 _ = mempty
 encodeMiniblockPayload minDelta miniblockSize bw vs =
   let !totalBits = miniblockSize * bw
       !totalBytes = (totalBits + 7) `shiftR` 3
-   in mconcat
-        [ B.word8 (byteAt byteIdx)
-        | byteIdx <- [0 .. totalBytes - 1]
-        ]
+      !packed = BSI.unsafeCreate totalBytes $ \p ->
+        let writeByte !i
+              | i >= totalBytes = pure ()
+              | otherwise = do
+                  pokeByteOff p i (byteAt i)
+                  writeByte (i + 1)
+        in writeByte 0
+   in B.byteString packed
   where
     n = VP.length vs
 
@@ -199,11 +205,10 @@ encodeZigzagLeb v =
 -- separators or length prefixes (the lengths block is the index).
 encodeDeltaLengthByteArray :: V.Vector ByteString -> ByteString
 encodeDeltaLengthByteArray vs =
-  let !lens = VP.fromList [fromIntegral (BS.length b) :: Int32 | b <- V.toList vs]
+  let !lens = VP.generate (V.length vs)
+                (\i -> fromIntegral (BS.length (V.unsafeIndex vs i)) :: Int32)
       !lengthsEncoded = encodeDeltaBinaryPackedInt32 lens
-      !concatenated   = BL.toStrict
-                          (B.toLazyByteString
-                            (V.foldl' (\acc b -> acc <> B.byteString b) mempty vs))
+      !concatenated   = BS.concat (V.toList vs)
    in lengthsEncoded <> concatenated
 
 -- ============================================================

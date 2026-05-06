@@ -699,7 +699,7 @@ main = do
   expect "nullPagesBitmap popcount"
     (NPB.nullPageCount packed == 5)
   expect "nullPagesBitmap nonNullPages == [1,3,4,7]"
-    (V.toList (NPB.nonNullPages (V.length nullPages) packed) == [1, 3, 4, 7])
+    (VP.toList (NPB.nonNullPages (V.length nullPages) packed) == [1, 3, 4, 7])
 
   -- DELTA_BINARY_PACKED writer round-trips through the reader for a few
   -- shapes (constant deltas, mixed deltas, negative deltas, single value).

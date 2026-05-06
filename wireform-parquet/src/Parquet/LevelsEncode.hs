@@ -20,7 +20,9 @@ import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as B
+import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Lazy as BL
+import Foreign.Storable (pokeByteOff)
 import Data.Int (Int32)
 import qualified Data.Vector.Primitive as VP
 import Data.Word (Word32, Word8)
@@ -66,10 +68,13 @@ rleRun bw value count =
   let !header = (count `shiftL` 1)
       !valueWord = fromIntegral value :: Word32
       !valueBytesCount = (bw + 7) `shiftR` 3
-      !valueBytes = BS.pack
-        [ fromIntegral (valueWord `shiftR` (i * 8) .&. 0xFF)
-        | i <- [0 .. valueBytesCount - 1]
-        ]
+      !valueBytes = BSI.unsafeCreate valueBytesCount $ \p ->
+        let writeByte !i
+              | i >= valueBytesCount = pure ()
+              | otherwise = do
+                  pokeByteOff p i (fromIntegral (valueWord `shiftR` (i * 8) .&. 0xFF) :: Word8)
+                  writeByte (i + 1)
+        in writeByte 0
    in BL.toStrict $ B.toLazyByteString $
         encodeULeb128 (fromIntegral header) <> B.byteString valueBytes
 
@@ -98,7 +103,13 @@ packBitsLsb bw vals =
   let !n = VP.length vals
       !totalBits = n * bw
       !totalBytes = (totalBits + 7) `shiftR` 3
-   in BS.pack [ byteAt i | i <- [0 .. totalBytes - 1] ]
+   in BSI.unsafeCreate totalBytes $ \p ->
+        let writeByte !byteIdx
+              | byteIdx >= totalBytes = pure ()
+              | otherwise = do
+                  pokeByteOff p byteIdx (byteAt byteIdx)
+                  writeByte (byteIdx + 1)
+        in writeByte 0
   where
     byteAt :: Int -> Word8
     byteAt byteIdx =
