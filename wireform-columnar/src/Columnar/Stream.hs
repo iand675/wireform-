@@ -217,11 +217,13 @@ iterUnfold s0 step = go s0
 -- ============================================================
 
 -- | Apply a pure function to every yielded element.
+{-# INLINE [1] iterMap #-}
 iterMap :: (a -> b) -> Iter a -> Iter b
 iterMap = fmap
 
 -- | Apply a function that may itself fail. A 'Left' from @f@
 -- terminates the iterator at that point.
+{-# INLINE [1] iterMapM #-}
 iterMapM :: (a -> Either String b) -> Iter a -> Iter b
 iterMapM f = go
   where
@@ -234,6 +236,7 @@ iterMapM f = go
 
 -- | Drop elements where @f@ returns 'Nothing'; yield @b@ where
 -- it returns @Just b@.
+{-# INLINE [1] iterMapMaybe #-}
 iterMapMaybe :: (a -> Maybe b) -> Iter a -> Iter b
 iterMapMaybe f = go
   where
@@ -245,8 +248,46 @@ iterMapMaybe f = go
         Just !b -> Right (IterYield b (go next))
 
 -- | Keep only elements that satisfy the predicate.
+{-# INLINE [1] iterFilter #-}
 iterFilter :: (a -> Bool) -> Iter a -> Iter a
 iterFilter p = iterMapMaybe (\a -> if p a then Just a else Nothing)
+
+-- | Fusion rules for chained 'Iter' transformations. Each
+-- pulls the per-step closure overhead out of the steady-state
+-- loop and lets the compiler specialise the combined function
+-- once. The @[1]@ phase number on the helper INLINE pragmas
+-- keeps the rules firing in early simplifier passes before
+-- the helpers get inlined into call sites.
+{-# RULES
+"wireform/iterMap-iterMap"
+  forall f g xs.
+    iterMap f (iterMap g xs) = iterMap (\x -> f (g x)) xs
+
+"wireform/iterMapMaybe-iterMap"
+  forall f g xs.
+    iterMapMaybe f (iterMap g xs) =
+      iterMapMaybe (\x -> f (g x)) xs
+
+"wireform/iterMap-iterMapMaybe"
+  forall f g xs.
+    iterMap f (iterMapMaybe g xs) =
+      iterMapMaybe (\x -> fmap f (g x)) xs
+
+"wireform/iterFilter-iterFilter"
+  forall p q xs.
+    iterFilter p (iterFilter q xs) =
+      iterFilter (\x -> q x && p x) xs
+
+"wireform/iterMap-iterFilter"
+  forall f p xs.
+    iterMap f (iterFilter p xs) =
+      iterMapMaybe (\x -> if p x then Just (f x) else Nothing) xs
+
+"wireform/iterFilter-iterMap"
+  forall p f xs.
+    iterFilter p (iterMap f xs) =
+      iterMapMaybe (\x -> let !y = f x in if p y then Just y else Nothing) xs
+  #-}
 
 -- | Stop after @n@ elements. Any decode error inside the first
 -- @n@ steps still surfaces; errors past @n@ do not.

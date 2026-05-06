@@ -1041,29 +1041,35 @@ materializeDictOptional ::
   dict ->
   (dict -> Int32 -> Maybe a) ->
   Either String (V.Vector (Maybe a))
-materializeDictOptional defs maxDef indices dict lookupDict =
-  let !n = VP.length defs
-      !maxD = fromIntegral maxDef :: Int32
-      go !acc !i !ixPos
+materializeDictOptional defs maxDef indices dict lookupDict = runST $ do
+  let !n      = VP.length defs
+      !maxD   = fromIntegral maxDef :: Int32
+      !nIdx   = VP.length indices
+  mv <- VM.unsafeNew n
+  let go !i !ixPos
         | i >= n =
-            if ixPos == VP.length indices
-              then Right acc
-              else Left "Parquet.Read: unconsumed dictionary indices"
-        | otherwise =
+            if ixPos == nIdx
+              then pure (Right ())
+              else pure (Left "Parquet.Read: unconsumed dictionary indices")
+        | otherwise = do
             let !d = VP.unsafeIndex defs i
-            in if d == maxD
-              then
-                if ixPos >= VP.length indices
-                  then Left "Parquet.Read: ran out of dictionary indices"
-                  else
-                    let !idx = VP.unsafeIndex indices ixPos
-                    in case lookupDict dict idx of
-                      Nothing -> Left "Parquet.Read: dictionary index out of range"
-                      Just v -> go (Just v : acc) (i + 1) (ixPos + 1)
-              else go (Nothing : acc) (i + 1) ixPos
-  in case go [] 0 0 of
-    Left e -> Left e
-    Right xs -> Right $! V.fromList (reverse xs)
+            if d == maxD
+              then if ixPos >= nIdx
+                then pure (Left "Parquet.Read: ran out of dictionary indices")
+                else do
+                  let !idx = VP.unsafeIndex indices ixPos
+                  case lookupDict dict idx of
+                    Nothing -> pure (Left "Parquet.Read: dictionary index out of range")
+                    Just v  -> do
+                      VM.unsafeWrite mv i (Just v)
+                      go (i + 1) (ixPos + 1)
+              else do
+                VM.unsafeWrite mv i Nothing
+                go (i + 1) ixPos
+  r <- go 0 0
+  case r of
+    Left e   -> pure (Left e)
+    Right () -> Right <$> V.unsafeFreeze mv
 
 -- | Specialized dictionary optional reader for @INT32@ columns.
 readDictionaryInt32OptionalColumnChunk ::
