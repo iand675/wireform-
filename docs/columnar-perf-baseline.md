@@ -52,6 +52,17 @@ File sizes (bytes): uncompressed=2,157,279 · snappy=1,212,588 · zstd=585,180.
 
 In other words the Arrow IPC numbers are bounded by Haskell's strict-data semantics, not by encoder/decoder cleverness; the 1.2 ms read is already very close to cache-warm memcpy speed for the dataset size.
 
+## View migration (in flight — see `docs/columnar-views-design.md`)
+
+We now ship the column-view representation that the perf design called out as the next big lever:
+
+* `Columnar.Bit` — bit-packed `VU.Vector Bit` with a full `Data.Vector.Unboxed` instance (`length`, `slice` at arbitrary bit offsets, `(!)`, `map`, `foldl'`, `zip`, mutable `read`/`write`/`freeze`/`thaw`). Eight `Bool`s per byte; matches Arrow / Parquet's wire format directly.
+* `Arrow.Column.NullableView` — validity bitmap + dense `VS.Vector` for every primitive `Col*Maybe` constructor. `8N` bytes of pointer spine drops to `ceil(N/8) + sizeof(values)`.
+* Primitive numeric / temporal `ColumnArray` constructors switched from `VP.Vector` to `VS.Vector`. The host-LE read fast path in `Arrow.Column.readInts*` / `readFloat*` / `readDoubleColumn` / `readDate*` / `readTime*` / `readTimestamp` / `readDuration` now adopts the source `ByteString`'s `ForeignPtr` directly (one call to `VS.unsafeFromForeignPtr` — zero copies). Big-endian still byte-swap-copies.
+* `Arrow.View` ships `Utf8View` / `BinaryView` / `LargeUtf8View` / `LargeBinaryView` view types plus a `View` typeclass for polymorphic iteration.
+
+Performance impact in the `parquet-throughput` bench is essentially unchanged because the Parquet read path still goes through `VP.Vector` internally and converts at the bridge with `VS.convert` (one O(N) walk). The Arrow IPC reader is the consumer that benefits most from the zero-copy adoption — every primitive column read after this PR is a constructor call instead of a memcpy. End-to-end Arrow IPC numbers are bounded by the boxed `V.Vector ColumnArray` spine + `RecordBatchDef` allocation rather than the column data itself; closing that gap is the next workstream.
+
 ## Why we're not at C/Rust speed
 
 The Parquet end-to-end numbers above are 1.05x–2.7x faster than pyarrow but the ratio against a hand-written C/Rust implementation is closer to 4-6x slower for the in-cache primitive paths. The remaining gap is structural rather than algorithmic:

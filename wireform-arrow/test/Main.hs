@@ -29,6 +29,7 @@ import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Unboxed as VU
 import Columnar.Bit (Bit (..))
 import qualified Arrow.Column as AC
+import qualified Arrow.View as AV
 import Data.Word (Word8, Word16, Word32, Word64)
 import System.Exit (exitFailure)
 
@@ -314,7 +315,24 @@ main = do
   -- writer produces).
   pyarrowGoldenRoundTrip
 
+  -- Arrow.View: Utf8View / BinaryView / View typeclass.
+  viewTypeclassRoundTrip
+
   putStrLn "All wireform-arrow round-trip tests passed."
+
+viewTypeclassRoundTrip :: IO ()
+viewTypeclassRoundTrip = do
+  let !ts = V.fromList ["alpha", "", "beta", "gamma"] :: V.Vector Text
+      !u  = AV.utf8ViewFromVector ts
+  expect "utf8View length matches input" (AV.vLength u == V.length ts)
+  expect "utf8View round-trips through vToList"
+    (AV.vToList u == V.toList ts)
+  expect "utf8View slice"
+    (AV.vToList (AV.vSlice 1 2 u) == ["", "beta"])
+  let !bs = V.fromList [BS.pack [1,2], BS.empty, BS.pack [3,4,5,6]]
+      !b  = AV.binaryViewFromVector bs
+  expect "binaryView round-trip" (AV.vToList b == V.toList bs)
+  expect "binaryView length" (AV.vLength b == 3)
 
 flatBufSchemaSelfCheck :: IO ()
 flatBufSchemaSelfCheck = do

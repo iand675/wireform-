@@ -48,6 +48,7 @@ library
     Arrow.Record.TH
     Arrow.Stream
     Arrow.Types
+    Arrow.View
     Arrow.Write
   build-depends:
     base >= 4.16 && < 5,

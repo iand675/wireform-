@@ -225,13 +225,15 @@ The `*Maybe` constructors retain a `fromMaybeList :: [Maybe a] -> NullableView a
 
 ## Sequencing
 
-1. `Columnar.Bit` — done.
-2. `VS.Vector` migration for primitive numeric constructors (unit 2). Largest surface, most test coverage.
-3. `NullableView` (unit 4) — depends on `Columnar.Bit` + `VS.Vector` for the underlying values buffer.
-4. `Utf8View` / `BinaryView` (unit 3) — depends on `VS.Vector`.
-5. Read-path zero-copy adoption (unit 5) — depends on units 2/3/4.
-6. `View` typeclass (unit 6) — depends on all the view types existing.
-7. Write path (unit 7) — automatic once unit 2 lands; minor follow-ups for the variable-length writers.
-8. Backward-compat helpers + tests + docs (units 8/9/10) — ride along with each unit.
+1. `Columnar.Bit` — **done**.
+2. `VS.Vector` migration for primitive numeric constructors (unit 2). Largest surface, most test coverage. **Done** for all primitive numeric, temporal, and interval constructors. `Parquet.Write.ColumnData` deliberately stays on `VP.Vector` for now (the writer's internal API is downstream of the bridge); the bridge does one `VS.convert` at the boundary, which is one O(N) walk per write.
+3. `NullableView` (unit 4) — **done**. Every `Col*Maybe` for primitive / temporal types now carries a `NullableView a` (validity bitmap + dense `VS.Vector a`). `ColBoolMaybe`, `ColUtf8Maybe`, `ColBinaryMaybe`, `ColLargeUtf8Maybe`, `ColLargeBinaryMaybe`, `ColFixedSizeBinaryMaybe` keep `V.Vector (Maybe a)` for now (their boxed elements would need their own view types — covered by unit 3 below).
+4. `Utf8View` / `BinaryView` (unit 3) — **partially done** (`Arrow.View` module ships the view types + `View` typeclass + per-row accessors + materialisation helpers). The `ColUtf8` / `ColBinary` / `ColLargeUtf8` / `ColLargeBinary` constructors still hold `V.Vector Text` / `V.Vector ByteString`; flipping them over (and updating consumers) is the remaining work for this unit.
+5. Read-path zero-copy adoption (unit 5) — **done** for all host-LE primitive paths in `Arrow.Column.read*Column`. The reader now calls `viewPrimVecLE` (which is one `BS.toForeignPtr` + one `VS.unsafeFromForeignPtr` — zero copies). The big-endian byte-swap path still allocates because it has to swap bytes during the copy.
+6. `View` typeclass (unit 6) — **done**. `Arrow.View.View` covers `VS.Vector`, `VU.Vector Bit`, `V.Vector`, `Utf8View`, `BinaryView`, `LargeUtf8View`, `LargeBinaryView`. Polymorphic loops can ask for `vLength` / `vUnsafeIndex` / `vSlice` / `vToList` regardless of the underlying view shape.
+7. Write path (unit 7) — **automatic**. The Arrow writer ('Arrow.Write') already serialises directly from `VS.Vector` and the new `NullableView` shape via `Bit.toByteString` for the validity buffer. The Parquet writer is unaffected (still consumes `VP.Vector` from the bridge).
+8. Backward-compat helpers (unit 8) — **done**. `Arrow.Column` exports `nvFromMaybeList` / `nvFromMaybeVector` / `nvFromVectors` / `nvToMaybeVector` / `nvToSentinel` for callers that haven't migrated to the validity-bitmap shape; `Arrow.View` exports `utf8ViewFromVector` / `binaryViewFromVector` / `utf8ViewToVector` / etc. for consumers that prefer the boxed shape.
+9. Tests (unit 9) — **done**. All eight existing test suites pass. `Arrow.View` round-trip tests added.
+10. Docs (unit 10) — **done**. This file + perf baseline updated.
 
-Each unit is a discrete PR. Steps 2 onwards involve a lot of mechanical edits; the migration is best done one constructor family at a time so test failures stay scoped.
+The remaining work in unit 3 (flip `ColUtf8` / `ColBinary` to hold the view types directly) is a separate PR and a larger consumer cascade than the primitive migration was — every `ColUtf8 v -> ...` site has to change — so we've left it for the next round.
