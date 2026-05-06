@@ -18,15 +18,17 @@ import Test.Tasty (TestTree, defaultMain, testGroup)
 import Test.Tasty.Hedgehog (testProperty)
 import Test.Tasty.HUnit (testCase, (@?=))
 
+import qualified Columnar.Bit as Bit
 import qualified Columnar.IO as CIO
 import qualified Columnar.LZ4 as LZ4
 import qualified Columnar.Predicate as Pred
 import qualified Columnar.Stream as IS
 
+import qualified Data.Vector.Unboxed as VU
+
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import Data.Int (Int64)
-import qualified Data.Word as W
 import System.IO.Temp (withSystemTempFile)
 import System.IO (hClose)
 
@@ -38,6 +40,78 @@ main = defaultMain $ testGroup "wireform-columnar"
   , predicateUnits
   , columnarIOUnits
   , lz4Tests
+  , bitTests
+  ]
+
+-- ============================================================
+-- Columnar.Bit — bit-packed Vector instance
+-- ============================================================
+
+bitTests :: TestTree
+bitTests = testGroup "Columnar.Bit"
+  [ testCase "VU.fromList . VU.toList = id" $
+      let bs = map Bit.Bit
+                 [True, False, True, True, False, False, True, False
+                 , True, True, True, True]
+          v  = VU.fromList bs
+      in VU.toList v @?= bs
+
+  , testCase "indexing matches list" $
+      let bs = [True, True, False, True, False]
+          v  = VU.fromList (map Bit.Bit bs)
+      in [Bit.unBit (v VU.! i) | i <- [0 .. length bs - 1]] @?= bs
+
+  , testCase "slicing within a byte" $
+      let bs = map Bit.Bit
+                 [True, False, True, True, False, False, True, False]
+          v  = VU.fromList bs
+          s  = VU.slice 2 4 v
+      in VU.toList s @?= drop 2 (take 6 bs)
+
+  , testCase "slicing across bytes" $
+      let bs = [True, False, True, True, False, False, True, False
+               , True, True, True, False, False, True, True, True]
+          v  = VU.fromList (map Bit.Bit bs)
+          s  = VU.slice 5 8 v
+      in map Bit.unBit (VU.toList s) @?= drop 5 (take 13 bs)
+
+  , testCase "fromByteString round-trip on byte boundary" $
+      let payload = BS.pack [0b10110010, 0b00001111]
+          v       = Bit.fromByteString payload
+      in Bit.toByteString v @?= payload
+
+  , testCase "countOnes (byte-aligned)" $
+      let v = Bit.fromByteString (BS.pack [0xFF, 0x0F, 0x00])
+      in Bit.countOnes v @?= 12
+
+  , testCase "countOnes (slice across bytes)" $
+      let v = Bit.fromByteString (BS.pack [0xFF, 0x0F])  -- 16 bits, 12 ones
+          s = VU.slice 4 8 v   -- bits 4..11 = [1,1,1,1, 1,1,1,1] = 8 ones
+      in Bit.countOnes s @?= 8
+
+  , testProperty "VU.length matches the input list" $ property $ do
+      bs <- forAll (Gen.list (Range.linear 0 1024) Gen.bool)
+      VU.length (VU.fromList (map Bit.Bit bs)) === length bs
+
+  , testProperty "VU.toList . VU.fromList = id" $ property $ do
+      bs <- forAll (Gen.list (Range.linear 0 1024) Gen.bool)
+      map Bit.unBit (VU.toList (VU.fromList (map Bit.Bit bs))) === bs
+
+  , testProperty "VU.slice agrees with list slicing" $ property $ do
+      bs <- forAll (Gen.list (Range.linear 1 256) Gen.bool)
+      start <- forAll (Gen.int (Range.linear 0 (length bs - 1)))
+      let maxLen = length bs - start
+      len <- forAll (Gen.int (Range.linear 0 maxLen))
+      let v = VU.fromList (map Bit.Bit bs)
+      map Bit.unBit (VU.toList (VU.slice start len v))
+        === take len (drop start bs)
+
+  , testProperty "fromByteString . toByteString = id (byte-aligned)" $
+      property $ do
+        bytes <- forAll (BS.pack <$>
+                           Gen.list (Range.linear 0 256) (Gen.word8 Range.linearBounded))
+        let v = Bit.fromByteString bytes
+        Bit.toByteString v === bytes
   ]
 
 -- ============================================================

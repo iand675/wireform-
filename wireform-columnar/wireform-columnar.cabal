@@ -28,6 +28,7 @@ library
   import: defaults
   hs-source-dirs: src
   exposed-modules:
+    Columnar.Bit
     Columnar.IO
     Columnar.LZ4
     Columnar.NullableBuild
@@ -60,6 +61,8 @@ test-suite wireform-columnar-test
   type: exitcode-stdio-1.0
   hs-source-dirs: test
   main-is: Main.hs
+  default-extensions:
+    BinaryLiterals
   build-depends:
     base >= 4.16 && < 5,
     wireform-columnar,
