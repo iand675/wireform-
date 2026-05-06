@@ -89,7 +89,9 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Vector as V
+import qualified Data.Vector.Mutable as VM
 import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Primitive.Mutable as MVP
 import Data.Word (Word8, Word32)
 import Foreign.Ptr (Ptr, plusPtr)
 import Foreign.Storable (pokeByteOff, pokeElemOff)
@@ -590,56 +592,116 @@ optionalColumnLength = \case
   OptBool v      -> V.length v
   OptByteArray v -> V.length v
 
+-- | Count 'Nothing' entries without materialising an intermediate
+-- vector.
+--
+-- The previous shape was @V.length (V.filter (== Nothing) v)@
+-- which allocates a whole new boxed vector just to count it.
+-- The new shape is a single 'V.foldl'' tally — no allocation.
 optionalColumnNullCount :: OptionalColumn -> Int
 optionalColumnNullCount = \case
-  OptInt32 v     -> V.length (V.filter (== Nothing) v)
-  OptInt64 v     -> V.length (V.filter (== Nothing) v)
-  OptFloat v     -> V.length (V.filter (== Nothing) v)
-  OptDouble v    -> V.length (V.filter (== Nothing) v)
-  OptBool v      -> V.length (V.filter (== Nothing) v)
-  OptByteArray v -> V.length (V.filter (== Nothing) v)
+  OptInt32 v     -> countNothings v
+  OptInt64 v     -> countNothings v
+  OptFloat v     -> countNothings v
+  OptDouble v    -> countNothings v
+  OptBool v      -> countNothings v
+  OptByteArray v -> countNothings v
+  where
+    {-# INLINE countNothings #-}
+    countNothings :: V.Vector (Maybe a) -> Int
+    countNothings = V.foldl' (\a x -> case x of Nothing -> a + 1; _ -> a) 0
 
 -- | Strip nulls and return only the present values as a 'ColumnData'.
+--
+-- Two-pass mutable-vector build. The previous shape went
+--
+--   VP.fromList [x | Just x <- V.toList v]
+--
+-- which materialised the source vector as a list (~n cons
+-- cells), built a filtered list (~present cons cells), and
+-- then walked the filtered list to size + fill the destination
+-- VP.Vector. The new shape is one pre-allocation +
+-- single-pass write — no intermediate list at all.
 optionalColumnPresentValues :: OptionalColumn -> ColumnData
 optionalColumnPresentValues = \case
-  OptInt32 v     -> ColInt32     (VP.fromList [x | Just x <- V.toList v])
-  OptInt64 v     -> ColInt64     (VP.fromList [x | Just x <- V.toList v])
-  OptFloat v     -> ColFloat     (VP.fromList [x | Just x <- V.toList v])
-  OptDouble v    -> ColDouble    (VP.fromList [x | Just x <- V.toList v])
-  OptBool v      -> ColBool      (V.fromList  [x | Just x <- V.toList v])
-  OptByteArray v -> ColByteArray (V.fromList  [x | Just x <- V.toList v])
+  OptInt32 v     -> ColInt32     (collectPrim v)
+  OptInt64 v     -> ColInt64     (collectPrim v)
+  OptFloat v     -> ColFloat     (collectPrim v)
+  OptDouble v    -> ColDouble    (collectPrim v)
+  OptBool v      -> ColBool      (collectBoxed v)
+  OptByteArray v -> ColByteArray (collectBoxed v)
+
+-- | Collect the 'Just' values of a boxed 'V.Vector' into a
+-- primitive 'VP.Vector'. Two passes: count present values,
+-- allocate exactly, fill in.
+{-# INLINE collectPrim #-}
+collectPrim :: VP.Prim a => V.Vector (Maybe a) -> VP.Vector a
+collectPrim v =
+  let !n = V.length v
+      !present = V.foldl' (\a x -> case x of Just _ -> a + 1; _ -> a) 0 v
+  in VP.create $ do
+       mv <- MVP.unsafeNew present
+       let go !i !j
+             | i >= n    = pure ()
+             | otherwise = case V.unsafeIndex v i of
+                 Just x  -> do MVP.unsafeWrite mv j x; go (i + 1) (j + 1)
+                 Nothing -> go (i + 1) j
+       go 0 0
+       pure mv
+
+-- | Same shape as 'collectPrim' but for boxed element types.
+{-# INLINE collectBoxed #-}
+collectBoxed :: V.Vector (Maybe a) -> V.Vector a
+collectBoxed v =
+  let !n = V.length v
+      !present = V.foldl' (\a x -> case x of Just _ -> a + 1; _ -> a) 0 v
+  in V.create $ do
+       mv <- VM.unsafeNew present
+       let go !i !j
+             | i >= n    = pure ()
+             | otherwise = case V.unsafeIndex v i of
+                 Just x  -> do VM.unsafeWrite mv j x; go (i + 1) (j + 1)
+                 Nothing -> go (i + 1) j
+       go 0 0
+       pure mv
 
 -- | Encode an 'OptionalColumn' as a single uncompressed @PLAIN@
 -- @DATA_PAGE@ V1 carrying the definition-level stream + present-only
 -- PLAIN values.
 encodeOptionalColumnPage :: OptionalColumn -> ByteString
 encodeOptionalColumnPage oc =
-  let !defs = VP.fromList
-        [ if isPresent v then 1 else 0
-        | v <- presenceList oc
-        ]
-      !defStream = LE.encodeLengthPrefixedHybrid 1 defs
-      !valuesBs = encodeColumnDataPagePayload (optionalColumnPresentValues oc)
-      !body = defStream <> valuesBs
-      !bodySize = BS.length body
-      !n = optionalColumnLength oc
-      !hdr = mkPlainDataPageHeader (fromIntegral n) (fromIntegral bodySize)
+  let !defs       = presenceVector oc
+      !defStream  = LE.encodeLengthPrefixedHybrid 1 defs
+      !valuesBs   = encodeColumnDataPagePayload (optionalColumnPresentValues oc)
+      !body       = defStream <> valuesBs
+      !bodySize   = BS.length body
+      !n          = optionalColumnLength oc
+      !hdr        = mkPlainDataPageHeader (fromIntegral n) (fromIntegral bodySize)
    in encodePageHeader hdr <> body
+
+-- | Build the definition-level vector for an 'OptionalColumn'
+-- (1 for present, 0 for null) in a single pass over the source.
+--
+-- Replaces the previous @VP.fromList [if isPresent v then 1
+-- else 0 | v <- map void (V.toList v)]@ shape, which built two
+-- intermediate lists before allocating the destination vector.
+presenceVector :: OptionalColumn -> VP.Vector Int32
+presenceVector = \case
+  OptInt32 v     -> presenceVecFrom v
+  OptInt64 v     -> presenceVecFrom v
+  OptFloat v     -> presenceVecFrom v
+  OptDouble v    -> presenceVecFrom v
+  OptBool v      -> presenceVecFrom v
+  OptByteArray v -> presenceVecFrom v
   where
-    isPresent (Just _) = True
-    isPresent Nothing  = False
-
-    presenceList :: OptionalColumn -> [Maybe ()]
-    presenceList = \case
-      OptInt32 v     -> map void (V.toList v)
-      OptInt64 v     -> map void (V.toList v)
-      OptFloat v     -> map void (V.toList v)
-      OptDouble v    -> map void (V.toList v)
-      OptBool v      -> map void (V.toList v)
-      OptByteArray v -> map void (V.toList v)
-
-    void Nothing  = Nothing
-    void (Just _) = Just ()
+    {-# INLINE presenceVecFrom #-}
+    presenceVecFrom :: V.Vector (Maybe a) -> VP.Vector Int32
+    presenceVecFrom v =
+      let !n = V.length v
+      in VP.generate n $ \i ->
+           case V.unsafeIndex v i of
+             Just _  -> 1
+             Nothing -> 0
 
 -- | Encode just the PLAIN-values portion (no page header). Used inside
 -- 'encodeOptionalColumnPage' so we can prepend the definition-level
