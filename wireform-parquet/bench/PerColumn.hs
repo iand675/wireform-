@@ -6,6 +6,7 @@ module Main (main) where
 
 import qualified Data.ByteString as BS
 import Data.Int (Int64)
+import Data.IORef
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
 import qualified Data.Text.Encoding as TE
@@ -44,15 +45,21 @@ mkSchema = V.fromList
 writeF :: V.Vector ColumnData -> BS.ByteString
 writeF cols = PHL.encodeParquet PHL.defaultWriteOptions mkSchema [cols]
 
-time :: String -> IO Int -> IO ()
-time label act = do
+time :: String -> Int -> IO Int -> IO ()
+time label iters act = do
+  -- Warm up
+  _ <- act
   t0 <- getCurrentTime
-  !n <- act
+  let loop !k !acc
+        | k >= iters = pure acc
+        | otherwise  = do !x <- act; loop (k + 1) (acc + x)
+  !n <- loop 0 0
   t1 <- getCurrentTime
-  let !ms = realToFrac (diffUTCTime t1 t0) * 1000 :: Double
-      !rps = (fromIntegral nRows / realToFrac (diffUTCTime t1 t0)) :: Double
-  putStrLn $ "  " ++ label ++ ": " ++ show ms ++ " ms (" ++ show n ++ " values, "
-              ++ show (round rps :: Int) ++ " rows/s)"
+  let !secs    = realToFrac (diffUTCTime t1 t0) :: Double
+      !msEach  = secs * 1000 / fromIntegral iters
+      !rpsEach = fromIntegral nRows / (secs / fromIntegral iters) :: Double
+  putStrLn $ "  " ++ label ++ ": " ++ show msEach ++ " ms (" ++ show n ++ " sum, "
+              ++ show (round rpsEach :: Int) ++ " rows/s)"
 
 main :: IO ()
 main = do
@@ -69,21 +76,51 @@ main = do
             in case PArrow.readParquetColumn pf 0 c fld of
                  Right cv -> AC.columnLength cv
                  Left  _  -> 0
-      -- Warm up
       _ <- pure (rd 0)
       putStrLn ""
-      putStrLn "=== Single-pass per-column reads (100k rows) ==="
-      time "id     (Int64)"      (pure (rd 0))
-      time "score  (Double)"     (pure (rd 1))
-      time "name   (Utf8 dict)"  (pure (rd 2))
-      time "active (Bool)"       (pure (rd 3))
+      putStrLn "=== Footer parse (decodeParquet only, 5x) ==="
+      time "decodeParquet" 5 $ do
+        case PHL.decodeParquet PHL.defaultReadOptions bs of
+          Left e -> error e
+          Right pf' ->
+            let !s = PArrow.numRowGroups pf'
+                  + V.length (AT.arrowFields (PArrow.parquetFileArrowSchema pf'))
+            in pure s
       putStrLn ""
-      putStrLn "=== Repeated reads (5x each) ==="
-      let bench label c =
-            time (label ++ " 5x") $ do
-              let !s = rd c + rd c + rd c + rd c + rd c
-              pure s
-      bench "id    " 0
-      bench "score " 1
-      bench "name  " 2
-      bench "active" 3
+      putStrLn "=== Single-pass per-column reads (100k rows) ==="
+      time "id     (Int64)" 1     (pure (rd 0))
+      time "score  (Double)" 1    (pure (rd 1))
+      time "name   (Utf8 dict)" 1 (pure (rd 2))
+      time "active (Bool)" 1      (pure (rd 3))
+      putStrLn ""
+      putStrLn "=== Repeated reads (5x each, footer pre-parsed) ==="
+      time "id     (Int64)" 5 (pure (rd 0))
+      time "score  (Double)" 5 (pure (rd 1))
+      time "name   (Utf8)" 5 (pure (rd 2))
+      time "active (Bool)" 5 (pure (rd 3))
+      putStrLn ""
+      putStrLn "=== End-to-end (decodeParquet + 4 cols, fresh bs each iter) ==="
+      -- Make 5 distinct ByteStrings so GHC can't CSE the whole
+      -- decoded result across iterations.
+      let !bsList = take 5 (iterate (\b -> BS.copy b) bs)
+      ref <- newIORef (0 :: Int)
+      let one !b = case PHL.decodeParquet PHL.defaultReadOptions b of
+            Left e   -> error e
+            Right pf' ->
+              let !sch'  = PArrow.parquetFileArrowSchema pf'
+                  !flds' = AT.arrowFields sch'
+                  rd' c =
+                    let !fld = V.unsafeIndex flds' c
+                    in case PArrow.readParquetColumn pf' 0 c fld of
+                         Right cv -> AC.columnLength cv
+                         Left  _  -> 0
+              in rd' 0 + rd' 1 + rd' 2 + rd' 3
+      -- warm up
+      modifyIORef' ref (+ one bs)
+      t0 <- getCurrentTime
+      mapM_ (\b -> modifyIORef' ref (+ one b)) bsList
+      t1 <- getCurrentTime
+      total <- readIORef ref
+      let !secs = realToFrac (diffUTCTime t1 t0) :: Double
+          !msEach = secs * 1000 / fromIntegral (length bsList)
+      putStrLn $ "  full read: " ++ show msEach ++ " ms (sum=" ++ show total ++ ")"

@@ -111,14 +111,19 @@ import Control.Monad.ST (ST, runST)
 import Data.Bits (shiftL, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString.Unsafe as BSU
 import Data.Int (Int32, Int64)
 import qualified Data.Vector as V
 import qualified Data.Vector.Mutable as VM
 import qualified Data.Vector.Primitive as VP
 import qualified Data.Vector.Primitive.Mutable as MVP
-import Data.Word (Word32, Word64)
+import Data.Word (Word8, Word32, Word64)
+import Foreign.Ptr (Ptr, castPtr)
+import Foreign.Storable (peekByteOff)
 import GHC.Float (castWord32ToFloat, castWord64ToDouble)
+import qualified Data.Primitive.ByteArray as PBA
 import System.IO.Unsafe (unsafePerformIO)
 
 import Columnar.SIMD (unpackBitsLsbUnsafe)
@@ -749,69 +754,62 @@ tryBrotli bs =
       Right x -> pure $ Right x
 #endif
 
+-- | Decode PLAIN-encoded fixed-width primitives.
+--
+-- Implementation note (perf): the previous version called
+-- 'readLE32'/'readLE64' per element, which each performed
+-- bounds-checked 'BS.index' calls byte-by-byte and reassembled
+-- the word with shifts (~10-20 ops per value). For 100k Int64
+-- values that is hundreds of thousands of bounds checks.
+--
+-- For Int32 / Int64 / Float / Double the Parquet PLAIN wire
+-- format is little-endian and bit-compatible with the host
+-- (x86_64 / aarch64 — both little-endian). The fastest decoder
+-- is therefore a single 'memcpy' from the source bytestring
+-- into the destination primitive vector's underlying mutable
+-- byte array; this is what 'decodePlainPrimLEMemcpy' does.
 decodePlainInt32 :: Int -> ByteString -> Either String (VP.Vector Int32)
-decodePlainInt32 n bs
-  | BS.length bs < n * 4 = Left "Parquet.Read: PLAIN INT32 buffer too small"
-  | otherwise =
-      Right $
-        runST $ do
-          mv <- MVP.new n
-          let go2 !i
-                | i >= n = VP.unsafeFreeze mv
-                | otherwise = do
-                    let !o = i * 4
-                        !v = readLE32 bs o
-                    MVP.write mv i (fromIntegral v :: Int32)
-                    go2 (i + 1)
-          go2 0
+decodePlainInt32 = decodePlainPrimLEMemcpy 4
+{-# INLINE decodePlainInt32 #-}
 
 decodePlainInt64 :: Int -> ByteString -> Either String (VP.Vector Int64)
-decodePlainInt64 n bs
-  | BS.length bs < n * 8 = Left "Parquet.Read: PLAIN INT64 buffer too small"
-  | otherwise =
-      Right $
-        runST $ do
-          mv <- MVP.new n
-          let go2 !i
-                | i >= n = VP.unsafeFreeze mv
-                | otherwise = do
-                    let !o = i * 8
-                        !v = readLE64 bs o
-                    MVP.write mv i (fromIntegral v :: Int64)
-                    go2 (i + 1)
-          go2 0
+decodePlainInt64 = decodePlainPrimLEMemcpy 8
+{-# INLINE decodePlainInt64 #-}
 
 decodePlainFloat :: Int -> ByteString -> Either String (VP.Vector Float)
-decodePlainFloat n bs
-  | BS.length bs < n * 4 = Left "Parquet.Read: PLAIN FLOAT buffer too small"
-  | otherwise =
-      Right $
-        runST $ do
-          mv <- MVP.new n
-          let go2 !i
-                | i >= n = VP.unsafeFreeze mv
-                | otherwise = do
-                    let !o = i * 4
-                        !w = readLE32 bs o
-                    MVP.write mv i (castWord32ToFloat w)
-                    go2 (i + 1)
-          go2 0
+decodePlainFloat = decodePlainPrimLEMemcpy 4
+{-# INLINE decodePlainFloat #-}
 
 decodePlainDouble :: Int -> ByteString -> Either String (VP.Vector Double)
-decodePlainDouble n bs
-  | BS.length bs < n * 8 = Left "Parquet.Read: PLAIN DOUBLE buffer too small"
-  | otherwise =
-      Right $
-        runST $ do
-          mv <- MVP.new n
-          let go2 !i
-                | i >= n = VP.unsafeFreeze mv
-                | otherwise = do
-                    let !o = i * 8
-                        !w = readLE64 bs o
-                    MVP.write mv i (castWord64ToDouble w)
-                    go2 (i + 1)
-          go2 0
+decodePlainDouble = decodePlainPrimLEMemcpy 8
+{-# INLINE decodePlainDouble #-}
+
+-- | Decode a PLAIN-encoded primitive vector by a single
+-- 'memcpy' from the source bytestring into a freshly-allocated
+-- primitive vector. Assumes the host byte order matches the
+-- wire format (Parquet PLAIN is little-endian; x86_64 and
+-- aarch64 are little-endian).
+{-# INLINE decodePlainPrimLEMemcpy #-}
+decodePlainPrimLEMemcpy
+  :: forall a. VP.Prim a
+  => Int                       -- ^ element size in bytes
+  -> Int                       -- ^ number of elements
+  -> ByteString
+  -> Either String (VP.Vector a)
+decodePlainPrimLEMemcpy !elemBytes n bs
+  | n <= 0 = Right VP.empty
+  | BS.length bs < n * elemBytes =
+      Left "Parquet.Read: PLAIN buffer too small"
+  | otherwise = Right $! BSI.accursedUnutterablePerformIO $
+      BSU.unsafeUseAsCStringLen bs $ \(srcCStr, _) -> do
+        mv <- MVP.unsafeNew n
+        let !nBytes = n * elemBytes
+            !srcPtr = castPtr srcCStr :: Ptr Word8
+        case mv of
+          MVP.MVector dstOffElems _ dstMba ->
+            PBA.copyPtrToMutableByteArray
+              dstMba (dstOffElems * elemBytes) srcPtr nBytes
+        VP.unsafeFreeze mv
 
 decodePlainBool :: Int -> ByteString -> Either String (V.Vector Bool)
 decodePlainBool n bs =
