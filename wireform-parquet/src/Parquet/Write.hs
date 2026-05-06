@@ -83,7 +83,7 @@ import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Unsafe as BSU
 import Foreign.Ptr (castPtr)
-import Data.Bits (setBit, zeroBits)
+import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import Data.Int (Int16, Int32, Int64)
 import qualified Data.Map.Strict as Map
 import Control.Monad.ST (runST)
@@ -521,8 +521,16 @@ statisticsForBool :: V.Vector Bool -> Statistics
 statisticsForBool vs
   | V.null vs = emptyStats
   | otherwise =
-      let hasFalse = V.any not vs
-          hasTrue  = V.any id vs
+      -- Single pass: short-circuit once both flags are seen.
+      let go !i !sawT !sawF
+            | sawT && sawF = (True, True)
+            | i >= V.length vs = (sawT, sawF)
+            | otherwise =
+                let !x = V.unsafeIndex vs i
+                in if x
+                     then go (i + 1) True sawF
+                     else go (i + 1) sawT True
+          (!hasTrue, !hasFalse) = go 0 False False
           encMin = if hasFalse then BS.singleton 0 else BS.singleton 1
           encMax = if hasTrue  then BS.singleton 1 else BS.singleton 0
       in Statistics (Just encMin) (Just encMax) (Just 0) Nothing
@@ -811,25 +819,47 @@ plainPrimVecBytes !elemBytes poker v =
 plainBoolVecBytes :: V.Vector Bool -> ByteString
 plainBoolVecBytes v =
   let !n        = V.length v
-      !numBytes = (n + 7) `quot` 8
+      !numBytes = (n + 7) `shiftR` 3
+      !nFull    = n `shiftR` 3      -- whole bytes (8 bools each)
+      !nTail    = n .&. 7
   in BSI.unsafeCreate numBytes $ \ptr -> do
-       let goByte !b
-             | b >= numBytes = pure ()
+       -- Whole-byte path: read 8 'Bool's, OR into an
+       -- accumulator with a static shift per slot. Unrolled
+       -- so GHC keeps the partial accumulator in a register.
+       let whole !b !base
+             | b >= nFull = pure ()
              | otherwise = do
-                 let !base = b * 8
-                     packBit !bit !acc
-                       | bit >= 8        = acc
-                       | base + bit >= n = acc
-                       | otherwise =
-                           let !x = V.unsafeIndex v (base + bit)
-                               !acc' = if x
-                                         then setBit acc bit
-                                         else acc
-                           in  packBit (bit + 1) acc'
-                     !out = packBit 0 (zeroBits :: Word8)
+                 let bit i = if V.unsafeIndex v (base + i) then 1 else 0 :: Word8
+                     !x0 = bit 0
+                     !x1 = bit 1
+                     !x2 = bit 2
+                     !x3 = bit 3
+                     !x4 = bit 4
+                     !x5 = bit 5
+                     !x6 = bit 6
+                     !x7 = bit 7
+                     !out = x0
+                          .|. (x1 `shiftL` 1)
+                          .|. (x2 `shiftL` 2)
+                          .|. (x3 `shiftL` 3)
+                          .|. (x4 `shiftL` 4)
+                          .|. (x5 `shiftL` 5)
+                          .|. (x6 `shiftL` 6)
+                          .|. (x7 `shiftL` 7)
                  pokeByteOff ptr b out
-                 goByte (b + 1)
-       goByte 0
+                 whole (b + 1) (base + 8)
+           tail_ !acc !base !i
+             | i >= nTail = pure (acc :: Word8)
+             | otherwise =
+                 let !flag = if V.unsafeIndex v (base + i) then 1 else 0 :: Word8
+                     !acc' = acc .|. (flag `shiftL` i)
+                 in tail_ acc' base (i + 1)
+       whole 0 0
+       if nTail > 0
+         then do
+           !acc <- tail_ 0 (nFull `shiftL` 3) 0
+           pokeByteOff ptr nFull acc
+         else pure ()
 
 -- | Encode a boxed bytestring vector as Parquet PLAIN BYTE_ARRAY:
 -- @len :: u32 LE@ followed by @len@ bytes per value.
