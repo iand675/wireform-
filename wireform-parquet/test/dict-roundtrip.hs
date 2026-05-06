@@ -29,7 +29,7 @@ mkSchema = V.fromList
 
 mkDataset :: Int -> V.Vector ColumnData
 mkDataset n = V.fromList
-  [ ColInt64  (VS.generate n fromIntegral)
+  [ ColInt64  (VP.generate n fromIntegral)
   , ColByteArray $ V.generate n $ \i ->
       TE.encodeUtf8 (T.pack ("name_" ++ show (i `rem` 100)))
   ]

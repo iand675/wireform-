@@ -391,9 +391,9 @@ main = do
   expect "nested leaf maxDef == 3" (Nested.nlMaxDef nLeaf == 3)
   expect "nested leaf maxRep == 1" (Nested.nlMaxRep nLeaf == 1)
   expect "nested leaf def levels match Dremel"
-    (VS.toList (Nested.nlDefLevels nLeaf) == [3, 2, 3, 1, 0])
+    (VP.toList (Nested.nlDefLevels nLeaf) == [3, 2, 3, 1, 0])
   expect "nested leaf rep levels match Dremel"
-    (VS.toList (Nested.nlRepLevels nLeaf) == [0, 1, 1, 0, 0])
+    (VP.toList (Nested.nlRepLevels nLeaf) == [0, 1, 1, 0, 0])
   expect "nested leaf present-value count == 2"
     (Nested.nlValueCount nLeaf == 2)
   expect "nested leaf PLAIN bytes are LE [1, 3]"
@@ -688,7 +688,7 @@ main = do
   expect "dictionary unique count == 3"
     (columnDataLength (dictUniques dict) == 3)
   expect "dictionary index vector has one entry per row"
-    (VS.length (dictIndices dict) == 6)
+    (VP.length (dictIndices dict) == 6)
   expect "dictionary page header is non-empty"
     (BS.length dictPage > 4)
   expect "dictionary data page is non-empty"
@@ -703,23 +703,23 @@ main = do
   expect "nullPagesBitmap popcount"
     (NPB.nullPageCount packed == 5)
   expect "nullPagesBitmap nonNullPages == [1,3,4,7]"
-    (VS.toList (NPB.nonNullPages (V.length nullPages) packed) == [1, 3, 4, 7])
+    (VP.toList (NPB.nonNullPages (V.length nullPages) packed) == [1, 3, 4, 7])
 
   -- DELTA_BINARY_PACKED writer round-trips through the reader for a few
   -- shapes (constant deltas, mixed deltas, negative deltas, single value).
   let testCases =
-        [ ("ascending integers", VS.fromList [1, 2, 3, 4, 5, 6, 7, 8, 9, 10 :: Int64])
-        , ("constant",           VS.fromList (replicate 12 (42 :: Int64)))
-        , ("descending negatives", VS.fromList [10, 5, 0, -5, -10, -50, -1000 :: Int64])
-        , ("singleton",          VS.fromList [12345 :: Int64])
-        , ("empty",              VS.empty :: VP.Vector Int64)
-        , ("128 mixed",          VS.fromList [let i64 = fromIntegral i :: Int64 in i64 * 7 - i64 `mod` 13 | i <- [(0 :: Int) .. 127]])
+        [ ("ascending integers", VP.fromList [1, 2, 3, 4, 5, 6, 7, 8, 9, 10 :: Int64])
+        , ("constant",           VP.fromList (replicate 12 (42 :: Int64)))
+        , ("descending negatives", VP.fromList [10, 5, 0, -5, -10, -50, -1000 :: Int64])
+        , ("singleton",          VP.fromList [12345 :: Int64])
+        , ("empty",              VP.empty :: VP.Vector Int64)
+        , ("128 mixed",          VP.fromList [let i64 = fromIntegral i :: Int64 in i64 * 7 - i64 `mod` 13 | i <- [(0 :: Int) .. 127]])
         ]
   flip mapM_ testCases $ \(name, vs) ->
-    case decodeDeltaBinaryPackedInt64 (VS.length vs) (encodeDeltaBinaryPackedInt64 vs) of
+    case decodeDeltaBinaryPackedInt64 (VP.length vs) (encodeDeltaBinaryPackedInt64 vs) of
       Right out ->
         expect ("DELTA_BINARY_PACKED round-trip: " ++ name)
-          (VS.toList out == VS.toList vs)
+          (VP.toList out == VP.toList vs)
       Left e -> failTest ("DELTA_BINARY_PACKED " ++ name ++ ": " ++ e)
 
   -- Modular encryption: round-trip plaintext through encrypt/decrypt for
@@ -750,18 +750,18 @@ main = do
     (BS.length (Enc.buildAadSuffix "x" Enc.ModuleFooter 0 0 0) == 15)
 
   -- BYTE_STREAM_SPLIT round-trips for FLOAT and DOUBLE.
-  let bssFloats  = VS.fromList [1.5, -2.25, 3.14159, 0, 1e9, -1e-9 :: Float]
-      bssDoubles = VS.fromList [1.5, -2.25, 3.14159, 0, 1e9, -1e-9 :: Double]
+  let bssFloats  = VP.fromList [1.5, -2.25, 3.14159, 0, 1e9, -1e-9 :: Float]
+      bssDoubles = VP.fromList [1.5, -2.25, 3.14159, 0, 1e9, -1e-9 :: Double]
       bssFloatBs  = encodeByteStreamSplitFloat bssFloats
       bssDoubleBs = encodeByteStreamSplitDouble bssDoubles
   expect "BYTE_STREAM_SPLIT FLOAT byte length == 4 * n"
-    (BS.length bssFloatBs == 4 * VS.length bssFloats)
+    (BS.length bssFloatBs == 4 * VP.length bssFloats)
   expect "BYTE_STREAM_SPLIT DOUBLE byte length == 8 * n"
-    (BS.length bssDoubleBs == 8 * VS.length bssDoubles)
-  case decodeByteStreamSplitFloat (VS.length bssFloats) bssFloatBs of
+    (BS.length bssDoubleBs == 8 * VP.length bssDoubles)
+  case decodeByteStreamSplitFloat (VP.length bssFloats) bssFloatBs of
     Right xs -> expect "BYTE_STREAM_SPLIT FLOAT round-trip" (xs == bssFloats)
     Left  e  -> failTest ("BYTE_STREAM_SPLIT FLOAT decode: " ++ e)
-  case decodeByteStreamSplitDouble (VS.length bssDoubles) bssDoubleBs of
+  case decodeByteStreamSplitDouble (VP.length bssDoubles) bssDoubleBs of
     Right xs -> expect "BYTE_STREAM_SPLIT DOUBLE round-trip" (xs == bssDoubles)
     Left  e  -> failTest ("BYTE_STREAM_SPLIT DOUBLE decode: " ++ e)
 
@@ -897,7 +897,7 @@ predicateRowGroupSkipping = do
         [ SchemaElement "schema" Nothing Nothing (Just 1) Nothing Nothing Nothing
         , SchemaElement "n" (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing
         ]
-      vs    = VS.fromList [(10 :: Int32), 20, 30, 40, 50]
+      vs    = VP.fromList [(10 :: Int32), 20, 30, 40, 50]
       fbs   = buildParquetFile schema (V.singleton (V.singleton (ColInt32 vs)))
   case loadParquetFile fbs of
     Left e -> failTest ("predicate: loadParquetFile: " ++ e)
@@ -999,7 +999,7 @@ logicalTypeRoundTrip = do
         SchemaElement "schema" Nothing Nothing
           (Just (fromIntegral (length cases))) Nothing Nothing Nothing
         : map mkSe cases
-      vs = VS.fromList [(0 :: Int32)]
+      vs = VP.fromList [(0 :: Int32)]
       cdata = ColInt32 vs
       -- Reuse the buildParquetFile entry for one stripe; the
       -- LogicalType slots ride along the schema regardless of
@@ -1063,13 +1063,13 @@ encodingRoundTripProperties = do
     let pass i =
           let !n = (i `mod` 32) + 1
               !s = seed + i
-              !vs = VS.fromList (mkInts32 s n)
+              !vs = VP.fromList (mkInts32 s n)
           in case decodeDeltaBinaryPackedInt64
-                   (VS.length vs)
+                   (VP.length vs)
                    (encodeDeltaBinaryPackedInt32 vs) of
                Right got
-                 | VS.toList (VS.map (fromIntegral :: Int64 -> Int32) got)
-                     == VS.toList vs -> True
+                 | VP.toList (VP.map (fromIntegral :: Int64 -> Int32) got)
+                     == VP.toList vs -> True
                _ -> False
     let !okCount = length (filter pass [1 .. cases])
     expect ("DELTA_BINARY_PACKED Int32 property: "
@@ -1081,11 +1081,11 @@ encodingRoundTripProperties = do
     let pass i =
           let !n = (i `mod` 32) + 1
               !s = seed + i + 1
-              !vs = VS.fromList (mkInts64 s n)
+              !vs = VP.fromList (mkInts64 s n)
           in case decodeDeltaBinaryPackedInt64
-                   (VS.length vs)
+                   (VP.length vs)
                    (encodeDeltaBinaryPackedInt64 vs) of
-               Right got | VS.toList got == VS.toList vs -> True
+               Right got | VP.toList got == VP.toList vs -> True
                _ -> False
     let !okCount = length (filter pass [1 .. cases])
     expect ("DELTA_BINARY_PACKED Int64 property: "
@@ -1097,11 +1097,11 @@ encodingRoundTripProperties = do
     let pass i =
           let !n = (i `mod` 16) + 1
               !s = seed + i + 2
-              !vs = VS.fromList (mkFloats s n)
+              !vs = VP.fromList (mkFloats s n)
           in case decodeByteStreamSplitFloat
-                   (VS.length vs)
+                   (VP.length vs)
                    (encodeByteStreamSplitFloat vs) of
-               Right got | VS.toList got == VS.toList vs -> True
+               Right got | VP.toList got == VP.toList vs -> True
                _ -> False
     let !okCount = length (filter pass [1 .. cases])
     expect ("BYTE_STREAM_SPLIT Float property: "
@@ -1113,11 +1113,11 @@ encodingRoundTripProperties = do
     let pass i =
           let !n = (i `mod` 16) + 1
               !s = seed + i + 3
-              !vs = VS.fromList (mkDoubles s n)
+              !vs = VP.fromList (mkDoubles s n)
           in case decodeByteStreamSplitDouble
-                   (VS.length vs)
+                   (VP.length vs)
                    (encodeByteStreamSplitDouble vs) of
-               Right got | VS.toList got == VS.toList vs -> True
+               Right got | VP.toList got == VP.toList vs -> True
                _ -> False
     let !okCount = length (filter pass [1 .. cases])
     expect ("BYTE_STREAM_SPLIT Double property: "
@@ -1228,9 +1228,9 @@ genericPageDispatch :: IO ()
 genericPageDispatch = do
   -- DELTA_BINARY_PACKED INT32 in a DATA_PAGE V1.
   do
-    let !values = VS.fromList ([10, 20, 30, 40, 50] :: [Int32])
+    let !values = VP.fromList ([10, 20, 30, 40, 50] :: [Int32])
         !payload = encodeDeltaBinaryPackedInt32 values
-        !numVals = VS.length values
+        !numVals = VP.length values
         !hdr = PageHeader
           { phType = PtDataPage
               (DataPageHeader { dphNumValues = fromIntegral numVals
@@ -1241,19 +1241,19 @@ genericPageDispatch = do
           }
         !chunk = encodePageHeader hdr <> payload
     case Parquet.Read.readGenericInt32ColumnChunk Uncompressed chunk of
-      Right v | VS.toList v == VS.toList values ->
+      Right v | VP.toList v == VP.toList values ->
         putStrLn "OK: generic INT32 dispatch handles DELTA_BINARY_PACKED"
       Right v -> failTest $ "DELTA_BINARY_PACKED Int32 mismatch: got "
-                            ++ show (VS.toList v)
+                            ++ show (VP.toList v)
       Left e  -> failTest $ "DELTA_BINARY_PACKED Int32: " ++ e
 
   -- BYTE_STREAM_SPLIT FLOAT in DATA_PAGE V1.
   do
-    let !values = VS.fromList ([1.0, -2.5, 3.14, 99.9] :: [Float])
+    let !values = VP.fromList ([1.0, -2.5, 3.14, 99.9] :: [Float])
         !payload = encodeByteStreamSplitFloat values
         !hdr = PageHeader
           { phType = PtDataPage
-              (DataPageHeader { dphNumValues = fromIntegral (VS.length values)
+              (DataPageHeader { dphNumValues = fromIntegral (VP.length values)
                               , dphEncoding  = 9  -- BYTE_STREAM_SPLIT
                               })
           , phUncompressedPageSize = Just (fromIntegral (BS.length payload))
@@ -1261,10 +1261,10 @@ genericPageDispatch = do
           }
         !chunk = encodePageHeader hdr <> payload
     case Parquet.Read.readGenericFloatColumnChunk Uncompressed chunk of
-      Right v | VS.toList v == VS.toList values ->
+      Right v | VP.toList v == VP.toList values ->
         putStrLn "OK: generic FLOAT dispatch handles BYTE_STREAM_SPLIT"
       Right v -> failTest $ "BYTE_STREAM_SPLIT Float mismatch: got "
-                            ++ show (VS.toList v)
+                            ++ show (VP.toList v)
       Left e  -> failTest $ "BYTE_STREAM_SPLIT Float: " ++ e
 
   -- DELTA_BYTE_ARRAY for BYTE_ARRAY in DATA_PAGE V1.
@@ -1294,7 +1294,7 @@ genericPageDispatch = do
   -- PLAIN INT64 wrapped in a DATA_PAGE_V2 (no level streams,
   -- uncompressed). This exercises the V2 page header dispatch.
   do
-    let !values = VS.fromList ([100, 200, 300] :: [Int64])
+    let !values = VP.fromList ([100, 200, 300] :: [Int64])
         !payload = mconcat
           [ BS.pack
               [ fromIntegral (v `mod` 256)
@@ -1302,14 +1302,14 @@ genericPageDispatch = do
               , fromIntegral ((v `div` 65536) `mod` 256)
               , 0, 0, 0, 0, 0
               ]
-          | v <- VS.toList values
+          | v <- VP.toList values
           ]
         !hdr = PageHeader
           { phType = PtDataPageV2
               DataPageHeaderV2
-                { dph2NumValues    = fromIntegral (VS.length values)
+                { dph2NumValues    = fromIntegral (VP.length values)
                 , dph2NumNulls     = 0
-                , dph2NumRows      = fromIntegral (VS.length values)
+                , dph2NumRows      = fromIntegral (VP.length values)
                 , dph2Encoding     = 0  -- PLAIN
                 , dph2DefLevelsLen = 0
                 , dph2RepLevelsLen = 0
@@ -1320,10 +1320,10 @@ genericPageDispatch = do
           }
         !chunk = encodePageHeader hdr <> payload
     case Parquet.Read.readGenericInt64ColumnChunk Uncompressed chunk of
-      Right v | VS.toList v == VS.toList values ->
+      Right v | VP.toList v == VP.toList values ->
         putStrLn "OK: generic INT64 dispatch handles DATA_PAGE_V2"
       Right v -> failTest $ "DATA_PAGE_V2 Int64 mismatch: got "
-                            ++ show (VS.toList v)
+                            ++ show (VP.toList v)
       Left e  -> failTest $ "DATA_PAGE_V2 Int64: " ++ e
 
 predicateBloomSkipping :: IO ()
@@ -1363,8 +1363,8 @@ arrowParquetProjection = do
         , AT.arrowFeatures = V.empty
         }
       !batch = V.fromList
-        [ AC.ColInt32 (VP.fromList [10, 20, 30 :: Int32])
-        , AC.ColInt32 (VP.fromList [40, 50, 60 :: Int32])
+        [ AC.ColInt32 (VS.fromList [10, 20, 30 :: Int32])
+        , AC.ColInt32 (VS.fromList [40, 50, 60 :: Int32])
         , AC.ColUtf8  (V.fromList ["alpha", "beta", "gamma"])
         ]
   case PArrow.arrowToParquet fullSchema [batch] of
@@ -1393,7 +1393,7 @@ arrowParquetProjection = do
             Right cols -> do
               let !expected = V.fromList
                     [ AC.ColUtf8  (V.fromList ["alpha", "beta", "gamma"])
-                    , AC.ColInt32 (VP.fromList [10, 20, 30 :: Int32])
+                    , AC.ColInt32 (VS.fromList [10, 20, 30 :: Int32])
                     ]
               if cols == expected
                 then putStrLn "OK: Parquet projection + reorder (c, a <- a, b, c)"
@@ -1424,7 +1424,7 @@ arrowParquetProjection = do
           case PArrow.parquetRowGroupToArrow widen pf 0 of
             Left e -> failTest $ "projection coercion: " ++ show e
             Right cols ->
-              if cols == V.singleton (AC.ColInt64 (VP.fromList [10, 20, 30 :: Int64]))
+              if cols == V.singleton (AC.ColInt64 (VS.fromList [10, 20, 30 :: Int64]))
                 then putStrLn "OK: Parquet projection coerces Int32 -> Int64"
                 else failTest $ "coercion mismatch: " ++ show (V.toList cols)
 
@@ -1442,7 +1442,7 @@ arrowParquetNestedBridge = do
         Nothing
         V.empty
       structCol = AC.ColStruct (V.fromList
-        [ ("x",    AC.ColInt32 (VP.fromList [1, 2, 3 :: Int32]))
+        [ ("x",    AC.ColInt32 (VS.fromList [1, 2, 3 :: Int32]))
         , ("name", AC.ColUtf8  (V.fromList ["a", "b", "c"]))
         ])
   case PArrow.arrowFieldToNestedSchema structField of
@@ -1471,7 +1471,7 @@ arrowParquetBridge = do
         , AT.arrowFeatures = V.empty
         }
       !batch = V.fromList
-        [ AC.ColInt32 (VP.fromList ([10, 20, 30] :: [Int32]))
+        [ AC.ColInt32 (VS.fromList ([10, 20, 30] :: [Int32]))
         , AC.ColUtf8  (V.fromList ["alpha", "beta", "gamma"])
         ]
   case PArrow.arrowToParquet arrowSchema [batch] of
