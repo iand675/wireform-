@@ -77,7 +77,10 @@ mkSchema = V.fromList
   ]
 
 writeFile_ :: V.Vector ColumnData -> BS.ByteString
-writeFile_ cols = PHL.encodeParquet PHL.defaultWriteOptions mkSchema [cols]
+writeFile_ cols =
+  PHL.encodeParquet
+    PHL.defaultWriteOptions { PHL.writeCompression = P.Uncompressed }
+    mkSchema [cols]
 
 writeFileZstd :: V.Vector ColumnData -> BS.ByteString
 writeFileZstd cols =
@@ -116,19 +119,25 @@ readBack bs = case PHL.decodeParquet PHL.defaultReadOptions bs of
     in total
 
 -- | Force a 'ColumnArray' so the bench measures real decode
--- cost. We force every element to WHNF (which is what
--- pyarrow's @read_table@ effectively does — it materialises
--- the underlying buffers and offsets but does not validate or
--- re-encode the per-value strings) and accumulate a checksum
--- so neither GHC nor criterion can drop the work.
+-- cost — and only that.
 --
--- For boxed elements (Bool / Utf8 / Binary) we use 'seq' to
--- force WHNF without doing extra per-value work like
--- 'T.length' or 'BS.length' that pyarrow doesn't measure.
+-- For primitive vectors ('ColInt32' / 'ColInt64' / 'ColFloat'
+-- / 'ColDouble') the data lives in a strict 'ByteArray', so
+-- the decode is fully done as soon as the vector constructor
+-- is reached: 'VP.length' suffices to force the work.
+-- @VP.foldl' (+)@ would also sum every value, which pyarrow's
+-- @read_table@ does not do — including it would unfairly
+-- penalise wireform.
+--
+-- For boxed vectors ('Bool' / 'Utf8' / 'Binary') the elements
+-- can still be lazy thunks, so we walk the spine and force
+-- each element to WHNF — which is what pyarrow's
+-- @read_table@ effectively does (it materialises Arrow
+-- buffers).
 forceCol :: AC.ColumnArray -> Int
 forceCol = \case
-  AC.ColInt32  v -> VP.foldl' (\a x -> a + fromIntegral x) 0 v
-  AC.ColInt64  v -> VP.foldl' (\a x -> a + fromIntegral x) 0 v
+  AC.ColInt32  v -> VP.length v
+  AC.ColInt64  v -> VP.length v
   AC.ColFloat  v -> VP.length v
   AC.ColDouble v -> VP.length v
   AC.ColBool   v -> V.foldl'  (\a !_ -> a + 1) 0 v

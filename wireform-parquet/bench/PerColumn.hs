@@ -28,8 +28,8 @@ import Parquet.Write (ColumnData (..))
 -- never runs and the bench misreports.)
 forceCol :: AC.ColumnArray -> Int
 forceCol = \case
-  AC.ColInt32  v -> VP.foldl' (\a x -> a + fromIntegral x) 0 v
-  AC.ColInt64  v -> VP.foldl' (\a x -> a + fromIntegral x) 0 v
+  AC.ColInt32  v -> VP.length v
+  AC.ColInt64  v -> VP.length v
   AC.ColFloat  v -> VP.length v
   AC.ColDouble v -> VP.length v
   AC.ColBool   v -> V.foldl'  (\a !_ -> a + 1) 0 v
@@ -59,7 +59,9 @@ mkSchema = V.fromList
   ]
 
 writeF :: V.Vector ColumnData -> BS.ByteString
-writeF cols = PHL.encodeParquet PHL.defaultWriteOptions mkSchema [cols]
+writeF cols = PHL.encodeParquet
+  PHL.defaultWriteOptions { PHL.writeCompression = P.Uncompressed }
+  mkSchema [cols]
 
 time :: String -> Int -> IO Int -> IO ()
 time label iters act = do
@@ -114,6 +116,21 @@ main = do
       time "score  (Double)" 5 (pure (rd 1))
       time "name   (Utf8)" 5 (pure (rd 2))
       time "active (Bool)" 5 (pure (rd 3))
+      putStrLn ""
+      putStrLn "=== Stage breakdown for one Int64 column (100x, fresh bs to defeat CSE) ==="
+      -- Pull the column chunk bytes once; time downstream stages.
+      case PR.columnChunkSlice pf 0 0 of
+        Right chunkBs -> do
+          let !codec = P.Uncompressed
+          time "  columnChunkSlice (just slice)" 100 $
+            case PR.columnChunkSlice pf 0 0 of
+              Right b -> pure (BS.length b)
+              Left _  -> pure 0
+          time "  readGenericInt64ColumnChunk (Uncompressed)" 100 $
+            case PR.readGenericInt64ColumnChunk codec chunkBs of
+              Right v -> pure (VP.length v)
+              Left _  -> pure 0
+        Left _ -> pure ()
       putStrLn ""
       putStrLn "=== End-to-end (decodeParquet + 4 cols, fresh bs each iter) ==="
       -- Make 5 distinct ByteStrings so GHC can't CSE the whole

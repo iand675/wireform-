@@ -1292,10 +1292,18 @@ genericReadColumnChunk
   -> Compression
   -> ByteString
   -> Either String a
-genericReadColumnChunk pp codec chunk0 = go 0 Nothing (ppEmpty pp)
+genericReadColumnChunk pp codec chunk0 = go 0 Nothing Nothing
   where
-    go !off !mDict !acc
-      | off >= BS.length chunk0 = Right acc
+    -- @mAcc@ is @Nothing@ until we've decoded our first data
+    -- page, then @Just v@. This lets the common single-page
+    -- case skip the @ppAppend@ entirely — for Int64 it would
+    -- otherwise allocate + memcpy the entire 800 KB page into
+    -- a fresh vector just to concatenate with the empty
+    -- accumulator.
+    go !off !mDict !mAcc
+      | off >= BS.length chunk0 = case mAcc of
+          Nothing -> Right (ppEmpty pp)
+          Just v  -> Right v
       | otherwise = do
           (hdr, afterHdr) <- readPageHeaderAt chunk0 off
           compSz <- case phCompressedPageSize hdr of
@@ -1316,13 +1324,16 @@ genericReadColumnChunk pp codec chunk0 = go 0 Nothing (ppEmpty pp)
                                (phUncompressedPageSize hdr) compBody
                       let !nDict = fromIntegral (dictNumValues dk) :: Int
                       dict <- ppDecodePlain pp nDict raw
-                      go nextOff (Just dict) acc
+                      go nextOff (Just dict) mAcc
                 PtDataPage dph -> do
                   raw <- decompressPageData codec
                            (phUncompressedPageSize hdr) compBody
                   let !n = fromIntegral (dphNumValues dph) :: Int
                   pageVec <- decodeDataPage pp mDict (dphEncoding dph) n raw
-                  go nextOff mDict (ppAppend pp acc pageVec)
+                  let !mAcc' = case mAcc of
+                        Nothing  -> Just pageVec
+                        Just acc -> Just (ppAppend pp acc pageVec)
+                  go nextOff mDict mAcc'
                 PtDataPageV2 dph2 -> do
                   -- V2 page body is: rep_levels ++ def_levels ++ values.
                   -- For required (max_def=0) flat columns the level
@@ -1343,7 +1354,10 @@ genericReadColumnChunk pp codec chunk0 = go 0 Nothing (ppEmpty pp)
                       let !n = fromIntegral (dph2NumValues dph2) :: Int
                       pageVec <-
                         decodeDataPage pp mDict (dph2Encoding dph2) n values
-                      go nextOff mDict (ppAppend pp acc pageVec)
+                      let !mAcc' = case mAcc of
+                            Nothing  -> Just pageVec
+                            Just acc -> Just (ppAppend pp acc pageVec)
+                      go nextOff mDict mAcc'
                 _ -> Left "Parquet.Read: expected DATA_PAGE / DATA_PAGE_V2 / DICTIONARY_PAGE"
 
     decodeDataPage pp' mDict !enc !n !raw
