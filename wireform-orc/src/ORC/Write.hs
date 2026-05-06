@@ -43,8 +43,12 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Primitive.Mutable as MVP
+import Control.Monad.ST (runST)
 import Data.Word (Word64, Word8)
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
+import qualified Data.ByteString.Internal as BSI
+import Foreign.Storable (pokeByteOff)
 
 import qualified ORC.Encryption as Enc
 import ORC.Footer (orcMagic, writeORCFooter)
@@ -162,66 +166,70 @@ encodeStringDictColumn
 encodeStringDictColumn texts =
   let !n = V.length texts
       -- First-occurrence dictionary. We walk once and keep a
-      -- 'Map' for lookup + a 'GrowList'-style accumulator for
-      -- the ordered unique entries. For the sizes this writer
-      -- targets (per-stripe dictionaries, usually <= a few
-      -- thousand unique strings) a Data.Map.Strict.Map Text Int
-      -- is the right call.
-      (indices, uniqueRev) = go 0 mempty [] V.empty
-        where
-          go !i !dict !uniqAcc !idxAcc
-            | i >= n = (idxAcc, uniqAcc)
-            | otherwise =
-                let !t = V.unsafeIndex texts i
-                in case Map.lookup t dict of
-                     Just k  ->
-                       go (i + 1) dict uniqAcc
-                          (V.snoc idxAcc (fromIntegral k :: Int64))
-                     Nothing ->
-                       let !k = Map.size dict
-                           !dict'   = Map.insert t k dict
-                           !uniqAcc' = t : uniqAcc
-                       in go (i + 1) dict' uniqAcc'
-                          (V.snoc idxAcc (fromIntegral k :: Int64))
+      -- 'Map' for lookup; the per-row index stream is written
+      -- straight into a mutable primitive vector.
+      --
+      -- Implementation note (perf): the previous version used
+      -- @V.snoc idxAcc@ to grow the indices vector — O(n) copy
+      -- per row, so O(n²) total work. For a 100k-row column
+      -- that's ~5 billion copies. The mutable-vector version
+      -- below is O(n).
+      (idxPrim, uniqueRev) = runST $ do
+        mv <- MVP.unsafeNew n
+        let go !i !dict !uniqAcc
+              | i >= n    = pure (dict, uniqAcc)
+              | otherwise = do
+                  let !t = V.unsafeIndex texts i
+                  case Map.lookup t dict of
+                    Just k -> do
+                      MVP.unsafeWrite mv i (fromIntegral k :: Int64)
+                      go (i + 1) dict uniqAcc
+                    Nothing -> do
+                      let !k     = Map.size dict
+                          !dict' = Map.insert t k dict
+                      MVP.unsafeWrite mv i (fromIntegral k :: Int64)
+                      go (i + 1) dict' (t : uniqAcc)
+        (_finalDict, accRev) <- go 0 mempty []
+        v <- VP.unsafeFreeze mv
+        pure (v, accRev)
       !uniques = V.fromList (reverse uniqueRev)
       !(dictBytes, lengthBs) = encodeStringDirectColumn uniques
-      -- Convert the boxed indices vector to a primitive one; the RLE
-      -- v2 encoder needs a VP.Vector Int64.
-      !idxPrim = VP.generate (V.length indices) (V.unsafeIndex indices)
       !dataBs = encodeRLEv2Direct idxPrim False
   in (dataBs, lengthBs, dictBytes)
 
 -- | Encode a float column (IEEE 754 single, little-endian).
+--
+-- Implementation note (perf): the previous version went
+-- through @ByteString.Builder@ with a @VP.foldl'@ + 4 per-byte
+-- @B.word8@ shift-extracts per element, then @BL.toStrict@.
+-- For a 100k-row column that allocates a 100k-deep Builder
+-- thunk plus the lazy chunk list. The new version
+-- pre-allocates the strict ByteString to its exact final size
+-- and writes each element with a single 4-byte poke.
 encodeFloatColumn :: VP.Vector Float -> ByteString
 encodeFloatColumn vals =
-  BL.toStrict $ B.toLazyByteString $ VP.foldl' (\acc v -> acc <> writeFloatLE v) mempty vals
+  let !n = VP.length vals
+  in BSI.unsafeCreate (n * 4) $ \ptr -> do
+       let go !i
+             | i >= n    = pure ()
+             | otherwise = do
+                 let !w = castFloatToWord32 (VP.unsafeIndex vals i)
+                 pokeByteOff ptr (i * 4) w
+                 go (i + 1)
+       go 0
 
 -- | Encode a double column (IEEE 754 double, little-endian).
 encodeDoubleColumn :: VP.Vector Double -> ByteString
 encodeDoubleColumn vals =
-  BL.toStrict $ B.toLazyByteString $ VP.foldl' (\acc v -> acc <> writeDoubleLE v) mempty vals
-
-{-# INLINE writeFloatLE #-}
-writeFloatLE :: Float -> B.Builder
-writeFloatLE !f =
-  let !w = castFloatToWord32 f
-  in B.word8 (fromIntegral (w .&. 0xFF))
-     <> B.word8 (fromIntegral ((w `shiftR` 8) .&. 0xFF))
-     <> B.word8 (fromIntegral ((w `shiftR` 16) .&. 0xFF))
-     <> B.word8 (fromIntegral ((w `shiftR` 24) .&. 0xFF))
-
-{-# INLINE writeDoubleLE #-}
-writeDoubleLE :: Double -> B.Builder
-writeDoubleLE !d =
-  let !w = castDoubleToWord64 d
-  in B.word8 (fromIntegral (w .&. 0xFF))
-     <> B.word8 (fromIntegral ((w `shiftR` 8) .&. 0xFF))
-     <> B.word8 (fromIntegral ((w `shiftR` 16) .&. 0xFF))
-     <> B.word8 (fromIntegral ((w `shiftR` 24) .&. 0xFF))
-     <> B.word8 (fromIntegral ((w `shiftR` 32) .&. 0xFF))
-     <> B.word8 (fromIntegral ((w `shiftR` 40) .&. 0xFF))
-     <> B.word8 (fromIntegral ((w `shiftR` 48) .&. 0xFF))
-     <> B.word8 (fromIntegral ((w `shiftR` 56) .&. 0xFF))
+  let !n = VP.length vals
+  in BSI.unsafeCreate (n * 8) $ \ptr -> do
+       let go !i
+             | i >= n    = pure ()
+             | otherwise = do
+                 let !w = castDoubleToWord64 (VP.unsafeIndex vals i)
+                 pokeByteOff ptr (i * 8) w
+                 go (i + 1)
+       go 0
 
 ------------------------------------------------------------------------
 -- Date / timestamp / decimal column encoders

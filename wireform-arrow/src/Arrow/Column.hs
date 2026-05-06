@@ -21,7 +21,12 @@ import Data.Bits (shiftL, (.|.))
 import Data.ByteString (ByteString)
 import Data.Maybe (fromMaybe)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Unsafe as BSU
+import Foreign.Ptr (Ptr, castPtr)
+import qualified Data.Primitive.ByteArray as PBA
+import qualified Data.Vector.Primitive.Mutable as MVP
+import System.IO.Unsafe (unsafePerformIO)
 import Data.Int (Int16, Int32, Int64, Int8)
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
@@ -350,14 +355,18 @@ readUInt32Column endian len rb body !bufIdx !nodeIdx = do
   valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * 4
     then Left "Arrow.Column: uint32 buffer too small"
-    else Right (ColUInt32 (VP.generate len $ \i -> readWord32 endian valsBs (i * 4)), nodeIdx + 1, bufIdx + 1)
+    else case endian of
+      Little -> Right (ColUInt32 (memcpyPrimVecLE 4 len valsBs), nodeIdx + 1, bufIdx + 1)
+      _      -> Right (ColUInt32 (VP.generate len $ \i -> readWord32 endian valsBs (i * 4)), nodeIdx + 1, bufIdx + 1)
 
 readUInt64Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readUInt64Column endian len rb body !bufIdx !nodeIdx = do
   valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * 8
     then Left "Arrow.Column: uint64 buffer too small"
-    else Right (ColUInt64 (VP.generate len $ \i -> readWord64 endian valsBs (i * 8)), nodeIdx + 1, bufIdx + 1)
+    else case endian of
+      Little -> Right (ColUInt64 (memcpyPrimVecLE 8 len valsBs), nodeIdx + 1, bufIdx + 1)
+      _      -> Right (ColUInt64 (VP.generate len $ \i -> readWord64 endian valsBs (i * 8)), nodeIdx + 1, bufIdx + 1)
 
 readFloat16Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readFloat16Column endian len rb body !bufIdx !nodeIdx = do
@@ -377,18 +386,22 @@ readFloatColumn endian len rb body !bufIdx !nodeIdx = do
   valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * 4
     then Left "Arrow.Column: float buffer too small"
-    else do
-      vec <- V.generateM len $ \i -> readF32 endian valsBs (i * 4)
-      Right (ColFloat (V.convert vec), nodeIdx + 1, bufIdx + 1)
+    else case endian of
+      Little -> Right (ColFloat (memcpyPrimVecLE 4 len valsBs), nodeIdx + 1, bufIdx + 1)
+      _      -> do
+        vec <- V.generateM len $ \i -> readF32 endian valsBs (i * 4)
+        Right (ColFloat (V.convert vec), nodeIdx + 1, bufIdx + 1)
 
 readDoubleColumn :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readDoubleColumn endian len rb body !bufIdx !nodeIdx = do
   valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * 8
     then Left "Arrow.Column: double buffer too small"
-    else do
-      vec <- V.generateM len $ \i -> readF64 endian valsBs (i * 8)
-      Right (ColDouble (V.convert vec), nodeIdx + 1, bufIdx + 1)
+    else case endian of
+      Little -> Right (ColDouble (memcpyPrimVecLE 8 len valsBs), nodeIdx + 1, bufIdx + 1)
+      _      -> do
+        vec <- V.generateM len $ \i -> readF64 endian valsBs (i * 8)
+        Right (ColDouble (V.convert vec), nodeIdx + 1, bufIdx + 1)
 
 readUtf8Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readUtf8Column endian len rb body !bufIdx !nodeIdx = do
@@ -473,48 +486,60 @@ readDate32Column endian len rb body !bufIdx !nodeIdx = do
   valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * 4
     then Left "Arrow.Column: date32 buffer too small"
-    else Right (ColDate32 (VP.generate len $ \i ->
-      fromIntegral (readWord32 endian valsBs (i * 4)) :: Int32), nodeIdx + 1, bufIdx + 1)
+    else case endian of
+      Little -> Right (ColDate32 (memcpyPrimVecLE 4 len valsBs), nodeIdx + 1, bufIdx + 1)
+      _      -> Right (ColDate32 (VP.generate len $ \i ->
+        fromIntegral (readWord32 endian valsBs (i * 4)) :: Int32), nodeIdx + 1, bufIdx + 1)
 
 readDate64Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readDate64Column endian len rb body !bufIdx !nodeIdx = do
   valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * 8
     then Left "Arrow.Column: date64 buffer too small"
-    else Right (ColDate64 (VP.generate len $ \i ->
-      fromIntegral (readWord64 endian valsBs (i * 8)) :: Int64), nodeIdx + 1, bufIdx + 1)
+    else case endian of
+      Little -> Right (ColDate64 (memcpyPrimVecLE 8 len valsBs), nodeIdx + 1, bufIdx + 1)
+      _      -> Right (ColDate64 (VP.generate len $ \i ->
+        fromIntegral (readWord64 endian valsBs (i * 8)) :: Int64), nodeIdx + 1, bufIdx + 1)
 
 readTime32Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readTime32Column endian len rb body !bufIdx !nodeIdx = do
   valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * 4
     then Left "Arrow.Column: time32 buffer too small"
-    else Right (ColTime32 (VP.generate len $ \i ->
-      fromIntegral (readWord32 endian valsBs (i * 4)) :: Int32), nodeIdx + 1, bufIdx + 1)
+    else case endian of
+      Little -> Right (ColTime32 (memcpyPrimVecLE 4 len valsBs), nodeIdx + 1, bufIdx + 1)
+      _      -> Right (ColTime32 (VP.generate len $ \i ->
+        fromIntegral (readWord32 endian valsBs (i * 4)) :: Int32), nodeIdx + 1, bufIdx + 1)
 
 readTime64Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readTime64Column endian len rb body !bufIdx !nodeIdx = do
   valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * 8
     then Left "Arrow.Column: time64 buffer too small"
-    else Right (ColTime64 (VP.generate len $ \i ->
-      fromIntegral (readWord64 endian valsBs (i * 8)) :: Int64), nodeIdx + 1, bufIdx + 1)
+    else case endian of
+      Little -> Right (ColTime64 (memcpyPrimVecLE 8 len valsBs), nodeIdx + 1, bufIdx + 1)
+      _      -> Right (ColTime64 (VP.generate len $ \i ->
+        fromIntegral (readWord64 endian valsBs (i * 8)) :: Int64), nodeIdx + 1, bufIdx + 1)
 
 readTimestampColumn :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readTimestampColumn endian len rb body !bufIdx !nodeIdx = do
   valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * 8
     then Left "Arrow.Column: timestamp buffer too small"
-    else Right (ColTimestamp (VP.generate len $ \i ->
-      fromIntegral (readWord64 endian valsBs (i * 8)) :: Int64), nodeIdx + 1, bufIdx + 1)
+    else case endian of
+      Little -> Right (ColTimestamp (memcpyPrimVecLE 8 len valsBs), nodeIdx + 1, bufIdx + 1)
+      _      -> Right (ColTimestamp (VP.generate len $ \i ->
+        fromIntegral (readWord64 endian valsBs (i * 8)) :: Int64), nodeIdx + 1, bufIdx + 1)
 
 readDurationColumn :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readDurationColumn endian len rb body !bufIdx !nodeIdx = do
   valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * 8
     then Left "Arrow.Column: duration buffer too small"
-    else Right (ColDuration (VP.generate len $ \i ->
-      fromIntegral (readWord64 endian valsBs (i * 8)) :: Int64), nodeIdx + 1, bufIdx + 1)
+    else case endian of
+      Little -> Right (ColDuration (memcpyPrimVecLE 8 len valsBs), nodeIdx + 1, bufIdx + 1)
+      _      -> Right (ColDuration (VP.generate len $ \i ->
+        fromIntegral (readWord64 endian valsBs (i * 8)) :: Int64), nodeIdx + 1, bufIdx + 1)
 
 readDecimal128Column :: Int -> Int -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readDecimal128Column precision scale len rb body !bufIdx !nodeIdx = do
@@ -990,9 +1015,44 @@ readInts16 endian signed len bs
           let v = readWord16 endian bs (i * 2)
           in if signed then fromIntegral (fromIntegral v :: Int16) else fromIntegral v
 
+-- | Memcpy a slice of @bs@ into a freshly-allocated primitive
+-- vector. Assumes the source bit pattern matches the host
+-- (Arrow LE on x86_64 / aarch64), so each element is exactly
+-- the same bit pattern in @bs@ and in the result vector.
+--
+-- Replaces the byte-by-byte readWord32 / readWord64 +
+-- VP.generate inner loop in the LE path of every primitive
+-- column reader; for a 100 k Int64 column that's one memcpy
+-- vs ~800 k bounds-checked unsafeIndex + shift / OR ops.
+{-# INLINE memcpyPrimVecLE #-}
+memcpyPrimVecLE
+  :: forall a. VP.Prim a
+  => Int                 -- ^ element size in bytes
+  -> Int                 -- ^ number of elements
+  -> ByteString
+  -> VP.Vector a
+memcpyPrimVecLE !elemBytes !len bs
+  | len <= 0  = VP.empty
+  | otherwise = unsafePerformIO $
+      BSU.unsafeUseAsCStringLen bs $ \(cstr, _) -> do
+        mv <- MVP.unsafeNew len
+        let !srcPtr = castPtr cstr :: Ptr Word8
+            !nBytes = len * elemBytes
+        case mv of
+          MVP.MVector dstOffElems _ dstMba ->
+            PBA.copyPtrToMutableByteArray
+              dstMba (dstOffElems * elemBytes) srcPtr nBytes
+        VP.unsafeFreeze mv
+
 readInts32 :: Endianness -> Bool -> Int -> ByteString -> Either String (VP.Vector Int32)
 readInts32 endian signed len bs
   | BS.length bs < len * 4 = Left "Arrow.Column: int32 buffer too small"
+  | endian == Little =
+      -- Fast path: bit pattern matches the host. signed/unsigned
+      -- distinguish only in how the bits are interpreted, not
+      -- in storage; either way the underlying ByteArray is the
+      -- same memcpy.
+      Right (memcpyPrimVecLE 4 len bs)
   | otherwise =
       Right $
         VP.generate len $ \i ->
@@ -1002,6 +1062,7 @@ readInts32 endian signed len bs
 readInts64 :: Endianness -> Bool -> Int -> ByteString -> Either String (VP.Vector Int64)
 readInts64 endian signed len bs
   | BS.length bs < len * 8 = Left "Arrow.Column: int64 buffer too small"
+  | endian == Little = Right (memcpyPrimVecLE 8 len bs)
   | otherwise =
       Right $
         VP.generate len $ \i ->

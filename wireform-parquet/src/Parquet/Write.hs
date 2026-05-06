@@ -351,6 +351,31 @@ encodeColumnDataPageV2Parts codec cd = do
 -- Page / column statistics
 -- ============================================================
 
+-- | A strict pair, used for fused single-pass min/max folds in the
+-- @statisticsFor*@ family. Avoids allocating a tuple per step.
+data MinMax a = MinMax !a !a
+
+-- | Single-pass min/max fold over a 'VP.Vector'. Replaces the
+-- two-pass @VP.foldl1' min vs ; VP.foldl1' max vs@ shape used by
+-- statistics computation; saves one full sweep of the column on
+-- every write.
+{-# INLINE minMaxVP #-}
+minMaxVP :: (VP.Prim a, Ord a) => VP.Vector a -> MinMax a
+minMaxVP vs =
+  let !v0 = VP.unsafeIndex vs 0
+  in VP.foldl' step (MinMax v0 v0) (VP.unsafeSlice 1 (VP.length vs - 1) vs)
+  where
+    step (MinMax !mn !mx) !x = MinMax (min mn x) (max mx x)
+
+-- | Single-pass min/max fold over a 'V.Vector'.
+{-# INLINE minMaxV #-}
+minMaxV :: Ord a => V.Vector a -> MinMax a
+minMaxV vs =
+  let !v0 = V.unsafeIndex vs 0
+  in V.foldl' step (MinMax v0 v0) (V.unsafeSlice 1 (V.length vs - 1) vs)
+  where
+    step (MinMax !mn !mx) !x = MinMax (min mn x) (max mx x)
+
 -- | Compute Parquet 'Statistics' for an @INT32@ column.
 --
 -- Encodes @min_value@ / @max_value@ as little-endian @INT32@ per the
@@ -361,8 +386,7 @@ statisticsForInt32 :: VP.Vector Int32 -> Statistics
 statisticsForInt32 vs
   | VP.null vs = emptyStats
   | otherwise =
-      let !mn = VP.foldl1' min vs
-          !mx = VP.foldl1' max vs
+      let !(MinMax mn mx) = minMaxVP vs
           encMin = i32LE mn
           encMax = i32LE mx
       in Statistics
@@ -379,8 +403,7 @@ statisticsForInt64 :: VP.Vector Int64 -> Statistics
 statisticsForInt64 vs
   | VP.null vs = emptyStats
   | otherwise =
-      let !mn = VP.foldl1' min vs
-          !mx = VP.foldl1' max vs
+      let !(MinMax mn mx) = minMaxVP vs
           encMin = i64LE mn
           encMax = i64LE mx
       in Statistics
@@ -399,8 +422,7 @@ statisticsForByteArray :: V.Vector ByteString -> Statistics
 statisticsForByteArray vs
   | V.null vs = emptyStats
   | otherwise =
-      let !mn = V.foldl1' minBS vs
-          !mx = V.foldl1' maxBS vs
+      let !(MinMax mn mx) = minMaxV vs
       in Statistics
            { statMin = Just mn
            , statMax = Just mx
@@ -409,9 +431,6 @@ statisticsForByteArray vs
            , statMinValue = Just mn
            , statMaxValue = Just mx
            }
-  where
-    minBS a b = if a <= b then a else b
-    maxBS a b = if a >= b then a else b
 
 emptyStats :: Statistics
 emptyStats = Statistics Nothing Nothing (Just 0) Nothing Nothing Nothing
@@ -428,8 +447,7 @@ statisticsForFloat :: VP.Vector Float -> Statistics
 statisticsForFloat vs
   | VP.null vs = emptyStats
   | otherwise =
-      let !mn = VP.foldl1' min vs
-          !mx = VP.foldl1' max vs
+      let !(MinMax mn mx) = minMaxVP vs
           encMin = fLE mn
           encMax = fLE mx
       in Statistics (Just encMin) (Just encMax) (Just 0) Nothing
@@ -440,8 +458,7 @@ statisticsForDouble :: VP.Vector Double -> Statistics
 statisticsForDouble vs
   | VP.null vs = emptyStats
   | otherwise =
-      let !mn = VP.foldl1' min vs
-          !mx = VP.foldl1' max vs
+      let !(MinMax mn mx) = minMaxVP vs
           encMin = dLE mn
           encMax = dLE mx
       in Statistics (Just encMin) (Just encMax) (Just 0) Nothing
