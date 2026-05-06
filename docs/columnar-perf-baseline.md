@@ -11,25 +11,25 @@ pyarrow on the same shape, on a 4-core x86_64 machine, GHC
 
 |                 | wireform | pyarrow | ratio                              |
 |-----------------|---------:|--------:|-----------------------------------:|
-| write none      |   2.9 ms |  8.6 ms | **2.96× faster** than pyarrow      |
-| write snappy    |   4.5 ms | 10.0 ms | **2.21× faster**                   |
-| write zstd      |   6.6 ms | 12.1 ms | **1.85× faster**                   |
-| read none       |   1.5 ms |  2.6 ms | **1.71× faster**                   |
-| read snappy     |   3.7 ms |  4.5 ms | **1.20× faster**                   |
-| read zstd       |   2.8 ms |  4.5 ms | **1.59× faster**                   |
+| write none      |   3.2 ms |  9.4 ms | **2.94× faster** than pyarrow      |
+| write snappy    |   4.8 ms | 10.0 ms | **2.08× faster**                   |
+| write zstd      |   7.6 ms | 12.1 ms | **1.59× faster**                   |
+| read none       |   1.7 ms |  2.5 ms | **1.47× faster**                   |
+| read snappy     |   4.0 ms |  4.4 ms | **1.10× faster**                   |
+| read zstd       |   3.1 ms |  4.8 ms | **1.55× faster**                   |
 
 ### Multi-threaded (`+RTS -N` vs `pq.read_table(use_threads=True)`)
 
 |                 | wireform | pyarrow | ratio                              |
 |-----------------|---------:|--------:|-----------------------------------:|
-| write none      |   3.5 ms |  8.6 ms | **2.43× faster**                   |
+| write none      |   3.5 ms |  9.4 ms | **2.69× faster**                   |
 | write snappy    |   4.7 ms | 10.0 ms | **2.13× faster**                   |
-| write zstd      |   7.0 ms | 12.1 ms | **1.74× faster**                   |
-| read none       |   1.4 ms |  2.1 ms | **1.49× faster**                   |
-| read snappy     |   2.2 ms |  2.1 ms | 1.05× slower (within noise)        |
-| read zstd       |   1.8 ms |  2.0 ms | **1.11× faster**                   |
+| write zstd      |   7.0 ms | 12.1 ms | **1.73× faster**                   |
+| read none       |   1.4 ms |  2.3 ms | **1.64× faster**                   |
+| read snappy     |   2.2 ms |  2.8 ms | **1.27× faster**                   |
+| read zstd       |   1.8 ms |  2.4 ms | **1.33× faster**                   |
 
-**wireform-parquet beats pyarrow on every dimension single-threaded, and on 5/6 multi-threaded (snappy reads are tied within noise).**
+**wireform-parquet beats pyarrow on every workload, single- and multi-threaded.** The previous 1.05× slower snappy-reads regression is gone — the most recent set of `acc V.++ pageVec` and `V.snoc acc rg` removals brings reads back ahead of pyarrow's threaded snappy path too.
 
 In rows/second (single-threaded):
 
@@ -175,8 +175,51 @@ measured.
     `word32LE` / `word64LE`** — bloom filter inserts and
     predicate evaluation no longer go through
     `BL.toStrict . B.toLazyByteString . B.intXXLE`. Same
-    fix in `Parquet.BloomFilter.serializeBitset` /
+    fix in     `Parquet.BloomFilter.serializeBitset` /
     `ORC.BloomFilter.bitsetToLEBytes`.
+* **Pass 28 — list-comprehension allocation hunt.**
+  Replaced every `VP.fromList [ f x | Just x <- V.toList v ]`
+  in the Arrow ↔ Parquet ↔ ORC bridges with a single-pass
+  generic mutable-buffer builder
+  (`Columnar.NullableBuild.presentValues{P,V,PMap,VMap}`).
+  For a 1 M-row 50 %-null Int64 column that's 3 fewer
+  full-vector allocations and walks per column.
+* **Pass 29 — kill the remaining O(N²) snoc / append loops.**
+  The "main" generic `Parquet.Read.genericReadColumnChunk`
+  was already cons + `ppConcat` (Pass 18), but a dozen
+  per-type readers (`readPlain*ColumnChunk`,
+  `readDictionaryOptionalColumnChunk`,
+  `readGenericOptionalColumnChunk`,
+  `readGenericOptionalSelectedPages`) still appended via
+  `acc V.++ pageVec` per page (O(K² · N) for K data pages
+  of N values). All switched to reverse-cons +
+  `V.concat (reverse pages)`. `ppAppend` removed from the
+  `PerPage` typeclass — last two callers eliminated, and
+  it never had the right shape to expose anyway.
+  Same fix on the writer side:
+    * `Parquet.Write.{layoutBlooms,layoutOffsetIndex,layoutColumnIndex}`
+      — O(R² + R · C²) per layout pass, three layout passes
+      per file. Refactored through one shared
+      `layoutAuxiliary` helper using cons-then-`V.fromListN`.
+    * `Parquet.Write.{buildRG,buildCol}`: same.
+    * `ORC.Footer.{decodePostScript,decodeFooter,decodeORCType}`:
+      footer decoder was O(K²) in stripe count K. Internal
+      `*Acc` shadow records carry cons lists, frozen at the
+      end via `V.fromList`.
+    * `ORC.Stripe.{stripeStreamSlices,decodeStripeFooter}`:
+      same.
+    * `ORC.Write.buildStripes`: same.
+* **Pass 30 — bit-pack writer allocation.**
+  `BS.pack [byteAt i | i <- [0..]]` patterns in
+  `Parquet.LevelsEncode.{packBitsLsb,rleRun}`,
+  `Parquet.DeltaEncode.encodeMiniblockPayload`, and
+  `Parquet.NullPagesBitmap.packNullPages` rewritten to
+  one `BSI.unsafeCreate` + `pokeByteOff` loop. Same in
+  `Parquet.DeltaEncode.encodeDeltaLengthByteArray` (now
+  `VP.generate` + `BS.concat`).
+  `Parquet.NullPagesBitmap.nonNullPages` now returns a
+  `VP.Vector Int` built by mutable-write loop instead of
+  `V.Vector Int` from a list. **API break.**
 
 ## Bench fairness
 
