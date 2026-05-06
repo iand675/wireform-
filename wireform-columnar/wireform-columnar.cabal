@@ -30,6 +30,7 @@ library
   exposed-modules:
     Columnar.IO
     Columnar.LZ4
+    Columnar.NullableBuild
     Columnar.Predicate
     Columnar.SIMD
     Columnar.Stream

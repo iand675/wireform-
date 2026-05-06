@@ -84,6 +84,8 @@ import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as V
+import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Primitive.Mutable as VPM
 import Data.Word (Word32, Word64)
 import GHC.Float (castFloatToWord32, castDoubleToWord64, castWord32ToFloat, castWord64ToDouble)
 
@@ -133,13 +135,8 @@ selectRowGroups
   :: V.Vector Text       -- ^ Column names parallel to @rgColumns@.
   -> Predicate
   -> V.Vector P.RowGroup
-  -> [Int]
-selectRowGroups colNames p rgs =
-  [ i
-  | i <- [0 .. V.length rgs - 1]
-  , let !rg = V.unsafeIndex rgs i
-  , evalRowGroup colNames p rg /= PSkip
-  ]
+  -> VP.Vector Int
+selectRowGroups colNames p rgs = pickRowGroups colNames p rgs (/= PSkip)
 
 -- | Inverse of 'selectRowGroups': the row-group indices the
 -- predicate proved can be skipped. Useful for stats / planning
@@ -148,13 +145,27 @@ skippedRowGroups
   :: V.Vector Text
   -> Predicate
   -> V.Vector P.RowGroup
-  -> [Int]
-skippedRowGroups colNames p rgs =
-  [ i
-  | i <- [0 .. V.length rgs - 1]
-  , let !rg = V.unsafeIndex rgs i
-  , evalRowGroup colNames p rg == PSkip
-  ]
+  -> VP.Vector Int
+skippedRowGroups colNames p rgs = pickRowGroups colNames p rgs (== PSkip)
+
+{-# INLINE pickRowGroups #-}
+pickRowGroups
+  :: V.Vector Text
+  -> Predicate
+  -> V.Vector P.RowGroup
+  -> (Decision -> Bool)
+  -> VP.Vector Int
+pickRowGroups colNames p rgs keep = VP.create $ do
+  let !n = V.length rgs
+  buf <- VPM.unsafeNew n
+  let go !i !w
+        | i >= n = pure (VPM.unsafeSlice 0 w buf)
+        | otherwise = do
+            let !rg = V.unsafeIndex rgs i
+            if keep (evalRowGroup colNames p rg)
+              then VPM.unsafeWrite buf w i >> go (i + 1) (w + 1)
+              else go (i + 1) w
+  go 0 0
 
 -- | Decide whether one column chunk can be skipped, given the
 -- predicate fragment that applies to its column. Useful when

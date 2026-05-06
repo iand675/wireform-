@@ -1861,18 +1861,19 @@ buildParquetFileMixedRaw codec schema rowGroups =
       !encodedRGs = V.map (V.map (\c -> case encodeMixedPageV1With codec c of
                                           Right x -> x
                                           Left e  -> error e)) rowGroups
-      !allPageBytes = concat
-        [ V.toList (V.map fst rg) | rg <- V.toList encodedRGs ]
-      !rgBytesLen = sum (map BS.length allPageBytes)
       !startOfData = 4 :: Int
 
-      -- One RowGroup metadata per input group.
-      (!rgMetas, !_) =
+      -- One RowGroup metadata per input group. Walks a flat
+      -- mutable buffer of column chunks for each group, then
+      -- freezes it into the immutable RowGroup.rgColumns vector
+      -- — avoids the O(N^2) V.snoc that the old foldl' had.
+      (!rgMetas, !endOff) =
+        ($!) (\(rgsR, off) -> (V.fromListN (V.length encodedRGs) (reverse rgsR), off)) $
         V.ifoldl'
           (\(!rgs, !off) rgIdx encoded ->
               let !colsData = V.unsafeIndex rowGroups rgIdx
-                  (!chunks, !off') =
-                    V.ifoldl' (buildChunk colsData) (V.empty, off) encoded
+                  !nCols    = V.length encoded
+                  (!chunks, !off') = buildChunks colsData encoded off nCols
                   !nRows = if V.null colsData
                              then 0
                              else fromIntegral (parquetColumnLength (V.unsafeIndex colsData 0))
@@ -1882,9 +1883,10 @@ buildParquetFileMixedRaw codec schema rowGroups =
                     , rgNumRows = nRows
                     , rgSortingColumns = Nothing
                     }
-               in (V.snoc rgs rg, off'))
-          (V.empty, startOfData)
+               in (rg : rgs, off'))
+          ([], startOfData)
           encodedRGs
+      !rgBytesLen = endOff - startOfData
 
       !totalRows = V.foldl' (\a rg -> a + rgNumRows rg) 0 rgMetas
       !fm = FileMetadata
@@ -1895,44 +1897,59 @@ buildParquetFileMixedRaw codec schema rowGroups =
         , fmCreatedBy = Just "wireform"
         , fmColumnOrders = Nothing
         }
-  in BL.toStrict $ B.toLazyByteString $
-       B.byteString parquetMagic
-       <> mconcat (map B.byteString allPageBytes)
-       <> B.byteString (writeFooter fm)
+      !footerBytes = writeFooter fm
+      -- Single allocation: magic + every page + footer. Plain
+      -- BS.concat (which calls a single mallocByteString
+      -- underneath) instead of Builder + BL.toStrict, because
+      -- we already have all the page bytestrings in hand.
+      !pageBSs =
+        V.foldr
+          (\rg acc ->
+              V.foldr (\(pageBS, _) bsAcc -> pageBS : bsAcc) acc rg)
+          []
+          encodedRGs
+  in BS.concat (parquetMagic : pageBSs ++ [footerBytes])
   where
     !leaves' = V.filter (maybe False (const True) . seType) schema
 
-    buildChunk
+    buildChunks
       :: V.Vector ParquetColumn
-      -> (V.Vector ColumnChunk, Int) -> Int -> (ByteString, Int)
+      -> V.Vector (ByteString, Int)
+      -> Int
+      -> Int
       -> (V.Vector ColumnChunk, Int)
-    buildChunk colsData (!cs, !cOff) colIdx (pageBs, uncompSize) =
-      let !cd = V.unsafeIndex colsData colIdx
-          !leaf = V.unsafeIndex leaves' colIdx
-          !sz = BS.length pageBs
-          !cc = ColumnChunk
-            { ccFilePath = Nothing
-            , ccFileOffset = fromIntegral cOff
-            , ccMetadata = Just ColumnMetadata
-                { cmType = fromMaybe (parquetColumnParquetType cd) (seType leaf)
-                , cmEncodings = V.singleton Plain
-                , cmPathInSchema = V.singleton (seName leaf)
-                , cmCodec = codec
-                , cmNumValues = fromIntegral (parquetColumnLength cd)
-                , cmTotalUncompressedSize = fromIntegral uncompSize
-                , cmTotalCompressedSize = fromIntegral sz
-                , cmDataPageOffset = fromIntegral cOff
-                , cmDictionaryPageOffset = Nothing
-                , cmStatistics = Just (parquetColumnStatistics cd)
-                , cmBloomFilterOffset = Nothing
-                , cmBloomFilterLength = Nothing
-                }
-            , ccOffsetIndexOffset = Nothing
-            , ccOffsetIndexLength = Nothing
-            , ccColumnIndexOffset = Nothing
-            , ccColumnIndexLength = Nothing
-            }
-      in (V.snoc cs cc, cOff + sz)
+    buildChunks colsData encoded off0 nCols =
+      let go !i !cs !off
+            | i >= nCols = (V.fromListN nCols (reverse cs), off)
+            | otherwise =
+                let !(pageBs, uncompSize) = V.unsafeIndex encoded i
+                    !cd   = V.unsafeIndex colsData i
+                    !leaf = V.unsafeIndex leaves' i
+                    !sz   = BS.length pageBs
+                    !cc = ColumnChunk
+                      { ccFilePath = Nothing
+                      , ccFileOffset = fromIntegral off
+                      , ccMetadata = Just ColumnMetadata
+                          { cmType = fromMaybe (parquetColumnParquetType cd) (seType leaf)
+                          , cmEncodings = V.singleton Plain
+                          , cmPathInSchema = V.singleton (seName leaf)
+                          , cmCodec = codec
+                          , cmNumValues = fromIntegral (parquetColumnLength cd)
+                          , cmTotalUncompressedSize = fromIntegral uncompSize
+                          , cmTotalCompressedSize = fromIntegral sz
+                          , cmDataPageOffset = fromIntegral off
+                          , cmDictionaryPageOffset = Nothing
+                          , cmStatistics = Just (parquetColumnStatistics cd)
+                          , cmBloomFilterOffset = Nothing
+                          , cmBloomFilterLength = Nothing
+                          }
+                      , ccOffsetIndexOffset = Nothing
+                      , ccOffsetIndexLength = Nothing
+                      , ccColumnIndexOffset = Nothing
+                      , ccColumnIndexLength = Nothing
+                      }
+                in go (i + 1) (cc : cs) (off + sz)
+      in go 0 [] off0
 
 -- ============================================================
 -- Size statistics

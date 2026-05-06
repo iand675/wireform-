@@ -55,7 +55,7 @@ module Parquet.Arrow
   ) where
 
 import Data.ByteString (ByteString)
-import Data.Int (Int32, Int64)
+import Data.Int (Int8, Int16, Int32, Int64)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import Data.Text (Text)
@@ -68,6 +68,7 @@ import Data.Word (Word8, Word16, Word32, Word64)
 import qualified Arrow.Column as AC
 import qualified Arrow.Types as AT
 
+import qualified Columnar.NullableBuild as NB
 import qualified Columnar.Stream as IS
 
 import qualified Parquet.Nested as PN
@@ -308,21 +309,21 @@ columnArrayToColumnData = \case
   -- preserve the nullability in the schema (Repetition=Optional)
   -- but drop the nulls here for now; round-trip will recover the
   -- present values with no NULL slots.
-  AC.ColInt8Maybe   v -> Right $ PW.ColInt32 (VP.fromList [fromIntegral i | Just i <- V.toList v])
-  AC.ColInt16Maybe  v -> Right $ PW.ColInt32 (VP.fromList [fromIntegral i | Just i <- V.toList v])
-  AC.ColInt32Maybe  v -> Right $ PW.ColInt32 (VP.fromList [i | Just i <- V.toList v])
-  AC.ColInt64Maybe  v -> Right $ PW.ColInt64 (VP.fromList [i | Just i <- V.toList v])
-  AC.ColUInt8Maybe  v -> Right $ PW.ColInt32 (VP.fromList [fromIntegral i | Just i <- V.toList v])
-  AC.ColUInt16Maybe v -> Right $ PW.ColInt32 (VP.fromList [fromIntegral i | Just i <- V.toList v])
-  AC.ColUInt32Maybe v -> Right $ PW.ColInt32 (VP.fromList [fromIntegral i | Just i <- V.toList v])
-  AC.ColUInt64Maybe v -> Right $ PW.ColInt64 (VP.fromList [fromIntegral i | Just i <- V.toList v])
-  AC.ColFloatMaybe  v -> Right $ PW.ColFloat (VP.fromList [f | Just f <- V.toList v])
-  AC.ColDoubleMaybe v -> Right $ PW.ColDouble (VP.fromList [d | Just d <- V.toList v])
-  AC.ColBoolMaybe   v -> Right $ PW.ColBool (V.fromList [b | Just b <- V.toList v])
-  AC.ColUtf8Maybe   v -> Right $ PW.ColByteArray (V.fromList [TE.encodeUtf8 t | Just t <- V.toList v])
-  AC.ColLargeUtf8Maybe v -> Right $ PW.ColByteArray (V.fromList [TE.encodeUtf8 t | Just t <- V.toList v])
-  AC.ColBinaryMaybe v -> Right $ PW.ColByteArray (V.fromList [b | Just b <- V.toList v])
-  AC.ColLargeBinaryMaybe v -> Right $ PW.ColByteArray (V.fromList [b | Just b <- V.toList v])
+  AC.ColInt8Maybe   v -> Right $ PW.ColInt32 (NB.presentValuesPMap (fromIntegral :: Int8  -> Int32) v)
+  AC.ColInt16Maybe  v -> Right $ PW.ColInt32 (NB.presentValuesPMap (fromIntegral :: Int16 -> Int32) v)
+  AC.ColInt32Maybe  v -> Right $ PW.ColInt32 (NB.presentValuesP v)
+  AC.ColInt64Maybe  v -> Right $ PW.ColInt64 (NB.presentValuesP v)
+  AC.ColUInt8Maybe  v -> Right $ PW.ColInt32 (NB.presentValuesPMap (fromIntegral :: Word8  -> Int32) v)
+  AC.ColUInt16Maybe v -> Right $ PW.ColInt32 (NB.presentValuesPMap (fromIntegral :: Word16 -> Int32) v)
+  AC.ColUInt32Maybe v -> Right $ PW.ColInt32 (NB.presentValuesPMap (fromIntegral :: Word32 -> Int32) v)
+  AC.ColUInt64Maybe v -> Right $ PW.ColInt64 (NB.presentValuesPMap (fromIntegral :: Word64 -> Int64) v)
+  AC.ColFloatMaybe  v -> Right $ PW.ColFloat  (NB.presentValuesP v)
+  AC.ColDoubleMaybe v -> Right $ PW.ColDouble (NB.presentValuesP v)
+  AC.ColBoolMaybe   v -> Right $ PW.ColBool       (NB.presentValuesV v)
+  AC.ColUtf8Maybe   v -> Right $ PW.ColByteArray  (NB.presentValuesVMap TE.encodeUtf8 v)
+  AC.ColLargeUtf8Maybe v -> Right $ PW.ColByteArray (NB.presentValuesVMap TE.encodeUtf8 v)
+  AC.ColBinaryMaybe v -> Right $ PW.ColByteArray  (NB.presentValuesV v)
+  AC.ColLargeBinaryMaybe v -> Right $ PW.ColByteArray (NB.presentValuesV v)
   other -> Left $ "Parquet.Arrow: Arrow column shape "
                   <> show other
                   <> " has no flat Parquet equivalent (nested types "

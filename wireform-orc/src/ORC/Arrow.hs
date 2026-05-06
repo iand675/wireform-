@@ -50,11 +50,12 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
-import Data.Word (Word32, Word64)
+import Data.Word (Word8, Word16, Word32, Word64)
 
 import qualified Arrow.Column as AC
 import qualified Arrow.Types as AT
 
+import qualified Columnar.NullableBuild as NB
 import qualified Columnar.Stream as IS
 
 import qualified ORC.Read   as OR
@@ -495,16 +496,9 @@ columnArrayToORCStreams !cid = go
       -> (a -> Int64)
       -> V.Vector (Word64, Word64, ByteString)
     intMaybe vmb c cast =
-      let (pres, xs) = presentPayload vmb cast
-      in  intStreams (Just pres) c (VP.fromList xs)
-
-    -- Boolean-RLE-encoded PRESENT bits + present-only payload.
-    presentPayload
-      :: V.Vector (Maybe a) -> (a -> b) -> (ByteString, [b])
-    presentPayload vmb cast =
-      let !pres   = OW.encodeBooleanRLE (V.map maybeToBool vmb)
-          !xs     = [cast x | Just x <- V.toList vmb]
-      in (pres, xs)
+      let !pres = OW.encodeBooleanRLE (V.map maybeToBool vmb)
+          !xs   = NB.presentValuesPMap cast vmb
+      in  intStreams (Just pres) c xs
 
     maybeToBool :: Maybe a -> Bool
     maybeToBool (Just _) = True
@@ -512,19 +506,19 @@ columnArrayToORCStreams !cid = go
 
     presentBits v =
       let !pres = OW.encodeBooleanRLE (V.map maybeToBool v)
-          !vs   = V.fromList [b | Just b <- V.toList v]
+          !vs   = NB.presentValuesV v
       in (pres, vs)
     presentFloat v =
       let !pres = OW.encodeBooleanRLE (V.map maybeToBool v)
-          !vs   = VP.fromList [f | Just f <- V.toList v]
+          !vs   = NB.presentValuesP v
       in (pres, vs)
     presentDouble v =
       let !pres = OW.encodeBooleanRLE (V.map maybeToBool v)
-          !vs   = VP.fromList [d | Just d <- V.toList v]
+          !vs   = NB.presentValuesP v
       in (pres, vs)
     presentBytes v =
       let !pres = OW.encodeBooleanRLE (V.map maybeToBool v)
-          !vs   = V.fromList [b | Just b <- V.toList v]
+          !vs   = NB.presentValuesV v
       in (pres, vs)
 
     -- ORC's RLE-v2 integer encoders take (Int64 vector, signed?).
@@ -922,14 +916,14 @@ intToArrow
   :: AT.ArrowType -> Bool -> V.Vector (Maybe Int64)
   -> Either String AC.ColumnArray
 intToArrow ty nullable xs = case (ty, nullable) of
-  (AT.AInt 8  True,  False) -> Right $! AC.ColInt8   (VP.fromList (map narrow8  (presentValues xs)))
-  (AT.AInt 16 True,  False) -> Right $! AC.ColInt16  (VP.fromList (map narrow16 (presentValues xs)))
-  (AT.AInt 32 True,  False) -> Right $! AC.ColInt32  (VP.fromList (map narrow32 (presentValues xs)))
-  (AT.AInt 64 True,  False) -> Right $! AC.ColInt64  (VP.fromList (presentValues xs))
-  (AT.AInt 8  False, False) -> Right $! AC.ColUInt8  (VP.fromList (map fromIntegral (presentValues xs)))
-  (AT.AInt 16 False, False) -> Right $! AC.ColUInt16 (VP.fromList (map fromIntegral (presentValues xs)))
-  (AT.AInt 32 False, False) -> Right $! AC.ColUInt32 (VP.fromList (map fromIntegral (presentValues xs)))
-  (AT.AInt 64 False, False) -> Right $! AC.ColUInt64 (VP.fromList (map fromIntegral (presentValues xs)))
+  (AT.AInt 8  True,  False) -> Right $! AC.ColInt8   (NB.presentValuesPMap narrow8  xs)
+  (AT.AInt 16 True,  False) -> Right $! AC.ColInt16  (NB.presentValuesPMap narrow16 xs)
+  (AT.AInt 32 True,  False) -> Right $! AC.ColInt32  (NB.presentValuesPMap narrow32 xs)
+  (AT.AInt 64 True,  False) -> Right $! AC.ColInt64  (NB.presentValuesP xs)
+  (AT.AInt 8  False, False) -> Right $! AC.ColUInt8  (NB.presentValuesPMap (fromIntegral :: Int64 -> Word8)  xs)
+  (AT.AInt 16 False, False) -> Right $! AC.ColUInt16 (NB.presentValuesPMap (fromIntegral :: Int64 -> Word16) xs)
+  (AT.AInt 32 False, False) -> Right $! AC.ColUInt32 (NB.presentValuesPMap (fromIntegral :: Int64 -> Word32) xs)
+  (AT.AInt 64 False, False) -> Right $! AC.ColUInt64 (NB.presentValuesPMap (fromIntegral :: Int64 -> Word64) xs)
   (AT.AInt 8  True,  True)  -> Right $! AC.ColInt8Maybe   (V.map (fmap narrow8)  xs)
   (AT.AInt 16 True,  True)  -> Right $! AC.ColInt16Maybe  (V.map (fmap narrow16) xs)
   (AT.AInt 32 True,  True)  -> Right $! AC.ColInt32Maybe  (V.map (fmap narrow32) xs)
@@ -947,8 +941,6 @@ intToArrow ty nullable xs = case (ty, nullable) of
     narrow32 :: Int64 -> Int32
     narrow32 = fromIntegral
 
-presentValues :: V.Vector (Maybe a) -> [a]
-presentValues v = [x | Just x <- V.toList v]
 
 -- | Lift a decoded ORC integer stream into one of Arrow's temporal
 -- column shapes. Width narrowing happens here (Date32 / Time32
@@ -958,17 +950,17 @@ temporalToArrow
   -> Either String AC.ColumnArray
 temporalToArrow ty nullable xs = case (ty, nullable) of
   (AT.ADate AT.DateDay, False) ->
-    Right $! AC.ColDate32 (VP.fromList (map narrow32 (presentValues xs)))
+    Right $! AC.ColDate32 (NB.presentValuesPMap narrow32 xs)
   (AT.ADate AT.DateMillisecond, False) ->
-    Right $! AC.ColDate64 (VP.fromList (presentValues xs))
+    Right $! AC.ColDate64 (NB.presentValuesP xs)
   (AT.ATime _ 32, False) ->
-    Right $! AC.ColTime32 (VP.fromList (map narrow32 (presentValues xs)))
+    Right $! AC.ColTime32 (NB.presentValuesPMap narrow32 xs)
   (AT.ATime _ 64, False) ->
-    Right $! AC.ColTime64 (VP.fromList (presentValues xs))
+    Right $! AC.ColTime64 (NB.presentValuesP xs)
   (AT.ATimestamp _ _, False) ->
-    Right $! AC.ColTimestamp (VP.fromList (presentValues xs))
+    Right $! AC.ColTimestamp (NB.presentValuesP xs)
   (AT.ADuration _, False) ->
-    Right $! AC.ColDuration (VP.fromList (presentValues xs))
+    Right $! AC.ColDuration (NB.presentValuesP xs)
 
   (AT.ADate AT.DateDay, True) ->
     Right $! AC.ColDate32Maybe (V.map (fmap narrow32) xs)

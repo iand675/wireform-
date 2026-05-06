@@ -1475,11 +1475,28 @@ toInt32Indices = \case
   ColUInt64 v -> Right (VP.map fromIntegral v)
   -- Nullable variants: coerce nulls to -1 sentinel (callers can
   -- consult the matching validity buffer if needed).
-  ColInt8Maybe   v -> Right $ VP.fromList [fromMaybe (-1) (fmap fromIntegral m) | m <- V.toList v]
-  ColInt16Maybe  v -> Right $ VP.fromList [fromMaybe (-1) (fmap fromIntegral m) | m <- V.toList v]
-  ColInt32Maybe  v -> Right $ VP.fromList [fromMaybe (-1) (fmap fromIntegral m) | m <- V.toList v]
-  ColInt64Maybe  v -> Right $ VP.fromList [fromMaybe (-1) (fmap fromIntegral m) | m <- V.toList v]
+  ColInt8Maybe   v -> Right $ maybeToSentinel (-1) (fromIntegral :: Int8  -> Int32) v
+  ColInt16Maybe  v -> Right $ maybeToSentinel (-1) (fromIntegral :: Int16 -> Int32) v
+  ColInt32Maybe  v -> Right $ maybeToSentinel (-1) id v
+  ColInt64Maybe  v -> Right $ maybeToSentinel (-1) (fromIntegral :: Int64 -> Int32) v
   c -> Left $ "Arrow.Column: dictionary index column has non-integer type: " ++ show c
+
+{-# INLINE maybeToSentinel #-}
+maybeToSentinel
+  :: VP.Prim b => b -> (a -> b) -> V.Vector (Maybe a) -> VP.Vector b
+maybeToSentinel sentinel f v =
+  let !n = V.length v
+  in VP.create $ do
+       buf <- MVP.unsafeNew n
+       let go !i
+             | i >= n = pure ()
+             | otherwise = do
+                 case V.unsafeIndex v i of
+                   Nothing -> MVP.unsafeWrite buf i sentinel
+                   Just x  -> MVP.unsafeWrite buf i (f x)
+                 go (i + 1)
+       go 0
+       pure buf
 
 -- | Replace the placeholder values column inside a @ColDictionary@
 -- with the column materialised from a @DictBatch.dbData@. Walks
