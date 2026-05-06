@@ -27,13 +27,17 @@
 -- the iteration count so the raw seconds are per-encode.
 module Main (main) where
 
+import Control.Concurrent.Async (forConcurrently)
 import Control.DeepSeq (NFData (..), deepseq)
+import Control.Parallel.Strategies (parMap, rseq)
 import qualified Data.ByteString as BS
 import Data.Int (Int64)
+import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text as T
+import System.IO.Unsafe (unsafePerformIO)
 
 import Criterion.Main (defaultMain, bench, bgroup, env, nf, whnf)
 
@@ -98,8 +102,8 @@ writeFileSnappy cols =
 -- decoded value to NF so the per-page allocation work and any
 -- deferred per-element decoding is captured by the benchmark.
 --
--- Returns a checksum that depends on every value, so neither
--- GHC nor criterion can drop the work.
+-- Single-threaded. Returns a checksum that depends on every
+-- value, so neither GHC nor criterion can drop the work.
 readBack :: BS.ByteString -> Int
 readBack bs = case PHL.decodeParquet PHL.defaultReadOptions bs of
   Left err -> error err
@@ -117,6 +121,35 @@ readBack bs = case PHL.decodeParquet PHL.defaultReadOptions bs of
                                Left  _  -> []
                     ]
     in total
+
+-- | Like 'readBack', but decodes column chunks in parallel
+-- across the GHC thread pool — this is the apples-to-apples
+-- analogue of pyarrow's @pq.read_table(use_threads=True)@.
+--
+-- Uses 'Control.Parallel.Strategies.parMap' (sparks) rather
+-- than @forConcurrently@: the per-task work is on the order of
+-- hundreds of microseconds, and async's @forkIO@-per-task
+-- overhead eats most of the win at that granularity. Sparks
+-- are essentially free to create and the runtime work-steals
+-- onto idle capabilities.
+readBackPar :: BS.ByteString -> Int
+readBackPar bs = case PHL.decodeParquet PHL.defaultReadOptions bs of
+  Left err -> error err
+  Right pf ->
+    let !sch    = PArrow.parquetFileArrowSchema pf
+        !nRG    = PArrow.numRowGroups pf
+        !nCols  = V.length (AT.arrowFields sch)
+        !work   =
+          [ (rg, c)
+          | rg <- [0 .. nRG - 1]
+          , c  <- [0 .. nCols - 1]
+          ]
+        decodeOne (rg, c) =
+          let !fld = V.unsafeIndex (AT.arrowFields sch) c
+          in case PArrow.readParquetColumn pf rg c fld of
+               Right cv -> forceCol cv
+               Left  _  -> 0
+    in sum (parMap rseq decodeOne work)
 
 -- | Force a 'ColumnArray' so the bench measures real decode
 -- cost — and only that.
@@ -165,14 +198,17 @@ main =
              ]
        , env (pure (writeFile_ dataset)) $ \bs ->
            bgroup ("read " ++ show nRows ++ " rows x 4 cols (uncompressed)")
-             [ bench "decode"        $ nf readBack bs
+             [ bench "decode"        $ nf readBack    bs
+             , bench "decode-par"    $ nf readBackPar bs
              ]
        , env (pure (writeFileSnappy dataset)) $ \bs ->
            bgroup ("read " ++ show nRows ++ " rows x 4 cols (snappy)")
-             [ bench "decode"        $ nf readBack bs
+             [ bench "decode"        $ nf readBack    bs
+             , bench "decode-par"    $ nf readBackPar bs
              ]
        , env (pure (writeFileZstd dataset)) $ \bs ->
            bgroup ("read " ++ show nRows ++ " rows x 4 cols (zstd)")
-             [ bench "decode"        $ nf readBack bs
+             [ bench "decode"        $ nf readBack    bs
+             , bench "decode-par"    $ nf readBackPar bs
              ]
        ]
