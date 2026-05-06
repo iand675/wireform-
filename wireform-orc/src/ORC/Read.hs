@@ -53,6 +53,11 @@ import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString.Unsafe as BSU
+import qualified Data.Primitive.ByteArray as PBA
+import qualified Data.Vector.Primitive.Mutable as MVP
+import Foreign.Ptr (Ptr, castPtr, plusPtr)
+import Foreign.Storable (peekByteOff)
 import Data.Int (Int16, Int32, Int64, Int8)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -281,15 +286,23 @@ decodeStringColumn numRows dataBs lengthBs dictBs mPresentBs
         Just present -> Right $! interleaveText present strings
 
 -- | Decode an IEEE 754 single-precision float column (little-endian).
+--
+-- No-present (no nulls) fast path: bulk-decode all bytes
+-- straight into a primitive 'VP.Vector' Float via 'memcpy',
+-- then wrap in 'Just'. Replaces the per-element
+-- @V.generate (Just . readFloatLE)@ shape which was reading
+-- bytes one at a time.
 decodeFloatColumn
   :: Int -> ByteString -> Maybe ByteString
   -> Either String (V.Vector (Maybe Float))
 decodeFloatColumn numRows dataBs mPresentBs = case mPresentBs of
-  Nothing -> do
-    if BS.length dataBs < numRows * 4
-      then Left "ORC.Read: float data stream too short"
-      else Right $! V.generate numRows $ \i ->
-             Just (readFloatLE dataBs (i * 4))
+  Nothing
+    | BS.length dataBs < numRows * 4 ->
+        Left "ORC.Read: float data stream too short"
+    | otherwise ->
+        let !raw = memcpyPrimVec 4 numRows dataBs :: VP.Vector Float
+        in  Right $! V.generate numRows
+              (\i -> Just (VP.unsafeIndex raw i))
   Just presentBs -> do
     present <- decodePresentStream numRows presentBs
     let !numPresent = countTrue present
@@ -302,17 +315,39 @@ decodeDoubleColumn
   :: Int -> ByteString -> Maybe ByteString
   -> Either String (V.Vector (Maybe Double))
 decodeDoubleColumn numRows dataBs mPresentBs = case mPresentBs of
-  Nothing -> do
-    if BS.length dataBs < numRows * 8
-      then Left "ORC.Read: double data stream too short"
-      else Right $! V.generate numRows $ \i ->
-             Just (readDoubleLE dataBs (i * 8))
+  Nothing
+    | BS.length dataBs < numRows * 8 ->
+        Left "ORC.Read: double data stream too short"
+    | otherwise ->
+        let !raw = memcpyPrimVec 8 numRows dataBs :: VP.Vector Double
+        in  Right $! V.generate numRows
+              (\i -> Just (VP.unsafeIndex raw i))
   Just presentBs -> do
     present <- decodePresentStream numRows presentBs
     let !numPresent = countTrue present
     if BS.length dataBs < numPresent * 8
       then Left "ORC.Read: double data stream too short"
       else Right $! interleaveDouble present dataBs
+
+-- | Memcpy a slice of @bs@ into a freshly-allocated primitive
+-- vector. Same shape as Arrow.Column's helper of the same
+-- name; assumes the source bit pattern matches the host
+-- (LE on x86_64 / aarch64), which matches ORC's IEEE-LE wire
+-- format.
+{-# INLINE memcpyPrimVec #-}
+memcpyPrimVec :: forall a. VP.Prim a => Int -> Int -> ByteString -> VP.Vector a
+memcpyPrimVec !elemBytes !len bs
+  | len <= 0  = VP.empty
+  | otherwise = unsafePerformIO $
+      BSU.unsafeUseAsCStringLen bs $ \(cstr, _) -> do
+        mv <- MVP.unsafeNew len
+        let !srcPtr = castPtr cstr
+            !nBytes = len * elemBytes
+        case mv of
+          MVP.MVector dstOffElems _ dstMba ->
+            PBA.copyPtrToMutableByteArray
+              dstMba (dstOffElems * elemBytes) (srcPtr :: Ptr Word8) nBytes
+        VP.unsafeFreeze mv
 
 -- | ORC timestamp: seconds since the ORC epoch + nanosecond adjustment.
 data ORCTimestamp = ORCTimestamp
@@ -504,8 +539,9 @@ decodeTinyIntColumn numRows dataBs mPresentBs = do
   if BS.length dataBs < numPresent
     then Left "ORC.Read: tinyint data stream too short"
     else do
+      -- Use unsafeIndex now that we've bounds-checked the slice.
       let bytes = V.generate numPresent $ \i ->
-            fromIntegral (BS.index dataBs i) :: Int8
+            fromIntegral (BSU.unsafeIndex dataBs i) :: Int8
       case mPresent of
         Nothing -> Right $! V.map Just bytes
         Just present -> Right $! interleaveWith present bytes
@@ -645,30 +681,20 @@ interleaveDouble present dataBs = runST $ do
 -- IEEE 754 little-endian readers
 ------------------------------------------------------------------------
 
+-- | LE Float read via a single 4-byte 'peekByteOff'. Replaces
+-- the byte-by-byte BS.index + shifts shape; matches the
+-- pattern used in Parquet.Read.
 {-# INLINE readFloatLE #-}
 readFloatLE :: ByteString -> Int -> Float
-readFloatLE bs !off =
-  let !b0 = fromIntegral (BS.index bs off) :: Word32
-      !b1 = fromIntegral (BS.index bs (off + 1)) :: Word32
-      !b2 = fromIntegral (BS.index bs (off + 2)) :: Word32
-      !b3 = fromIntegral (BS.index bs (off + 3)) :: Word32
-  in castWord32ToFloat (b0 .|. (b1 `shiftL` 8) .|. (b2 `shiftL` 16) .|. (b3 `shiftL` 24))
+readFloatLE bs !off = castWord32ToFloat $! unsafePerformIO $
+  BSU.unsafeUseAsCStringLen bs $ \(cstr, _) ->
+    peekByteOff (cstr `plusPtr` off) 0
 
 {-# INLINE readDoubleLE #-}
 readDoubleLE :: ByteString -> Int -> Double
-readDoubleLE bs !off =
-  let !b0 = fromIntegral (BS.index bs off) :: Word64
-      !b1 = fromIntegral (BS.index bs (off + 1)) :: Word64
-      !b2 = fromIntegral (BS.index bs (off + 2)) :: Word64
-      !b3 = fromIntegral (BS.index bs (off + 3)) :: Word64
-      !b4 = fromIntegral (BS.index bs (off + 4)) :: Word64
-      !b5 = fromIntegral (BS.index bs (off + 5)) :: Word64
-      !b6 = fromIntegral (BS.index bs (off + 6)) :: Word64
-      !b7 = fromIntegral (BS.index bs (off + 7)) :: Word64
-  in castWord64ToDouble
-       ( b0 .|. (b1 `shiftL` 8) .|. (b2 `shiftL` 16) .|. (b3 `shiftL` 24)
-         .|. (b4 `shiftL` 32) .|. (b5 `shiftL` 40) .|. (b6 `shiftL` 48) .|. (b7 `shiftL` 56)
-       )
+readDoubleLE bs !off = castWord64ToDouble $! unsafePerformIO $
+  BSU.unsafeUseAsCStringLen bs $ \(cstr, _) ->
+    peekByteOff (cstr `plusPtr` off) 0
 
 ------------------------------------------------------------------------
 -- String helpers

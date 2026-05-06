@@ -31,6 +31,7 @@ import Data.Bits (complement, shiftL, shiftR, xor, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as B
+import qualified Data.ByteString.Unsafe as BSU
 import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int64, Int8)
 import Data.STRef ()
@@ -483,6 +484,9 @@ rleV2PatchedBaseStep signed firstByte bs !off out !written !cap = do
 -- Varint primitives
 ------------------------------------------------------------------------
 
+-- | Read one ORC unsigned varint. Bounds-checked at the byte
+-- boundary; the inner per-byte read uses 'BSU.unsafeIndex'
+-- after we've established @pos < bsLen@.
 {-# INLINE readVulong #-}
 readVulong :: ByteString -> Int -> Either String (Word64, Int)
 readVulong bs !off = go off 0 0
@@ -492,7 +496,7 @@ readVulong bs !off = go off 0 0
       | pos >= bsLen = Left "ORC.RLE: truncated varint"
       | shift >= 64  = Left "ORC.RLE: varint overflow"
       | otherwise    =
-          let !b    = fromIntegral (BS.index bs pos) :: Word64
+          let !b    = fromIntegral (BSU.unsafeIndex bs pos) :: Word64
               !val' = val .|. ((b .&. 0x7F) `shiftL` shift)
           in if b .&. 0x80 == 0
                then Right (val', pos + 1)
@@ -528,7 +532,10 @@ decodeWidth !n
       28 -> 40;  29 -> 48;  30 -> 56;  31 -> 64
       _  -> 1
 
--- | Read @nbytes@ in big-endian order as a 'Word64'.
+-- | Read @nbytes@ in big-endian order as a 'Word64'. Caller
+-- must have bounds-checked the source slice; this inner loop
+-- uses 'BSU.unsafeIndex' (called once per RLE-v2 packed
+-- integer, so removing the per-byte bounds check matters).
 {-# INLINE readBigEndian #-}
 readBigEndian :: ByteString -> Int -> Int -> Word64
 readBigEndian bs !off !nbytes = go 0 0
@@ -536,7 +543,7 @@ readBigEndian bs !off !nbytes = go 0 0
     go !i !acc
       | i >= nbytes = acc
       | otherwise   =
-          let !b = fromIntegral (BS.index bs (off + i)) :: Word64
+          let !b = fromIntegral (BSU.unsafeIndex bs (off + i)) :: Word64
           in go (i + 1) ((acc `shiftL` 8) .|. b)
 
 -- | Extract a @w@-bit value from an MSB-first packed bit stream.
