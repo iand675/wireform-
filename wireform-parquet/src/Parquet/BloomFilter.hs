@@ -39,6 +39,9 @@ module Parquet.BloomFilter
   , sbbfCheck
   , sbbfInsertHash
   , sbbfCheckHash
+    -- * Bulk build API (avoids the O(n²) thaw-per-insert)
+  , buildSbbfFromHashes
+  , buildSbbfFromBytes
     -- * Wire format
   , BloomFilterHeader (..)
   , encodeBloomFilter
@@ -189,25 +192,108 @@ maskBitForLane x i =
       !idx = fromIntegral (y `shiftR` 27) :: Int
   in 1 `shiftL` idx
 
+-- | The previous shape was
+--
+--   updateBlock ws blockIdx x = runST $ do
+--     mv <- VU.thaw ws            -- O(|ws|) COPY OF THE WHOLE BITSET
+--     ...write 4 words...
+--     VU.unsafeFreeze mv          -- another O(|ws|) copy
+--
+-- which made each 'sbbfInsert' O(bitset bytes). For 100 k
+-- inserts into a 16 KB filter that's 100 k × 16 KB = ~1.6 GB
+-- of pure memcpy work — pathological.
+--
+-- The replacement keeps the existing pure-API
+-- ('updateBlock'/'sbbfInsertHash') path for backwards
+-- compatibility and as a small-N convenience, but provides
+-- 'updateBlockM' for in-place mutation. Bulk callers should
+-- use 'buildSbbfFromHashes' / 'buildSbbfFromBytes' which thaw
+-- once, write all values, freeze once.
 updateBlock :: VU.Vector Word64 -> Int -> Word32 -> VU.Vector Word64
 updateBlock ws !blockIdx !x = runST $ do
   mv <- VU.thaw ws
+  updateBlockM mv blockIdx x
+  VU.unsafeFreeze mv
+
+-- | In-place block update — used by the bulk-build path.
+{-# INLINE updateBlockM #-}
+updateBlockM :: MVU.MVector s Word64 -> Int -> Word32 -> ST s ()
+updateBlockM mv !blockIdx !x = do
   let !base = blockIdx * 4
   -- Block is 8 lanes -> packed as 4 words: lane0|lane1, lane2|lane3, ...
   applyLanePair mv (base + 0) x 0 1
   applyLanePair mv (base + 1) x 2 3
   applyLanePair mv (base + 2) x 4 5
   applyLanePair mv (base + 3) x 6 7
-  VU.unsafeFreeze mv
   where
     applyLanePair :: MVU.MVector s Word64 -> Int -> Word32 -> Int -> Int -> ST s ()
-    applyLanePair mv idx !x' lo hi = do
-      !cur <- MVU.unsafeRead mv idx
+    applyLanePair mv' idx !x' lo hi = do
+      !cur <- MVU.unsafeRead mv' idx
       let !mLo = fromIntegral (maskBitForLane x' lo) :: Word64
           !mHi = fromIntegral (maskBitForLane x' hi) :: Word64
           !packed = mLo .|. (mHi `unsafeShiftL` 32)
           !new    = cur .|. packed
-      MVU.unsafeWrite mv idx new
+      MVU.unsafeWrite mv' idx new
+
+-- | Build an 'Sbbf' by inserting an entire vector of 64-bit
+-- hashes in one ST pass: thaw once, write all, freeze once.
+-- O(values + bitset bytes) total work — vs O(values × bitset
+-- bytes) for the naive @V.foldl' sbbfInsertHash empty@.
+{-# INLINE buildSbbfFromHashes #-}
+buildSbbfFromHashes
+  :: Int                  -- ^ bitset size in bytes (rounded up to a block)
+  -> VU.Vector Word64     -- ^ pre-computed XXH64 hashes
+  -> Sbbf
+buildSbbfFromHashes nBytesIn hashes =
+  let !nBytes = roundUpBlock (max blockBytes nBytesIn)
+      !blocks = nBytes `quot` blockBytes
+      !words_ = blocks * 4
+  in Sbbf
+       { sbbfBytes  = nBytes
+       , sbbfBlocks = blocks
+       , sbbfData   = VU.create $ do
+           mv <- MVU.replicate words_ 0
+           let go !i
+                 | i >= VU.length hashes = pure ()
+                 | otherwise = do
+                     let !h = VU.unsafeIndex hashes i
+                         !blockIdx = blockIndex h blocks
+                         !x = fromIntegral h :: Word32
+                     updateBlockM mv blockIdx x
+                     go (i + 1)
+           go 0
+           pure mv
+       }
+
+-- | Build an 'Sbbf' by hashing + inserting each value in a
+-- vector of byte-payloads. Computes XXH64 inline so we don't
+-- materialise an intermediate hash vector.
+{-# INLINE buildSbbfFromBytes #-}
+buildSbbfFromBytes
+  :: Int                 -- ^ bitset size in bytes
+  -> V.Vector ByteString
+  -> Sbbf
+buildSbbfFromBytes nBytesIn vs =
+  let !nBytes = roundUpBlock (max blockBytes nBytesIn)
+      !blocks = nBytes `quot` blockBytes
+      !words_ = blocks * 4
+  in Sbbf
+       { sbbfBytes  = nBytes
+       , sbbfBlocks = blocks
+       , sbbfData   = VU.create $ do
+           mv <- MVU.replicate words_ 0
+           let !n = V.length vs
+               go !i
+                 | i >= n = pure ()
+                 | otherwise = do
+                     let !h = xxh64 (V.unsafeIndex vs i)
+                         !blockIdx = blockIndex h blocks
+                         !x = fromIntegral h :: Word32
+                     updateBlockM mv blockIdx x
+                     go (i + 1)
+           go 0
+           pure mv
+       }
 
 checkBlock :: VU.Vector Word64 -> Int -> Word32 -> Bool
 checkBlock ws !blockIdx !x =

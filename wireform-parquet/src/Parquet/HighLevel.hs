@@ -69,6 +69,8 @@ import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Unboxed as VU
+import qualified Wireform.Hash as WHash
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
 
 import qualified Parquet.BloomFilter as Bloom
@@ -266,24 +268,39 @@ mkAuxes opts schema cols =
 -- default), then inserts each value's PLAIN-encoded payload —
 -- matching what 'Parquet.Predicate.encodePlain' probes with on
 -- the read side.
+-- | Build a split-block bloom filter populated from a column's
+-- values. Sizes the filter via 'Bloom.optimalNumBytes' for the
+-- column's row count at a 1% false-positive rate (parquet-cpp's
+-- default), then inserts each value's PLAIN-encoded payload.
+--
+-- Uses 'Bloom.buildSbbfFromHashes' so the bitset is allocated
+-- once and updated in place — vs the previous 'foldl' over
+-- 'sbbfInsert' shape which copied the entire bitset on every
+-- value (O(rows × bitset_bytes) total work — pathological for
+-- any non-trivial filter size). This collapses to
+-- O(rows + bitset_bytes).
 buildBloomFilterFor :: ColumnData -> Bloom.Sbbf
 buildBloomFilterFor col =
-  let !ndv      = max 1 (columnDistinctEstimate col)
-      !nBytes   = Bloom.optimalNumBytes ndv 0.01
-      !empty0   = Bloom.newSbbf nBytes
+  let !ndv    = max 1 (columnDistinctEstimate col)
+      !nBytes = Bloom.optimalNumBytes ndv 0.01
   in case col of
        ColInt32 v ->
-         VP.foldl' (\acc x -> Bloom.sbbfInsert (i32LE x) acc) empty0 v
+         Bloom.buildSbbfFromHashes nBytes (VU.generate (VP.length v)
+           (\i -> WHash.xxh64 0 (i32LE (VP.unsafeIndex v i))))
        ColInt64 v ->
-         VP.foldl' (\acc x -> Bloom.sbbfInsert (i64LE x) acc) empty0 v
+         Bloom.buildSbbfFromHashes nBytes (VU.generate (VP.length v)
+           (\i -> WHash.xxh64 0 (i64LE (VP.unsafeIndex v i))))
        ColFloat v ->
-         VP.foldl' (\acc x -> Bloom.sbbfInsert (f32LE x) acc) empty0 v
+         Bloom.buildSbbfFromHashes nBytes (VU.generate (VP.length v)
+           (\i -> WHash.xxh64 0 (f32LE (VP.unsafeIndex v i))))
        ColDouble v ->
-         VP.foldl' (\acc x -> Bloom.sbbfInsert (f64LE x) acc) empty0 v
+         Bloom.buildSbbfFromHashes nBytes (VU.generate (VP.length v)
+           (\i -> WHash.xxh64 0 (f64LE (VP.unsafeIndex v i))))
        ColBool v ->
-         V.foldl' (\acc x -> Bloom.sbbfInsert (boolPayload x) acc) empty0 v
+         Bloom.buildSbbfFromHashes nBytes (VU.generate (V.length v)
+           (\i -> WHash.xxh64 0 (boolPayload (V.unsafeIndex v i))))
        ColByteArray v ->
-         V.foldl' (\acc x -> Bloom.sbbfInsert x acc) empty0 v
+         Bloom.buildSbbfFromBytes nBytes v
 
 -- | Cheap distinct-value upper bound: row count. Real
 -- distinct-counting would need a second pass; sizing for the
