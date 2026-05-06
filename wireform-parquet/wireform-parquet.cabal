@@ -76,6 +76,7 @@ library
     Parquet.Types
     Parquet.Write
     Parquet.RLE
+    Parquet.Footer.Direct
   other-modules:
   build-depends:
     base >= 4.16 && < 5,

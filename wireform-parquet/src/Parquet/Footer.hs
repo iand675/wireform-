@@ -36,6 +36,7 @@ import qualified Data.Text.Encoding
 import Data.Word (Word32)
 import qualified Data.Vector as V
 
+import qualified Parquet.Footer.Direct as Direct
 import Parquet.Thrift.Schema
 import Parquet.Types
 import qualified Thrift.Value as TV
@@ -52,10 +53,17 @@ parquetMagic = BS.pack [0x50, 0x41, 0x52, 0x31]
 parquetEncryptedMagic :: ByteString
 parquetEncryptedMagic = BS.pack [0x50, 0x41, 0x52, 0x45]
 
+-- | Encode a 'FileMetadata' to bytes and wrap it with the
+-- @PAR1@ trailer.
+--
+-- Uses 'Parquet.Footer.Direct.writeFileMetadataDirect' which
+-- bypasses the @TV.Value@ intermediate tree the older
+-- @encodeCompact . fileMetadataToThrift@ shape allocates. For
+-- a 256-column file with one row group that's ~5,000 fewer
+-- @TV.Value@ + @(Int16, TV.Value)@ allocations per write.
 writeFooter :: FileMetadata -> ByteString
 writeFooter fm =
-  let !thriftVal = fileMetadataToThrift fm
-      !encoded = encodeCompact thriftVal
+  let !encoded = Direct.writeFileMetadataDirect fm
    in writeRawFooter parquetMagic encoded
 
 -- | Build a footer trailer from already-encoded thrift bytes plus a
