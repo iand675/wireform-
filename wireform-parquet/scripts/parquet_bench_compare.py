@@ -60,11 +60,11 @@ def time_pyarrow_write(table: pa.Table, codec: str | None) -> tuple[float, int]:
         times.append(time.perf_counter() - t0)
     return (min(times), nbytes)
 
-def time_pyarrow_read(blob: bytes) -> float:
+def time_pyarrow_read(blob: bytes, use_threads: bool = False) -> float:
     times = []
     for _ in range(ITERS):
         t0 = time.perf_counter()
-        _ = pq.read_table(pa.BufferReader(blob))
+        _ = pq.read_table(pa.BufferReader(blob), use_threads=use_threads)
         times.append(time.perf_counter() - t0)
     return min(times)
 

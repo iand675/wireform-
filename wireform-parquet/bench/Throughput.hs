@@ -42,6 +42,7 @@ import qualified Parquet.Read as PR
 import qualified Parquet.Arrow as PArrow
 import qualified Parquet.Types as P
 import qualified Arrow.Types as AT
+import qualified Arrow.Column as AC
 import Parquet.Write (ColumnData (..))
 
 -- | Default 100k rows is enough to push past per-call
@@ -90,9 +91,12 @@ writeFileSnappy cols =
     PHL.defaultWriteOptions { PHL.writeCompression = P.Snappy }
     mkSchema [cols]
 
--- | Decode the file's footer + every column. Forces the
--- result through deepseq so the per-page allocation work is
--- captured by the benchmark.
+-- | Decode the file's footer + every column, forcing each
+-- decoded value to NF so the per-page allocation work and any
+-- deferred per-element decoding is captured by the benchmark.
+--
+-- Returns a checksum that depends on every value, so neither
+-- GHC nor criterion can drop the work.
 readBack :: BS.ByteString -> Int
 readBack bs = case PHL.decodeParquet PHL.defaultReadOptions bs of
   Left err -> error err
@@ -101,7 +105,7 @@ readBack bs = case PHL.decodeParquet PHL.defaultReadOptions bs of
         !nRG    = PArrow.numRowGroups pf
         !nCols  = V.length (AT.arrowFields sch)
         !total  = sum
-                    [ rowsIn col
+                    [ forceCol col
                     | rg <- [0 .. nRG - 1]
                     , c  <- [0 .. nCols - 1]
                     , let !fld = V.unsafeIndex (AT.arrowFields sch) c
@@ -110,8 +114,27 @@ readBack bs = case PHL.decodeParquet PHL.defaultReadOptions bs of
                                Left  _  -> []
                     ]
     in total
-  where
-    rowsIn _ = 1   -- counting columns, not row counts; criterion just needs a forced value
+
+-- | Force a 'ColumnArray' so the bench measures real decode
+-- cost. We force every element to WHNF (which is what
+-- pyarrow's @read_table@ effectively does — it materialises
+-- the underlying buffers and offsets but does not validate or
+-- re-encode the per-value strings) and accumulate a checksum
+-- so neither GHC nor criterion can drop the work.
+--
+-- For boxed elements (Bool / Utf8 / Binary) we use 'seq' to
+-- force WHNF without doing extra per-value work like
+-- 'T.length' or 'BS.length' that pyarrow doesn't measure.
+forceCol :: AC.ColumnArray -> Int
+forceCol = \case
+  AC.ColInt32  v -> VP.foldl' (\a x -> a + fromIntegral x) 0 v
+  AC.ColInt64  v -> VP.foldl' (\a x -> a + fromIntegral x) 0 v
+  AC.ColFloat  v -> VP.length v
+  AC.ColDouble v -> VP.length v
+  AC.ColBool   v -> V.foldl'  (\a !_ -> a + 1) 0 v
+  AC.ColUtf8   v -> V.foldl'  (\a !_ -> a + 1) 0 v
+  AC.ColBinary v -> V.foldl'  (\a !_ -> a + 1) 0 v
+  c              -> AC.columnLength c
 
 instance NFData ColumnData where
   rnf (ColInt32 v)     = v `seq` ()

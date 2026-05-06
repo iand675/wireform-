@@ -553,9 +553,8 @@ readParquetColumn pf rgIdx colIdx fld = do
       AC.ColDouble  <$> PR.readGenericDoubleColumnChunk codec chunk
     AT.ABool | not nullable ->
       AC.ColBool    <$> PR.readGenericBoolColumnChunk codec chunk
-    AT.AUtf8 | not nullable -> do
-      bs <- PR.readGenericByteArrayColumnChunk codec chunk
-      Right $ AC.ColUtf8 (V.map decodeUtf8Lossy bs)
+    AT.AUtf8 | not nullable ->
+      AC.ColUtf8 <$> PR.readGenericTextColumnChunk codec chunk
     AT.ABinary | not nullable ->
       AC.ColBinary  <$> PR.readGenericByteArrayColumnChunk codec chunk
     -- Temporal non-nullable: read the underlying int stream and

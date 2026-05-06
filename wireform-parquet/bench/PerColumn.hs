@@ -21,6 +21,22 @@ import qualified Arrow.Types as AT
 import qualified Arrow.Column as AC
 import Parquet.Write (ColumnData (..))
 
+-- | Force every element of a 'ColumnArray' so the per-column
+-- timing actually measures decode work, not just thunk
+-- allocation. (V.map and friends are lazy in their elements
+-- by default; without this the deferred Text construction
+-- never runs and the bench misreports.)
+forceCol :: AC.ColumnArray -> Int
+forceCol = \case
+  AC.ColInt32  v -> VP.foldl' (\a x -> a + fromIntegral x) 0 v
+  AC.ColInt64  v -> VP.foldl' (\a x -> a + fromIntegral x) 0 v
+  AC.ColFloat  v -> VP.length v
+  AC.ColDouble v -> VP.length v
+  AC.ColBool   v -> V.foldl'  (\a !_ -> a + 1) 0 v
+  AC.ColUtf8   v -> V.foldl'  (\a !_ -> a + 1) 0 v
+  AC.ColBinary v -> V.foldl'  (\a !_ -> a + 1) 0 v
+  c              -> AC.columnLength c
+
 nRows :: Int
 nRows = 100_000
 
@@ -74,7 +90,7 @@ main = do
           rd c =
             let !fld = V.unsafeIndex flds c
             in case PArrow.readParquetColumn pf 0 c fld of
-                 Right cv -> AC.columnLength cv
+                 Right cv -> forceCol cv
                  Left  _  -> 0
       _ <- pure (rd 0)
       putStrLn ""
@@ -112,7 +128,7 @@ main = do
                   rd' c =
                     let !fld = V.unsafeIndex flds' c
                     in case PArrow.readParquetColumn pf' 0 c fld of
-                         Right cv -> AC.columnLength cv
+                         Right cv -> forceCol cv
                          Left  _  -> 0
               in rd' 0 + rd' 1 + rd' 2 + rd' 3
       -- warm up
