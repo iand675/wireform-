@@ -52,6 +52,9 @@ module Parquet.Predicate
     -- * Statistics-based skipping
   , evalRowGroup
   , evalColumnChunk
+    -- * High-level row-group selection
+  , selectRowGroups
+  , skippedRowGroups
     -- * Page-index-based skipping
   , evalPagesByColumnIndex
     -- * Bloom-filter membership
@@ -107,6 +110,51 @@ evalRowGroup
   -> P.RowGroup
   -> Decision
 evalRowGroup colNames p rg = evalPredicate (lookupChunkStats colNames rg) p
+
+-- | High-level row-group filter: return the indices of every
+-- row group that the predicate /can't/ rule out, in original
+-- order.
+--
+-- Uses 'evalRowGroup' under the hood; row groups whose
+-- statistics prove no row matches ('PSkip') are dropped, all
+-- others are kept ('PMaybeKeep' is conservative — never
+-- introduces false negatives).
+--
+-- Typical use:
+--
+-- @
+-- let !pf = ...
+--     !names = leafColumnNames (pfFooter pf)
+--     !p = 'PCol' \"ts\" ('PGtEq' ('PVInt64' 1700000000))
+-- forM_ (selectRowGroups names p (fmRowGroups (pfFooter pf))) \\rg ->
+--   readRowGroup pf rg
+-- @
+selectRowGroups
+  :: V.Vector Text       -- ^ Column names parallel to @rgColumns@.
+  -> Predicate
+  -> V.Vector P.RowGroup
+  -> [Int]
+selectRowGroups colNames p rgs =
+  [ i
+  | i <- [0 .. V.length rgs - 1]
+  , let !rg = V.unsafeIndex rgs i
+  , evalRowGroup colNames p rg /= PSkip
+  ]
+
+-- | Inverse of 'selectRowGroups': the row-group indices the
+-- predicate proved can be skipped. Useful for stats / planning
+-- output ("skipped 7 of 12 row groups").
+skippedRowGroups
+  :: V.Vector Text
+  -> Predicate
+  -> V.Vector P.RowGroup
+  -> [Int]
+skippedRowGroups colNames p rgs =
+  [ i
+  | i <- [0 .. V.length rgs - 1]
+  , let !rg = V.unsafeIndex rgs i
+  , evalRowGroup colNames p rg == PSkip
+  ]
 
 -- | Decide whether one column chunk can be skipped, given the
 -- predicate fragment that applies to its column. Useful when
