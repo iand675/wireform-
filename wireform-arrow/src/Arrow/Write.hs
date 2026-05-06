@@ -19,6 +19,7 @@ module Arrow.Write
   , BuildAcc (..)
   ) where
 
+import Control.Monad (when)
 import Data.Bits ((.&.), (.|.), shiftL, complement)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
@@ -238,78 +239,118 @@ encodeInt32s = encodePlainInt32Column
 encodeInt64s :: VP.Vector Int64 -> ByteString
 encodeInt64s = encodePlainInt64Column
 
--- Large variable-length (Int64 offsets) encoders.
+-- Large variable-length (Int64 offsets) encoders. Two-pass:
+-- first compute total payload size, then allocate the
+-- offsets buffer ((n+1) * 8 bytes) and the data buffer
+-- (totalSize bytes) once each and write straight in. Avoids
+-- the Builder.<> loop that previously allocated one Builder
+-- closure per element.
 encodePlainLargeUtf8 :: V.Vector Text -> (ByteString, ByteString)
 encodePlainLargeUtf8 vec =
   let !n = V.length vec
-      go !i !off !offB !datB
-        | i >= n =
-            ( BL.toStrict (B.toLazyByteString (offB <> B.int64LE off))
-            , BL.toStrict (B.toLazyByteString datB)
-            )
-        | otherwise =
-            let !bs = TE.encodeUtf8 (V.unsafeIndex vec i)
-                !len = fromIntegral (BS.length bs) :: Int64
-            in go (i + 1) (off + len) (offB <> B.int64LE off) (datB <> B.byteString bs)
-  in go 0 0 mempty mempty
+      -- First pass: encode each Text to ByteString, collect
+      -- a parallel V.Vector of ByteStrings + record total
+      -- size. encodeUtf8 caches the result inline so the
+      -- second pass doesn't re-encode.
+      !bss = V.map TE.encodeUtf8 vec
+      !totalSize = V.foldl' (\acc bs -> acc + BS.length bs) 0 bss
+  in (encodeLargeOffsetsBuf bss n, encodeContiguousPayload bss n totalSize)
 
 encodePlainLargeBinary :: V.Vector ByteString -> (ByteString, ByteString)
 encodePlainLargeBinary vec =
   let !n = V.length vec
-      go !i !off !offB !datB
-        | i >= n =
-            ( BL.toStrict (B.toLazyByteString (offB <> B.int64LE off))
-            , BL.toStrict (B.toLazyByteString datB)
-            )
-        | otherwise =
-            let !bs = V.unsafeIndex vec i
-                !len = fromIntegral (BS.length bs) :: Int64
-            in go (i + 1) (off + len) (offB <> B.int64LE off) (datB <> B.byteString bs)
-  in go 0 0 mempty mempty
+      !totalSize = V.foldl' (\acc bs -> acc + BS.length bs) 0 vec
+  in (encodeLargeOffsetsBuf vec n, encodeContiguousPayload vec n totalSize)
+
+-- Allocate (n+1) * 8 bytes, write Int64-LE running offsets.
+{-# INLINE encodeLargeOffsetsBuf #-}
+encodeLargeOffsetsBuf :: V.Vector ByteString -> Int -> ByteString
+encodeLargeOffsetsBuf vec n =
+  let !sz = (n + 1) * 8
+  in BSI.unsafeCreate sz $ \p ->
+       let go !i !off
+             | i >= n = pokeByteOff p (i * 8) (off :: Int64)
+             | otherwise = do
+                 pokeByteOff p (i * 8) (off :: Int64)
+                 let !len = fromIntegral (BS.length (V.unsafeIndex vec i)) :: Int64
+                 go (i + 1) (off + len)
+       in go 0 0
+
+-- Allocate totalSize bytes and memcpy each value's payload in.
+{-# INLINE encodeContiguousPayload #-}
+encodeContiguousPayload :: V.Vector ByteString -> Int -> Int -> ByteString
+encodeContiguousPayload vec n totalSize =
+  BSI.unsafeCreate totalSize $ \p ->
+    let go !i !off
+          | i >= n = pure ()
+          | otherwise = do
+              let !bs  = V.unsafeIndex vec i
+                  !len = BS.length bs
+              BSU.unsafeUseAsCStringLen bs $ \(srcPtr, _) ->
+                BSI.memcpy (p `Foreign.Ptr.plusPtr` off)
+                           (Foreign.Ptr.castPtr srcPtr) len
+              go (i + 1) (off + len)
+    in go 0 0
 
 -- Fixed-size binary: just concatenate the fixed-width payloads. The
 -- caller is expected to have enforced the width (we do a best-effort
 -- pad / truncate here so ragged inputs don't corrupt the downstream
 -- offsets).
 encodePlainFixedSizeBinary :: Int -> V.Vector ByteString -> ByteString
-encodePlainFixedSizeBinary !w vec = BL.toStrict $ B.toLazyByteString $
-  V.foldl' (\acc bs ->
-              let !raw = BS.length bs
-              in if raw == w
-                   then acc <> B.byteString bs
-                   else if raw > w
-                          then acc <> B.byteString (BS.take w bs)
-                          else acc <> B.byteString bs
-                                   <> B.byteString (BS.replicate (w - raw) 0)
-           ) mempty vec
+encodePlainFixedSizeBinary !w vec
+  | w <= 0 || V.null vec = BS.empty
+  | otherwise =
+      let !n  = V.length vec
+          !sz = n * w
+      in BSI.unsafeCreate sz $ \p ->
+           let go !i !off
+                 | i >= n = pure ()
+                 | otherwise = do
+                     let !bs  = V.unsafeIndex vec i
+                         !raw = BS.length bs
+                         !copyLen = min raw w
+                     BSU.unsafeUseAsCStringLen bs $ \(srcPtr, _) ->
+                       BSI.memcpy (p `Foreign.Ptr.plusPtr` off)
+                                  (Foreign.Ptr.castPtr srcPtr) copyLen
+                     -- Zero-pad if the input is shorter than w.
+                     when (copyLen < w) $ do
+                       _ <- BSI.memset (p `Foreign.Ptr.plusPtr` (off + copyLen))
+                                       0 (fromIntegral (w - copyLen))
+                       pure ()
+                     go (i + 1) (off + w)
+           in go 0 0
 
 -- Interval encoders (YearMonth / DayTime / MonthDayNano).
 encodeIntervalYearMonth :: VP.Vector Int32 -> ByteString
 encodeIntervalYearMonth = encodePlainInt32Column
 
 encodeIntervalDayTime :: VP.Vector Int32 -> VP.Vector Int32 -> ByteString
-encodeIntervalDayTime days millis = BL.toStrict $ B.toLazyByteString $
+encodeIntervalDayTime days millis =
   let !n = min (VP.length days) (VP.length millis)
-      go !i
-        | i >= n = mempty
-        | otherwise =
-            B.int32LE (VP.unsafeIndex days i)
-            <> B.int32LE (VP.unsafeIndex millis i)
-            <> go (i + 1)
-  in go 0
+      !sz = n * 8
+  in BSI.unsafeCreate sz $ \p ->
+       let go !i !off
+             | i >= n = pure ()
+             | otherwise = do
+                 pokeByteOff p off       (VP.unsafeIndex days i  :: Int32)
+                 pokeByteOff p (off + 4) (VP.unsafeIndex millis i :: Int32)
+                 go (i + 1) (off + 8)
+       in go 0 0
 
 encodeIntervalMonthDayNano
   :: VP.Vector Int32 -> VP.Vector Int32 -> VP.Vector Int64 -> ByteString
-encodeIntervalMonthDayNano months days nanos = BL.toStrict $ B.toLazyByteString $
+encodeIntervalMonthDayNano months days nanos =
   let !n = min (VP.length months) (min (VP.length days) (VP.length nanos))
-      go !i
-        | i >= n = mempty
-        | otherwise =
-            B.int32LE (VP.unsafeIndex months i)
-            <> B.int32LE (VP.unsafeIndex days i)
-            <> B.int64LE (VP.unsafeIndex nanos i)
-            <> go (i + 1)
-  in go 0
+      !sz = n * 16
+  in BSI.unsafeCreate sz $ \p ->
+       let go !i !off
+             | i >= n = pure ()
+             | otherwise = do
+                 pokeByteOff p off       (VP.unsafeIndex months i :: Int32)
+                 pokeByteOff p (off + 4) (VP.unsafeIndex days i   :: Int32)
+                 pokeByteOff p (off + 8) (VP.unsafeIndex nanos i  :: Int64)
+                 go (i + 1) (off + 16)
+       in go 0 0
 
 alignUp8 :: Int -> Int
 alignUp8 n = (n + 7) .&. complement 7
