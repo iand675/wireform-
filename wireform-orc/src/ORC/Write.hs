@@ -418,10 +418,14 @@ buildORCFileWithRowLookupFooter adjustFooter rowsForStripe types stripeData =
                                            (V.unsafeIndex types i))))
                  nCols
 
-      buildStripes :: Int -> Word64 -> V.Vector StripeInformation -> [ByteString]
+      -- Reverse-cons accumulator for StripeInformation: avoids
+      -- the O(N^2) V.snoc per stripe. The stripe payload list
+      -- is already cons-then-reverse so just match that.
+      buildStripes :: Int -> Word64 -> [StripeInformation] -> [ByteString]
                    -> (V.Vector StripeInformation, [ByteString])
-      buildStripes !i !off !siAcc !bsAcc
-        | i >= V.length stripeData = (siAcc, reverse bsAcc)
+      buildStripes !i !off !siRev !bsRev
+        | i >= V.length stripeData =
+            (V.fromListN (V.length stripeData) (reverse siRev), reverse bsRev)
         | otherwise =
             let !sdata = V.unsafeIndex stripeData i
                 !streams = V.map (\(kind, col, bs) ->
@@ -440,9 +444,9 @@ buildORCFileWithRowLookupFooter adjustFooter rowsForStripe types stripeData =
                   }
                 !stripeBs = BS.concat (V.toList (V.map (\(_, _, bs) -> bs) sdata) ++ [footerBs])
                 !stripeLen = fromIntegral (BS.length stripeBs) :: Word64
-            in buildStripes (i + 1) (off + stripeLen) (V.snoc siAcc si) (stripeBs : bsAcc)
+            in buildStripes (i + 1) (off + stripeLen) (si : siRev) (stripeBs : bsRev)
 
-      (!stripeInfos, !stripeBss) = buildStripes 0 headerLen V.empty []
+      (!stripeInfos, !stripeBss) = buildStripes 0 headerLen [] []
       !contentLen = V.foldl' (\a si -> a + siIndexLength si + siDataLength si + siFooterLength si) 0 stripeInfos
 
       !baseFooter = ORCFooter

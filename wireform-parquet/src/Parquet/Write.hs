@@ -1196,53 +1196,99 @@ encryptAuxModule mEnc mt rgOrd payload = case mEnc of
           Right enc -> enc
           Left  _   -> payload
 
-layoutBlooms
+-- All three layout passes (bloom / offset-index / column-index)
+-- have the same shape: walk row groups, walk each column inside
+-- a row group, optionally emit one auxiliary payload per column,
+-- update offsets in place, return the rewritten row groups +
+-- payloads + final offset.
+--
+-- The original code accumulated rewritten row groups / column
+-- chunks via 'V.snoc' inside ifoldl' loops — O(R^2) over row
+-- groups and O(C^2) over columns. For wide or many-row-group
+-- files (100 cols x 100 RGs) that's ~1e8 unnecessary copies per
+-- layout pass, three layout passes per file. Single shared
+-- helper below uses cons-then-V.fromListN.
+{-# INLINE layoutAuxiliary #-}
+layoutAuxiliary
   :: V.Vector RowGroup
   -> V.Vector (V.Vector ColumnAux)
   -> Int                        -- ^ starting offset
+  -> (Int -> Int -> ColumnAux -> ColumnChunk -> Int
+       -> Maybe (ColumnChunk, ByteString))
+        -- ^ rewriteCol rgOrd cIdx aux cc off ->
+        --     Nothing if no auxiliary payload for this column,
+        --     Just (rewritten chunk, payload bytes) otherwise.
   -> (V.Vector RowGroup, [ByteString], Int)
-layoutBlooms rgs auxes start = go 0 start [] V.empty
+layoutAuxiliary rgs auxes start rewriteCol = goRG 0 start [] []
   where
-    go !i !off !payloads !acc
-      | i >= V.length rgs = (acc, reverse payloads, off)
+    !nRGs = V.length rgs
+    !nAuxes = V.length auxes
+
+    goRG !i !off !payloadsAcc !rgAcc
+      | i >= nRGs =
+          let !rgsOut = V.fromListN nRGs (reverse rgAcc)
+          in (rgsOut, reverse payloadsAcc, off)
       | otherwise =
-          let !rg = V.unsafeIndex rgs i
+          let !rg   = V.unsafeIndex rgs i
               !cols = rgColumns rg
-              !aux  = if i < V.length auxes then V.unsafeIndex auxes i else V.empty
+              !aux  = if i < nAuxes then V.unsafeIndex auxes i else V.empty
+              !nCols = V.length cols
               (!cols', !off', !payloads') =
-                V.ifoldl' (rewriteCol i aux) (V.empty, off, payloads) cols
-              !rg' = rg { rgColumns = cols' }
-           in go (i + 1) off' payloads' (V.snoc acc rg')
+                goCol i aux cols nCols 0 [] off payloadsAcc
+              !rg'  = rg { rgColumns = cols' }
+          in goRG (i + 1) off' payloads' (rg' : rgAcc)
 
-    rewriteCol
-      :: Int                       -- row-group ordinal
-      -> V.Vector ColumnAux
-      -> (V.Vector ColumnChunk, Int, [ByteString])
-      -> Int -> ColumnChunk
-      -> (V.Vector ColumnChunk, Int, [ByteString])
-    rewriteCol rgOrd aux (!ccs, !off, !payloads) cIdx cc =
-      let mAux = if cIdx < V.length aux then Just (V.unsafeIndex aux cIdx) else Nothing
-       in case mAux >>= caBloomFilter of
-            Nothing -> (V.snoc ccs cc, off, payloads)
-            Just bf ->
-              let !raw = encodeBloomFilter bf
-                  -- Encrypt the bloom filter bitset module if the
-                  -- column's encrypted. We treat the encoded bloom
-                  -- filter (which already includes the
-                  -- length-delimited header) as a single
-                  -- 'ModuleBloomFilterBitset' module per the spec's
-                  -- "modular encryption" framing.
-                  !bs  = encryptAuxModule (mAux >>= caEncryption)
-                           Enc.ModuleBloomFilterBitset rgOrd raw
-                  !bsLen = BS.length bs
-                  !cm0 = fromMaybe defaultMetadata (ccMetadata cc)
-                  !cm' = cm0
-                    { cmBloomFilterOffset = Just (fromIntegral off)
-                    , cmBloomFilterLength = Just (fromIntegral bsLen)
-                    }
-                  !cc' = cc { ccMetadata = Just cm' }
-               in (V.snoc ccs cc', off + bsLen, bs : payloads)
+    goCol !rgOrd !aux !cols !nCols !cIdx !ccAcc !off !payloadsAcc
+      | cIdx >= nCols =
+          let !ccsOut = V.fromListN nCols (reverse ccAcc)
+          in (ccsOut, off, payloadsAcc)
+      | otherwise =
+          let !cc = V.unsafeIndex cols cIdx
+              !mAuxRow =
+                if cIdx < V.length aux
+                  then Just (V.unsafeIndex aux cIdx)
+                  else Nothing
+          in case mAuxRow of
+               Nothing ->
+                 goCol rgOrd aux cols nCols (cIdx + 1)
+                       (cc : ccAcc) off payloadsAcc
+               Just auxRow ->
+                 case rewriteCol rgOrd cIdx auxRow cc off of
+                   Nothing ->
+                     goCol rgOrd aux cols nCols (cIdx + 1)
+                           (cc : ccAcc) off payloadsAcc
+                   Just (!cc', !bs) ->
+                     let !bsLen = BS.length bs
+                     in goCol rgOrd aux cols nCols (cIdx + 1)
+                              (cc' : ccAcc) (off + bsLen) (bs : payloadsAcc)
 
+layoutBlooms
+  :: V.Vector RowGroup
+  -> V.Vector (V.Vector ColumnAux)
+  -> Int
+  -> (V.Vector RowGroup, [ByteString], Int)
+layoutBlooms rgs auxes start =
+  layoutAuxiliary rgs auxes start $ \rgOrd _cIdx auxRow cc off ->
+    case caBloomFilter auxRow of
+      Nothing -> Nothing
+      Just bf ->
+        let !raw = encodeBloomFilter bf
+            -- Encrypt the bloom filter bitset module if the column's
+            -- encrypted. We treat the encoded bloom filter (which
+            -- already includes the length-delimited header) as a
+            -- single ModuleBloomFilterBitset module per the spec's
+            -- modular-encryption framing.
+            !bs  = encryptAuxModule (caEncryption auxRow)
+                     Enc.ModuleBloomFilterBitset rgOrd raw
+            !bsLen = BS.length bs
+            !cm0 = fromMaybe defaultMetadata (ccMetadata cc)
+            !cm' = cm0
+              { cmBloomFilterOffset = Just (fromIntegral off)
+              , cmBloomFilterLength = Just (fromIntegral bsLen)
+              }
+            !cc' = cc { ccMetadata = Just cm' }
+        in Just (cc', bs)
+  where
     defaultMetadata = ColumnMetadata
       { cmType = PTInt32, cmEncodings = V.empty, cmPathInSchema = V.empty
       , cmCodec = Uncompressed, cmNumValues = 0
@@ -1259,78 +1305,40 @@ layoutOffsetIndex
   -> Int
   -> V.Vector (V.Vector ByteString)
   -> (V.Vector RowGroup, [ByteString], Int)
-layoutOffsetIndex rgs auxes start _ = go 0 start [] V.empty
-  where
-    go !i !off !payloads !acc
-      | i >= V.length rgs = (acc, reverse payloads, off)
-      | otherwise =
-          let !rg = V.unsafeIndex rgs i
-              !cols = rgColumns rg
-              !aux  = if i < V.length auxes then V.unsafeIndex auxes i else V.empty
-              (!cols', !off', !payloads') =
-                V.ifoldl' (rewriteCol i aux) (V.empty, off, payloads) cols
-              !rg' = rg { rgColumns = cols' }
-           in go (i + 1) off' payloads' (V.snoc acc rg')
-
-    rewriteCol
-      :: Int
-      -> V.Vector ColumnAux
-      -> (V.Vector ColumnChunk, Int, [ByteString])
-      -> Int -> ColumnChunk
-      -> (V.Vector ColumnChunk, Int, [ByteString])
-    rewriteCol rgOrd aux (!ccs, !off, !payloads) cIdx cc =
-      let mAux = if cIdx < V.length aux then Just (V.unsafeIndex aux cIdx) else Nothing
-       in case mAux >>= caOffsetIndex of
-            Nothing -> (V.snoc ccs cc, off, payloads)
-            Just oi ->
-              let !raw = encodeOffsetIndex oi
-                  !bs  = encryptAuxModule (mAux >>= caEncryption)
-                           Enc.ModuleOffsetIndex rgOrd raw
-                  !bsLen = BS.length bs
-                  !cc' = cc
-                    { ccOffsetIndexOffset = Just (fromIntegral off)
-                    , ccOffsetIndexLength = Just (fromIntegral bsLen)
-                    }
-               in (V.snoc ccs cc', off + bsLen, bs : payloads)
+layoutOffsetIndex rgs auxes start _ =
+  layoutAuxiliary rgs auxes start $ \rgOrd _cIdx auxRow cc off ->
+    case caOffsetIndex auxRow of
+      Nothing -> Nothing
+      Just oi ->
+        let !raw = encodeOffsetIndex oi
+            !bs  = encryptAuxModule (caEncryption auxRow)
+                     Enc.ModuleOffsetIndex rgOrd raw
+            !bsLen = BS.length bs
+            !cc' = cc
+              { ccOffsetIndexOffset = Just (fromIntegral off)
+              , ccOffsetIndexLength = Just (fromIntegral bsLen)
+              }
+        in Just (cc', bs)
 
 layoutColumnIndex
   :: V.Vector RowGroup
   -> V.Vector (V.Vector ColumnAux)
   -> Int
   -> (V.Vector RowGroup, [ByteString], Int)
-layoutColumnIndex rgs auxes start = go 0 start [] V.empty
-  where
-    go !i !off !payloads !acc
-      | i >= V.length rgs = (acc, reverse payloads, off)
-      | otherwise =
-          let !rg = V.unsafeIndex rgs i
-              !cols = rgColumns rg
-              !aux  = if i < V.length auxes then V.unsafeIndex auxes i else V.empty
-              (!cols', !off', !payloads') =
-                V.ifoldl' (rewriteCol i aux) (V.empty, off, payloads) cols
-              !rg' = rg { rgColumns = cols' }
-           in go (i + 1) off' payloads' (V.snoc acc rg')
-
-    rewriteCol
-      :: Int
-      -> V.Vector ColumnAux
-      -> (V.Vector ColumnChunk, Int, [ByteString])
-      -> Int -> ColumnChunk
-      -> (V.Vector ColumnChunk, Int, [ByteString])
-    rewriteCol rgOrd aux (!ccs, !off, !payloads) cIdx cc =
-      let mAux = if cIdx < V.length aux then Just (V.unsafeIndex aux cIdx) else Nothing
-       in case mAux >>= caColumnIndex of
-            Nothing -> (V.snoc ccs cc, off, payloads)
-            Just ci ->
-              let !raw = encodeColumnIndex ci
-                  !bs  = encryptAuxModule (mAux >>= caEncryption)
-                           Enc.ModuleColumnIndex rgOrd raw
-                  !bsLen = BS.length bs
-                  !cc' = cc
-                    { ccColumnIndexOffset = Just (fromIntegral off)
-                    , ccColumnIndexLength = Just (fromIntegral bsLen)
-                    }
-               in (V.snoc ccs cc', off + bsLen, bs : payloads)
+layoutColumnIndex rgs auxes start =
+  layoutAuxiliary rgs auxes start $ \rgOrd _cIdx auxRow cc off ->
+    case caColumnIndex auxRow of
+      Nothing -> Nothing
+      Just ci ->
+        let !raw = encodeColumnIndex ci
+            !bs  = encryptAuxModule (caEncryption auxRow)
+                     Enc.ModuleColumnIndex rgOrd raw
+            !bsLen = BS.length bs
+            !cc' = cc
+              { ccColumnIndexOffset = Just (fromIntegral off)
+              , ccColumnIndexLength = Just (fromIntegral bsLen)
+              }
+        in Just (cc', bs)
 
 -- Suppress unused-import warning when bloom-filter sizing helpers aren't
 -- referenced directly in the writer (they are part of the public API).
@@ -1468,7 +1476,11 @@ buildParquetFileWithIndex' mFootEnc schema rowGroups auxes =
       !startOfData = 4 :: Int
       !startOfBloom = startOfData + rgBytesLen
 
-      (!rgMetasBase, _) = V.ifoldl' buildRG (V.empty, startOfData) encodedRGs
+      -- buildRGRev accumulates a reverse-cons list of RowGroups
+      -- (avoiding the O(R^2) V.snoc), which we then freeze in a
+      -- single V.fromListN call.
+      (!rgMetasBaseRev, _) = V.ifoldl' buildRGRev ([], startOfData) encodedRGs
+      !rgMetasBase = V.fromListN (V.length encodedRGs) (reverse rgMetasBaseRev)
 
       (!rgMetasBloom, !bloomBytes, !endOfBloom) =
         layoutBlooms rgMetasBase auxes startOfBloom
@@ -1631,12 +1643,19 @@ buildParquetFileWithIndex' mFootEnc schema rowGroups auxes =
             Just _  -> chunkBytes  -- TODO: per-page encryption for dict pages
       in EncodedColumnChunk finalBytes uncompSz Uncompressed (Just dictLen) True
 
-    buildRG
-      :: (V.Vector RowGroup, Int) -> Int -> V.Vector EncodedColumnChunk
-      -> (V.Vector RowGroup, Int)
-    buildRG (!rgs, !off) rgIdx encodedCols =
+    -- Avoid the V.snoc inside the ifoldl' over @encodedCols@:
+    -- accumulate ColumnChunks onto a reverse-cons list and freeze
+    -- with V.fromListN. Same single-pass cost without the O(C^2)
+    -- copying. Caller passes the existing (rgs, off) and we
+    -- return ((rg : rgs_rev_acc), off2) — outer caller is also
+    -- reverse-cons.
+    buildRGRev
+      :: ([RowGroup], Int)
+      -> Int -> V.Vector EncodedColumnChunk -> ([RowGroup], Int)
+    buildRGRev (!rgsRev, !off) rgIdx encodedCols =
       let !colsData = V.unsafeIndex rowGroups rgIdx
-          (!cols, !off2) = V.ifoldl' (buildCol colsData) (V.empty, off) encodedCols
+          !nCols    = V.length encodedCols
+          (!cols, !off2) = buildCols colsData encodedCols nCols 0 [] off
           !nRows = if V.null colsData
                      then 0
                      else fromIntegral (columnDataLength (V.unsafeIndex colsData 0))
@@ -1646,51 +1665,51 @@ buildParquetFileWithIndex' mFootEnc schema rowGroups auxes =
             , rgNumRows = nRows
             , rgSortingColumns = Nothing
             }
-      in (V.snoc rgs rg, off2)
+      in (rg : rgsRev, off2)
 
-    buildCol
+    buildCols
       :: V.Vector ColumnData
-      -> (V.Vector ColumnChunk, Int) -> Int -> EncodedColumnChunk
+      -> V.Vector EncodedColumnChunk
+      -> Int -> Int -> [ColumnChunk] -> Int
       -> (V.Vector ColumnChunk, Int)
-    buildCol colsData (!cs, !cOff) colIdx ecc =
-      let !cd = V.unsafeIndex colsData colIdx
-          !leaf = V.unsafeIndex leaves colIdx
-          !sz = BS.length (eccBytes ecc)
-          -- For dict-encoded chunks the dict page is first,
-          -- followed by the data page. cmDictionaryPageOffset
-          -- points at the dict page (= cOff), and
-          -- cmDataPageOffset points past it.
-          !dataPageOff = case eccDictPageLen ecc of
-            Just dictLen -> cOff + dictLen
-            Nothing      -> cOff
-          !encs = if eccUsedDict ecc
-                    then V.fromList [PlainDictionary, RLEDictionary]
-                    else V.singleton Plain
-          !cc = ColumnChunk
-            { ccFilePath = Nothing
-            , ccFileOffset = fromIntegral cOff
-            , ccMetadata = Just ColumnMetadata
-                { cmType = fromMaybe (columnDataParquetType cd) (seType leaf)
-                , cmEncodings = encs
-                , cmPathInSchema = V.singleton (seName leaf)
-                , cmCodec = eccCodec ecc
-                , cmNumValues = fromIntegral (columnDataLength cd)
-                , cmTotalUncompressedSize = fromIntegral (eccUncompSize ecc)
-                , cmTotalCompressedSize = fromIntegral sz
-                , cmDataPageOffset = fromIntegral dataPageOff
-                , cmDictionaryPageOffset = case eccDictPageLen ecc of
-                    Just _  -> Just (fromIntegral cOff)
-                    Nothing -> Nothing
-                , cmStatistics = Just (columnDataStatistics cd)
-                , cmBloomFilterOffset = Nothing
-                , cmBloomFilterLength = Nothing
+    buildCols colsData encodedCols !nCols !colIdx !ccs !cOff
+      | colIdx >= nCols = (V.fromListN nCols (reverse ccs), cOff)
+      | otherwise =
+          let !ecc  = V.unsafeIndex encodedCols colIdx
+              !cd   = V.unsafeIndex colsData colIdx
+              !leaf = V.unsafeIndex leaves colIdx
+              !sz   = BS.length (eccBytes ecc)
+              !dataPageOff = case eccDictPageLen ecc of
+                Just dictLen -> cOff + dictLen
+                Nothing      -> cOff
+              !encs = if eccUsedDict ecc
+                        then V.fromList [PlainDictionary, RLEDictionary]
+                        else V.singleton Plain
+              !cc = ColumnChunk
+                { ccFilePath = Nothing
+                , ccFileOffset = fromIntegral cOff
+                , ccMetadata = Just ColumnMetadata
+                    { cmType = fromMaybe (columnDataParquetType cd) (seType leaf)
+                    , cmEncodings = encs
+                    , cmPathInSchema = V.singleton (seName leaf)
+                    , cmCodec = eccCodec ecc
+                    , cmNumValues = fromIntegral (columnDataLength cd)
+                    , cmTotalUncompressedSize = fromIntegral (eccUncompSize ecc)
+                    , cmTotalCompressedSize = fromIntegral sz
+                    , cmDataPageOffset = fromIntegral dataPageOff
+                    , cmDictionaryPageOffset = case eccDictPageLen ecc of
+                        Just _  -> Just (fromIntegral cOff)
+                        Nothing -> Nothing
+                    , cmStatistics = Just (columnDataStatistics cd)
+                    , cmBloomFilterOffset = Nothing
+                    , cmBloomFilterLength = Nothing
+                    }
+                , ccOffsetIndexOffset = Nothing
+                , ccOffsetIndexLength = Nothing
+                , ccColumnIndexOffset = Nothing
+                , ccColumnIndexLength = Nothing
                 }
-            , ccOffsetIndexOffset = Nothing
-            , ccOffsetIndexLength = Nothing
-            , ccColumnIndexOffset = Nothing
-            , ccColumnIndexLength = Nothing
-            }
-      in (V.snoc cs cc, cOff + sz)
+          in buildCols colsData encodedCols nCols (colIdx + 1) (cc : ccs) (cOff + sz)
 
 -- | Output of 'encodeOne' — carries enough state for 'buildCol'
 -- to populate 'ColumnMetadata' correctly, including the

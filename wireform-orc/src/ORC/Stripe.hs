@@ -178,7 +178,9 @@ streamSlice stripeBs !offset !len =
 -- | Walk streams in @StripeFooter@ order and slice each payload from the start
 -- of @stripeBs@ (index + data region; caller supplies the full stripe blob).
 stripeStreamSlices :: ByteString -> StripeFooter -> Either String (V.Vector (Stream, ByteString))
-stripeStreamSlices stripeBs (StripeFooter streams _encs) = go 0 0 V.empty
+stripeStreamSlices stripeBs (StripeFooter streams _encs) = do
+  acc <- go 0 0 []
+  Right (V.fromListN (V.length streams) (reverse acc))
   where
     go !i !pos !acc
       | i >= V.length streams = Right acc
@@ -188,7 +190,7 @@ stripeStreamSlices stripeBs (StripeFooter streams _encs) = go 0 0 V.empty
           in case streamSlice stripeBs pos l of
             Left e -> Left e
             Right chunk ->
-              go (i + 1) (pos + l) (V.snoc acc (st, chunk))
+              go (i + 1) (pos + l) ((st, chunk) : acc)
 
 -- | Parse protobuf @StripeFooter@. Reads the @streams@ list
 -- (field 1) and the @columns@ list (field 2 — each entry is
@@ -196,8 +198,11 @@ stripeStreamSlices stripeBs (StripeFooter streams _encs) = go 0 0 V.empty
 -- encryption variants / encryptedLocalKeys) are skipped for
 -- now since this reader doesn't yet act on them.
 decodeStripeFooter :: ByteString -> Either String StripeFooter
-decodeStripeFooter bs =
-  (\(streams, encs) -> StripeFooter streams encs) <$> go 0 V.empty V.empty
+decodeStripeFooter bs = do
+  (streamsRev, encsRev) <- go 0 [] []
+  -- Reverse-cons + V.fromList instead of V.snoc loops.
+  Right (StripeFooter (V.fromList (reverse streamsRev))
+                      (V.fromList (reverse encsRev)))
   where
     !len = BS.length bs
     go !off !accStreams !accEncs
@@ -210,11 +215,11 @@ decodeStripeFooter bs =
             StripeFooter_Streams -> do
               (chunk, off2) <- getLenDelim bs off1 len
               st <- decodeStream chunk
-              go off2 (V.snoc accStreams st) accEncs
+              go off2 (st : accStreams) accEncs
             StripeFooter_Columns -> do
               (chunk, off2) <- getLenDelim bs off1 len
               ce <- decodeColumnEncoding chunk
-              go off2 accStreams (V.snoc accEncs ce)
+              go off2 accStreams (ce : accEncs)
             _ -> skipField wt bs off1 len >>= \off2 -> go off2 accStreams accEncs
 
 -- | Decode one 'ColumnEncoding' payload (the inner protobuf

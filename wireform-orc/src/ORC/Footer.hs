@@ -336,36 +336,89 @@ encodePostScript ps = BL.toStrict $ B.toLazyByteString $ mconcat
 ------------------------------------------------------------------------
 
 decodePostScript :: ByteString -> Either String PostScript
-decodePostScript bs = decodeMsg bs (PostScript 0 0 0 V.empty BS.empty) step
+decodePostScript bs = do
+  acc <- decodeMsg bs emptyAcc step
+  Right (toPostScript acc)
   where
+    -- Reverse-accumulating shadow record: the protobuf
+    -- decoder is single-pass, so we build psVersion as a
+    -- cons list and freeze once instead of V.snoc'ing on
+    -- every entry (O(N^2) on long version vectors — small
+    -- in practice but free to fix).
+    emptyAcc = PostScriptAcc 0 0 0 [] BS.empty
     step ps = \case
-      PostScript_FooterLength         -> ReadVarint  $ \v -> ps { psFooterLength = v }
-      PostScript_Compression          -> ReadVarint  $ \v -> ps { psCompression = v }
-      PostScript_CompressionBlockSize -> ReadVarint  $ \v -> ps { psCompressionBlockSize = v }
-      PostScript_Version              -> ReadVarint  $ \v -> ps { psVersion = V.snoc (psVersion ps) (fromIntegral v) }
-      PostScript_Magic                -> ReadBytes   $ \v -> ps { psMagic = v }
+      PostScript_FooterLength         -> ReadVarint $ \v -> ps { psaFooterLength = v }
+      PostScript_Compression          -> ReadVarint $ \v -> ps { psaCompression = v }
+      PostScript_CompressionBlockSize -> ReadVarint $ \v -> ps { psaCompressionBlockSize = v }
+      PostScript_Version              -> ReadVarint $ \v ->
+        ps { psaVersionRev = fromIntegral v : psaVersionRev ps }
+      PostScript_Magic                -> ReadBytes  $ \v -> ps { psaMagic = v }
       _                               -> SkipUnknown
+    toPostScript a = PostScript
+      { psFooterLength         = psaFooterLength a
+      , psCompression          = psaCompression a
+      , psCompressionBlockSize = psaCompressionBlockSize a
+      , psVersion              = V.fromList (reverse (psaVersionRev a))
+      , psMagic                = psaMagic a
+      }
+
+-- Internal accumulator mirroring 'PostScript' but with a list
+-- in place of the version 'Vector', so we don't pay O(N^2) for
+-- V.snoc inside the decoder loop.
+data PostScriptAcc = PostScriptAcc
+  { psaFooterLength         :: !Word64
+  , psaCompression          :: !Word64
+  , psaCompressionBlockSize :: !Word64
+  , psaVersionRev           :: ![Word32]
+  , psaMagic                :: !ByteString
+  }
 
 decodeFooter :: ByteString -> Either String ORCFooter
-decodeFooter bs = decodeMsg bs emptyFooter step
+decodeFooter bs = do
+  acc <- decodeMsg bs emptyAcc step
+  Right (finalize acc)
   where
-    emptyFooter =
-      ORCFooter 0 0 V.empty V.empty V.empty 0 V.empty Nothing
+    emptyAcc = FooterAcc 0 0 [] [] [] 0 [] Nothing
     step f = \case
-      Footer_HeaderLength  -> ReadVarint $ \v    -> f { orcHeaderLength = v }
-      Footer_ContentLength -> ReadVarint $ \v    -> f { orcContentLength = v }
+      Footer_HeaderLength  -> ReadVarint $ \v -> f { faHeaderLength = v }
+      Footer_ContentLength -> ReadVarint $ \v -> f { faContentLength = v }
       Footer_Stripes       -> ReadNested decodeStripeInfo $ \si ->
-        f { orcStripes = V.snoc (orcStripes f) si }
+        f { faStripesRev = si : faStripesRev f }
       Footer_Types         -> ReadNested decodeORCType $ \t ->
-        f { orcTypes = V.snoc (orcTypes f) t }
+        f { faTypesRev = t : faTypesRev f }
       Footer_Metadata      -> ReadNested decodeMetadataEntry $ \e ->
-        f { orcMetadata = V.snoc (orcMetadata f) e }
-      Footer_NumberOfRows  -> ReadVarint $ \v    -> f { orcNumberOfRows = v }
+        f { faMetadataRev = e : faMetadataRev f }
+      Footer_NumberOfRows  -> ReadVarint $ \v -> f { faNumberOfRows = v }
       Footer_Statistics    -> ReadNested decodeColStats $ \cs ->
-        f { orcStatistics = V.snoc (orcStatistics f) cs }
+        f { faStatisticsRev = cs : faStatisticsRev f }
       Footer_Encryption    -> ReadBytes $ \enc ->
-        f { orcEncryption = Just (FooterEncryption enc) }
+        f { faEncryption = Just (FooterEncryption enc) }
       _                    -> SkipUnknown
+    finalize a = ORCFooter
+      { orcHeaderLength  = faHeaderLength a
+      , orcContentLength = faContentLength a
+      , orcStripes       = V.fromList (reverse (faStripesRev a))
+      , orcTypes         = V.fromList (reverse (faTypesRev a))
+      , orcMetadata      = V.fromList (reverse (faMetadataRev a))
+      , orcNumberOfRows  = faNumberOfRows a
+      , orcStatistics    = V.fromList (reverse (faStatisticsRev a))
+      , orcEncryption    = faEncryption a
+      }
+
+-- Internal cons-list accumulator. Same fields as 'ORCFooter'
+-- but with reverse lists in place of vectors so the decoder
+-- doesn't pay O(N^2) for V.snoc per stripe / type / column
+-- statistics entry.
+data FooterAcc = FooterAcc
+  { faHeaderLength   :: !Word64
+  , faContentLength  :: !Word64
+  , faStripesRev     :: ![StripeInformation]
+  , faTypesRev       :: ![ORCType]
+  , faMetadataRev    :: ![(T.Text, ByteString)]
+  , faNumberOfRows   :: !Word64
+  , faStatisticsRev  :: ![ColumnStatistics]
+  , faEncryption     :: !(Maybe FooterEncryption)
+  }
 
 decodeStripeInfo :: ByteString -> Either String StripeInformation
 decodeStripeInfo bs = decodeMsg bs (StripeInformation 0 0 0 0 0) step
@@ -379,18 +432,32 @@ decodeStripeInfo bs = decodeMsg bs (StripeInformation 0 0 0 0 0) step
       _                              -> SkipUnknown
 
 decodeORCType :: ByteString -> Either String ORCType
-decodeORCType bs = decodeMsg bs (ORCType TKBoolean V.empty V.empty) step
+decodeORCType bs = do
+  acc <- decodeMsg bs emptyAcc step
+  Right (toORCType acc)
   where
+    emptyAcc = ORCTypeAcc TKBoolean [] []
     step ot = \case
       ORCType_Kind       -> ReadVarintE $ \v -> case intToTypeKind (fromIntegral v) of
-        Just tk -> Right ot { otKind = tk }
+        Just tk -> Right ot { otaKind = tk }
         Nothing -> Left $ "ORC.Footer: invalid TypeKind " ++ show v
       ORCType_Subtypes   -> ReadVarint $ \v ->
-        ot { otSubtypes = V.snoc (otSubtypes ot) (fromIntegral v) }
+        ot { otaSubtypesRev = fromIntegral v : otaSubtypesRev ot }
       ORCType_FieldNames -> ReadBytesE $ \v -> case TE.decodeUtf8' v of
-        Right t -> Right ot { otFieldNames = V.snoc (otFieldNames ot) t }
+        Right t -> Right ot { otaFieldNamesRev = t : otaFieldNamesRev ot }
         Left _  -> Left "ORC.Footer: invalid UTF-8 in field name"
       _                  -> SkipUnknown
+    toORCType a = ORCType
+      { otKind       = otaKind a
+      , otSubtypes   = V.fromList (reverse (otaSubtypesRev a))
+      , otFieldNames = V.fromList (reverse (otaFieldNamesRev a))
+      }
+
+data ORCTypeAcc = ORCTypeAcc
+  { otaKind          :: !TypeKind
+  , otaSubtypesRev   :: ![Word32]
+  , otaFieldNamesRev :: ![T.Text]
+  }
 
 decodeMetadataEntry :: ByteString -> Either String (T.Text, ByteString)
 decodeMetadataEntry bs = decodeMsg bs (T.empty, BS.empty) step
