@@ -1279,6 +1279,16 @@ data PerPage a = PerPage
     -- @ppExtended encoding numValues body@ — return Left if the
     -- encoding is genuinely unsupported for this physical type.
   , ppAppend :: !(a -> a -> a)
+    -- ^ Two-arg concatenation. Used as a fallback; prefer
+    -- 'ppConcat' which is O(total bytes) regardless of how many
+    -- pages are concatenated.
+  , ppConcat :: !([a] -> a)
+    -- ^ N-way concatenation of page chunks in order. Should be
+    -- O(total bytes), NOT O(pages × total) which a naive left
+    -- fold of 'ppAppend' would give. (For 'VP.Vector' / 'V.Vector'
+    -- this is what 'VP.concat' / 'V.concat' provide out of the
+    -- box: one allocation of the final length + one pass of
+    -- per-page memcpy.)
   , ppEmpty :: !a
   }
 
@@ -1292,18 +1302,20 @@ genericReadColumnChunk
   -> Compression
   -> ByteString
   -> Either String a
-genericReadColumnChunk pp codec chunk0 = go 0 Nothing Nothing
+genericReadColumnChunk pp codec chunk0 = go 0 Nothing []
   where
-    -- @mAcc@ is @Nothing@ until we've decoded our first data
-    -- page, then @Just v@. This lets the common single-page
-    -- case skip the @ppAppend@ entirely — for Int64 it would
-    -- otherwise allocate + memcpy the entire 800 KB page into
-    -- a fresh vector just to concatenate with the empty
-    -- accumulator.
-    go !off !mDict !mAcc
-      | off >= BS.length chunk0 = case mAcc of
-          Nothing -> Right (ppEmpty pp)
-          Just v  -> Right v
+    -- @pageVecs@ collects per-page results in REVERSE order. We
+    -- finish with one 'ppConcat' (= 'VP.concat' / 'V.concat')
+    -- over @reverse pageVecs@, which is O(total bytes). The
+    -- previous shape used 'ppAppend' incrementally, which for a
+    -- column with k pages allocated + memcpy'd O(k²) page bytes
+    -- — for a 1 M-row Utf8 column with 12 pages that's ~78
+    -- pages of redundant memcpy.
+    go !off !mDict !pageVecs
+      | off >= BS.length chunk0 = case pageVecs of
+          []  -> Right (ppEmpty pp)
+          [v] -> Right v
+          vs  -> Right $! ppConcat pp (reverse vs)
       | otherwise = do
           (hdr, afterHdr) <- readPageHeaderAt chunk0 off
           compSz <- case phCompressedPageSize hdr of
@@ -1324,16 +1336,13 @@ genericReadColumnChunk pp codec chunk0 = go 0 Nothing Nothing
                                (phUncompressedPageSize hdr) compBody
                       let !nDict = fromIntegral (dictNumValues dk) :: Int
                       dict <- ppDecodePlain pp nDict raw
-                      go nextOff (Just dict) mAcc
+                      go nextOff (Just dict) pageVecs
                 PtDataPage dph -> do
                   raw <- decompressPageData codec
                            (phUncompressedPageSize hdr) compBody
                   let !n = fromIntegral (dphNumValues dph) :: Int
                   pageVec <- decodeDataPage pp mDict (dphEncoding dph) n raw
-                  let !mAcc' = case mAcc of
-                        Nothing  -> Just pageVec
-                        Just acc -> Just (ppAppend pp acc pageVec)
-                  go nextOff mDict mAcc'
+                  go nextOff mDict (pageVec : pageVecs)
                 PtDataPageV2 dph2 -> do
                   -- V2 page body is: rep_levels ++ def_levels ++ values.
                   -- For required (max_def=0) flat columns the level
@@ -1354,10 +1363,7 @@ genericReadColumnChunk pp codec chunk0 = go 0 Nothing Nothing
                       let !n = fromIntegral (dph2NumValues dph2) :: Int
                       pageVec <-
                         decodeDataPage pp mDict (dph2Encoding dph2) n values
-                      let !mAcc' = case mAcc of
-                            Nothing  -> Just pageVec
-                            Just acc -> Just (ppAppend pp acc pageVec)
-                      go nextOff mDict mAcc'
+                      go nextOff mDict (pageVec : pageVecs)
                 _ -> Left "Parquet.Read: expected DATA_PAGE / DATA_PAGE_V2 / DICTIONARY_PAGE"
 
     decodeDataPage pp' mDict !enc !n !raw
@@ -1383,6 +1389,7 @@ dispatchInt32 = PerPage
         then decodeDeltaBinaryPackedInt32 n raw
         else Left $ unsupportedEncoding "INT32" enc
   , ppAppend = (VP.++)
+  , ppConcat = VP.concat
   , ppEmpty = VP.empty
   }
 
@@ -1395,6 +1402,7 @@ dispatchInt64 = PerPage
         then decodeDeltaBinaryPackedInt64 n raw
         else Left $ unsupportedEncoding "INT64" enc
   , ppAppend = (VP.++)
+  , ppConcat = VP.concat
   , ppEmpty = VP.empty
   }
 
@@ -1407,6 +1415,7 @@ dispatchFloat = PerPage
         then decodeByteStreamSplitFloat n raw
         else Left $ unsupportedEncoding "FLOAT" enc
   , ppAppend = (VP.++)
+  , ppConcat = VP.concat
   , ppEmpty = VP.empty
   }
 
@@ -1419,6 +1428,7 @@ dispatchDouble = PerPage
         then decodeByteStreamSplitDouble n raw
         else Left $ unsupportedEncoding "DOUBLE" enc
   , ppAppend = (VP.++)
+  , ppConcat = VP.concat
   , ppEmpty = VP.empty
   }
 
@@ -1441,6 +1451,7 @@ dispatchBool = PerPage
           Right $! V.generate n (\i -> VP.unsafeIndex ws i /= 0)
         else Left $ unsupportedEncoding "BOOLEAN" enc
   , ppAppend = (V.++)
+  , ppConcat = V.concat
   , ppEmpty = V.empty
   }
 
@@ -1456,6 +1467,7 @@ dispatchByteArray = PerPage
           then decodeDeltaByteArray n raw
           else Left $ unsupportedEncoding "BYTE_ARRAY" enc
   , ppAppend = (V.++)
+  , ppConcat = V.concat
   , ppEmpty = V.empty
   }
 
@@ -1496,6 +1508,7 @@ dispatchUtf8 = PerPage
                   Right $! V.map decodeUtf8LossyTextRead bs
           else Left $ unsupportedEncoding "BYTE_ARRAY (Utf8)" enc
   , ppAppend = (V.++)
+  , ppConcat = V.concat
   , ppEmpty = V.empty
   }
 

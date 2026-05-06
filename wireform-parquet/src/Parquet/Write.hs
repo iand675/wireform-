@@ -39,6 +39,7 @@ module Parquet.Write
     -- * Column data
   , ColumnData(..)
   , columnDataLength
+  , columnDataPlainEncodedSize
   , columnDataParquetType
   , columnDataStatistics
   , encodeColumnDataPage
@@ -483,6 +484,23 @@ data ColumnData
   deriving (Show, Eq)
 
 -- | Number of values in the column.
+-- | Return the size in bytes that 'encodeColumnDataPagePayload'
+-- would produce, without actually encoding. Constant time for
+-- fixed-width primitives and bools, O(n) for byte-array columns
+-- (one fold over the lengths). Used by the V2 page writer to
+-- avoid encoding the column twice just to record the
+-- uncompressed page size on the column metadata.
+columnDataPlainEncodedSize :: ColumnData -> Int
+columnDataPlainEncodedSize = \case
+  ColInt32  v -> VP.length v * 4
+  ColInt64  v -> VP.length v * 8
+  ColFloat  v -> VP.length v * 4
+  ColDouble v -> VP.length v * 8
+  ColBool   v -> (V.length v + 7) `quot` 8
+  ColByteArray v ->
+    -- 4-byte LE length prefix per value plus the bytes themselves.
+    V.foldl' (\acc bs -> acc + 4 + BS.length bs) 0 v
+
 columnDataLength :: ColumnData -> Int
 columnDataLength = \case
   ColInt32 v     -> VP.length v
@@ -1381,14 +1399,20 @@ buildParquetFileWithIndex' mFootEnc schema rowGroups auxes =
               -- segments) when recording sizes on the column metadata so
               -- that ccTotalCompressedSize / ccTotalUncompressedSize
               -- reflect on-disk reality.
-              let !raw     = encodeColumnDataPage cd
-                  uncompSz = BS.length raw
+              --
+              -- Perf note: we used to call 'encodeColumnDataPage cd'
+              -- here just to compute @uncompSz@, then 'encodeColumnDataPageV2Parts'
+              -- to get the actual output — re-encoding the entire
+              -- column twice. 'columnDataPlainEncodedSize' gives the
+              -- same number in O(1) for primitives (and one fold
+              -- for byte arrays).
+              let !uncompSz   = columnDataPlainEncodedSize cd
                   partsResult = encodeColumnDataPageV2Parts codecRequested cd
                   parts = case partsResult of
                     Right p  -> p
                     Left  _  -> case encodeColumnDataPageV2Parts Uncompressed cd of
                                   Right p  -> p
-                                  Left  _  -> (raw, BS.empty, BS.empty, BS.empty)
+                                  Left  _  -> (encodeColumnDataPage cd, BS.empty, BS.empty, BS.empty)
                   codecActual = if codecRequested == Uncompressed
                                   then Uncompressed
                                   else codecRequested
