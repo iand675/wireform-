@@ -26,6 +26,8 @@ import qualified Data.ByteString.Builder as B
 import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Unsafe as BSU
+import qualified Data.IORef as IORef
+import Data.IORef (newIORef, readIORef, writeIORef)
 import qualified Data.Primitive.ByteArray as PBA
 import qualified Data.Text.Array as TA
 import qualified Data.Text.Internal as TI
@@ -33,6 +35,7 @@ import qualified Foreign.Ptr
 import Foreign.Ptr (Ptr)
 import Foreign.Storable (pokeByteOff)
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
+import System.IO.Unsafe (unsafePerformIO)
 import Data.Int (Int8, Int16, Int32, Int64)
 import Data.Maybe (isJust, fromMaybe)
 import Data.Text (Text)
@@ -805,19 +808,26 @@ varFlat offBs datBs n acc =
 -- | Encode a @V.Vector (Maybe a)@ for an @Unboxed/Primitive a@ value
 -- payload. Builds a validity bitmap + a dense payload (nulls filled
 -- with the caller-supplied zero).
+--
+-- Implementation note (perf): the previous version did
+-- @V.map isJust vec@ to materialise a boxed @V.Vector Bool@
+-- and then packed it via 'encodeNullBitmap', plus an extra
+-- 'countNulls' pass. Now we do one fused walk: a single
+-- 'encodeMaybeNullBitmap' that packs bits straight from the
+-- source @V.Vector (Maybe a)@ and returns the null count
+-- alongside, so the boxed-Bool intermediate is gone.
 primNullable
   :: VP.Prim a
   => (VP.Vector a -> ByteString) -> a
   -> V.Vector (Maybe a) -> BuildAcc -> BuildAcc
 primNullable enc zero vec acc =
   let !n  = fromIntegral (V.length vec) :: Int64
-      !nc = fromIntegral (countNulls vec) :: Int64
-      validity = V.map isJust vec
+      !(validityBs, !nc) = encodeMaybeNullBitmap vec
       vals = VP.generate (V.length vec) $ \i ->
                fromMaybe zero (V.unsafeIndex vec i)
   in addBufData (enc vals)
-     $ addBufData (encodeNullBitmap validity)
-     $ addFieldNode n nc acc
+     $ addBufData validityBs
+     $ addFieldNode n (fromIntegral nc) acc
 
 -- | Encode a @V.Vector (Maybe a)@ backed by 'V.Vector' (i.e. not
 -- primitive — 'Bool' / 'ByteString' / 'Text'). The 'V.Vector'-side
@@ -828,12 +838,11 @@ primNullableBoxed
   -> V.Vector (Maybe a) -> BuildAcc -> BuildAcc
 primNullableBoxed enc zero vec acc =
   let !n  = fromIntegral (V.length vec) :: Int64
-      !nc = fromIntegral (countNulls vec) :: Int64
-      validity = V.map isJust vec
+      !(validityBs, !nc) = encodeMaybeNullBitmap vec
       vals = V.map (fromMaybe zero) vec
   in addBufData (enc vals)
-     $ addBufData (encodeNullBitmap validity)
-     $ addFieldNode n nc acc
+     $ addBufData validityBs
+     $ addFieldNode n (fromIntegral nc) acc
 
 -- | Encode a @V.Vector (Maybe a)@ that serialises as an
 -- (offsets, data) pair (Utf8 / Binary / LargeUtf8 / LargeBinary).
@@ -842,14 +851,60 @@ varNullableBoxed
   -> V.Vector (Maybe a) -> BuildAcc -> BuildAcc
 varNullableBoxed enc zero vec acc =
   let !n  = fromIntegral (V.length vec) :: Int64
-      !nc = fromIntegral (countNulls vec) :: Int64
-      validity = V.map isJust vec
+      !(validityBs, !nc) = encodeMaybeNullBitmap vec
       vals = V.map (fromMaybe zero) vec
       (offBs, datBs) = enc vals
   in addBufData datBs
      $ addBufData offBs
-     $ addBufData (encodeNullBitmap validity)
-     $ addFieldNode n nc acc
+     $ addBufData validityBs
+     $ addFieldNode n (fromIntegral nc) acc
+
+-- | Pack the LSB-first validity bitmap for a @V.Vector (Maybe a)@
+-- and count nulls in the same pass. Allocates a single strict
+-- 'ByteString' of @ceil (n / 8)@ bytes.
+--
+-- Replaces the previous two-pass shape
+--
+--   validity   = V.map isJust vec        -- N boxed Bools
+--   nc         = countNulls vec          -- one more walk
+--   bytesOut   = encodeNullBitmap validity   -- pack bits from boxed Bools
+--
+-- with a single ST loop straight to a pinned strict ByteString.
+{-# INLINE encodeMaybeNullBitmap #-}
+encodeMaybeNullBitmap :: V.Vector (Maybe a) -> (ByteString, Int)
+encodeMaybeNullBitmap v =
+  let !n      = V.length v
+      !nBytes = (n + 7) `quot` 8
+      -- Walk once: pack bits + tally nulls.
+      goByte !p !b !nc
+        | b >= nBytes = pure nc
+        | otherwise = do
+            let !base = b * 8
+                packBit !bit !accBits !accNulls
+                  | bit >= 8        = pure (accBits, accNulls)
+                  | base + bit >= n = pure (accBits, accNulls)
+                  | otherwise =
+                      case V.unsafeIndex v (base + bit) of
+                        Just _  -> packBit (bit + 1) (accBits .|. (1 `shiftL` bit)) accNulls
+                        Nothing -> packBit (bit + 1) accBits (accNulls + 1)
+            (out, nc') <- packBit 0 (0 :: Word8) nc
+            pokeByteOff p b out
+            goByte p (b + 1) nc'
+      -- Run the IO action via unsafeCreate's body and capture
+      -- the null count out-of-band by sharing an IORef. Since
+      -- BSI.unsafeCreate's callback returns (), thread the
+      -- count via a small IORef.
+      (resBs, ncOut) = unsafePerformIO $ do
+        ncRef <- newIORef (0 :: Int)
+        bs <- pure $ BSI.unsafeCreate nBytes $ \p -> do
+          nc <- goByte p 0 0
+          writeIORef ncRef nc
+        -- Force the ByteString contents so 'unsafeCreate's
+        -- writer runs and ncRef gets populated.
+        BS.length bs `seq` pure ()
+        nc <- readIORef ncRef
+        pure (bs, nc)
+  in (resBs, ncOut)
 
 -- | Count @False@ entries in a validity bitmap.
 validityNullCount :: V.Vector Bool -> Int64
