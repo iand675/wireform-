@@ -492,7 +492,7 @@ readUInt16Column endian len rb body !bufIdx !nodeIdx = do
   if BS.length valsBs < len * 2
     then Left "Arrow.Column: uint16 buffer too small"
     else case endian of
-      Little -> Right (ColUInt16 (memcpyPrimVecLE 2 len valsBs), nodeIdx + 1, bufIdx + 1)
+      Little -> Right (ColUInt16 (viewPrimVecLE 2 len valsBs), nodeIdx + 1, bufIdx + 1)
       _      -> Right (ColUInt16 (bswapPrimVec16 len valsBs), nodeIdx + 1, bufIdx + 1)
 
 readUInt32Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
@@ -501,7 +501,7 @@ readUInt32Column endian len rb body !bufIdx !nodeIdx = do
   if BS.length valsBs < len * 4
     then Left "Arrow.Column: uint32 buffer too small"
     else case endian of
-      Little -> Right (ColUInt32 (memcpyPrimVecLE 4 len valsBs), nodeIdx + 1, bufIdx + 1)
+      Little -> Right (ColUInt32 (viewPrimVecLE 4 len valsBs), nodeIdx + 1, bufIdx + 1)
       _      -> Right (ColUInt32 (bswapPrimVec32 len valsBs), nodeIdx + 1, bufIdx + 1)
 
 readUInt64Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
@@ -510,7 +510,7 @@ readUInt64Column endian len rb body !bufIdx !nodeIdx = do
   if BS.length valsBs < len * 8
     then Left "Arrow.Column: uint64 buffer too small"
     else case endian of
-      Little -> Right (ColUInt64 (memcpyPrimVecLE 8 len valsBs), nodeIdx + 1, bufIdx + 1)
+      Little -> Right (ColUInt64 (viewPrimVecLE 8 len valsBs), nodeIdx + 1, bufIdx + 1)
       _      -> Right (ColUInt64 (bswapPrimVec64 len valsBs), nodeIdx + 1, bufIdx + 1)
 
 readFloat16Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
@@ -532,7 +532,7 @@ readFloatColumn endian len rb body !bufIdx !nodeIdx = do
   if BS.length valsBs < len * 4
     then Left "Arrow.Column: float buffer too small"
     else case endian of
-      Little -> Right (ColFloat (memcpyPrimVecLE 4 len valsBs), nodeIdx + 1, bufIdx + 1)
+      Little -> Right (ColFloat (viewPrimVecLE 4 len valsBs), nodeIdx + 1, bufIdx + 1)
       _      -> Right (ColFloat (bswapPrimVec32 len valsBs), nodeIdx + 1, bufIdx + 1)
 
 readDoubleColumn :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
@@ -541,7 +541,7 @@ readDoubleColumn endian len rb body !bufIdx !nodeIdx = do
   if BS.length valsBs < len * 8
     then Left "Arrow.Column: double buffer too small"
     else case endian of
-      Little -> Right (ColDouble (memcpyPrimVecLE 8 len valsBs), nodeIdx + 1, bufIdx + 1)
+      Little -> Right (ColDouble (viewPrimVecLE 8 len valsBs), nodeIdx + 1, bufIdx + 1)
       _      -> Right (ColDouble (bswapPrimVec64 len valsBs), nodeIdx + 1, bufIdx + 1)
 
 readUtf8Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
@@ -692,7 +692,7 @@ readDate32Column endian len rb body !bufIdx !nodeIdx = do
   if BS.length valsBs < len * 4
     then Left "Arrow.Column: date32 buffer too small"
     else case endian of
-      Little -> Right (ColDate32 (memcpyPrimVecLE 4 len valsBs), nodeIdx + 1, bufIdx + 1)
+      Little -> Right (ColDate32 (viewPrimVecLE 4 len valsBs), nodeIdx + 1, bufIdx + 1)
       _      -> Right (ColDate32 (VS.generate len $ \i ->
         fromIntegral (readWord32 endian valsBs (i * 4)) :: Int32), nodeIdx + 1, bufIdx + 1)
 
@@ -702,7 +702,7 @@ readDate64Column endian len rb body !bufIdx !nodeIdx = do
   if BS.length valsBs < len * 8
     then Left "Arrow.Column: date64 buffer too small"
     else case endian of
-      Little -> Right (ColDate64 (memcpyPrimVecLE 8 len valsBs), nodeIdx + 1, bufIdx + 1)
+      Little -> Right (ColDate64 (viewPrimVecLE 8 len valsBs), nodeIdx + 1, bufIdx + 1)
       _      -> Right (ColDate64 (VS.generate len $ \i ->
         fromIntegral (readWord64 endian valsBs (i * 8)) :: Int64), nodeIdx + 1, bufIdx + 1)
 
@@ -712,7 +712,7 @@ readTime32Column endian len rb body !bufIdx !nodeIdx = do
   if BS.length valsBs < len * 4
     then Left "Arrow.Column: time32 buffer too small"
     else case endian of
-      Little -> Right (ColTime32 (memcpyPrimVecLE 4 len valsBs), nodeIdx + 1, bufIdx + 1)
+      Little -> Right (ColTime32 (viewPrimVecLE 4 len valsBs), nodeIdx + 1, bufIdx + 1)
       _      -> Right (ColTime32 (VS.generate len $ \i ->
         fromIntegral (readWord32 endian valsBs (i * 4)) :: Int32), nodeIdx + 1, bufIdx + 1)
 
@@ -722,7 +722,7 @@ readTime64Column endian len rb body !bufIdx !nodeIdx = do
   if BS.length valsBs < len * 8
     then Left "Arrow.Column: time64 buffer too small"
     else case endian of
-      Little -> Right (ColTime64 (memcpyPrimVecLE 8 len valsBs), nodeIdx + 1, bufIdx + 1)
+      Little -> Right (ColTime64 (viewPrimVecLE 8 len valsBs), nodeIdx + 1, bufIdx + 1)
       _      -> Right (ColTime64 (VS.generate len $ \i ->
         fromIntegral (readWord64 endian valsBs (i * 8)) :: Int64), nodeIdx + 1, bufIdx + 1)
 
@@ -732,7 +732,7 @@ readTimestampColumn endian len rb body !bufIdx !nodeIdx = do
   if BS.length valsBs < len * 8
     then Left "Arrow.Column: timestamp buffer too small"
     else case endian of
-      Little -> Right (ColTimestamp (memcpyPrimVecLE 8 len valsBs), nodeIdx + 1, bufIdx + 1)
+      Little -> Right (ColTimestamp (viewPrimVecLE 8 len valsBs), nodeIdx + 1, bufIdx + 1)
       _      -> Right (ColTimestamp (VS.generate len $ \i ->
         fromIntegral (readWord64 endian valsBs (i * 8)) :: Int64), nodeIdx + 1, bufIdx + 1)
 
@@ -742,7 +742,7 @@ readDurationColumn endian len rb body !bufIdx !nodeIdx = do
   if BS.length valsBs < len * 8
     then Left "Arrow.Column: duration buffer too small"
     else case endian of
-      Little -> Right (ColDuration (memcpyPrimVecLE 8 len valsBs), nodeIdx + 1, bufIdx + 1)
+      Little -> Right (ColDuration (viewPrimVecLE 8 len valsBs), nodeIdx + 1, bufIdx + 1)
       _      -> Right (ColDuration (VS.generate len $ \i ->
         fromIntegral (readWord64 endian valsBs (i * 8)) :: Int64), nodeIdx + 1, bufIdx + 1)
 
@@ -1240,7 +1240,7 @@ readInts32 endian _signed len bs
       -- distinguish only in how the bits are interpreted, not
       -- in storage; either way the underlying ByteArray is the
       -- same memcpy.
-      Right (memcpyPrimVecLE 4 len bs)
+      Right (viewPrimVecLE 4 len bs)
   | otherwise =
       -- Big endian source: SIMDe pshufb byte-swap into the
       -- destination vector.
@@ -1249,7 +1249,7 @@ readInts32 endian _signed len bs
 readInts64 :: Endianness -> Bool -> Int -> ByteString -> Either String (VS.Vector Int64)
 readInts64 endian _signed len bs
   | BS.length bs < len * 8 = Left "Arrow.Column: int64 buffer too small"
-  | endian == Little = Right (memcpyPrimVecLE 8 len bs)
+  | endian == Little = Right (viewPrimVecLE 8 len bs)
   | otherwise        = Right (bswapPrimVec64 len bs)
 
 int32FromWord :: Word32 -> Int32
