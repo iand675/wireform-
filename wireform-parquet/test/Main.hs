@@ -669,7 +669,7 @@ main = do
               (ColumnAux Nothing Nothing Nothing Uncompressed PageV2 Nothing False))))
 
   -- Optional column page: definition levels + present-only PLAIN values.
-  let optCol = OptInt32 (V.fromList [Just 1, Nothing, Just 3, Nothing, Just 5])
+  let optCol = OptInt32 (AC.nvFromMaybeList 0 [Just 1, Nothing, Just 3, Nothing, Just 5])
       pageBs = encodeOptionalColumnPage optCol
   expect "optional-column-page produces a non-empty body"
     (BS.length pageBs > 4)

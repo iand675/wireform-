@@ -22,6 +22,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
 import qualified Data.Vector.Storable as VS
+import qualified Arrow.Column as AC
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.FilePath ((</>))
@@ -216,7 +217,7 @@ mixedRow = V.fromList
   [ PCRequired (ColInt64 (VS.fromList [10, 20, 30 :: Int64]))
   , PCOptional (OptByteArray (V.fromList
       [ Just "alice", Nothing, Just "carol" :: Maybe ByteString ]))
-  , PCOptional (OptDouble (V.fromList
+  , PCOptional (OptDouble (AC.nvFromMaybeList 0
       [ Just 1.5, Just 2.5, Nothing :: Maybe Double ]))
   ]
 
@@ -287,11 +288,11 @@ optFloatSchema = optColSchema P.PTFloat   Nothing "x"
 optBoolSchema  = optColSchema P.PTBoolean Nothing "x"
 
 optInt32Row, optInt64Row, optFloatRow, optBoolRow :: V.Vector ParquetColumn
-optInt32Row = V.singleton $ PCOptional $ OptInt32 (V.fromList
+optInt32Row = V.singleton $ PCOptional $ OptInt32 (AC.nvFromMaybeList 0
   [ Just 1, Nothing, Just 3, Just (-1) ])
-optInt64Row = V.singleton $ PCOptional $ OptInt64 (V.fromList
+optInt64Row = V.singleton $ PCOptional $ OptInt64 (AC.nvFromMaybeList 0
   [ Just 100, Nothing, Just 300 ])
-optFloatRow = V.singleton $ PCOptional $ OptFloat (V.fromList
+optFloatRow = V.singleton $ PCOptional $ OptFloat (AC.nvFromMaybeList 0
   [ Just 1.5, Just 2.5, Nothing, Just 4.5 ])
 optBoolRow = V.singleton $ PCOptional $ OptBool (V.fromList
   [ Just True, Nothing, Just False, Just True, Nothing ])

@@ -94,6 +94,11 @@ import qualified Data.Vector.Mutable as VM
 import qualified Data.Vector.Primitive as VP
 import qualified Data.Vector.Primitive.Mutable as MVP
 import qualified Data.Vector.Storable as VS
+import qualified Data.Vector.Storable.Mutable as VSM
+import qualified Data.Vector.Unboxed as VU
+import qualified Arrow.Column as AC
+import qualified Columnar.Bit as Bit
+import Columnar.Bit (Bit (..), unBit)
 import Data.Word (Word8, Word32)
 import Foreign.Ptr (Ptr, plusPtr)
 import Foreign.Storable (pokeByteOff, pokeElemOff)
@@ -639,40 +644,43 @@ columnDataStatistics = \case
 -- Nullable columns: definition levels + PLAIN values
 -- ============================================================
 
--- | A column with optional values. Internally we store the present-flag
--- vector alongside the present-only values; readers reconstruct the
--- @Maybe@ shape via 'Parquet.Levels.materializePlainInt32Optional' and
--- friends.
+-- | A column with optional values. Held as flat-shape views
+-- ('AC.NullableView' for primitives, boxed 'V.Vector (Maybe a)'
+-- for variable-length / bit-packed payloads) so the Arrow
+-- bridge can hand the data straight in without rebuilding
+-- a 'V.Vector (Maybe a)' first.
+--
+-- Encoders below extract validity + present-only values
+-- directly from the views (one pass each), no
+-- 'V.Vector (Maybe a)' intermediate.
 data OptionalColumn
-  = OptInt32     !(V.Vector (Maybe Int32))
-  | OptInt64     !(V.Vector (Maybe Int64))
-  | OptFloat     !(V.Vector (Maybe Float))
-  | OptDouble    !(V.Vector (Maybe Double))
+  = OptInt32     !(AC.NullableView Int32)
+  | OptInt64     !(AC.NullableView Int64)
+  | OptFloat     !(AC.NullableView Float)
+  | OptDouble    !(AC.NullableView Double)
   | OptBool      !(V.Vector (Maybe Bool))
   | OptByteArray !(V.Vector (Maybe ByteString))
   deriving (Show, Eq)
 
 optionalColumnLength :: OptionalColumn -> Int
 optionalColumnLength = \case
-  OptInt32 v     -> V.length v
-  OptInt64 v     -> V.length v
-  OptFloat v     -> V.length v
-  OptDouble v    -> V.length v
+  OptInt32 nv    -> AC.nvLength nv
+  OptInt64 nv    -> AC.nvLength nv
+  OptFloat nv    -> AC.nvLength nv
+  OptDouble nv   -> AC.nvLength nv
   OptBool v      -> V.length v
   OptByteArray v -> V.length v
 
 -- | Count 'Nothing' entries without materialising an intermediate
--- vector.
---
--- The previous shape was @V.length (V.filter (== Nothing) v)@
--- which allocates a whole new boxed vector just to count it.
--- The new shape is a single 'V.foldl'' tally — no allocation.
+-- vector. For primitives this is 'nvNullCount' (popcount over
+-- the validity bitmap); for the boxed variants it's a single
+-- foldl' tally over the source.
 optionalColumnNullCount :: OptionalColumn -> Int
 optionalColumnNullCount = \case
-  OptInt32 v     -> countNothings v
-  OptInt64 v     -> countNothings v
-  OptFloat v     -> countNothings v
-  OptDouble v    -> countNothings v
+  OptInt32 nv    -> AC.nvNullCount nv
+  OptInt64 nv    -> AC.nvNullCount nv
+  OptFloat nv    -> AC.nvNullCount nv
+  OptDouble nv   -> AC.nvNullCount nv
   OptBool v      -> countNothings v
   OptByteArray v -> countNothings v
   where
@@ -681,24 +689,42 @@ optionalColumnNullCount = \case
     countNothings = V.foldl' (\a x -> case x of Nothing -> a + 1; _ -> a) 0
 
 -- | Strip nulls and return only the present values as a 'ColumnData'.
---
--- Two-pass mutable-vector build. The previous shape went
---
---   VP.fromList [x | Just x <- V.toList v]
---
--- which materialised the source vector as a list (~n cons
--- cells), built a filtered list (~present cons cells), and
--- then walked the filtered list to size + fill the destination
--- VP.Vector. The new shape is one pre-allocation +
--- single-pass write — no intermediate list at all.
+-- For primitives backed by 'AC.NullableView' this is a single-pass
+-- compaction guided by the validity bitmap into a fresh
+-- 'VS.Vector'; for boxed variants it's the same one-pass
+-- mutable-vector build the previous shape used.
 optionalColumnPresentValues :: OptionalColumn -> ColumnData
 optionalColumnPresentValues = \case
-  OptInt32 v     -> ColInt32     (VS.convert (collectPrim v))
-  OptInt64 v     -> ColInt64     (VS.convert (collectPrim v))
-  OptFloat v     -> ColFloat     (VS.convert (collectPrim v))
-  OptDouble v    -> ColDouble    (VS.convert (collectPrim v))
-  OptBool v      -> ColBool      (collectBoxed v)
+  OptInt32 nv    -> ColInt32   (compactNV nv)
+  OptInt64 nv    -> ColInt64   (compactNV nv)
+  OptFloat nv    -> ColFloat   (compactNV nv)
+  OptDouble nv   -> ColDouble  (compactNV nv)
+  OptBool v      -> ColBool    (collectBoxed v)
   OptByteArray v -> ColByteArray (collectBoxed v)
+
+-- | One-pass compactor: walks 'nvValidity' (or assumes all-valid
+-- when the bitmap is empty) and copies the present 'nvValues'
+-- into a fresh dense 'VS.Vector' sized to the popcount. Same
+-- shape as 'collectPrim' but operating on the views directly.
+{-# INLINE compactNV #-}
+compactNV :: VS.Storable a => AC.NullableView a -> VS.Vector a
+compactNV nv
+  | VU.null (AC.nvValidity nv) = AC.nvValues nv
+  | otherwise =
+      let !validity = AC.nvValidity nv
+          !values   = AC.nvValues nv
+          !n        = AC.nvLength nv
+          !nPresent = Bit.countOnes validity
+      in VS.create $ do
+           mv <- VSM.unsafeNew nPresent
+           let go !i !w
+                 | i >= n = pure ()
+                 | unBit (VU.unsafeIndex validity i) = do
+                     VSM.unsafeWrite mv w (VS.unsafeIndex values i)
+                     go (i + 1) (w + 1)
+                 | otherwise = go (i + 1) w
+           go 0 0
+           pure mv
 
 -- | Collect the 'Just' values of a boxed 'V.Vector' into a
 -- primitive 'VP.Vector'. Two passes: count present values,
@@ -756,10 +782,10 @@ encodeOptionalColumnPage oc =
 -- intermediate lists before allocating the destination vector.
 presenceVector :: OptionalColumn -> VP.Vector Int32
 presenceVector = \case
-  OptInt32 v     -> presenceVecFrom v
-  OptInt64 v     -> presenceVecFrom v
-  OptFloat v     -> presenceVecFrom v
-  OptDouble v    -> presenceVecFrom v
+  OptInt32 nv    -> presenceFromNV nv
+  OptInt64 nv    -> presenceFromNV nv
+  OptFloat nv    -> presenceFromNV nv
+  OptDouble nv   -> presenceFromNV nv
   OptBool v      -> presenceVecFrom v
   OptByteArray v -> presenceVecFrom v
   where
@@ -771,6 +797,20 @@ presenceVector = \case
            case V.unsafeIndex v i of
              Just _  -> 1
              Nothing -> 0
+
+    -- | NV variant: read straight from the validity bitmap.
+    -- Empty bitmap means all-valid (Arrow / our NV
+    -- convention), so we emit a vector of 1s.
+    {-# INLINE presenceFromNV #-}
+    presenceFromNV :: VS.Storable a => AC.NullableView a -> VP.Vector Int32
+    presenceFromNV nv
+      | VU.null (AC.nvValidity nv) =
+          VP.replicate (AC.nvLength nv) 1
+      | otherwise =
+          let !validity = AC.nvValidity nv
+              !n        = AC.nvLength nv
+          in VP.generate n $ \i ->
+               if unBit (VU.unsafeIndex validity i) then 1 else 0
 
 -- | Encode just the PLAIN-values portion (no page header). Used inside
 -- 'encodeOptionalColumnPage' so we can prepend the definition-level

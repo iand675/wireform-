@@ -168,6 +168,7 @@ executable wireform-parquet-interop-probe
   ghc-options: -O1
   build-depends:
     base >= 4.16 && < 5,
+    wireform-arrow,
     wireform-parquet,
     bytestring >= 0.11 && < 0.13,
     filepath >= 1.4 && < 1.6,

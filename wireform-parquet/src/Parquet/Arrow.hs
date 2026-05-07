@@ -150,17 +150,13 @@ arrowToParquetMixed sch batches = do
 columnArrayToParquetColumn
   :: AC.ColumnArray -> Either String PW.ParquetColumn
 columnArrayToParquetColumn col = case col of
-  -- Nullable primitives now arrive as NullableView; rehydrate
-  -- the @V.Vector (Maybe a)@ that the Parquet writer's
-  -- OptColumn shape still expects.
-  AC.ColInt32Maybe v ->
-    Right $ PW.PCOptional (PW.OptInt32 (AC.nvToMaybeVector v))
-  AC.ColInt64Maybe v ->
-    Right $ PW.PCOptional (PW.OptInt64 (AC.nvToMaybeVector v))
-  AC.ColFloatMaybe v ->
-    Right $ PW.PCOptional (PW.OptFloat (AC.nvToMaybeVector v))
-  AC.ColDoubleMaybe v ->
-    Right $ PW.PCOptional (PW.OptDouble (AC.nvToMaybeVector v))
+  -- Nullable primitives now go straight through: 'OptInt32'
+  -- etc. hold 'AC.NullableView' directly, so the bridge is a
+  -- no-op constructor application.
+  AC.ColInt32Maybe v  -> Right $ PW.PCOptional (PW.OptInt32 v)
+  AC.ColInt64Maybe v  -> Right $ PW.PCOptional (PW.OptInt64 v)
+  AC.ColFloatMaybe v  -> Right $ PW.PCOptional (PW.OptFloat v)
+  AC.ColDoubleMaybe v -> Right $ PW.PCOptional (PW.OptDouble v)
   AC.ColBoolMaybe v ->
     Right $ PW.PCOptional (PW.OptBool (AV.nullableBoolViewToMaybeVector v))
   AC.ColUtf8Maybe v ->
@@ -175,33 +171,29 @@ columnArrayToParquetColumn col = case col of
   AC.ColLargeBinaryMaybe v ->
     Right $ PW.PCOptional (PW.OptByteArray
       (AV.nullableLargeBinaryViewToMaybeVector v))
-  -- Int8 / Int16 / UInt* nullable: widen to Int32 while
-  -- preserving Nothing positions.
-  AC.ColInt8Maybe v ->
-    Right $ PW.PCOptional (PW.OptInt32 (V.map (fmap fromIntegral) (AC.nvToMaybeVector v)))
+  -- Int8 / Int16 / UInt* nullable: widen to Int32 / Int64 via
+  -- 'nvMap' (one O(N) VS.map over the values vector; validity
+  -- bitmap aliased into the result).
+  AC.ColInt8Maybe v  ->
+    Right $ PW.PCOptional (PW.OptInt32 (AC.nvMap (fromIntegral :: Int8 -> Int32)  v))
   AC.ColInt16Maybe v ->
-    Right $ PW.PCOptional (PW.OptInt32 (V.map (fmap fromIntegral) (AC.nvToMaybeVector v)))
+    Right $ PW.PCOptional (PW.OptInt32 (AC.nvMap (fromIntegral :: Int16 -> Int32) v))
   AC.ColUInt8Maybe v ->
-    Right $ PW.PCOptional (PW.OptInt32 (V.map (fmap (fromIntegral :: Word8  -> Int32)) (AC.nvToMaybeVector v)))
+    Right $ PW.PCOptional (PW.OptInt32 (AC.nvMap (fromIntegral :: Word8 -> Int32)  v))
   AC.ColUInt16Maybe v ->
-    Right $ PW.PCOptional (PW.OptInt32 (V.map (fmap (fromIntegral :: Word16 -> Int32)) (AC.nvToMaybeVector v)))
+    Right $ PW.PCOptional (PW.OptInt32 (AC.nvMap (fromIntegral :: Word16 -> Int32) v))
   AC.ColUInt32Maybe v ->
-    Right $ PW.PCOptional (PW.OptInt32 (V.map (fmap (fromIntegral :: Word32 -> Int32)) (AC.nvToMaybeVector v)))
+    Right $ PW.PCOptional (PW.OptInt32 (AC.nvMap (fromIntegral :: Word32 -> Int32) v))
   AC.ColUInt64Maybe v ->
-    Right $ PW.PCOptional (PW.OptInt64 (V.map (fmap (fromIntegral :: Word64 -> Int64)) (AC.nvToMaybeVector v)))
-  -- Temporal nullable: widen payload to matching INT32 / INT64.
-  AC.ColDate32Maybe v ->
-    Right $ PW.PCOptional (PW.OptInt32 (AC.nvToMaybeVector v))
-  AC.ColDate64Maybe v ->
-    Right $ PW.PCOptional (PW.OptInt64 (AC.nvToMaybeVector v))
-  AC.ColTime32Maybe v ->
-    Right $ PW.PCOptional (PW.OptInt32 (AC.nvToMaybeVector v))
-  AC.ColTime64Maybe v ->
-    Right $ PW.PCOptional (PW.OptInt64 (AC.nvToMaybeVector v))
-  AC.ColTimestampMaybe v ->
-    Right $ PW.PCOptional (PW.OptInt64 (AC.nvToMaybeVector v))
-  AC.ColDurationMaybe v ->
-    Right $ PW.PCOptional (PW.OptInt64 (AC.nvToMaybeVector v))
+    Right $ PW.PCOptional (PW.OptInt64 (AC.nvMap (fromIntegral :: Word64 -> Int64) v))
+  -- Temporal nullable: payload is already Int32 / Int64 in the
+  -- view, so this is just a constructor switch.
+  AC.ColDate32Maybe v    -> Right $ PW.PCOptional (PW.OptInt32 v)
+  AC.ColDate64Maybe v    -> Right $ PW.PCOptional (PW.OptInt64 v)
+  AC.ColTime32Maybe v    -> Right $ PW.PCOptional (PW.OptInt32 v)
+  AC.ColTime64Maybe v    -> Right $ PW.PCOptional (PW.OptInt64 v)
+  AC.ColTimestampMaybe v -> Right $ PW.PCOptional (PW.OptInt64 v)
+  AC.ColDurationMaybe v  -> Right $ PW.PCOptional (PW.OptInt64 v)
   -- Required columns: just delegate.
   _ ->
     PW.PCRequired <$> columnArrayToColumnData col
