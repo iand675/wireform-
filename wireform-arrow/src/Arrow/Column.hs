@@ -46,6 +46,7 @@ import GHC.Exts (ByteArray#)
 import qualified Data.Primitive.ByteArray as PBA
 import qualified Data.Text.Array as TA
 import qualified Data.Text.Internal as TI
+import Control.Monad.ST (runST)
 import qualified Data.Vector.Mutable as VM
 import qualified Data.Vector.Primitive.Mutable as MVP
 import System.IO.Unsafe (unsafePerformIO)
@@ -1461,15 +1462,39 @@ computeViewVariadicMap topFields varCounts =
 
 -- | Same as 'materializeFieldsR' but threads the precomputed view
 -- variadic-count vector.
-materializeFieldsR' :: Endianness -> V.Vector Int -> V.Vector Field -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (V.Vector ColumnArray, Int, Int)
+--
+-- Materializes columns into a /pre-sized/ mutable boxed vector
+-- and freezes once. We know there's exactly one 'ColumnArray'
+-- per field, so allocating @N@ slots up front and writing in
+-- order avoids the previous "cons onto list, reverse,
+-- 'V.fromList'" sequence (which paid 2N list-cell allocations
+-- + a fresh Array# of size N + the rebuild). Now: one Array#
+-- of size N, written linearly.
+--
+-- Carries the 'Either String' through 'ST' explicitly via a
+-- short-circuit return — once we hit a 'Left' we stop writing
+-- and propagate the error.
+materializeFieldsR'
+  :: Endianness -> V.Vector Int -> V.Vector Field
+  -> RecordBatchDef -> ByteString -> Int -> Int
+  -> Either String (V.Vector ColumnArray, Int, Int)
 materializeFieldsR' endian viewMap fields rb body !nodeIdx0 !bufIdx0 =
-  go 0 nodeIdx0 bufIdx0 []
-  where
-    go !i !ni !bi !acc
-      | i >= V.length fields = Right (V.fromList (reverse acc), ni, bi)
-      | otherwise = do
-          (col, ni', bi') <- materializeField' endian viewMap (V.unsafeIndex fields i) rb body ni bi
-          go (i + 1) ni' bi' (col : acc)
+  runST $ do
+    let !n = V.length fields
+    mv <- VM.unsafeNew n
+    let loop !i !ni !bi
+          | i >= n = do
+              v <- V.unsafeFreeze mv
+              pure (Right (v, ni, bi))
+          | otherwise =
+              case materializeField'
+                     endian viewMap (V.unsafeIndex fields i)
+                     rb body ni bi of
+                Left e               -> pure (Left e)
+                Right (col, ni', bi') -> do
+                  VM.unsafeWrite mv i col
+                  loop (i + 1) ni' bi'
+    loop 0 nodeIdx0 bufIdx0
 
 materializeField' :: Endianness -> V.Vector Int -> Field -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 materializeField' endian viewMap f rb body !nodeIdx !bufIdx =
@@ -1640,15 +1665,29 @@ materializeViewCol' endian viewMap utf8 f rb body !nodeIdx !bufIdx = do
                     _               -> 0
   materializeViewColWithVar endian utf8 varCount f rb body nodeIdx bufIdx
 
-materializeFieldsR :: Endianness -> V.Vector Field -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (V.Vector ColumnArray, Int, Int)
+materializeFieldsR
+  :: Endianness -> V.Vector Field -> RecordBatchDef -> ByteString
+  -> Int -> Int
+  -> Either String (V.Vector ColumnArray, Int, Int)
 materializeFieldsR endian fields rb body !nodeIdx0 !bufIdx0 =
-  go 0 nodeIdx0 bufIdx0 []
-  where
-    go !i !ni !bi !acc
-      | i >= V.length fields = Right (V.fromList (reverse acc), ni, bi)
-      | otherwise = do
-          (col, ni', bi') <- materializeField endian (V.unsafeIndex fields i) rb body ni bi
-          go (i + 1) ni' bi' (col : acc)
+  -- Same shape as 'materializeFieldsR'' (mutable boxed
+  -- vector, in-order writes, single freeze) — see that
+  -- function's note for rationale.
+  runST $ do
+    let !n = V.length fields
+    mv <- VM.unsafeNew n
+    let loop !i !ni !bi
+          | i >= n = do
+              v <- V.unsafeFreeze mv
+              pure (Right (v, ni, bi))
+          | otherwise =
+              case materializeField endian
+                     (V.unsafeIndex fields i) rb body ni bi of
+                Left e -> pure (Left e)
+                Right (col, ni', bi') -> do
+                  VM.unsafeWrite mv i col
+                  loop (i + 1) ni' bi'
+    loop 0 nodeIdx0 bufIdx0
 
 materializeField :: Endianness -> Field -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 materializeField endian f rb body !nodeIdx !bufIdx =

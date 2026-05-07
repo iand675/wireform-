@@ -70,18 +70,23 @@ Performance impact:
 * Arrow IPC writes: writes that already had the column in view shape (the typical Arrow-to-Arrow transcode case) are now `n + 1` ForeignPtr handoffs instead of `n` per-row poke loops.
 * Parquet end-to-end (read or write a fresh boxed dataset): essentially unchanged from the pre-views numbers — the Parquet writer's internal `RLE` / `Levels` / `BloomFilter` machinery still uses `VP.Vector` for primitive bit-packed work, and the bridge converts at the boundary. The win is structural (the bridge is now a constructor swap for primitives, not a `VS.convert`); the wall-clock is unchanged because the writer was already memcpy-bound on the page-body emit.
 
-End-to-end Arrow IPC numbers are bounded by the boxed `V.Vector ColumnArray` spine + the `RecordBatchDef` boxed-vector allocation, not the column data itself. Closing that gap is the next workstream.
+End-to-end Arrow IPC numbers used to be bounded by the boxed `V.Vector ColumnArray` spine + the `RecordBatchDef` boxed-vector allocation. Both have since been addressed (see "Round 2" below); the remaining structural gaps are listed in the next section.
 
 ## Why we're not at C/Rust speed
 
-The Parquet end-to-end numbers above are 1.05x–2.7x faster than pyarrow but the ratio against a hand-written C/Rust implementation is closer to 4-6x slower for the in-cache primitive paths. The remaining gap is structural rather than algorithmic:
+The Parquet end-to-end numbers above are 1.05x–2.7x faster than pyarrow but the ratio against a hand-written C/Rust implementation is closer to 4-6x slower for the in-cache primitive paths. The remaining gap is structural rather than algorithmic. Most of the bullets that used to live here have been knocked off; what's left:
 
-* **GC pressure** — every column read allocates a fresh `V.Vector` (boxed) or `VP.Vector` (with its own `ByteArray`) which gets handed to the caller and eventually has to be collected. C/Rust returns a slice into the source buffer.
-* **`V.Vector Bool` / `V.Vector Text`** — these are spines of pointers to `True`/`False` singletons or `Text` constructors; even though each individual write is a single pointer store, the cache footprint of the spine itself is N pointers vs N bits (Bool) or 4-byte slice triples (Text in arrow-rs).
-* **No bit-packed in-memory `Bool`** — Arrow's wire format already packs `Bool`s into bits, but our `ColBool` un-packs them to `V.Vector Bool` on read. Keeping the bit-packed form end-to-end would close 8× of the cache pressure.
-* **Per-`Text` validation** — non-ASCII pages still go through `TE.decodeUtf8'` per slice. arrow-rs validates the whole buffer once and exposes views.
+* **GHC RTS overhead** — even with view-based reads, every batch boundary still pays for one `V.Vector ColumnArray` allocation (one Array# of N pointers + the per-column constructor boxes). For wide schemas with many small batches this is non-trivial. Closing it would mean either an unboxed sum representation for `ColumnArray` (currently impossible without GHC support) or a streaming API that never materialises the full boxed spine.
+* **No SIMD page decompression** — LZ4 / Snappy go through their respective C libraries which are already SIMD-aware, but the boundary crossing per page is non-zero. arrow-rs decompresses straight into the column buffer; we still copy through an intermediate ByteString.
+* **No streaming columnar predicate evaluator** — predicate pushdown skips row groups + pages, but within a selected page we still materialise the whole column before filtering. arrow-rs / DataFusion can fuse decode + filter.
 
-The first three would require changing the `ColumnArray` constructor types (`ColBool`, `ColUtf8`, …) to a slice/view representation. That's a separate workstream; everything in the "History" section below stays inside the existing in-memory representation.
+### Round 2 (this PR)
+
+Three of the four bullets that used to live here have been closed:
+
+* ~~**`V.Vector ColumnArray` spine**~~ — `materializeFieldsR` / `materializeFieldsR'` now build into a pre-sized mutable boxed vector + single freeze, eliminating the cons-then-reverse-then-`fromList` thunk + double-allocation pattern.
+* ~~**`RecordBatchDef` boxed-vector allocations**~~ — `rbNodes`, `rbBuffers`, `rbVariadicBufferCounts` are now `VS.Vector` (with `Storable` instances on `FieldNode` / `Buffer`). Per-batch read does fewer pointer-chasing index loads, and `validateRecordBatchBuffers` hands the underlying `ForeignPtr` straight to the SIMD validator with zero copy.
+* ~~**Per-`Text` UTF-8 validation**~~ — `Utf8View` / `LargeUtf8View` carry a /lazy/ pre-validated `TA.Array`; the whole data buffer is decoded once with the lenient UTF-8 decoder on first per-row access, and subsequent reads do `TI.text arr offset length` (a 3-word constructor, no validation, no allocation).
 
 ## History (read uncompressed)
 
