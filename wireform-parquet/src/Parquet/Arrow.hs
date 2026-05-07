@@ -157,20 +157,23 @@ columnArrayToParquetColumn col = case col of
   AC.ColInt64Maybe v  -> Right $ PW.PCOptional (PW.OptInt64 v)
   AC.ColFloatMaybe v  -> Right $ PW.PCOptional (PW.OptFloat v)
   AC.ColDoubleMaybe v -> Right $ PW.PCOptional (PW.OptDouble v)
-  AC.ColBoolMaybe v ->
-    Right $ PW.PCOptional (PW.OptBool (AV.nullableBoolViewToMaybeVector v))
-  AC.ColUtf8Maybe v ->
-    Right $ PW.PCOptional (PW.OptByteArray
-      (V.map (fmap TE.encodeUtf8) (AV.nullableUtf8ViewToMaybeVector v)))
-  AC.ColBinaryMaybe v ->
-    Right $ PW.PCOptional (PW.OptByteArray
-      (AV.nullableBinaryViewToMaybeVector v))
+  -- Nullable Bool / Binary / Utf8 also flow through views
+  -- with no boxed Maybe-vector intermediate.
+  AC.ColBoolMaybe v   -> Right $ PW.PCOptional (PW.OptBool v)
+  AC.ColUtf8Maybe v   ->
+    -- Utf8 -> Binary view is a zero-copy newtype swap; the
+    -- data buffer already holds the UTF-8 bytes.
+    Right $ PW.PCOptional (PW.OptByteArray (AV.nullableUtf8ToBinaryView v))
+  AC.ColBinaryMaybe v -> Right $ PW.PCOptional (PW.OptByteArray v)
   AC.ColLargeUtf8Maybe v ->
+    -- Large views have Int64 offsets; Parquet's Int32-offset
+    -- BinaryView path handles offsets up to 2 GiB, which is
+    -- plenty for any single Parquet column chunk.
     Right $ PW.PCOptional (PW.OptByteArray
-      (V.map (fmap TE.encodeUtf8) (AV.nullableLargeUtf8ViewToMaybeVector v)))
+      (AV.nullableLargeBinaryToBinaryView (AV.nullableLargeUtf8ToBinaryView v)))
   AC.ColLargeBinaryMaybe v ->
     Right $ PW.PCOptional (PW.OptByteArray
-      (AV.nullableLargeBinaryViewToMaybeVector v))
+      (AV.nullableLargeBinaryToBinaryView v))
   -- Int8 / Int16 / UInt* nullable: widen to Int32 / Int64 via
   -- 'nvMap' (one O(N) VS.map over the values vector; validity
   -- bitmap aliased into the result).

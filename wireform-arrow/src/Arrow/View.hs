@@ -65,6 +65,8 @@ module Arrow.View
   , largeUtf8ViewToBinaryView
   , nullableUtf8ToBinaryView
   , nullableLargeUtf8ToBinaryView
+  , largeBinaryViewToBinaryView
+  , nullableLargeBinaryToBinaryView
     -- * Buffer reinterpretation
   , vsSliceToBytes
   , bsToStorable
@@ -510,6 +512,21 @@ nullableBinaryViewToLarge
   :: NullableBinaryView -> NullableLargeBinaryView
 nullableBinaryViewToLarge (NullableBinaryView v b) =
   NullableLargeBinaryView v (binaryViewToLargeBinaryView b)
+
+-- | Narrow Int64 offsets back to Int32. Lossy if any offset
+-- exceeds 'maxBound :: Int32' (2 GiB), which would be a
+-- single Parquet column chunk -- vanishingly rare in
+-- practice. Data buffer is shared.
+{-# INLINE largeBinaryViewToBinaryView #-}
+largeBinaryViewToBinaryView :: LargeBinaryView -> BinaryView
+largeBinaryViewToBinaryView (LargeBinaryView offs dat) =
+  BinaryView (VS.map fromIntegral offs) dat
+
+{-# INLINE nullableLargeBinaryToBinaryView #-}
+nullableLargeBinaryToBinaryView
+  :: NullableLargeBinaryView -> NullableBinaryView
+nullableLargeBinaryToBinaryView (NullableLargeBinaryView v b) =
+  NullableBinaryView v (largeBinaryViewToBinaryView b)
 
 -- | Like 'utf8ViewFromVector' but builds a 'LargeUtf8View'
 -- (Int64 offsets).

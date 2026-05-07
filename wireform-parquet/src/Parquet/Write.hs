@@ -97,6 +97,7 @@ import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Storable.Mutable as VSM
 import qualified Data.Vector.Unboxed as VU
 import qualified Arrow.Column as AC
+import qualified Arrow.View as AV
 import qualified Columnar.Bit as Bit
 import Columnar.Bit (Bit (..), unBit)
 import Data.Word (Word8, Word32)
@@ -658,8 +659,8 @@ data OptionalColumn
   | OptInt64     !(AC.NullableView Int64)
   | OptFloat     !(AC.NullableView Float)
   | OptDouble    !(AC.NullableView Double)
-  | OptBool      !(V.Vector (Maybe Bool))
-  | OptByteArray !(V.Vector (Maybe ByteString))
+  | OptBool      !AV.NullableBoolView
+  | OptByteArray !AV.NullableBinaryView
   deriving (Show, Eq)
 
 optionalColumnLength :: OptionalColumn -> Int
@@ -668,39 +669,95 @@ optionalColumnLength = \case
   OptInt64 nv    -> AC.nvLength nv
   OptFloat nv    -> AC.nvLength nv
   OptDouble nv   -> AC.nvLength nv
-  OptBool v      -> V.length v
-  OptByteArray v -> V.length v
+  OptBool nbv    -> VU.length (AV.nbvValues nbv)
+  OptByteArray nbv -> AV.vLength (AV.nbvBinValues nbv)
 
--- | Count 'Nothing' entries without materialising an intermediate
--- vector. For primitives this is 'nvNullCount' (popcount over
--- the validity bitmap); for the boxed variants it's a single
--- foldl' tally over the source.
+-- | Count nulls via popcount over the validity bitmap (or 0
+-- when the bitmap is empty / all-valid).
 optionalColumnNullCount :: OptionalColumn -> Int
 optionalColumnNullCount = \case
   OptInt32 nv    -> AC.nvNullCount nv
   OptInt64 nv    -> AC.nvNullCount nv
   OptFloat nv    -> AC.nvNullCount nv
   OptDouble nv   -> AC.nvNullCount nv
-  OptBool v      -> countNothings v
-  OptByteArray v -> countNothings v
+  OptBool nbv    -> nbvNullCount nbv
+  OptByteArray nbv ->
+    let !validity = AV.nbvBinValidity nbv
+        !n        = AV.vLength (AV.nbvBinValues nbv)
+    in if VU.null validity then 0 else n - Bit.countOnes validity
   where
-    {-# INLINE countNothings #-}
-    countNothings :: V.Vector (Maybe a) -> Int
-    countNothings = V.foldl' (\a x -> case x of Nothing -> a + 1; _ -> a) 0
+    nbvNullCount nbv =
+      let !validity = AV.nbvValidity nbv
+          !n        = VU.length (AV.nbvValues nbv)
+      in if VU.null validity then 0 else n - Bit.countOnes validity
 
 -- | Strip nulls and return only the present values as a 'ColumnData'.
--- For primitives backed by 'AC.NullableView' this is a single-pass
--- compaction guided by the validity bitmap into a fresh
--- 'VS.Vector'; for boxed variants it's the same one-pass
--- mutable-vector build the previous shape used.
+-- All four primitive shapes go through 'compactNV' (one-pass
+-- bitmap-guided VS-compaction); the variable-length / bool
+-- variants go through 'compactBoolNV' / 'compactByteArrayNV'
+-- which do the same shape on bit-packed bools and on the
+-- view's data buffer respectively.
 optionalColumnPresentValues :: OptionalColumn -> ColumnData
 optionalColumnPresentValues = \case
-  OptInt32 nv    -> ColInt32   (compactNV nv)
-  OptInt64 nv    -> ColInt64   (compactNV nv)
-  OptFloat nv    -> ColFloat   (compactNV nv)
-  OptDouble nv   -> ColDouble  (compactNV nv)
-  OptBool v      -> ColBool    (collectBoxed v)
-  OptByteArray v -> ColByteArray (collectBoxed v)
+  OptInt32 nv      -> ColInt32     (compactNV nv)
+  OptInt64 nv      -> ColInt64     (compactNV nv)
+  OptFloat nv      -> ColFloat     (compactNV nv)
+  OptDouble nv     -> ColDouble    (compactNV nv)
+  OptBool nbv      -> ColBool      (compactBoolNV nbv)
+  OptByteArray nbv -> ColByteArray (compactByteArrayNV nbv)
+
+-- | Bit-packed bool compactor. Walks the validity bitmap and
+-- copies present-only bits into a fresh boxed @V.Vector Bool@
+-- (which is what the existing 'ColBool' encoder expects).
+{-# INLINE compactBoolNV #-}
+compactBoolNV :: AV.NullableBoolView -> V.Vector Bool
+compactBoolNV nbv
+  | VU.null (AV.nbvValidity nbv) =
+      let !values = AV.nbvValues nbv
+          !n      = VU.length values
+      in V.generate n (\i -> unBit (VU.unsafeIndex values i))
+  | otherwise =
+      let !validity = AV.nbvValidity nbv
+          !values   = AV.nbvValues nbv
+          !n        = VU.length values
+          !nPresent = Bit.countOnes validity
+      in V.create $ do
+           mv <- VM.unsafeNew nPresent
+           let go !i !w
+                 | i >= n = pure ()
+                 | unBit (VU.unsafeIndex validity i) = do
+                     VM.unsafeWrite mv w
+                       (unBit (VU.unsafeIndex values i))
+                     go (i + 1) (w + 1)
+                 | otherwise = go (i + 1) w
+           go 0 0
+           pure mv
+
+-- | NullableBinaryView compactor. Slices alias the view's data
+-- buffer (zero-copy slice triples); only the boxed @V.Vector@
+-- backing array is freshly allocated.
+{-# INLINE compactByteArrayNV #-}
+compactByteArrayNV :: AV.NullableBinaryView -> V.Vector ByteString
+compactByteArrayNV nbv
+  | VU.null (AV.nbvBinValidity nbv) =
+      let !bview = AV.nbvBinValues nbv
+          !n     = AV.vLength bview
+      in V.generate n (AV.binaryAt bview)
+  | otherwise =
+      let !validity = AV.nbvBinValidity nbv
+          !bview    = AV.nbvBinValues nbv
+          !n        = AV.vLength bview
+          !nPresent = Bit.countOnes validity
+      in V.create $ do
+           mv <- VM.unsafeNew nPresent
+           let go !i !w
+                 | i >= n = pure ()
+                 | unBit (VU.unsafeIndex validity i) = do
+                     VM.unsafeWrite mv w (AV.binaryAt bview i)
+                     go (i + 1) (w + 1)
+                 | otherwise = go (i + 1) w
+           go 0 0
+           pure mv
 
 -- | One-pass compactor: walks 'nvValidity' (or assumes all-valid
 -- when the bitmap is empty) and copies the present 'nvValues'
@@ -786,31 +843,29 @@ presenceVector = \case
   OptInt64 nv    -> presenceFromNV nv
   OptFloat nv    -> presenceFromNV nv
   OptDouble nv   -> presenceFromNV nv
-  OptBool v      -> presenceVecFrom v
-  OptByteArray v -> presenceVecFrom v
+  OptBool nbv    -> presenceFromBitmap (AV.nbvValidity nbv)
+                                       (VU.length (AV.nbvValues nbv))
+  OptByteArray nbv -> presenceFromBitmap (AV.nbvBinValidity nbv)
+                                         (AV.vLength (AV.nbvBinValues nbv))
   where
-    {-# INLINE presenceVecFrom #-}
-    presenceVecFrom :: V.Vector (Maybe a) -> VP.Vector Int32
-    presenceVecFrom v =
-      let !n = V.length v
-      in VP.generate n $ \i ->
-           case V.unsafeIndex v i of
-             Just _  -> 1
-             Nothing -> 0
-
     -- | NV variant: read straight from the validity bitmap.
     -- Empty bitmap means all-valid (Arrow / our NV
     -- convention), so we emit a vector of 1s.
     {-# INLINE presenceFromNV #-}
     presenceFromNV :: VS.Storable a => AC.NullableView a -> VP.Vector Int32
-    presenceFromNV nv
-      | VU.null (AC.nvValidity nv) =
-          VP.replicate (AC.nvLength nv) 1
+    presenceFromNV nv =
+      presenceFromBitmap (AC.nvValidity nv) (AC.nvLength nv)
+
+    -- | Generic bitmap -> def-level vector. All four NV
+    -- variants share this shape now; the only thing they
+    -- differ on is how they expose 'validity' and 'length'.
+    {-# INLINE presenceFromBitmap #-}
+    presenceFromBitmap :: VU.Vector Bit -> Int -> VP.Vector Int32
+    presenceFromBitmap validity n
+      | VU.null validity = VP.replicate n 1
       | otherwise =
-          let !validity = AC.nvValidity nv
-              !n        = AC.nvLength nv
-          in VP.generate n $ \i ->
-               if unBit (VU.unsafeIndex validity i) then 1 else 0
+          VP.generate n $ \i ->
+            if unBit (VU.unsafeIndex validity i) then 1 else 0
 
 -- | Encode just the PLAIN-values portion (no page header). Used inside
 -- 'encodeOptionalColumnPage' so we can prepend the definition-level

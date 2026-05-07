@@ -23,6 +23,7 @@ import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
 import qualified Data.Vector.Storable as VS
 import qualified Arrow.Column as AC
+import qualified Arrow.View as AV
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.FilePath ((</>))
@@ -215,8 +216,9 @@ mixedSchema =
 mixedRow :: V.Vector ParquetColumn
 mixedRow = V.fromList
   [ PCRequired (ColInt64 (VS.fromList [10, 20, 30 :: Int64]))
-  , PCOptional (OptByteArray (V.fromList
-      [ Just "alice", Nothing, Just "carol" :: Maybe ByteString ]))
+  , PCOptional (OptByteArray
+      (AV.nullableBinaryViewFromMaybeVector (V.fromList
+        [ Just "alice", Nothing, Just "carol" :: Maybe ByteString ])))
   , PCOptional (OptDouble (AC.nvFromMaybeList 0
       [ Just 1.5, Just 2.5, Nothing :: Maybe Double ]))
   ]
@@ -294,5 +296,6 @@ optInt64Row = V.singleton $ PCOptional $ OptInt64 (AC.nvFromMaybeList 0
   [ Just 100, Nothing, Just 300 ])
 optFloatRow = V.singleton $ PCOptional $ OptFloat (AC.nvFromMaybeList 0
   [ Just 1.5, Just 2.5, Nothing, Just 4.5 ])
-optBoolRow = V.singleton $ PCOptional $ OptBool (V.fromList
-  [ Just True, Nothing, Just False, Just True, Nothing ])
+optBoolRow = V.singleton $ PCOptional $ OptBool
+  (AV.nullableBoolViewFromMaybeVector (V.fromList
+    [ Just True, Nothing, Just False, Just True, Nothing ]))
