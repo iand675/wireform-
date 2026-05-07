@@ -34,6 +34,7 @@ module ORC.Read
   , decodeBoolColumn
   , decodeBoolColumnNV
   , decodeStringColumn
+  , decodeStringColumnNV
   , decodeStringDictColumn
   , decodeFloatColumn
   , decodeFloatColumnNV
@@ -392,6 +393,89 @@ decodeStringColumn numRows dataBs lengthBs dictBs mPresentBs
       case mPresent of
         Nothing -> Right $! V.map Just strings
         Just present -> Right $! interleaveText present strings
+
+-- | Flat-shape ORC string reader for DIRECT_V2 encoding.
+-- Returns a 'AV.NullableBinaryView' (validity + offsets +
+-- contiguous data) directly. The dictionary case
+-- (DICTIONARY_V2) still falls through to the boxed
+-- 'decodeStringColumn' path -- the dictionary lookup is more
+-- involved and uncommon enough that the per-row-Maybe-Text
+-- intermediate isn't worth eliminating yet.
+--
+-- The big win versus 'decodeStringColumn': the data buffer
+-- is the source bytestring reinterpreted zero-copy as a
+-- 'VS.Vector Word8'; offsets are computed in lockstep with
+-- the present-stream walk; no per-row 'Text' / 'ByteString'
+-- allocation, no 'V.Vector (Maybe Text)' backing array.
+decodeStringColumnNV
+  :: Int -> ByteString -> ByteString -> ByteString -> Maybe ByteString
+  -> Either String AV.NullableBinaryView
+decodeStringColumnNV numRows dataBs lengthBs dictBs mPresentBs
+  | not (BS.null dictBs) = do
+      -- Fall back to the boxed reader + the bridge-style
+      -- conversion. Same cost as the previous bridge path
+      -- for this rare case.
+      xs <- decodeStringDictColumn numRows dictBs lengthBs dataBs mPresentBs
+      let !bsXs = V.map (fmap TE.encodeUtf8) xs
+      Right $! AV.nullableBinaryViewFromMaybeVector bsXs
+  | otherwise = do
+      (numPresent, mPresent) <- resolvePresent numRows mPresentBs
+      lengths <- decodeRLEv2Int False numPresent lengthBs
+      case mPresent of
+        Nothing -> Right $! buildNVNoPresent dataBs lengths
+        Just present ->
+          Right $! buildNVWithPresent numRows dataBs lengths present
+{-# INLINE decodeStringColumnNV #-}
+
+-- | No-PRESENT fast path: validity is empty (= all valid),
+-- offsets are the cumulative sum of @lengths@, data buffer is
+-- the source bytestring reinterpreted zero-copy.
+buildNVNoPresent
+  :: ByteString -> VP.Vector Int64 -> AV.NullableBinaryView
+buildNVNoPresent dataBs lengths = runST $ do
+  let !n = VP.length lengths
+  offM <- VSM.unsafeNew (n + 1)
+  let go !i !cur
+        | i >= n = do
+            VSM.unsafeWrite offM n (fromIntegral cur :: Int32)
+            pure ()
+        | otherwise = do
+            let !len = fromIntegral (VP.unsafeIndex lengths i) :: Int
+            VSM.unsafeWrite offM i (fromIntegral cur :: Int32)
+            go (i + 1) (cur + len)
+  go 0 0
+  !offs <- VS.unsafeFreeze offM
+  let !dat = AV.bsToStorable dataBs
+  pure (AV.NullableBinaryView VU.empty (AV.BinaryView offs dat))
+
+-- | With-PRESENT path: walk the present stream once,
+-- writing validity bits + offsets in lockstep. The data
+-- buffer is the source bytestring zero-copy (rows alias
+-- their slices).
+buildNVWithPresent
+  :: Int -> ByteString -> VP.Vector Int64
+  -> V.Vector Bool -> AV.NullableBinaryView
+buildNVWithPresent numRows dataBs lengths present = runST $ do
+  bitM <- VUM.unsafeNew numRows
+  offM <- VSM.unsafeNew (numRows + 1)
+  let go !i !j !cur
+        | i >= numRows = do
+            VSM.unsafeWrite offM numRows (fromIntegral cur :: Int32)
+            pure ()
+        | V.unsafeIndex present i = do
+            let !len = fromIntegral (VP.unsafeIndex lengths j) :: Int
+            VUM.unsafeWrite bitM i (Bit True)
+            VSM.unsafeWrite offM i (fromIntegral cur :: Int32)
+            go (i + 1) (j + 1) (cur + len)
+        | otherwise = do
+            VUM.unsafeWrite bitM i (Bit False)
+            VSM.unsafeWrite offM i (fromIntegral cur :: Int32)
+            go (i + 1) j cur
+  go 0 0 0
+  !validity <- VU.unsafeFreeze bitM
+  !offs     <- VS.unsafeFreeze offM
+  let !dat = AV.bsToStorable dataBs
+  pure (AV.NullableBinaryView validity (AV.BinaryView offs dat))
 
 -- | Decode an IEEE 754 single-precision float column (little-endian).
 --

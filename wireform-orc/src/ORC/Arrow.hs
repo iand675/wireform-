@@ -952,33 +952,36 @@ decodeOneColumn cid fld numRows stripeBs streams = do
     stringColumn mPresentBs ty = do
       dataBs   <- sliceFor streamData
       lengthBs <- sliceFor streamLength
-      xs <- OR.decodeStringColumn numRows dataBs lengthBs BS.empty mPresentBs
-      let !decoded = case ty of
-            AT.ABinary       -> AC.ColBinary
-                                  (AV.binaryViewFromVector
-                                     (V.map (maybe BS.empty TE.encodeUtf8) xs))
-            AT.ALargeBinary  -> AC.ColLargeBinary
-                                  (AV.binaryViewFromVector_l
-                                     (V.map (maybe BS.empty TE.encodeUtf8) xs))
-            AT.ALargeUtf8    -> AC.ColLargeUtf8
-                                  (AV.utf8ViewFromVector_l
-                                     (V.map (maybe T.empty id) xs))
-            _                -> AC.ColUtf8
-                                  (AV.utf8ViewFromVector
-                                     (V.map (maybe T.empty id) xs))
+      -- Flat-shape string read: per-page builds a
+      -- NullableBinaryView (validity bits + Int32 offsets +
+      -- contiguous data buffer) directly. The data buffer
+      -- is the source bytestring reinterpreted zero-copy
+      -- (bsToStorable is a ForeignPtr cast, no memcpy).
+      -- DICTIONARY_V2 still falls back to the boxed
+      -- decoder + V.map encoding inside decodeStringColumnNV.
+      nbv <- OR.decodeStringColumnNV numRows dataBs lengthBs BS.empty mPresentBs
       if AT.fieldNullable fld
         then Right $ case ty of
-               AT.ABinary       -> AC.ColBinaryMaybe
-                                     (AV.nullableBinaryViewFromMaybeVector
-                                        (V.map (fmap TE.encodeUtf8) xs))
+               AT.ABinary       -> AC.ColBinaryMaybe nbv
                AT.ALargeBinary  -> AC.ColLargeBinaryMaybe
-                                     (AV.nullableLargeBinaryViewFromMaybeVector
-                                        (V.map (fmap TE.encodeUtf8) xs))
+                                     (AV.nullableBinaryViewToLarge nbv)
                AT.ALargeUtf8    -> AC.ColLargeUtf8Maybe
-                                     (AV.nullableLargeUtf8ViewFromMaybeVector xs)
+                                     (AV.nullableBinaryToLargeUtf8View
+                                        (AV.nullableBinaryViewToLarge nbv))
                _                -> AC.ColUtf8Maybe
-                                     (AV.nullableUtf8ViewFromMaybeVector xs)
-        else Right decoded
+                                     (AV.nullableBinaryToUtf8View nbv)
+        else Right $ case ty of
+               AT.ABinary       -> AC.ColBinary (AV.nbvBinValues nbv)
+               AT.ALargeBinary  -> AC.ColLargeBinary
+                                     (AV.binaryViewToLargeBinaryView
+                                        (AV.nbvBinValues nbv))
+               AT.ALargeUtf8    -> AC.ColLargeUtf8
+                                     (AV.binaryViewToLargeUtf8View
+                                        (AV.binaryViewToLargeBinaryView
+                                           (AV.nbvBinValues nbv)))
+               _                -> AC.ColUtf8
+                                     (AV.binaryViewToUtf8View
+                                        (AV.nbvBinValues nbv))
 
 -- | Cast a @V.Vector (Maybe Int64)@ stream to the right Arrow
 -- column flavour. ORC ints use a single Int64-backed RLE-v2

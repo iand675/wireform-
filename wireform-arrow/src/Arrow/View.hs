@@ -57,8 +57,13 @@ module Arrow.View
   , mkLargeUtf8View
   , binaryViewToUtf8View
   , nullableBinaryToUtf8View
+  , binaryViewToLargeBinaryView
+  , binaryViewToLargeUtf8View
+  , nullableBinaryViewToLarge
+  , nullableBinaryToLargeUtf8View
     -- * Buffer reinterpretation
   , vsSliceToBytes
+  , bsToStorable
     -- * Nullable variable-length view types
   , NullableBoolView (..)
   , NullableUtf8View (..)
@@ -452,6 +457,30 @@ binaryViewToUtf8View (BinaryView off dat) = mkUtf8View off dat
 nullableBinaryToUtf8View :: NullableBinaryView -> NullableUtf8View
 nullableBinaryToUtf8View (NullableBinaryView v b) =
   NullableUtf8View v (binaryViewToUtf8View b)
+
+-- | Same as 'nullableBinaryToUtf8View' but promotes to the
+-- Int64-offset variant. Costs the offsets-promotion pass
+-- (O(n) VS.map fromIntegral), which is a fraction of the
+-- column data size.
+{-# INLINE nullableBinaryToLargeUtf8View #-}
+nullableBinaryToLargeUtf8View
+  :: NullableLargeBinaryView -> NullableLargeUtf8View
+nullableBinaryToLargeUtf8View (NullableLargeBinaryView v b) =
+  NullableLargeUtf8View v (binaryViewToLargeUtf8View b)
+
+-- | Promote a 'BinaryView' (Int32 offsets) to a
+-- 'LargeBinaryView' (Int64 offsets). Just a VS.map over the
+-- offsets; data buffer is shared.
+{-# INLINE binaryViewToLargeBinaryView #-}
+binaryViewToLargeBinaryView :: BinaryView -> LargeBinaryView
+binaryViewToLargeBinaryView (BinaryView offs dat) =
+  LargeBinaryView (VS.map fromIntegral offs) dat
+
+{-# INLINE nullableBinaryViewToLarge #-}
+nullableBinaryViewToLarge
+  :: NullableBinaryView -> NullableLargeBinaryView
+nullableBinaryViewToLarge (NullableBinaryView v b) =
+  NullableLargeBinaryView v (binaryViewToLargeBinaryView b)
 
 -- | Like 'utf8ViewFromVector' but builds a 'LargeUtf8View'
 -- (Int64 offsets).
