@@ -27,6 +27,7 @@ import Data.Int (Int32, Int64)
 import qualified Data.Map.Strict as Map
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Storable as VS
 
 import qualified Avro.Container as Avro
 import qualified Avro.Value as AV
@@ -68,7 +69,7 @@ main = do
         , P.SchemaElement "id"     (Just P.Required) (Just P.PTInt64)     Nothing  Nothing Nothing Nothing
         , P.SchemaElement "name"   (Just P.Required) (Just P.PTByteArray) Nothing  Nothing Nothing Nothing
         ]
-      idVals   = VP.fromList [(0 :: Int64) .. 9]
+      idVals   = VS.fromList [(0 :: Int64) .. 9]
       nameVals = V.fromList ["alpha", "beta", "gamma", "delta", "epsilon",
                              "zeta", "eta", "theta", "iota", "kappa"]
       cols = V.fromList

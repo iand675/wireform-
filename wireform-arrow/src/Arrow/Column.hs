@@ -572,21 +572,11 @@ readUtf8Column endian len rb body !bufIdx !nodeIdx = do
       -- Build a Utf8View directly: both buffers stay as
       -- VS.Vector views into the source body. UTF-8 validation
       -- still runs at per-row access time via 'AV.utf8At'.
-      case endian of
-        Little ->
-          let !view = Utf8View
-                { uvOffsets = viewPrimVecLE 4 (len + 1) offBs
-                , uvData    = viewPrimVecLE 1 (BS.length datBs) datBs
-                }
-          in Right (ColUtf8 view, nodeIdx + 1, bufIdx + 2)
-        _ -> do
-          -- Big-endian: copy + bswap the offsets, then the
-          -- data buffer is already the wire bytes.
-          let !view = Utf8View
-                { uvOffsets = bswapPrimVec32 (len + 1) offBs
-                , uvData    = viewPrimVecLE 1 (BS.length datBs) datBs
-                }
-          Right (ColUtf8 view, nodeIdx + 1, bufIdx + 2)
+      let !offs = case endian of
+            Little -> viewPrimVecLE 4 (len + 1) offBs
+            _      -> bswapPrimVec32 (len + 1) offBs
+          !view = AV.mkUtf8View offs (viewPrimVecLE 1 (BS.length datBs) datBs)
+      in Right (ColUtf8 view, nodeIdx + 1, bufIdx + 2)
 
 -- | True iff every byte of the buffer is ASCII.
 -- Delegates to the SIMDe-accelerated 'SIMD.isAsciiBS' (SSE2 /
@@ -663,10 +653,8 @@ readLargeUtf8Column endian len rb body !bufIdx !nodeIdx = do
       let !offsets = case endian of
             Little -> viewPrimVecLE 8 (len + 1) offBs
             _      -> bswapPrimVec64 (len + 1) offBs
-          !view = LargeUtf8View
-            { luvOffsets = offsets
-            , luvData    = viewPrimVecLE 1 (BS.length datBs) datBs
-            }
+          !view = AV.mkLargeUtf8View offsets
+                    (viewPrimVecLE 1 (BS.length datBs) datBs)
       in Right (ColLargeUtf8 view, nodeIdx + 1, bufIdx + 2)
 
 readLargeBinaryColumn :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
@@ -934,10 +922,8 @@ readUtf8ColumnMaybe endian len rb body !bufIdx !nodeIdx = do
             _      -> bswapPrimVec32 (len + 1) offBs
           !view = AV.NullableUtf8View
             { AV.nuvValidity = validBits
-            , AV.nuvValues   = Utf8View
-                { uvOffsets = offs
-                , uvData    = viewPrimVecLE 1 (BS.length datBs) datBs
-                }
+            , AV.nuvValues   = AV.mkUtf8View offs
+                                 (viewPrimVecLE 1 (BS.length datBs) datBs)
             }
       in Right (ColUtf8Maybe view, nodeIdx + 1, bufIdx + 3)
 
@@ -976,10 +962,8 @@ readLargeUtf8ColumnMaybe endian len rb body !bufIdx !nodeIdx = do
             _      -> bswapPrimVec64 (len + 1) offBs
           !view = AV.NullableLargeUtf8View
             { AV.nluvValidity = validBits
-            , AV.nluvValues   = LargeUtf8View
-                { luvOffsets = offs
-                , luvData    = viewPrimVecLE 1 (BS.length datBs) datBs
-                }
+            , AV.nluvValues   = AV.mkLargeUtf8View offs
+                                  (viewPrimVecLE 1 (BS.length datBs) datBs)
             }
       in Right (ColLargeUtf8Maybe view, nodeIdx + 1, bufIdx + 3)
 
@@ -1634,13 +1618,13 @@ placeholderColumn = \case
 -- placeholder above and by callers that need an "absent"
 -- column value.
 emptyUtf8View :: Utf8View
-emptyUtf8View = Utf8View (VS.singleton 0) VS.empty
+emptyUtf8View = AV.mkUtf8View (VS.singleton 0) VS.empty
 
 emptyBinaryView :: BinaryView
 emptyBinaryView = BinaryView (VS.singleton 0) VS.empty
 
 emptyLargeUtf8View :: LargeUtf8View
-emptyLargeUtf8View = LargeUtf8View (VS.singleton 0) VS.empty
+emptyLargeUtf8View = AV.mkLargeUtf8View (VS.singleton 0) VS.empty
 
 emptyLargeBinaryView :: LargeBinaryView
 emptyLargeBinaryView = LargeBinaryView (VS.singleton 0) VS.empty

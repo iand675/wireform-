@@ -41,6 +41,7 @@ import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Storable as VS
 
 import Iceberg.Types
   ( DeleteFile (..)
@@ -83,7 +84,7 @@ writePositionDeleteFile
   -> (ByteString, DeleteFile)
 writePositionDeleteFile outputPath rows =
   let !filePathCol = V.map (TE.encodeUtf8 . pdrFilePath) rows
-      !posCol      = VP.fromList (V.toList (V.map pdrPos rows))
+      !posCol      = VS.fromList (V.toList (V.map pdrPos rows))
       !schema = V.fromList
         [ P.SchemaElement "table"
             Nothing Nothing (Just 2) Nothing Nothing Nothing

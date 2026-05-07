@@ -53,6 +53,10 @@ module Arrow.View
   , binaryViewFromVector
   , utf8ViewFromVector_l
   , binaryViewFromVector_l
+  , mkUtf8View
+  , mkLargeUtf8View
+    -- * Buffer reinterpretation
+  , vsSliceToBytes
     -- * Nullable variable-length view types
   , NullableBoolView (..)
   , NullableUtf8View (..)
@@ -84,11 +88,14 @@ module Arrow.View
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Internal as BSI
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Array as TA
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
+import qualified Data.Text.Internal as TI
 import qualified Data.Vector as V
 import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Unboxed as VU
@@ -171,28 +178,50 @@ instance View (V.Vector a) where
 
 -- | Variable-length UTF-8 column held as the on-the-wire
 -- representation: an @(N + 1)@-element offsets buffer and a
--- contiguous data buffer.
+-- contiguous data buffer, plus a /lazily-validated/ shared
+-- 'TA.Array' that lets per-row access skip per-element UTF-8
+-- validation.
 --
 --   * @uvOffsets@: 'Int32' offsets into 'uvData', in bytes.
 --     Always @N + 1@ entries — the last is the total size.
 --   * @uvData@:   contiguous UTF-8 bytes. The slice for row
 --     @i@ is @uvData[ uvOffsets[i] .. uvOffsets[i+1] )@.
+--   * @uvText@:   lazy. On first access, the entire @uvData@
+--     buffer is decoded once with the lenient UTF-8 decoder
+--     and the resulting 'TA.Array' is cached. Per-row reads
+--     then do @TI.text uvText offset length@ — a small
+--     constructor, no validation, no allocation. For all-
+--     ASCII data the decoder shares the source bytes, so the
+--     cache is a no-copy view.
 --
--- Both fields are 'VS.Vector', so the entire view can adopt
--- a source 'ByteString''s 'ForeignPtr' without copying. Per-
--- row access produces a 'Text' that shares the underlying
--- bytes (no allocation beyond the small @Text@ constructor).
+-- Eq / Show ignore the lazy 'uvText' cache (it's a function
+-- of @uvData@); two views compare equal iff their offsets and
+-- data buffers compare equal.
 data Utf8View = Utf8View
   { uvOffsets :: !(VS.Vector Int32)
   , uvData    :: !(VS.Vector Word8)
-  } deriving stock (Eq, Show)
+  , uvText    :: TA.Array
+    -- ^ /Lazy/. Cached pre-validated text array; computed
+    -- once on first per-row access via 'utf8At'.
+  }
+
+instance Eq Utf8View where
+  Utf8View o1 d1 _ == Utf8View o2 d2 _ = o1 == o2 && d1 == d2
+
+instance Show Utf8View where
+  show (Utf8View o d _) = "Utf8View { uvOffsets = " ++ show o
+    ++ ", uvData = " ++ show d ++ ", uvText = <lazy> }"
 
 instance View Utf8View where
   type Element Utf8View = Text
   vLength      v = max 0 (VS.length (uvOffsets v) - 1)
   vUnsafeIndex   = utf8At
-  vSlice s l (Utf8View off dat) =
-    Utf8View (VS.unsafeSlice s (l + 1) off) dat
+  -- Slicing carves the offsets buffer; the data buffer +
+  -- text cache stay shared (slicing does not change which
+  -- bytes are valid). Subsequent index calls go through the
+  -- (now narrower) offsets and read into the same text array.
+  vSlice s l (Utf8View off dat arr) =
+    Utf8View (VS.unsafeSlice s (l + 1) off) dat arr
   {-# INLINE vLength #-}
   {-# INLINE vUnsafeIndex #-}
   {-# INLINE vSlice #-}
@@ -215,18 +244,26 @@ instance View BinaryView where
   {-# INLINE vSlice #-}
 
 -- | 64-bit-offset variant of 'Utf8View' for columns whose
--- data buffer is > 2 GiB.
+-- data buffer is > 2 GiB. Same lazy-text cache.
 data LargeUtf8View = LargeUtf8View
   { luvOffsets :: !(VS.Vector Int64)
   , luvData    :: !(VS.Vector Word8)
-  } deriving stock (Eq, Show)
+  , luvText    :: TA.Array
+  }
+
+instance Eq LargeUtf8View where
+  LargeUtf8View o1 d1 _ == LargeUtf8View o2 d2 _ = o1 == o2 && d1 == d2
+
+instance Show LargeUtf8View where
+  show (LargeUtf8View o d _) = "LargeUtf8View { luvOffsets = " ++ show o
+    ++ ", luvData = " ++ show d ++ ", luvText = <lazy> }"
 
 instance View LargeUtf8View where
   type Element LargeUtf8View = Text
   vLength      v = max 0 (VS.length (luvOffsets v) - 1)
   vUnsafeIndex   = largeUtf8At
-  vSlice s l (LargeUtf8View off dat) =
-    LargeUtf8View (VS.unsafeSlice s (l + 1) off) dat
+  vSlice s l (LargeUtf8View off dat arr) =
+    LargeUtf8View (VS.unsafeSlice s (l + 1) off) dat arr
   {-# INLINE vLength #-}
   {-# INLINE vUnsafeIndex #-}
   {-# INLINE vSlice #-}
@@ -251,16 +288,19 @@ instance View LargeBinaryView where
 -- Per-row access
 -- ============================================================
 
+-- | Per-row UTF-8 access. Pulls the @(offset, length)@ pair
+-- from the offsets buffer and constructs a 'Text' that
+-- shares the pre-validated 'TA.Array' cached on the view.
+-- Zero allocation beyond the small 'Text' constructor (3
+-- machine words). UTF-8 validation runs once per view, on
+-- first call to any row.
 {-# INLINE utf8At #-}
 utf8At :: Utf8View -> Int -> Text
-utf8At (Utf8View off dat) i =
-  let !s   = fromIntegral (VS.unsafeIndex off i) :: Int
+utf8At (Utf8View off _ arr) i =
+  let !s   = fromIntegral (VS.unsafeIndex off i)       :: Int
       !e   = fromIntegral (VS.unsafeIndex off (i + 1)) :: Int
       !len = e - s
-      slice = vsSliceToBytes dat s len
-  in case TE.decodeUtf8' slice of
-       Right t -> t
-       Left _  -> TE.decodeUtf8With TEE.lenientDecode slice
+  in TI.text arr s len
 
 {-# INLINE binaryAt #-}
 binaryAt :: BinaryView -> Int -> ByteString
@@ -271,13 +311,11 @@ binaryAt (BinaryView off dat) i =
 
 {-# INLINE largeUtf8At #-}
 largeUtf8At :: LargeUtf8View -> Int -> Text
-largeUtf8At (LargeUtf8View off dat) i =
-  let !s   = fromIntegral (VS.unsafeIndex off i) :: Int
+largeUtf8At (LargeUtf8View off _ arr) i =
+  let !s   = fromIntegral (VS.unsafeIndex off i)       :: Int
       !e   = fromIntegral (VS.unsafeIndex off (i + 1)) :: Int
-      slice = vsSliceToBytes dat s (e - s)
-  in case TE.decodeUtf8' slice of
-       Right t -> t
-       Left _  -> TE.decodeUtf8With TEE.lenientDecode slice
+      !len = e - s
+  in TI.text arr s len
 
 {-# INLINE largeBinaryAt #-}
 largeBinaryAt :: LargeBinaryView -> Int -> ByteString
@@ -286,17 +324,19 @@ largeBinaryAt (LargeBinaryView off dat) i =
       !e   = fromIntegral (VS.unsafeIndex off (i + 1)) :: Int
   in vsSliceToBytes dat s (e - s)
 
--- | Materialise a slice of a @VS.Vector Word8@ as a strict
--- 'ByteString'. Copies the bytes into a fresh
--- @ByteString@'s 'ForeignPtr' (we don't have a way to
--- share the storable vector's ForeignPtr through the
--- 'BS.PS' constructor without re-introducing the same
--- storable vector internals — small follow-up).
+-- | O(1) reinterpretation of a slice of a @VS.Vector Word8@ as
+-- a strict 'ByteString'. Both representations are a
+-- 'ForeignPtr' + length pair underneath; we just hand the
+-- vector's underlying foreign pointer to 'BSI.fromForeignPtr'
+-- with the slice offset baked in. Lifetime is tied to the
+-- vector's foreign pointer.
 {-# INLINE vsSliceToBytes #-}
 vsSliceToBytes :: VS.Vector Word8 -> Int -> Int -> ByteString
 vsSliceToBytes v start len
   | len <= 0  = BS.empty
-  | otherwise = BS.pack [ VS.unsafeIndex v (start + i) | i <- [0 .. len - 1] ]
+  | otherwise =
+      let !(fp, off, _) = VS.unsafeToForeignPtr v
+      in BSI.fromForeignPtr fp (off + start) len
 
 -- ============================================================
 -- Materialisation back to boxed vectors (legacy callers)
@@ -321,11 +361,51 @@ largeBinaryViewToVector v = V.generate (vLength v) (vUnsafeIndex v)
 -- | Build a 'Utf8View' from a boxed 'V.Vector' of 'Text'.
 -- Single pass: walk once to compute the offsets buffer and
 -- the total data size, then allocate the data buffer once
--- and copy each value's bytes in.
+-- and copy each value's bytes in. Pre-populates the lazy
+-- text cache via 'mkUtf8View'.
 utf8ViewFromVector :: V.Vector Text -> Utf8View
 utf8ViewFromVector v =
   let !bss = V.map TE.encodeUtf8 v
-  in binaryViewToUtf8View (binaryViewFromVector bss)
+      !bv  = binaryViewFromVector bss
+  in mkUtf8View (bvOffsets bv) (bvData bv)
+
+-- | Smart constructor: build a 'Utf8View' from prepared
+-- offsets + data buffers, populating the lazy text-array
+-- cache. Same buffers in / out — the only added work is the
+-- thunk that decodes the data buffer the first time
+-- per-row access is invoked.
+{-# INLINE mkUtf8View #-}
+mkUtf8View :: VS.Vector Int32 -> VS.Vector Word8 -> Utf8View
+mkUtf8View offs dat =
+  Utf8View
+    { uvOffsets = offs
+    , uvData    = dat
+    , uvText    = vsToTextArray dat
+    }
+
+{-# INLINE mkLargeUtf8View #-}
+mkLargeUtf8View :: VS.Vector Int64 -> VS.Vector Word8 -> LargeUtf8View
+mkLargeUtf8View offs dat =
+  LargeUtf8View
+    { luvOffsets = offs
+    , luvData    = dat
+    , luvText    = vsToTextArray dat
+    }
+
+-- | Decode a 'VS.Vector Word8' as one big lenient-decoded
+-- 'Text' and return its underlying array. For valid all-
+-- ASCII UTF-8 the underlying array shares the source bytes;
+-- for general UTF-8 with replacement characters it's a
+-- single per-buffer copy. Either way, /one/ validation walk
+-- replaces the per-row 'TE.decodeUtf8'' calls the previous
+-- shape paid.
+{-# INLINE vsToTextArray #-}
+vsToTextArray :: VS.Vector Word8 -> TA.Array
+vsToTextArray dat =
+  let !bs = vsSliceToBytes dat 0 (VS.length dat)
+      !(TI.Text arr _off _len) =
+        TE.decodeUtf8With TEE.lenientDecode bs
+  in arr
 
 -- | Build a 'BinaryView' from a boxed 'V.Vector' of
 -- 'ByteString'. Same single-pass shape.
@@ -341,14 +421,15 @@ binaryViewFromVector v =
   in BinaryView offs (bsToStorable payload)
 
 binaryViewToUtf8View :: BinaryView -> Utf8View
-binaryViewToUtf8View (BinaryView off dat) = Utf8View off dat
+binaryViewToUtf8View (BinaryView off dat) = mkUtf8View off dat
 
 -- | Like 'utf8ViewFromVector' but builds a 'LargeUtf8View'
 -- (Int64 offsets).
 utf8ViewFromVector_l :: V.Vector Text -> LargeUtf8View
 utf8ViewFromVector_l v =
   let !bss = V.map TE.encodeUtf8 v
-  in binaryViewToLargeUtf8View (binaryViewFromVector_l bss)
+      !lbv = binaryViewFromVector_l bss
+  in mkLargeUtf8View (lbvOffsets lbv) (lbvData lbv)
 
 -- | Like 'binaryViewFromVector' but builds a 'LargeBinaryView'
 -- (Int64 offsets).
@@ -364,7 +445,7 @@ binaryViewFromVector_l v =
   in LargeBinaryView offs (bsToStorable payload)
 
 binaryViewToLargeUtf8View :: LargeBinaryView -> LargeUtf8View
-binaryViewToLargeUtf8View (LargeBinaryView off dat) = LargeUtf8View off dat
+binaryViewToLargeUtf8View (LargeBinaryView off dat) = mkLargeUtf8View off dat
 
 -- ============================================================
 -- Nullable view types
