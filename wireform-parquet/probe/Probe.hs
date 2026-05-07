@@ -143,33 +143,33 @@ leafElem ty conv name =
 reqInt32 :: ([P.SchemaElement], V.Vector ColumnData)
 reqInt32 =
   ( [rootElem 1, leafElem P.PTInt32 Nothing "x"]
-  , V.singleton (ColInt32 (VP.fromList [1, 2, 3, 4, 5 :: Int32]))
+  , V.singleton (ColInt32 (VS.fromList [1, 2, 3, 4, 5 :: Int32]))
   )
 
 reqInt64 :: ([P.SchemaElement], V.Vector ColumnData)
 reqInt64 =
   ( [rootElem 1, leafElem P.PTInt64 Nothing "x"]
-  , V.singleton (ColInt64 (VP.fromList [10, 20, 30, 40, 50 :: Int64]))
+  , V.singleton (ColInt64 (VS.fromList [10, 20, 30, 40, 50 :: Int64]))
   )
 
 reqInt64Twice :: ([P.SchemaElement], [V.Vector ColumnData])
 reqInt64Twice =
   ( [rootElem 1, leafElem P.PTInt64 Nothing "x"]
-  ,   [ V.singleton (ColInt64 (VP.fromList [1, 2, 3 :: Int64]))
-      , V.singleton (ColInt64 (VP.fromList [4, 5, 6 :: Int64]))
+  ,   [ V.singleton (ColInt64 (VS.fromList [1, 2, 3 :: Int64]))
+      , V.singleton (ColInt64 (VS.fromList [4, 5, 6 :: Int64]))
       ]
   )
 
 reqFloat :: ([P.SchemaElement], V.Vector ColumnData)
 reqFloat =
   ( [rootElem 1, leafElem P.PTFloat Nothing "x"]
-  , V.singleton (ColFloat (VP.fromList [1.5, 2.5, 3.5 :: Float]))
+  , V.singleton (ColFloat (VS.fromList [1.5, 2.5, 3.5 :: Float]))
   )
 
 reqDouble :: ([P.SchemaElement], V.Vector ColumnData)
 reqDouble =
   ( [rootElem 1, leafElem P.PTDouble Nothing "x"]
-  , V.singleton (ColDouble (VP.fromList [1.5, -2.5, 3.14159 :: Double]))
+  , V.singleton (ColDouble (VS.fromList [1.5, -2.5, 3.14159 :: Double]))
   )
 
 reqBool :: ([P.SchemaElement], V.Vector ColumnData)
@@ -213,7 +213,7 @@ mixedSchema =
 
 mixedRow :: V.Vector ParquetColumn
 mixedRow = V.fromList
-  [ PCRequired (ColInt64 (VP.fromList [10, 20, 30 :: Int64]))
+  [ PCRequired (ColInt64 (VS.fromList [10, 20, 30 :: Int64]))
   , PCOptional (OptByteArray (V.fromList
       [ Just "alice", Nothing, Just "carol" :: Maybe ByteString ]))
   , PCOptional (OptDouble (V.fromList
@@ -231,21 +231,21 @@ reqDate32 :: ([P.SchemaElement], V.Vector ColumnData)
 reqDate32 =
   ( [rootElem 1, leafElem P.PTInt32 (Just P.CTDate) "d"]
     -- Days since 1970-01-01. 18000 days ~ 2019-04-13.
-  , V.singleton (ColInt32 (VP.fromList [0, 18000, 19000 :: Int32]))
+  , V.singleton (ColInt32 (VS.fromList [0, 18000, 19000 :: Int32]))
   )
 
 reqTimeMillis :: ([P.SchemaElement], V.Vector ColumnData)
 reqTimeMillis =
   ( [rootElem 1, leafElem P.PTInt32 (Just P.CTTimeMillis) "t"]
   , V.singleton
-      (ColInt32 (VP.fromList [0, 12345, 86400000 - 1 :: Int32]))
+      (ColInt32 (VS.fromList [0, 12345, 86400000 - 1 :: Int32]))
   )
 
 reqTimestampMillis :: ([P.SchemaElement], V.Vector ColumnData)
 reqTimestampMillis =
   ( [rootElem 1, leafElem P.PTInt64 (Just P.CTTimestampMillis) "ts"]
   , V.singleton
-      (ColInt64 (VP.fromList [0, 1700000000000 :: Int64]))
+      (ColInt64 (VS.fromList [0, 1700000000000 :: Int64]))
   )
 
 reqUInt32 :: ([P.SchemaElement], V.Vector ColumnData)
@@ -254,7 +254,7 @@ reqUInt32 =
     -- Stored as Int32 with an unsigned reinterpretation;
     -- maxBound :: Int32 = 2_147_483_647, fromIntegral
     -- (maxBound :: Word32) wraps to -1.
-  , V.singleton (ColInt32 (VP.fromList
+  , V.singleton (ColInt32 (VS.fromList
       [ 0, 1
       , maxBound :: Int32   -- = 2_147_483_647 unsigned
       , -1 :: Int32         -- = 4_294_967_295 unsigned

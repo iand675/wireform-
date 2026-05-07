@@ -39,7 +39,7 @@ mixedSchema n = V.fromList
 mixedDataset :: Int -> V.Vector ColumnData
 mixedDataset n = V.fromList
   [ ColInt64  (VP.generate n fromIntegral)
-  , ColDouble (VP.generate n (\i -> fromIntegral i * 0.5))
+  , ColDouble (VS.generate n (\i -> fromIntegral i * 0.5))
   , ColByteArray $ V.generate n $ \i ->
       TE.encodeUtf8 (T.pack ("name_" ++ show (i `rem` 1000)))
   , ColBool   (V.generate n (\i -> i `rem` 2 == 0))
@@ -59,7 +59,7 @@ intSchema nCols = V.fromList $
 
 intDataset :: Int -> Int -> V.Vector ColumnData
 intDataset nCols nRows = V.generate nCols $ \c ->
-  ColInt64 (VP.generate nRows (\i -> fromIntegral (c * nRows + i)))
+  ColInt64 (VS.generate nRows (\i -> fromIntegral (c * nRows + i)))
 
 -- ----------------------------------------------------------------------
 -- Helpers

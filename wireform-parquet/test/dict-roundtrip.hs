@@ -10,6 +10,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Text as T
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Storable as VS
 
 import qualified Parquet.HighLevel as PHL
 import qualified Parquet.Arrow as PArrow
@@ -29,7 +30,7 @@ mkSchema = V.fromList
 
 mkDataset :: Int -> V.Vector ColumnData
 mkDataset n = V.fromList
-  [ ColInt64  (VP.generate n fromIntegral)
+  [ ColInt64  (VS.generate n fromIntegral)
   , ColByteArray $ V.generate n $ \i ->
       TE.encodeUtf8 (T.pack ("name_" ++ show (i `rem` 100)))
   ]

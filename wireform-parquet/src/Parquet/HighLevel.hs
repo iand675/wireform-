@@ -71,6 +71,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Map.Strict as Map
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Unboxed as VU
 import qualified Wireform.Hash as WHash
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
@@ -410,17 +411,17 @@ buildBloomFilterFor col =
       !nBytes = Bloom.optimalNumBytes ndv 0.01
   in case col of
        ColInt32 v ->
-         Bloom.buildSbbfFromHashes nBytes (VU.generate (VP.length v)
-           (\i -> WHash.xxh64 0 (i32LE (VP.unsafeIndex v i))))
+         Bloom.buildSbbfFromHashes nBytes (VU.generate (VS.length v)
+           (\i -> WHash.xxh64 0 (i32LE (VS.unsafeIndex v i))))
        ColInt64 v ->
-         Bloom.buildSbbfFromHashes nBytes (VU.generate (VP.length v)
-           (\i -> WHash.xxh64 0 (i64LE (VP.unsafeIndex v i))))
+         Bloom.buildSbbfFromHashes nBytes (VU.generate (VS.length v)
+           (\i -> WHash.xxh64 0 (i64LE (VS.unsafeIndex v i))))
        ColFloat v ->
-         Bloom.buildSbbfFromHashes nBytes (VU.generate (VP.length v)
-           (\i -> WHash.xxh64 0 (f32LE (VP.unsafeIndex v i))))
+         Bloom.buildSbbfFromHashes nBytes (VU.generate (VS.length v)
+           (\i -> WHash.xxh64 0 (f32LE (VS.unsafeIndex v i))))
        ColDouble v ->
-         Bloom.buildSbbfFromHashes nBytes (VU.generate (VP.length v)
-           (\i -> WHash.xxh64 0 (f64LE (VP.unsafeIndex v i))))
+         Bloom.buildSbbfFromHashes nBytes (VU.generate (VS.length v)
+           (\i -> WHash.xxh64 0 (f64LE (VS.unsafeIndex v i))))
        ColBool v ->
          Bloom.buildSbbfFromHashes nBytes (VU.generate (V.length v)
            (\i -> WHash.xxh64 0 (boolPayload (V.unsafeIndex v i))))
@@ -433,10 +434,10 @@ buildBloomFilterFor col =
 -- but never underfilled.
 columnDistinctEstimate :: ColumnData -> Int
 columnDistinctEstimate = \case
-  ColInt32 v     -> VP.length v
-  ColInt64 v     -> VP.length v
-  ColFloat v     -> VP.length v
-  ColDouble v    -> VP.length v
+  ColInt32 v     -> VS.length v
+  ColInt64 v     -> VS.length v
+  ColFloat v     -> VS.length v
+  ColDouble v    -> VS.length v
   ColBool v      -> V.length v
   ColByteArray v -> V.length v
 

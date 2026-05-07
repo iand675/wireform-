@@ -172,14 +172,14 @@ main = do
                      (sbbfCheck (BSC.pack v) sbbf')) values
 
   -- Statistics (via columnDataStatistics, the public column-typed API).
-  let s32 = columnDataStatistics (ColInt32 (VP.fromList [3, -1, 7, 0, 4 :: Int32]))
+  let s32 = columnDataStatistics (ColInt32 (VS.fromList [3, -1, 7, 0, 4 :: Int32]))
   expect "Int32 stats min"
     (statMinValue s32 == Just (BS.pack [0xFF, 0xFF, 0xFF, 0xFF]))   -- -1 LE
   expect "Int32 stats max"
     (statMaxValue s32 == Just (BS.pack [0x07, 0x00, 0x00, 0x00]))
   expect "Int32 stats nullCount"
     (statNullCount s32 == Just 0)
-  let s64 = columnDataStatistics (ColInt64 (VP.fromList [10, 5, -3, 100 :: Int64]))
+  let s64 = columnDataStatistics (ColInt64 (VS.fromList [10, 5, -3, 100 :: Int64]))
   expect "Int64 stats min/max present"
     (statMinValue s64 /= Nothing && statMaxValue s64 /= Nothing)
   let sBA = columnDataStatistics
@@ -188,7 +188,7 @@ main = do
     (statMinValue sBA == Just (BSC.pack "apple"))
   expect "ByteArray stats max == 'cherry'"
     (statMaxValue sBA == Just (BSC.pack "cherry"))
-  let sEmpty = columnDataStatistics (ColInt32 VP.empty)
+  let sEmpty = columnDataStatistics (ColInt32 VS.empty)
   expect "empty Int32 stats has no min/max"
     (statMinValue sEmpty == Nothing && statMaxValue sEmpty == Nothing)
 
@@ -197,7 +197,7 @@ main = do
         [ SchemaElement "schema" Nothing Nothing (Just 1) Nothing Nothing Nothing
         , SchemaElement "x" (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing
         ]
-      vs   = VP.fromList [(3 :: Int32), -1, 7, 0, 4]
+      vs   = VS.fromList [(3 :: Int32), -1, 7, 0, 4]
       fbs  = buildParquetFile schema (V.singleton (V.singleton (ColInt32 vs)))
   case loadParquetFile fbs of
     Left e -> failTest ("loadParquetFile: " ++ e)
@@ -221,7 +221,7 @@ main = do
         [ SchemaElement "schema" Nothing Nothing (Just 1) Nothing Nothing Nothing
         , SchemaElement "y" (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing
         ]
-      vsIdx = ColInt32 (VP.fromList [(1 :: Int32), 2, 3, 4])
+      vsIdx = ColInt32 (VS.fromList [(1 :: Int32), 2, 3, 4])
       bf    = sbbfInsertHash 0xdeadbeef (newSbbf (optimalNumBytes 1024 0.01))
       oi    = OffsetIndex
                 { oiPageLocations = V.singleton (PageLocation 0 16 0)
@@ -275,10 +275,10 @@ main = do
         , SchemaElement "ba"   (Just Required) (Just PTByteArray) Nothing Nothing Nothing Nothing
         ]
       cols  = V.fromList
-        [ ColInt32     (VP.fromList [(1 :: Int32), 2, 3])
-        , ColInt64     (VP.fromList [(10 :: Int64), 20, 30])
-        , ColFloat     (VP.fromList [1.5 :: Float, 2.5, 3.5])
-        , ColDouble    (VP.fromList [1e9 :: Double, 2e9, 3e9])
+        [ ColInt32     (VS.fromList [(1 :: Int32), 2, 3])
+        , ColInt64     (VS.fromList [(10 :: Int64), 20, 30])
+        , ColFloat     (VS.fromList [1.5 :: Float, 2.5, 3.5])
+        , ColDouble    (VS.fromList [1e9 :: Double, 2e9, 3e9])
         , ColBool      (V.fromList [True, False, True])
         , ColByteArray (V.fromList [BSC.pack "alpha", BSC.pack "beta", BSC.pack "gamma"])
         ]
@@ -353,7 +353,7 @@ main = do
         [ SchemaElement "schema" Nothing Nothing (Just 1) Nothing Nothing Nothing
         , SchemaElement "x" (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing
         ]
-      v2Vals = ColInt32 (VP.fromList [(11 :: Int32), 22, 33, 44])
+      v2Vals = ColInt32 (VS.fromList [(11 :: Int32), 22, 33, 44])
       v2Aux  = ColumnAux Nothing Nothing Nothing Uncompressed PageV2 Nothing False
       v2File = buildParquetFileWithIndex v2Schema
                  (V.singleton (V.singleton v2Vals))
@@ -417,7 +417,7 @@ main = do
                   , ceKeyMetadata   = BSC.pack "kid:test"
                   , ceColumnOrdinal = 0
                   }
-      encVals = ColInt32 (VP.fromList [(7 :: Int32), 8, 9])
+      encVals = ColInt32 (VS.fromList [(7 :: Int32), 8, 9])
       encSchema = V.fromList
         [ SchemaElement "schema" Nothing Nothing (Just 1) Nothing Nothing Nothing
         , SchemaElement "v" (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing
@@ -898,7 +898,7 @@ predicateRowGroupSkipping = do
         [ SchemaElement "schema" Nothing Nothing (Just 1) Nothing Nothing Nothing
         , SchemaElement "n" (Just Required) (Just PTInt32) Nothing Nothing Nothing Nothing
         ]
-      vs    = VP.fromList [(10 :: Int32), 20, 30, 40, 50]
+      vs    = VS.fromList [(10 :: Int32), 20, 30, 40, 50]
       fbs   = buildParquetFile schema (V.singleton (V.singleton (ColInt32 vs)))
   case loadParquetFile fbs of
     Left e -> failTest ("predicate: loadParquetFile: " ++ e)
@@ -1000,7 +1000,7 @@ logicalTypeRoundTrip = do
         SchemaElement "schema" Nothing Nothing
           (Just (fromIntegral (length cases))) Nothing Nothing Nothing
         : map mkSe cases
-      vs = VP.fromList [(0 :: Int32)]
+      vs = VS.fromList [(0 :: Int32)]
       cdata = ColInt32 vs
       -- Reuse the buildParquetFile entry for one stripe; the
       -- LogicalType slots ride along the schema regardless of

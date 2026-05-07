@@ -19,7 +19,7 @@ instance NFData PW.ColumnData where
 
 mkColumn :: Int -> Int -> PW.ColumnData
 mkColumn n distinct =
-  PW.ColInt64 (VP.generate n (\i -> fromIntegral (i `rem` distinct)))
+  PW.ColInt64 (VS.generate n (\i -> fromIntegral (i `rem` distinct)))
 
 main :: IO ()
 main = defaultMain

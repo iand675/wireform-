@@ -93,6 +93,7 @@ import qualified Data.Vector as V
 import qualified Data.Vector.Mutable as VM
 import qualified Data.Vector.Primitive as VP
 import qualified Data.Vector.Primitive.Mutable as MVP
+import qualified Data.Vector.Storable as VS
 import Data.Word (Word8, Word32)
 import Foreign.Ptr (Ptr, plusPtr)
 import Foreign.Storable (pokeByteOff, pokeElemOff)
@@ -551,11 +552,21 @@ dLE v = BSI.unsafeCreate 8 $ \p ->
 -- | A single column's worth of values, tagged with its physical type.
 -- Used by 'buildParquetFileTyped' / 'buildParquetFileTypedWithIndex' so
 -- writers can emit any primitive type from one entry point.
+-- | Column-typed values for the Parquet writer's flat, all-
+-- required path. Now carries 'VS.Vector' for primitives so
+-- the bridge can hand off the source 'ByteString''s
+-- 'ForeignPtr' directly via 'VS.unsafeFromForeignPtr' — no
+-- copy on the read-then-write code path that's common when
+-- transcoding Arrow batches into Parquet.
+--
+-- 'ColBool' continues to use a boxed 'V.Vector Bool' until
+-- the writer's bit-pack encoder picks up a 'VU.Vector Bit'
+-- shape directly (next round).
 data ColumnData
-  = ColInt32     !(VP.Vector Int32)
-  | ColInt64     !(VP.Vector Int64)
-  | ColFloat     !(VP.Vector Float)
-  | ColDouble    !(VP.Vector Double)
+  = ColInt32     !(VS.Vector Int32)
+  | ColInt64     !(VS.Vector Int64)
+  | ColFloat     !(VS.Vector Float)
+  | ColDouble    !(VS.Vector Double)
   | ColBool      !(V.Vector  Bool)
   | ColByteArray !(V.Vector ByteString)
   deriving (Show, Eq)
@@ -569,10 +580,10 @@ data ColumnData
 -- uncompressed page size on the column metadata.
 columnDataPlainEncodedSize :: ColumnData -> Int
 columnDataPlainEncodedSize = \case
-  ColInt32  v -> VP.length v * 4
-  ColInt64  v -> VP.length v * 8
-  ColFloat  v -> VP.length v * 4
-  ColDouble v -> VP.length v * 8
+  ColInt32  v -> VS.length v * 4
+  ColInt64  v -> VS.length v * 8
+  ColFloat  v -> VS.length v * 4
+  ColDouble v -> VS.length v * 8
   ColBool   v -> (V.length v + 7) `quot` 8
   ColByteArray v ->
     -- 4-byte LE length prefix per value plus the bytes themselves.
@@ -580,10 +591,10 @@ columnDataPlainEncodedSize = \case
 
 columnDataLength :: ColumnData -> Int
 columnDataLength = \case
-  ColInt32 v     -> VP.length v
-  ColInt64 v     -> VP.length v
-  ColFloat v     -> VP.length v
-  ColDouble v    -> VP.length v
+  ColInt32 v     -> VS.length v
+  ColInt64 v     -> VS.length v
+  ColFloat v     -> VS.length v
+  ColDouble v    -> VS.length v
   ColBool v      -> V.length v
   ColByteArray v -> V.length v
 
@@ -617,10 +628,10 @@ encodeColumnDataPageParts cd =
 -- | Compute Parquet 'Statistics' for the column.
 columnDataStatistics :: ColumnData -> Statistics
 columnDataStatistics = \case
-  ColInt32 v     -> statisticsForInt32 v
-  ColInt64 v     -> statisticsForInt64 v
-  ColFloat v     -> statisticsForFloat v
-  ColDouble v    -> statisticsForDouble v
+  ColInt32 v     -> statisticsForInt32 (VS.convert v)
+  ColInt64 v     -> statisticsForInt64 (VS.convert v)
+  ColFloat v     -> statisticsForFloat (VS.convert v)
+  ColDouble v    -> statisticsForDouble (VS.convert v)
   ColBool v      -> statisticsForBool v
   ColByteArray v -> statisticsForByteArray v
 
@@ -682,10 +693,10 @@ optionalColumnNullCount = \case
 -- single-pass write — no intermediate list at all.
 optionalColumnPresentValues :: OptionalColumn -> ColumnData
 optionalColumnPresentValues = \case
-  OptInt32 v     -> ColInt32     (collectPrim v)
-  OptInt64 v     -> ColInt64     (collectPrim v)
-  OptFloat v     -> ColFloat     (collectPrim v)
-  OptDouble v    -> ColDouble    (collectPrim v)
+  OptInt32 v     -> ColInt32     (VS.convert (collectPrim v))
+  OptInt64 v     -> ColInt64     (VS.convert (collectPrim v))
+  OptFloat v     -> ColFloat     (VS.convert (collectPrim v))
+  OptDouble v    -> ColDouble    (VS.convert (collectPrim v))
   OptBool v      -> ColBool      (collectBoxed v)
   OptByteArray v -> ColByteArray (collectBoxed v)
 
@@ -796,19 +807,19 @@ encodeColumnDataPagePayload = \case
 -- before writing.
 {-# INLINE plainPrimVecBytes #-}
 plainPrimVecBytes
-  :: forall a. VP.Prim a
+  :: forall a. VS.Storable a
   => Int                                 -- ^ size of one element in bytes
   -> (Ptr Word8 -> Int -> a -> IO ())    -- ^ poker (base, byte-off, value)
-  -> VP.Vector a
+  -> VS.Vector a
   -> ByteString
 plainPrimVecBytes !elemBytes poker v =
-  let !n     = VP.length v
+  let !n     = VS.length v
       !nByte = n * elemBytes
   in BSI.unsafeCreate nByte $ \ptr -> do
        let go !i !off
              | i >= n    = pure ()
              | otherwise = do
-                 poker ptr off (VP.unsafeIndex v i)
+                 poker ptr off (VS.unsafeIndex v i)
                  go (i + 1) (off + elemBytes)
        go 0 0
 
@@ -929,21 +940,24 @@ buildDictionary = \case
   ColBool v      -> boxedDict v   ColBool
   ColByteArray v -> boxedDict v   ColByteArray
 
--- | Dictionary builder for primitive vectors.
+-- | Dictionary builder for primitive vectors. Now reads from
+-- a 'VS.Vector' (matching the new 'ColumnData' shape) and
+-- builds the index stream into a primitive Int32 vector
+-- (the reader expects 'VP.Vector Int32' indices).
 {-# INLINE primDict #-}
 primDict
-  :: (VP.Prim a, Ord a)
-  => VP.Vector a
-  -> (VP.Vector a -> ColumnData)
+  :: (VS.Storable a, Ord a)
+  => VS.Vector a
+  -> (VS.Vector a -> ColumnData)
   -> Dictionary
 primDict xs reify =
-  let !n = VP.length xs
+  let !n = VS.length xs
       (uniqRev, indices) = runST $ do
         mv <- MVP.unsafeNew n
         let go !i !dict !rev !next
               | i >= n = pure (rev, next)
               | otherwise = do
-                  let !x = VP.unsafeIndex xs i
+                  let !x = VS.unsafeIndex xs i
                   case Map.lookup x dict of
                     Just k  -> do
                       MVP.unsafeWrite mv i (fromIntegral k :: Int32)
@@ -955,7 +969,7 @@ primDict xs reify =
         idx <- VP.unsafeFreeze mv
         pure (revFinal, idx)
   in Dictionary
-       { dictUniques = reify (VP.fromList (reverse uniqRev))
+       { dictUniques = reify (VS.fromList (reverse uniqRev))
        , dictIndices = indices
        }
 

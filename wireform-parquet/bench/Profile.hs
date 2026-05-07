@@ -38,8 +38,8 @@ nIters = 5
 
 mkDataset :: Int -> V.Vector ColumnData
 mkDataset n = V.fromList
-  [ ColInt64  (VP.generate n fromIntegral)
-  , ColDouble (VP.generate n (\i -> fromIntegral i * 0.5))
+  [ ColInt64  (VS.generate n fromIntegral)
+  , ColDouble (VS.generate n (\i -> fromIntegral i * 0.5))
   , ColByteArray $ V.generate n $ \i ->
       TE.encodeUtf8 (T.pack ("name_" ++ show (i `rem` 1000)))
   , ColBool   (V.generate n (\i -> i `rem` 2 == 0))

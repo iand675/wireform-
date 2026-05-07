@@ -64,6 +64,7 @@ import qualified Data.Text.Encoding.Error as TE
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
 import qualified Data.Vector.Primitive.Mutable as MVP
+import qualified Data.Vector.Storable.Mutable as MVS
 import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Unboxed as VU
 import Foreign.Storable (Storable)
@@ -290,16 +291,16 @@ arrowFieldToSchemaElement f = do
 columnArrayToColumnData
   :: AC.ColumnArray -> Either String PW.ColumnData
 columnArrayToColumnData = \case
-  AC.ColInt8   v -> Right $ PW.ColInt32 (VS.convert (VS.map fromIntegral v))
-  AC.ColInt16  v -> Right $ PW.ColInt32 (VS.convert (VS.map fromIntegral v))
-  AC.ColInt32  v -> Right $ PW.ColInt32 (VS.convert v)
-  AC.ColInt64  v -> Right $ PW.ColInt64 (VS.convert v)
-  AC.ColUInt8  v -> Right $ PW.ColInt32 (VS.convert (VS.map (fromIntegral :: Word8  -> Int32) v))
-  AC.ColUInt16 v -> Right $ PW.ColInt32 (VS.convert (VS.map (fromIntegral :: Word16 -> Int32) v))
-  AC.ColUInt32 v -> Right $ PW.ColInt32 (VS.convert (VS.map (fromIntegral :: Word32 -> Int32) v))
-  AC.ColUInt64 v -> Right $ PW.ColInt64 (VS.convert (VS.map (fromIntegral :: Word64 -> Int64) v))
-  AC.ColFloat  v -> Right $ PW.ColFloat (VS.convert v)
-  AC.ColDouble v -> Right $ PW.ColDouble (VS.convert v)
+  AC.ColInt8   v -> Right $ PW.ColInt32 (VS.map fromIntegral v)
+  AC.ColInt16  v -> Right $ PW.ColInt32 (VS.map fromIntegral v)
+  AC.ColInt32  v -> Right $ PW.ColInt32 v
+  AC.ColInt64  v -> Right $ PW.ColInt64 v
+  AC.ColUInt8  v -> Right $ PW.ColInt32 (VS.map (fromIntegral :: Word8 -> Int32) v)
+  AC.ColUInt16 v -> Right $ PW.ColInt32 (VS.map (fromIntegral :: Word16 -> Int32) v)
+  AC.ColUInt32 v -> Right $ PW.ColInt32 (VS.map (fromIntegral :: Word32 -> Int32) v)
+  AC.ColUInt64 v -> Right $ PW.ColInt64 (VS.map (fromIntegral :: Word64 -> Int64) v)
+  AC.ColFloat  v -> Right $ PW.ColFloat v
+  AC.ColDouble v -> Right $ PW.ColDouble v
   AC.ColBool   v -> Right $ PW.ColBool
                               (V.generate (VU.length v)
                                           (\i -> unBit (VU.unsafeIndex v i)))
@@ -312,12 +313,12 @@ columnArrayToColumnData = \case
   -- Temporal types: lower to the natural Parquet physical type
   -- the schema element declared (Int32 for Date32 / Time32, Int64
   -- for Date64 / Time64 / Timestamp / Duration).
-  AC.ColDate32 v   -> Right $ PW.ColInt32 (VS.convert v)
-  AC.ColDate64 v   -> Right $ PW.ColInt64 (VS.convert v)
-  AC.ColTime32 v   -> Right $ PW.ColInt32 (VS.convert v)
-  AC.ColTime64 v   -> Right $ PW.ColInt64 (VS.convert v)
-  AC.ColTimestamp v -> Right $ PW.ColInt64 (VS.convert v)
-  AC.ColDuration  v -> Right $ PW.ColInt64 (VS.convert v)
+  AC.ColDate32 v   -> Right $ PW.ColInt32 v
+  AC.ColDate64 v   -> Right $ PW.ColInt64 v
+  AC.ColTime32 v   -> Right $ PW.ColInt32 v
+  AC.ColTime64 v   -> Right $ PW.ColInt64 v
+  AC.ColTimestamp v -> Right $ PW.ColInt64 v
+  AC.ColDuration  v -> Right $ PW.ColInt64 v
   -- Nullable: drop nulls, emit only the present values. The
   -- writer's high-level path treats every column as
   -- (Required+ColumnData); proper Optional support requires a
@@ -366,23 +367,23 @@ boxedToBitVec v = VU.generate (V.length v) (\i -> Bit (V.unsafeIndex v i))
 
 {-# INLINE nvPresentVP #-}
 nvPresentVP
-  :: (Storable a, VP.Prim b)
-  => (a -> b) -> AC.NullableView a -> VP.Vector b
+  :: (Storable a, Storable b)
+  => (a -> b) -> AC.NullableView a -> VS.Vector b
 nvPresentVP f nv =
   let !values   = AC.nvValues nv
       !validity = AC.nvValidity nv
       !n        = VS.length values
       !allValid = VU.null validity
-  in VP.create $ do
-       buf <- MVP.unsafeNew n
+  in VS.create $ do
+       buf <- MVS.unsafeNew n
        let go !i !w
-             | i >= n = pure (MVP.unsafeSlice 0 w buf)
+             | i >= n = pure (MVS.unsafeSlice 0 w buf)
              | otherwise =
                  let !present = allValid
                               || unBit (VU.unsafeIndex validity i)
                  in if present
                       then do
-                        MVP.unsafeWrite buf w (f (VS.unsafeIndex values i))
+                        MVS.unsafeWrite buf w (f (VS.unsafeIndex values i))
                         go (i + 1) (w + 1)
                       else go (i + 1) w
        _ <- go 0 0
