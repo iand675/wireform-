@@ -952,7 +952,7 @@ primDict
   -> Dictionary
 primDict xs reify =
   let !n = VS.length xs
-      (uniqRev, indices) = runST $ do
+      (!uniqRev, !nUniq, !indices) = runST $ do
         mv <- MVP.unsafeNew n
         let go !i !dict !rev !next
               | i >= n = pure (rev, next)
@@ -965,11 +965,11 @@ primDict xs reify =
                     Nothing -> do
                       MVP.unsafeWrite mv i (fromIntegral next :: Int32)
                       go (i + 1) (Map.insert x next dict) (x : rev) (next + 1)
-        (revFinal, _) <- go 0 Map.empty [] (0 :: Int)
+        (revFinal, !nUniqST) <- go 0 Map.empty [] (0 :: Int)
         idx <- VP.unsafeFreeze mv
-        pure (revFinal, idx)
+        pure (revFinal, nUniqST, idx)
   in Dictionary
-       { dictUniques = reify (VS.fromList (reverse uniqRev))
+       { dictUniques = reify (VS.fromListN nUniq (reverse uniqRev))
        , dictIndices = indices
        }
 
@@ -982,7 +982,7 @@ boxedDict
   -> Dictionary
 boxedDict xs reify =
   let !n = V.length xs
-      (uniqRev, indices) = runST $ do
+      (!uniqRev, !nUniq, !indices) = runST $ do
         mv <- MVP.unsafeNew n
         let go !i !dict !rev !next
               | i >= n = pure (rev, next)
@@ -995,11 +995,11 @@ boxedDict xs reify =
                     Nothing -> do
                       MVP.unsafeWrite mv i (fromIntegral next :: Int32)
                       go (i + 1) (Map.insert x next dict) (x : rev) (next + 1)
-        (revFinal, _) <- go 0 Map.empty [] (0 :: Int)
+        (revFinal, !nUniqST) <- go 0 Map.empty [] (0 :: Int)
         idx <- VP.unsafeFreeze mv
-        pure (revFinal, idx)
+        pure (revFinal, nUniqST, idx)
   in Dictionary
-       { dictUniques = reify (V.fromList (reverse uniqRev))
+       { dictUniques = reify (V.fromListN nUniq (reverse uniqRev))
        , dictIndices = indices
        }
 

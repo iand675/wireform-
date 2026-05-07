@@ -116,8 +116,11 @@ encodeORC
   -> [(V.Vector (Word64, Word64, ByteString), Word64)]
   -> Either String ByteString
 encodeORC opts types stripesWithRows =
-  let !sd   = V.fromList (map fst stripesWithRows)
-      !rows = V.fromList (map snd stripesWithRows)
+  -- Single pass through the input list, then two zero-cost
+  -- 'V.unzip' splits, instead of two independent
+  -- 'V.fromList . map (fst|snd)' walks.
+  let !pairs = V.fromList stripesWithRows
+      (!sd, !rows) = V.unzip pairs
   in  case writeEncryption opts of
         Nothing -> Right (buildORCFileWithRows types sd rows)
         Just (enc, plan) ->

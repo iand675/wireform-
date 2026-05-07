@@ -42,6 +42,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as V
+import qualified Data.Vector.Mutable as VM
 import qualified Data.Vector.Primitive as VP
 import qualified Data.Vector.Primitive.Mutable as MVP
 import Control.Monad.ST (runST)
@@ -174,7 +175,7 @@ encodeStringDictColumn texts =
       -- per row, so O(n²) total work. For a 100k-row column
       -- that's ~5 billion copies. The mutable-vector version
       -- below is O(n).
-      (idxPrim, uniqueRev) = runST $ do
+      (idxPrim, uniqueRev, !nUniq) = runST $ do
         mv <- MVP.unsafeNew n
         let go !i !dict !uniqAcc
               | i >= n    = pure (dict, uniqAcc)
@@ -189,10 +190,12 @@ encodeStringDictColumn texts =
                           !dict' = Map.insert t k dict
                       MVP.unsafeWrite mv i (fromIntegral k :: Int64)
                       go (i + 1) dict' (t : uniqAcc)
-        (_finalDict, accRev) <- go 0 mempty []
+        (finalDict, accRev) <- go 0 mempty []
         v <- VP.unsafeFreeze mv
-        pure (v, accRev)
-      !uniques = V.fromList (reverse uniqueRev)
+        pure (v, accRev, Map.size finalDict)
+      -- Use 'fromListN' with the exact unique count rather than
+      -- 'fromList', which doubles its backing array as it grows.
+      !uniques = V.fromListN nUniq (reverse uniqueRev)
       !(dictBytes, lengthBs) = encodeStringDirectColumn uniques
       !dataBs = encodeRLEv2Direct idxPrim False
   in (dataBs, lengthBs, dictBytes)
@@ -494,18 +497,27 @@ encryptStripeStreams
   -> V.Vector (Word64, Word64, ByteString)
   -> Either String (V.Vector (Word64, Word64, ByteString))
 encryptStripeStreams se streams = do
-  -- Derive the per-stripe key once; reuse across all streams in the
-  -- stripe.
   stripeKey <- Enc.encryptStripeKey (seLocalKey se) (seStripeId se)
-  let go !i !streamOffset !acc
-        | i >= V.length streams = Right (V.fromList (reverse acc))
-        | otherwise = do
-            let (kind, col, payload) = V.unsafeIndex streams i
-                !iv = Enc.deriveStreamIv (seStripeId se) streamOffset
-            ciphertext <- Enc.aesCtrXor stripeKey iv payload
-            let !next = streamOffset + fromIntegral (BS.length payload)
-            go (i + 1) next ((kind, col, ciphertext) : acc)
-  go 0 0 []
+  -- Output count == input count, so allocate the result
+  -- vector up front and write in order. Replaces the
+  -- cons-then-reverse-then-V.fromList loop.
+  let !n = V.length streams
+  runST $ do
+    mv <- VM.unsafeNew n
+    let go !i !streamOffset
+          | i >= n = do
+              v <- V.unsafeFreeze mv
+              pure (Right v)
+          | otherwise = do
+              let (kind, col, payload) = V.unsafeIndex streams i
+                  !iv = Enc.deriveStreamIv (seStripeId se) streamOffset
+              case Enc.aesCtrXor stripeKey iv payload of
+                Left e -> pure (Left e)
+                Right ciphertext -> do
+                  VM.unsafeWrite mv i (kind, col, ciphertext)
+                  let !next = streamOffset + fromIntegral (BS.length payload)
+                  go (i + 1) next
+    go 0 0
 
 -- | Inverse of 'encryptStripeStreams': given the same
 -- 'StripeEncryption' and the encrypted byte payload, recover the

@@ -877,13 +877,17 @@ decodeOneColumn cid fld numRows stripeBs streams = do
       xs <- OR.decodeFloatColumn numRows dataBs mPresentBs
       if AT.fieldNullable fld
         then Right (AC.ColFloatMaybe (AC.nvFromMaybeVector 0 xs))
-        else Right (AC.ColFloat (VS.fromList (map (maybe 0 id) (V.toList xs))))
+        else Right (AC.ColFloat
+               (VS.generate (V.length xs)
+                  (\i -> maybe 0 id (V.unsafeIndex xs i))))
     AT.AFloatingPoint AT.DoublePrecision -> do
       dataBs <- sliceFor streamData
       xs <- OR.decodeDoubleColumn numRows dataBs mPresentBs
       if AT.fieldNullable fld
         then Right (AC.ColDoubleMaybe (AC.nvFromMaybeVector 0 xs))
-        else Right (AC.ColDouble (VS.fromList (map (maybe 0 id) (V.toList xs))))
+        else Right (AC.ColDouble
+               (VS.generate (V.length xs)
+                  (\i -> maybe 0 id (V.unsafeIndex xs i))))
     AT.AUtf8        -> stringColumn mPresentBs AT.AUtf8
     AT.ALargeUtf8   -> stringColumn mPresentBs AT.ALargeUtf8
     AT.ABinary      -> stringColumn mPresentBs AT.ABinary

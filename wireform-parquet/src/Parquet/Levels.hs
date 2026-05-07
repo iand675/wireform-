@@ -362,37 +362,10 @@ materializeRepeatedInt32 ::
   Int ->
   ByteString ->
   Either String (V.Vector (V.Vector (Maybe Int32)))
-materializeRepeatedInt32 reps defs maxDef plain
-  | VP.length reps /= VP.length defs =
-      Left "Parquet.Levels: rep/def level count mismatch"
-  | otherwise = case goRepI32 [] [] 0 0 of
-      Left e -> Left e
-      Right (rows, _) ->
-        Right $! V.fromList (reverse (map (V.fromList . reverse) rows))
-  where
-    !n = VP.length reps
-    !maxD = fromIntegral maxDef :: Int32
-
-    goRepI32 :: [[Maybe Int32]] -> [Maybe Int32] -> Int -> Int
-             -> Either String ([[Maybe Int32]], Int)
-    goRepI32 !rows !curRow !i !off
-      | i >= n =
-          let !finalRows = if null curRow then rows else curRow : rows
-          in Right (finalRows, off)
-      | otherwise =
-          let !r = VP.unsafeIndex reps i
-              !d = VP.unsafeIndex defs i
-              !rows' = if r == 0
-                         then if null curRow then rows else curRow : rows
-                         else rows
-              !row' = if r == 0 then [] else curRow
-          in if d == maxD
-               then
-                 if off + 4 > BS.length plain
-                   then Left "Parquet.Levels: PLAIN INT32 buffer too small for repeated column"
-                   else let !v = fromIntegral (readLE32 plain off) :: Int32
-                        in goRepI32 rows' (Just v : row') (i + 1) (off + 4)
-               else goRepI32 rows' (Nothing : row') (i + 1) off
+materializeRepeatedInt32 reps defs maxDef plain =
+  materializeFixedWidth 4
+    (\bs off -> fromIntegral (readLE32 bs off) :: Int32)
+    reps defs maxDef plain
 
 -- | Materialize a repeated @BYTE_ARRAY@ column using repetition and definition levels.
 materializeRepeatedByteArray ::
@@ -404,27 +377,38 @@ materializeRepeatedByteArray ::
 materializeRepeatedByteArray reps defs maxDef plain
   | VP.length reps /= VP.length defs =
       Left "Parquet.Levels: rep/def level count mismatch"
-  | otherwise = case goRepBA [] [] 0 0 of
+  | otherwise = case goRepBA [] 0 [] 0 0 0 of
       Left e -> Left e
-      Right (rows, _) ->
-        Right $! V.fromList (reverse (map (V.fromList . reverse) rows))
+      Right (rowsRev, !rowCount) ->
+        -- See 'materializeFixedWidth' for why this is one
+        -- outer V.fromListN instead of the previous nested
+        -- map (V.fromList . reverse) ...
+        Right $! V.fromListN rowCount (reverse rowsRev)
   where
     !n = VP.length reps
     !maxD = fromIntegral maxDef :: Int32
 
-    goRepBA :: [[Maybe ByteString]] -> [Maybe ByteString] -> Int -> Int
-            -> Either String ([[Maybe ByteString]], Int)
-    goRepBA !rows !curRow !i !off
+    closeRow !curRowLen !curRow =
+      V.fromListN curRowLen (reverse curRow)
+
+    goRepBA :: [V.Vector (Maybe ByteString)] -> Int
+            -> [Maybe ByteString] -> Int -> Int -> Int
+            -> Either String ([V.Vector (Maybe ByteString)], Int)
+    goRepBA !rowsRev !nRows !curRow !curLen !i !off
       | i >= n =
-          let !finalRows = if null curRow then rows else curRow : rows
-          in Right (finalRows, off)
+          if curLen == 0
+            then Right (rowsRev, nRows)
+            else Right (closeRow curLen curRow : rowsRev, nRows + 1)
       | otherwise =
           let !r = VP.unsafeIndex reps i
               !d = VP.unsafeIndex defs i
-              !rows' = if r == 0
-                         then if null curRow then rows else curRow : rows
-                         else rows
-              !row' = if r == 0 then [] else curRow
+              (!rowsRev', !nRows', !curRow', !curLen')
+                | r == 0 && curLen > 0 =
+                    (closeRow curLen curRow : rowsRev, nRows + 1, [], 0)
+                | r == 0 =
+                    (rowsRev, nRows, [], 0)
+                | otherwise =
+                    (rowsRev, nRows, curRow, curLen)
           in if d == maxD
                then
                  if off + 4 > BS.length plain
@@ -434,8 +418,8 @@ materializeRepeatedByteArray reps defs maxDef plain
                         in if len < 0 || off2 + len > BS.length plain
                              then Left "Parquet.Levels: BYTE_ARRAY payload out of bounds for repeated column"
                              else let !val = BS.take len (BS.drop off2 plain)
-                                  in goRepBA rows' (Just val : row') (i + 1) (off2 + len)
-               else goRepBA rows' (Nothing : row') (i + 1) off
+                                  in goRepBA rowsRev' nRows' (Just val : curRow') (curLen' + 1) (i + 1) (off2 + len)
+               else goRepBA rowsRev' nRows' (Nothing : curRow') (curLen' + 1) (i + 1) off
 
 -- | Materialize a repeated @INT64@ column using repetition and definition levels.
 materializeRepeatedInt64 ::
@@ -483,32 +467,54 @@ materializeFixedWidth
 materializeFixedWidth !w decode reps defs maxDef plain
   | VP.length reps /= VP.length defs =
       Left "Parquet.Levels: rep/def level count mismatch"
-  | otherwise = case go [] [] 0 0 of
+  | otherwise = case go [] 0 [] 0 0 0 of
       Left e -> Left e
-      Right (rows, _) ->
-        Right $! V.fromList (reverse (map (V.fromList . reverse) rows))
+      Right (rowsRev, !rowCount) ->
+        -- One outer pass: each row was already closed into a
+        -- V.Vector via 'closeRow', so we just need to reverse
+        -- + materialise the outer cons-list. Previous shape
+        -- did N reverses + N V.fromList's + an outer reverse
+        -- + an outer V.fromList, all post-loop.
+        Right $! V.fromListN rowCount (reverse rowsRev)
   where
     !n = VP.length reps
     !maxD = fromIntegral maxDef :: Int32
 
-    go !rows !curRow !i !off
+    -- 'closeRow' freezes the cons-list (which is in /reverse/
+    -- collection order) into a V.Vector. We track the row
+    -- length explicitly so V.fromListN can pre-allocate
+    -- exactly the right size with no growth.
+    closeRow !curRowLen !curRow =
+      V.fromListN curRowLen (reverse curRow)
+
+    -- @rowsRev@ : list of finished V.Vector rows in reverse order
+    -- @nRows@   : finished row count
+    -- @curRow@  : current row's elements in reverse order
+    -- @curLen@  : current row length
+    go !rowsRev !nRows !curRow !curLen !i !off
       | i >= n =
-          let !finalRows = if null curRow then rows else curRow : rows
-          in Right (finalRows, off)
+          if curLen == 0
+            then Right (rowsRev, nRows)
+            else Right (closeRow curLen curRow : rowsRev, nRows + 1)
       | otherwise =
           let !r = VP.unsafeIndex reps i
               !d = VP.unsafeIndex defs i
-              !rows' = if r == 0
-                         then if null curRow then rows else curRow : rows
-                         else rows
-              !row' = if r == 0 then [] else curRow
+              -- @r == 0@ starts a new top-level row; close
+              -- the in-progress one (if any) first.
+              (!rowsRev', !nRows', !curRow', !curLen')
+                | r == 0 && curLen > 0 =
+                    (closeRow curLen curRow : rowsRev, nRows + 1, [], 0)
+                | r == 0 =
+                    (rowsRev, nRows, [], 0)
+                | otherwise =
+                    (rowsRev, nRows, curRow, curLen)
           in if d == maxD
                then
                  if off + w > BS.length plain
                    then Left "Parquet.Levels: PLAIN buffer too small for repeated column"
                    else let !v = decode plain off
-                        in go rows' (Just v : row') (i + 1) (off + w)
-               else go rows' (Nothing : row') (i + 1) off
+                        in go rowsRev' nRows' (Just v : curRow') (curLen' + 1) (i + 1) (off + w)
+               else go rowsRev' nRows' (Nothing : curRow') (curLen' + 1) (i + 1) off
 
 -- | Decode a column with arbitrary repetition depth (i.e. nested
 -- @LIST<LIST<…<T>>>@) using the standard Dremel reconstruction

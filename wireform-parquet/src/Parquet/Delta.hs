@@ -17,6 +17,7 @@ import qualified Data.ByteString as BS
 import Data.Int (Int32, Int64)
 import Data.Word (Word64)
 import qualified Data.Vector as V
+import qualified Data.Vector.Mutable as VM
 import qualified Data.Vector.Primitive as VP
 import qualified Data.Vector.Primitive.Mutable as MVP
 
@@ -173,19 +174,25 @@ decodeDeltaLengthByteArray _n bs = do
 {-# INLINE decodeDeltaLengthByteArray #-}
 
 splitByLengths :: VP.Vector Int64 -> ByteString -> Either String (V.Vector ByteString)
-splitByLengths lens payload = case go [] 0 0 of
-    Left e -> Left e
-    Right xs -> Right $! V.fromList (reverse xs)
-  where
-    !n = VP.length lens
-    go !acc !i !off
-      | i >= n = Right acc
-      | otherwise =
-          let !len = fromIntegral (VP.unsafeIndex lens i) :: Int
-          in if len < 0 || off + len > BS.length payload
-               then Left "Parquet.Delta: DELTA_LENGTH_BYTE_ARRAY payload truncated"
-               else let !val = BS.take len (BS.drop off payload)
-                    in go (val : acc) (i + 1) (off + len)
+splitByLengths lens payload = runST $ do
+  -- Output count is known up front, so allocate the boxed
+  -- vector directly and write in order. Replaces the
+  -- previous cons-then-reverse-then-V.fromList loop.
+  let !n = VP.length lens
+  mv <- VM.unsafeNew n
+  let go !i !off
+        | i >= n = do
+            v <- V.unsafeFreeze mv
+            pure (Right v)
+        | otherwise =
+            let !len = fromIntegral (VP.unsafeIndex lens i) :: Int
+            in if len < 0 || off + len > BS.length payload
+                 then pure (Left "Parquet.Delta: DELTA_LENGTH_BYTE_ARRAY payload truncated")
+                 else do
+                   let !val = BS.take len (BS.drop off payload)
+                   VM.unsafeWrite mv i val
+                   go (i + 1) (off + len)
+  go 0 0
 
 -- | DELTA_BYTE_ARRAY: delta-packed prefix lengths + DELTA_LENGTH_BYTE_ARRAY suffixes.
 -- Front-compressed / incremental string encoding.
@@ -201,18 +208,21 @@ reconstructPrefixCompressed :: VP.Vector Int64 -> V.Vector ByteString -> Either 
 reconstructPrefixCompressed prefixLens suffixes
   | VP.length prefixLens /= V.length suffixes =
       Left "Parquet.Delta: prefix/suffix count mismatch"
-  | otherwise = case go [] 0 BS.empty of
-      Left e -> Left e
-      Right xs -> Right $! V.fromList (reverse xs)
-  where
-    !n = VP.length prefixLens
-    go !acc !i !prev
-      | i >= n = Right acc
-      | otherwise =
-          let !pLen = fromIntegral (VP.unsafeIndex prefixLens i) :: Int
-              !suffix = V.unsafeIndex suffixes i
-          in if pLen < 0 || pLen > BS.length prev
-               then Left "Parquet.Delta: prefix length exceeds previous value length"
-               else let !prefix = BS.take pLen prev
-                        !val = BS.append prefix suffix
-                    in go (val : acc) (i + 1) val
+  | otherwise = runST $ do
+      let !n = VP.length prefixLens
+      mv <- VM.unsafeNew n
+      let go !i !prev
+            | i >= n = do
+                v <- V.unsafeFreeze mv
+                pure (Right v)
+            | otherwise =
+                let !pLen = fromIntegral (VP.unsafeIndex prefixLens i) :: Int
+                    !suffix = V.unsafeIndex suffixes i
+                in if pLen < 0 || pLen > BS.length prev
+                     then pure (Left "Parquet.Delta: prefix length exceeds previous value length")
+                     else do
+                       let !prefix = BS.take pLen prev
+                           !val = BS.append prefix suffix
+                       VM.unsafeWrite mv i val
+                       go (i + 1) val
+      go 0 BS.empty

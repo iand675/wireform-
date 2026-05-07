@@ -254,13 +254,18 @@ shred schema rows = do
   finalAcc <- V.foldM' (\acc row -> shredRow schema acc row 0 0) seeds rows
   Right (V.imap (\i ld -> finalize ld (V.unsafeIndex finalAcc i)) leaves)
   where
+    -- def / rep are appended together (one pair per shred event)
+    -- so a single 'accLevelCount' keeps both lengths in sync. Use
+    -- 'VP.fromListN' with the exact count to skip 'VP.fromList'\'s
+    -- size-doubling growth.
     finalize ld acc =
-      NestedLeaf
+      let !lc = accLevelCount acc
+      in NestedLeaf
         { nlPath        = ldPath ld
         , nlMaxDef      = ldMaxDef ld
         , nlMaxRep      = ldMaxRep ld
-        , nlDefLevels   = VP.fromList (reverse (accDefs acc))
-        , nlRepLevels   = VP.fromList (reverse (accReps acc))
+        , nlDefLevels   = VP.fromListN lc (reverse (accDefs acc))
+        , nlRepLevels   = VP.fromListN lc (reverse (accReps acc))
         , nlValueBytes  = BL.toStrict (B.toLazyByteString (accValuesB acc))
         , nlValueCount  = accValueCount acc
         }
@@ -271,12 +276,17 @@ shred schema rows = do
 data LeafAcc = LeafAcc
   { accDefs       :: ![Int32]   -- ^ reversed
   , accReps       :: ![Int32]   -- ^ reversed
+  , accLevelCount :: !Int
+    -- ^ Tracked alongside @accDefs@ / @accReps@ so 'finalize'
+    -- can pre-size the 'VP.Vector'. Always equal to
+    -- @length accDefs == length accReps@ — the two are
+    -- pushed in lock-step by the shredder.
   , accValuesB    :: !B.Builder
   , accValueCount :: !Int
   }
 
 emptyAcc :: LeafAcc
-emptyAcc = LeafAcc [] [] mempty 0
+emptyAcc = LeafAcc [] [] 0 mempty 0
 
 -- | Shred one row recursively. The arguments are the schema we're
 -- still descending through, the per-leaf accumulators (one slot per
@@ -465,6 +475,7 @@ pushLeaf :: LeafAcc -> Int -> Int -> LeafValue -> LeafAcc
 pushLeaf acc d r v = LeafAcc
   { accDefs       = fromIntegral d : accDefs acc
   , accReps       = fromIntegral r : accReps acc
+  , accLevelCount = accLevelCount acc + 1
   , accValuesB    = accValuesB acc <> encodeLeafValue v
   , accValueCount = accValueCount acc + 1
   }
@@ -473,6 +484,7 @@ pushNull :: LeafAcc -> Int -> Int -> LeafAcc
 pushNull acc d r = LeafAcc
   { accDefs       = fromIntegral d : accDefs acc
   , accReps       = fromIntegral r : accReps acc
+  , accLevelCount = accLevelCount acc + 1
   , accValuesB    = accValuesB acc
   , accValueCount = accValueCount acc
   }
