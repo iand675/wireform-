@@ -426,14 +426,14 @@ countNulls = V.foldl' (\c x -> case x of Nothing -> c + 1; Just _ -> c) 0
 buildRecordBatch :: Schema -> V.Vector ColumnArray -> ByteString
 buildRecordBatch schema cols =
   let !acc = encodeColumns (arrowFields schema) cols emptyBuildAcc
-      !nodes = V.fromList (reverse (baNodes acc))
-      !bufs = V.fromList (reverse (baBufs acc))
+      !nodes = VS.fromList (reverse (baNodes acc))
+      !bufs = VS.fromList (reverse (baBufs acc))
       !numRows = if V.null cols then 0 else columnLength (V.head cols)
       !rb = RecordBatchDef
         { rbLength = fromIntegral numRows
         , rbNodes = nodes
         , rbBuffers = bufs
-        , rbVariadicBufferCounts = V.fromList (reverse (baVariadic acc))
+        , rbVariadicBufferCounts = VS.fromList (reverse (baVariadic acc))
         , rbBodyCompression = Nothing
         }
       !bodyLen = baOffset acc
@@ -460,10 +460,10 @@ encodeRecordBatchMeta rb bodyLen = BL.toStrict $ B.toLazyByteString $
   where
     headerBs = BL.toStrict $ B.toLazyByteString $
       B.int64LE (rbLength rb)
-      <> B.int32LE (fromIntegral (V.length (rbNodes rb)))
-      <> V.foldl' (\acc n -> acc <> B.int64LE (fnLength n) <> B.int64LE (fnNullCount n)) mempty (rbNodes rb)
-      <> B.int32LE (fromIntegral (V.length (rbBuffers rb)))
-      <> V.foldl' (\acc b -> acc <> B.int64LE (bufOffset b) <> B.int64LE (bufLength b)) mempty (rbBuffers rb)
+      <> B.int32LE (fromIntegral (VS.length (rbNodes rb)))
+      <> VS.foldl' (\acc n -> acc <> B.int64LE (fnLength n) <> B.int64LE (fnNullCount n)) mempty (rbNodes rb)
+      <> B.int32LE (fromIntegral (VS.length (rbBuffers rb)))
+      <> VS.foldl' (\acc b -> acc <> B.int64LE (bufOffset b) <> B.int64LE (bufLength b)) mempty (rbBuffers rb)
 
 -- * Column encoding (DFS preorder, matching Arrow spec)
 

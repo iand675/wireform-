@@ -462,8 +462,10 @@ maybeDecompressBatch
 maybeDecompressBatch rb body = case rbBodyCompression rb of
   Nothing    -> Right (rb, body)
   Just codec -> do
-    (newBufs, newBody) <- decompressBody codec (rbBuffers rb) body
-    Right ( rb { rbBuffers         = newBufs
+    -- decompressBody works on V.Vector Buffer; convert at boundary.
+    (newBufs, newBody) <- decompressBody codec
+                            (V.convert (rbBuffers rb)) body
+    Right ( rb { rbBuffers         = VS.convert newBufs
                , rbBodyCompression = Nothing
                }
           , newBody

@@ -358,22 +358,22 @@ materializeFlatRecordBatch schema rb body = do
   let fields = arrowFields schema
   nBufsSum <- countBuffersFlat fields
   let nNodes = countFieldNodesFlat fields
-  if V.length (rbNodes rb) /= nNodes
+  if VS.length (rbNodes rb) /= nNodes
     then
       Left $
         "Arrow.Column: field node count mismatch (expected "
           ++ show nNodes
           ++ ", got "
-          ++ show (V.length (rbNodes rb))
+          ++ show (VS.length (rbNodes rb))
           ++ ")"
     else
-      if V.length (rbBuffers rb) /= nBufsSum
+      if VS.length (rbBuffers rb) /= nBufsSum
         then
           Left $
             "Arrow.Column: buffer count mismatch (expected "
               ++ show nBufsSum
               ++ ", got "
-              ++ show (V.length (rbBuffers rb))
+              ++ show (VS.length (rbBuffers rb))
               ++ ")"
         else do
           let bodyLen = fromIntegral (BS.length body) :: Int64
@@ -395,11 +395,11 @@ materializeOne endian f rb body !nodeIdx !bufIdx
   -- field node's length is the only state. Same shape regardless
   -- of fieldNullable.
   | ANull <- fieldType f =
-      let node = V.unsafeIndex (rbNodes rb) nodeIdx
+      let node = VS.unsafeIndex (rbNodes rb) nodeIdx
           !len = fromIntegral (fnLength node) :: Int
       in Right (ColNull len, nodeIdx + 1, bufIdx)
   | otherwise =
-  let node = V.unsafeIndex (rbNodes rb) nodeIdx
+  let node = VS.unsafeIndex (rbNodes rb) nodeIdx
       !len = fromIntegral (fnLength node) :: Int
   in if fieldNullable f
     then case fieldType f of
@@ -465,38 +465,38 @@ materializeOne endian f rb body !nodeIdx !bufIdx
 
 readInt8Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readInt8Column _endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+  valsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
   col <- readInts8 len valsBs
   Right (ColInt8 col, nodeIdx + 1, bufIdx + 1)
 
 readInt16Column :: Endianness -> Bool -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readInt16Column endian signed len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+  valsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
   col <- readInts16 endian signed len valsBs
   Right (ColInt16 col, nodeIdx + 1, bufIdx + 1)
 
 readInt32Column :: Endianness -> Bool -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readInt32Column endian signed len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+  valsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
   col <- readInts32 endian signed len valsBs
   Right (ColInt32 col, nodeIdx + 1, bufIdx + 1)
 
 readInt64Column :: Endianness -> Bool -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readInt64Column endian signed len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+  valsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
   col <- readInts64 endian signed len valsBs
   Right (ColInt64 col, nodeIdx + 1, bufIdx + 1)
 
 readUInt8Column :: Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readUInt8Column len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+  valsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len
     then Left "Arrow.Column: uint8 buffer too small"
     else Right (ColUInt8 (VS.generate len $ \i -> BSU.unsafeIndex valsBs i), nodeIdx + 1, bufIdx + 1)
 
 readUInt16Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readUInt16Column endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+  valsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * 2
     then Left "Arrow.Column: uint16 buffer too small"
     else case endian of
@@ -505,7 +505,7 @@ readUInt16Column endian len rb body !bufIdx !nodeIdx = do
 
 readUInt32Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readUInt32Column endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+  valsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * 4
     then Left "Arrow.Column: uint32 buffer too small"
     else case endian of
@@ -514,7 +514,7 @@ readUInt32Column endian len rb body !bufIdx !nodeIdx = do
 
 readUInt64Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readUInt64Column endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+  valsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * 8
     then Left "Arrow.Column: uint64 buffer too small"
     else case endian of
@@ -523,20 +523,20 @@ readUInt64Column endian len rb body !bufIdx !nodeIdx = do
 
 readFloat16Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readFloat16Column endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+  valsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * 2
     then Left "Arrow.Column: float16 buffer too small"
     else Right (ColFloat16 (VS.generate len $ \i -> readWord16 endian valsBs (i * 2)), nodeIdx + 1, bufIdx + 1)
 
 readBoolColumn :: Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readBoolColumn len rb body !bufIdx !nodeIdx = do
-  dataBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+  dataBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
   bs <- unpackBools len dataBs
   Right (ColBool bs, nodeIdx + 1, bufIdx + 1)
 
 readFloatColumn :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readFloatColumn endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+  valsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * 4
     then Left "Arrow.Column: float buffer too small"
     else case endian of
@@ -545,7 +545,7 @@ readFloatColumn endian len rb body !bufIdx !nodeIdx = do
 
 readDoubleColumn :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readDoubleColumn endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+  valsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * 8
     then Left "Arrow.Column: double buffer too small"
     else case endian of
@@ -554,8 +554,8 @@ readDoubleColumn endian len rb body !bufIdx !nodeIdx = do
 
 readUtf8Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readUtf8Column endian len rb body !bufIdx !nodeIdx = do
-  offBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
-  datBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
+  offBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
+  datBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) (bufIdx + 1))
   if BS.length offBs < (len + 1) * 4
     then Left "Arrow.Column: UTF-8 offsets buffer too small"
     else
@@ -629,8 +629,8 @@ pbaToTextArr (PBA.ByteArray ba#) = TA.ByteArray ba#
 
 readBinaryColumn :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readBinaryColumn endian len rb body !bufIdx !nodeIdx = do
-  offBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
-  datBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
+  offBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
+  datBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) (bufIdx + 1))
   if BS.length offBs < (len + 1) * 4
     then Left "Arrow.Column: binary offsets buffer too small"
     else
@@ -645,8 +645,8 @@ readBinaryColumn endian len rb body !bufIdx !nodeIdx = do
 
 readLargeUtf8Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readLargeUtf8Column endian len rb body !bufIdx !nodeIdx = do
-  offBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
-  datBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
+  offBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
+  datBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) (bufIdx + 1))
   if BS.length offBs < (len + 1) * 8
     then Left "Arrow.Column: large UTF-8 offsets buffer too small"
     else
@@ -659,8 +659,8 @@ readLargeUtf8Column endian len rb body !bufIdx !nodeIdx = do
 
 readLargeBinaryColumn :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readLargeBinaryColumn endian len rb body !bufIdx !nodeIdx = do
-  offBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
-  datBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
+  offBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
+  datBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) (bufIdx + 1))
   if BS.length offBs < (len + 1) * 8
     then Left "Arrow.Column: large binary offsets buffer too small"
     else
@@ -675,7 +675,7 @@ readLargeBinaryColumn endian len rb body !bufIdx !nodeIdx = do
 
 readFixedSizeBinaryColumn :: Int -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readFixedSizeBinaryColumn byteWidth len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+  valsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * byteWidth
     then Left "Arrow.Column: fixed-size binary buffer too small"
     else Right (ColFixedSizeBinary byteWidth (V.generate len $ \i ->
@@ -683,7 +683,7 @@ readFixedSizeBinaryColumn byteWidth len rb body !bufIdx !nodeIdx = do
 
 readDate32Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readDate32Column endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+  valsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * 4
     then Left "Arrow.Column: date32 buffer too small"
     else case endian of
@@ -693,7 +693,7 @@ readDate32Column endian len rb body !bufIdx !nodeIdx = do
 
 readDate64Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readDate64Column endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+  valsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * 8
     then Left "Arrow.Column: date64 buffer too small"
     else case endian of
@@ -703,7 +703,7 @@ readDate64Column endian len rb body !bufIdx !nodeIdx = do
 
 readTime32Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readTime32Column endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+  valsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * 4
     then Left "Arrow.Column: time32 buffer too small"
     else case endian of
@@ -713,7 +713,7 @@ readTime32Column endian len rb body !bufIdx !nodeIdx = do
 
 readTime64Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readTime64Column endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+  valsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * 8
     then Left "Arrow.Column: time64 buffer too small"
     else case endian of
@@ -723,7 +723,7 @@ readTime64Column endian len rb body !bufIdx !nodeIdx = do
 
 readTimestampColumn :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readTimestampColumn endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+  valsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * 8
     then Left "Arrow.Column: timestamp buffer too small"
     else case endian of
@@ -733,7 +733,7 @@ readTimestampColumn endian len rb body !bufIdx !nodeIdx = do
 
 readDurationColumn :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readDurationColumn endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+  valsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * 8
     then Left "Arrow.Column: duration buffer too small"
     else case endian of
@@ -743,7 +743,7 @@ readDurationColumn endian len rb body !bufIdx !nodeIdx = do
 
 readDecimal128Column :: Int -> Int -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readDecimal128Column precision scale len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+  valsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * 16
     then Left "Arrow.Column: decimal128 buffer too small"
     else Right (ColDecimal128 precision scale (V.generate len $ \i ->
@@ -751,7 +751,7 @@ readDecimal128Column precision scale len rb body !bufIdx !nodeIdx = do
 
 readDecimal256Column :: Int -> Int -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readDecimal256Column precision scale len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+  valsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length valsBs < len * 32
     then Left "Arrow.Column: decimal256 buffer too small"
     else Right (ColDecimal256 precision scale (V.generate len $ \i ->
@@ -778,8 +778,8 @@ readPrimColumnMaybe
   -> Int -> RecordBatchDef -> ByteString -> Int -> Int
   -> Either String (ColumnArray, Int, Int)
 readPrimColumnMaybe !elemBytes !label !decodeVals !mkCol len rb body !bufIdx !nodeIdx = do
-  validBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
-  valsBs  <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
+  validBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
+  valsBs  <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) (bufIdx + 1))
   validBits <- unpackBools len validBs
   if BS.length valsBs < len * elemBytes
     then Left ("Arrow.Column: " ++ label ++ " values buffer too small")
@@ -850,8 +850,8 @@ readFloat16ColumnMaybe endian =
 
 readBoolColumnMaybe :: Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readBoolColumnMaybe len rb body !bufIdx !nodeIdx = do
-  validBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
-  dataBs  <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
+  validBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
+  dataBs  <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) (bufIdx + 1))
   validBits <- unpackBools len validBs
   valBits   <- unpackBools len dataBs
   -- Both bitmaps are already in wire shape (validity +
@@ -910,9 +910,9 @@ validBitAt v i = unBit (VU.unsafeIndex v i)
 -- non-nullable Utf8View semantics).
 readUtf8ColumnMaybe :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readUtf8ColumnMaybe endian len rb body !bufIdx !nodeIdx = do
-  validBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
-  offBs   <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
-  datBs   <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 2))
+  validBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
+  offBs   <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) (bufIdx + 1))
+  datBs   <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) (bufIdx + 2))
   validBits <- unpackBools len validBs
   if BS.length offBs < (len + 1) * 4
     then Left "Arrow.Column: UTF-8 offsets buffer too small"
@@ -929,9 +929,9 @@ readUtf8ColumnMaybe endian len rb body !bufIdx !nodeIdx = do
 
 readBinaryColumnMaybe :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readBinaryColumnMaybe endian len rb body !bufIdx !nodeIdx = do
-  validBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
-  offBs   <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
-  datBs   <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 2))
+  validBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
+  offBs   <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) (bufIdx + 1))
+  datBs   <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) (bufIdx + 2))
   validBits <- unpackBools len validBs
   if BS.length offBs < (len + 1) * 4
     then Left "Arrow.Column: binary offsets buffer too small"
@@ -950,9 +950,9 @@ readBinaryColumnMaybe endian len rb body !bufIdx !nodeIdx = do
 
 readLargeUtf8ColumnMaybe :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readLargeUtf8ColumnMaybe endian len rb body !bufIdx !nodeIdx = do
-  validBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
-  offBs   <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
-  datBs   <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 2))
+  validBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
+  offBs   <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) (bufIdx + 1))
+  datBs   <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) (bufIdx + 2))
   validBits <- unpackBools len validBs
   if BS.length offBs < (len + 1) * 8
     then Left "Arrow.Column: large UTF-8 offsets buffer too small"
@@ -969,9 +969,9 @@ readLargeUtf8ColumnMaybe endian len rb body !bufIdx !nodeIdx = do
 
 readLargeBinaryColumnMaybe :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readLargeBinaryColumnMaybe endian len rb body !bufIdx !nodeIdx = do
-  validBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
-  offBs   <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
-  datBs   <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 2))
+  validBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
+  offBs   <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) (bufIdx + 1))
+  datBs   <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) (bufIdx + 2))
   validBits <- unpackBools len validBs
   if BS.length offBs < (len + 1) * 8
     then Left "Arrow.Column: large binary offsets buffer too small"
@@ -990,8 +990,8 @@ readLargeBinaryColumnMaybe endian len rb body !bufIdx !nodeIdx = do
 
 readFixedSizeBinaryColumnMaybe :: Int -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readFixedSizeBinaryColumnMaybe byteWidth len rb body !bufIdx !nodeIdx = do
-  validBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
-  valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
+  validBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
+  valsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) (bufIdx + 1))
   validBits <- unpackBools len validBs
   if BS.length valsBs < len * byteWidth
     then Left "Arrow.Column: fixed-size binary values buffer too small"
@@ -1043,8 +1043,8 @@ readDurationColumnMaybe endian =
 
 readDecimal128ColumnMaybe :: Int -> Int -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readDecimal128ColumnMaybe precision scale len rb body !bufIdx !nodeIdx = do
-  validBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
-  valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
+  validBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
+  valsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) (bufIdx + 1))
   validBits <- unpackBools len validBs
   if BS.length valsBs < len * 16
     then Left "Arrow.Column: decimal128 values buffer too small"
@@ -1057,8 +1057,8 @@ readDecimal128ColumnMaybe precision scale len rb body !bufIdx !nodeIdx = do
 
 readDecimal256ColumnMaybe :: Int -> Int -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readDecimal256ColumnMaybe precision scale len rb body !bufIdx !nodeIdx = do
-  validBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
-  valsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
+  validBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
+  valsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) (bufIdx + 1))
   validBits <- unpackBools len validBs
   if BS.length valsBs < len * 32
     then Left "Arrow.Column: decimal256 values buffer too small"
@@ -1431,7 +1431,7 @@ materializeRecordBatch schema rb body = do
 -- pre-order indices starting at 0; only @AUtf8View@ /
 -- @ABinaryView@ fields consume an entry from the variadic vector.
 computeViewVariadicMap
-  :: V.Vector Field -> V.Vector Int64 -> V.Vector Int
+  :: V.Vector Field -> VS.Vector Int64 -> V.Vector Int
 computeViewVariadicMap topFields varCounts =
   -- We use a vector indexed by node id; size = total field nodes.
   let !total = sumNodes topFields
@@ -1445,7 +1445,7 @@ computeViewVariadicMap topFields varCounts =
             (ni', vi', m') = V.foldl' go (ni1, nextVi vi (fieldType f), m1) (fieldChildren f)
         in (ni', vi', m')
       assignVar ni vi m =
-        let !c = case varCounts V.!? vi of
+        let !c = case varCounts VS.!? vi of
                    Just v  -> fromIntegral v
                    Nothing -> 0
         in  m VS.// [(ni, c)]
@@ -1669,12 +1669,12 @@ materializeField endian f rb body !nodeIdx !bufIdx =
 
 materializeStruct :: Endianness -> Field -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 materializeStruct endian f rb body !nodeIdx !bufIdx = do
-  let node = V.unsafeIndex (rbNodes rb) nodeIdx
+  let node = VS.unsafeIndex (rbNodes rb) nodeIdx
       !len = fromIntegral (fnLength node) :: Int
       !nodeIdx1 = nodeIdx + 1
   (validity, !bufIdx1) <- if fieldNullable f
     then do
-      validBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+      validBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
       vs <- unpackBools len validBs
       Right (Just vs, bufIdx + 1)
     else Right (Nothing, bufIdx)
@@ -1686,16 +1686,16 @@ materializeStruct endian f rb body !nodeIdx !bufIdx = do
 
 materializeListCol :: Endianness -> Field -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 materializeListCol endian f rb body !nodeIdx !bufIdx = do
-  let node = V.unsafeIndex (rbNodes rb) nodeIdx
+  let node = VS.unsafeIndex (rbNodes rb) nodeIdx
       !len = fromIntegral (fnLength node) :: Int
       !nodeIdx1 = nodeIdx + 1
   (validity, !bufIdx1) <- if fieldNullable f
     then do
-      validBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+      validBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
       vs <- unpackBools len validBs
       Right (Just vs, bufIdx + 1)
     else Right (Nothing, bufIdx)
-  offBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx1)
+  offBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx1)
   if BS.length offBs < (len + 1) * 4
     then Left "Arrow.Column: list offsets buffer too small"
     else do
@@ -1713,16 +1713,16 @@ materializeListCol endian f rb body !nodeIdx !bufIdx = do
 
 materializeMapCol :: Endianness -> Field -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 materializeMapCol endian f rb body !nodeIdx !bufIdx = do
-  let node = V.unsafeIndex (rbNodes rb) nodeIdx
+  let node = VS.unsafeIndex (rbNodes rb) nodeIdx
       !len = fromIntegral (fnLength node) :: Int
       !nodeIdx1 = nodeIdx + 1
   (validity, !bufIdx1) <- if fieldNullable f
     then do
-      validBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+      validBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
       vs <- unpackBools len validBs
       Right (Just vs, bufIdx + 1)
     else Right (Nothing, bufIdx)
-  offBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx1)
+  offBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx1)
   if BS.length offBs < (len + 1) * 4
     then Left "Arrow.Column: map offsets buffer too small"
     else do
@@ -1746,17 +1746,17 @@ materializeMapCol endian f rb body !nodeIdx !bufIdx = do
 
 materializeUnionCol :: Endianness -> Field -> UnionMode -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 materializeUnionCol endian f mode rb body !nodeIdx !bufIdx = do
-  let node = V.unsafeIndex (rbNodes rb) nodeIdx
+  let node = VS.unsafeIndex (rbNodes rb) nodeIdx
       !len = fromIntegral (fnLength node) :: Int
       !nodeIdx1 = nodeIdx + 1
-  typeIdsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+  typeIdsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
   if BS.length typeIdsBs < len
     then Left "Arrow.Column: union type_ids buffer too small"
     else do
       let typeIds = VS.generate len $ \i -> fromIntegral (BSU.unsafeIndex typeIdsBs i) :: Int8
       case mode of
         Dense -> do
-          offsetsBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
+          offsetsBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) (bufIdx + 1))
           if BS.length offsetsBs < len * 4
             then Left "Arrow.Column: dense union offsets buffer too small"
             else do
@@ -1772,12 +1772,12 @@ materializeUnionCol endian f mode rb body !nodeIdx !bufIdx = do
 
 materializeFixedSizeListCol :: Endianness -> Int -> Field -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 materializeFixedSizeListCol endian _listSize f rb body !nodeIdx !bufIdx = do
-  let node = V.unsafeIndex (rbNodes rb) nodeIdx
+  let node = VS.unsafeIndex (rbNodes rb) nodeIdx
       !len = fromIntegral (fnLength node) :: Int
       !nodeIdx1 = nodeIdx + 1
   (validity, !bufIdx1) <- if fieldNullable f
     then do
-      validBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+      validBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
       vs <- unpackBools len validBs
       Right (Just vs, bufIdx + 1)
     else Right (Nothing, bufIdx)
@@ -1792,16 +1792,16 @@ materializeFixedSizeListCol endian _listSize f rb body !nodeIdx !bufIdx = do
 
 materializeLargeListCol :: Endianness -> Field -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 materializeLargeListCol endian f rb body !nodeIdx !bufIdx = do
-  let node = V.unsafeIndex (rbNodes rb) nodeIdx
+  let node = VS.unsafeIndex (rbNodes rb) nodeIdx
       !len = fromIntegral (fnLength node) :: Int
       !nodeIdx1 = nodeIdx + 1
   (validity, !bufIdx1) <- if fieldNullable f
     then do
-      validBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+      validBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
       vs <- unpackBools len validBs
       Right (Just vs, bufIdx + 1)
     else Right (Nothing, bufIdx)
-  offBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx1)
+  offBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx1)
   if BS.length offBs < (len + 1) * 8
     then Left "Arrow.Column: large list offsets buffer too small"
     else do
@@ -1828,16 +1828,16 @@ materializeIntervalCol
   :: Endianness -> IntervalUnit -> Field -> RecordBatchDef -> ByteString
   -> Int -> Int -> Either String (ColumnArray, Int, Int)
 materializeIntervalCol endian unit f rb body !nodeIdx !bufIdx = do
-  let node = V.unsafeIndex (rbNodes rb) nodeIdx
+  let node = VS.unsafeIndex (rbNodes rb) nodeIdx
       !len = fromIntegral (fnLength node) :: Int
       !nodeIdx1 = nodeIdx + 1
   (_validity, !bufIdx1) <- if fieldNullable f
     then do
-      validBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+      validBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
       vs <- unpackBools len validBs
       Right (Just vs, bufIdx + 1)
     else Right (Nothing, bufIdx)
-  dataBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx1)
+  dataBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx1)
   let !bufIdx2 = bufIdx1 + 1
   col <- case unit of
     YearMonth
@@ -1905,17 +1905,17 @@ materializeListViewCol
   -> Int -> Int
   -> Either String (ColumnArray, Int, Int)
 materializeListViewCol endian large f rb body !nodeIdx !bufIdx = do
-  let node = V.unsafeIndex (rbNodes rb) nodeIdx
+  let node = VS.unsafeIndex (rbNodes rb) nodeIdx
       !len = fromIntegral (fnLength node) :: Int
       !nodeIdx1 = nodeIdx + 1
   (validity, !bufIdx1) <- if fieldNullable f
     then do
-      validBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+      validBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
       vs <- unpackBools len validBs
       Right (Just vs, bufIdx + 1)
     else Right (Nothing, bufIdx)
-  offBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx1)
-  sizBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx1 + 1))
+  offBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx1)
+  sizBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) (bufIdx1 + 1))
   let !w        = if large then 8 else 4
       !need     = len * w
   when' (BS.length offBs < need) $
@@ -1982,7 +1982,7 @@ materializeViewCol endian utf8 f rb body !nodeIdx !bufIdx =
   -- without a per-view cursor (single-view-column batches). The
   -- top-level 'materializeRecordBatch' uses the cursor-aware
   -- 'materializeViewColWithVar' via 'computeViewVariadicMap'.
-  let !varCount = case V.toList (rbVariadicBufferCounts rb) of
+  let !varCount = case VS.toList (rbVariadicBufferCounts rb) of
                     []      -> 0
                     (c:_)   -> fromIntegral c :: Int
   in  materializeViewColWithVar endian utf8 varCount f rb body nodeIdx bufIdx
@@ -2000,21 +2000,21 @@ materializeViewColWithVar
   -> Int -> Int
   -> Either String (ColumnArray, Int, Int)
 materializeViewColWithVar endian utf8 varCount f rb body !nodeIdx !bufIdx = do
-  let node = V.unsafeIndex (rbNodes rb) nodeIdx
+  let node = VS.unsafeIndex (rbNodes rb) nodeIdx
       !len = fromIntegral (fnLength node) :: Int
       !nodeIdx1 = nodeIdx + 1
   (validity, !bufIdx1) <- if fieldNullable f
     then do
-      validBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
+      validBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx)
       vs <- unpackBools len validBs
       Right (Just vs, bufIdx + 1)
     else Right (Nothing, bufIdx)
-  viewBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx1)
+  viewBs <- sliceBuffer body (VS.unsafeIndex (rbBuffers rb) bufIdx1)
   when' (BS.length viewBs < len * 16) $
     Left "Arrow.Column: view buffer too small"
   -- Resolve data buffers
   dataBufs <- mapM (sliceBuffer body)
-                [ V.unsafeIndex (rbBuffers rb) (bufIdx1 + 1 + i)
+                [ VS.unsafeIndex (rbBuffers rb) (bufIdx1 + 1 + i)
                 | i <- [0 .. varCount - 1] ]
   let !bufIdx2 = bufIdx1 + 1 + varCount
   rows <- forM [0 .. len - 1] $ \i -> resolveView viewBs dataBufs i

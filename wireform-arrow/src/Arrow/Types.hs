@@ -46,6 +46,9 @@ import Data.Bits (shiftL, (.|.))
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as V
+import qualified Data.Vector.Storable as VS
+import Foreign.Ptr (Ptr, castPtr)
+import Foreign.Storable (Storable (..))
 import Data.Word (Word64, Word8)
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
@@ -179,23 +182,51 @@ data Schema = Schema
   } deriving stock (Show, Eq, Generic)
     deriving anyclass (NFData)
 
+-- | A FieldNode in an Arrow @RecordBatch@: per-column row count
+-- and null count. Two Int64 fields so it has a trivial
+-- 'Storable' instance, which lets 'rbNodes' be a 'VS.Vector'
+-- (no per-element pointer indirection) instead of a boxed
+-- @V.Vector FieldNode@.
 data FieldNode = FieldNode
   { fnLength    :: !Int64
   , fnNullCount :: !Int64
   } deriving stock (Show, Eq, Generic)
     deriving anyclass (NFData)
 
+instance Storable FieldNode where
+  sizeOf _    = 16
+  alignment _ = 8
+  peek p      = FieldNode
+    <$> peekByteOff (castPtr p)        0
+    <*> peekByteOff (castPtr p :: Ptr Int64) 8
+  poke p (FieldNode l n) = do
+    pokeByteOff (castPtr p :: Ptr Int64) 0 l
+    pokeByteOff (castPtr p :: Ptr Int64) 8 n
+
+-- | An Arrow body 'Buffer': @(offset, length)@ pair. Storable
+-- so 'rbBuffers' can be a 'VS.Vector' — same per-batch
+-- allocation reduction as 'FieldNode'.
 data Buffer = Buffer
   { bufOffset :: !Int64
   , bufLength :: !Int64
   } deriving stock (Show, Eq, Generic)
     deriving anyclass (NFData)
 
+instance Storable Buffer where
+  sizeOf _    = 16
+  alignment _ = 8
+  peek p      = Buffer
+    <$> peekByteOff (castPtr p :: Ptr Int64) 0
+    <*> peekByteOff (castPtr p :: Ptr Int64) 8
+  poke p (Buffer o l) = do
+    pokeByteOff (castPtr p :: Ptr Int64) 0 o
+    pokeByteOff (castPtr p :: Ptr Int64) 8 l
+
 data RecordBatchDef = RecordBatchDef
   { rbLength  :: !Int64
-  , rbNodes   :: !(Vector FieldNode)
-  , rbBuffers :: !(Vector Buffer)
-  , rbVariadicBufferCounts :: !(Vector Int64)
+  , rbNodes   :: !(VS.Vector FieldNode)
+  , rbBuffers :: !(VS.Vector Buffer)
+  , rbVariadicBufferCounts :: !(VS.Vector Int64)
     -- ^ Per Arrow @format/Message.fbs@: when the schema contains
     -- @Utf8View@ or @BinaryView@ fields each such field has a
     -- variable number of additional data buffers for out-of-line

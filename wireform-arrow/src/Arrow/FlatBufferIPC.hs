@@ -89,6 +89,7 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int16, Int32, Int64)
 import qualified Data.Text as T
 import qualified Data.Vector as V
+import qualified Data.Vector.Storable as VS
 import Data.Word (Word8)
 import System.IO.Unsafe (unsafePerformIO)
 
@@ -397,15 +398,15 @@ writeBufferStruct bf b = do
 
 writeRecordBatch :: Builder -> RecordBatchDef -> IO Int
 writeRecordBatch b rb = do
-  variadicVec <- if V.null (rbVariadicBufferCounts rb)
+  variadicVec <- if VS.null (rbVariadicBufferCounts rb)
     then pure Nothing
     else do
-      uo <- writeVectorInt64 b (V.toList (rbVariadicBufferCounts rb))
+      uo <- writeVectorInt64 b (VS.toList (rbVariadicBufferCounts rb))
       pure (Just uo)
   buffersVec <- writeVectorOfStructs b 16 8
-                  [ writeBufferStruct buf | buf <- V.toList (rbBuffers rb) ]
+                  [ writeBufferStruct buf | buf <- VS.toList (rbBuffers rb) ]
   nodesVec   <- writeVectorOfStructs b 16 8
-                  [ writeFieldNodeStruct fn | fn <- V.toList (rbNodes rb) ]
+                  [ writeFieldNodeStruct fn | fn <- VS.toList (rbNodes rb) ]
   -- BodyCompression (slot 3): table { codec: i8 (default 0), method: i8 (default 0) }.
   bodyCompVec <- case rbBodyCompression rb of
     Nothing -> pure Nothing
@@ -964,9 +965,9 @@ buildRecordBatchBytesWith mCodec sch cols =
           compressBody codec bufs0 rawBody
       !rb = RecordBatchDef
               { rbLength  = fromIntegral numRows
-              , rbNodes   = nodes
-              , rbBuffers = bufs
-              , rbVariadicBufferCounts = rawVar
+              , rbNodes   = VS.convert nodes
+              , rbBuffers = VS.convert bufs
+              , rbVariadicBufferCounts = VS.convert rawVar
               , rbBodyCompression = mCodec
               }
   in (rb, body)
@@ -1405,14 +1406,17 @@ isNullable = \case
 denormaliseBuffers
   :: Schema -> RecordBatchDef -> RecordBatchDef
 denormaliseBuffers sch rb =
-  let !inputBufs = rbBuffers rb
-      !varCounts = rbVariadicBufferCounts rb
+  -- Convert in/out at the boundary; 'stripField' below still
+  -- works on boxed V.Vector internally to keep its tree-walk
+  -- straightforward.
+  let !inputBufs = V.convert (rbBuffers rb) :: V.Vector Buffer
+      !varCounts = V.convert (rbVariadicBufferCounts rb) :: V.Vector Int64
       (_, _, !revOut) = V.foldl' step (0 :: Int, 0 :: Int, []) (arrowFields sch)
       step (!bIdx, !vIdx, acc) f =
         let (!consumed, !varConsumed, !emitted) =
               stripField f inputBufs bIdx varCounts vIdx
         in  (bIdx + consumed, vIdx + varConsumed, reverse emitted ++ acc)
-  in  rb { rbBuffers = V.fromList (reverse revOut) }
+  in  rb { rbBuffers = VS.fromList (reverse revOut) }
 
 -- | Walk one schema field and decide which spec-format buffers to
 -- keep. Returns @(#source buffers consumed, #variadic-count
@@ -2031,29 +2035,31 @@ readRecordBatchTable bs rbPos = do
     Nothing -> Right 0
     Just b  -> peekI64 bs b
   nodes <- case s 1 of
-    Nothing -> Right V.empty
+    Nothing -> Right VS.empty
     Just b  -> do
       vecPos <- followUOffset bs b
       (_, elems) <- readVectorOfStructs bs vecPos 16
-      V.mapM (\ep -> do
-                l <- peekI64 bs ep
-                nc <- peekI64 bs (ep + 8)
-                Right (FieldNode l nc)) elems
+      VS.fromListN (V.length elems) <$> V.toList <$>
+        V.mapM (\ep -> do
+                  l <- peekI64 bs ep
+                  nc <- peekI64 bs (ep + 8)
+                  Right (FieldNode l nc)) elems
   bufs <- case s 2 of
-    Nothing -> Right V.empty
+    Nothing -> Right VS.empty
     Just b  -> do
       vecPos <- followUOffset bs b
       (_, elems) <- readVectorOfStructs bs vecPos 16
-      V.mapM (\ep -> do
-                o <- peekI64 bs ep
-                l <- peekI64 bs (ep + 8)
-                Right (Buffer o l)) elems
+      VS.fromListN (V.length elems) <$> V.toList <$>
+        V.mapM (\ep -> do
+                  o <- peekI64 bs ep
+                  l <- peekI64 bs (ep + 8)
+                  Right (Buffer o l)) elems
   variadic <- case s 4 of
-    Nothing -> Right V.empty
+    Nothing -> Right VS.empty
     Just b  -> do
       vecPos <- followUOffset bs b
       n <- peekU32 bs vecPos
-      V.generateM (fromIntegral n) $ \i -> peekI64 bs (vecPos + 4 + 8 * i)
+      VS.generateM (fromIntegral n) $ \i -> peekI64 bs (vecPos + 4 + 8 * i)
   -- Slot 3 is BodyCompression (a table). When present we read
   -- the codec discriminator and translate to our enum.
   bodyComp <- case s 3 of

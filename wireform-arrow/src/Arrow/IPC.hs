@@ -23,8 +23,8 @@ import Data.Int (Int32, Int64)
 import qualified Data.Text.Encoding as TE
 import Data.Word (Word8, Word16, Word32, Word64)
 import qualified Data.Vector as V
-import Foreign.Marshal.Array (allocaArray)
-import Foreign.Storable (pokeElemOff)
+import qualified Data.Vector.Storable as VS
+import Foreign.Ptr (Ptr, castPtr)
 import System.IO.Unsafe (unsafePerformIO)
 
 import Arrow.Types
@@ -129,11 +129,11 @@ encodeArrowType = \case
 encodeRecordBatch :: RecordBatchDef -> ByteString
 encodeRecordBatch rb = BL.toStrict $ B.toLazyByteString $
   buildLE64 (fromIntegral (rbLength rb))
-  <> buildLE32 (fromIntegral (V.length (rbNodes rb)))
-  <> V.foldl' (\acc n -> acc <> buildLE64 (fromIntegral (fnLength n))
+  <> buildLE32 (fromIntegral (VS.length (rbNodes rb)))
+  <> VS.foldl' (\acc n -> acc <> buildLE64 (fromIntegral (fnLength n))
                               <> buildLE64 (fromIntegral (fnNullCount n))) mempty (rbNodes rb)
-  <> buildLE32 (fromIntegral (V.length (rbBuffers rb)))
-  <> V.foldl' (\acc b -> acc <> buildLE64 (fromIntegral (bufOffset b))
+  <> buildLE32 (fromIntegral (VS.length (rbBuffers rb)))
+  <> VS.foldl' (\acc b -> acc <> buildLE64 (fromIntegral (bufOffset b))
                               <> buildLE64 (fromIntegral (bufLength b))) mempty (rbBuffers rb)
 
 -- Decoding
@@ -254,21 +254,21 @@ decodeRecordBatch bs = do
   let !len = fromIntegral (readLE64 bs 0) :: Int64
       !nNodes = fromIntegral (readLE32 bs 8) :: Int
   ensure bs 12 (nNodes * 16)
-  let !nodes = V.generate nNodes (\i ->
+  let !nodes = VS.generate nNodes (\i ->
         let !o = 12 + i * 16
         in FieldNode (fromIntegral (readLE64 bs o)) (fromIntegral (readLE64 bs (o + 8))))
       !off2 = 12 + nNodes * 16
   ensure bs off2 4
   let !nBufs = fromIntegral (readLE32 bs off2) :: Int
   ensure bs (off2 + 4) (nBufs * 16)
-  let !bufs = V.generate nBufs (\i ->
+  let !bufs = VS.generate nBufs (\i ->
         let !o = off2 + 4 + i * 16
         in Buffer (fromIntegral (readLE64 bs o)) (fromIntegral (readLE64 bs (o + 8))))
   Right RecordBatchDef
     { rbLength = len
     , rbNodes = nodes
     , rbBuffers = bufs
-    , rbVariadicBufferCounts = V.empty
+    , rbVariadicBufferCounts = VS.empty
     , rbBodyCompression = Nothing
     }
 
@@ -332,12 +332,14 @@ ensure bs off n
 validateRecordBatchBuffers :: RecordBatchDef -> Int64 -> Bool
 validateRecordBatchBuffers rb bodyLen = unsafePerformIO $ do
   let !bufs = rbBuffers rb
-      !n = V.length bufs
+      !n = VS.length bufs
   if n == 0
     then pure True
-    else allocaArray (n * 2) $ \ptr -> do
-      V.iforM_ bufs $ \i buf -> do
-        pokeElemOff ptr (i * 2) (bufOffset buf)
-        pokeElemOff ptr (i * 2 + 1) (bufLength buf)
-      pure $! validateArrowBuffers ptr n bodyLen
+    else
+      -- VS.Vector Buffer is laid out as N x (Int64,Int64) =
+      -- N x 16 bytes, exactly the shape validateArrowBuffers
+      -- expects. Hand the underlying ForeignPtr's pointer
+      -- straight in — no per-buffer copy.
+      VS.unsafeWith bufs $ \bufPtr ->
+        pure $! validateArrowBuffers (castPtr bufPtr :: Ptr Int64) n bodyLen
 {-# INLINE validateRecordBatchBuffers #-}
