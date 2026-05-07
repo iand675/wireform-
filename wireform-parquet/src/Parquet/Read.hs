@@ -93,6 +93,22 @@ module Parquet.Read
   , readGenericDoubleOptionalColumnChunk
   , readGenericBoolOptionalColumnChunk
   , readGenericByteArrayOptionalColumnChunk
+    -- ** Flat-shape ('NullableView') optional readers
+    --
+    -- These return @(VU.Vector Bit, VS.Vector a)@ pair-shaped
+    -- 'AC.NullableView's directly: per-page validity bits and
+    -- dense storable values are written into pre-allocated
+    -- mutable buffers as the level / value streams are
+    -- consumed. They never go through @V.Vector (Maybe a)@,
+    -- so there is no 'Just'/'Nothing' allocation, no per-row
+    -- pointer indirection, and no second walk to convert to
+    -- the bridge's 'NullableView' shape. Use these instead of
+    -- the @V.Vector (Maybe a)@ variants when feeding the
+    -- Arrow bridge.
+  , readGenericInt32OptionalColumnChunkNV
+  , readGenericInt64OptionalColumnChunkNV
+  , readGenericFloatOptionalColumnChunkNV
+  , readGenericDoubleOptionalColumnChunkNV
     -- * Page-index-driven page skipping
   , readGenericInt32SelectedPages
   , readGenericInt64SelectedPages
@@ -122,6 +138,12 @@ import qualified Data.Vector as V
 import qualified Data.Vector.Mutable as VM
 import qualified Data.Vector.Primitive as VP
 import qualified Data.Vector.Primitive.Mutable as MVP
+import qualified Data.Vector.Storable as VS
+import qualified Data.Vector.Storable.Mutable as VSM
+import qualified Data.Vector.Unboxed as VU
+import qualified Data.Vector.Unboxed.Mutable as VUM
+import qualified Arrow.Column as AC
+import Columnar.Bit (Bit (..))
 import Data.Text (Text)
 import qualified Data.Text.Array as TA
 import qualified Data.Text.Encoding as TE
@@ -1794,6 +1816,192 @@ interleaveDefined def maxD defined = runST $ do
             go (i + 1) j
   go 0 0
   V.unsafeFreeze v
+
+-- ============================================================
+-- Flat-shape ('NullableView') optional readers
+-- ============================================================
+--
+-- Same per-page state machine as 'readGenericOptionalColumnChunk'
+-- but the per-page result is a @(VU.Vector Bit, VS.Vector a)@
+-- pair instead of a @V.Vector (Maybe a)@. Per-page interleave
+-- writes directly into the storable + bit-packed buffers; no
+-- 'Maybe' constructor allocation, no boxed-pointer per slot.
+-- Concatenation across pages is one 'VU.concat' + one
+-- 'VS.concat' at the end of the chunk.
+
+readGenericInt32OptionalColumnChunkNV
+  :: Compression -> Int -> Int -> ByteString
+  -> Either String (AC.NullableView Int32)
+readGenericInt32OptionalColumnChunkNV =
+  readGenericOptionalColumnChunkPrim dispatchInt32 0
+{-# INLINE readGenericInt32OptionalColumnChunkNV #-}
+
+readGenericInt64OptionalColumnChunkNV
+  :: Compression -> Int -> Int -> ByteString
+  -> Either String (AC.NullableView Int64)
+readGenericInt64OptionalColumnChunkNV =
+  readGenericOptionalColumnChunkPrim dispatchInt64 0
+{-# INLINE readGenericInt64OptionalColumnChunkNV #-}
+
+readGenericFloatOptionalColumnChunkNV
+  :: Compression -> Int -> Int -> ByteString
+  -> Either String (AC.NullableView Float)
+readGenericFloatOptionalColumnChunkNV =
+  readGenericOptionalColumnChunkPrim dispatchFloat 0
+{-# INLINE readGenericFloatOptionalColumnChunkNV #-}
+
+readGenericDoubleOptionalColumnChunkNV
+  :: Compression -> Int -> Int -> ByteString
+  -> Either String (AC.NullableView Double)
+readGenericDoubleOptionalColumnChunkNV =
+  readGenericOptionalColumnChunkPrim dispatchDouble 0
+{-# INLINE readGenericDoubleOptionalColumnChunkNV #-}
+
+-- | Primitive (Storable + Prim) optional column reader. Walks
+-- pages, per page calls 'materialiseOptionalPagePrim' which
+-- writes directly into 'VS.MVector' / 'VUM.MVector' buffers,
+-- then concatenates the per-page validity + values vectors at
+-- the end.
+--
+-- @sentinel@ is the byte pattern written into 'nvValues' for
+-- null slots; readers must check 'nvValidity' before consuming
+-- the value (the bridge always does).
+readGenericOptionalColumnChunkPrim
+  :: forall a.
+     (VS.Storable a, VP.Prim a)
+  => PerPage (VP.Vector a)
+  -> a
+  -> Compression -> Int -> Int -> ByteString
+  -> Either String (AC.NullableView a)
+readGenericOptionalColumnChunkPrim pp sentinel codec maxRep maxDef chunk0 = do
+  pagesRev <- go 0 Nothing []
+  case pagesRev of
+    []        -> Right (AC.NullableView VU.empty VS.empty)
+    [(b, vs)] -> Right (AC.NullableView b vs)
+    ps        ->
+      -- Reverse the page list (built in encounter order
+      -- via cons + reverse — same shape as the existing
+      -- readers) and concat once. VU.concat / VS.concat
+      -- both allocate exactly the total length and copy in
+      -- a single linear pass.
+      let !ordered = reverse ps
+          !validity = VU.concat (map fst ordered)
+          !values   = VS.concat (map snd ordered)
+      in Right (AC.NullableView validity values)
+  where
+    go !off !mDict !acc
+      | off >= BS.length chunk0 = Right acc
+      | otherwise = do
+          (hdr, afterHdr) <- readPageHeaderAt chunk0 off
+          compSz <- case phCompressedPageSize hdr of
+            Nothing -> Left "Parquet.Read: missing compressed_page_size"
+            Just s  -> Right (fromIntegral s :: Int)
+          let !bodyStart = afterHdr
+          if bodyStart + compSz > BS.length chunk0
+            then Left "Parquet.Read: truncated page body"
+            else do
+              let !compBody = BS.take compSz (BS.drop bodyStart chunk0)
+                  !nextOff = bodyStart + compSz
+              case phType hdr of
+                PtDictionaryPage dk
+                  | not (dictEncoding dk == encPlain || dictEncoding dk == encPlainDictionary) ->
+                      Left "Parquet.Read: dictionary page encoding is neither PLAIN (0) nor PLAIN_DICTIONARY (2)"
+                  | otherwise -> do
+                      raw <- decompressPageData codec
+                               (phUncompressedPageSize hdr) compBody
+                      let !nDict = fromIntegral (dictNumValues dk) :: Int
+                      dict <- ppDecodePlain pp nDict raw
+                      go nextOff (Just dict) acc
+                PtDataPage dph -> do
+                  raw <- decompressPageData codec
+                           (phUncompressedPageSize hdr) compBody
+                  let !nVals = fromIntegral (dphNumValues dph) :: Int
+                  (_rep, def, valBytes) <-
+                    parseDataPageV1Levels maxRep maxDef nVals raw
+                  page <- materialiseOptionalPagePrim pp sentinel mDict
+                            (dphEncoding dph) maxDef def valBytes
+                  go nextOff mDict (page : acc)
+                PtDataPageV2 dph2 -> do
+                  let !repLen = fromIntegral (dph2RepLevelsLen dph2) :: Int
+                      !defLen = fromIntegral (dph2DefLevelsLen dph2) :: Int
+                      !levelsLen = repLen + defLen
+                      !body = compBody
+                  if levelsLen > BS.length body
+                    then Left "Parquet.Read: V2 levels exceed body size"
+                    else do
+                      let !defBs = BS.take defLen (BS.drop repLen body)
+                          !valuesSection = BS.drop levelsLen body
+                          !nVals = fromIntegral (dph2NumValues dph2) :: Int
+                          !bwDef = levelBitWidth maxDef
+                      values <- if dph2IsCompressed dph2
+                        then decompressPageData codec
+                               (phUncompressedPageSize hdr) valuesSection
+                        else Right valuesSection
+                      def <- if defLen == 0
+                        then Right (VP.replicate nVals 0)
+                        else decodeHybridRleUnsigned32 bwDef nVals defBs
+                      page <- materialiseOptionalPagePrim pp sentinel mDict
+                                (dph2Encoding dph2) maxDef def values
+                      go nextOff mDict (page : acc)
+                _ -> Left "Parquet.Read: expected DATA_PAGE / DATA_PAGE_V2 / DICTIONARY_PAGE"
+
+-- | Per-page flat-shape optional materialiser.
+--
+-- Decodes the defined values once into the 'PerPage' vector
+-- type (typically 'VP.Vector a'), then walks the def-level
+-- vector once and writes each slot of the output buffers in
+-- order:
+--
+--   * @validity[i] = (def[i] == maxDef)@
+--   * @values[i]   = defined[j]@ when valid (and @j@
+--     advances), else @sentinel@.
+--
+-- Two mutable buffers (one VS, one VU) of size @n@ are
+-- allocated once per page and frozen immediately. No 'Maybe'
+-- boxing.
+materialiseOptionalPagePrim
+  :: forall a.
+     (VS.Storable a, VP.Prim a)
+  => PerPage (VP.Vector a)
+  -> a
+  -> Maybe (VP.Vector a)
+  -> Int32           -- ^ @encoding@ value from the page header
+  -> Int             -- ^ max definition level (Int form for the level walk)
+  -> VP.Vector Int32 -- ^ definition levels
+  -> ByteString      -- ^ encoded values
+  -> Either String (VU.Vector Bit, VS.Vector a)
+materialiseOptionalPagePrim pp sentinel mDict !enc !maxDef def valBytes = do
+  let !maxD = fromIntegral maxDef :: Int32
+      !n    = VP.length def
+      !nDef = VP.foldl' (\a d -> if d == maxD then a + 1 else a) 0 def
+  defined <-
+    if enc == encPlain
+      then ppDecodePlain pp nDef valBytes
+      else if isDictionaryEncoding enc
+        then case mDict of
+          Nothing ->
+            Left "Parquet.Read: RLE_DICTIONARY page before dictionary page"
+          Just dict -> do
+            indices <- decodeDictionaryIndices nDef valBytes
+            ppDecodeDictIndices pp nDef valBytes dict indices
+        else ppExtended pp enc nDef valBytes
+  Right $! runST $ do
+    valM <- VSM.unsafeNew n
+    bitM <- VUM.unsafeNew n
+    let go !i !j
+          | i >= n = pure ()
+          | VP.unsafeIndex def i == maxD = do
+              VUM.unsafeWrite bitM i (Bit True)
+              VSM.unsafeWrite valM i (VP.unsafeIndex defined j)
+              go (i + 1) (j + 1)
+          | otherwise = do
+              VUM.unsafeWrite bitM i (Bit False)
+              VSM.unsafeWrite valM i sentinel
+              go (i + 1) j
+    go 0 0
+    !validity <- VU.unsafeFreeze bitM
+    !values   <- VS.unsafeFreeze valM
+    pure (validity, values)
 
 -- ============================================================
 -- Page-index-driven page skipping

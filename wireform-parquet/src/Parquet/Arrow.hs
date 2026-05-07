@@ -656,18 +656,20 @@ readParquetColumn pf rgIdx colIdx fld = do
     -- returns @V.Vector (Maybe a)@; we lift to NullableView at
     -- the bridge with a sentinel of 0 for the null slots
     -- (consumers must check the validity bitmap before reading).
+    -- Nullable primitives go through the flat-shape NV readers:
+    -- per-page validity bits and dense storable values are
+    -- written straight into VS / VU buffers and concatenated
+    -- across pages with VS.concat / VU.concat. No
+    -- V.Vector (Maybe a) intermediate, no per-row Just/Nothing
+    -- box, no second walk through 'nvFromMaybeVector'.
     AT.AInt 32 True | nullable ->
-      AC.ColInt32Maybe . AC.nvFromMaybeVector 0
-        <$> PR.readGenericInt32OptionalColumnChunk codec 0 1 chunk
+      AC.ColInt32Maybe <$> PR.readGenericInt32OptionalColumnChunkNV codec 0 1 chunk
     AT.AInt 64 True | nullable ->
-      AC.ColInt64Maybe . AC.nvFromMaybeVector 0
-        <$> PR.readGenericInt64OptionalColumnChunk codec 0 1 chunk
+      AC.ColInt64Maybe <$> PR.readGenericInt64OptionalColumnChunkNV codec 0 1 chunk
     AT.AFloatingPoint AT.Single | nullable ->
-      AC.ColFloatMaybe . AC.nvFromMaybeVector 0
-        <$> PR.readGenericFloatOptionalColumnChunk codec 0 1 chunk
+      AC.ColFloatMaybe <$> PR.readGenericFloatOptionalColumnChunkNV codec 0 1 chunk
     AT.AFloatingPoint AT.DoublePrecision | nullable ->
-      AC.ColDoubleMaybe . AC.nvFromMaybeVector 0
-        <$> PR.readGenericDoubleOptionalColumnChunk codec 0 1 chunk
+      AC.ColDoubleMaybe <$> PR.readGenericDoubleOptionalColumnChunkNV codec 0 1 chunk
     AT.ABool | nullable ->
       AC.ColBoolMaybe . AV.nullableBoolViewFromMaybeVector
         <$> PR.readGenericBoolOptionalColumnChunk codec 0 1 chunk
@@ -678,24 +680,20 @@ readParquetColumn pf rgIdx colIdx fld = do
     AT.ABinary | nullable ->
       AC.ColBinaryMaybe . AV.nullableBinaryViewFromMaybeVector
         <$> PR.readGenericByteArrayOptionalColumnChunk codec 0 1 chunk
+    -- Same NV-flat fast path for nullable temporals — these
+    -- all carry an underlying Int32 or Int64 stream.
     AT.ADate AT.DateDay | nullable ->
-      AC.ColDate32Maybe . AC.nvFromMaybeVector 0
-        <$> PR.readGenericInt32OptionalColumnChunk codec 0 1 chunk
+      AC.ColDate32Maybe <$> PR.readGenericInt32OptionalColumnChunkNV codec 0 1 chunk
     AT.ADate AT.DateMillisecond | nullable ->
-      AC.ColDate64Maybe . AC.nvFromMaybeVector 0
-        <$> PR.readGenericInt64OptionalColumnChunk codec 0 1 chunk
+      AC.ColDate64Maybe <$> PR.readGenericInt64OptionalColumnChunkNV codec 0 1 chunk
     AT.ATime _ 32 | nullable ->
-      AC.ColTime32Maybe . AC.nvFromMaybeVector 0
-        <$> PR.readGenericInt32OptionalColumnChunk codec 0 1 chunk
+      AC.ColTime32Maybe <$> PR.readGenericInt32OptionalColumnChunkNV codec 0 1 chunk
     AT.ATime _ 64 | nullable ->
-      AC.ColTime64Maybe . AC.nvFromMaybeVector 0
-        <$> PR.readGenericInt64OptionalColumnChunk codec 0 1 chunk
+      AC.ColTime64Maybe <$> PR.readGenericInt64OptionalColumnChunkNV codec 0 1 chunk
     AT.ATimestamp _ _ | nullable ->
-      AC.ColTimestampMaybe . AC.nvFromMaybeVector 0
-        <$> PR.readGenericInt64OptionalColumnChunk codec 0 1 chunk
+      AC.ColTimestampMaybe <$> PR.readGenericInt64OptionalColumnChunkNV codec 0 1 chunk
     AT.ADuration _ | nullable ->
-      AC.ColDurationMaybe . AC.nvFromMaybeVector 0
-        <$> PR.readGenericInt64OptionalColumnChunk codec 0 1 chunk
+      AC.ColDurationMaybe <$> PR.readGenericInt64OptionalColumnChunkNV codec 0 1 chunk
 
     other ->
       Left $ "Parquet.Arrow: column type "
