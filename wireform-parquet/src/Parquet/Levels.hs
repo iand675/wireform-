@@ -23,10 +23,13 @@ module Parquet.Levels
   , materializeRepeatedDouble
   , materializeRepeatedByteArray
   , materializeRepeatedByNested
+  , RepeatedColumn (..)
+  , RepeatedBinaryColumn (..)
   , NestedValue (..)
   ) where
 
 import Control.Monad.ST (ST, runST)
+import Control.Monad.ST.Unsafe (unsafeIOToST)
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
@@ -37,11 +40,21 @@ import Data.Text (Text)
 import qualified Data.Vector as V
 import qualified Data.Vector.Mutable as VM
 import qualified Data.Vector.Primitive as VP
-import Data.Word (Word32, Word64)
-import Foreign.Ptr (plusPtr)
+import qualified Data.Vector.Storable as VS
+import qualified Data.Vector.Storable.Mutable as VSM
+import qualified Data.Vector.Unboxed as VU
+import qualified Data.Vector.Unboxed.Mutable as VUM
+import Data.Word (Word8, Word32, Word64)
+import Foreign.Marshal.Utils (copyBytes)
+import Foreign.Ptr (castPtr, plusPtr)
 import Foreign.Storable (peekByteOff)
 import GHC.Float (castWord32ToFloat, castWord64ToDouble)
 import System.IO.Unsafe (unsafePerformIO)
+import Unsafe.Coerce (unsafeCoerce)
+
+import qualified Arrow.Column as AC
+import qualified Arrow.View as AV
+import Columnar.Bit (Bit (..))
 
 import Parquet.RLE (decodeHybridRleUnsigned32)
 import Parquet.Types (Repetition (..), SchemaElement (..))
@@ -356,70 +369,146 @@ findChild sch parent name = do
 --
 -- @rep=0@ starts a new top-level row. Within a row, @rep>0@ continues the same
 -- list. @def \< maxDef@ means the list element is null.
+-- | The arrow-rs @ListArray<T>@ shape for fixed-width
+-- repeated primitive columns.
+--
+-- Three buffers, all sized exactly:
+--
+--   * @rcOffsets@: 'VS.Vector Int32', size @rowCount + 1@.
+--     Row @i@ occupies leaf indices
+--     @rcOffsets[i] .. rcOffsets[i+1])@.
+--   * @rcValues@:  'AC.NullableView a', size @leafCount@.
+--     Validity bitmap + dense values; @rcValues[j]@ is null
+--     iff @validity[j]@ is unset.
+--
+-- Identical layout to Arrow's 'ColList' wrapping a
+-- 'ColInt32Maybe' (etc.). Replaces the previous nested
+-- @V.Vector (V.Vector (Maybe a))@ shape that allocated
+-- O(N) list cells + O(rowCount) inner @V.Vector@s; the new
+-- shape is one offsets allocation + one validity bitmap
+-- + one dense values buffer with no list cells in sight.
+data RepeatedColumn a = RepeatedColumn
+  { rcOffsets :: !(VS.Vector Int32)
+  , rcValues  :: !(AC.NullableView a)
+  } deriving stock (Show, Eq)
+
 materializeRepeatedInt32 ::
   VP.Vector Int32 ->
   VP.Vector Int32 ->
   Int ->
   ByteString ->
-  Either String (V.Vector (V.Vector (Maybe Int32)))
+  Either String (RepeatedColumn Int32)
 materializeRepeatedInt32 reps defs maxDef plain =
   materializeFixedWidth 4
     (\bs off -> fromIntegral (readLE32 bs off) :: Int32)
-    reps defs maxDef plain
+    0 reps defs maxDef plain
 
 -- | Materialize a repeated @BYTE_ARRAY@ column using repetition and definition levels.
+-- | Same arrow-rs @ListArray@ shape for variable-length
+-- @BYTE_ARRAY@ repeated columns. The leaf buffer is a
+-- 'AV.NullableBinaryView' (validity + Int32 offsets +
+-- contiguous data buffer); the outer offsets vector
+-- carves it into per-row slices.
+data RepeatedBinaryColumn = RepeatedBinaryColumn
+  { rbcOffsets :: !(VS.Vector Int32)
+  , rbcValues  :: !AV.NullableBinaryView
+  } deriving stock (Show, Eq)
+
 materializeRepeatedByteArray ::
   VP.Vector Int32 ->
   VP.Vector Int32 ->
   Int ->
   ByteString ->
-  Either String (V.Vector (V.Vector (Maybe ByteString)))
+  Either String RepeatedBinaryColumn
 materializeRepeatedByteArray reps defs maxDef plain
   | VP.length reps /= VP.length defs =
       Left "Parquet.Levels: rep/def level count mismatch"
-  | otherwise = case goRepBA [] 0 [] 0 0 0 of
-      Left e -> Left e
-      Right (rowsRev, !rowCount) ->
-        -- See 'materializeFixedWidth' for why this is one
-        -- outer V.fromListN instead of the previous nested
-        -- map (V.fromList . reverse) ...
-        Right $! V.fromListN rowCount (reverse rowsRev)
+  | otherwise = do
+      let !n        = VP.length reps
+          !maxD     = fromIntegral maxDef :: Int32
+          -- Pre-pass 1 (cheap, primitive): row count and
+          -- total byte count for the leaf data buffer.
+          !rowCount = VP.foldl'
+            (\acc r -> if r == 0 then acc + 1 else acc) 0 reps
+      totalBytes <- preScanBytes 0 0 0 n maxD
+      runST $ do
+        outerOffM <- VSM.unsafeNew (rowCount + 1)
+        leafOffM  <- VSM.unsafeNew (n + 1)
+        bitM      <- VUM.unsafeNew n
+        datM      <- VSM.unsafeNew totalBytes
+        let go !i !rowIdx !plainOff !cur
+              | i >= n = do
+                  VSM.unsafeWrite outerOffM rowCount (fromIntegral n :: Int32)
+                  VSM.unsafeWrite leafOffM  n        (fromIntegral cur :: Int32)
+                  pure (Right ())
+              | otherwise = do
+                  let !r = VP.unsafeIndex reps i
+                      !d = VP.unsafeIndex defs i
+                  rowIdx' <- if r == 0
+                    then do
+                      VSM.unsafeWrite outerOffM rowIdx (fromIntegral i :: Int32)
+                      pure (rowIdx + 1)
+                    else pure rowIdx
+                  if d == maxD
+                    then if plainOff + 4 > BS.length plain
+                           then pure (Left "Parquet.Levels: BYTE_ARRAY truncated length for repeated column")
+                           else do
+                             let !len = fromIntegral (readLE32 plain plainOff) :: Int
+                                 !off2 = plainOff + 4
+                             if len < 0 || off2 + len > BS.length plain
+                               then pure (Left "Parquet.Levels: BYTE_ARRAY payload out of bounds for repeated column")
+                               else do
+                                 VUM.unsafeWrite bitM i (Bit True)
+                                 VSM.unsafeWrite leafOffM i (fromIntegral cur :: Int32)
+                                 copyBSIntoMV datM cur
+                                   (BS.take len (BS.drop off2 plain))
+                                 go (i + 1) rowIdx' (off2 + len) (cur + len)
+                    else do
+                      VUM.unsafeWrite bitM i (Bit False)
+                      VSM.unsafeWrite leafOffM i (fromIntegral cur :: Int32)
+                      go (i + 1) rowIdx' plainOff cur
+        rR <- go 0 0 0 0
+        case rR of
+          Left e -> pure (Left e)
+          Right () -> do
+            !outerOffs <- VS.unsafeFreeze outerOffM
+            !leafOffs  <- VS.unsafeFreeze leafOffM
+            !validity  <- VU.unsafeFreeze bitM
+            !dat       <- VS.unsafeFreeze datM
+            pure $ Right $! RepeatedBinaryColumn
+              { rbcOffsets = outerOffs
+              , rbcValues  = AV.NullableBinaryView validity
+                               (AV.BinaryView leafOffs dat)
+              }
   where
-    !n = VP.length reps
-    !maxD = fromIntegral maxDef :: Int32
-
-    closeRow !curRowLen !curRow =
-      V.fromListN curRowLen (reverse curRow)
-
-    goRepBA :: [V.Vector (Maybe ByteString)] -> Int
-            -> [Maybe ByteString] -> Int -> Int -> Int
-            -> Either String ([V.Vector (Maybe ByteString)], Int)
-    goRepBA !rowsRev !nRows !curRow !curLen !i !off
-      | i >= n =
-          if curLen == 0
-            then Right (rowsRev, nRows)
-            else Right (closeRow curLen curRow : rowsRev, nRows + 1)
+    -- Two cheap primitive passes give us the exact total
+    -- byte count for the leaf data buffer; we then allocate
+    -- everything at the right size and fill in one shot.
+    preScanBytes !i !off !acc !n !maxD
+      | i >= n = Right acc
       | otherwise =
-          let !r = VP.unsafeIndex reps i
-              !d = VP.unsafeIndex defs i
-              (!rowsRev', !nRows', !curRow', !curLen')
-                | r == 0 && curLen > 0 =
-                    (closeRow curLen curRow : rowsRev, nRows + 1, [], 0)
-                | r == 0 =
-                    (rowsRev, nRows, [], 0)
-                | otherwise =
-                    (rowsRev, nRows, curRow, curLen)
+          let !d = VP.unsafeIndex defs i
           in if d == maxD
-               then
-                 if off + 4 > BS.length plain
-                   then Left "Parquet.Levels: BYTE_ARRAY truncated length for repeated column"
-                   else let !len = fromIntegral (readLE32 plain off) :: Int
+               then if off + 4 > BS.length plain
+                      then Left "Parquet.Levels: BYTE_ARRAY truncated length for repeated column"
+                      else
+                        let !len = fromIntegral (readLE32 plain off) :: Int
                             !off2 = off + 4
                         in if len < 0 || off2 + len > BS.length plain
                              then Left "Parquet.Levels: BYTE_ARRAY payload out of bounds for repeated column"
-                             else let !val = BS.take len (BS.drop off2 plain)
-                                  in goRepBA rowsRev' nRows' (Just val : curRow') (curLen' + 1) (i + 1) (off2 + len)
-               else goRepBA rowsRev' nRows' (Nothing : curRow') (curLen' + 1) (i + 1) off
+                             else preScanBytes (i + 1) (off2 + len) (acc + len) n maxD
+               else preScanBytes (i + 1) off acc n maxD
+
+    {-# INLINE copyBSIntoMV #-}
+    copyBSIntoMV :: VSM.MVector s Word8 -> Int -> ByteString -> ST s ()
+    copyBSIntoMV mv dstOff bs = unsafeIOToST $
+      VSM.unsafeWith (unsafeCoerceMV mv) $ \dstPtr ->
+        BSU.unsafeUseAsCStringLen bs $ \(srcPtr, srcLen) ->
+          copyBytes (castPtr (dstPtr `plusPtr` dstOff))
+                    (castPtr srcPtr) srcLen
+      where
+        unsafeCoerceMV :: VSM.MVector s Word8 -> VSM.IOVector Word8
+        unsafeCoerceMV = unsafeCoerce
 
 -- | Materialize a repeated @INT64@ column using repetition and definition levels.
 materializeRepeatedInt64 ::
@@ -427,9 +516,9 @@ materializeRepeatedInt64 ::
   VP.Vector Int32 ->
   Int ->
   ByteString ->
-  Either String (V.Vector (V.Vector (Maybe Int64)))
+  Either String (RepeatedColumn Int64)
 materializeRepeatedInt64 =
-  materializeFixedWidth 8 decodeI64
+  materializeFixedWidth 8 decodeI64 0
   where
     decodeI64 !bs !off = fromIntegral (readLE64 bs off) :: Int64
 
@@ -439,9 +528,9 @@ materializeRepeatedFloat ::
   VP.Vector Int32 ->
   Int ->
   ByteString ->
-  Either String (V.Vector (V.Vector (Maybe Float)))
+  Either String (RepeatedColumn Float)
 materializeRepeatedFloat =
-  materializeFixedWidth 4 (\bs off -> castWord32ToFloat (readLE32 bs off))
+  materializeFixedWidth 4 (\bs off -> castWord32ToFloat (readLE32 bs off)) 0
 
 -- | Materialize a repeated @DOUBLE@ column using repetition and definition levels.
 materializeRepeatedDouble ::
@@ -449,72 +538,78 @@ materializeRepeatedDouble ::
   VP.Vector Int32 ->
   Int ->
   ByteString ->
-  Either String (V.Vector (V.Vector (Maybe Double)))
+  Either String (RepeatedColumn Double)
 materializeRepeatedDouble =
-  materializeFixedWidth 8 (\bs off -> castWord64ToDouble (readLE64 bs off))
+  materializeFixedWidth 8 (\bs off -> castWord64ToDouble (readLE64 bs off)) 0
 
--- | Fixed-width primitive repeated materialiser. Walks rep/def
--- levels row-grouped and lifts the fixed-size on-disk slice at
--- @off@ via @decode bs off@ when @d == maxDef@.
+-- | Fixed-width primitive repeated materialiser, arrow-rs
+-- @ListArray@ shape.
+--
+-- Three pre-sized buffers: outer offsets ('VS.Vector Int32',
+-- size @rowCount + 1@), per-leaf validity bitmap
+-- ('VU.Vector Bit', size @leafCount = n@), dense values
+-- ('VS.Vector a', size @leafCount = n@; @sentinel@ at null
+-- positions). Single fused pass over reps + defs + plain
+-- writes everything in lockstep. No list cells, no nested
+-- @V.Vector@ allocations.
 materializeFixedWidth
-  :: Int
-  -> (ByteString -> Int -> a)
-  -> VP.Vector Int32
-  -> VP.Vector Int32
-  -> Int
-  -> ByteString
-  -> Either String (V.Vector (V.Vector (Maybe a)))
-materializeFixedWidth !w decode reps defs maxDef plain
+  :: VS.Storable a
+  => Int                       -- ^ element size in bytes
+  -> (ByteString -> Int -> a)  -- ^ decoder for one element
+  -> a                         -- ^ sentinel for null slots
+  -> VP.Vector Int32           -- ^ repetition levels
+  -> VP.Vector Int32           -- ^ definition levels
+  -> Int                       -- ^ max definition level
+  -> ByteString                -- ^ raw PLAIN values
+  -> Either String (RepeatedColumn a)
+materializeFixedWidth !w decode sentinel reps defs maxDef plain
   | VP.length reps /= VP.length defs =
       Left "Parquet.Levels: rep/def level count mismatch"
-  | otherwise = case go [] 0 [] 0 0 0 of
-      Left e -> Left e
-      Right (rowsRev, !rowCount) ->
-        -- One outer pass: each row was already closed into a
-        -- V.Vector via 'closeRow', so we just need to reverse
-        -- + materialise the outer cons-list. Previous shape
-        -- did N reverses + N V.fromList's + an outer reverse
-        -- + an outer V.fromList, all post-loop.
-        Right $! V.fromListN rowCount (reverse rowsRev)
-  where
-    !n = VP.length reps
-    !maxD = fromIntegral maxDef :: Int32
-
-    -- 'closeRow' freezes the cons-list (which is in /reverse/
-    -- collection order) into a V.Vector. We track the row
-    -- length explicitly so V.fromListN can pre-allocate
-    -- exactly the right size with no growth.
-    closeRow !curRowLen !curRow =
-      V.fromListN curRowLen (reverse curRow)
-
-    -- @rowsRev@ : list of finished V.Vector rows in reverse order
-    -- @nRows@   : finished row count
-    -- @curRow@  : current row's elements in reverse order
-    -- @curLen@  : current row length
-    go !rowsRev !nRows !curRow !curLen !i !off
-      | i >= n =
-          if curLen == 0
-            then Right (rowsRev, nRows)
-            else Right (closeRow curLen curRow : rowsRev, nRows + 1)
-      | otherwise =
-          let !r = VP.unsafeIndex reps i
-              !d = VP.unsafeIndex defs i
-              -- @r == 0@ starts a new top-level row; close
-              -- the in-progress one (if any) first.
-              (!rowsRev', !nRows', !curRow', !curLen')
-                | r == 0 && curLen > 0 =
-                    (closeRow curLen curRow : rowsRev, nRows + 1, [], 0)
-                | r == 0 =
-                    (rowsRev, nRows, [], 0)
-                | otherwise =
-                    (rowsRev, nRows, curRow, curLen)
-          in if d == maxD
-               then
-                 if off + w > BS.length plain
-                   then Left "Parquet.Levels: PLAIN buffer too small for repeated column"
-                   else let !v = decode plain off
-                        in go rowsRev' nRows' (Just v : curRow') (curLen' + 1) (i + 1) (off + w)
-               else go rowsRev' nRows' (Nothing : curRow') (curLen' + 1) (i + 1) off
+  | otherwise =
+      let !n        = VP.length reps
+          !maxD     = fromIntegral maxDef :: Int32
+          -- Pre-pass: row count = #(rep == 0). One primitive
+          -- scan over reps; cache-friendly + branch-predictable.
+          !rowCount = VP.foldl'
+            (\acc r -> if r == 0 then acc + 1 else acc) 0 reps
+      in runST $ do
+           offM <- VSM.unsafeNew (rowCount + 1)
+           bitM <- VUM.unsafeNew n
+           valM <- VSM.unsafeNew n
+           let go !i !rowIdx !plainOff
+                 | i >= n = do
+                     VSM.unsafeWrite offM rowCount (fromIntegral n :: Int32)
+                     pure (Right ())
+                 | otherwise = do
+                     let !r = VP.unsafeIndex reps i
+                         !d = VP.unsafeIndex defs i
+                     rowIdx' <- if r == 0
+                       then do
+                         VSM.unsafeWrite offM rowIdx (fromIntegral i :: Int32)
+                         pure (rowIdx + 1)
+                       else pure rowIdx
+                     if d == maxD
+                       then if plainOff + w > BS.length plain
+                              then pure (Left "Parquet.Levels: PLAIN buffer too small for repeated column")
+                              else do
+                                VUM.unsafeWrite bitM i (Bit True)
+                                VSM.unsafeWrite valM i (decode plain plainOff)
+                                go (i + 1) rowIdx' (plainOff + w)
+                       else do
+                         VUM.unsafeWrite bitM i (Bit False)
+                         VSM.unsafeWrite valM i sentinel
+                         go (i + 1) rowIdx' plainOff
+           rR <- go 0 0 0
+           case rR of
+             Left e -> pure (Left e)
+             Right () -> do
+               !offs     <- VS.unsafeFreeze offM
+               !validity <- VU.unsafeFreeze bitM
+               !values   <- VS.unsafeFreeze valM
+               pure $ Right $! RepeatedColumn
+                 { rcOffsets = offs
+                 , rcValues  = AC.NullableView validity values
+                 }
 
 -- | Decode a column with arbitrary repetition depth (i.e. nested
 -- @LIST<LIST<…<T>>>@) using the standard Dremel reconstruction

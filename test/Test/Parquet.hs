@@ -7,6 +7,9 @@ import qualified Data.Text as T
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
 import qualified Data.Vector.Storable as VS
+import qualified Data.Vector.Unboxed as VU
+import qualified Arrow.Column as AC
+import Columnar.Bit (Bit (..))
 import Hedgehog
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
@@ -36,6 +39,7 @@ import Parquet.Levels
   , materializeRepeatedFloat
   , materializeRepeatedInt32
   , materializeRepeatedInt64
+  , RepeatedColumn (..)
   , maxLevelsForColumnPath
   , parseDataPageV1Levels
   )
@@ -186,11 +190,15 @@ levelsAndSchemaTests = testGroup "Levels + schema max levels"
             , 0x14, 0x00, 0x00, 0x00  -- 20
             , 0x1E, 0x00, 0x00, 0x00  -- 30
             ]
+      -- arrow-rs ListArray shape: outer offsets carve the
+      -- leaf NullableView into per-row slices.
       materializeRepeatedInt32 reps defs 1 plain
-        @?= Right (V.fromList
-              [ V.fromList [Just 10, Just 20]
-              , V.fromList [Just 30]
-              ])
+        @?= Right (RepeatedColumn
+              { rcOffsets = VS.fromList [0, 2, 3]
+              , rcValues  = AC.NullableView
+                              (VU.fromList [Bit True, Bit True, Bit True])
+                              (VS.fromList [10, 20, 30])
+              })
   , testCase "materializeRepeatedInt64 with null element" $ do
       let reps = VP.fromList [(0 :: Int32), 1, 0]
           defs = VP.fromList [(1 :: Int32), 0, 1]
@@ -199,10 +207,12 @@ levelsAndSchemaTests = testGroup "Levels + schema max levels"
             , 0xD0, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  -- 2000
             ]
       materializeRepeatedInt64 reps defs 1 plain
-        @?= Right (V.fromList
-              [ V.fromList [Just 1000, Nothing]
-              , V.fromList [Just 2000]
-              ])
+        @?= Right (RepeatedColumn
+              { rcOffsets = VS.fromList [0, 2, 3]
+              , rcValues  = AC.NullableView
+                              (VU.fromList [Bit True, Bit False, Bit True])
+                              (VS.fromList [1000, 0, 2000])
+              })
   , testCase "materializeRepeatedFloat single row" $ do
       let reps = VP.fromList [(0 :: Int32), 1]
           defs = VP.replicate 2 (1 :: Int32)
@@ -212,7 +222,12 @@ levelsAndSchemaTests = testGroup "Levels + schema max levels"
             , 0x00, 0x00, 0x00, 0x40
             ]
       materializeRepeatedFloat reps defs 1 plain
-        @?= Right (V.singleton (V.fromList [Just 1.0, Just 2.0]))
+        @?= Right (RepeatedColumn
+              { rcOffsets = VS.fromList [0, 2]
+              , rcValues  = AC.NullableView
+                              (VU.fromList [Bit True, Bit True])
+                              (VS.fromList [1.0, 2.0])
+              })
   , testCase "materializeRepeatedDouble single row" $ do
       let reps = VP.fromList [(0 :: Int32)]
           defs = VP.replicate 1 (1 :: Int32)
@@ -220,7 +235,12 @@ levelsAndSchemaTests = testGroup "Levels + schema max levels"
           plain = BS.pack
             [ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF8, 0x3F ]
       materializeRepeatedDouble reps defs 1 plain
-        @?= Right (V.singleton (V.singleton (Just 1.5)))
+        @?= Right (RepeatedColumn
+              { rcOffsets = VS.fromList [0, 1]
+              , rcValues  = AC.NullableView
+                              (VU.fromList [Bit True])
+                              (VS.fromList [1.5])
+              })
   , testCase "materializeRepeatedByNested 2-deep LIST<LIST<int32>>" $ do
       -- Two top-level rows:
       --   row 0 = [[10, 20], [30]]
