@@ -671,15 +671,21 @@ readParquetColumn pf rgIdx colIdx fld = do
     AT.AFloatingPoint AT.DoublePrecision | nullable ->
       AC.ColDoubleMaybe <$> PR.readGenericDoubleOptionalColumnChunkNV codec 0 1 chunk
     AT.ABool | nullable ->
-      AC.ColBoolMaybe . AV.nullableBoolViewFromMaybeVector
-        <$> PR.readGenericBoolOptionalColumnChunk codec 0 1 chunk
+      -- Same NV fast path: writes validity bits + value bits
+      -- straight into bit-packed VU buffers as the page is
+      -- decoded; no V.Vector (Maybe Bool), no per-row pointer.
+      AC.ColBoolMaybe <$> PR.readGenericBoolOptionalColumnChunkNV codec 0 1 chunk
     AT.AUtf8 | nullable -> do
-      bs <- PR.readGenericByteArrayOptionalColumnChunk codec 0 1 chunk
-      Right $ AC.ColUtf8Maybe
-        (AV.nullableUtf8ViewFromMaybeVector (V.map (fmap decodeUtf8Lossy) bs))
+      -- NV path: per-page builder writes validity, offsets,
+      -- and contiguous data bytes straight into the
+      -- NullableBinaryView buffers. Reinterpret the
+      -- resulting binary view as a UTF-8 view (zero copy --
+      -- both wrap the same offsets + data buffers).
+      nbv <- PR.readGenericByteArrayOptionalColumnChunkNV codec 0 1 chunk
+      Right $ AC.ColUtf8Maybe (AV.nullableBinaryToUtf8View nbv)
     AT.ABinary | nullable ->
-      AC.ColBinaryMaybe . AV.nullableBinaryViewFromMaybeVector
-        <$> PR.readGenericByteArrayOptionalColumnChunk codec 0 1 chunk
+      AC.ColBinaryMaybe
+        <$> PR.readGenericByteArrayOptionalColumnChunkNV codec 0 1 chunk
     -- Same NV-flat fast path for nullable temporals — these
     -- all carry an underlying Int32 or Int64 stream.
     AT.ADate AT.DateDay | nullable ->

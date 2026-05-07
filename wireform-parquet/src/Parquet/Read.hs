@@ -109,6 +109,8 @@ module Parquet.Read
   , readGenericInt64OptionalColumnChunkNV
   , readGenericFloatOptionalColumnChunkNV
   , readGenericDoubleOptionalColumnChunkNV
+  , readGenericBoolOptionalColumnChunkNV
+  , readGenericByteArrayOptionalColumnChunkNV
     -- * Page-index-driven page skipping
   , readGenericInt32SelectedPages
   , readGenericInt64SelectedPages
@@ -143,7 +145,14 @@ import qualified Data.Vector.Storable.Mutable as VSM
 import qualified Data.Vector.Unboxed as VU
 import qualified Data.Vector.Unboxed.Mutable as VUM
 import qualified Arrow.Column as AC
+import qualified Arrow.View as AV
 import Columnar.Bit (Bit (..))
+import qualified Data.ByteString.Unsafe as BSU
+import Control.Monad.ST.Unsafe (unsafeIOToST)
+import Foreign.Ptr (castPtr, plusPtr)
+import Foreign.Marshal.Utils (copyBytes)
+import Data.Word (Word8)
+import Unsafe.Coerce (unsafeCoerce)
 import Data.Text (Text)
 import qualified Data.Text.Array as TA
 import qualified Data.Text.Encoding as TE
@@ -2002,6 +2011,348 @@ materialiseOptionalPagePrim pp sentinel mDict !enc !maxDef def valBytes = do
     !validity <- VU.unsafeFreeze bitM
     !values   <- VS.unsafeFreeze valM
     pure (validity, values)
+
+-- | Bool variant of 'readGenericOptionalColumnChunkPrim': both
+-- validity and values are bit-packed @VU.Vector Bit@. Per page
+-- the decoded boolean payload still arrives as a boxed
+-- @V.Vector Bool@ (that's what 'dispatchBool' produces, since
+-- the existing PerPage shape is monomorphic on a single chunk
+-- type), but we do the boxed-to-bit-packed copy in the same
+-- pass that interleaves validity, so the boxed vector dies
+-- before the page write returns. No persistent
+-- @V.Vector (Maybe Bool)@ in the pipeline.
+readGenericBoolOptionalColumnChunkNV
+  :: Compression -> Int -> Int -> ByteString
+  -> Either String AV.NullableBoolView
+readGenericBoolOptionalColumnChunkNV codec maxRep maxDef chunk0 = do
+  pagesRev <- go 0 Nothing []
+  case pagesRev of
+    []        -> Right (AV.NullableBoolView VU.empty VU.empty)
+    [(b, vs)] -> Right (AV.NullableBoolView b vs)
+    ps        ->
+      let !ordered = reverse ps
+          !validity = VU.concat (map fst ordered)
+          !values   = VU.concat (map snd ordered)
+      in Right (AV.NullableBoolView validity values)
+  where
+    pp = dispatchBool
+
+    go !off !mDict !acc
+      | off >= BS.length chunk0 = Right acc
+      | otherwise = do
+          (hdr, afterHdr) <- readPageHeaderAt chunk0 off
+          compSz <- case phCompressedPageSize hdr of
+            Nothing -> Left "Parquet.Read: missing compressed_page_size"
+            Just s  -> Right (fromIntegral s :: Int)
+          let !bodyStart = afterHdr
+          if bodyStart + compSz > BS.length chunk0
+            then Left "Parquet.Read: truncated page body"
+            else do
+              let !compBody = BS.take compSz (BS.drop bodyStart chunk0)
+                  !nextOff = bodyStart + compSz
+              case phType hdr of
+                PtDictionaryPage _ ->
+                  -- BOOLEAN columns aren't dictionary-encoded
+                  -- in practice; skip and let the data pages
+                  -- proceed without a dictionary.
+                  go nextOff mDict acc
+                PtDataPage dph -> do
+                  raw <- decompressPageData codec
+                           (phUncompressedPageSize hdr) compBody
+                  let !nVals = fromIntegral (dphNumValues dph) :: Int
+                  (_rep, def, valBytes) <-
+                    parseDataPageV1Levels maxRep maxDef nVals raw
+                  page <- materialiseOptionalPageBool pp mDict
+                            (dphEncoding dph) maxDef def valBytes
+                  go nextOff mDict (page : acc)
+                PtDataPageV2 dph2 -> do
+                  let !repLen = fromIntegral (dph2RepLevelsLen dph2) :: Int
+                      !defLen = fromIntegral (dph2DefLevelsLen dph2) :: Int
+                      !levelsLen = repLen + defLen
+                      !body = compBody
+                  if levelsLen > BS.length body
+                    then Left "Parquet.Read: V2 levels exceed body size"
+                    else do
+                      let !defBs = BS.take defLen (BS.drop repLen body)
+                          !valuesSection = BS.drop levelsLen body
+                          !nVals = fromIntegral (dph2NumValues dph2) :: Int
+                          !bwDef = levelBitWidth maxDef
+                      values <- if dph2IsCompressed dph2
+                        then decompressPageData codec
+                               (phUncompressedPageSize hdr) valuesSection
+                        else Right valuesSection
+                      def <- if defLen == 0
+                        then Right (VP.replicate nVals 0)
+                        else decodeHybridRleUnsigned32 bwDef nVals defBs
+                      page <- materialiseOptionalPageBool pp mDict
+                                (dph2Encoding dph2) maxDef def values
+                      go nextOff mDict (page : acc)
+                _ -> Left "Parquet.Read: expected DATA_PAGE / DATA_PAGE_V2 / DICTIONARY_PAGE"
+
+materialiseOptionalPageBool
+  :: PerPage (V.Vector Bool)
+  -> Maybe (V.Vector Bool)
+  -> Int32
+  -> Int
+  -> VP.Vector Int32
+  -> ByteString
+  -> Either String (VU.Vector Bit, VU.Vector Bit)
+materialiseOptionalPageBool pp mDict !enc !maxDef def valBytes = do
+  let !maxD = fromIntegral maxDef :: Int32
+      !n    = VP.length def
+      !nDef = VP.foldl' (\a d -> if d == maxD then a + 1 else a) 0 def
+  defined <-
+    if enc == encPlain
+      then ppDecodePlain pp nDef valBytes
+      else if isDictionaryEncoding enc
+        then case mDict of
+          Nothing ->
+            Left "Parquet.Read: RLE_DICTIONARY page before dictionary page"
+          Just dict -> do
+            indices <- decodeDictionaryIndices nDef valBytes
+            ppDecodeDictIndices pp nDef valBytes dict indices
+        else ppExtended pp enc nDef valBytes
+  Right $! runST $ do
+    valM <- VUM.unsafeNew n
+    bitM <- VUM.unsafeNew n
+    let go !i !j
+          | i >= n = pure ()
+          | VP.unsafeIndex def i == maxD = do
+              VUM.unsafeWrite bitM i (Bit True)
+              VUM.unsafeWrite valM i (Bit (V.unsafeIndex defined j))
+              go (i + 1) (j + 1)
+          | otherwise = do
+              VUM.unsafeWrite bitM i (Bit False)
+              VUM.unsafeWrite valM i (Bit False)
+              go (i + 1) j
+    go 0 0
+    !validity <- VU.unsafeFreeze bitM
+    !values   <- VU.unsafeFreeze valM
+    pure (validity, values)
+
+-- | ByteArray (UTF-8 / binary) variant. Per page emits a
+-- fully-formed 'NullableBinaryView': validity bits + Int32
+-- offsets + a single contiguous data buffer. The decoded
+-- @V.Vector ByteString@ for the page is consumed in-pass:
+-- we walk @def@ once, computing offsets cumulatively and
+-- copying the per-row bytes into a single pre-allocated
+-- 'ByteString' buffer of the known total size. No
+-- @V.Vector (Maybe ByteString)@ ever exists.
+--
+-- Across pages we then build the chunk-level
+-- 'NullableBinaryView' by:
+--
+--   * VU.concat'ing the per-page validity bitmaps.
+--   * Concatenating the per-page data buffers and rewriting
+--     each page's offsets to be relative to the chunk-level
+--     buffer.
+--
+-- The rewrite is just an addition of a per-page base offset
+-- to each entry, done once into a fresh VS buffer.
+readGenericByteArrayOptionalColumnChunkNV
+  :: Compression -> Int -> Int -> ByteString
+  -> Either String AV.NullableBinaryView
+readGenericByteArrayOptionalColumnChunkNV codec maxRep maxDef chunk0 = do
+  pagesRev <- go 0 Nothing []
+  case pagesRev of
+    []   -> Right (AV.NullableBinaryView VU.empty
+                    (AV.BinaryView (VS.singleton 0) VS.empty))
+    [p]  -> Right p
+    pgs  ->
+      -- Stitch pages: total slot count = sum of per-page
+      -- slot counts; total data bytes = sum of per-page
+      -- data lengths. Allocate the offset + data buffers
+      -- once and copy each page in.
+      Right $! concatNullableBinaryPages (reverse pgs)
+  where
+    pp = dispatchByteArray
+
+    go !off !mDict !acc
+      | off >= BS.length chunk0 = Right acc
+      | otherwise = do
+          (hdr, afterHdr) <- readPageHeaderAt chunk0 off
+          compSz <- case phCompressedPageSize hdr of
+            Nothing -> Left "Parquet.Read: missing compressed_page_size"
+            Just s  -> Right (fromIntegral s :: Int)
+          let !bodyStart = afterHdr
+          if bodyStart + compSz > BS.length chunk0
+            then Left "Parquet.Read: truncated page body"
+            else do
+              let !compBody = BS.take compSz (BS.drop bodyStart chunk0)
+                  !nextOff = bodyStart + compSz
+              case phType hdr of
+                PtDictionaryPage dk
+                  | not (dictEncoding dk == encPlain || dictEncoding dk == encPlainDictionary) ->
+                      Left "Parquet.Read: dictionary page encoding is neither PLAIN (0) nor PLAIN_DICTIONARY (2)"
+                  | otherwise -> do
+                      raw <- decompressPageData codec
+                               (phUncompressedPageSize hdr) compBody
+                      let !nDict = fromIntegral (dictNumValues dk) :: Int
+                      dict <- ppDecodePlain pp nDict raw
+                      go nextOff (Just dict) acc
+                PtDataPage dph -> do
+                  raw <- decompressPageData codec
+                           (phUncompressedPageSize hdr) compBody
+                  let !nVals = fromIntegral (dphNumValues dph) :: Int
+                  (_rep, def, valBytes) <-
+                    parseDataPageV1Levels maxRep maxDef nVals raw
+                  page <- materialiseOptionalPageBA pp mDict
+                            (dphEncoding dph) maxDef def valBytes
+                  go nextOff mDict (page : acc)
+                PtDataPageV2 dph2 -> do
+                  let !repLen = fromIntegral (dph2RepLevelsLen dph2) :: Int
+                      !defLen = fromIntegral (dph2DefLevelsLen dph2) :: Int
+                      !levelsLen = repLen + defLen
+                      !body = compBody
+                  if levelsLen > BS.length body
+                    then Left "Parquet.Read: V2 levels exceed body size"
+                    else do
+                      let !defBs = BS.take defLen (BS.drop repLen body)
+                          !valuesSection = BS.drop levelsLen body
+                          !nVals = fromIntegral (dph2NumValues dph2) :: Int
+                          !bwDef = levelBitWidth maxDef
+                      values <- if dph2IsCompressed dph2
+                        then decompressPageData codec
+                               (phUncompressedPageSize hdr) valuesSection
+                        else Right valuesSection
+                      def <- if defLen == 0
+                        then Right (VP.replicate nVals 0)
+                        else decodeHybridRleUnsigned32 bwDef nVals defBs
+                      page <- materialiseOptionalPageBA pp mDict
+                                (dph2Encoding dph2) maxDef def values
+                      go nextOff mDict (page : acc)
+                _ -> Left "Parquet.Read: expected DATA_PAGE / DATA_PAGE_V2 / DICTIONARY_PAGE"
+
+-- | Per-page builder for the ByteArray flat-shape variant.
+-- Walks @def@ twice: once to compute the page's total data-
+-- buffer size + the validity bitmap (cheap, primitive), then
+-- once to write offsets and copy bytes in lockstep.
+materialiseOptionalPageBA
+  :: PerPage (V.Vector ByteString)
+  -> Maybe (V.Vector ByteString)
+  -> Int32
+  -> Int
+  -> VP.Vector Int32
+  -> ByteString
+  -> Either String AV.NullableBinaryView
+materialiseOptionalPageBA pp mDict !enc !maxDef def valBytes = do
+  let !maxD = fromIntegral maxDef :: Int32
+      !n    = VP.length def
+      !nDef = VP.foldl' (\a d -> if d == maxD then a + 1 else a) 0 def
+  defined <-
+    if enc == encPlain
+      then ppDecodePlain pp nDef valBytes
+      else if isDictionaryEncoding enc
+        then case mDict of
+          Nothing ->
+            Left "Parquet.Read: RLE_DICTIONARY page before dictionary page"
+          Just dict -> do
+            indices <- decodeDictionaryIndices nDef valBytes
+            ppDecodeDictIndices pp nDef valBytes dict indices
+        else ppExtended pp enc nDef valBytes
+  -- Pre-pass: total bytes across the defined values; gives
+  -- us the data-buffer size up front so the value buffer is
+  -- a single VS.unsafeNew (no resizing).
+  let !totalBytes = V.foldl' (\acc bs -> acc + BS.length bs) 0 defined
+  Right $! runST $ do
+    bitM  <- VUM.unsafeNew n
+    offM  <- VSM.unsafeNew (n + 1)
+    datM  <- VSM.unsafeNew totalBytes
+    let go !i !j !curOff
+          | i >= n = do
+              VSM.unsafeWrite offM n (fromIntegral curOff :: Int32)
+              pure ()
+          | VP.unsafeIndex def i == maxD = do
+              VUM.unsafeWrite bitM i (Bit True)
+              VSM.unsafeWrite offM i (fromIntegral curOff :: Int32)
+              let !bs = V.unsafeIndex defined j
+                  !len = BS.length bs
+              -- Copy the row's bytes into the dense data
+              -- buffer at @curOff@. Same shape used by the
+              -- non-optional ByteArray reader.
+              copyBSIntoMV datM curOff bs
+              go (i + 1) (j + 1) (curOff + len)
+          | otherwise = do
+              VUM.unsafeWrite bitM i (Bit False)
+              VSM.unsafeWrite offM i (fromIntegral curOff :: Int32)
+              go (i + 1) j curOff
+    go 0 0 0
+    !validity <- VU.unsafeFreeze bitM
+    !offs     <- VS.unsafeFreeze offM
+    !dat      <- VS.unsafeFreeze datM
+    pure (AV.NullableBinaryView validity (AV.BinaryView offs dat))
+
+-- | Copy a 'ByteString' byte-for-byte into a mutable
+-- 'VS.MVector' starting at the given destination offset.
+-- Used by 'materialiseOptionalPageBA' (and would be a fine
+-- factoring target for the non-optional path too).
+-- The mutable vector here lives in 'ST s'; we coerce it to
+-- 'IOVector' just for the duration of the FFI memcpy via
+-- 'unsafeIOToST'. This is the same pattern 'Data.Vector.Storable'
+-- uses internally for 'unsafeWith' on mutable vectors.
+copyBSIntoMV :: VSM.MVector s Word8 -> Int -> ByteString -> ST s ()
+copyBSIntoMV mv dstOff bs = unsafeIOToST $
+  VSM.unsafeWith (unsafeCoerceMV mv) $ \dstPtr ->
+    BSU.unsafeUseAsCStringLen bs $ \(srcPtr, srcLen) ->
+      copyBytes (castPtr (dstPtr `plusPtr` dstOff))
+                (castPtr srcPtr) srcLen
+  where
+    unsafeCoerceMV :: VSM.MVector s Word8 -> VSM.IOVector Word8
+    unsafeCoerceMV = unsafeCoerce
+
+-- | Stitch a non-empty page list into a single
+-- 'NullableBinaryView'. Page offsets are rewritten to be
+-- absolute against the chunk-level data buffer (each page
+-- contributes a base = sum of prior pages' data lengths).
+concatNullableBinaryPages
+  :: [AV.NullableBinaryView] -> AV.NullableBinaryView
+concatNullableBinaryPages pages = runST $ do
+  -- Total slot count + total data byte count.
+  let totalSlots = sum (map (\p -> VU.length (AV.nbvBinValidity p)) pages)
+      totalBytes = sum (map (\p -> VS.length (AV.bvData (AV.nbvBinValues p))) pages)
+  bitM <- VUM.unsafeNew totalSlots
+  offM <- VSM.unsafeNew (totalSlots + 1)
+  datM <- VSM.unsafeNew totalBytes
+  let writePages !slotBase !byteBase [] = do
+        VSM.unsafeWrite offM slotBase (fromIntegral byteBase :: Int32)
+        pure ()
+      writePages !slotBase !byteBase (p : rest) = do
+        let !validity = AV.nbvBinValidity p
+            !bview    = AV.nbvBinValues p
+            !pOffs    = AV.bvOffsets bview
+            !pData    = AV.bvData bview
+            !nSlots   = VU.length validity
+            !nBytes   = VS.length pData
+        -- 1. Copy validity bits one by one (bit-packed
+        --    cross-byte slicing makes a bulk memcpy
+        --    awkward; this is one pass per page over n
+        --    bits, no allocation).
+        let copyBits !i
+              | i >= nSlots = pure ()
+              | otherwise = do
+                  VUM.unsafeWrite bitM (slotBase + i)
+                                  (VU.unsafeIndex validity i)
+                  copyBits (i + 1)
+        copyBits 0
+        -- 2. Rewrite offsets: out[i] = byteBase + in[i].
+        let copyOffs !i
+              | i >= nSlots = pure ()
+              | otherwise = do
+                  let !o = fromIntegral (VS.unsafeIndex pOffs i) :: Int
+                  VSM.unsafeWrite offM (slotBase + i)
+                                  (fromIntegral (byteBase + o) :: Int32)
+                  copyOffs (i + 1)
+        copyOffs 0
+        -- 3. Copy the page's data bytes. VS slice-copy is
+        --    a single memcpy.
+        VS.unsafeCopy
+          (VSM.unsafeSlice byteBase nBytes datM) pData
+        writePages (slotBase + nSlots) (byteBase + nBytes) rest
+  writePages 0 0 pages
+  !validity <- VU.unsafeFreeze bitM
+  !offs     <- VS.unsafeFreeze offM
+  !dat      <- VS.unsafeFreeze datM
+  pure (AV.NullableBinaryView validity (AV.BinaryView offs dat))
 
 -- ============================================================
 -- Page-index-driven page skipping

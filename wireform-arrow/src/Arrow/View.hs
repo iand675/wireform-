@@ -55,6 +55,8 @@ module Arrow.View
   , binaryViewFromVector_l
   , mkUtf8View
   , mkLargeUtf8View
+  , binaryViewToUtf8View
+  , nullableBinaryToUtf8View
     -- * Buffer reinterpretation
   , vsSliceToBytes
     -- * Nullable variable-length view types
@@ -422,6 +424,17 @@ binaryViewFromVector v =
 
 binaryViewToUtf8View :: BinaryView -> Utf8View
 binaryViewToUtf8View (BinaryView off dat) = mkUtf8View off dat
+
+-- | Zero-copy reinterpretation of a 'NullableBinaryView' as a
+-- 'NullableUtf8View'. Both wrap the same offsets + data
+-- buffers; only the per-row decode path differs ('utf8At'
+-- vs 'binaryAt'). UTF-8 validation runs lazily on first use
+-- via the 'Utf8View' text-array cache. Used by the Parquet
+-- bridge so we don't need a separate UTF-8 NV reader.
+{-# INLINE nullableBinaryToUtf8View #-}
+nullableBinaryToUtf8View :: NullableBinaryView -> NullableUtf8View
+nullableBinaryToUtf8View (NullableBinaryView v b) =
+  NullableUtf8View v (binaryViewToUtf8View b)
 
 -- | Like 'utf8ViewFromVector' but builds a 'LargeUtf8View'
 -- (Int64 offsets).
