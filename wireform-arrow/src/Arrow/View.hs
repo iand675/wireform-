@@ -61,6 +61,10 @@ module Arrow.View
   , binaryViewToLargeUtf8View
   , nullableBinaryViewToLarge
   , nullableBinaryToLargeUtf8View
+  , utf8ViewToBinaryView
+  , largeUtf8ViewToBinaryView
+  , nullableUtf8ToBinaryView
+  , nullableLargeUtf8ToBinaryView
     -- * Buffer reinterpretation
   , vsSliceToBytes
   , bsToStorable
@@ -446,6 +450,31 @@ binaryViewFromVector v =
 
 binaryViewToUtf8View :: BinaryView -> Utf8View
 binaryViewToUtf8View (BinaryView off dat) = mkUtf8View off dat
+
+-- | Zero-copy reinterpretation in the other direction:
+-- view a 'Utf8View' as a 'BinaryView' (raw bytes), discarding
+-- the lazy text-array cache. Useful when an encoder wants
+-- bytes rather than 'Text's (e.g. when round-tripping a
+-- string column through a writer that already takes
+-- 'ByteString' input).
+{-# INLINE utf8ViewToBinaryView #-}
+utf8ViewToBinaryView :: Utf8View -> BinaryView
+utf8ViewToBinaryView (Utf8View offs dat _) = BinaryView offs dat
+
+{-# INLINE largeUtf8ViewToBinaryView #-}
+largeUtf8ViewToBinaryView :: LargeUtf8View -> LargeBinaryView
+largeUtf8ViewToBinaryView (LargeUtf8View offs dat _) = LargeBinaryView offs dat
+
+{-# INLINE nullableUtf8ToBinaryView #-}
+nullableUtf8ToBinaryView :: NullableUtf8View -> NullableBinaryView
+nullableUtf8ToBinaryView (NullableUtf8View v u) =
+  NullableBinaryView v (utf8ViewToBinaryView u)
+
+{-# INLINE nullableLargeUtf8ToBinaryView #-}
+nullableLargeUtf8ToBinaryView
+  :: NullableLargeUtf8View -> NullableLargeBinaryView
+nullableLargeUtf8ToBinaryView (NullableLargeUtf8View v u) =
+  NullableLargeBinaryView v (largeUtf8ViewToBinaryView u)
 
 -- | Zero-copy reinterpretation of a 'NullableBinaryView' as a
 -- 'NullableUtf8View'. Both wrap the same offsets + data

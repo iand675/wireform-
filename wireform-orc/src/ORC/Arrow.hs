@@ -430,12 +430,17 @@ columnArrayToORCStreams !cid = go
       AC.ColFloat  v -> Right (floatStreams Nothing cid v)
       AC.ColDouble v -> Right (doubleStreams Nothing cid v)
 
+      -- All four go to the same stringStreams shape (a
+      -- V.Vector ByteString of zero-copy slices into the
+      -- view's data buffer). The Utf8 -> Binary view
+      -- reinterpretation is zero-copy (same offsets +
+      -- data buffers, just a different newtype).
       AC.ColUtf8 v ->
         Right (stringStreams Nothing cid
-                 (V.map TE.encodeUtf8 (AV.utf8ViewToVector v)))
+                 (AV.binaryViewToVector (AV.utf8ViewToBinaryView v)))
       AC.ColLargeUtf8 v ->
         Right (stringStreams Nothing cid
-                 (V.map TE.encodeUtf8 (AV.largeUtf8ViewToVector v)))
+                 (AV.largeBinaryViewToVector (AV.largeUtf8ViewToBinaryView v)))
       AC.ColBinary v ->
         Right (stringStreams Nothing cid (AV.binaryViewToVector v))
       AC.ColLargeBinary v ->
@@ -471,19 +476,20 @@ columnArrayToORCStreams !cid = go
         let (pres, present) = presentNVPrim v
         in Right (doubleStreams (Just pres) cid present)
 
-      AC.ColUtf8Maybe   v ->
-        let (pres, present) = presentBytes (V.map (fmap TE.encodeUtf8)
-                                              (AV.nullableUtf8ViewToMaybeVector v))
+      -- Reinterpret nullable Utf8 views as nullable binary
+      -- views (zero-copy) so the same NV bytes path applies.
+      AC.ColUtf8Maybe v ->
+        let (pres, present) = presentBytesNV (AV.nullableUtf8ToBinaryView v)
         in Right (stringStreams (Just pres) cid present)
       AC.ColLargeUtf8Maybe v ->
-        let (pres, present) = presentBytes (V.map (fmap TE.encodeUtf8)
-                                              (AV.nullableLargeUtf8ViewToMaybeVector v))
+        let (pres, present) = presentBytesNVL
+                                (AV.nullableLargeUtf8ToBinaryView v)
         in Right (stringStreams (Just pres) cid present)
       AC.ColBinaryMaybe v ->
-        let (pres, present) = presentBytes (AV.nullableBinaryViewToMaybeVector v)
+        let (pres, present) = presentBytesNV v
         in Right (stringStreams (Just pres) cid present)
       AC.ColLargeBinaryMaybe v ->
-        let (pres, present) = presentBytes (AV.nullableLargeBinaryViewToMaybeVector v)
+        let (pres, present) = presentBytesNVL v
         in Right (stringStreams (Just pres) cid present)
 
       -- Nullable temporals: reuse intMaybe with the matching
@@ -532,6 +538,48 @@ columnArrayToORCStreams !cid = go
           !vs   = NB.presentValuesV v
       in (pres, vs)
 
+    -- Flat-shape NullableBinaryView path for ORC string
+    -- writes. Validity bits and present-only ByteString slices
+    -- are walked once together; per-row slices alias the
+    -- view's data buffer (zero-copy slice triples).
+    presentBytesNV
+      :: AV.NullableBinaryView -> (ByteString, V.Vector ByteString)
+    presentBytesNV nbv =
+      let !validity  = AV.nbvBinValidity nbv
+          !bview     = AV.nbvBinValues nbv
+          !n         = AV.vLength bview
+          !presBoolV = V.generate n
+                         (\i -> VU.null validity ||
+                                unBit (VU.unsafeIndex validity i))
+          !pres = OW.encodeBooleanRLE presBoolV
+          -- Present-only vector: zero-copy slices into the
+          -- view's data buffer for the indices where
+          -- validity is set. 'V.imapMaybe' walks once and
+          -- filters in place.
+          !present = V.imapMaybe
+                       (\i isPresent ->
+                          if isPresent then Just (AV.binaryAt bview i)
+                                       else Nothing)
+                       presBoolV
+      in (pres, present)
+
+    presentBytesNVL
+      :: AV.NullableLargeBinaryView -> (ByteString, V.Vector ByteString)
+    presentBytesNVL nlbv =
+      let !validity = AV.nlbvValidity nlbv
+          !lbview   = AV.nlbvValues nlbv
+          !n        = AV.vLength lbview
+          !presBoolV = V.generate n
+                         (\i -> VU.null validity ||
+                                unBit (VU.unsafeIndex validity i))
+          !pres = OW.encodeBooleanRLE presBoolV
+          !present = V.imapMaybe
+                       (\i isPresent ->
+                          if isPresent then Just (AV.largeBinaryAt lbview i)
+                                       else Nothing)
+                       presBoolV
+      in (pres, present)
+
     maybeToBool :: Maybe a -> Bool
     maybeToBool (Just _) = True
     maybeToBool Nothing  = False
@@ -579,7 +627,11 @@ columnArrayToORCStreams !cid = go
       presentPrefix mPres c <>
         V.singleton (streamData, c, OW.encodeDoubleColumn (VS.convert xs))
     stringStreams mPres !c bytesVec =
-      let !(dataBs, lengthBs) = OW.encodeStringDirectColumn (V.map decodeBytesAsText bytesVec)
+      -- Direct ByteString shape: skip the previous
+      -- decodeBytesAsText -> encodeStringDirectColumn round
+      -- trip (which decoded each row to Text and immediately
+      -- re-encoded back to bytes).
+      let !(dataBs, lengthBs) = OW.encodeStringDirectColumnBS bytesVec
       in presentPrefix mPres c <>
          V.fromList
            [ (streamData,   c, dataBs)

@@ -11,6 +11,7 @@ module ORC.Write
   , encodeBooleanRLE
   , encodeIntColumn
   , encodeStringDirectColumn
+  , encodeStringDirectColumnBS
   , encodeStringDictColumn
   , encodeFloatColumn
   , encodeDoubleColumn
@@ -142,11 +143,20 @@ encodeIntColumn = encodeRLEv2Direct
 -- | Encode a string column with DIRECT_V2 encoding.
 -- Returns (DATA stream, LENGTH stream).
 encodeStringDirectColumn :: V.Vector T.Text -> (ByteString, ByteString)
-encodeStringDirectColumn texts =
-  let !encodedTexts = V.map TE.encodeUtf8 texts
-      !dataBs = BS.concat (V.toList encodedTexts)
-      !lengths = VP.generate (V.length texts) $ \i ->
-        fromIntegral (BS.length (V.unsafeIndex encodedTexts i)) :: Int64
+encodeStringDirectColumn = encodeStringDirectColumnBS . V.map TE.encodeUtf8
+
+-- | Same as 'encodeStringDirectColumn' but takes raw bytes
+-- directly. Avoids the ByteString -> Text -> ByteString round
+-- trip the @ColBinary@ / @NullableBinaryView@ paths used to
+-- pay (one TE.decodeUtf8 walk + one TE.encodeUtf8 walk + N
+-- short-lived Text + N short-lived ByteString allocations
+-- per row, all to recover the same bytes).
+{-# INLINE encodeStringDirectColumnBS #-}
+encodeStringDirectColumnBS :: V.Vector ByteString -> (ByteString, ByteString)
+encodeStringDirectColumnBS bss =
+  let !dataBs = BS.concat (V.toList bss)
+      !lengths = VP.generate (V.length bss) $ \i ->
+        fromIntegral (BS.length (V.unsafeIndex bss i)) :: Int64
       !lengthBs = encodeRLEv2Direct lengths False
   in (dataBs, lengthBs)
 
