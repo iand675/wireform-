@@ -158,14 +158,15 @@ readPositionDeleteFile bs = do
       posChunk      <- PR.columnChunkSlice pf 0 posIdx
       paths    <- PR.readPlainByteArrayColumnChunk P.Uncompressed filePathChunk
       positions <- PR.readPlainInt64ColumnChunk P.Uncompressed posChunk
-      if VP.length positions /= V.length paths
+      if VS.length positions /= V.length paths
         then Left
           ("Iceberg.Delete.readPositionDeleteFile: column row count "
             ++ "mismatch (file_path=" ++ show (V.length paths)
-            ++ ", pos=" ++ show (VP.length positions) ++ ")")
+            ++ ", pos=" ++ show (VS.length positions) ++ ")")
         else
           let !paths'     = V.map TE.decodeUtf8 paths
-              !positions' = V.fromList (VP.toList positions)
+              !positions' = V.generate (VS.length positions)
+                              (VS.unsafeIndex positions)
            in Right (V.zipWith PositionDeleteRow paths' positions')
 
 -- ============================================================

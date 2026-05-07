@@ -136,7 +136,7 @@ main = do
               Left _  -> pure 0
           time "  readGenericInt64ColumnChunk (Uncompressed)" 100 $
             case PR.readGenericInt64ColumnChunk codec chunkBs of
-              Right v -> pure (VP.length v)
+              Right v -> pure (VS.length v)
               Left _  -> pure 0
         Left _ -> pure ()
 
@@ -149,7 +149,7 @@ main = do
             putStrLn "=== Snappy stage breakdown for one Int64 column ==="
             time "  readGenericInt64ColumnChunk (Snappy)" 100 $
               case PR.readGenericInt64ColumnChunk P.Snappy snappyChunk of
-                Right v -> pure (VP.length v)
+                Right v -> pure (VS.length v)
                 Left _  -> pure 0
           Left _ -> pure ()
         Left _ -> pure ()

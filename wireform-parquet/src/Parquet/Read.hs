@@ -443,13 +443,16 @@ decompressDataPageBody codec chunk off = do
 -- reverse-cons + single concat at the end is O(K + total
 -- elements).
 {-# INLINE collectPagesPrim #-}
+-- | Walk a column chunk and apply a per-page decoder of any
+-- vector flavour (VS / VP / V / VU). The per-page result type
+-- is whatever the decoder returns; the caller chooses how to
+-- concatenate ('VS.concat', 'VP.concat', 'V.concat', etc.).
 collectPagesPrim
-  :: VP.Prim a
-  => ByteString
+  :: ByteString
   -> Compression
   -> Int32                         -- ^ Required PLAIN-style encoding tag
-  -> (Int -> ByteString -> Either String (VP.Vector a))
-  -> Either String [VP.Vector a]
+  -> (Int -> ByteString -> Either String v)
+  -> Either String [v]
 collectPagesPrim chunk codec wantedEnc decode = go 0 []
   where
     go !off !acc
@@ -506,13 +509,13 @@ collectOptionalPagesBoxed chunk codec maxRep maxDef mat = go 0 []
               go nextOff (page : acc)
 
 -- | Read every @DATA_PAGE@ with @PLAIN@ @INT32@ in order until the chunk ends.
-readPlainInt32ColumnChunk :: Compression -> ByteString -> Either String (VP.Vector Int32)
+readPlainInt32ColumnChunk :: Compression -> ByteString -> Either String (VS.Vector Int32)
 readPlainInt32ColumnChunk codec chunk = do
   pages <- collectPagesPrim chunk codec encPlain decodePlainInt32
-  Right (VP.concat (reverse pages))
+  Right (VS.concat (reverse pages))
 
 -- | Read the first data page of a chunk as @PLAIN@ @INT32@ values.
-readPlainInt32FirstPage :: Compression -> ByteString -> Either String (VP.Vector Int32)
+readPlainInt32FirstPage :: Compression -> ByteString -> Either String (VS.Vector Int32)
 readPlainInt32FirstPage codec chunk = do
   (_hdr, dph, raw, _) <- decompressDataPageBody codec chunk 0
   if dphEncoding dph /= encPlain
@@ -611,22 +614,22 @@ readPlainByteArrayOptionalColumnChunk codec mr md ch =
   readPlainOptionalColumnChunkWith codec mr md ch materializePlainByteArrayOptional
 
 -- | @PLAIN@ @INT64@ (little-endian), all @DATA_PAGE@s concatenated.
-readPlainInt64ColumnChunk :: Compression -> ByteString -> Either String (VP.Vector Int64)
+readPlainInt64ColumnChunk :: Compression -> ByteString -> Either String (VS.Vector Int64)
 readPlainInt64ColumnChunk codec chunk = do
   pages <- collectPagesPrim chunk codec encPlain decodePlainInt64
-  Right (VP.concat (reverse pages))
+  Right (VS.concat (reverse pages))
 
 -- | @PLAIN@ @FLOAT@ (IEEE little-endian).
-readPlainFloatColumnChunk :: Compression -> ByteString -> Either String (VP.Vector Float)
+readPlainFloatColumnChunk :: Compression -> ByteString -> Either String (VS.Vector Float)
 readPlainFloatColumnChunk codec chunk = do
   pages <- collectPagesPrim chunk codec encPlain decodePlainFloat
-  Right (VP.concat (reverse pages))
+  Right (VS.concat (reverse pages))
 
 -- | @PLAIN@ @DOUBLE@ (IEEE little-endian).
-readPlainDoubleColumnChunk :: Compression -> ByteString -> Either String (VP.Vector Double)
+readPlainDoubleColumnChunk :: Compression -> ByteString -> Either String (VS.Vector Double)
 readPlainDoubleColumnChunk codec chunk = do
   pages <- collectPagesPrim chunk codec encPlain decodePlainDouble
-  Right (VP.concat (reverse pages))
+  Right (VS.concat (reverse pages))
 
 -- | @PLAIN@ @BOOLEAN@ (packed bits, LSB of first byte is first value).
 readPlainBoolColumnChunk :: Compression -> ByteString -> Either String (V.Vector Bool)
@@ -643,7 +646,7 @@ readPlainByteArrayColumnChunk codec chunk = do
 -- | Dictionary page (@PLAIN@ @INT32@ values) followed by @DATA_PAGE@s with
 -- @PLAIN_DICTIONARY@ (indices as @PLAIN@ @INT32@). Plain @DATA_PAGE@s without
 -- a dictionary are also accepted.
-readPlainDictionaryInt32ColumnChunk :: Compression -> ByteString -> Either String (VP.Vector Int32)
+readPlainDictionaryInt32ColumnChunk :: Compression -> ByteString -> Either String (VS.Vector Int32)
 readPlainDictionaryInt32ColumnChunk codec chunk = do
   -- Reverse-cons of pages, concat once at end. O(K + total
   -- elements) instead of O(K^2 + total elements) for K data
@@ -653,7 +656,7 @@ readPlainDictionaryInt32ColumnChunk codec chunk = do
     then Left "Parquet.Read: empty dictionary column chunk"
     else if null pagesRev
            then Left "Parquet.Read: empty dictionary column chunk"
-           else Right (VP.concat (reverse pagesRev))
+           else Right (VS.concat (reverse pagesRev))
   where
     go !off !mDict !pagesRev
       | off >= BS.length chunk = Right (mDict, pagesRev)
@@ -690,21 +693,9 @@ readPlainDictionaryInt32ColumnChunk codec chunk = do
                           Just d -> Right d
                         let !n = fromIntegral (dphNumValues dph) :: Int
                         ix <- decodeDictionaryIndices n raw
-                        let !nD = VP.length dict0
-                            ok =
-                              VP.foldl'
-                                ( \a k ->
-                                    a
-                                      && ( let !j = fromIntegral k :: Int
-                                           in j >= 0 && j < nD
-                                         )
-                                )
-                                True
-                                ix
-                        if not ok
-                          then Left "Parquet.Read: dictionary index out of range"
-                          else do
-                            let !pageVec = VP.map (\k -> dict0 VP.! fromIntegral k) ix
+                        case dictLookupVS dict0 ix of
+                          Left e' -> Left e'
+                          Right pageVec ->
                             go nextOff mDict (pageVec : pagesRev)
                   e ->
                     Left $
@@ -824,48 +815,58 @@ tryBrotli bs =
 -- is therefore a single 'memcpy' from the source bytestring
 -- into the destination primitive vector's underlying mutable
 -- byte array; this is what 'decodePlainPrimLEMemcpy' does.
-decodePlainInt32 :: Int -> ByteString -> Either String (VP.Vector Int32)
-decodePlainInt32 = decodePlainPrimLEMemcpy 4
+decodePlainInt32 :: Int -> ByteString -> Either String (VS.Vector Int32)
+decodePlainInt32 = decodePlainPrimLEMemcpyVS 4
 {-# INLINE decodePlainInt32 #-}
 
-decodePlainInt64 :: Int -> ByteString -> Either String (VP.Vector Int64)
-decodePlainInt64 = decodePlainPrimLEMemcpy 8
+decodePlainInt64 :: Int -> ByteString -> Either String (VS.Vector Int64)
+decodePlainInt64 = decodePlainPrimLEMemcpyVS 8
 {-# INLINE decodePlainInt64 #-}
 
-decodePlainFloat :: Int -> ByteString -> Either String (VP.Vector Float)
-decodePlainFloat = decodePlainPrimLEMemcpy 4
+decodePlainFloat :: Int -> ByteString -> Either String (VS.Vector Float)
+decodePlainFloat = decodePlainPrimLEMemcpyVS 4
 {-# INLINE decodePlainFloat #-}
 
-decodePlainDouble :: Int -> ByteString -> Either String (VP.Vector Double)
-decodePlainDouble = decodePlainPrimLEMemcpy 8
+decodePlainDouble :: Int -> ByteString -> Either String (VS.Vector Double)
+decodePlainDouble = decodePlainPrimLEMemcpyVS 8
 {-# INLINE decodePlainDouble #-}
 
 -- | Decode a PLAIN-encoded primitive vector by a single
 -- 'memcpy' from the source bytestring into a freshly-allocated
--- primitive vector. Assumes the host byte order matches the
--- wire format (Parquet PLAIN is little-endian; x86_64 and
--- aarch64 are little-endian).
-{-# INLINE decodePlainPrimLEMemcpy #-}
-decodePlainPrimLEMemcpy
-  :: forall a. VP.Prim a
+-- /storable/ vector ('VS.Vector', 'ForeignPtr'-backed). Assumes
+-- the host byte order matches the wire format (Parquet PLAIN
+-- is little-endian; x86_64 and aarch64 are little-endian).
+--
+-- This is the read-side counterpart of the Arrow bridge: the
+-- Arrow column types (after the views migration) hold
+-- 'VS.Vector' for primitives, so decoding straight into VS
+-- means the bridge can take the result with no extra copy
+-- (the previous shape allocated a 'VP.Vector' here and the
+-- bridge then ran 'VS.convert', which memcpy'd ByteArray ->
+-- ForeignPtr -- one full N-element pass per column chunk).
+{-# INLINE decodePlainPrimLEMemcpyVS #-}
+decodePlainPrimLEMemcpyVS
+  :: forall a. VS.Storable a
   => Int                       -- ^ element size in bytes
   -> Int                       -- ^ number of elements
   -> ByteString
-  -> Either String (VP.Vector a)
-decodePlainPrimLEMemcpy !elemBytes n bs
-  | n <= 0 = Right VP.empty
+  -> Either String (VS.Vector a)
+decodePlainPrimLEMemcpyVS !elemBytes n bs
+  | n <= 0 = Right VS.empty
   | BS.length bs < n * elemBytes =
       Left "Parquet.Read: PLAIN buffer too small"
-  | otherwise = Right $! BSI.accursedUnutterablePerformIO $
-      BSU.unsafeUseAsCStringLen bs $ \(srcCStr, _) -> do
-        mv <- MVP.unsafeNew n
-        let !nBytes = n * elemBytes
-            !srcPtr = castPtr srcCStr :: Ptr Word8
-        case mv of
-          MVP.MVector dstOffElems _ dstMba ->
-            PBA.copyPtrToMutableByteArray
-              dstMba (dstOffElems * elemBytes) srcPtr nBytes
-        VP.unsafeFreeze mv
+  | otherwise = Right $! BSI.accursedUnutterablePerformIO $ do
+      -- Allocate a fresh ForeignPtr-backed mutable storable
+      -- vector of the right size, memcpy from the
+      -- ByteString into it, freeze. One copy total.
+      mv <- VSM.unsafeNew n :: IO (VSM.IOVector a)
+      let !nBytes = n * elemBytes
+      VSM.unsafeWith mv $ \dstPtr ->
+        BSU.unsafeUseAsCStringLen bs $ \(srcCStr, _) ->
+          copyBytes (castPtr dstPtr :: Ptr Word8)
+                    (castPtr srcCStr :: Ptr Word8)
+                    nBytes
+      VS.unsafeFreeze mv
 
 decodePlainBool :: Int -> ByteString -> Either String (V.Vector Bool)
 decodePlainBool n bs =
@@ -1122,13 +1123,13 @@ materializeDictOptional defs maxDef indices dict lookupDict = runST $ do
 readDictionaryInt32OptionalColumnChunk ::
   Compression -> Int -> Int -> ByteString -> Either String (V.Vector (Maybe Int32))
 readDictionaryInt32OptionalColumnChunk =
-  readDictionaryOptionalColumnChunk decodePlainInt32 vpLookupInt32
+  readDictionaryOptionalColumnChunk decodePlainInt32 vsLookupInt32
   where
-    vpLookupInt32 :: VP.Vector Int32 -> Int32 -> Maybe Int32
-    vpLookupInt32 v idx =
+    vsLookupInt32 :: VS.Vector Int32 -> Int32 -> Maybe Int32
+    vsLookupInt32 v idx =
       let !i = fromIntegral idx :: Int
-      in if i >= 0 && i < VP.length v
-        then Just (VP.unsafeIndex v i)
+      in if i >= 0 && i < VS.length v
+        then Just (VS.unsafeIndex v i)
         else Nothing
 
 -- | Decompress a @DATA_PAGE_V2@ body. In v2 the repetition\/definition levels
@@ -1242,36 +1243,36 @@ readPlainFixedLenByteArrayColumnChunk typeLen codec chunk = go 0 []
 
 -- | @BYTE_STREAM_SPLIT@ for @FLOAT@: bytes are transposed into 4 runs of N bytes.
 {-# INLINE decodeByteStreamSplitFloat #-}
-decodeByteStreamSplitFloat :: Int -> ByteString -> Either String (VP.Vector Float)
+decodeByteStreamSplitFloat :: Int -> ByteString -> Either String (VS.Vector Float)
 decodeByteStreamSplitFloat n bs
   | BS.length bs < n * 4 = Left "Parquet.Read: BYTE_STREAM_SPLIT FLOAT buffer too small"
   | otherwise =
       Right $
         runST $ do
-          mv <- MVP.new n
+          mv <- VSM.new n
           let go2 !i
-                | i >= n = VP.unsafeFreeze mv
+                | i >= n = VS.unsafeFreeze mv
                 | otherwise = do
                     let !b0 = fromIntegral (BS.index bs i) :: Word32
                         !b1 = fromIntegral (BS.index bs (n + i)) :: Word32
                         !b2 = fromIntegral (BS.index bs (2 * n + i)) :: Word32
                         !b3 = fromIntegral (BS.index bs (3 * n + i)) :: Word32
                         !w = b0 .|. (b1 `shiftL` 8) .|. (b2 `shiftL` 16) .|. (b3 `shiftL` 24)
-                    MVP.write mv i (castWord32ToFloat w)
+                    VSM.write mv i (castWord32ToFloat w)
                     go2 (i + 1)
           go2 0
 
 -- | @BYTE_STREAM_SPLIT@ for @DOUBLE@: bytes are transposed into 8 runs of N bytes.
 {-# INLINE decodeByteStreamSplitDouble #-}
-decodeByteStreamSplitDouble :: Int -> ByteString -> Either String (VP.Vector Double)
+decodeByteStreamSplitDouble :: Int -> ByteString -> Either String (VS.Vector Double)
 decodeByteStreamSplitDouble n bs
   | BS.length bs < n * 8 = Left "Parquet.Read: BYTE_STREAM_SPLIT DOUBLE buffer too small"
   | otherwise =
       Right $
         runST $ do
-          mv <- MVP.new n
+          mv <- VSM.new n
           let go2 !i
-                | i >= n = VP.unsafeFreeze mv
+                | i >= n = VS.unsafeFreeze mv
                 | otherwise = do
                     let !b0 = fromIntegral (BS.index bs i) :: Word64
                         !b1 = fromIntegral (BS.index bs (n + i)) :: Word64
@@ -1283,7 +1284,7 @@ decodeByteStreamSplitDouble n bs
                         !b7 = fromIntegral (BS.index bs (7 * n + i)) :: Word64
                         !w = b0 .|. (b1 `shiftL` 8) .|. (b2 `shiftL` 16) .|. (b3 `shiftL` 24)
                               .|. (b4 `shiftL` 32) .|. (b5 `shiftL` 40) .|. (b6 `shiftL` 48) .|. (b7 `shiftL` 56)
-                    MVP.write mv i (castWord64ToDouble w)
+                    VSM.write mv i (castWord64ToDouble w)
                     go2 (i + 1)
           go2 0
 
@@ -1463,52 +1464,57 @@ genericReadColumnChunk pp codec chunk0 = go 0 Nothing []
 -- Per-physical-type dispatchers
 -- ============================================================
 
-dispatchInt32 :: PerPage (VP.Vector Int32)
+-- | Dispatchers for primitive types now produce 'VS.Vector'
+-- per page. The chunk-level concat is 'VS.concat', a single
+-- linear allocation + memcpy of all pages. Output flows
+-- straight into Arrow's 'ColInt32' / 'ColInt64' / etc.
+-- without any further conversion at the bridge.
+dispatchInt32 :: PerPage (VS.Vector Int32)
 dispatchInt32 = PerPage
   { ppDecodePlain  = decodePlainInt32
-  , ppDecodeDictIndices = \_n _raw dict indices -> dictLookupVP dict indices
+  , ppDecodeDictIndices = \_n _raw dict indices -> dictLookupVS dict indices
   , ppExtended = \enc n raw ->
       if enc == encDeltaBinaryPacked
         then decodeDeltaBinaryPackedInt32 n raw
         else Left $ unsupportedEncoding "INT32" enc
-  , ppConcat = VP.concat
-  , ppEmpty = VP.empty
+  , ppConcat = VS.concat
+  , ppEmpty = VS.empty
   }
 
-dispatchInt64 :: PerPage (VP.Vector Int64)
+dispatchInt64 :: PerPage (VS.Vector Int64)
 dispatchInt64 = PerPage
   { ppDecodePlain  = decodePlainInt64
-  , ppDecodeDictIndices = \_n _raw dict indices -> dictLookupVP dict indices
+  , ppDecodeDictIndices = \_n _raw dict indices -> dictLookupVS dict indices
   , ppExtended = \enc n raw ->
       if enc == encDeltaBinaryPacked
         then decodeDeltaBinaryPackedInt64 n raw
         else Left $ unsupportedEncoding "INT64" enc
-  , ppConcat = VP.concat
-  , ppEmpty = VP.empty
+  , ppConcat = VS.concat
+  , ppEmpty = VS.empty
   }
 
-dispatchFloat :: PerPage (VP.Vector Float)
+dispatchFloat :: PerPage (VS.Vector Float)
 dispatchFloat = PerPage
   { ppDecodePlain = decodePlainFloat
-  , ppDecodeDictIndices = \_n _raw dict indices -> dictLookupVP dict indices
+  , ppDecodeDictIndices = \_n _raw dict indices -> dictLookupVS dict indices
   , ppExtended = \enc n raw ->
       if enc == encByteStreamSplit
         then decodeByteStreamSplitFloat n raw
         else Left $ unsupportedEncoding "FLOAT" enc
-  , ppConcat = VP.concat
-  , ppEmpty = VP.empty
+  , ppConcat = VS.concat
+  , ppEmpty = VS.empty
   }
 
-dispatchDouble :: PerPage (VP.Vector Double)
+dispatchDouble :: PerPage (VS.Vector Double)
 dispatchDouble = PerPage
   { ppDecodePlain = decodePlainDouble
-  , ppDecodeDictIndices = \_n _raw dict indices -> dictLookupVP dict indices
+  , ppDecodeDictIndices = \_n _raw dict indices -> dictLookupVS dict indices
   , ppExtended = \enc n raw ->
       if enc == encByteStreamSplit
         then decodeByteStreamSplitDouble n raw
         else Left $ unsupportedEncoding "DOUBLE" enc
-  , ppConcat = VP.concat
-  , ppEmpty = VP.empty
+  , ppConcat = VS.concat
+  , ppEmpty = VS.empty
   }
 
 dispatchBool :: PerPage (V.Vector Bool)
@@ -1588,16 +1594,25 @@ dispatchUtf8 = PerPage
   , ppEmpty = V.empty
   }
 
-dictLookupVP
-  :: VP.Prim a
-  => VP.Vector a -> VP.Vector Int32 -> Either String (VP.Vector a)
-dictLookupVP dict indices =
-  let !nD = VP.length dict
+-- | Storable-vector dictionary lookup: gather decoded values
+-- by indexing into a 'VS.Vector' dictionary. Allocates one
+-- 'VS.Vector' of the result size and fills it with a single
+-- linear pass; no boxed intermediate. Used by the primitive
+-- 'PerPage' dispatchers ('dispatchInt32', 'dispatchInt64',
+-- 'dispatchFloat', 'dispatchDouble').
+dictLookupVS
+  :: VS.Storable a
+  => VS.Vector a -> VP.Vector Int32 -> Either String (VS.Vector a)
+dictLookupVS dict indices =
+  let !nD = VS.length dict
       !ok = VP.foldl' (\a k -> a && let !j = fromIntegral k :: Int
                                     in j >= 0 && j < nD) True indices
   in if not ok
        then Left "Parquet.Read: dictionary index out of range"
-       else Right $! VP.map (\k -> dict VP.! fromIntegral k) indices
+       else Right $!
+              VS.generate (VP.length indices)
+                (\i -> VS.unsafeIndex dict
+                         (fromIntegral (VP.unsafeIndex indices i)))
 
 dictLookupVBS
   :: V.Vector ByteString -> VP.Vector Int32 -> Either String (V.Vector ByteString)
@@ -1622,19 +1637,19 @@ unsupportedEncoding ty enc =
 -- Public generic readers (required)
 -- ============================================================
 
-readGenericInt32ColumnChunk :: Compression -> ByteString -> Either String (VP.Vector Int32)
+readGenericInt32ColumnChunk :: Compression -> ByteString -> Either String (VS.Vector Int32)
 readGenericInt32ColumnChunk = genericReadColumnChunk dispatchInt32
 {-# INLINE readGenericInt32ColumnChunk #-}
 
-readGenericInt64ColumnChunk :: Compression -> ByteString -> Either String (VP.Vector Int64)
+readGenericInt64ColumnChunk :: Compression -> ByteString -> Either String (VS.Vector Int64)
 readGenericInt64ColumnChunk = genericReadColumnChunk dispatchInt64
 {-# INLINE readGenericInt64ColumnChunk #-}
 
-readGenericFloatColumnChunk :: Compression -> ByteString -> Either String (VP.Vector Float)
+readGenericFloatColumnChunk :: Compression -> ByteString -> Either String (VS.Vector Float)
 readGenericFloatColumnChunk = genericReadColumnChunk dispatchFloat
 {-# INLINE readGenericFloatColumnChunk #-}
 
-readGenericDoubleColumnChunk :: Compression -> ByteString -> Either String (VP.Vector Double)
+readGenericDoubleColumnChunk :: Compression -> ByteString -> Either String (VS.Vector Double)
 readGenericDoubleColumnChunk = genericReadColumnChunk dispatchDouble
 {-# INLINE readGenericDoubleColumnChunk #-}
 
@@ -1672,25 +1687,25 @@ readGenericInt32OptionalColumnChunk
   :: Compression -> Int -> Int -> ByteString
   -> Either String (V.Vector (Maybe Int32))
 readGenericInt32OptionalColumnChunk =
-  readGenericOptionalColumnChunk dispatchInt32 vpToBoxed
+  readGenericOptionalColumnChunk dispatchInt32 vsToBoxed
 
 readGenericInt64OptionalColumnChunk
   :: Compression -> Int -> Int -> ByteString
   -> Either String (V.Vector (Maybe Int64))
 readGenericInt64OptionalColumnChunk =
-  readGenericOptionalColumnChunk dispatchInt64 vpToBoxed
+  readGenericOptionalColumnChunk dispatchInt64 vsToBoxed
 
 readGenericFloatOptionalColumnChunk
   :: Compression -> Int -> Int -> ByteString
   -> Either String (V.Vector (Maybe Float))
 readGenericFloatOptionalColumnChunk =
-  readGenericOptionalColumnChunk dispatchFloat vpToBoxed
+  readGenericOptionalColumnChunk dispatchFloat vsToBoxed
 
 readGenericDoubleOptionalColumnChunk
   :: Compression -> Int -> Int -> ByteString
   -> Either String (V.Vector (Maybe Double))
 readGenericDoubleOptionalColumnChunk =
-  readGenericOptionalColumnChunk dispatchDouble vpToBoxed
+  readGenericOptionalColumnChunk dispatchDouble vsToBoxed
 
 readGenericBoolOptionalColumnChunk
   :: Compression -> Int -> Int -> ByteString
@@ -1811,6 +1826,13 @@ materialiseOptionalPage pp toBoxed mDict !enc !maxDef !def !valBytes = do
 vpToBoxed :: VP.Prim a => VP.Vector a -> V.Vector a
 vpToBoxed = VP.convert
 
+-- | Convert a 'VS.Vector' to a 'V.Vector' for the boxed
+-- @V.Vector (Maybe a)@ optional path. Used by the
+-- 'readGeneric*OptionalColumnChunk' (boxed shape) wrappers
+-- now that the per-page output is 'VS.Vector'.
+vsToBoxed :: VS.Storable a => VS.Vector a -> V.Vector a
+vsToBoxed v = V.generate (VS.length v) (VS.unsafeIndex v)
+
 interleaveDefined :: VP.Vector Int32 -> Int32 -> V.Vector a -> V.Vector (Maybe a)
 interleaveDefined def maxD defined = runST $ do
   let !n = VP.length def
@@ -1866,7 +1888,7 @@ readGenericDoubleOptionalColumnChunkNV =
   readGenericOptionalColumnChunkPrim dispatchDouble 0
 {-# INLINE readGenericDoubleOptionalColumnChunkNV #-}
 
--- | Primitive (Storable + Prim) optional column reader. Walks
+-- | Storable-primitive optional column reader. Walks
 -- pages, per page calls 'materialiseOptionalPagePrim' which
 -- writes directly into 'VS.MVector' / 'VUM.MVector' buffers,
 -- then concatenates the per-page validity + values vectors at
@@ -1877,8 +1899,8 @@ readGenericDoubleOptionalColumnChunkNV =
 -- the value (the bridge always does).
 readGenericOptionalColumnChunkPrim
   :: forall a.
-     (VS.Storable a, VP.Prim a)
-  => PerPage (VP.Vector a)
+     VS.Storable a
+  => PerPage (VS.Vector a)
   -> a
   -> Compression -> Int -> Int -> ByteString
   -> Either String (AC.NullableView a)
@@ -1970,10 +1992,10 @@ readGenericOptionalColumnChunkPrim pp sentinel codec maxRep maxDef chunk0 = do
 -- boxing.
 materialiseOptionalPagePrim
   :: forall a.
-     (VS.Storable a, VP.Prim a)
-  => PerPage (VP.Vector a)
+     VS.Storable a
+  => PerPage (VS.Vector a)
   -> a
-  -> Maybe (VP.Vector a)
+  -> Maybe (VS.Vector a)
   -> Int32           -- ^ @encoding@ value from the page header
   -> Int             -- ^ max definition level (Int form for the level walk)
   -> VP.Vector Int32 -- ^ definition levels
@@ -2001,7 +2023,7 @@ materialiseOptionalPagePrim pp sentinel mDict !enc !maxDef def valBytes = do
           | i >= n = pure ()
           | VP.unsafeIndex def i == maxD = do
               VUM.unsafeWrite bitM i (Bit True)
-              VSM.unsafeWrite valM i (VP.unsafeIndex defined j)
+              VSM.unsafeWrite valM i (VS.unsafeIndex defined j)
               go (i + 1) (j + 1)
           | otherwise = do
               VUM.unsafeWrite bitM i (Bit False)
@@ -2379,22 +2401,22 @@ concatNullableBinaryPages pages = runST $ do
 
 readGenericInt32SelectedPages
   :: Compression -> ByteString -> V.Vector PageLocation -> V.Vector Bool
-  -> Either String (VP.Vector Int32)
+  -> Either String (VS.Vector Int32)
 readGenericInt32SelectedPages = readSelectedPages dispatchInt32
 
 readGenericInt64SelectedPages
   :: Compression -> ByteString -> V.Vector PageLocation -> V.Vector Bool
-  -> Either String (VP.Vector Int64)
+  -> Either String (VS.Vector Int64)
 readGenericInt64SelectedPages = readSelectedPages dispatchInt64
 
 readGenericFloatSelectedPages
   :: Compression -> ByteString -> V.Vector PageLocation -> V.Vector Bool
-  -> Either String (VP.Vector Float)
+  -> Either String (VS.Vector Float)
 readGenericFloatSelectedPages = readSelectedPages dispatchFloat
 
 readGenericDoubleSelectedPages
   :: Compression -> ByteString -> V.Vector PageLocation -> V.Vector Bool
-  -> Either String (VP.Vector Double)
+  -> Either String (VS.Vector Double)
 readGenericDoubleSelectedPages = readSelectedPages dispatchDouble
 
 readGenericBoolSelectedPages
@@ -2525,28 +2547,28 @@ readGenericInt32OptionalSelectedPages
   -> V.Vector PageLocation -> V.Vector Bool
   -> Either String (V.Vector (Maybe Int32))
 readGenericInt32OptionalSelectedPages =
-  readGenericOptionalSelectedPages dispatchInt32 vpToBoxed
+  readGenericOptionalSelectedPages dispatchInt32 vsToBoxed
 
 readGenericInt64OptionalSelectedPages
   :: Compression -> Int -> Int -> ByteString
   -> V.Vector PageLocation -> V.Vector Bool
   -> Either String (V.Vector (Maybe Int64))
 readGenericInt64OptionalSelectedPages =
-  readGenericOptionalSelectedPages dispatchInt64 vpToBoxed
+  readGenericOptionalSelectedPages dispatchInt64 vsToBoxed
 
 readGenericFloatOptionalSelectedPages
   :: Compression -> Int -> Int -> ByteString
   -> V.Vector PageLocation -> V.Vector Bool
   -> Either String (V.Vector (Maybe Float))
 readGenericFloatOptionalSelectedPages =
-  readGenericOptionalSelectedPages dispatchFloat vpToBoxed
+  readGenericOptionalSelectedPages dispatchFloat vsToBoxed
 
 readGenericDoubleOptionalSelectedPages
   :: Compression -> Int -> Int -> ByteString
   -> V.Vector PageLocation -> V.Vector Bool
   -> Either String (V.Vector (Maybe Double))
 readGenericDoubleOptionalSelectedPages =
-  readGenericOptionalSelectedPages dispatchDouble vpToBoxed
+  readGenericOptionalSelectedPages dispatchDouble vsToBoxed
 
 readGenericBoolOptionalSelectedPages
   :: Compression -> Int -> Int -> ByteString

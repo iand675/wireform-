@@ -6,6 +6,7 @@ import Data.Int (Int32, Int64)
 import qualified Data.Text as T
 import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Storable as VS
 import Hedgehog
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
@@ -75,17 +76,17 @@ plainDecoderTests :: TestTree
 plainDecoderTests = testGroup "PLAIN column decoders"
   [ testCase "INT32 little-endian" $ do
       let bs = BS.pack [0x07, 0x00, 0x00, 0x00, 0xFE, 0xFF, 0xFF, 0xFF]
-      decodePlainInt32 2 bs @?= Right (VP.fromList [(7 :: Int32), (-2 :: Int32)])
+      decodePlainInt32 2 bs @?= Right (VS.fromList [(7 :: Int32), (-2 :: Int32)])
   , testCase "INT64 little-endian" $ do
       let bs =
             BS.pack
               [ 0x2A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
               , 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
               ]
-      decodePlainInt64 2 bs @?= Right (VP.fromList [(42 :: Int64), (-1 :: Int64)])
+      decodePlainInt64 2 bs @?= Right (VS.fromList [(42 :: Int64), (-1 :: Int64)])
   , testCase "DOUBLE little-endian" $ do
       let bs = BS.pack [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
-      decodePlainDouble 1 bs @?= Right (VP.fromList [0.0])
+      decodePlainDouble 1 bs @?= Right (VS.fromList [0.0])
   , testCase "BYTE_ARRAY length-prefixed" $ do
       let bs = BS.pack [0x03, 0x00, 0x00, 0x00, 0x61, 0x62, 0x63, 0x01, 0x00, 0x00, 0x00, 0x7A]
       decodePlainByteArray 2 bs
@@ -450,7 +451,7 @@ dictionaryOptionalTests = testGroup "Dictionary optional columns"
           chunk = dictHdr <> dictBody <> dataHdr <> dataBody
           lookupInt32 v idx =
             let i = fromIntegral idx :: Int
-            in if i >= 0 && i < VP.length v then Just (VP.unsafeIndex v i) else Nothing
+            in if i >= 0 && i < VS.length v then Just (VS.unsafeIndex v i) else Nothing
       case readDictionaryOptionalColumnChunk decodePlainInt32 lookupInt32
              Uncompressed 0 1 chunk of
         Left e -> assertFailure e
@@ -473,7 +474,7 @@ dictionaryOptionalTests = testGroup "Dictionary optional columns"
           chunk = dictHdr <> dictBody <> dataHdr <> dataBody
           lookupInt32 v idx =
             let i = fromIntegral idx :: Int
-            in if i >= 0 && i < VP.length v then Just (VP.unsafeIndex v i) else Nothing
+            in if i >= 0 && i < VS.length v then Just (VS.unsafeIndex v i) else Nothing
       case readDictionaryOptionalColumnChunk decodePlainInt32 lookupInt32
              Uncompressed 0 1 chunk of
         Left e -> assertFailure e

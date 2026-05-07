@@ -720,7 +720,7 @@ main = do
     case decodeDeltaBinaryPackedInt64 (VP.length vs) (encodeDeltaBinaryPackedInt64 vs) of
       Right out ->
         expect ("DELTA_BINARY_PACKED round-trip: " ++ name)
-          (VP.toList out == VP.toList vs)
+          (VS.toList out == VP.toList vs)
       Left e -> failTest ("DELTA_BINARY_PACKED " ++ name ++ ": " ++ e)
 
   -- Modular encryption: round-trip plaintext through encrypt/decrypt for
@@ -760,10 +760,10 @@ main = do
   expect "BYTE_STREAM_SPLIT DOUBLE byte length == 8 * n"
     (BS.length bssDoubleBs == 8 * VP.length bssDoubles)
   case decodeByteStreamSplitFloat (VP.length bssFloats) bssFloatBs of
-    Right xs -> expect "BYTE_STREAM_SPLIT FLOAT round-trip" (xs == bssFloats)
+    Right xs -> expect "BYTE_STREAM_SPLIT FLOAT round-trip" (VS.toList xs == VP.toList bssFloats)
     Left  e  -> failTest ("BYTE_STREAM_SPLIT FLOAT decode: " ++ e)
   case decodeByteStreamSplitDouble (VP.length bssDoubles) bssDoubleBs of
-    Right xs -> expect "BYTE_STREAM_SPLIT DOUBLE round-trip" (xs == bssDoubles)
+    Right xs -> expect "BYTE_STREAM_SPLIT DOUBLE round-trip" (VS.toList xs == VP.toList bssDoubles)
     Left  e  -> failTest ("BYTE_STREAM_SPLIT DOUBLE decode: " ++ e)
 
   -- Compression codec round-trips. All codecs should be refused by the
@@ -1069,7 +1069,7 @@ encodingRoundTripProperties = do
                    (VP.length vs)
                    (encodeDeltaBinaryPackedInt32 vs) of
                Right got
-                 | VP.toList (VP.map (fromIntegral :: Int64 -> Int32) got)
+                 | map (fromIntegral :: Int64 -> Int32) (VS.toList got)
                      == VP.toList vs -> True
                _ -> False
     let !okCount = length (filter pass [1 .. cases])
@@ -1086,7 +1086,7 @@ encodingRoundTripProperties = do
           in case decodeDeltaBinaryPackedInt64
                    (VP.length vs)
                    (encodeDeltaBinaryPackedInt64 vs) of
-               Right got | VP.toList got == VP.toList vs -> True
+               Right got | VS.toList got == VP.toList vs -> True
                _ -> False
     let !okCount = length (filter pass [1 .. cases])
     expect ("DELTA_BINARY_PACKED Int64 property: "
@@ -1102,7 +1102,7 @@ encodingRoundTripProperties = do
           in case decodeByteStreamSplitFloat
                    (VP.length vs)
                    (encodeByteStreamSplitFloat vs) of
-               Right got | VP.toList got == VP.toList vs -> True
+               Right got | VS.toList got == VP.toList vs -> True
                _ -> False
     let !okCount = length (filter pass [1 .. cases])
     expect ("BYTE_STREAM_SPLIT Float property: "
@@ -1118,7 +1118,7 @@ encodingRoundTripProperties = do
           in case decodeByteStreamSplitDouble
                    (VP.length vs)
                    (encodeByteStreamSplitDouble vs) of
-               Right got | VP.toList got == VP.toList vs -> True
+               Right got | VS.toList got == VP.toList vs -> True
                _ -> False
     let !okCount = length (filter pass [1 .. cases])
     expect ("BYTE_STREAM_SPLIT Double property: "
@@ -1242,10 +1242,10 @@ genericPageDispatch = do
           }
         !chunk = encodePageHeader hdr <> payload
     case Parquet.Read.readGenericInt32ColumnChunk Uncompressed chunk of
-      Right v | VP.toList v == VP.toList values ->
+      Right v | VS.toList v == VP.toList values ->
         putStrLn "OK: generic INT32 dispatch handles DELTA_BINARY_PACKED"
       Right v -> failTest $ "DELTA_BINARY_PACKED Int32 mismatch: got "
-                            ++ show (VP.toList v)
+                            ++ show (VS.toList v)
       Left e  -> failTest $ "DELTA_BINARY_PACKED Int32: " ++ e
 
   -- BYTE_STREAM_SPLIT FLOAT in DATA_PAGE V1.
@@ -1262,10 +1262,10 @@ genericPageDispatch = do
           }
         !chunk = encodePageHeader hdr <> payload
     case Parquet.Read.readGenericFloatColumnChunk Uncompressed chunk of
-      Right v | VP.toList v == VP.toList values ->
+      Right v | VS.toList v == VP.toList values ->
         putStrLn "OK: generic FLOAT dispatch handles BYTE_STREAM_SPLIT"
       Right v -> failTest $ "BYTE_STREAM_SPLIT Float mismatch: got "
-                            ++ show (VP.toList v)
+                            ++ show (VS.toList v)
       Left e  -> failTest $ "BYTE_STREAM_SPLIT Float: " ++ e
 
   -- DELTA_BYTE_ARRAY for BYTE_ARRAY in DATA_PAGE V1.
@@ -1321,10 +1321,10 @@ genericPageDispatch = do
           }
         !chunk = encodePageHeader hdr <> payload
     case Parquet.Read.readGenericInt64ColumnChunk Uncompressed chunk of
-      Right v | VP.toList v == VP.toList values ->
+      Right v | VS.toList v == VP.toList values ->
         putStrLn "OK: generic INT64 dispatch handles DATA_PAGE_V2"
       Right v -> failTest $ "DATA_PAGE_V2 Int64 mismatch: got "
-                            ++ show (VP.toList v)
+                            ++ show (VS.toList v)
       Left e  -> failTest $ "DATA_PAGE_V2 Int64: " ++ e
 
 predicateBloomSkipping :: IO ()

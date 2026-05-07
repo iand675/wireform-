@@ -20,15 +20,21 @@ import qualified Data.Vector as V
 import qualified Data.Vector.Mutable as VM
 import qualified Data.Vector.Primitive as VP
 import qualified Data.Vector.Primitive.Mutable as MVP
+import qualified Data.Vector.Storable as VS
 
-decodeDeltaBinaryPackedInt32 :: Int -> ByteString -> Either String (VP.Vector Int32)
+-- | DELTA_BINARY_PACKED INT32: storable-vector output for the
+-- post-views Arrow bridge.
+decodeDeltaBinaryPackedInt32 :: Int -> ByteString -> Either String (VS.Vector Int32)
 decodeDeltaBinaryPackedInt32 n bs = do
   (v64, _) <- decodeDeltaBinaryPackedRaw n bs
-  Right (VP.map fromIntegral v64)
+  Right $! VS.generate (VP.length v64)
+            (\i -> fromIntegral (VP.unsafeIndex v64 i))
 {-# INLINE decodeDeltaBinaryPackedInt32 #-}
 
-decodeDeltaBinaryPackedInt64 :: Int -> ByteString -> Either String (VP.Vector Int64)
-decodeDeltaBinaryPackedInt64 n bs = fst <$> decodeDeltaBinaryPackedRaw n bs
+decodeDeltaBinaryPackedInt64 :: Int -> ByteString -> Either String (VS.Vector Int64)
+decodeDeltaBinaryPackedInt64 n bs = do
+  (v64, _) <- decodeDeltaBinaryPackedRaw n bs
+  Right $! VS.convert v64
 {-# INLINE decodeDeltaBinaryPackedInt64 #-}
 
 decodeDeltaBinaryPackedRaw :: Int -> ByteString -> Either String (VP.Vector Int64, Int)

@@ -602,18 +602,18 @@ readParquetColumn pf rgIdx colIdx fld = do
   -- type (PLAIN, dictionary, DELTA_*, BYTE_STREAM_SPLIT) and
   -- both DATA_PAGE and DATA_PAGE_V2.
   case AT.fieldType fld of
-    -- Non-nullable primitives. Parquet's reader returns
-    -- VP.Vector; we VS.convert at the bridge for now (zero-copy
-    -- adoption of the source ForeignPtr is unit 5 of the views
-    -- migration).
+    -- Non-nullable primitives. Parquet's reader now returns
+    -- 'VS.Vector' directly, so the bridge is a no-op
+    -- constructor application -- no per-chunk VS.convert
+    -- copy.
     AT.AInt 32 True | not nullable ->
-      AC.ColInt32 . VS.convert <$> PR.readGenericInt32ColumnChunk codec chunk
+      AC.ColInt32 <$> PR.readGenericInt32ColumnChunk codec chunk
     AT.AInt 64 True | not nullable ->
-      AC.ColInt64 . VS.convert <$> PR.readGenericInt64ColumnChunk codec chunk
+      AC.ColInt64 <$> PR.readGenericInt64ColumnChunk codec chunk
     AT.AFloatingPoint AT.Single | not nullable ->
-      AC.ColFloat . VS.convert <$> PR.readGenericFloatColumnChunk codec chunk
+      AC.ColFloat <$> PR.readGenericFloatColumnChunk codec chunk
     AT.AFloatingPoint AT.DoublePrecision | not nullable ->
-      AC.ColDouble . VS.convert <$> PR.readGenericDoubleColumnChunk codec chunk
+      AC.ColDouble <$> PR.readGenericDoubleColumnChunk codec chunk
     AT.ABool | not nullable ->
       AC.ColBool . boxedToBitVec <$> PR.readGenericBoolColumnChunk codec chunk
     AT.AUtf8 | not nullable ->
@@ -625,17 +625,17 @@ readParquetColumn pf rgIdx colIdx fld = do
     -- Temporal non-nullable: read the underlying int stream and
     -- cast to the Arrow column flavour.
     AT.ADate AT.DateDay | not nullable ->
-      AC.ColDate32 . VS.convert <$> PR.readGenericInt32ColumnChunk codec chunk
+      AC.ColDate32 <$> PR.readGenericInt32ColumnChunk codec chunk
     AT.ADate AT.DateMillisecond | not nullable ->
-      AC.ColDate64 . VS.convert <$> PR.readGenericInt64ColumnChunk codec chunk
+      AC.ColDate64 <$> PR.readGenericInt64ColumnChunk codec chunk
     AT.ATime _ 32 | not nullable ->
-      AC.ColTime32 . VS.convert <$> PR.readGenericInt32ColumnChunk codec chunk
+      AC.ColTime32 <$> PR.readGenericInt32ColumnChunk codec chunk
     AT.ATime _ 64 | not nullable ->
-      AC.ColTime64 . VS.convert <$> PR.readGenericInt64ColumnChunk codec chunk
+      AC.ColTime64 <$> PR.readGenericInt64ColumnChunk codec chunk
     AT.ATimestamp _ _ | not nullable ->
-      AC.ColTimestamp . VS.convert <$> PR.readGenericInt64ColumnChunk codec chunk
+      AC.ColTimestamp <$> PR.readGenericInt64ColumnChunk codec chunk
     AT.ADuration _ | not nullable ->
-      AC.ColDuration . VS.convert <$> PR.readGenericInt64ColumnChunk codec chunk
+      AC.ColDuration <$> PR.readGenericInt64ColumnChunk codec chunk
 
     -- INT96 (legacy 12-byte timestamp) and FIXED_LEN_BYTE_ARRAY
     -- (UUIDs / float16 / decimal128 in fixed form). Both are
