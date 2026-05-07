@@ -99,7 +99,9 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
 import qualified Data.Text.Internal as TI
 import qualified Data.Vector as V
+import Control.Monad.ST (runST)
 import qualified Data.Vector.Storable as VS
+import qualified Data.Vector.Storable.Mutable as VSM
 import qualified Data.Vector.Unboxed as VU
 import Data.Word (Word8)
 
@@ -411,15 +413,30 @@ vsToTextArray dat =
 
 -- | Build a 'BinaryView' from a boxed 'V.Vector' of
 -- 'ByteString'. Same single-pass shape.
+-- | Build a 'BinaryView' from a boxed vector of 'ByteString's.
+--
+-- Offsets are computed via a single cumulative-sum pass into a
+-- pre-sized mutable storable vector (O(N), one allocation).
+-- The previous shape was 'VS.generate (n+1) $ \\i -> ... (V.take i v) ...'
+-- which is O(N^2) -- each offset re-folded the prefix.
+--
+-- Data is concatenated with 'BS.concat', then reinterpreted
+-- zero-copy as a 'VS.Vector Word8' via 'bsToStorable'.
 binaryViewFromVector :: V.Vector ByteString -> BinaryView
 binaryViewFromVector v =
   let !n = V.length v
-      offs = VS.generate (n + 1) $ \i ->
-        if i == 0 then 0
-        else fromIntegral
-               (V.foldl' (\acc bs -> acc + BS.length bs) 0
-                         (V.take i v)) :: Int32
-      payload = BS.concat (V.toList v)
+      !offs = runST $ do
+        mv <- VSM.unsafeNew (n + 1)
+        VSM.unsafeWrite mv 0 0
+        let go !i !cur
+              | i >= n = pure ()
+              | otherwise = do
+                  let !cur' = cur + BS.length (V.unsafeIndex v i)
+                  VSM.unsafeWrite mv (i + 1) (fromIntegral cur' :: Int32)
+                  go (i + 1) cur'
+        go 0 (0 :: Int)
+        VS.unsafeFreeze mv
+      !payload = BS.concat (V.toList v)
   in BinaryView offs (bsToStorable payload)
 
 binaryViewToUtf8View :: BinaryView -> Utf8View
@@ -446,15 +463,23 @@ utf8ViewFromVector_l v =
 
 -- | Like 'binaryViewFromVector' but builds a 'LargeBinaryView'
 -- (Int64 offsets).
+-- | Int64-offset variant. Same single-pass cumulative-sum
+-- shape as 'binaryViewFromVector'; see that comment for why.
 binaryViewFromVector_l :: V.Vector ByteString -> LargeBinaryView
 binaryViewFromVector_l v =
   let !n = V.length v
-      offs = VS.generate (n + 1) $ \i ->
-        if i == 0 then 0
-        else fromIntegral
-               (V.foldl' (\acc bs -> acc + BS.length bs) 0
-                         (V.take i v)) :: Int64
-      payload = BS.concat (V.toList v)
+      !offs = runST $ do
+        mv <- VSM.unsafeNew (n + 1)
+        VSM.unsafeWrite mv 0 0
+        let go !i !cur
+              | i >= n = pure ()
+              | otherwise = do
+                  let !cur' = cur + BS.length (V.unsafeIndex v i)
+                  VSM.unsafeWrite mv (i + 1) (fromIntegral cur' :: Int64)
+                  go (i + 1) cur'
+        go 0 (0 :: Int)
+        VS.unsafeFreeze mv
+      !payload = BS.concat (V.toList v)
   in LargeBinaryView offs (bsToStorable payload)
 
 binaryViewToLargeUtf8View :: LargeBinaryView -> LargeUtf8View
@@ -672,5 +697,16 @@ nullableFixedSizeBinaryViewToMaybeVector nv =
 
 -- | Helper: copy a 'ByteString' into a 'VS.Vector Word8'.
 -- Used by the 'fromVector' constructors above.
+-- | Zero-copy reinterpretation of a 'ByteString' as a
+-- 'VS.Vector Word8'. Both wrap a 'ForeignPtr Word8' + offset +
+-- length internally; the only difference is which API you
+-- call. Lifetime is tied to the source bytestring's foreign
+-- pointer (so callers should keep the bytestring alive while
+-- they use the vector).
+--
+-- The previous version was a per-byte 'VS.generate (BS.length bs) (BS.index bs)'
+-- loop -- O(N) memory allocation + per-byte BS.index overhead.
 bsToStorable :: ByteString -> VS.Vector Word8
-bsToStorable bs = VS.generate (BS.length bs) (BS.index bs)
+bsToStorable bs =
+  let (fp, off, len) = BSI.toForeignPtr bs
+  in VS.unsafeFromForeignPtr fp off len
