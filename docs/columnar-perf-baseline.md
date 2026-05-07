@@ -52,16 +52,25 @@ File sizes (bytes): uncompressed=2,157,279 · snappy=1,212,588 · zstd=585,180.
 
 In other words the Arrow IPC numbers are bounded by Haskell's strict-data semantics, not by encoder/decoder cleverness; the 1.2 ms read is already very close to cache-warm memcpy speed for the dataset size.
 
-## View migration (in flight — see `docs/columnar-views-design.md`)
+## View migration (complete — see `docs/columnar-views-design.md`)
 
-We now ship the column-view representation that the perf design called out as the next big lever:
+Every primitive, temporal, variable-length, and nullable column in `Arrow.Column.ColumnArray` is now backed by a view that wraps the source `ByteString`'s `ForeignPtr` rather than allocating a fresh boxed vector:
 
-* `Columnar.Bit` — bit-packed `VU.Vector Bit` with a full `Data.Vector.Unboxed` instance (`length`, `slice` at arbitrary bit offsets, `(!)`, `map`, `foldl'`, `zip`, mutable `read`/`write`/`freeze`/`thaw`). Eight `Bool`s per byte; matches Arrow / Parquet's wire format directly.
-* `Arrow.Column.NullableView` — validity bitmap + dense `VS.Vector` for every primitive `Col*Maybe` constructor. `8N` bytes of pointer spine drops to `ceil(N/8) + sizeof(values)`.
-* Primitive numeric / temporal `ColumnArray` constructors switched from `VP.Vector` to `VS.Vector`. The host-LE read fast path in `Arrow.Column.readInts*` / `readFloat*` / `readDoubleColumn` / `readDate*` / `readTime*` / `readTimestamp` / `readDuration` now adopts the source `ByteString`'s `ForeignPtr` directly (one call to `VS.unsafeFromForeignPtr` — zero copies). Big-endian still byte-swap-copies.
-* `Arrow.View` ships `Utf8View` / `BinaryView` / `LargeUtf8View` / `LargeBinaryView` view types plus a `View` typeclass for polymorphic iteration.
+* `Columnar.Bit` — bit-packed `VU.Vector Bit` with a full `Data.Vector.Unboxed` instance.
+* `VS.Vector` for every primitive numeric / temporal / interval column. The host-LE Arrow IPC reader adopts the source bytestring's `ForeignPtr` directly via `VS.unsafeFromForeignPtr` — zero copies, zero per-row allocation.
+* `Arrow.View.Utf8View` / `BinaryView` / `LargeUtf8View` / `LargeBinaryView` — variable-length columns held as (offsets `VS.Vector`, data `VS.Vector`) pairs. The Arrow IPC reader hands back views that wrap the source body's bytes; the writer dumps the offsets + data buffers straight into the body via `vsByteString` (no-copy reinterpretation of `VS.Vector` as `ByteString`).
+* `Arrow.Column.NullableView` for primitive `Col*Maybe` (validity bitmap + dense `VS.Vector` of values).
+* `Arrow.View.NullableBoolView` — two bit vectors (validity + values), matching Arrow's wire format. Replaces the old `V.Vector (Maybe Bool)` (one pointer per row).
+* `Arrow.View.NullableUtf8View` / `NullableBinaryView` / `NullableLargeUtf8View` / `NullableLargeBinaryView` / `NullableFixedSizeBinaryView` for variable-length nullable columns. Validity bitmap + the dense view types above.
+* `Arrow.View.View` typeclass for polymorphic iteration across every view shape.
 
-Performance impact in the `parquet-throughput` bench is essentially unchanged because the Parquet read path still goes through `VP.Vector` internally and converts at the bridge with `VS.convert` (one O(N) walk). The Arrow IPC reader is the consumer that benefits most from the zero-copy adoption — every primitive column read after this PR is a constructor call instead of a memcpy. End-to-end Arrow IPC numbers are bounded by the boxed `V.Vector ColumnArray` spine + `RecordBatchDef` allocation rather than the column data itself; closing that gap is the next workstream.
+Performance impact:
+
+* Arrow IPC primitive reads: a constructor call instead of a memcpy. Variable-length string / binary reads: one `viewPrimVecLE` per buffer (offsets + data) instead of a per-row UTF-8 validation walk producing a boxed `V.Vector Text`. Nullable variants: two extra `ForeignPtr` handoffs (validity bitmap + dense view) instead of an `N`-row boxed `V.Vector (Maybe a)` spine.
+* Arrow IPC writes: writes that already had the column in view shape (the typical Arrow-to-Arrow transcode case) are now `n + 1` ForeignPtr handoffs instead of `n` per-row poke loops.
+* Parquet end-to-end (read or write a fresh boxed dataset): essentially unchanged from the pre-views numbers — the Parquet writer's internal `RLE` / `Levels` / `BloomFilter` machinery still uses `VP.Vector` for primitive bit-packed work, and the bridge converts at the boundary. The win is structural (the bridge is now a constructor swap for primitives, not a `VS.convert`); the wall-clock is unchanged because the writer was already memcpy-bound on the page-body emit.
+
+End-to-end Arrow IPC numbers are bounded by the boxed `V.Vector ColumnArray` spine + the `RecordBatchDef` boxed-vector allocation, not the column data itself. Closing that gap is the next workstream.
 
 ## Why we're not at C/Rust speed
 
