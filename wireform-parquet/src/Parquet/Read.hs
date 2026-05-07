@@ -155,6 +155,7 @@ import qualified Columnar.Bit as Bit
 import qualified Data.ByteString.Unsafe as BSU
 import Control.Monad.ST.Unsafe (unsafeIOToST)
 import Foreign.Ptr (castPtr, plusPtr)
+import qualified Foreign.ForeignPtr as FFP
 import Foreign.Marshal.Utils (copyBytes)
 import Data.Word (Word8)
 import Unsafe.Coerce (unsafeCoerce)
@@ -836,19 +837,23 @@ decodePlainDouble :: Int -> ByteString -> Either String (VS.Vector Double)
 decodePlainDouble = decodePlainPrimLEMemcpyVS 8
 {-# INLINE decodePlainDouble #-}
 
--- | Decode a PLAIN-encoded primitive vector by a single
--- 'memcpy' from the source bytestring into a freshly-allocated
--- /storable/ vector ('VS.Vector', 'ForeignPtr'-backed). Assumes
--- the host byte order matches the wire format (Parquet PLAIN
--- is little-endian; x86_64 and aarch64 are little-endian).
+-- | Decode a PLAIN-encoded primitive page as a 'VS.Vector'
+-- by /adopting/ the source bytestring's 'ForeignPtr' --
+-- zero copy. Assumes the host byte order matches the wire
+-- format (Parquet PLAIN is little-endian; x86_64 and
+-- aarch64 are LE).
 --
--- This is the read-side counterpart of the Arrow bridge: the
--- Arrow column types (after the views migration) hold
--- 'VS.Vector' for primitives, so decoding straight into VS
--- means the bridge can take the result with no extra copy
--- (the previous shape allocated a 'VP.Vector' here and the
--- bridge then ran 'VS.convert', which memcpy'd ByteArray ->
--- ForeignPtr -- one full N-element pass per column chunk).
+-- Lifetime: the resulting 'VS.Vector' shares the
+-- bytestring's foreign pointer, so it stays alive as long
+-- as anyone references it (same shape Arrow.Column's
+-- 'viewPrimVecLE' already uses).
+--
+-- Multi-page chunks still pay one final 'VS.concat' that
+-- allocates the merged buffer + memcpys each page in; that
+-- copy is unavoidable without a discontiguous-storage shape.
+-- Single-page chunks (very common for moderate-size data
+-- and for mmap'd Parquet files) get true zero-copy reads
+-- end-to-end.
 {-# INLINE decodePlainPrimLEMemcpyVS #-}
 decodePlainPrimLEMemcpyVS
   :: forall a. VS.Storable a
@@ -860,18 +865,12 @@ decodePlainPrimLEMemcpyVS !elemBytes n bs
   | n <= 0 = Right VS.empty
   | BS.length bs < n * elemBytes =
       Left "Parquet.Read: PLAIN buffer too small"
-  | otherwise = Right $! BSI.accursedUnutterablePerformIO $ do
-      -- Allocate a fresh ForeignPtr-backed mutable storable
-      -- vector of the right size, memcpy from the
-      -- ByteString into it, freeze. One copy total.
-      mv <- VSM.unsafeNew n :: IO (VSM.IOVector a)
-      let !nBytes = n * elemBytes
-      VSM.unsafeWith mv $ \dstPtr ->
-        BSU.unsafeUseAsCStringLen bs $ \(srcCStr, _) ->
-          copyBytes (castPtr dstPtr :: Ptr Word8)
-                    (castPtr srcCStr :: Ptr Word8)
-                    nBytes
-      VS.unsafeFreeze mv
+  | otherwise =
+      let (fp, off, _) = BSI.toForeignPtr bs
+      in Right $!
+           VS.unsafeFromForeignPtr
+             (FFP.castForeignPtr (FFP.plusForeignPtr fp off))
+             0 n
 
 decodePlainBool :: Int -> ByteString -> Either String (V.Vector Bool)
 decodePlainBool n bs =
