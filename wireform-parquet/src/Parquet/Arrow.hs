@@ -616,12 +616,18 @@ readParquetColumn pf rgIdx colIdx fld = do
       AC.ColDouble <$> PR.readGenericDoubleColumnChunk codec chunk
     AT.ABool | not nullable ->
       AC.ColBool . boxedToBitVec <$> PR.readGenericBoolColumnChunk codec chunk
+    -- BV path: per-page writes offsets + dense data straight
+    -- into the BinaryView buffers, no V.Vector ByteString
+    -- intermediate. UTF-8 reinterpretation is zero-copy via
+    -- AV.binaryViewToUtf8View (UTF-8 validation runs lazily on
+    -- first per-row access through the Utf8View text-array
+    -- cache).
     AT.AUtf8 | not nullable ->
-      AC.ColUtf8 . AV.utf8ViewFromVector
-        <$> PR.readGenericTextColumnChunk codec chunk
+      AC.ColUtf8 . AV.binaryViewToUtf8View
+        <$> PR.readGenericByteArrayColumnChunkBV codec chunk
     AT.ABinary | not nullable ->
-      AC.ColBinary . AV.binaryViewFromVector
-        <$> PR.readGenericByteArrayColumnChunk codec chunk
+      AC.ColBinary
+        <$> PR.readGenericByteArrayColumnChunkBV codec chunk
     -- Temporal non-nullable: read the underlying int stream and
     -- cast to the Arrow column flavour.
     AT.ADate AT.DateDay | not nullable ->

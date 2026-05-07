@@ -111,6 +111,8 @@ module Parquet.Read
   , readGenericDoubleOptionalColumnChunkNV
   , readGenericBoolOptionalColumnChunkNV
   , readGenericByteArrayOptionalColumnChunkNV
+    -- ** Flat-shape ('BinaryView') non-nullable byte-array reader
+  , readGenericByteArrayColumnChunkBV
     -- * Page-index-driven page skipping
   , readGenericInt32SelectedPages
   , readGenericInt64SelectedPages
@@ -2151,6 +2153,176 @@ materialiseOptionalPageBool pp mDict !enc !maxDef def valBytes = do
     !validity <- VU.unsafeFreeze bitM
     !values   <- VU.unsafeFreeze valM
     pure (validity, values)
+
+-- ============================================================
+-- Non-nullable BYTE_ARRAY -> BinaryView (flat-shape) reader
+-- ============================================================
+
+-- | 'BinaryView' (offsets + dense data) variant of the
+-- non-nullable BYTE_ARRAY reader. Per-page output is a
+-- 'BinaryView' built directly via 'decodePlainByteArrayBV';
+-- chunk-level concat is one allocation of the total
+-- offsets + data buffers and a copy-in per page (offsets are
+-- rewritten to be absolute against the chunk-level data
+-- buffer). Dictionary pages are decoded into a
+-- 'BinaryView' once and held; data pages with
+-- @PLAIN_DICTIONARY@ / @RLE_DICTIONARY@ encoding gather
+-- bytes from the dictionary into a fresh per-page
+-- 'BinaryView' via 'gatherBinaryView'.
+--
+-- Replaces the bridge's previous
+--   AC.ColBinary . AV.binaryViewFromVector
+--     <$> PR.readGenericByteArrayColumnChunk codec chunk
+-- which paid: N short-lived 'ByteString' slice triples in a
+-- boxed 'V.Vector', then a separate
+-- 'binaryViewFromVector' walk to produce the offsets +
+-- contiguous data buffer (plus the O(N^2) bug that fix is in
+-- the previous commit).
+readGenericByteArrayColumnChunkBV
+  :: Compression -> ByteString -> Either String AV.BinaryView
+readGenericByteArrayColumnChunkBV =
+  genericReadColumnChunk dispatchByteArrayBV
+{-# INLINE readGenericByteArrayColumnChunkBV #-}
+
+dispatchByteArrayBV :: PerPage AV.BinaryView
+dispatchByteArrayBV = PerPage
+  { ppDecodePlain = decodePlainByteArrayBV
+  , ppDecodeDictIndices = \_n _raw dict indices ->
+      Right (gatherBinaryView dict indices)
+  , ppExtended = \enc n raw ->
+      if enc == encDeltaLengthByteArray
+        then do
+          v <- decodeDeltaLengthByteArray n raw
+          Right (AV.binaryViewFromVector v)
+        else if enc == encDeltaByteArray
+          then do
+            v <- decodeDeltaByteArray n raw
+            Right (AV.binaryViewFromVector v)
+          else Left $ unsupportedEncoding "BYTE_ARRAY" enc
+  , ppConcat = concatBinaryViews
+  , ppEmpty = AV.BinaryView (VS.singleton 0) VS.empty
+  }
+
+-- | Single-page PLAIN BYTE_ARRAY -> 'BinaryView'.
+--
+-- Two passes: first scan the page to count + sum the
+-- length-prefixed payloads (gives the exact total data byte
+-- count, so the output buffer is one allocation); second
+-- pass writes offsets and memcpy's bytes in lockstep.
+decodePlainByteArrayBV
+  :: Int -> ByteString -> Either String AV.BinaryView
+decodePlainByteArrayBV n bs0
+  | n <= 0 = Right (AV.BinaryView (VS.singleton 0) VS.empty)
+  | otherwise = do
+      totalBytes <- preScan 0 0 0
+      Right $! runST $ do
+        offM <- VSM.unsafeNew (n + 1)
+        datM <- VSM.unsafeNew totalBytes
+        let go !i !off !cur
+              | i >= n = do
+                  VSM.unsafeWrite offM n (fromIntegral cur :: Int32)
+                  pure ()
+              | otherwise = do
+                  let !len = fromIntegral (readLE32 bs0 off) :: Int
+                      !off2 = off + 4
+                  VSM.unsafeWrite offM i (fromIntegral cur :: Int32)
+                  copyBSIntoMV datM cur (BS.take len (BS.drop off2 bs0))
+                  go (i + 1) (off2 + len) (cur + len)
+        go 0 0 0
+        !offs <- VS.unsafeFreeze offM
+        !dat  <- VS.unsafeFreeze datM
+        pure (AV.BinaryView offs dat)
+  where
+    !totalLen = BS.length bs0
+    preScan !i !off !acc
+      | i >= n = Right acc
+      | off + 4 > totalLen =
+          Left "Parquet.Read: PLAIN BYTE_ARRAY truncated length"
+      | otherwise =
+          let !len = fromIntegral (readLE32 bs0 off) :: Int
+              !off2 = off + 4
+          in if len < 0 || off2 + len > totalLen
+               then Left "Parquet.Read: PLAIN BYTE_ARRAY payload out of bounds"
+               else preScan (i + 1) (off2 + len) (acc + len)
+
+-- | Gather a fresh 'BinaryView' by indexing into a dictionary
+-- 'BinaryView'. Two passes: sum the gathered byte count from
+-- the dictionary's offset deltas, then write offsets + memcpy
+-- per row from the dictionary's data buffer into the output
+-- data buffer.
+gatherBinaryView
+  :: AV.BinaryView -> VP.Vector Int32 -> AV.BinaryView
+gatherBinaryView dict indices = runST $ do
+  let !n = VP.length indices
+      !dOffs = AV.bvOffsets dict
+      !dDat  = AV.bvData dict
+      !nDict = max 0 (VS.length dOffs - 1)
+      bytesAt !i =
+        let !s = fromIntegral (VS.unsafeIndex dOffs i)       :: Int
+            !e = fromIntegral (VS.unsafeIndex dOffs (i + 1)) :: Int
+        in e - s
+      totalBytes = VP.foldl'
+        (\acc k ->
+            let !i = fromIntegral k :: Int
+            in if i < 0 || i >= nDict then acc else acc + bytesAt i)
+        0 indices
+  offM <- VSM.unsafeNew (n + 1)
+  datM <- VSM.unsafeNew totalBytes
+  let go !i !cur
+        | i >= n = do
+            VSM.unsafeWrite offM n (fromIntegral cur :: Int32)
+            pure ()
+        | otherwise = do
+            let !k    = fromIntegral (VP.unsafeIndex indices i) :: Int
+                !s    = fromIntegral (VS.unsafeIndex dOffs k)       :: Int
+                !e    = fromIntegral (VS.unsafeIndex dOffs (k + 1)) :: Int
+                !len  = e - s
+            VSM.unsafeWrite offM i (fromIntegral cur :: Int32)
+            -- Copy the dict slice [s, s+len) into datM at cur.
+            VS.unsafeCopy
+              (VSM.unsafeSlice cur len datM)
+              (VS.unsafeSlice s len dDat)
+            go (i + 1) (cur + len)
+  go 0 0
+  !offs <- VS.unsafeFreeze offM
+  !dat  <- VS.unsafeFreeze datM
+  pure (AV.BinaryView offs dat)
+
+-- | Stitch a list of 'BinaryView's into a single 'BinaryView'.
+-- One allocation each for the merged offsets + data buffers;
+-- per-page offsets are rewritten to absolute against the
+-- merged data buffer.
+concatBinaryViews :: [AV.BinaryView] -> AV.BinaryView
+concatBinaryViews [] = AV.BinaryView (VS.singleton 0) VS.empty
+concatBinaryViews [bv] = bv
+concatBinaryViews bvs = runST $ do
+  let totalSlots = sum (map (\bv -> max 0 (VS.length (AV.bvOffsets bv) - 1)) bvs)
+      totalBytes = sum (map (\bv -> VS.length (AV.bvData bv)) bvs)
+  offM <- VSM.unsafeNew (totalSlots + 1)
+  datM <- VSM.unsafeNew totalBytes
+  let writePages !slotBase !byteBase [] = do
+        VSM.unsafeWrite offM slotBase (fromIntegral byteBase :: Int32)
+        pure ()
+      writePages !slotBase !byteBase (p : rest) = do
+        let !pOffs  = AV.bvOffsets p
+            !pData  = AV.bvData p
+            !nSlots = max 0 (VS.length pOffs - 1)
+            !nBytes = VS.length pData
+        let copyOffs !i
+              | i >= nSlots = pure ()
+              | otherwise = do
+                  let !o = fromIntegral (VS.unsafeIndex pOffs i) :: Int
+                  VSM.unsafeWrite offM (slotBase + i)
+                                  (fromIntegral (byteBase + o) :: Int32)
+                  copyOffs (i + 1)
+        copyOffs 0
+        VS.unsafeCopy
+          (VSM.unsafeSlice byteBase nBytes datM) pData
+        writePages (slotBase + nSlots) (byteBase + nBytes) rest
+  writePages 0 0 bvs
+  !offs <- VS.unsafeFreeze offM
+  !dat  <- VS.unsafeFreeze datM
+  pure (AV.BinaryView offs dat)
 
 -- | ByteArray (UTF-8 / binary) variant. Per page emits a
 -- fully-formed 'NullableBinaryView': validity bits + Int32
