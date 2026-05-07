@@ -615,7 +615,11 @@ readParquetColumn pf rgIdx colIdx fld = do
     AT.AFloatingPoint AT.DoublePrecision | not nullable ->
       AC.ColDouble <$> PR.readGenericDoubleColumnChunk codec chunk
     AT.ABool | not nullable ->
-      AC.ColBool . boxedToBitVec <$> PR.readGenericBoolColumnChunk codec chunk
+      -- BV path: per-page decode is one Bit.fromByteStringN
+      -- on the wire bytes (Parquet's PLAIN BOOLEAN already
+      -- stores LSB-first packed bits, which is exactly the
+      -- VU.Vector Bit storage). No V.Vector Bool intermediate.
+      AC.ColBool <$> PR.readGenericBoolColumnChunkBV codec chunk
     -- BV path: per-page writes offsets + dense data straight
     -- into the BinaryView buffers, no V.Vector ByteString
     -- intermediate. UTF-8 reinterpretation is zero-copy via

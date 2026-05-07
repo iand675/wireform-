@@ -113,6 +113,8 @@ module Parquet.Read
   , readGenericByteArrayOptionalColumnChunkNV
     -- ** Flat-shape ('BinaryView') non-nullable byte-array reader
   , readGenericByteArrayColumnChunkBV
+    -- ** Flat-shape ('VU.Vector Bit') non-nullable bool reader
+  , readGenericBoolColumnChunkBV
     -- * Page-index-driven page skipping
   , readGenericInt32SelectedPages
   , readGenericInt64SelectedPages
@@ -149,6 +151,7 @@ import qualified Data.Vector.Unboxed.Mutable as VUM
 import qualified Arrow.Column as AC
 import qualified Arrow.View as AV
 import Columnar.Bit (Bit (..))
+import qualified Columnar.Bit as Bit
 import qualified Data.ByteString.Unsafe as BSU
 import Control.Monad.ST.Unsafe (unsafeIOToST)
 import Foreign.Ptr (castPtr, plusPtr)
@@ -2183,6 +2186,56 @@ readGenericByteArrayColumnChunkBV
 readGenericByteArrayColumnChunkBV =
   genericReadColumnChunk dispatchByteArrayBV
 {-# INLINE readGenericByteArrayColumnChunkBV #-}
+
+-- | 'VU.Vector Bit' (bit-packed) variant of the
+-- non-nullable BOOLEAN reader. The Parquet wire format
+-- already stores BOOLEAN as LSB-first packed bits, which is
+-- exactly the storage of 'VU.Vector Bit' -- so per-page
+-- decode is a one-allocation 'Bit.fromByteStringN' (one
+-- memcpy from the source bytestring into a primitive byte
+-- vector + a 'Bit'-newtype-wrap). Replaces the previous
+-- bridge sequence:
+--
+--   AC.ColBool . boxedToBitVec
+--     <$> PR.readGenericBoolColumnChunk codec chunk
+--
+-- which paid: per-page 'unpackBitsLsbUnsafe' walked the
+-- wire bytes and wrote N 'Bool' pointers (Just/Nothing
+-- singletons, but still N pointer slots), then the bridge
+-- walked again to bit-pack into 'VU.Vector Bit'.
+readGenericBoolColumnChunkBV
+  :: Compression -> ByteString -> Either String (VU.Vector Bit)
+readGenericBoolColumnChunkBV =
+  genericReadColumnChunk dispatchBoolBV
+{-# INLINE readGenericBoolColumnChunkBV #-}
+
+-- | PerPage record for the bit-packed BOOLEAN reader.
+-- BOOLEAN columns aren't dictionary-encoded in practice
+-- (see 'dispatchBool' for the same note); the dict path
+-- raises an error if it ever fires.
+dispatchBoolBV :: PerPage (VU.Vector Bit)
+dispatchBoolBV = PerPage
+  { ppDecodePlain = \n bs ->
+      let !need = (n + 7) `quot` 8
+      in if BS.length bs < need
+           then Left "Parquet.Read: PLAIN BOOLEAN buffer too small"
+           else Right $! Bit.fromByteStringN n bs
+  , ppDecodeDictIndices = \_n _raw _dict _ix ->
+      Left "Parquet.Read: BOOLEAN unexpectedly dictionary-encoded"
+  , ppExtended = \enc n raw ->
+      if enc == encRle
+        then do
+          -- BOOLEAN with RLE encoding: existing 'dispatchBool'
+          -- pulls a V.Vector Bool through Parquet.RLE; reuse
+          -- that and convert at the boundary (same source-of-
+          -- truth, one extra walk per RLE-encoded BOOLEAN
+          -- page; rare in practice).
+          v <- ppExtended dispatchBool enc n raw
+          Right $! VU.generate (V.length v) (\i -> Bit (V.unsafeIndex v i))
+        else Left $ unsupportedEncoding "BOOLEAN" enc
+  , ppConcat = VU.concat
+  , ppEmpty = VU.empty
+  }
 
 dispatchByteArrayBV :: PerPage AV.BinaryView
 dispatchByteArrayBV = PerPage
