@@ -172,19 +172,25 @@ main = do
   roundTripPrim "DoubleMaybe"
     (ColDoubleMaybe (AC.nvFromMaybeList 0 [Just 1.5, Nothing]))
   roundTripPrim "BoolMaybe"
-    (ColBoolMaybe (V.fromList [Just True, Nothing, Just False, Just True]))
+    (ColBoolMaybe (AV.nullableBoolViewFromMaybeVector
+                     (V.fromList [Just True, Nothing, Just False, Just True])))
 
   roundTripPrim "Utf8Maybe"
-    (ColUtf8Maybe (V.fromList [Just "alpha", Nothing, Just ""]))
+    (ColUtf8Maybe (AV.nullableUtf8ViewFromMaybeVector
+                     (V.fromList [Just "alpha", Nothing, Just ""])))
   roundTripPrim "BinaryMaybe"
-    (ColBinaryMaybe (V.fromList [Just (BS.pack [1, 2]), Nothing]))
+    (ColBinaryMaybe (AV.nullableBinaryViewFromMaybeVector
+                       (V.fromList [Just (BS.pack [1, 2]), Nothing])))
   roundTripPrim "LargeUtf8Maybe"
-    (ColLargeUtf8Maybe (V.fromList [Nothing, Just "beta"]))
+    (ColLargeUtf8Maybe (AV.nullableLargeUtf8ViewFromMaybeVector
+                          (V.fromList [Nothing, Just "beta"])))
   roundTripPrim "LargeBinaryMaybe"
-    (ColLargeBinaryMaybe (V.fromList [Just (BS.pack [0xFF]), Nothing]))
+    (ColLargeBinaryMaybe (AV.nullableLargeBinaryViewFromMaybeVector
+                            (V.fromList [Just (BS.pack [0xFF]), Nothing])))
   roundTripPrim "FixedSizeBinaryMaybe"
-    (ColFixedSizeBinaryMaybe 3
-      (V.fromList [Just (BS.pack [1, 2, 3]), Nothing, Just (BS.pack [4, 5, 6])]))
+    (ColFixedSizeBinaryMaybe
+      (AV.nullableFixedSizeBinaryViewFromMaybeVector 3
+        (V.fromList [Just (BS.pack [1, 2, 3]), Nothing, Just (BS.pack [4, 5, 6])])))
 
   roundTripPrim "Date32Maybe" (ColDate32Maybe (AC.nvFromMaybeList 0 [Just (0 :: Int32), Nothing]))
   roundTripPrim "Date64Maybe" (ColDate64Maybe (AC.nvFromMaybeList 0 [Just (0 :: Int64), Nothing]))
@@ -391,7 +397,8 @@ flatBufRoundTrip = do
        })
     (V.fromList
        [ ColInt32      (VS.fromList ([1, 2, 3] :: [Int32]))
-       , ColUtf8Maybe  (V.fromList [Just "x", Nothing, Just "z"])
+       , ColUtf8Maybe (AV.nullableUtf8ViewFromMaybeVector
+                          (V.fromList [Just "x", Nothing, Just "z"]))
        ])
 
   -- Post-V5 columns: writer + reader byte-compatible end to end.
@@ -530,8 +537,10 @@ pyarrowGoldenRoundTrip = do
   goldenCheck "pa_mixed.arrows"
     (V.fromList
        [ ColInt64 (VS.fromList [10, 20, 30 :: Int64])
-       , ColUtf8Maybe (V.fromList [Just "alpha", Nothing, Just "gamma"])
-       , ColBoolMaybe (V.fromList [Just True, Just False, Nothing])
+       , ColUtf8Maybe (AV.nullableUtf8ViewFromMaybeVector
+                         (V.fromList [Just "alpha", Nothing, Just "gamma"]))
+       , ColBoolMaybe (AV.nullableBoolViewFromMaybeVector
+                         (V.fromList [Just True, Just False, Nothing]))
        ])
 
   -- Dictionary-encoded batch: the decoder resolves
@@ -680,7 +689,7 @@ dictReplacementRoundTrip = do
                       ++ show (length batches)
   where
     valuesToList (ColUtf8 v)          = AV.utf8ViewToVector v
-    valuesToList (ColUtf8Maybe v)     = V.mapMaybe id v
+    valuesToList (ColUtf8Maybe v)     = V.mapMaybe id (AV.nullableUtf8ViewToMaybeVector v)
     valuesToList _                    = V.empty
 
 bodyCompressionRoundTrip :: BodyCompressionCodec -> Schema -> V.Vector ColumnArray -> IO ()
@@ -1175,7 +1184,7 @@ inferArrowType = \case
   ColBinaryMaybe _  -> ABinary
   ColLargeUtf8Maybe _   -> ALargeUtf8
   ColLargeBinaryMaybe _ -> ALargeBinary
-  ColFixedSizeBinaryMaybe w _ -> AFixedSizeBinary w
+  ColFixedSizeBinaryMaybe v -> AFixedSizeBinary (AV.nfsbvWidth v)
   ColDate32Maybe _ -> ADate DateDay
   ColDate64Maybe _ -> ADate DateMillisecond
   ColTime32Maybe _ -> ATime Second 32
@@ -1205,7 +1214,7 @@ isNullable = \case
   ColBinaryMaybe _   -> True
   ColLargeUtf8Maybe _   -> True
   ColLargeBinaryMaybe _ -> True
-  ColFixedSizeBinaryMaybe _ _ -> True
+  ColFixedSizeBinaryMaybe _ -> True
   ColDate32Maybe _   -> True
   ColDate64Maybe _   -> True
   ColTime32Maybe _   -> True

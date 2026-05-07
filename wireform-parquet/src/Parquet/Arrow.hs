@@ -161,15 +161,19 @@ columnArrayToParquetColumn col = case col of
   AC.ColDoubleMaybe v ->
     Right $ PW.PCOptional (PW.OptDouble (AC.nvToMaybeVector v))
   AC.ColBoolMaybe v ->
-    Right $ PW.PCOptional (PW.OptBool v)
+    Right $ PW.PCOptional (PW.OptBool (AV.nullableBoolViewToMaybeVector v))
   AC.ColUtf8Maybe v ->
-    Right $ PW.PCOptional (PW.OptByteArray (V.map (fmap TE.encodeUtf8) v))
+    Right $ PW.PCOptional (PW.OptByteArray
+      (V.map (fmap TE.encodeUtf8) (AV.nullableUtf8ViewToMaybeVector v)))
   AC.ColBinaryMaybe v ->
-    Right $ PW.PCOptional (PW.OptByteArray v)
+    Right $ PW.PCOptional (PW.OptByteArray
+      (AV.nullableBinaryViewToMaybeVector v))
   AC.ColLargeUtf8Maybe v ->
-    Right $ PW.PCOptional (PW.OptByteArray (V.map (fmap TE.encodeUtf8) v))
+    Right $ PW.PCOptional (PW.OptByteArray
+      (V.map (fmap TE.encodeUtf8) (AV.nullableLargeUtf8ViewToMaybeVector v)))
   AC.ColLargeBinaryMaybe v ->
-    Right $ PW.PCOptional (PW.OptByteArray v)
+    Right $ PW.PCOptional (PW.OptByteArray
+      (AV.nullableLargeBinaryViewToMaybeVector v))
   -- Int8 / Int16 / UInt* nullable: widen to Int32 while
   -- preserving Nothing positions.
   AC.ColInt8Maybe v ->
@@ -332,11 +336,19 @@ columnArrayToColumnData = \case
   AC.ColUInt64Maybe v -> Right $ PW.ColInt64 (nvPresentVP (fromIntegral :: Word64 -> Int64) v)
   AC.ColFloatMaybe  v -> Right $ PW.ColFloat  (nvPresentVP id v)
   AC.ColDoubleMaybe v -> Right $ PW.ColDouble (nvPresentVP id v)
-  AC.ColBoolMaybe   v -> Right $ PW.ColBool       (NB.presentValuesV v)
-  AC.ColUtf8Maybe   v -> Right $ PW.ColByteArray  (NB.presentValuesVMap TE.encodeUtf8 v)
-  AC.ColLargeUtf8Maybe v -> Right $ PW.ColByteArray (NB.presentValuesVMap TE.encodeUtf8 v)
-  AC.ColBinaryMaybe v -> Right $ PW.ColByteArray  (NB.presentValuesV v)
-  AC.ColLargeBinaryMaybe v -> Right $ PW.ColByteArray (NB.presentValuesV v)
+  AC.ColBoolMaybe   v -> Right $ PW.ColBool
+                                    (NB.presentValuesV (AV.nullableBoolViewToMaybeVector v))
+  AC.ColUtf8Maybe   v -> Right $ PW.ColByteArray
+                                    (NB.presentValuesVMap TE.encodeUtf8
+                                       (AV.nullableUtf8ViewToMaybeVector v))
+  AC.ColLargeUtf8Maybe v -> Right $ PW.ColByteArray
+                                       (NB.presentValuesVMap TE.encodeUtf8
+                                          (AV.nullableLargeUtf8ViewToMaybeVector v))
+  AC.ColBinaryMaybe v -> Right $ PW.ColByteArray
+                                    (NB.presentValuesV (AV.nullableBinaryViewToMaybeVector v))
+  AC.ColLargeBinaryMaybe v -> Right $ PW.ColByteArray
+                                       (NB.presentValuesV
+                                          (AV.nullableLargeBinaryViewToMaybeVector v))
   other -> Left $ "Parquet.Arrow: Arrow column shape "
                   <> show other
                   <> " has no flat Parquet equivalent (nested types "
@@ -656,12 +668,15 @@ readParquetColumn pf rgIdx colIdx fld = do
       AC.ColDoubleMaybe . AC.nvFromMaybeVector 0
         <$> PR.readGenericDoubleOptionalColumnChunk codec 0 1 chunk
     AT.ABool | nullable ->
-      AC.ColBoolMaybe <$> PR.readGenericBoolOptionalColumnChunk codec 0 1 chunk
+      AC.ColBoolMaybe . AV.nullableBoolViewFromMaybeVector
+        <$> PR.readGenericBoolOptionalColumnChunk codec 0 1 chunk
     AT.AUtf8 | nullable -> do
       bs <- PR.readGenericByteArrayOptionalColumnChunk codec 0 1 chunk
-      Right $ AC.ColUtf8Maybe (V.map (fmap decodeUtf8Lossy) bs)
+      Right $ AC.ColUtf8Maybe
+        (AV.nullableUtf8ViewFromMaybeVector (V.map (fmap decodeUtf8Lossy) bs))
     AT.ABinary | nullable ->
-      AC.ColBinaryMaybe <$> PR.readGenericByteArrayOptionalColumnChunk codec 0 1 chunk
+      AC.ColBinaryMaybe . AV.nullableBinaryViewFromMaybeVector
+        <$> PR.readGenericByteArrayOptionalColumnChunk codec 0 1 chunk
     AT.ADate AT.DateDay | nullable ->
       AC.ColDate32Maybe . AC.nvFromMaybeVector 0
         <$> PR.readGenericInt32OptionalColumnChunk codec 0 1 chunk
@@ -838,9 +853,12 @@ columnArrayToNestedRows col = case col of
   AC.ColInt64Maybe v -> Right (V.map (maybe PN.NRNull (PN.NRLeaf . PN.LvInt64)) (AC.nvToMaybeVector v))
   AC.ColFloatMaybe v -> Right (V.map (maybe PN.NRNull (PN.NRLeaf . PN.LvFloat)) (AC.nvToMaybeVector v))
   AC.ColDoubleMaybe v -> Right (V.map (maybe PN.NRNull (PN.NRLeaf . PN.LvDouble)) (AC.nvToMaybeVector v))
-  AC.ColBoolMaybe v -> Right (V.map (maybe PN.NRNull (PN.NRLeaf . PN.LvBool)) v)
-  AC.ColUtf8Maybe v -> Right (V.map (maybe PN.NRNull (PN.NRLeaf . PN.LvString)) v)
-  AC.ColBinaryMaybe v -> Right (V.map (maybe PN.NRNull (PN.NRLeaf . PN.LvBinary)) v)
+  AC.ColBoolMaybe v -> Right (V.map (maybe PN.NRNull (PN.NRLeaf . PN.LvBool))
+                                      (AV.nullableBoolViewToMaybeVector v))
+  AC.ColUtf8Maybe v -> Right (V.map (maybe PN.NRNull (PN.NRLeaf . PN.LvString))
+                                     (AV.nullableUtf8ViewToMaybeVector v))
+  AC.ColBinaryMaybe v -> Right (V.map (maybe PN.NRNull (PN.NRLeaf . PN.LvBinary))
+                                       (AV.nullableBinaryViewToMaybeVector v))
 
   -- Struct: each row is an NRStruct of field values indexed in
   -- declared order. Every child must yield the same row count.
@@ -1173,15 +1191,16 @@ decodeSelectedOptionalColumn codec fileBs locs keep fld = case AT.fieldType fld 
     AC.ColDoubleMaybe . AC.nvFromMaybeVector 0
       <$> PR.readGenericDoubleOptionalSelectedPages codec 0 1 fileBs locs keep
   AT.ABool ->
-    AC.ColBoolMaybe   <$> PR.readGenericBoolOptionalSelectedPages
-                            codec 0 1 fileBs locs keep
+    AC.ColBoolMaybe . AV.nullableBoolViewFromMaybeVector
+      <$> PR.readGenericBoolOptionalSelectedPages codec 0 1 fileBs locs keep
   AT.AUtf8 -> do
     bs <- PR.readGenericByteArrayOptionalSelectedPages
             codec 0 1 fileBs locs keep
-    Right $ AC.ColUtf8Maybe (V.map (fmap decodeUtf8Lossy) bs)
+    Right $ AC.ColUtf8Maybe (AV.nullableUtf8ViewFromMaybeVector
+                               (V.map (fmap decodeUtf8Lossy) bs))
   AT.ABinary ->
-    AC.ColBinaryMaybe <$> PR.readGenericByteArrayOptionalSelectedPages
-                            codec 0 1 fileBs locs keep
+    AC.ColBinaryMaybe . AV.nullableBinaryViewFromMaybeVector
+      <$> PR.readGenericByteArrayOptionalSelectedPages codec 0 1 fileBs locs keep
   AT.ADate AT.DateDay ->
     AC.ColDate32Maybe . AC.nvFromMaybeVector 0
       <$> PR.readGenericInt32OptionalSelectedPages codec 0 1 fileBs locs keep

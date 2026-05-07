@@ -103,7 +103,7 @@ writeMode outDir = do
     [V.fromList
        [ ColInt64 (VS.fromList ([10,20,30] :: [Int64]))
        , ColUtf8  (AV.utf8ViewFromVector (V.fromList ["hello","world","!"]))
-       , ColBoolMaybe (V.fromList [Just True, Nothing, Just False])
+       , ColBoolMaybe (AV.nullableBoolViewFromMaybeVector (V.fromList [Just True, Nothing, Just False]))
        ]]
 
   -- 3) Post-V5: Utf8View (inline + null + out-of-line).

@@ -558,7 +558,16 @@ encodeCol f col acc = case col of
   ColFloat16Maybe v -> primNullable encodeFloat16s (0 :: Word16) v acc
   ColFloatMaybe   v -> primNullable encodePlainFloat  (0 :: Float)  v acc
   ColDoubleMaybe  v -> primNullable encodePlainDouble (0 :: Double) v acc
-  ColBoolMaybe v -> primNullableBoxed encodePlainBool False v acc
+  -- Nullable Bool: validity bitmap + values bitmap, both
+  -- already in wire format.
+  ColBoolMaybe v ->
+    let !validity = encodeNullBitmap (AV.nbvValidity v)
+        !values   = encodeNullBitmap (AV.nbvValues v)
+        !n        = fromIntegral (AV.nbvLength v) :: Int64
+        !nc       = fromIntegral (AV.nbvNullCount v) :: Int64
+    in addBufData values
+       $ addBufData validity
+       $ addFieldNode n nc acc
   ColDate32Maybe    v -> primNullable encodeInt32s (0 :: Int32) v acc
   ColDate64Maybe    v -> primNullable encodeInt64s (0 :: Int64) v acc
   ColTime32Maybe    v -> primNullable encodeInt32s (0 :: Int32) v acc
@@ -566,17 +575,34 @@ encodeCol f col acc = case col of
   ColTimestampMaybe v -> primNullable encodeInt64s (0 :: Int64) v acc
   ColDurationMaybe  v -> primNullable encodeInt64s (0 :: Int64) v acc
 
-  -- Nullable variable-length + fixed-size binary columns.
-  ColUtf8Maybe v ->
-    varNullableBoxed encodePlainUtf8 T.empty v acc
-  ColBinaryMaybe v ->
-    varNullableBoxed encodePlainBinary BS.empty v acc
-  ColLargeUtf8Maybe v ->
-    varNullableBoxed encodePlainLargeUtf8 T.empty v acc
-  ColLargeBinaryMaybe v ->
-    varNullableBoxed encodePlainLargeBinary BS.empty v acc
-  ColFixedSizeBinaryMaybe w v ->
-    primNullableBoxed (encodePlainFixedSizeBinary w) (BS.replicate w 0) v acc
+  -- Nullable variable-length: validity + offsets + data,
+  -- all already in wire format. Three buffer handoffs.
+  ColUtf8Maybe v -> writeNullableVar
+                      (AV.nuvValidity v)
+                      (AV.uvOffsets (AV.nuvValues v))
+                      (AV.uvData (AV.nuvValues v))
+                      acc
+  ColBinaryMaybe v -> writeNullableVar
+                        (AV.nbvBinValidity v)
+                        (AV.bvOffsets (AV.nbvBinValues v))
+                        (AV.bvData (AV.nbvBinValues v))
+                        acc
+  ColLargeUtf8Maybe v -> writeNullableVar
+                           (AV.nluvValidity v)
+                           (AV.luvOffsets (AV.nluvValues v))
+                           (AV.luvData (AV.nluvValues v))
+                           acc
+  ColLargeBinaryMaybe v -> writeNullableVar
+                             (AV.nlbvValidity v)
+                             (AV.lbvOffsets (AV.nlbvValues v))
+                             (AV.lbvData (AV.nlbvValues v))
+                             acc
+  ColFixedSizeBinaryMaybe v ->
+    primNullableBoxed
+      (encodePlainFixedSizeBinary (AV.nfsbvWidth v))
+      (BS.replicate (AV.nfsbvWidth v) 0)
+      (AV.nullableFixedSizeBinaryViewToMaybeVector v)
+      acc
 
   -- ============================================================
   -- Nested columns
@@ -987,6 +1013,27 @@ validityNullCount v = fromIntegral (VU.length v - Bit.countOnes v)
 {-# INLINE boxedToBitVec #-}
 boxedToBitVec :: V.Vector Bool -> VU.Vector Bit
 boxedToBitVec v = VU.generate (V.length v) (\i -> Bit (V.unsafeIndex v i))
+
+-- | Build a nullable variable-length column field node:
+-- (validity bitmap, offsets, data buffer, nullCount). All
+-- three buffers are already in wire format on the source
+-- views, so this is three ForeignPtr handoffs plus one
+-- bit-popcount.
+{-# INLINE writeNullableVar #-}
+writeNullableVar
+  :: Storable a
+  => VU.Vector Bit -> VS.Vector a -> VS.Vector Word8
+  -> BuildAcc -> BuildAcc
+writeNullableVar !validity !offsets !dataBuf acc =
+  let !validityBs = encodeNullBitmap validity
+      !offsetsBs  = vsByteString offsets
+      !dataBs     = vsByteString dataBuf
+      !n          = fromIntegral (VU.length validity) :: Int64
+      !nc         = validityNullCount validity
+  in addBufData dataBs
+     $ addBufData offsetsBs
+     $ addBufData validityBs
+     $ addFieldNode n nc acc
 
 -- | Reinterpret a 'VS.Vector' as a strict 'ByteString' /without
 -- copying/. Both representations are a 'ForeignPtr' + length

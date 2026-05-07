@@ -425,8 +425,14 @@ decodeInterleavedFrames sch = go Map.empty []
       (ColLargeBinary n, ColLargeBinary o) ->
         ColLargeBinary (AV.binaryViewFromVector_l
                           (AV.largeBinaryViewToVector o V.++ AV.largeBinaryViewToVector n))
-      (ColUtf8Maybe n, ColUtf8Maybe o)     -> ColUtf8Maybe (o V.++ n)
-      (ColBinaryMaybe n, ColBinaryMaybe o) -> ColBinaryMaybe (o V.++ n)
+      (ColUtf8Maybe n, ColUtf8Maybe o) ->
+        ColUtf8Maybe (AV.nullableUtf8ViewFromMaybeVector
+                        (AV.nullableUtf8ViewToMaybeVector o
+                          V.++ AV.nullableUtf8ViewToMaybeVector n))
+      (ColBinaryMaybe n, ColBinaryMaybe o) ->
+        ColBinaryMaybe (AV.nullableBinaryViewFromMaybeVector
+                          (AV.nullableBinaryViewToMaybeVector o
+                            V.++ AV.nullableBinaryViewToMaybeVector n))
       -- Primitive numeric vectors concatenate trivially.
       (ColInt32 n, ColInt32 o)             -> ColInt32 (o VS.++ n)
       (ColInt64 n, ColInt64 o)             -> ColInt64 (o VS.++ n)
@@ -549,7 +555,7 @@ arrowTypeOfDictValues = \case
   ColDouble _            -> AFloatingPoint DoublePrecision
   ColDoubleMaybe _       -> AFloatingPoint DoublePrecision
   ColFixedSizeBinary n _      -> AFixedSizeBinary n
-  ColFixedSizeBinaryMaybe n _ -> AFixedSizeBinary n
+  ColFixedSizeBinaryMaybe v   -> AFixedSizeBinary (AV.nfsbvWidth v)
   -- Everything else: fall back to utf8 so we at least have a
   -- well-formed schema; in practice dictionary value columns are
   -- almost always strings or primitives.

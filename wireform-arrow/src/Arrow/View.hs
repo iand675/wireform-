@@ -53,12 +53,40 @@ module Arrow.View
   , binaryViewFromVector
   , utf8ViewFromVector_l
   , binaryViewFromVector_l
+    -- * Nullable variable-length view types
+  , NullableBoolView (..)
+  , NullableUtf8View (..)
+  , NullableBinaryView (..)
+  , NullableLargeUtf8View (..)
+  , NullableLargeBinaryView (..)
+  , NullableFixedSizeBinaryView (..)
+    -- ** Nullable construction
+  , nullableBoolViewFromMaybeVector
+  , nullableUtf8ViewFromMaybeVector
+  , nullableBinaryViewFromMaybeVector
+  , nullableLargeUtf8ViewFromMaybeVector
+  , nullableLargeBinaryViewFromMaybeVector
+  , nullableFixedSizeBinaryViewFromMaybeVector
+    -- ** Nullable materialisation
+  , nullableBoolViewToMaybeVector
+  , nullableUtf8ViewToMaybeVector
+  , nullableBinaryViewToMaybeVector
+  , nullableLargeUtf8ViewToMaybeVector
+  , nullableLargeBinaryViewToMaybeVector
+  , nullableFixedSizeBinaryViewToMaybeVector
+    -- ** Nullable accessors / counts
+  , nullableBoolAt
+  , nullableUtf8At
+  , nullableBinaryAt
+  , nbvLength
+  , nbvNullCount
   ) where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
+import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
 import qualified Data.Vector as V
@@ -337,6 +365,216 @@ binaryViewFromVector_l v =
 
 binaryViewToLargeUtf8View :: LargeBinaryView -> LargeUtf8View
 binaryViewToLargeUtf8View (LargeBinaryView off dat) = LargeUtf8View off dat
+
+-- ============================================================
+-- Nullable view types
+-- ============================================================
+
+-- | Nullable Bool column: validity bitmap + values bitmap.
+-- Each is @ceil(N / 8)@ bytes — the wire format of an Arrow
+-- nullable BOOL column directly.
+data NullableBoolView = NullableBoolView
+  { nbvValidity :: !(VU.Vector Bit)
+  , nbvValues   :: !(VU.Vector Bit)
+  } deriving stock (Eq, Show)
+
+-- | Nullable UTF-8 column: validity bitmap + dense Utf8View.
+-- Null slots in 'nuvValues' carry whatever was on the wire
+-- (typically the empty string); consumers must consult
+-- 'nuvValidity' before reading.
+data NullableUtf8View = NullableUtf8View
+  { nuvValidity :: !(VU.Vector Bit)
+  , nuvValues   :: !Utf8View
+  } deriving stock (Eq, Show)
+
+data NullableBinaryView = NullableBinaryView
+  { nbvBinValidity :: !(VU.Vector Bit)
+  , nbvBinValues   :: !BinaryView
+  } deriving stock (Eq, Show)
+
+data NullableLargeUtf8View = NullableLargeUtf8View
+  { nluvValidity :: !(VU.Vector Bit)
+  , nluvValues   :: !LargeUtf8View
+  } deriving stock (Eq, Show)
+
+data NullableLargeBinaryView = NullableLargeBinaryView
+  { nlbvValidity :: !(VU.Vector Bit)
+  , nlbvValues   :: !LargeBinaryView
+  } deriving stock (Eq, Show)
+
+-- | Nullable fixed-size binary column: width + validity
+-- bitmap + dense values vector. Null slots carry @width@
+-- bytes of whatever was on the wire (typically zero).
+data NullableFixedSizeBinaryView = NullableFixedSizeBinaryView
+  { nfsbvWidth    :: !Int
+  , nfsbvValidity :: !(VU.Vector Bit)
+  , nfsbvValues   :: !(V.Vector ByteString)
+  } deriving stock (Eq, Show)
+
+-- ----------------------------------------------------------------
+-- Common length / nullcount helpers
+-- ----------------------------------------------------------------
+
+{-# INLINE nbvLength #-}
+nbvLength :: NullableBoolView -> Int
+nbvLength = VU.length . nbvValidity
+
+{-# INLINE nbvNullCount #-}
+nbvNullCount :: NullableBoolView -> Int
+nbvNullCount nv =
+  let !v = nbvValidity nv
+  in VU.length v
+       - VU.foldl' (\acc (Bit b) -> if b then acc + 1 else acc) 0 v
+
+-- ----------------------------------------------------------------
+-- Nullable accessors
+-- ----------------------------------------------------------------
+
+{-# INLINE nullableBoolAt #-}
+nullableBoolAt :: NullableBoolView -> Int -> Maybe Bool
+nullableBoolAt nv i
+  | not (validBit (nbvValidity nv) i) = Nothing
+  | otherwise = Just (unBit (VU.unsafeIndex (nbvValues nv) i))
+
+{-# INLINE nullableUtf8At #-}
+nullableUtf8At :: NullableUtf8View -> Int -> Maybe Text
+nullableUtf8At nv i
+  | not (validBit (nuvValidity nv) i) = Nothing
+  | otherwise = Just (utf8At (nuvValues nv) i)
+
+{-# INLINE nullableBinaryAt #-}
+nullableBinaryAt :: NullableBinaryView -> Int -> Maybe ByteString
+nullableBinaryAt nv i
+  | not (validBit (nbvBinValidity nv) i) = Nothing
+  | otherwise = Just (binaryAt (nbvBinValues nv) i)
+
+{-# INLINE validBit #-}
+validBit :: VU.Vector Bit -> Int -> Bool
+validBit v i
+  | VU.null v = True
+  | otherwise = unBit (VU.unsafeIndex v i)
+
+-- ----------------------------------------------------------------
+-- Construction / materialisation
+-- ----------------------------------------------------------------
+
+nullableBoolViewFromMaybeVector :: V.Vector (Maybe Bool) -> NullableBoolView
+nullableBoolViewFromMaybeVector v =
+  let !n = V.length v
+  in NullableBoolView
+       { nbvValidity = VU.generate n $ \i ->
+           case V.unsafeIndex v i of
+             Just _  -> Bit True
+             Nothing -> Bit False
+       , nbvValues   = VU.generate n $ \i ->
+           case V.unsafeIndex v i of
+             Just b  -> Bit b
+             Nothing -> Bit False
+       }
+
+nullableUtf8ViewFromMaybeVector :: V.Vector (Maybe Text) -> NullableUtf8View
+nullableUtf8ViewFromMaybeVector v =
+  let !validity = VU.generate (V.length v) $ \i ->
+        case V.unsafeIndex v i of
+          Just _  -> Bit True
+          Nothing -> Bit False
+      !densified = V.map (maybe T.empty id) v
+  in NullableUtf8View
+       { nuvValidity = validity
+       , nuvValues   = utf8ViewFromVector densified
+       }
+
+nullableBinaryViewFromMaybeVector
+  :: V.Vector (Maybe ByteString) -> NullableBinaryView
+nullableBinaryViewFromMaybeVector v =
+  let !validity = VU.generate (V.length v) $ \i ->
+        case V.unsafeIndex v i of
+          Just _  -> Bit True
+          Nothing -> Bit False
+      !densified = V.map (maybe BS.empty id) v
+  in NullableBinaryView
+       { nbvBinValidity = validity
+       , nbvBinValues   = binaryViewFromVector densified
+       }
+
+nullableLargeUtf8ViewFromMaybeVector
+  :: V.Vector (Maybe Text) -> NullableLargeUtf8View
+nullableLargeUtf8ViewFromMaybeVector v =
+  let !validity = VU.generate (V.length v) $ \i ->
+        case V.unsafeIndex v i of
+          Just _  -> Bit True
+          Nothing -> Bit False
+      !densified = V.map (maybe T.empty id) v
+  in NullableLargeUtf8View
+       { nluvValidity = validity
+       , nluvValues   = utf8ViewFromVector_l densified
+       }
+
+nullableLargeBinaryViewFromMaybeVector
+  :: V.Vector (Maybe ByteString) -> NullableLargeBinaryView
+nullableLargeBinaryViewFromMaybeVector v =
+  let !validity = VU.generate (V.length v) $ \i ->
+        case V.unsafeIndex v i of
+          Just _  -> Bit True
+          Nothing -> Bit False
+      !densified = V.map (maybe BS.empty id) v
+  in NullableLargeBinaryView
+       { nlbvValidity = validity
+       , nlbvValues   = binaryViewFromVector_l densified
+       }
+
+nullableFixedSizeBinaryViewFromMaybeVector
+  :: Int -> V.Vector (Maybe ByteString) -> NullableFixedSizeBinaryView
+nullableFixedSizeBinaryViewFromMaybeVector w v =
+  let !validity = VU.generate (V.length v) $ \i ->
+        case V.unsafeIndex v i of
+          Just _  -> Bit True
+          Nothing -> Bit False
+      !densified = V.map (maybe (BS.replicate w 0) id) v
+  in NullableFixedSizeBinaryView
+       { nfsbvWidth    = w
+       , nfsbvValidity = validity
+       , nfsbvValues   = densified
+       }
+
+nullableBoolViewToMaybeVector :: NullableBoolView -> V.Vector (Maybe Bool)
+nullableBoolViewToMaybeVector nv =
+  V.generate (nbvLength nv) (nullableBoolAt nv)
+
+nullableUtf8ViewToMaybeVector :: NullableUtf8View -> V.Vector (Maybe Text)
+nullableUtf8ViewToMaybeVector nv =
+  V.generate (vLength (nuvValues nv)) (nullableUtf8At nv)
+
+nullableBinaryViewToMaybeVector :: NullableBinaryView -> V.Vector (Maybe ByteString)
+nullableBinaryViewToMaybeVector nv =
+  V.generate (vLength (nbvBinValues nv)) (nullableBinaryAt nv)
+
+nullableLargeUtf8ViewToMaybeVector
+  :: NullableLargeUtf8View -> V.Vector (Maybe Text)
+nullableLargeUtf8ViewToMaybeVector nv =
+  let !len = vLength (nluvValues nv)
+  in V.generate len $ \i ->
+       if not (validBit (nluvValidity nv) i)
+         then Nothing
+         else Just (largeUtf8At (nluvValues nv) i)
+
+nullableLargeBinaryViewToMaybeVector
+  :: NullableLargeBinaryView -> V.Vector (Maybe ByteString)
+nullableLargeBinaryViewToMaybeVector nv =
+  let !len = vLength (nlbvValues nv)
+  in V.generate len $ \i ->
+       if not (validBit (nlbvValidity nv) i)
+         then Nothing
+         else Just (largeBinaryAt (nlbvValues nv) i)
+
+nullableFixedSizeBinaryViewToMaybeVector
+  :: NullableFixedSizeBinaryView -> V.Vector (Maybe ByteString)
+nullableFixedSizeBinaryViewToMaybeVector nv =
+  let !values = nfsbvValues nv
+  in V.generate (V.length values) $ \i ->
+       if not (validBit (nfsbvValidity nv) i)
+         then Nothing
+         else Just (V.unsafeIndex values i)
 
 -- | Helper: copy a 'ByteString' into a 'VS.Vector Word8'.
 -- Used by the 'fromVector' constructors above.

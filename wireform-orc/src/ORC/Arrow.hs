@@ -462,7 +462,7 @@ columnArrayToORCStreams !cid = go
       AC.ColUInt64Maybe v -> Right (intMaybe v cid fromIntegral)
 
       AC.ColBoolMaybe   v ->
-        let (pres, present) = presentBits v
+        let (pres, present) = presentBits (AV.nullableBoolViewToMaybeVector v)
         in Right (boolStreams (Just pres) cid present)
       AC.ColFloatMaybe  v ->
         let (pres, present) = presentNVPrim v
@@ -472,16 +472,18 @@ columnArrayToORCStreams !cid = go
         in Right (doubleStreams (Just pres) cid present)
 
       AC.ColUtf8Maybe   v ->
-        let (pres, present) = presentBytes (V.map (fmap TE.encodeUtf8) v)
+        let (pres, present) = presentBytes (V.map (fmap TE.encodeUtf8)
+                                              (AV.nullableUtf8ViewToMaybeVector v))
         in Right (stringStreams (Just pres) cid present)
       AC.ColLargeUtf8Maybe v ->
-        let (pres, present) = presentBytes (V.map (fmap TE.encodeUtf8) v)
+        let (pres, present) = presentBytes (V.map (fmap TE.encodeUtf8)
+                                              (AV.nullableLargeUtf8ViewToMaybeVector v))
         in Right (stringStreams (Just pres) cid present)
       AC.ColBinaryMaybe v ->
-        let (pres, present) = presentBytes v
+        let (pres, present) = presentBytes (AV.nullableBinaryViewToMaybeVector v)
         in Right (stringStreams (Just pres) cid present)
       AC.ColLargeBinaryMaybe v ->
-        let (pres, present) = presentBytes v
+        let (pres, present) = presentBytes (AV.nullableLargeBinaryViewToMaybeVector v)
         in Right (stringStreams (Just pres) cid present)
 
       -- Nullable temporals: reuse intMaybe with the matching
@@ -866,7 +868,7 @@ decodeOneColumn cid fld numRows stripeBs streams = do
       dataBs <- sliceFor streamData
       xs <- OR.decodeBoolColumn numRows dataBs mPresentBs
       if AT.fieldNullable fld
-        then Right (AC.ColBoolMaybe xs)
+        then Right (AC.ColBoolMaybe (AV.nullableBoolViewFromMaybeVector xs))
         else Right (AC.ColBool
                (VU.generate (V.length xs)
                   (\i -> Bit (maybe False id (V.unsafeIndex xs i)))))
@@ -956,10 +958,16 @@ decodeOneColumn cid fld numRows stripeBs streams = do
                                      (V.map (maybe T.empty id) xs))
       if AT.fieldNullable fld
         then Right $ case ty of
-               AT.ABinary       -> AC.ColBinaryMaybe (V.map (fmap TE.encodeUtf8) xs)
-               AT.ALargeBinary  -> AC.ColLargeBinaryMaybe (V.map (fmap TE.encodeUtf8) xs)
-               AT.ALargeUtf8    -> AC.ColLargeUtf8Maybe xs
-               _                -> AC.ColUtf8Maybe xs
+               AT.ABinary       -> AC.ColBinaryMaybe
+                                     (AV.nullableBinaryViewFromMaybeVector
+                                        (V.map (fmap TE.encodeUtf8) xs))
+               AT.ALargeBinary  -> AC.ColLargeBinaryMaybe
+                                     (AV.nullableLargeBinaryViewFromMaybeVector
+                                        (V.map (fmap TE.encodeUtf8) xs))
+               AT.ALargeUtf8    -> AC.ColLargeUtf8Maybe
+                                     (AV.nullableLargeUtf8ViewFromMaybeVector xs)
+               _                -> AC.ColUtf8Maybe
+                                     (AV.nullableUtf8ViewFromMaybeVector xs)
         else Right decoded
 
 -- | Cast a @V.Vector (Maybe Int64)@ stream to the right Arrow

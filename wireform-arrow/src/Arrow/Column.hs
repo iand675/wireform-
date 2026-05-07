@@ -62,7 +62,13 @@ import Data.Word (Word8, Word16, Word32, Word64)
 import GHC.Float (castWord32ToFloat, castWord64ToDouble)
 
 import Arrow.IPC (validateRecordBatchBuffers)
-import Arrow.View (Utf8View (..), BinaryView (..), LargeUtf8View (..), LargeBinaryView (..))
+import Arrow.View
+  ( Utf8View (..), BinaryView (..)
+  , LargeUtf8View (..), LargeBinaryView (..)
+  , NullableBoolView, NullableUtf8View, NullableBinaryView
+  , NullableLargeUtf8View, NullableLargeBinaryView
+  , NullableFixedSizeBinaryView
+  )
 import qualified Arrow.View as AV
 import Columnar.Bit (Bit (..))
 import qualified Columnar.Bit as Bit
@@ -246,12 +252,12 @@ data ColumnArray
   | ColFloat16Maybe !(NullableView Word16)
   | ColFloatMaybe  !(NullableView Float)
   | ColDoubleMaybe !(NullableView Double)
-  | ColBoolMaybe !(V.Vector (Maybe Bool))
-  | ColUtf8Maybe !(V.Vector (Maybe Text))
-  | ColBinaryMaybe !(V.Vector (Maybe ByteString))
-  | ColLargeUtf8Maybe !(V.Vector (Maybe Text))
-  | ColLargeBinaryMaybe !(V.Vector (Maybe ByteString))
-  | ColFixedSizeBinaryMaybe !Int !(V.Vector (Maybe ByteString))
+  | ColBoolMaybe !NullableBoolView
+  | ColUtf8Maybe !NullableUtf8View
+  | ColBinaryMaybe !NullableBinaryView
+  | ColLargeUtf8Maybe !NullableLargeUtf8View
+  | ColLargeBinaryMaybe !NullableLargeBinaryView
+  | ColFixedSizeBinaryMaybe !NullableFixedSizeBinaryView
   | ColDate32Maybe    !(NullableView Int32)
   | ColDate64Maybe    !(NullableView Int64)
   | ColTime32Maybe    !(NullableView Int32)
@@ -860,15 +866,13 @@ readBoolColumnMaybe len rb body !bufIdx !nodeIdx = do
   dataBs  <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
   validBits <- unpackBools len validBs
   valBits   <- unpackBools len dataBs
-  -- ColBoolMaybe still uses V.Vector (Maybe Bool) for now (unit
-  -- 4 of the views migration moves it to a NullableView Bit
-  -- as well; deferred because nullable Bool in the wild is
-  -- rare). Materialise from the two packed bitmaps.
-  let !xs = V.generate len $ \i ->
-        if not (unBit (VU.unsafeIndex validBits i))
-          then Nothing
-          else Just (unBit (VU.unsafeIndex valBits i))
-  Right (ColBoolMaybe xs, nodeIdx + 1, bufIdx + 2)
+  -- Both bitmaps are already in wire shape (validity +
+  -- packed values). Hand them straight to NullableBoolView
+  -- — no per-row allocation, no boxed spine.
+  Right
+    ( ColBoolMaybe (AV.NullableBoolView validBits valBits)
+    , nodeIdx + 1, bufIdx + 2
+    )
 
 readFloatColumnMaybe :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readFloatColumnMaybe endian =
@@ -909,97 +913,96 @@ readDoubleColumnMaybe endian =
 validBitAt :: VU.Vector Bit -> Int -> Bool
 validBitAt v i = unBit (VU.unsafeIndex v i)
 
+-- | Nullable variable-length readers all follow the same shape:
+-- decode the validity bitmap into a packed VU.Vector Bit, build
+-- the dense Utf8View / BinaryView / large variant directly from
+-- the source body's offsets + data buffers (zero copy), then
+-- wrap in the matching NullableXxxView. Per-row UTF-8
+-- validation is deferred until access time (matches the
+-- non-nullable Utf8View semantics).
 readUtf8ColumnMaybe :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readUtf8ColumnMaybe endian len rb body !bufIdx !nodeIdx = do
   validBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
-  offBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
-  datBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 2))
+  offBs   <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
+  datBs   <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 2))
   validBits <- unpackBools len validBs
   if BS.length offBs < (len + 1) * 4
     then Left "Arrow.Column: UTF-8 offsets buffer too small"
-    else do
-      strs <-
-        forM [0 .. len - 1] $ \i ->
-          if not (validBitAt validBits i)
-            then pure Nothing
-            else do
-              s0 <- readI32 endian offBs (i * 4)
-              s1 <- readI32 endian offBs ((i + 1) * 4)
-              let !start = fromIntegral s0
-                  !end = fromIntegral s1
-              if start < 0 || end < start || end > BS.length datBs
-                then Left "Arrow.Column: invalid UTF-8 slice (nullable)"
-                else case TE.decodeUtf8' (BS.take (end - start) (BS.drop start datBs)) of
-                  Right t -> pure $ Just t
-                  Left _ -> Left "Arrow.Column: invalid UTF-8 bytes"
-      Right (ColUtf8Maybe (V.fromList strs), nodeIdx + 1, bufIdx + 3)
+    else
+      let !offs = case endian of
+            Little -> viewPrimVecLE 4 (len + 1) offBs
+            _      -> bswapPrimVec32 (len + 1) offBs
+          !view = AV.NullableUtf8View
+            { AV.nuvValidity = validBits
+            , AV.nuvValues   = Utf8View
+                { uvOffsets = offs
+                , uvData    = viewPrimVecLE 1 (BS.length datBs) datBs
+                }
+            }
+      in Right (ColUtf8Maybe view, nodeIdx + 1, bufIdx + 3)
 
 readBinaryColumnMaybe :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readBinaryColumnMaybe endian len rb body !bufIdx !nodeIdx = do
   validBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
-  offBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
-  datBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 2))
+  offBs   <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
+  datBs   <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 2))
   validBits <- unpackBools len validBs
   if BS.length offBs < (len + 1) * 4
     then Left "Arrow.Column: binary offsets buffer too small"
-    else do
-      bins <-
-        forM [0 .. len - 1] $ \i ->
-          if not (validBitAt validBits i)
-            then pure Nothing
-            else do
-              s0 <- readI32 endian offBs (i * 4)
-              s1 <- readI32 endian offBs ((i + 1) * 4)
-              let !start = fromIntegral s0
-                  !end = fromIntegral s1
-              if start < 0 || end < start || end > BS.length datBs
-                then Left "Arrow.Column: invalid binary slice (nullable)"
-                else pure $ Just $! BS.take (end - start) (BS.drop start datBs)
-      Right (ColBinaryMaybe (V.fromList bins), nodeIdx + 1, bufIdx + 3)
+    else
+      let !offs = case endian of
+            Little -> viewPrimVecLE 4 (len + 1) offBs
+            _      -> bswapPrimVec32 (len + 1) offBs
+          !view = AV.NullableBinaryView
+            { AV.nbvBinValidity = validBits
+            , AV.nbvBinValues   = BinaryView
+                { bvOffsets = offs
+                , bvData    = viewPrimVecLE 1 (BS.length datBs) datBs
+                }
+            }
+      in Right (ColBinaryMaybe view, nodeIdx + 1, bufIdx + 3)
 
 readLargeUtf8ColumnMaybe :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readLargeUtf8ColumnMaybe endian len rb body !bufIdx !nodeIdx = do
   validBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
-  offBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
-  datBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 2))
+  offBs   <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
+  datBs   <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 2))
   validBits <- unpackBools len validBs
   if BS.length offBs < (len + 1) * 8
     then Left "Arrow.Column: large UTF-8 offsets buffer too small"
-    else do
-      strs <-
-        forM [0 .. len - 1] $ \i ->
-          if not (validBitAt validBits i)
-            then pure Nothing
-            else do
-              let !s0 = fromIntegral (readWord64 endian offBs (i * 8)) :: Int
-                  !s1 = fromIntegral (readWord64 endian offBs ((i + 1) * 8)) :: Int
-              if s0 < 0 || s1 < s0 || s1 > BS.length datBs
-                then Left "Arrow.Column: invalid large UTF-8 slice (nullable)"
-                else case TE.decodeUtf8' (BS.take (s1 - s0) (BS.drop s0 datBs)) of
-                  Right t -> pure $ Just t
-                  Left _ -> Left "Arrow.Column: invalid large UTF-8 bytes"
-      Right (ColLargeUtf8Maybe (V.fromList strs), nodeIdx + 1, bufIdx + 3)
+    else
+      let !offs = case endian of
+            Little -> viewPrimVecLE 8 (len + 1) offBs
+            _      -> bswapPrimVec64 (len + 1) offBs
+          !view = AV.NullableLargeUtf8View
+            { AV.nluvValidity = validBits
+            , AV.nluvValues   = LargeUtf8View
+                { luvOffsets = offs
+                , luvData    = viewPrimVecLE 1 (BS.length datBs) datBs
+                }
+            }
+      in Right (ColLargeUtf8Maybe view, nodeIdx + 1, bufIdx + 3)
 
 readLargeBinaryColumnMaybe :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readLargeBinaryColumnMaybe endian len rb body !bufIdx !nodeIdx = do
   validBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) bufIdx)
-  offBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
-  datBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 2))
+  offBs   <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
+  datBs   <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 2))
   validBits <- unpackBools len validBs
   if BS.length offBs < (len + 1) * 8
     then Left "Arrow.Column: large binary offsets buffer too small"
-    else do
-      bins <-
-        forM [0 .. len - 1] $ \i ->
-          if not (validBitAt validBits i)
-            then pure Nothing
-            else do
-              let !s0 = fromIntegral (readWord64 endian offBs (i * 8)) :: Int
-                  !s1 = fromIntegral (readWord64 endian offBs ((i + 1) * 8)) :: Int
-              if s0 < 0 || s1 < s0 || s1 > BS.length datBs
-                then Left "Arrow.Column: invalid large binary slice (nullable)"
-                else pure $ Just $! BS.take (s1 - s0) (BS.drop s0 datBs)
-      Right (ColLargeBinaryMaybe (V.fromList bins), nodeIdx + 1, bufIdx + 3)
+    else
+      let !offs = case endian of
+            Little -> viewPrimVecLE 8 (len + 1) offBs
+            _      -> bswapPrimVec64 (len + 1) offBs
+          !view = AV.NullableLargeBinaryView
+            { AV.nlbvValidity = validBits
+            , AV.nlbvValues   = LargeBinaryView
+                { lbvOffsets = offs
+                , lbvData    = viewPrimVecLE 1 (BS.length datBs) datBs
+                }
+            }
+      in Right (ColLargeBinaryMaybe view, nodeIdx + 1, bufIdx + 3)
 
 readFixedSizeBinaryColumnMaybe :: Int -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readFixedSizeBinaryColumnMaybe byteWidth len rb body !bufIdx !nodeIdx = do
@@ -1008,13 +1011,15 @@ readFixedSizeBinaryColumnMaybe byteWidth len rb body !bufIdx !nodeIdx = do
   validBits <- unpackBools len validBs
   if BS.length valsBs < len * byteWidth
     then Left "Arrow.Column: fixed-size binary values buffer too small"
-    else do
-      xs <-
-        forM [0 .. len - 1] $ \i ->
-          if not (validBitAt validBits i)
-            then pure Nothing
-            else pure $ Just $! BS.take byteWidth (BS.drop (i * byteWidth) valsBs)
-      Right (ColFixedSizeBinaryMaybe byteWidth (V.fromList xs), nodeIdx + 1, bufIdx + 2)
+    else
+      let !values = V.generate len $ \i ->
+            BS.take byteWidth (BS.drop (i * byteWidth) valsBs)
+          !view = AV.NullableFixedSizeBinaryView
+            { AV.nfsbvWidth    = byteWidth
+            , AV.nfsbvValidity = validBits
+            , AV.nfsbvValues   = values
+            }
+      in Right (ColFixedSizeBinaryMaybe view, nodeIdx + 1, bufIdx + 2)
 
 readDate32ColumnMaybe :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readDate32ColumnMaybe endian =
@@ -1371,12 +1376,12 @@ columnLength = \case
   ColFloat16Maybe v -> nvLength v
   ColFloatMaybe  v -> nvLength v
   ColDoubleMaybe v -> nvLength v
-  ColBoolMaybe v -> V.length v
-  ColUtf8Maybe v -> V.length v
-  ColBinaryMaybe v -> V.length v
-  ColLargeUtf8Maybe v -> V.length v
-  ColLargeBinaryMaybe v -> V.length v
-  ColFixedSizeBinaryMaybe _ v -> V.length v
+  ColBoolMaybe v        -> AV.nbvLength v
+  ColUtf8Maybe v        -> AV.vLength (AV.nuvValues v)
+  ColBinaryMaybe v      -> AV.vLength (AV.nbvBinValues v)
+  ColLargeUtf8Maybe v   -> AV.vLength (AV.nluvValues v)
+  ColLargeBinaryMaybe v -> AV.vLength (AV.nlbvValues v)
+  ColFixedSizeBinaryMaybe v -> V.length (AV.nfsbvValues v)
   ColDate32Maybe    v -> nvLength v
   ColDate64Maybe    v -> nvLength v
   ColTime32Maybe    v -> nvLength v
@@ -2154,12 +2159,45 @@ sliceColumnArray !start0 !len0 col =
       ColFloat16Maybe v -> ColFloat16Maybe (sliceNV s l v)
       ColFloatMaybe v -> ColFloatMaybe (sliceNV s l v)
       ColDoubleMaybe v -> ColDoubleMaybe (sliceNV s l v)
-      ColBoolMaybe v -> ColBoolMaybe (V.slice s l v)
-      ColUtf8Maybe v -> ColUtf8Maybe (V.slice s l v)
-      ColBinaryMaybe v -> ColBinaryMaybe (V.slice s l v)
-      ColLargeUtf8Maybe v -> ColLargeUtf8Maybe (V.slice s l v)
-      ColLargeBinaryMaybe v -> ColLargeBinaryMaybe (V.slice s l v)
-      ColFixedSizeBinaryMaybe w v -> ColFixedSizeBinaryMaybe w (V.slice s l v)
+      -- Nullable variable-length views: a true row-slice
+      -- needs to carve both the validity bitmap and the
+      -- underlying view (offsets + data). For now we slice
+      -- the validity bitmap and the values' wrapped view
+      -- (Utf8View / BinaryView / large variants slice their
+      -- offsets correctly — the data buffer is shared and
+      -- a sub-range carves a sub-range of offsets at the
+      -- corresponding index window). FixedSizeBinary keeps
+      -- the same V.Vector ByteString slice it always had.
+      ColBoolMaybe v ->
+        ColBoolMaybe v
+          { AV.nbvValidity = VU.slice s l (AV.nbvValidity v)
+          , AV.nbvValues   = VU.slice s l (AV.nbvValues v)
+          }
+      ColUtf8Maybe v ->
+        ColUtf8Maybe v
+          { AV.nuvValidity = VU.slice s l (AV.nuvValidity v)
+          , AV.nuvValues   = AV.vSlice s l (AV.nuvValues v)
+          }
+      ColBinaryMaybe v ->
+        ColBinaryMaybe v
+          { AV.nbvBinValidity = VU.slice s l (AV.nbvBinValidity v)
+          , AV.nbvBinValues   = AV.vSlice s l (AV.nbvBinValues v)
+          }
+      ColLargeUtf8Maybe v ->
+        ColLargeUtf8Maybe v
+          { AV.nluvValidity = VU.slice s l (AV.nluvValidity v)
+          , AV.nluvValues   = AV.vSlice s l (AV.nluvValues v)
+          }
+      ColLargeBinaryMaybe v ->
+        ColLargeBinaryMaybe v
+          { AV.nlbvValidity = VU.slice s l (AV.nlbvValidity v)
+          , AV.nlbvValues   = AV.vSlice s l (AV.nlbvValues v)
+          }
+      ColFixedSizeBinaryMaybe v ->
+        ColFixedSizeBinaryMaybe v
+          { AV.nfsbvValidity = VU.slice s l (AV.nfsbvValidity v)
+          , AV.nfsbvValues   = V.slice s l (AV.nfsbvValues v)
+          }
       ColDate32Maybe v -> ColDate32Maybe (sliceNV s l v)
       ColDate64Maybe v -> ColDate64Maybe (sliceNV s l v)
       ColTime32Maybe v -> ColTime32Maybe (sliceNV s l v)
@@ -2254,7 +2292,8 @@ validateMapKeysSorted = \case
     checkSlice keys s w =
       case keys of
         ColUtf8 v   -> compareSliceShow s w (utf8ViewToVector v)
-        ColUtf8Maybe v -> compareSliceShow s w v
+        ColUtf8Maybe v -> compareSliceShow s w
+                            (AV.nullableUtf8ViewToMaybeVector v)
         ColInt32 v -> compareSlice s w v
         ColInt64 v -> compareSlice s w v
         ColUInt32 v -> compareSlice s w v

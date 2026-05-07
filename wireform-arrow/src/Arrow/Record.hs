@@ -231,13 +231,16 @@ doubleE :: Encoder Double
 doubleE = mkE (AFloatingPoint DoublePrecision) (ColDouble . VS.convert) (ColDoubleMaybe . AC.nvFromMaybeVector 0)
 
 boolE :: Encoder Bool
-boolE = mkE ABool (ColBool . boolVecToBitVec) ColBoolMaybe
+boolE = mkE ABool (ColBool . boolVecToBitVec)
+                  (ColBoolMaybe . AV.nullableBoolViewFromMaybeVector)
 
 utf8E :: Encoder Text
-utf8E = mkE AUtf8 (ColUtf8 . AV.utf8ViewFromVector) ColUtf8Maybe
+utf8E = mkE AUtf8 (ColUtf8 . AV.utf8ViewFromVector)
+                  (ColUtf8Maybe . AV.nullableUtf8ViewFromMaybeVector)
 
 binaryE :: Encoder ByteString
-binaryE = mkE ABinary (ColBinary . AV.binaryViewFromVector) ColBinaryMaybe
+binaryE = mkE ABinary (ColBinary . AV.binaryViewFromVector)
+                       (ColBinaryMaybe . AV.nullableBinaryViewFromMaybeVector)
 
 -- | Days since Unix epoch (INT32). Arrow logical @Date(DateDay)@.
 date32E :: Encoder Int32
@@ -363,7 +366,7 @@ doubleD = mkD (AFloatingPoint DoublePrecision)
 boolD :: Decoder Bool
 boolD = mkD ABool
   (expectCol "ColBool"      $ \case ColBool      v -> Right (bitVecToBoolVec v); o -> expectErr "ColBool" o)
-  (expectCol "ColBoolMaybe" $ \case ColBoolMaybe v -> Right v;                    o -> expectErr "ColBoolMaybe" o)
+  (expectCol "ColBoolMaybe" $ \case ColBoolMaybe v -> Right (AV.nullableBoolViewToMaybeVector v); o -> expectErr "ColBoolMaybe" o)
 
 -- | Convert a packed @VU.Vector Bit@ back to the boxed
 -- @V.Vector Bool@ representation the Decoder API exposes.
@@ -373,12 +376,12 @@ bitVecToBoolVec v = V.generate (VU.length v) (\i -> unBit (VU.unsafeIndex v i))
 utf8D :: Decoder Text
 utf8D = mkD AUtf8
   (expectCol "ColUtf8"      $ \case ColUtf8      v -> Right (AV.utf8ViewToVector v); o -> expectErr "ColUtf8" o)
-  (expectCol "ColUtf8Maybe" $ \case ColUtf8Maybe v -> Right v; o -> expectErr "ColUtf8Maybe" o)
+  (expectCol "ColUtf8Maybe" $ \case ColUtf8Maybe v -> Right (AV.nullableUtf8ViewToMaybeVector v); o -> expectErr "ColUtf8Maybe" o)
 
 binaryD :: Decoder ByteString
 binaryD = mkD ABinary
   (expectCol "ColBinary"      $ \case ColBinary      v -> Right (AV.binaryViewToVector v); o -> expectErr "ColBinary" o)
-  (expectCol "ColBinaryMaybe" $ \case ColBinaryMaybe v -> Right v; o -> expectErr "ColBinaryMaybe" o)
+  (expectCol "ColBinaryMaybe" $ \case ColBinaryMaybe v -> Right (AV.nullableBinaryViewToMaybeVector v); o -> expectErr "ColBinaryMaybe" o)
 
 date32D :: Decoder Int32
 date32D = mkD (ADate DateDay)
