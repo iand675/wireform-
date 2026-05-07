@@ -12,6 +12,7 @@ module Arrow.Column
   , nvLookup
   , nvLength
   , nvNullCount
+  , nvMap
   , nvFromMaybeList
   , nvFromMaybeVector
   , nvFromVectors
@@ -115,6 +116,18 @@ data NullableView a = NullableView
 
 -- | True iff slot @i@ of a 'NullableView' carries a value.
 {-# INLINE nvIsPresent #-}
+-- | Map a function over a 'NullableView' values buffer,
+-- preserving the validity bitmap unchanged. For type-narrowing
+-- bridges (e.g. ORC's underlying Int64 stream into Arrow's
+-- Int8 / Int16 / Int32 / Word8 / Word16 / Word32 columns) this
+-- is one O(N) linear pass over the dense values, with the
+-- validity bitmap aliased into the output. No 'V.map (fmap f)'
+-- over a boxed @V.Vector (Maybe a)@.
+{-# INLINE nvMap #-}
+nvMap :: (VS.Storable a, VS.Storable b)
+      => (a -> b) -> NullableView a -> NullableView b
+nvMap f (NullableView v xs) = NullableView v (VS.map f xs)
+
 nvIsPresent :: NullableView a -> Int -> Bool
 nvIsPresent nv i
   | VU.null (nvValidity nv) = True

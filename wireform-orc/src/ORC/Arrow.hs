@@ -856,38 +856,40 @@ decodeOneColumn cid fld numRows stripeBs streams = do
   -- so nulls round-trip correctly.
   let mPresentBs = either (const Nothing) Just (sliceFor streamPresent)
   case AT.fieldType fld of
+    -- All primitive paths now go through the NV decoders:
+    -- per-page output is already a (validity, dense-values)
+    -- pair in the bridge's target shape; no V.Vector (Maybe a)
+    -- intermediate, no second walk through nvFromMaybeVector.
+    -- For non-nullable columns we discard the (empty) validity
+    -- bitmap and use the dense values vector directly; for
+    -- nullable columns we narrow the values via nvMap (one
+    -- O(N) linear VS.map) and wrap.
     AT.AInt _ True -> do
       dataBs <- sliceFor streamData
-      xs <- OR.decodeIntColumn True numRows dataBs mPresentBs
-      intToArrow (AT.fieldType fld) (AT.fieldNullable fld) xs
+      nv <- OR.decodeIntColumnNV True numRows dataBs mPresentBs
+      intToArrowNV (AT.fieldType fld) (AT.fieldNullable fld) nv
     AT.AInt _ False -> do
       dataBs <- sliceFor streamData
-      xs <- OR.decodeIntColumn False numRows dataBs mPresentBs
-      intToArrow (AT.fieldType fld) (AT.fieldNullable fld) xs
+      nv <- OR.decodeIntColumnNV False numRows dataBs mPresentBs
+      intToArrowNV (AT.fieldType fld) (AT.fieldNullable fld) nv
     AT.ABool -> do
       dataBs <- sliceFor streamData
-      xs <- OR.decodeBoolColumn numRows dataBs mPresentBs
+      nbv <- OR.decodeBoolColumnNV numRows dataBs mPresentBs
       if AT.fieldNullable fld
-        then Right (AC.ColBoolMaybe (AV.nullableBoolViewFromMaybeVector xs))
-        else Right (AC.ColBool
-               (VU.generate (V.length xs)
-                  (\i -> Bit (maybe False id (V.unsafeIndex xs i)))))
+        then Right (AC.ColBoolMaybe nbv)
+        else Right (AC.ColBool (AV.nbvValues nbv))
     AT.AFloatingPoint AT.Single -> do
       dataBs <- sliceFor streamData
-      xs <- OR.decodeFloatColumn numRows dataBs mPresentBs
+      nv <- OR.decodeFloatColumnNV numRows dataBs mPresentBs
       if AT.fieldNullable fld
-        then Right (AC.ColFloatMaybe (AC.nvFromMaybeVector 0 xs))
-        else Right (AC.ColFloat
-               (VS.generate (V.length xs)
-                  (\i -> maybe 0 id (V.unsafeIndex xs i))))
+        then Right (AC.ColFloatMaybe nv)
+        else Right (AC.ColFloat (AC.nvValues nv))
     AT.AFloatingPoint AT.DoublePrecision -> do
       dataBs <- sliceFor streamData
-      xs <- OR.decodeDoubleColumn numRows dataBs mPresentBs
+      nv <- OR.decodeDoubleColumnNV numRows dataBs mPresentBs
       if AT.fieldNullable fld
-        then Right (AC.ColDoubleMaybe (AC.nvFromMaybeVector 0 xs))
-        else Right (AC.ColDouble
-               (VS.generate (V.length xs)
-                  (\i -> maybe 0 id (V.unsafeIndex xs i))))
+        then Right (AC.ColDoubleMaybe nv)
+        else Right (AC.ColDouble (AC.nvValues nv))
     AT.AUtf8        -> stringColumn mPresentBs AT.AUtf8
     AT.ALargeUtf8   -> stringColumn mPresentBs AT.ALargeUtf8
     AT.ABinary      -> stringColumn mPresentBs AT.ABinary
@@ -897,12 +899,12 @@ decodeOneColumn cid fld numRows stripeBs streams = do
     -- Timestamp / Duration i64.
     AT.ADate _ -> do
       dataBs <- sliceFor streamData
-      xs <- OR.decodeIntColumn True numRows dataBs mPresentBs
-      temporalToArrow (AT.fieldType fld) (AT.fieldNullable fld) xs
+      nv <- OR.decodeIntColumnNV True numRows dataBs mPresentBs
+      temporalToArrowNV (AT.fieldType fld) (AT.fieldNullable fld) nv
     AT.ATime _ _ -> do
       dataBs <- sliceFor streamData
-      xs <- OR.decodeIntColumn True numRows dataBs mPresentBs
-      temporalToArrow (AT.fieldType fld) (AT.fieldNullable fld) xs
+      nv <- OR.decodeIntColumnNV True numRows dataBs mPresentBs
+      temporalToArrowNV (AT.fieldType fld) (AT.fieldNullable fld) nv
     AT.ATimestamp _ _ -> do
       -- ORC timestamps are encoded as DATA (signed seconds
       -- since 2015-01-01 GMT, the ORC epoch — NOT 1970) +
@@ -913,12 +915,16 @@ decodeOneColumn cid fld numRows stripeBs streams = do
       dataBs <- sliceFor streamData
       nanoBs <- sliceFor streamSecondary
       tss <- OR.decodeTimestampColumn numRows dataBs nanoBs mPresentBs
+      -- Conversion still goes through V.Vector (Maybe Int64)
+      -- because the per-row reconstruction wants ORCTimestamp;
+      -- could be flattened to NV with a custom decoder later
+      -- but timestamps are uncommon enough to keep simple.
       let !nsVec = V.map (fmap timestampToUnixNanos) tss
       temporalToArrow (AT.fieldType fld) (AT.fieldNullable fld) nsVec
     AT.ADuration _ -> do
       dataBs <- sliceFor streamData
-      xs <- OR.decodeIntColumn True numRows dataBs mPresentBs
-      temporalToArrow (AT.fieldType fld) (AT.fieldNullable fld) xs
+      nv <- OR.decodeIntColumnNV True numRows dataBs mPresentBs
+      temporalToArrowNV (AT.fieldType fld) (AT.fieldNullable fld) nv
     other ->
       Left $ "ORC.Arrow: column type " ++ show other
               ++ " not yet supported by the read bridge"
@@ -981,6 +987,47 @@ decodeOneColumn cid fld numRows stripeBs streams = do
 intToArrow
   :: AT.ArrowType -> Bool -> V.Vector (Maybe Int64)
   -> Either String AC.ColumnArray
+-- | Flat-shape variant of 'intToArrow' used by the new bridge
+-- path. Takes a 'AC.NullableView' Int64 (already validity +
+-- dense values) and dispatches on the target Arrow width:
+--
+--   * Non-nullable: returns the dense values vector directly
+--     (wrapped in the right ColXxx constructor) and discards
+--     the validity bitmap. Type-narrowing (Int64 -> Int8 /
+--     Int16 / Int32 / Word*) is one O(N) 'VS.map'.
+--   * Nullable: 'nvMap' over the values to narrow, validity
+--     bitmap aliased into the result. No re-walk for nulls,
+--     no boxed intermediate.
+intToArrowNV
+  :: AT.ArrowType -> Bool -> AC.NullableView Int64
+  -> Either String AC.ColumnArray
+intToArrowNV ty nullable nv = case (ty, nullable) of
+  (AT.AInt 8  True,  False) -> Right $! AC.ColInt8   (VS.map narrow8  vs)
+  (AT.AInt 16 True,  False) -> Right $! AC.ColInt16  (VS.map narrow16 vs)
+  (AT.AInt 32 True,  False) -> Right $! AC.ColInt32  (VS.map narrow32 vs)
+  (AT.AInt 64 True,  False) -> Right $! AC.ColInt64  vs
+  (AT.AInt 8  False, False) -> Right $! AC.ColUInt8  (VS.map (fromIntegral :: Int64 -> Word8)  vs)
+  (AT.AInt 16 False, False) -> Right $! AC.ColUInt16 (VS.map (fromIntegral :: Int64 -> Word16) vs)
+  (AT.AInt 32 False, False) -> Right $! AC.ColUInt32 (VS.map (fromIntegral :: Int64 -> Word32) vs)
+  (AT.AInt 64 False, False) -> Right $! AC.ColUInt64 (VS.map (fromIntegral :: Int64 -> Word64) vs)
+  (AT.AInt 8  True,  True)  -> Right $! AC.ColInt8Maybe   (AC.nvMap narrow8  nv)
+  (AT.AInt 16 True,  True)  -> Right $! AC.ColInt16Maybe  (AC.nvMap narrow16 nv)
+  (AT.AInt 32 True,  True)  -> Right $! AC.ColInt32Maybe  (AC.nvMap narrow32 nv)
+  (AT.AInt 64 True,  True)  -> Right $! AC.ColInt64Maybe  nv
+  (AT.AInt 8  False, True)  -> Right $! AC.ColUInt8Maybe  (AC.nvMap (fromIntegral :: Int64 -> Word8)  nv)
+  (AT.AInt 16 False, True)  -> Right $! AC.ColUInt16Maybe (AC.nvMap (fromIntegral :: Int64 -> Word16) nv)
+  (AT.AInt 32 False, True)  -> Right $! AC.ColUInt32Maybe (AC.nvMap (fromIntegral :: Int64 -> Word32) nv)
+  (AT.AInt 64 False, True)  -> Right $! AC.ColUInt64Maybe (AC.nvMap (fromIntegral :: Int64 -> Word64) nv)
+  _ -> Left $ "ORC.Arrow.intToArrowNV: unexpected type/null combo " ++ show (ty, nullable)
+  where
+    !vs = AC.nvValues nv
+    narrow8 :: Int64 -> Int8
+    narrow8 = fromIntegral
+    narrow16 :: Int64 -> Int16
+    narrow16 = fromIntegral
+    narrow32 :: Int64 -> Int32
+    narrow32 = fromIntegral
+
 intToArrow ty nullable xs = case (ty, nullable) of
   (AT.AInt 8  True,  False) -> Right $! AC.ColInt8   (presentVS narrow8  xs)
   (AT.AInt 16 True,  False) -> Right $! AC.ColInt16  (presentVS narrow16 xs)
@@ -1032,6 +1079,32 @@ presentVS f v =
 temporalToArrow
   :: AT.ArrowType -> Bool -> V.Vector (Maybe Int64)
   -> Either String AC.ColumnArray
+-- | Flat-shape variant of 'temporalToArrow'. Same Int64 -> Arrow
+-- temporal narrowing as 'temporalToArrow' but operating on a
+-- 'AC.NullableView' Int64 rather than a 'V.Vector (Maybe Int64)'.
+temporalToArrowNV
+  :: AT.ArrowType -> Bool -> AC.NullableView Int64
+  -> Either String AC.ColumnArray
+temporalToArrowNV ty nullable nv = case (ty, nullable) of
+  (AT.ADate AT.DateDay, False)         -> Right $! AC.ColDate32 (VS.map narrow32 vs)
+  (AT.ADate AT.DateMillisecond, False) -> Right $! AC.ColDate64 vs
+  (AT.ATime _ 32, False)               -> Right $! AC.ColTime32 (VS.map narrow32 vs)
+  (AT.ATime _ 64, False)               -> Right $! AC.ColTime64 vs
+  (AT.ATimestamp _ _, False)           -> Right $! AC.ColTimestamp vs
+  (AT.ADuration _, False)              -> Right $! AC.ColDuration vs
+  (AT.ADate AT.DateDay, True)          -> Right $! AC.ColDate32Maybe (AC.nvMap narrow32 nv)
+  (AT.ADate AT.DateMillisecond, True)  -> Right $! AC.ColDate64Maybe nv
+  (AT.ATime _ 32, True)                -> Right $! AC.ColTime32Maybe (AC.nvMap narrow32 nv)
+  (AT.ATime _ 64, True)                -> Right $! AC.ColTime64Maybe nv
+  (AT.ATimestamp _ _, True)            -> Right $! AC.ColTimestampMaybe nv
+  (AT.ADuration _, True)               -> Right $! AC.ColDurationMaybe nv
+  _ -> Left $ "ORC.Arrow.temporalToArrowNV: unexpected type/null combo "
+                ++ show (ty, nullable)
+  where
+    !vs = AC.nvValues nv
+    narrow32 :: Int64 -> Int32
+    narrow32 = fromIntegral
+
 temporalToArrow ty nullable xs = case (ty, nullable) of
   (AT.ADate AT.DateDay, False) ->
     Right $! AC.ColDate32 (presentVS narrow32 xs)

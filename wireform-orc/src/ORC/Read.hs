@@ -30,11 +30,15 @@ module ORC.Read
     -- (re-exported from "ORC.Compress" for backward compatibility)
     -- * Column decoders
   , decodeIntColumn
+  , decodeIntColumnNV
   , decodeBoolColumn
+  , decodeBoolColumnNV
   , decodeStringColumn
   , decodeStringDictColumn
   , decodeFloatColumn
+  , decodeFloatColumnNV
   , decodeDoubleColumn
+  , decodeDoubleColumnNV
   , decodeTimestampColumn
   , ORCTimestamp (..)
   , decodeDateColumn
@@ -64,6 +68,14 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as V
 import qualified Data.Vector.Mutable as MV
 import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Storable as VS
+import qualified Data.Vector.Storable.Mutable as VSM
+import qualified Data.Vector.Unboxed as VU
+import qualified Data.Vector.Unboxed.Mutable as VUM
+import qualified Arrow.Column as AC
+import qualified Arrow.View as AV
+import Columnar.Bit (Bit (..))
+import Foreign.Marshal.Utils (copyBytes)
 import Data.Word (Word8, Word32, Word64)
 import GHC.Float (castWord32ToFloat, castWord64ToDouble)
 import System.IO.Unsafe (unsafePerformIO)
@@ -243,6 +255,60 @@ decodeIntColumn signed numRows dataBs mPresentBs = case mPresentBs of
     vals <- decodeRLEv2Int signed numPresent dataBs
     Right $! interleaveInt present vals
 
+-- | Flat-shape variant of 'decodeIntColumn': returns a
+-- @(VU.Vector Bit, VS.Vector Int64)@ pair already in the
+-- bridge's 'AC.NullableView' shape. Skips the
+-- @V.Vector (Maybe Int64)@ intermediate that 'decodeIntColumn'
+-- builds (one Just/Nothing constructor per row + N pointer
+-- slots in the boxed backing array, all immediately garbage
+-- after the bridge converts to NullableView).
+--
+-- For the no-PRESENT case (no nulls), the validity bitmap
+-- is left empty -- 'nvIsPresent' returns True for every
+-- index when the bitmap is empty, matching Arrow's
+-- "@null_count == 0@ producers may omit the validity buffer"
+-- convention.
+decodeIntColumnNV
+  :: Bool -> Int -> ByteString -> Maybe ByteString
+  -> Either String (AC.NullableView Int64)
+decodeIntColumnNV signed numRows dataBs mPresentBs = case mPresentBs of
+  Nothing -> do
+    vals <- decodeRLEv2Int signed numRows dataBs
+    -- vals :: VP.Vector Int64 of length numRows; convert to
+    -- VS.Vector once. (VS.convert is one linear copy; the
+    -- bridge's previous code did the same work + a separate
+    -- N-pointer V.Vector wrap + a third walk in
+    -- 'nvFromMaybeVector'.)
+    Right $! AC.NullableView VU.empty (VS.convert vals)
+  Just presentBs -> do
+    present <- decodePresentStream numRows presentBs
+    let !numPresent = countTrue present
+    vals <- decodeRLEv2Int signed numPresent dataBs
+    Right $! interleaveIntNV present vals
+{-# INLINE decodeIntColumnNV #-}
+
+interleaveIntNV
+  :: V.Vector Bool -> VP.Vector Int64 -> AC.NullableView Int64
+interleaveIntNV present vals = runST $ do
+  let !n = V.length present
+  bitM <- VUM.unsafeNew n
+  valM <- VSM.unsafeNew n
+  let go !i !j
+        | i >= n = pure ()
+        | V.unsafeIndex present i = do
+            VUM.unsafeWrite bitM i (Bit True)
+            VSM.unsafeWrite valM i (VP.unsafeIndex vals j)
+            go (i + 1) (j + 1)
+        | otherwise = do
+            VUM.unsafeWrite bitM i (Bit False)
+            VSM.unsafeWrite valM i 0
+            go (i + 1) j
+  go 0 0
+  !validity <- VU.unsafeFreeze bitM
+  !values   <- VS.unsafeFreeze valM
+  pure (AC.NullableView validity values)
+{-# INLINE interleaveIntNV #-}
+
 -- | Decode a boolean column with optional null mask.
 decodeBoolColumn
   :: Int -> ByteString -> Maybe ByteString
@@ -256,6 +322,48 @@ decodeBoolColumn numRows dataBs mPresentBs = case mPresentBs of
     let !numPresent = countTrue present
     vals <- decodeBooleanRLE numPresent dataBs
     Right $! interleaveBool present vals
+
+-- | Flat-shape Bool reader. Returns 'AV.NullableBoolView'
+-- (validity bits + value bits both bit-packed) directly.
+decodeBoolColumnNV
+  :: Int -> ByteString -> Maybe ByteString
+  -> Either String AV.NullableBoolView
+decodeBoolColumnNV numRows dataBs mPresentBs = case mPresentBs of
+  Nothing -> do
+    vals <- decodeBooleanRLE numRows dataBs
+    -- vals :: V.Vector Bool. Pack into VU.Vector Bit; leave
+    -- validity empty (= all valid).
+    let !packed = VU.generate (V.length vals)
+                    (\i -> Bit (V.unsafeIndex vals i))
+    Right $! AV.NullableBoolView VU.empty packed
+  Just presentBs -> do
+    present <- decodePresentStream numRows presentBs
+    let !numPresent = countTrue present
+    vals <- decodeBooleanRLE numPresent dataBs
+    Right $! interleaveBoolNV present vals
+{-# INLINE decodeBoolColumnNV #-}
+
+interleaveBoolNV
+  :: V.Vector Bool -> V.Vector Bool -> AV.NullableBoolView
+interleaveBoolNV present vals = runST $ do
+  let !n = V.length present
+  bitM <- VUM.unsafeNew n
+  valM <- VUM.unsafeNew n
+  let go !i !j
+        | i >= n = pure ()
+        | V.unsafeIndex present i = do
+            VUM.unsafeWrite bitM i (Bit True)
+            VUM.unsafeWrite valM i (Bit (V.unsafeIndex vals j))
+            go (i + 1) (j + 1)
+        | otherwise = do
+            VUM.unsafeWrite bitM i (Bit False)
+            VUM.unsafeWrite valM i (Bit False)
+            go (i + 1) j
+  go 0 0
+  !validity <- VU.unsafeFreeze bitM
+  !values   <- VU.unsafeFreeze valM
+  pure (AV.NullableBoolView validity values)
+{-# INLINE interleaveBoolNV #-}
 
 -- | Decode a string column, auto-dispatching between DIRECT_V2 and
 -- DICTIONARY_V2 encodings based on whether the dictionary data stream
@@ -310,6 +418,47 @@ decodeFloatColumn numRows dataBs mPresentBs = case mPresentBs of
       then Left "ORC.Read: float data stream too short"
       else Right $! interleaveFloat present dataBs
 
+-- | Flat-shape Float reader. See 'decodeIntColumnNV'.
+decodeFloatColumnNV
+  :: Int -> ByteString -> Maybe ByteString
+  -> Either String (AC.NullableView Float)
+decodeFloatColumnNV numRows dataBs mPresentBs = case mPresentBs of
+  Nothing
+    | BS.length dataBs < numRows * 4 ->
+        Left "ORC.Read: float data stream too short"
+    | otherwise ->
+        Right $! AC.NullableView VU.empty
+          (memcpyPrimVecVS 4 numRows dataBs)
+  Just presentBs -> do
+    present <- decodePresentStream numRows presentBs
+    let !numPresent = countTrue present
+    if BS.length dataBs < numPresent * 4
+      then Left "ORC.Read: float data stream too short"
+      else Right $! interleaveFloatNV present dataBs
+{-# INLINE decodeFloatColumnNV #-}
+
+interleaveFloatNV
+  :: V.Vector Bool -> ByteString -> AC.NullableView Float
+interleaveFloatNV present dataBs = runST $ do
+  let !n = V.length present
+  bitM <- VUM.unsafeNew n
+  valM <- VSM.unsafeNew n
+  let go !i !j
+        | i >= n = pure ()
+        | V.unsafeIndex present i = do
+            VUM.unsafeWrite bitM i (Bit True)
+            VSM.unsafeWrite valM i (readFloatLE dataBs (j * 4))
+            go (i + 1) (j + 1)
+        | otherwise = do
+            VUM.unsafeWrite bitM i (Bit False)
+            VSM.unsafeWrite valM i 0
+            go (i + 1) j
+  go 0 0
+  !validity <- VU.unsafeFreeze bitM
+  !values   <- VS.unsafeFreeze valM
+  pure (AC.NullableView validity values)
+{-# INLINE interleaveFloatNV #-}
+
 -- | Decode an IEEE 754 double-precision float column (little-endian).
 decodeDoubleColumn
   :: Int -> ByteString -> Maybe ByteString
@@ -328,6 +477,47 @@ decodeDoubleColumn numRows dataBs mPresentBs = case mPresentBs of
     if BS.length dataBs < numPresent * 8
       then Left "ORC.Read: double data stream too short"
       else Right $! interleaveDouble present dataBs
+
+-- | Flat-shape Double reader. See 'decodeIntColumnNV'.
+decodeDoubleColumnNV
+  :: Int -> ByteString -> Maybe ByteString
+  -> Either String (AC.NullableView Double)
+decodeDoubleColumnNV numRows dataBs mPresentBs = case mPresentBs of
+  Nothing
+    | BS.length dataBs < numRows * 8 ->
+        Left "ORC.Read: double data stream too short"
+    | otherwise ->
+        Right $! AC.NullableView VU.empty
+          (memcpyPrimVecVS 8 numRows dataBs)
+  Just presentBs -> do
+    present <- decodePresentStream numRows presentBs
+    let !numPresent = countTrue present
+    if BS.length dataBs < numPresent * 8
+      then Left "ORC.Read: double data stream too short"
+      else Right $! interleaveDoubleNV present dataBs
+{-# INLINE decodeDoubleColumnNV #-}
+
+interleaveDoubleNV
+  :: V.Vector Bool -> ByteString -> AC.NullableView Double
+interleaveDoubleNV present dataBs = runST $ do
+  let !n = V.length present
+  bitM <- VUM.unsafeNew n
+  valM <- VSM.unsafeNew n
+  let go !i !j
+        | i >= n = pure ()
+        | V.unsafeIndex present i = do
+            VUM.unsafeWrite bitM i (Bit True)
+            VSM.unsafeWrite valM i (readDoubleLE dataBs (j * 8))
+            go (i + 1) (j + 1)
+        | otherwise = do
+            VUM.unsafeWrite bitM i (Bit False)
+            VSM.unsafeWrite valM i 0
+            go (i + 1) j
+  go 0 0
+  !validity <- VU.unsafeFreeze bitM
+  !values   <- VS.unsafeFreeze valM
+  pure (AC.NullableView validity values)
+{-# INLINE interleaveDoubleNV #-}
 
 -- | Memcpy a slice of @bs@ into a freshly-allocated primitive
 -- vector. Same shape as Arrow.Column's helper of the same
@@ -348,6 +538,24 @@ memcpyPrimVec !elemBytes !len bs
             PBA.copyPtrToMutableByteArray
               dstMba (dstOffElems * elemBytes) (srcPtr :: Ptr Word8) nBytes
         VP.unsafeFreeze mv
+
+-- | Storable-vector variant: 'memcpy' from the source
+-- bytestring straight into a fresh 'ForeignPtr'-backed
+-- 'VS.Vector'. One copy. Used by the flat-shape 'NullableView'
+-- decoders so the per-page output buffer is already in the
+-- bridge's target shape with no second 'VS.convert' walk.
+{-# INLINE memcpyPrimVecVS #-}
+memcpyPrimVecVS :: forall a. VS.Storable a => Int -> Int -> ByteString -> VS.Vector a
+memcpyPrimVecVS !elemBytes !len bs
+  | len <= 0  = VS.empty
+  | otherwise = unsafePerformIO $
+      BSU.unsafeUseAsCStringLen bs $ \(cstr, _) -> do
+        mv <- VSM.unsafeNew len :: IO (VSM.IOVector a)
+        let !srcPtr = castPtr cstr :: Ptr Word8
+            !nBytes = len * elemBytes
+        VSM.unsafeWith mv $ \dstPtr ->
+          copyBytes (castPtr dstPtr) srcPtr nBytes
+        VS.unsafeFreeze mv
 
 -- | ORC timestamp: seconds since the ORC epoch + nanosecond adjustment.
 data ORCTimestamp = ORCTimestamp
