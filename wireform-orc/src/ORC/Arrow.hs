@@ -966,13 +966,15 @@ decodeOneColumn cid fld numRows stripeBs streams = do
       -- semantics as Arrow's ColTimestamp.
       dataBs <- sliceFor streamData
       nanoBs <- sliceFor streamSecondary
-      tss <- OR.decodeTimestampColumn numRows dataBs nanoBs mPresentBs
-      -- Conversion still goes through V.Vector (Maybe Int64)
-      -- because the per-row reconstruction wants ORCTimestamp;
-      -- could be flattened to NV with a custom decoder later
-      -- but timestamps are uncommon enough to keep simple.
-      let !nsVec = V.map (fmap timestampToUnixNanos) tss
-      temporalToArrow (AT.fieldType fld) (AT.fieldNullable fld) nsVec
+      -- Flat-shape: 'decodeTimestampColumnNV' fuses
+      -- seconds-decode + nanos-decode + ORC-epoch-shift +
+      -- to-unix-nanos into a single pass over both streams,
+      -- writing straight into a 'NullableView Int64'. No
+      -- intermediate 'V.Vector (Maybe ORCTimestamp)' or
+      -- 'V.map (fmap timestampToUnixNanos)' walk.
+      nv <- OR.decodeTimestampColumnNV
+              numRows orcEpochSecondsFromUnix dataBs nanoBs mPresentBs
+      temporalToArrowNV (AT.fieldType fld) (AT.fieldNullable fld) nv
     AT.ADuration _ -> do
       dataBs <- sliceFor streamData
       nv <- OR.decodeIntColumnNV True numRows dataBs mPresentBs

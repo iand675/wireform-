@@ -40,6 +40,7 @@ module ORC.Read
   , decodeFloatColumnNV
   , decodeDoubleColumn
   , decodeDoubleColumnNV
+  , decodeTimestampColumnNV
   , decodeTimestampColumn
   , ORCTimestamp (..)
   , decodeDateColumn
@@ -670,6 +671,76 @@ decodeTimestampColumn numRows secBs nanoBs mPresentBs = do
       case mPresent of
         Nothing -> Right $! V.map Just timestamps
         Just present -> Right $! interleaveWith present timestamps
+
+-- | Flat-shape timestamp reader: returns
+-- 'AC.NullableView Int64' carrying the unix-nano payload
+-- already, which is exactly what Arrow's @ColTimestamp@ /
+-- @ColTimestampMaybe@ store. Skips the
+-- 'V.Vector (Maybe ORCTimestamp)' intermediate plus the
+-- subsequent 'V.map (fmap timestampToUnixNanos)' walk.
+--
+-- Performs the seconds-to-nanos shift + nanos-decode +
+-- ORC-epoch-to-Unix-epoch shift inline in a single pass over
+-- the seconds + nanos primitive vectors.
+decodeTimestampColumnNV
+  :: Int            -- ^ numRows
+  -> Int64          -- ^ orcEpochSecondsFromUnix (caller supplies the
+                    --   ORC-epoch -> Unix-epoch shift; lives in
+                    --   ORC.Arrow so we don't duplicate the constant)
+  -> ByteString     -- ^ DATA stream (signed seconds, RLE v2)
+  -> ByteString     -- ^ SECONDARY stream (encoded nanos, RLE v2)
+  -> Maybe ByteString
+  -> Either String (AC.NullableView Int64)
+decodeTimestampColumnNV numRows epochShift secBs nanoBs mPresentBs = do
+  (numPresent, mPresent) <- resolvePresent numRows mPresentBs
+  secs  <- decodeRLEv2Int True  numPresent secBs
+  nanos <- decodeRLEv2Int False numPresent nanoBs
+  let !n = VP.length secs
+  if VP.length nanos /= n
+    then Left "ORC.Read: timestamp seconds/nanos length mismatch"
+    else case mPresent of
+      Nothing -> Right $! AC.NullableView VU.empty (densifyTs secs nanos)
+      Just present ->
+        Right $! interleaveTsNV present secs nanos
+  where
+    {-# INLINE toUnixNanos #-}
+    toUnixNanos !s !rawNano =
+      (s + epochShift) * 1_000_000_000 + decodeORCNano rawNano
+
+    densifyTs !secs !nanos =
+      let !nP = VP.length secs
+      in VS.create $ do
+           mv <- VSM.unsafeNew nP
+           let go !i
+                 | i >= nP = pure ()
+                 | otherwise = do
+                     let !s = VP.unsafeIndex secs i
+                         !rn = VP.unsafeIndex nanos i
+                     VSM.unsafeWrite mv i (toUnixNanos s rn)
+                     go (i + 1)
+           go 0
+           pure mv
+
+    interleaveTsNV !present !secs !nanos = runST $ do
+      let !nFull = V.length present
+      bitM <- VUM.unsafeNew nFull
+      valM <- VSM.unsafeNew nFull
+      let go !i !j
+            | i >= nFull = pure ()
+            | V.unsafeIndex present i = do
+                let !s  = VP.unsafeIndex secs j
+                    !rn = VP.unsafeIndex nanos j
+                VUM.unsafeWrite bitM i (Bit True)
+                VSM.unsafeWrite valM i (toUnixNanos s rn)
+                go (i + 1) (j + 1)
+            | otherwise = do
+                VUM.unsafeWrite bitM i (Bit False)
+                VSM.unsafeWrite valM i 0
+                go (i + 1) j
+      go 0 0
+      !validity <- VU.unsafeFreeze bitM
+      !values   <- VS.unsafeFreeze valM
+      pure (AC.NullableView validity values)
 
 -- | Decode the ORC nanosecond encoding: top 3 bits = trailing-zero scale,
 -- lower bits = the nano value before scaling.
