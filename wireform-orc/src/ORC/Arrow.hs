@@ -57,6 +57,7 @@ import qualified Arrow.Types as AT
 
 import Columnar.Bit (Bit (..))
 import qualified Columnar.Bit as Bit
+import qualified Arrow.View as AV
 import qualified Columnar.NullableBuild as NB
 import qualified Columnar.Stream as IS
 import qualified Data.Vector.Storable as VS
@@ -429,10 +430,16 @@ columnArrayToORCStreams !cid = go
       AC.ColFloat  v -> Right (floatStreams Nothing cid v)
       AC.ColDouble v -> Right (doubleStreams Nothing cid v)
 
-      AC.ColUtf8 v -> Right (stringStreams Nothing cid (V.map TE.encodeUtf8 v))
-      AC.ColLargeUtf8 v -> Right (stringStreams Nothing cid (V.map TE.encodeUtf8 v))
-      AC.ColBinary v -> Right (stringStreams Nothing cid v)
-      AC.ColLargeBinary v -> Right (stringStreams Nothing cid v)
+      AC.ColUtf8 v ->
+        Right (stringStreams Nothing cid
+                 (V.map TE.encodeUtf8 (AV.utf8ViewToVector v)))
+      AC.ColLargeUtf8 v ->
+        Right (stringStreams Nothing cid
+                 (V.map TE.encodeUtf8 (AV.largeUtf8ViewToVector v)))
+      AC.ColBinary v ->
+        Right (stringStreams Nothing cid (AV.binaryViewToVector v))
+      AC.ColLargeBinary v ->
+        Right (stringStreams Nothing cid (AV.largeBinaryViewToVector v))
 
       -- Temporal types: map to an integer stream at the natural
       -- width. Date = days-since-epoch, Time/Duration/Timestamp
@@ -936,13 +943,17 @@ decodeOneColumn cid fld numRows stripeBs streams = do
       xs <- OR.decodeStringColumn numRows dataBs lengthBs BS.empty mPresentBs
       let !decoded = case ty of
             AT.ABinary       -> AC.ColBinary
-                                  (V.map (maybe BS.empty TE.encodeUtf8) xs)
+                                  (AV.binaryViewFromVector
+                                     (V.map (maybe BS.empty TE.encodeUtf8) xs))
             AT.ALargeBinary  -> AC.ColLargeBinary
-                                  (V.map (maybe BS.empty TE.encodeUtf8) xs)
+                                  (AV.binaryViewFromVector_l
+                                     (V.map (maybe BS.empty TE.encodeUtf8) xs))
             AT.ALargeUtf8    -> AC.ColLargeUtf8
-                                  (V.map (maybe T.empty id) xs)
+                                  (AV.utf8ViewFromVector_l
+                                     (V.map (maybe T.empty id) xs))
             _                -> AC.ColUtf8
-                                  (V.map (maybe T.empty id) xs)
+                                  (AV.utf8ViewFromVector
+                                     (V.map (maybe T.empty id) xs))
       if AT.fieldNullable fld
         then Right $ case ty of
                AT.ABinary       -> AC.ColBinaryMaybe (V.map (fmap TE.encodeUtf8) xs)

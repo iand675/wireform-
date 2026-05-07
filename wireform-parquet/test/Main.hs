@@ -20,6 +20,7 @@ import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Unboxed as VU
 import Columnar.Bit (Bit (..))
 import qualified Arrow.Column as AC
+import qualified Arrow.View as AV
 import Data.Int (Int32, Int64)
 
 import qualified Crypto.Random as RNG
@@ -1365,7 +1366,7 @@ arrowParquetProjection = do
       !batch = V.fromList
         [ AC.ColInt32 (VS.fromList [10, 20, 30 :: Int32])
         , AC.ColInt32 (VS.fromList [40, 50, 60 :: Int32])
-        , AC.ColUtf8  (V.fromList ["alpha", "beta", "gamma"])
+        , AC.ColUtf8  (AV.utf8ViewFromVector (V.fromList ["alpha", "beta", "gamma"]))
         ]
   case PArrow.arrowToParquet fullSchema [batch] of
     Left  e -> failTest $ "projection arrowToParquet: " ++ e
@@ -1392,7 +1393,7 @@ arrowParquetProjection = do
             Left  e    -> failTest $ "parquetRowGroupToArrow: " ++ show e
             Right cols -> do
               let !expected = V.fromList
-                    [ AC.ColUtf8  (V.fromList ["alpha", "beta", "gamma"])
+                    [ AC.ColUtf8  (AV.utf8ViewFromVector (V.fromList ["alpha", "beta", "gamma"]))
                     , AC.ColInt32 (VS.fromList [10, 20, 30 :: Int32])
                     ]
               if cols == expected
@@ -1443,7 +1444,7 @@ arrowParquetNestedBridge = do
         V.empty
       structCol = AC.ColStruct (V.fromList
         [ ("x",    AC.ColInt32 (VS.fromList [1, 2, 3 :: Int32]))
-        , ("name", AC.ColUtf8  (V.fromList ["a", "b", "c"]))
+        , ("name", AC.ColUtf8  (AV.utf8ViewFromVector (V.fromList ["a", "b", "c"])))
         ])
   case PArrow.arrowFieldToNestedSchema structField of
     Left  e   -> failTest $ "arrowFieldToNestedSchema: " ++ e
@@ -1472,7 +1473,7 @@ arrowParquetBridge = do
         }
       !batch = V.fromList
         [ AC.ColInt32 (VS.fromList ([10, 20, 30] :: [Int32]))
-        , AC.ColUtf8  (V.fromList ["alpha", "beta", "gamma"])
+        , AC.ColUtf8  (AV.utf8ViewFromVector (V.fromList ["alpha", "beta", "gamma"]))
         ]
   case PArrow.arrowToParquet arrowSchema [batch] of
     Left  e  -> failTest $ "arrowToParquet: " ++ e

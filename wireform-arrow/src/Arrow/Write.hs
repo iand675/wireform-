@@ -34,7 +34,7 @@ import qualified Data.Text.Array as TA
 import qualified Data.Text.Internal as TI
 import qualified Foreign.Ptr
 import Foreign.Ptr (Ptr)
-import Foreign.Storable (Storable, pokeByteOff)
+import Foreign.Storable (Storable, pokeByteOff, sizeOf)
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
 import System.IO.Unsafe (unsafePerformIO)
 import Data.Int (Int8, Int16, Int32, Int64)
@@ -54,6 +54,8 @@ import Arrow.Types
 import Arrow.IPC (encodeIPCMessage)
 import Arrow.Column (ColumnArray (..), columnLength)
 import qualified Arrow.Column as AC
+import qualified Arrow.View as AV
+import Foreign.ForeignPtr (castForeignPtr, withForeignPtr)
 
 -- * Plain column encoders
 --
@@ -520,18 +522,27 @@ encodeCol f col acc = case col of
   -- ============================================================
   -- Non-null variable-length columns
   -- ============================================================
+  -- Utf8 / Binary columns now carry view types whose
+  -- (offsets, data) buffers are already in wire format. We
+  -- can dump them straight to the body without any
+  -- per-element work — this is one VS.Vector ByteString
+  -- conversion per buffer (one syscall under the hood).
   ColUtf8 v ->
-    let (offBs, datBs) = encodePlainUtf8 v
-    in varFlat offBs datBs (V.length v) acc
+    let !offBs = vsByteString (AV.uvOffsets v)
+        !datBs = vsByteString (AV.uvData v)
+    in varFlat offBs datBs (AV.vLength v) acc
   ColBinary v ->
-    let (offBs, datBs) = encodePlainBinary v
-    in varFlat offBs datBs (V.length v) acc
+    let !offBs = vsByteString (AV.bvOffsets v)
+        !datBs = vsByteString (AV.bvData v)
+    in varFlat offBs datBs (AV.vLength v) acc
   ColLargeUtf8 v ->
-    let (offBs, datBs) = encodePlainLargeUtf8 v
-    in varFlat offBs datBs (V.length v) acc
+    let !offBs = vsByteString (AV.luvOffsets v)
+        !datBs = vsByteString (AV.luvData v)
+    in varFlat offBs datBs (AV.vLength v) acc
   ColLargeBinary v ->
-    let (offBs, datBs) = encodePlainLargeBinary v
-    in varFlat offBs datBs (V.length v) acc
+    let !offBs = vsByteString (AV.lbvOffsets v)
+        !datBs = vsByteString (AV.lbvData v)
+    in varFlat offBs datBs (AV.vLength v) acc
 
   -- ============================================================
   -- Nullable primitives (one validity bitmap + one data buffer)
@@ -976,6 +987,25 @@ validityNullCount v = fromIntegral (VU.length v - Bit.countOnes v)
 {-# INLINE boxedToBitVec #-}
 boxedToBitVec :: V.Vector Bool -> VU.Vector Bit
 boxedToBitVec v = VU.generate (V.length v) (\i -> Bit (V.unsafeIndex v i))
+
+-- | Reinterpret a 'VS.Vector' as a strict 'ByteString' /without
+-- copying/. Both representations are a 'ForeignPtr' + length
+-- pair underneath; we just hand the underlying foreign pointer
+-- to BSI.fromForeignPtr.
+--
+-- Used in the variable-length writer to dump the offsets and
+-- data buffers of a 'Utf8View' / 'BinaryView' / large variants
+-- straight into the body. With this in place, an Arrow IPC
+-- write of a string column is a single ForeignPtr handoff
+-- per buffer — no per-element walk, no allocation.
+{-# INLINE vsByteString #-}
+vsByteString :: forall a. Storable a => VS.Vector a -> ByteString
+vsByteString v =
+  let !(fp, off, len) = VS.unsafeToForeignPtr v
+      !bytesPerElem   = sizeOf (undefined :: a)
+      !byteOff        = off * bytesPerElem
+      !byteLen        = len * bytesPerElem
+  in BSI.fromForeignPtr (castForeignPtr fp) byteOff byteLen
 
 -- * Stream / File writers
 

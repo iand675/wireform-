@@ -68,6 +68,7 @@ import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Unboxed as VU
 import Foreign.Storable (Storable)
 import Columnar.Bit (Bit (..))
+import qualified Arrow.View as AV
 import Data.Word (Word8, Word16, Word32, Word64)
 
 import qualified Arrow.Column as AC
@@ -298,10 +299,12 @@ columnArrayToColumnData = \case
   AC.ColBool   v -> Right $ PW.ColBool
                               (V.generate (VU.length v)
                                           (\i -> unBit (VU.unsafeIndex v i)))
-  AC.ColUtf8   v -> Right $ PW.ColByteArray (V.map TE.encodeUtf8 v)
-  AC.ColLargeUtf8 v -> Right $ PW.ColByteArray (V.map TE.encodeUtf8 v)
-  AC.ColBinary v -> Right $ PW.ColByteArray v
-  AC.ColLargeBinary v -> Right $ PW.ColByteArray v
+  AC.ColUtf8      v -> Right $ PW.ColByteArray
+                                 (V.map TE.encodeUtf8 (AV.utf8ViewToVector v))
+  AC.ColLargeUtf8 v -> Right $ PW.ColByteArray
+                                 (V.map TE.encodeUtf8 (AV.largeUtf8ViewToVector v))
+  AC.ColBinary    v -> Right $ PW.ColByteArray (AV.binaryViewToVector v)
+  AC.ColLargeBinary v -> Right $ PW.ColByteArray (AV.largeBinaryViewToVector v)
   -- Temporal types: lower to the natural Parquet physical type
   -- the schema element declared (Int32 for Date32 / Time32, Int64
   -- for Date64 / Time64 / Timestamp / Duration).
@@ -601,9 +604,11 @@ readParquetColumn pf rgIdx colIdx fld = do
     AT.ABool | not nullable ->
       AC.ColBool . boxedToBitVec <$> PR.readGenericBoolColumnChunk codec chunk
     AT.AUtf8 | not nullable ->
-      AC.ColUtf8 <$> PR.readGenericTextColumnChunk codec chunk
+      AC.ColUtf8 . AV.utf8ViewFromVector
+        <$> PR.readGenericTextColumnChunk codec chunk
     AT.ABinary | not nullable ->
-      AC.ColBinary  <$> PR.readGenericByteArrayColumnChunk codec chunk
+      AC.ColBinary . AV.binaryViewFromVector
+        <$> PR.readGenericByteArrayColumnChunk codec chunk
     -- Temporal non-nullable: read the underlying int stream and
     -- cast to the Arrow column flavour.
     AT.ADate AT.DateDay | not nullable ->
@@ -819,10 +824,14 @@ columnArrayToNestedRows col = case col of
                              (\i -> PN.NRLeaf (PN.LvDouble (VS.unsafeIndex v i))))
   AC.ColBool v   -> Right (V.generate (VU.length v)
                              (\i -> PN.NRLeaf (PN.LvBool (unBit (VU.unsafeIndex v i)))))
-  AC.ColUtf8 v   -> Right (V.map (PN.NRLeaf . PN.LvString) v)
-  AC.ColBinary v -> Right (V.map (PN.NRLeaf . PN.LvBinary) v)
-  AC.ColLargeUtf8 v -> Right (V.map (PN.NRLeaf . PN.LvString) v)
-  AC.ColLargeBinary v -> Right (V.map (PN.NRLeaf . PN.LvBinary) v)
+  AC.ColUtf8 v   -> Right (V.map (PN.NRLeaf . PN.LvString)
+                                  (AV.utf8ViewToVector v))
+  AC.ColBinary v -> Right (V.map (PN.NRLeaf . PN.LvBinary)
+                                  (AV.binaryViewToVector v))
+  AC.ColLargeUtf8 v -> Right (V.map (PN.NRLeaf . PN.LvString)
+                                     (AV.largeUtf8ViewToVector v))
+  AC.ColLargeBinary v -> Right (V.map (PN.NRLeaf . PN.LvBinary)
+                                       (AV.largeBinaryViewToVector v))
 
   -- Nullable primitives: NRNull for Nothing, NRLeaf for Just.
   AC.ColInt32Maybe v -> Right (V.map (maybe PN.NRNull (PN.NRLeaf . PN.LvInt32)) (AC.nvToMaybeVector v))
@@ -1120,8 +1129,9 @@ decodeSelectedColumn codec fileBs locs keep fld = case AT.fieldType fld of
   AT.ABool        -> AC.ColBool . boxedToBitVec <$> PR.readGenericBoolSelectedPages   codec fileBs locs keep
   AT.AUtf8        -> do
     bs <- PR.readGenericByteArraySelectedPages codec fileBs locs keep
-    Right $ AC.ColUtf8 (V.map decodeUtf8Lossy bs)
-  AT.ABinary      -> AC.ColBinary <$> PR.readGenericByteArraySelectedPages codec fileBs locs keep
+    Right $ AC.ColUtf8 (AV.utf8ViewFromVector (V.map decodeUtf8Lossy bs))
+  AT.ABinary      -> AC.ColBinary . AV.binaryViewFromVector
+                        <$> PR.readGenericByteArraySelectedPages codec fileBs locs keep
   AT.ADate AT.DateDay         ->
     AC.ColDate32   . VS.convert <$> PR.readGenericInt32SelectedPages codec fileBs locs keep
   AT.ADate AT.DateMillisecond ->

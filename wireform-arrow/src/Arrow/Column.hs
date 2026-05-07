@@ -62,6 +62,8 @@ import Data.Word (Word8, Word16, Word32, Word64)
 import GHC.Float (castWord32ToFloat, castWord64ToDouble)
 
 import Arrow.IPC (validateRecordBatchBuffers)
+import Arrow.View (Utf8View (..), BinaryView (..), LargeUtf8View (..), LargeBinaryView (..))
+import qualified Arrow.View as AV
 import Columnar.Bit (Bit (..))
 import qualified Columnar.Bit as Bit
 import qualified Columnar.SIMD as SIMD
@@ -212,10 +214,10 @@ data ColumnArray
   | ColFloat !(VS.Vector Float)
   | ColDouble !(VS.Vector Double)
   | ColBool !(VU.Vector Bit)
-  | ColUtf8 !(V.Vector Text)
-  | ColBinary !(V.Vector ByteString)
-  | ColLargeUtf8 !(V.Vector Text)
-  | ColLargeBinary !(V.Vector ByteString)
+  | ColUtf8 !Utf8View
+  | ColBinary !BinaryView
+  | ColLargeUtf8 !LargeUtf8View
+  | ColLargeBinary !LargeBinaryView
   | ColFixedSizeBinary !Int !(V.Vector ByteString)
   | ColDate32 !(VS.Vector Int32)
   | ColDate64 !(VS.Vector Int64)
@@ -561,23 +563,24 @@ readUtf8Column endian len rb body !bufIdx !nodeIdx = do
       -- buffer (~100 µs for 1 MB) and the savings vs the
       -- @V.generateM + TE.decodeUtf8'@ shape are 100 k tiny
       -- ByteArray allocations.
+      -- Build a Utf8View directly: both buffers stay as
+      -- VS.Vector views into the source body. UTF-8 validation
+      -- still runs at per-row access time via 'AV.utf8At'.
       case endian of
-        Little | isAsciiBS datBs ->
-          fmap (\v -> (ColUtf8 v, nodeIdx + 1, bufIdx + 2))
-               (readUtf8ColumnFastAscii len offBs datBs)
+        Little ->
+          let !view = Utf8View
+                { uvOffsets = viewPrimVecLE 4 (len + 1) offBs
+                , uvData    = viewPrimVecLE 1 (BS.length datBs) datBs
+                }
+          in Right (ColUtf8 view, nodeIdx + 1, bufIdx + 2)
         _ -> do
-          strs <-
-            V.generateM len $ \i -> do
-              s0 <- readI32 endian offBs (i * 4)
-              s1 <- readI32 endian offBs ((i + 1) * 4)
-              let !start = fromIntegral s0
-                  !end = fromIntegral s1
-              if start < 0 || end < start || end > BS.length datBs
-                then Left "Arrow.Column: invalid UTF-8 slice"
-                else case TE.decodeUtf8' (BS.take (end - start) (BS.drop start datBs)) of
-                  Right t -> Right t
-                  Left _ -> Left "Arrow.Column: invalid UTF-8 bytes"
-          Right (ColUtf8 strs, nodeIdx + 1, bufIdx + 2)
+          -- Big-endian: copy + bswap the offsets, then the
+          -- data buffer is already the wire bytes.
+          let !view = Utf8View
+                { uvOffsets = bswapPrimVec32 (len + 1) offBs
+                , uvData    = viewPrimVecLE 1 (BS.length datBs) datBs
+                }
+          Right (ColUtf8 view, nodeIdx + 1, bufIdx + 2)
 
 -- | True iff every byte of the buffer is ASCII.
 -- Delegates to the SIMDe-accelerated 'SIMD.isAsciiBS' (SSE2 /
@@ -634,17 +637,15 @@ readBinaryColumn endian len rb body !bufIdx !nodeIdx = do
   datBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
   if BS.length offBs < (len + 1) * 4
     then Left "Arrow.Column: binary offsets buffer too small"
-    else do
-      bins <-
-        V.generateM len $ \i -> do
-          s0 <- readI32 endian offBs (i * 4)
-          s1 <- readI32 endian offBs ((i + 1) * 4)
-          let !start = fromIntegral s0
-              !end = fromIntegral s1
-          if start < 0 || end < start || end > BS.length datBs
-            then Left "Arrow.Column: invalid binary slice"
-            else Right $! BS.take (end - start) (BS.drop start datBs)
-      Right (ColBinary bins, nodeIdx + 1, bufIdx + 2)
+    else
+      let !offsets = case endian of
+            Little -> viewPrimVecLE 4 (len + 1) offBs
+            _      -> bswapPrimVec32 (len + 1) offBs
+          !view = BinaryView
+            { bvOffsets = offsets
+            , bvData    = viewPrimVecLE 1 (BS.length datBs) datBs
+            }
+      in Right (ColBinary view, nodeIdx + 1, bufIdx + 2)
 
 readLargeUtf8Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readLargeUtf8Column endian len rb body !bufIdx !nodeIdx = do
@@ -652,16 +653,15 @@ readLargeUtf8Column endian len rb body !bufIdx !nodeIdx = do
   datBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
   if BS.length offBs < (len + 1) * 8
     then Left "Arrow.Column: large UTF-8 offsets buffer too small"
-    else do
-      strs <- V.generateM len $ \i -> do
-        let !s0 = fromIntegral (readWord64 endian offBs (i * 8)) :: Int
-            !s1 = fromIntegral (readWord64 endian offBs ((i + 1) * 8)) :: Int
-        if s0 < 0 || s1 < s0 || s1 > BS.length datBs
-          then Left "Arrow.Column: invalid large UTF-8 slice"
-          else case TE.decodeUtf8' (BS.take (s1 - s0) (BS.drop s0 datBs)) of
-            Right t -> Right t
-            Left _ -> Left "Arrow.Column: invalid large UTF-8 bytes"
-      Right (ColLargeUtf8 strs, nodeIdx + 1, bufIdx + 2)
+    else
+      let !offsets = case endian of
+            Little -> viewPrimVecLE 8 (len + 1) offBs
+            _      -> bswapPrimVec64 (len + 1) offBs
+          !view = LargeUtf8View
+            { luvOffsets = offsets
+            , luvData    = viewPrimVecLE 1 (BS.length datBs) datBs
+            }
+      in Right (ColLargeUtf8 view, nodeIdx + 1, bufIdx + 2)
 
 readLargeBinaryColumn :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readLargeBinaryColumn endian len rb body !bufIdx !nodeIdx = do
@@ -669,14 +669,15 @@ readLargeBinaryColumn endian len rb body !bufIdx !nodeIdx = do
   datBs <- sliceBuffer body (V.unsafeIndex (rbBuffers rb) (bufIdx + 1))
   if BS.length offBs < (len + 1) * 8
     then Left "Arrow.Column: large binary offsets buffer too small"
-    else do
-      bins <- V.generateM len $ \i -> do
-        let !s0 = fromIntegral (readWord64 endian offBs (i * 8)) :: Int
-            !s1 = fromIntegral (readWord64 endian offBs ((i + 1) * 8)) :: Int
-        if s0 < 0 || s1 < s0 || s1 > BS.length datBs
-          then Left "Arrow.Column: invalid large binary slice"
-          else Right $! BS.take (s1 - s0) (BS.drop s0 datBs)
-      Right (ColLargeBinary bins, nodeIdx + 1, bufIdx + 2)
+    else
+      let !offsets = case endian of
+            Little -> viewPrimVecLE 8 (len + 1) offBs
+            _      -> bswapPrimVec64 (len + 1) offBs
+          !view = LargeBinaryView
+            { lbvOffsets = offsets
+            , lbvData    = viewPrimVecLE 1 (BS.length datBs) datBs
+            }
+      in Right (ColLargeBinary view, nodeIdx + 1, bufIdx + 2)
 
 readFixedSizeBinaryColumn :: Int -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
 readFixedSizeBinaryColumn byteWidth len rb body !bufIdx !nodeIdx = do
@@ -1346,10 +1347,10 @@ columnLength = \case
   ColFloat v -> VS.length v
   ColDouble v -> VS.length v
   ColBool v -> VU.length v
-  ColUtf8 v -> V.length v
-  ColBinary v -> V.length v
-  ColLargeUtf8 v -> V.length v
-  ColLargeBinary v -> V.length v
+  ColUtf8 v -> AV.vLength v
+  ColBinary v -> AV.vLength v
+  ColLargeUtf8 v -> AV.vLength v
+  ColLargeBinary v -> AV.vLength v
   ColFixedSizeBinary _ v -> V.length v
   ColDate32 v -> VS.length v
   ColDate64 v -> VS.length v
@@ -1607,10 +1608,10 @@ resolveDictionaryColumn lookupVals = go
 -- in with the real values from a 'DictBatch'.
 placeholderColumn :: ArrowType -> ColumnArray
 placeholderColumn = \case
-  AUtf8       -> ColUtf8       V.empty
-  ABinary     -> ColBinary     V.empty
-  ALargeUtf8  -> ColLargeUtf8  V.empty
-  ALargeBinary -> ColLargeBinary V.empty
+  AUtf8       -> ColUtf8       emptyUtf8View
+  ABinary     -> ColBinary     emptyBinaryView
+  ALargeUtf8  -> ColLargeUtf8  emptyLargeUtf8View
+  ALargeBinary -> ColLargeBinary emptyLargeBinaryView
   AInt 8 True -> ColInt8 VS.empty
   AInt 8 False -> ColUInt8 VS.empty
   AInt 16 True -> ColInt16 VS.empty
@@ -1622,7 +1623,22 @@ placeholderColumn = \case
   AFloatingPoint Single -> ColFloat VS.empty
   AFloatingPoint DoublePrecision -> ColDouble VS.empty
   ABool -> ColBool VU.empty
-  _    -> ColUtf8 V.empty   -- conservative fallback
+  _    -> ColUtf8 emptyUtf8View   -- conservative fallback
+
+-- | Zero-row Utf8View / BinaryView. Used by the dictionary
+-- placeholder above and by callers that need an "absent"
+-- column value.
+emptyUtf8View :: Utf8View
+emptyUtf8View = Utf8View (VS.singleton 0) VS.empty
+
+emptyBinaryView :: BinaryView
+emptyBinaryView = BinaryView (VS.singleton 0) VS.empty
+
+emptyLargeUtf8View :: LargeUtf8View
+emptyLargeUtf8View = LargeUtf8View (VS.singleton 0) VS.empty
+
+emptyLargeBinaryView :: LargeBinaryView
+emptyLargeBinaryView = LargeBinaryView (VS.singleton 0) VS.empty
 
 -- | View materializer with precomputed variadic-count map; the
 -- nodeIdx of the current field selects the entry.
@@ -2107,10 +2123,10 @@ sliceColumnArray !start0 !len0 col =
       ColFloat v      -> ColFloat (VS.slice s l v)
       ColDouble v     -> ColDouble (VS.slice s l v)
       ColBool v       -> ColBool (VU.slice s l v)
-      ColUtf8 v       -> ColUtf8 (V.slice s l v)
-      ColBinary v     -> ColBinary (V.slice s l v)
-      ColLargeUtf8 v  -> ColLargeUtf8 (V.slice s l v)
-      ColLargeBinary v -> ColLargeBinary (V.slice s l v)
+      ColUtf8 v       -> ColUtf8 (AV.vSlice s l v)
+      ColBinary v     -> ColBinary (AV.vSlice s l v)
+      ColLargeUtf8 v  -> ColLargeUtf8 (AV.vSlice s l v)
+      ColLargeBinary v -> ColLargeBinary (AV.vSlice s l v)
       ColFixedSizeBinary w v -> ColFixedSizeBinary w (V.slice s l v)
       ColDate32 v     -> ColDate32 (VS.slice s l v)
       ColDate64 v     -> ColDate64 (VS.slice s l v)
@@ -2237,13 +2253,19 @@ validateMapKeysSorted = \case
     -- key column's constructor.
     checkSlice keys s w =
       case keys of
-        ColUtf8 v   -> compareSliceShow s w v
+        ColUtf8 v   -> compareSliceShow s w (utf8ViewToVector v)
         ColUtf8Maybe v -> compareSliceShow s w v
         ColInt32 v -> compareSlice s w v
         ColInt64 v -> compareSlice s w v
         ColUInt32 v -> compareSlice s w v
         ColUInt64 v -> compareSlice s w v
         _ -> Nothing  -- unsupported key type; assume sorted
+
+    -- Materialise the view's text as a boxed vector for the
+    -- diagnostic compareSliceShow call. Re-decoding per row
+    -- is fine here — this is a sortedness check, not a hot
+    -- path.
+    utf8ViewToVector v = AV.utf8ViewToVector v
 
     compareSlice :: (Ord a, Storable a, Show a)
                  => Int -> Int -> VS.Vector a -> Maybe (Int, String, String)

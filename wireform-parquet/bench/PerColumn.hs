@@ -21,6 +21,7 @@ import qualified Parquet.Arrow as PArrow
 import qualified Parquet.Types as P
 import qualified Arrow.Types as AT
 import qualified Arrow.Column as AC
+import qualified Arrow.View as AV
 import Parquet.Write (ColumnData (..))
 
 -- | Force every element of a 'ColumnArray' so the per-column
@@ -35,8 +36,8 @@ forceCol = \case
   AC.ColFloat  v -> VS.length v
   AC.ColDouble v -> VS.length v
   AC.ColBool   v -> VU.length v
-  AC.ColUtf8   v -> V.foldl'  (\a !_ -> a + 1) 0 v
-  AC.ColBinary v -> V.foldl'  (\a !_ -> a + 1) 0 v
+  AC.ColUtf8   v -> AV.vLength v
+  AC.ColBinary v -> AV.vLength v
   c              -> AC.columnLength c
 
 nRows :: Int

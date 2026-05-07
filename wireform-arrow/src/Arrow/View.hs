@@ -51,6 +51,8 @@ module Arrow.View
     -- * Construction
   , utf8ViewFromVector
   , binaryViewFromVector
+  , utf8ViewFromVector_l
+  , binaryViewFromVector_l
   ) where
 
 import Data.ByteString (ByteString)
@@ -312,6 +314,29 @@ binaryViewFromVector v =
 
 binaryViewToUtf8View :: BinaryView -> Utf8View
 binaryViewToUtf8View (BinaryView off dat) = Utf8View off dat
+
+-- | Like 'utf8ViewFromVector' but builds a 'LargeUtf8View'
+-- (Int64 offsets).
+utf8ViewFromVector_l :: V.Vector Text -> LargeUtf8View
+utf8ViewFromVector_l v =
+  let !bss = V.map TE.encodeUtf8 v
+  in binaryViewToLargeUtf8View (binaryViewFromVector_l bss)
+
+-- | Like 'binaryViewFromVector' but builds a 'LargeBinaryView'
+-- (Int64 offsets).
+binaryViewFromVector_l :: V.Vector ByteString -> LargeBinaryView
+binaryViewFromVector_l v =
+  let !n = V.length v
+      offs = VS.generate (n + 1) $ \i ->
+        if i == 0 then 0
+        else fromIntegral
+               (V.foldl' (\acc bs -> acc + BS.length bs) 0
+                         (V.take i v)) :: Int64
+      payload = BS.concat (V.toList v)
+  in LargeBinaryView offs (bsToStorable payload)
+
+binaryViewToLargeUtf8View :: LargeBinaryView -> LargeUtf8View
+binaryViewToLargeUtf8View (LargeBinaryView off dat) = LargeUtf8View off dat
 
 -- | Helper: copy a 'ByteString' into a 'VS.Vector Word8'.
 -- Used by the 'fromVector' constructors above.

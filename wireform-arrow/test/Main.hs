@@ -143,10 +143,10 @@ main = do
     (ColFixedSizeBinary 4 (V.fromList
       [ BS.pack [0, 1, 2, 3], BS.pack [0xFF, 0xFE, 0xFD, 0xFC] ]))
 
-  roundTripPrim "Utf8"   (ColUtf8   (V.fromList ["alpha", "beta", "", "\xe2\x9a\xa1"]))
-  roundTripPrim "Binary" (ColBinary (V.fromList [BS.pack [1,2,3], BS.empty, BS.pack [0xFF]]))
-  roundTripPrim "LargeUtf8"   (ColLargeUtf8   (V.fromList ["alpha", "beta"]))
-  roundTripPrim "LargeBinary" (ColLargeBinary (V.fromList [BS.pack [0,1,2], BS.pack [0xFF]]))
+  roundTripPrim "Utf8"   (ColUtf8   (AV.utf8ViewFromVector (V.fromList ["alpha", "beta", "", "\xe2\x9a\xa1"])))
+  roundTripPrim "Binary" (ColBinary (AV.binaryViewFromVector (V.fromList [BS.pack [1,2,3], BS.empty, BS.pack [0xFF]])))
+  roundTripPrim "LargeUtf8"   (ColLargeUtf8   (AV.utf8ViewFromVector_l (V.fromList ["alpha", "beta"])))
+  roundTripPrim "LargeBinary" (ColLargeBinary (AV.binaryViewFromVector_l (V.fromList [BS.pack [0,1,2], BS.pack [0xFF]])))
 
   -- Nullable variants.
   roundTripPrim "Int8Maybe"
@@ -205,7 +205,7 @@ main = do
        ])
     (ColStruct $ V.fromList
        [ ("id",   ColInt64 (VS.fromList [1, 2, 3]))
-       , ("name", ColUtf8  (V.fromList ["a", "b", "c"]))
+       , ("name", ColUtf8  (AV.utf8ViewFromVector (V.fromList ["a", "b", "c"])))
        ])
 
   roundTripNested "StructMaybe"
@@ -272,7 +272,7 @@ main = do
       ])
     (ColMap
        (VS.fromList [0, 2, 2, 3])
-       (ColUtf8 (V.fromList ["a", "b", "c"]))
+       (ColUtf8 (AV.utf8ViewFromVector (V.fromList ["a", "b", "c"])))
        (ColInt32 (VS.fromList [1, 2, 3])))
 
   -- Dense union over (int32, utf8).
@@ -286,7 +286,7 @@ main = do
        (VS.fromList [0, 0, 1])
        (V.fromList
          [ ColInt32 (VS.fromList [100, 200])
-         , ColUtf8  (V.fromList ["hello"])
+         , ColUtf8  (AV.utf8ViewFromVector (V.fromList ["hello"]))
          ]))
 
   -- Sparse union over (bool, int32).
@@ -435,7 +435,7 @@ flatBufRoundTrip = do
     (Schema (V.singleton dictField) Little V.empty V.empty)
     (V.singleton (ColDictionary 0
         (VS.fromList ([0, 1, 0, 2, 1] :: [Int32]))
-        (ColUtf8 (V.fromList ["a", "b", "c"]))))
+        (ColUtf8 (AV.utf8ViewFromVector (V.fromList ["a", "b", "c"])))))
 
   -- ANull column: schema metadata round-trip + ColNull row count
   highLevelRoundTrip "Null"
@@ -483,7 +483,7 @@ flatBufRoundTrip = do
     (V.fromList
        [ ColInt64 (VS.fromList
             ([1..1000] :: [Int64]))   -- enough bytes that ZSTD shrinks
-       , ColUtf8 (V.replicate 1000 "highly-compressible-payload")
+       , ColUtf8 (AV.utf8ViewFromVector (V.replicate 1000 "highly-compressible-payload"))
        ])
 
   -- LZ4_FRAME body compression: same shape / sizing as the ZSTD
@@ -498,7 +498,7 @@ flatBufRoundTrip = do
        ]) Little V.empty V.empty)
     (V.fromList
        [ ColInt64 (VS.fromList ([1..1000] :: [Int64]))
-       , ColUtf8 (V.replicate 1000 "highly-compressible-payload")
+       , ColUtf8 (AV.utf8ViewFromVector (V.replicate 1000 "highly-compressible-payload"))
        ])
 
   -- DictReplaceOnChange: two batches with the SAME dict id but
@@ -539,7 +539,7 @@ pyarrowGoldenRoundTrip = do
   -- emitted ahead of the record batch.
   goldenDictCheck "pa_dict.arrows"
     [0, 1, 0, 2, 1]
-    (ColUtf8 (V.fromList ["a", "b", "c"]))
+    (ColUtf8 (AV.utf8ViewFromVector (V.fromList ["a", "b", "c"])))
 
 goldenCheck :: FilePath -> V.Vector ColumnArray -> IO ()
 goldenCheck name expected = do
@@ -652,10 +652,10 @@ dictReplacementRoundTrip = do
         Little V.empty V.empty
       !batch1 = V.singleton $ ColDictionary 0
         (VS.fromList [0, 1, 0])
-        (ColUtf8 (V.fromList ["a", "b"]))
+        (ColUtf8 (AV.utf8ViewFromVector (V.fromList ["a", "b"])))
       !batch2 = V.singleton $ ColDictionary 0
         (VS.fromList [0, 1, 0])
-        (ColUtf8 (V.fromList ["x", "y"]))
+        (ColUtf8 (AV.utf8ViewFromVector (V.fromList ["x", "y"])))
       !opts  = defaultWriteOptions { writeDictHandling = DictReplaceOnChange }
       !bytes = encodeArrowStream opts sch [batch1, batch2]
   case decodeArrowStream bytes of
@@ -679,7 +679,7 @@ dictReplacementRoundTrip = do
           failTest $ "dict-replace expected 2 batches, got "
                       ++ show (length batches)
   where
-    valuesToList (ColUtf8 v)          = v
+    valuesToList (ColUtf8 v)          = AV.utf8ViewToVector v
     valuesToList (ColUtf8Maybe v)     = V.mapMaybe id v
     valuesToList _                    = V.empty
 
@@ -906,8 +906,8 @@ recordHelperTests = do
 
   -- validateMapKeysSorted
   -- Build a ColMap with sorted keys vs unsorted keys.
-  let !sortedKeys = ColUtf8 (V.fromList ["a", "b", "c"])
-      !unsortedKeys = ColUtf8 (V.fromList ["b", "a", "c"])
+  let !sortedKeys = ColUtf8 (AV.utf8ViewFromVector (V.fromList ["a", "b", "c"]))
+      !unsortedKeys = ColUtf8 (AV.utf8ViewFromVector (V.fromList ["b", "a", "c"]))
       !vals     = ColInt32 (VS.fromList [1, 2, 3 :: Int32])
       !offsets  = VS.fromList [0, 3 :: Int32]
       !sortedMap   = ColMap offsets sortedKeys vals
@@ -1008,7 +1008,7 @@ projectionRoundTrip = do
       !batch = V.fromList
         [ ColInt32 (VS.fromList ([1, 2, 3] :: [Int32]))
         , ColInt64 (VS.fromList ([10, 20, 30] :: [Int64]))
-        , ColUtf8  (V.fromList ["x", "y", "z"])
+        , ColUtf8  (AV.utf8ViewFromVector (V.fromList ["x", "y", "z"]))
         ]
       !bytes = encodeArrowStream defaultWriteOptions sch [batch]
   case openStreamReader bytes of

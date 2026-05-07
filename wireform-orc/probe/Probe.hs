@@ -15,6 +15,7 @@ import qualified Data.Vector.Primitive as VP
 import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Unboxed as VU
 import Columnar.Bit (Bit (..))
+import qualified Arrow.View as AV
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.FilePath ((</>))
@@ -91,7 +92,7 @@ stringSch = AT.defaultSchema (V.singleton
 
 stringBatches :: [V.Vector AC.ColumnArray]
 stringBatches =
-  [ V.singleton (AC.ColUtf8 (V.fromList ["alpha", "beta", "gamma"])) ]
+  [ V.singleton (AC.ColUtf8 (AV.utf8ViewFromVector (V.fromList ["alpha", "beta", "gamma"]))) ]
 
 boolSch :: AT.Schema
 boolSch = AT.defaultSchema (V.singleton
@@ -112,7 +113,7 @@ mixedBatches :: [V.Vector AC.ColumnArray]
 mixedBatches =
   [ V.fromList
       [ AC.ColInt64 (VS.fromList [10, 20, 30 :: Int64])
-      , AC.ColUtf8 (V.fromList ["alice", "bob", "carol"])
+      , AC.ColUtf8 (AV.utf8ViewFromVector (V.fromList ["alice", "bob", "carol"]))
       , AC.ColDouble (VS.fromList [1.5, 2.5, 3.5 :: Double])
       ]
   ]
@@ -138,7 +139,7 @@ structBatches :: [V.Vector AC.ColumnArray]
 structBatches =
   [ V.singleton (AC.ColStruct (V.fromList
       [ ("i", AC.ColInt64 (VS.fromList [1, 2, 3 :: Int64]))
-      , ("n", AC.ColUtf8  (V.fromList ["a", "b", "c"]))
+      , ("n", AC.ColUtf8  (AV.utf8ViewFromVector (V.fromList ["a", "b", "c"])))
       ]))
   ]
 

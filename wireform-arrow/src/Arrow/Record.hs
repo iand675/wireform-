@@ -117,6 +117,7 @@ import Columnar.Bit (Bit (..))
 import Data.Word (Word8, Word16, Word32, Word64)
 
 import qualified Arrow.Column as AC
+import qualified Arrow.View as AV
 import Data.Maybe (fromMaybe, isJust)
 import Arrow.Column (ColumnArray (..))
 import Arrow.Types
@@ -233,10 +234,10 @@ boolE :: Encoder Bool
 boolE = mkE ABool (ColBool . boolVecToBitVec) ColBoolMaybe
 
 utf8E :: Encoder Text
-utf8E = mkE AUtf8 ColUtf8 ColUtf8Maybe
+utf8E = mkE AUtf8 (ColUtf8 . AV.utf8ViewFromVector) ColUtf8Maybe
 
 binaryE :: Encoder ByteString
-binaryE = mkE ABinary ColBinary ColBinaryMaybe
+binaryE = mkE ABinary (ColBinary . AV.binaryViewFromVector) ColBinaryMaybe
 
 -- | Days since Unix epoch (INT32). Arrow logical @Date(DateDay)@.
 date32E :: Encoder Int32
@@ -371,12 +372,12 @@ bitVecToBoolVec v = V.generate (VU.length v) (\i -> unBit (VU.unsafeIndex v i))
 
 utf8D :: Decoder Text
 utf8D = mkD AUtf8
-  (expectCol "ColUtf8"      $ \case ColUtf8      v -> Right v; o -> expectErr "ColUtf8" o)
+  (expectCol "ColUtf8"      $ \case ColUtf8      v -> Right (AV.utf8ViewToVector v); o -> expectErr "ColUtf8" o)
   (expectCol "ColUtf8Maybe" $ \case ColUtf8Maybe v -> Right v; o -> expectErr "ColUtf8Maybe" o)
 
 binaryD :: Decoder ByteString
 binaryD = mkD ABinary
-  (expectCol "ColBinary"      $ \case ColBinary      v -> Right v; o -> expectErr "ColBinary" o)
+  (expectCol "ColBinary"      $ \case ColBinary      v -> Right (AV.binaryViewToVector v); o -> expectErr "ColBinary" o)
   (expectCol "ColBinaryMaybe" $ \case ColBinaryMaybe v -> Right v; o -> expectErr "ColBinaryMaybe" o)
 
 date32D :: Decoder Int32

@@ -76,6 +76,7 @@ import Arrow.Column
   , resolveDictionaryColumn
   )
 import qualified Arrow.FlatBufferIPC as FB
+import qualified Arrow.View as AV
 import Arrow.FlatBufferIPC
   ( DictBatch (..)
   , buildRecordBatchBytes
@@ -407,10 +408,23 @@ decodeInterleavedFrames sch = go Map.empty []
     -- now an explicit error path consumers can catch.
     appendCols new old = case (new, old) of
       -- Variable-length string / binary columns concatenate.
-      (ColUtf8 n, ColUtf8 o)               -> ColUtf8 (o V.++ n)
-      (ColLargeUtf8 n, ColLargeUtf8 o)     -> ColLargeUtf8 (o V.++ n)
-      (ColBinary n, ColBinary o)           -> ColBinary (o V.++ n)
-      (ColLargeBinary n, ColLargeBinary o) -> ColLargeBinary (o V.++ n)
+      -- View-shaped string / binary columns: materialise both
+      -- back to V.Vector for now and rebuild the view. Cheap
+      -- relative to the dictionary-batch path's normal cost
+      -- (this only fires for delta-dict batches with string
+      -- value types — rare).
+      (ColUtf8 n, ColUtf8 o) ->
+        ColUtf8 (AV.utf8ViewFromVector
+                   (AV.utf8ViewToVector o V.++ AV.utf8ViewToVector n))
+      (ColLargeUtf8 n, ColLargeUtf8 o) ->
+        ColLargeUtf8 (AV.utf8ViewFromVector_l
+                        (AV.largeUtf8ViewToVector o V.++ AV.largeUtf8ViewToVector n))
+      (ColBinary n, ColBinary o) ->
+        ColBinary (AV.binaryViewFromVector
+                     (AV.binaryViewToVector o V.++ AV.binaryViewToVector n))
+      (ColLargeBinary n, ColLargeBinary o) ->
+        ColLargeBinary (AV.binaryViewFromVector_l
+                          (AV.largeBinaryViewToVector o V.++ AV.largeBinaryViewToVector n))
       (ColUtf8Maybe n, ColUtf8Maybe o)     -> ColUtf8Maybe (o V.++ n)
       (ColBinaryMaybe n, ColBinaryMaybe o) -> ColBinaryMaybe (o V.++ n)
       -- Primitive numeric vectors concatenate trivially.

@@ -11,6 +11,7 @@ import qualified Data.Vector as V
 import qualified Data.Vector.Primitive as VP
 import qualified Data.Vector.Storable as VS
 import qualified Arrow.Column as AC
+import qualified Arrow.View as AV
 import Data.Int (Int8, Int16, Int32, Int64)
 import Data.Word (Word8, Word16, Word32, Word64)
 import System.Environment (getArgs)
@@ -101,7 +102,7 @@ writeMode outDir = do
       }
     [V.fromList
        [ ColInt64 (VS.fromList ([10,20,30] :: [Int64]))
-       , ColUtf8  (V.fromList ["hello","world","!"])
+       , ColUtf8  (AV.utf8ViewFromVector (V.fromList ["hello","world","!"]))
        , ColBoolMaybe (V.fromList [Just True, Nothing, Just False])
        ]]
 
@@ -161,7 +162,7 @@ writeMode outDir = do
       }
     [V.singleton (ColDictionary 0
         (VS.fromList ([0,1,0,2,1] :: [Int32]))
-        (ColUtf8 (V.fromList ["a","b","c"])))]
+        (ColUtf8 (AV.utf8ViewFromVector (V.fromList ["a","b","c"]))))]
 
   -- ZSTD body compression: a 500-row int64 column compressed
   -- per Arrow's BodyCompression spec.
@@ -193,7 +194,7 @@ writeMode outDir = do
         }
       dictBatch = V.singleton (ColDictionary 0
         (VS.fromList ([0,1,0,2,1] :: [Int32]))
-        (ColUtf8 (V.fromList ["a","b","c"])))
+        (ColUtf8 (AV.utf8ViewFromVector (V.fromList ["a","b","c"]))))
   BS.writeFile (outDir <> "/ours_dict.arrow")
     (encodeArrowFile defaultWriteOptions dictSchema [dictBatch])
 
@@ -231,8 +232,8 @@ writeMode outDir = do
   writeSample "binary"
     (Schema (V.singleton (pField "b" False ABinary V.empty))
             Little V.empty V.empty)
-    [V.singleton (ColBinary (V.fromList
-       ["\x00\x01\x02", "\xff", "" :: ByteString]))]
+    [V.singleton (ColBinary (AV.binaryViewFromVector (V.fromList
+       ["\x00\x01\x02", "\xff", "" :: ByteString])))]
   writeSample "fixedbin16"
     (Schema (V.singleton (pField "u" False (AFixedSizeBinary 16) V.empty))
             Little V.empty V.empty)
@@ -292,7 +293,7 @@ writeMode outDir = do
        Little V.empty V.empty)
     [V.singleton (ColStruct (V.fromList
        [ ("i", ColInt32 (VS.fromList ([1, 2, 3] :: [Int32])))
-       , ("n", ColUtf8  (V.fromList ["a", "b", "c"]))
+       , ("n", ColUtf8  (AV.utf8ViewFromVector (V.fromList ["a", "b", "c"])))
        ]))]
 
   -- 14) Map<utf8, int32>. Per Arrow spec the Map is encoded
@@ -309,7 +310,7 @@ writeMode outDir = do
        Little V.empty V.empty)
     [V.singleton (ColMap
         (VS.fromList ([0, 2, 5] :: [Int32]))
-        (ColUtf8 (V.fromList ["k1", "k2", "k3", "k4", "k5"]))
+        (ColUtf8 (AV.utf8ViewFromVector (V.fromList ["k1", "k2", "k3", "k4", "k5"])))
         (ColInt32 (VS.fromList ([10, 20, 30, 40, 50] :: [Int32]))))]
 
   -- 15) LargeList<int32> — 64-bit offsets.
@@ -335,7 +336,7 @@ writeMode outDir = do
   writeSample "large_utf8"
     (Schema (V.singleton (pField "s" False ALargeUtf8 V.empty))
        Little V.empty V.empty)
-    [V.singleton (ColLargeUtf8 (V.fromList ["alpha", "beta", "gamma"]))]
+    [V.singleton (ColLargeUtf8 (AV.utf8ViewFromVector_l (V.fromList ["alpha", "beta", "gamma"])))]
 
   -- 18) DenseUnion<int32, utf8>.
   --
@@ -354,7 +355,7 @@ writeMode outDir = do
         (VS.fromList ([0, 0, 1, 1, 2] :: [Int32]))   -- per-child offsets
         (V.fromList
            [ ColInt32 (VS.fromList ([10, 20, 30] :: [Int32]))
-           , ColUtf8  (V.fromList ["a", "b"])
+           , ColUtf8  (AV.utf8ViewFromVector (V.fromList ["a", "b"]))
            ]))]
 
   putStrLn ("wrote probe outputs to " ++ outDir)
