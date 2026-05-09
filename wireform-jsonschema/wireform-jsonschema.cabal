@@ -141,6 +141,7 @@ library
                     -- wireform integration
                     , JsonSchema.Class
                     , JsonSchema.CodeGen
+                    , JsonSchema.CodeGen.Registry
                     , JsonSchema.Derive
     build-depends:    base >= 4.17.0.0 && < 5
                     , aeson >= 2.0 && < 3
@@ -218,6 +219,7 @@ test-suite wireform-jsonschema-test
                     , JsonSchema.Keywords.ApplicatorSpec
                     , JsonSchema.TestHelpers
                     , JsonSchema.DeriveSpec
+                    , JsonSchema.CodeGen.RegistrySpec
     build-tool-depends: hspec-discover:hspec-discover >= 2.11 && < 3
     build-depends:    base >= 4.17.0.0 && < 5
                     , wireform-jsonschema

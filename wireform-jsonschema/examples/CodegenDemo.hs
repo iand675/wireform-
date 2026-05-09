@@ -31,10 +31,25 @@ import GHC.Generics (Generic)
 import JsonSchema (parseSchema)
 import JsonSchema.Class (HasJsonSchema, jsonSchemaJSON)
 import JsonSchema.CodeGen
-  ( generateJsonSchemaTypesWithName
+  ( generateJsonSchemaTypesWith
   , renderGeneratedModule
   )
+import JsonSchema.CodeGen.Registry
+  ( MappingRegistry
+  , defaultMappingRegistry
+  , emptyMappingRegistry
+  , matchAll
+  , matchFormat
+  , matchHasProperty
+  , matchPattern
+  , matchPatternRegex
+  , matchRef
+  , matchType
+  , register
+  , typeMapping
+  )
 import JsonSchema.Derive (deriveHasJsonSchema)
+import JsonSchema.Types (SchemaType (..))
 
 -- ---------------------------------------------------------------------------
 -- Example 1 — schema-driven codegen on a record schema
@@ -47,9 +62,14 @@ personSchemaJSON = either error id $ Aeson.eitherDecode $ BL.pack
   \, \"type\": \"object\"\n\
   \, \"required\": [\"name\"]\n\
   \, \"properties\":\n\
-  \    { \"name\":  { \"type\": \"string\"  }\n\
-  \    , \"age\":   { \"type\": \"integer\" }\n\
-  \    , \"email\": { \"type\": \"string\", \"format\": \"email\" }\n\
+  \    { \"name\":      { \"type\": \"string\"  }\n\
+  \    , \"age\":       { \"type\": \"integer\" }\n\
+  \    , \"email\":     { \"type\": \"string\", \"format\": \"email\" }\n\
+  \    , \"createdAt\": { \"type\": \"string\", \"format\": \"date-time\" }\n\
+  \    , \"id\":        { \"type\": \"string\", \"format\": \"uuid\" }\n\
+  \    , \"website\":   { \"type\": \"string\", \"format\": \"uri\" }\n\
+  \    , \"sha256\":    { \"type\": \"string\", \"pattern\": \"^[0-9a-fA-F]{64}$\" }\n\
+  \    , \"manager\":   { \"$ref\": \"https://acme.example/schemas/Person.json\" }\n\
   \    }\n\
   \}"
 
@@ -113,8 +133,8 @@ subHeading t = do
   T.putStrLn t
   T.putStrLn (T.replicate 60 "-")
 
-runSchemaCodegen :: Text -> Aeson.Value -> IO ()
-runSchemaCodegen rootName json = do
+runSchemaCodegen :: MappingRegistry -> Text -> Aeson.Value -> IO ()
+runSchemaCodegen reg rootName json = do
   subHeading ("Input schema (" <> rootName <> ")")
   T.putStrLn (prettyJSON json)
   case parseSchema json of
@@ -123,7 +143,7 @@ runSchemaCodegen rootName json = do
     Right s -> do
       subHeading ("Generated Haskell (" <> rootName <> ")")
       T.putStrLn (renderGeneratedModule
-                    (generateJsonSchemaTypesWithName rootName s))
+                    (generateJsonSchemaTypesWith reg rootName s))
 
 runDerive
   :: forall a. HasJsonSchema a
@@ -134,11 +154,32 @@ runDerive _ name = do
   subHeading (name <> " :: jsonSchemaJSON")
   T.putStrLn (prettyJSON (jsonSchemaJSON @a))
 
+-- | A registry that pulls in the standard format mappings, points
+-- @\$ref@s into our own @Acme.Person@ module, and recognises a
+-- specific SHA-256 pattern as a custom @Sha256@ newtype.
+demoRegistry :: MappingRegistry
+demoRegistry =
+    register (matchRef "https://acme.example/schemas/Person.json")
+             (typeMapping "Person" ["Acme.Person (Person)"])
+  $ register (matchAll [ matchType StringType
+                       , matchPatternRegex "^\\^\\[0-9a-fA-F\\]\\{64\\}\\$$"
+                       ])
+             (typeMapping "Sha256" ["Acme.Crypto (Sha256)"])
+  $ register (matchHasProperty "tag" Nothing)
+             (typeMapping "Aeson.Value" [])
+  $ defaultMappingRegistry
+
 main :: IO ()
 main = do
-  heading "JsonSchema.CodeGen — schema-driven generation"
-  runSchemaCodegen "Person" personSchemaJSON
-  runSchemaCodegen "Color"  colorSchemaJSON
+  heading "JsonSchema.CodeGen — schema-driven generation (empty registry)"
+  runSchemaCodegen emptyMappingRegistry "Person" personSchemaJSON
+
+  heading "JsonSchema.CodeGen — schema-driven generation (defaultMappingRegistry)"
+  runSchemaCodegen defaultMappingRegistry "Person" personSchemaJSON
+
+  heading "JsonSchema.CodeGen — schema-driven generation (custom registry)"
+  runSchemaCodegen demoRegistry "Person" personSchemaJSON
+  runSchemaCodegen demoRegistry "Color"  colorSchemaJSON
 
   heading "JsonSchema.Derive — annotation-driven deriver"
   runDerive (Proxy :: Proxy Address)  "Address"

@@ -24,10 +24,17 @@
 -- * @\$ref@ values resolve against the registry passed in;
 --   unresolved refs become @Aeson.Value@ placeholders.
 module JsonSchema.CodeGen
-  ( generateJsonSchemaTypes
+  ( -- * Top-level
+    generateJsonSchemaTypes
   , generateJsonSchemaTypesWithName
+  , generateJsonSchemaTypesWith
+
+    -- * Output
   , GeneratedModule (..)
   , renderGeneratedModule
+
+    -- * Re-exports
+  , module JsonSchema.CodeGen.Registry
   ) where
 
 import qualified Data.Aeson as Aeson
@@ -51,6 +58,7 @@ import JsonSchema.Types
   , SchemaValidation (..)
   , Reference (..)
   )
+import JsonSchema.CodeGen.Registry
 
 -- ---------------------------------------------------------------------------
 -- Public API
@@ -76,24 +84,44 @@ renderGeneratedModule g =
     <> T.singleton '\n'
 
 -- | Emit declarations for a single root schema using the supplied root
--- type name (e.g. @"Person"@).
+-- type name (e.g. @"Person"@). Uses 'emptyMappingRegistry' — every
+-- field that doesn't fit a primitive maps to @Aeson.Value@. Use
+-- 'generateJsonSchemaTypesWith' to drive richer mappings.
 generateJsonSchemaTypesWithName :: Text -> Schema -> GeneratedModule
-generateJsonSchemaTypesWithName rootName schema =
-  let env0 = freshEnv
-      (env, _) = runCodegen (collectSchema rootName schema) env0
-   in GeneratedModule
-        { generatedHeader = defaultHeader
-        , generatedDecls = reverse (envDecls env)
-        }
+generateJsonSchemaTypesWithName =
+  generateJsonSchemaTypesWith emptyMappingRegistry
 
--- | Like 'generateJsonSchemaTypesWithName' but use the schema's @\$id@
--- (or @\"Root\"@) to name the root type.
+-- | Emit declarations for a single root schema using the schema's
+-- @\$id@ (or @\"Root\"@) to name the root type.
 generateJsonSchemaTypes :: Schema -> GeneratedModule
 generateJsonSchemaTypes schema =
   let name = case schemaId schema of
         Just t | not (T.null t) -> sanitizeTypeName t
         _ -> "Root"
    in generateJsonSchemaTypesWithName name schema
+
+-- | Emit declarations for a single root schema, consulting the given
+-- 'MappingRegistry' before falling back to a fresh data declaration.
+--
+-- The registry contributes:
+--
+-- 1. The Haskell type expression to splice in for each matched
+--    sub-schema (via 'lookupMapping').
+-- 2. The @import@ block to add to the module header (deduped via
+--    'registryImports').
+generateJsonSchemaTypesWith
+  :: MappingRegistry
+  -> Text
+  -> Schema
+  -> GeneratedModule
+generateJsonSchemaTypesWith reg rootName schema =
+  let env0     = freshEnv reg
+      (env, _) = runCodegen (collectSchema rootName schema) env0
+      header   = renderHeader (envExtraImports env)
+   in GeneratedModule
+        { generatedHeader = header
+        , generatedDecls  = reverse (envDecls env)
+        }
 
 -- ---------------------------------------------------------------------------
 -- Codegen environment
@@ -106,10 +134,21 @@ data Env = Env
     -- ^ Type names already emitted (to avoid duplicates).
   , envCounter :: !Int
     -- ^ Counter used to mint unique nested type names.
+  , envRegistry :: !MappingRegistry
+    -- ^ Mapping registry consulted before fresh declarations.
+  , envExtraImports :: !(Set Text)
+    -- ^ Imports needed by the generated declarations
+    -- (registry-driven plus the always-on baseline).
   }
 
-freshEnv :: Env
-freshEnv = Env { envDecls = [], envSeen = Set.empty, envCounter = 0 }
+freshEnv :: MappingRegistry -> Env
+freshEnv reg = Env
+  { envDecls        = []
+  , envSeen         = Set.empty
+  , envCounter      = 0
+  , envRegistry     = reg
+  , envExtraImports = Set.empty
+  }
 
 -- A poor-man's state monad over Env. Keeps the implementation
 -- self-contained and avoids dragging mtl in as an extra dep here
@@ -142,21 +181,37 @@ markSeen n = Codegen $ \e -> (e { envSeen = Set.insert n (envSeen e) }, ())
 isSeen :: Text -> Codegen Bool
 isSeen n = Codegen $ \e -> (e, n `Set.member` envSeen e)
 
+getRegistry :: Codegen MappingRegistry
+getRegistry = Codegen $ \e -> (e, envRegistry e)
+
+addImports :: [Text] -> Codegen ()
+addImports xs = Codegen $ \e ->
+  ( e { envExtraImports =
+          envExtraImports e <> Set.fromList xs }
+  , ()
+  )
+
 -- ---------------------------------------------------------------------------
 -- Schema → declaration walk
 -- ---------------------------------------------------------------------------
 
 -- | The result of compiling a schema is a Haskell type expression
--- (possibly referring to types we have just emitted).
+-- (possibly referring to types we have just emitted, or to types
+-- supplied by the registry).
 collectSchema :: Text -> Schema -> Codegen Text
-collectSchema name schema = case schemaCore schema of
-  BooleanSchema _ ->
-    -- An @any@ schema has no useful Haskell type beyond Aeson.Value.
-    pure "Aeson.Value"
-  ObjectSchema (SchemaObject (Left _)) ->
-    pure "Aeson.Value"
-  ObjectSchema (SchemaObject (Right o)) ->
-    collectObject name o
+collectSchema name schema = do
+  reg <- getRegistry
+  case lookupMapping reg schema of
+    Just tm -> do
+      addImports (tmHaskellImports tm)
+      pure (tmHaskellType tm)
+    Nothing -> case schemaCore schema of
+      BooleanSchema _ ->
+        pure "Aeson.Value"
+      ObjectSchema (SchemaObject (Left _)) ->
+        pure "Aeson.Value"
+      ObjectSchema (SchemaObject (Right o)) ->
+        collectObject name o
 
 collectObject :: Text -> ObjectSchemaData -> Codegen Text
 collectObject name o
@@ -295,18 +350,26 @@ hasObjectShape s = case schemaCore s of
 -- Naming
 -- ---------------------------------------------------------------------------
 
-defaultHeader :: Text
-defaultHeader = T.unlines
-  [ "{-# LANGUAGE OverloadedStrings #-}"
-  , "{-# LANGUAGE DeriveGeneric #-}"
-  , "-- Generated by JsonSchema.CodeGen. Do not edit by hand."
-  , "module Generated where"
-  , ""
-  , "import Data.Aeson (Value)"
-  , "import qualified Data.Aeson as Aeson"
-  , "import Data.Map.Strict (Map)"
-  , "import Data.Text (Text)"
+-- | The set of imports the generator always emits, on top of any
+-- contributed by the registry.
+baselineImports :: Set Text
+baselineImports = Set.fromList
+  [ "Data.Aeson (Value)"
+  , "qualified Data.Aeson as Aeson"
+  , "Data.Map.Strict (Map)"
+  , "Data.Text (Text)"
   ]
+
+renderHeader :: Set Text -> Text
+renderHeader extra =
+  T.unlines $
+    [ "{-# LANGUAGE OverloadedStrings #-}"
+    , "{-# LANGUAGE DeriveGeneric #-}"
+    , "-- Generated by JsonSchema.CodeGen. Do not edit by hand."
+    , "module Generated where"
+    , ""
+    ]
+      ++ map ("import " <>) (Set.toAscList (baselineImports <> extra))
 
 mkConstructor :: Text -> Text -> Text
 mkConstructor parent v =
