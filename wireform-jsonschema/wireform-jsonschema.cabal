@@ -204,6 +204,7 @@ test-suite wireform-jsonschema-test
                     , JsonSchema.Vocabulary.ValidationSpec
                     , JsonSchema.Keywords.ApplicatorSpec
                     , JsonSchema.TestHelpers
+                    , JsonSchema.DeriveSpec
     build-tool-depends: hspec-discover:hspec-discover >= 2.11 && < 3
     build-depends:    base >= 4.17.0.0 && < 5
                     , wireform-jsonschema

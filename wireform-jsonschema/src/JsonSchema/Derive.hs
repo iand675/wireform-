@@ -6,8 +6,16 @@
 -- The deriver is the JSON-Schema sibling of @Wireform.Derive.Aeson@:
 -- it consumes the same 'Wireform.Derive.Modifier.Modifier' vocabulary
 -- (so a single set of @ANN@ pragmas drives Aeson encoding,
--- JsonSchema reflection, and every other wireform format simultaneously)
--- and emits a 'JsonSchema.Class.HasJsonSchema' instance.
+-- JsonSchema reflection, and every other wireform format
+-- simultaneously) and emits a 'JsonSchema.Class.HasJsonSchema'
+-- instance.
+--
+-- Internally the deriver builds the schema as an 'Aeson.Value' at use
+-- time and runs it through @JsonSchema.Parser.parseSchema@. This way
+-- it inherits all of the parser's invariants — @schemaRawKeywords@ is
+-- populated, the dialect / vocabulary is resolved correctly, and the
+-- result drops straight into the runtime validator with no extra
+-- bookkeeping.
 --
 -- == Quick start
 --
@@ -39,15 +47,13 @@ module JsonSchema.Derive
   ( deriveHasJsonSchema
   ) where
 
-import Control.Monad (foldM, unless)
-import Data.List.NonEmpty (NonEmpty (..))
-import qualified Data.List.NonEmpty as NE
-import qualified Data.Map.Strict as Map
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KM
 import Data.Maybe (mapMaybe)
-import qualified Data.Set as Set
 import Data.Proxy (Proxy (..))
-import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Vector as V
 import Language.Haskell.TH
 
 import Wireform.Derive.Backend (backendJsonSchema)
@@ -65,23 +71,9 @@ import Wireform.Derive.TypeInfo
   , reifyTypeInfo
   )
 
-import JsonSchema.Class (HasJsonSchema (..), primitiveSchema, withValidation)
-import JsonSchema.Types
-  ( ArrayItemsValidation (..)
-  , ObjectSchemaData (..)
-  , OneOrMany (..)
-  , Schema (..)
-  , SchemaCore (..)
-  , SchemaObject (..)
-  , SchemaType (..)
-  , SchemaValidation (..)
-  , booleanSchema
-  , defaultObjectSchemaData
-  , defaultSchemaValidation
-  , objectSchema
-  )
-
-import qualified Data.Aeson as Aeson
+import JsonSchema.Class (HasJsonSchema (..))
+import JsonSchema.Parser (parseSchema)
+import JsonSchema.Renderer (renderSchema)
 
 -- ---------------------------------------------------------------------------
 -- Public entry point
@@ -110,6 +102,17 @@ applyTypeArgs = foldl AppT
 
 -- | Build the @Q Exp@ for @'toJsonSchema' \_ = ...@ depending on the
 -- shape of the data declaration.
+--
+-- The expression we splice is
+--
+-- @
+-- case 'parseSchema' \<aeson value built from the type\> of
+--   Right s -> s
+--   Left e  -> error (\"deriveHasJsonSchema: parse failed for T: \" \<\> show e)
+-- @
+--
+-- so the resulting 'Schema' has @schemaRawKeywords@ populated and
+-- the runtime validator finds every keyword we emit.
 toJsonSchemaBody :: TypeInfo -> Q Exp
 toJsonSchemaBody ti = case typeInfoShape ti of
   TypeShapeNewtype con ->
@@ -118,66 +121,86 @@ toJsonSchemaBody ti = case typeInfoShape ti of
         [| toJsonSchema (Proxy :: Proxy $(pure innerTy)) |]
       _ -> fail "deriveHasJsonSchema: newtype must have exactly one field"
 
-  TypeShapeRecord con -> recordSchema con
-
-  TypeShapeEnum cons -> enumSchema cons
-
-  TypeShapeSum cons -> sumSchema cons
+  TypeShapeRecord con -> wrap (recordSchemaJSON con)
+  TypeShapeEnum cons  -> wrap (enumSchemaJSON cons)
+  TypeShapeSum cons   -> wrap (sumSchemaJSON cons)
+  where
+    -- Wrap a @Q Exp@ producing an Aeson.Value in the parseSchema
+    -- pipeline.
+    wrap mkValue = do
+      v <- mkValue
+      [|
+          case parseSchema $(pure v) of
+            Right s  -> s
+            Left err ->
+              error
+                ("JsonSchema.Derive: parseSchema failed for "
+                   <> $(litE (StringL (nameBase (typeInfoName ti))))
+                   <> ": " <> show err)
+       |]
 
 -- ---------------------------------------------------------------------------
 -- Records
 -- ---------------------------------------------------------------------------
 
-recordSchema :: ConInfo -> Q Exp
-recordSchema con = do
+recordSchemaJSON :: ConInfo -> Q Exp
+recordSchemaJSON con = do
   let fields = conInfoFields con
-  fieldExprs <- traverse fieldEntry fields
-  let propsExp = ListE (map fst fieldExprs)
-      requiredExp = ListE (mapMaybe snd fieldExprs)
+  fieldEntries <- traverse fieldEntry fields
+  let propPairsExp = ListE (map fst fieldEntries)
+      requiredExp  = ListE (mapMaybe snd fieldEntries)
   [|
-      let props = Map.fromList $(pure propsExp)
-          req  = $(pure requiredExp)
-          v    = defaultSchemaValidation
-                   { validationProperties = Just props
-                   , validationRequired =
-                       if null req
-                         then Nothing
-                         else Just (Set.fromList req)
-                   }
-       in objectSchema $ defaultObjectSchemaData
-            { objectSchemaDataType = Just (One ObjectType)
-            , objectSchemaDataValidation = v
-            }
+      let propsList = $(pure propPairsExp)
+          requiredFields = $(pure requiredExp)
+          props =
+            Aeson.Object $
+              KM.fromList
+                [ (Key.fromText k, v) | (k, v) <- propsList ]
+          base =
+            [ (Key.fromText (T.pack "type"),       Aeson.String (T.pack "object"))
+            , (Key.fromText (T.pack "properties"), props)
+            ]
+          required =
+            if null requiredFields
+              then []
+              else
+                [ ( Key.fromText (T.pack "required")
+                  , Aeson.Array (V.fromList (map Aeson.String requiredFields))
+                  )
+                ]
+       in Aeson.Object (KM.fromList (base ++ required))
    |]
   where
-    fieldEntry :: FieldInfo -> Q (Exp, Maybe Exp)
     fieldEntry FieldInfo{fieldInfoName = mName, fieldInfoType = ty} = do
       key <- case mName of
         Just n -> resolveFieldKey n
-        Nothing ->
-          fail "deriveHasJsonSchema: positional fields are not supported \
-                \(use a record constructor)"
+        Nothing -> fail "deriveHasJsonSchema: positional fields are not \
+                        \supported (use a record constructor)"
       keyExp <- [| T.pack key |]
-      schemaExp <- [| toJsonSchema (Proxy :: Proxy $(pure ty)) |]
-      let entry = TupE [Just keyExp, Just schemaExp]
+      schemaJsonExp <-
+        [| renderSchema (toJsonSchema (Proxy :: Proxy $(pure (stripMaybe ty)))) |]
+      let entry = TupE [Just keyExp, Just schemaJsonExp]
           required = if isMaybeType ty then Nothing else Just keyExp
       pure (entry, required)
 
--- | Resolve a field selector to its wire key under the JSON-Schema
--- backend. Falls back to the field's selector base name if no
--- 'rename' modifier applies.
+    -- For required-field detection. The schema for a 'Maybe a' is
+    -- still emitted (as the inner schema with @null@ added to the
+    -- type union); the field just isn't listed in 'required'.
+    stripMaybe :: Type -> Type
+    stripMaybe t = case t of
+      AppT (ConT n) inner | n == ''Maybe -> inner
+      _ -> t
+
 resolveFieldKey :: Name -> Q String
 resolveFieldKey n = do
   mi <- reifyModifierInfoFor backendJsonSchema n
   let base = nameBase n
   pure $ case miRename mi of
     Just (RenameSpecLiteral t) -> T.unpack t
-    Just (RenameSpecStyle st) -> T.unpack (applyStyle st (T.pack base))
-    Just (RenameSpecApply _) -> base
-    Nothing -> base
+    Just (RenameSpecStyle st)  -> T.unpack (applyStyle st (T.pack base))
+    Just (RenameSpecApply _)   -> base
+    Nothing                    -> base
 
--- | Whether a Haskell type is a @Maybe a@. Required-field detection
--- treats @Maybe@-typed fields as optional in the JSON Schema.
 isMaybeType :: Type -> Bool
 isMaybeType (AppT (ConT n) _) = n == ''Maybe
 isMaybeType _ = False
@@ -186,93 +209,100 @@ isMaybeType _ = False
 -- Enums
 -- ---------------------------------------------------------------------------
 
-enumSchema :: [ConInfo] -> Q Exp
-enumSchema cons = do
+enumSchemaJSON :: [ConInfo] -> Q Exp
+enumSchemaJSON cons = do
   let names = map (T.pack . nameBase . conInfoName) cons
   namesExp <- [| names |]
   [|
-      let valuesNE = case NE.nonEmpty (map Aeson.String $(pure namesExp)) of
-            Nothing -> error "deriveHasJsonSchema: enum has no constructors"
-            Just ne -> ne
-       in objectSchema $ defaultObjectSchemaData
-            { objectSchemaDataType = Just (One StringType)
-            , objectSchemaDataEnum = Just valuesNE
-            }
+      let xs = $(pure namesExp)
+       in Aeson.Object $ KM.fromList
+            [ (Key.fromText (T.pack "type"), Aeson.String (T.pack "string"))
+            , ( Key.fromText (T.pack "enum")
+              , Aeson.Array (V.fromList (map Aeson.String xs))
+              )
+            ]
    |]
 
 -- ---------------------------------------------------------------------------
--- Tagged sum types
+-- Sum types (tagged-object encoding)
 -- ---------------------------------------------------------------------------
 
-sumSchema :: [ConInfo] -> Q Exp
-sumSchema cons = do
-  branchExps <- traverse sumBranch cons
-  let listExp = ListE branchExps
+sumSchemaJSON :: [ConInfo] -> Q Exp
+sumSchemaJSON cons = do
+  branches <- traverse sumBranch cons
+  let listExp = ListE branches
   [|
-      let branches = $(pure listExp)
-          oneOfNE = case NE.nonEmpty branches of
-            Nothing -> error "deriveHasJsonSchema: sum type has no constructors"
-            Just ne -> ne
-       in objectSchema $ defaultObjectSchemaData
-            { objectSchemaDataOneOf = Just oneOfNE }
+      let bs = $(pure listExp)
+       in Aeson.Object $ KM.fromList
+            [ ( Key.fromText (T.pack "oneOf")
+              , Aeson.Array (V.fromList bs)
+              )
+            ]
    |]
   where
     sumBranch :: ConInfo -> Q Exp
     sumBranch ConInfo{conInfoName = nm, conInfoFields = fs} = do
       let tag = T.pack (nameBase nm)
           hasContents = not (null fs)
-      tagSchemaExp <- [|
-          objectSchema defaultObjectSchemaData
-            { objectSchemaDataType = Just (One StringType)
-            , objectSchemaDataConst = Just (Aeson.String tag)
-            }
-        |]
-      contentsSchemaExp <- contentsSchema fs
-      let mkPropsExp =
-            if hasContents
-              then [| Map.fromList
-                        [ (T.pack "tag",      $(pure tagSchemaExp))
-                        , (T.pack "contents", $(pure contentsSchemaExp))
-                        ] |]
-              else [| Map.fromList
-                        [ (T.pack "tag", $(pure tagSchemaExp)) ] |]
-          mkRequiredExp =
-            if hasContents
-              then [| Set.fromList [T.pack "tag", T.pack "contents"] |]
-              else [| Set.fromList [T.pack "tag"] |]
+      tagExp <- [| tag |]
+      contentsExp <- contentsSchemaJSON fs
       [|
-          let propsMap = $mkPropsExp
-              requiredKeys = $mkRequiredExp
-              v = defaultSchemaValidation
-                    { validationProperties = Just propsMap
-                    , validationRequired = Just requiredKeys
-                    }
-           in objectSchema defaultObjectSchemaData
-                { objectSchemaDataType = Just (One ObjectType)
-                , objectSchemaDataValidation = v
-                }
+          let tagSchema =
+                Aeson.Object $ KM.fromList
+                  [ (Key.fromText (T.pack "type"),  Aeson.String (T.pack "string"))
+                  , (Key.fromText (T.pack "const"), Aeson.String $(pure tagExp))
+                  ]
+              base =
+                [ (Key.fromText (T.pack "type"), Aeson.String (T.pack "object"))
+                ]
+              propsAndRequired
+                | hasContents =
+                    [ ( Key.fromText (T.pack "properties")
+                      , Aeson.Object $ KM.fromList
+                          [ (Key.fromText (T.pack "tag"), tagSchema)
+                          , (Key.fromText (T.pack "contents"), $(pure contentsExp))
+                          ]
+                      )
+                    , ( Key.fromText (T.pack "required")
+                      , Aeson.Array
+                          (V.fromList
+                             [ Aeson.String (T.pack "tag")
+                             , Aeson.String (T.pack "contents")
+                             ])
+                      )
+                    ]
+                | otherwise =
+                    [ ( Key.fromText (T.pack "properties")
+                      , Aeson.Object $ KM.fromList
+                          [(Key.fromText (T.pack "tag"), tagSchema)]
+                      )
+                    , ( Key.fromText (T.pack "required")
+                      , Aeson.Array
+                          (V.fromList [Aeson.String (T.pack "tag")])
+                      )
+                    ]
+           in Aeson.Object (KM.fromList (base ++ propsAndRequired))
        |]
 
-    contentsSchema :: [FieldInfo] -> Q Exp
-    contentsSchema [] = [| booleanSchema True |]
-    contentsSchema [FieldInfo _ t] =
-      [| toJsonSchema (Proxy :: Proxy $(pure t)) |]
-    contentsSchema fs = do
+    contentsSchemaJSON :: [FieldInfo] -> Q Exp
+    contentsSchemaJSON [] = [| Aeson.Bool True |]
+    contentsSchemaJSON [FieldInfo _ ty] =
+      [| renderSchema (toJsonSchema (Proxy :: Proxy $(pure ty))) |]
+    contentsSchemaJSON tys = do
       schemas <- traverse (\(FieldInfo _ t) ->
-                              [| toJsonSchema (Proxy :: Proxy $(pure t)) |]) fs
-      let listSchemas = ListE schemas
+                              [| renderSchema (toJsonSchema (Proxy :: Proxy $(pure t))) |]) tys
+      let listExp = ListE schemas
       [|
-          let arrSchemas = $(pure listSchemas)
-              prefixNE = case NE.nonEmpty arrSchemas of
-                Nothing -> error "deriveHasJsonSchema: empty constructor"
-                Just ne -> ne
-              v = defaultSchemaValidation
-                    { validationPrefixItems = Just prefixNE
-                    , validationMinItems = Just (fromIntegral (length arrSchemas))
-                    , validationMaxItems = Just (fromIntegral (length arrSchemas))
-                    }
-           in objectSchema defaultObjectSchemaData
-                { objectSchemaDataType = Just (One ArrayType)
-                , objectSchemaDataValidation = v
-                }
+          let xs = $(pure listExp)
+              n  = length xs
+           in Aeson.Object $ KM.fromList
+                [ ( Key.fromText (T.pack "type")
+                  , Aeson.String (T.pack "array")
+                  )
+                , ( Key.fromText (T.pack "prefixItems")
+                  , Aeson.Array (V.fromList xs)
+                  )
+                , ( Key.fromText (T.pack "minItems"), Aeson.Number (fromIntegral n))
+                , ( Key.fromText (T.pack "maxItems"), Aeson.Number (fromIntegral n))
+                ]
        |]
