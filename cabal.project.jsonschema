@@ -1,0 +1,13 @@
+-- Minimal project file for working on wireform-jsonschema in
+-- isolation (some sibling packages need C libs not present in
+-- every dev environment).
+packages:
+  wireform-jsonschema/
+  wireform-derive/
+  idn/
+  ecma262-regex/
+
+package *
+  optimization: 1
+
+constraints: text >= 2.1

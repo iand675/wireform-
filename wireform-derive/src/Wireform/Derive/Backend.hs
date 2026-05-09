@@ -32,6 +32,7 @@ module Wireform.Derive.Backend
   , backendBond
   , backendFlatBuffers
   , backendCapnProto
+  , backendJsonSchema
 
     -- * Document / object stores
   , backendBSON
@@ -147,6 +148,11 @@ backendFlatBuffers = Backend "flatbuffers"
 -- | Cap\'n Proto.
 backendCapnProto :: Backend
 backendCapnProto = Backend "capnproto"
+
+-- | JSON Schema (draft-04 through 2020-12). Deriver lives in the
+-- @wireform-jsonschema@ package and produces 'HasJsonSchema' instances.
+backendJsonSchema :: Backend
+backendJsonSchema = Backend "jsonschema"
 
 -- ---------------------------------------------------------------------------
 -- Document / object stores

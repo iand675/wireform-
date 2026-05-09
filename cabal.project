@@ -32,6 +32,9 @@ packages:
   wireform-fory/
   wireform-grpc/
   wireform-kafka/
+  wireform-jsonschema/
+  idn/
+  ecma262-regex/
 
 package *
   optimization: 1

@@ -1,0 +1,162 @@
+cabal-version:      3.0
+name:               ecma262-regex
+version:            0.1.0.0
+synopsis:           ECMAScript 262 (JavaScript) regular expressions for Haskell
+description:
+  This package provides full ECMAScript 262 (JavaScript-compatible) regular
+  expression support for Haskell. It uses FFI bindings to QuickJS's libregexp,
+  which is fully compliant with the ECMAScript 2023 specification.
+  .
+  Features:
+  .
+  * Full ECMAScript 2023 regex specification compliance
+  * All regex flags: global, ignoreCase, multiline, dotAll, unicode, sticky, indices, unicodeSets
+  * Named capture groups
+  * Lookahead and lookbehind assertions
+  * Unicode property escapes
+  * Backreferences
+  * High-performance native implementation
+  .
+  The underlying C library (libregexp from QuickJS) is licensed under the MIT
+  license and is included in this package.
+
+homepage:           https://github.com/iand675/fractal
+bug-reports:        https://github.com/iand675/fractal/issues
+license:            MIT
+license-file:       LICENSE
+author:             Ian Duncan
+maintainer:         ian@iankduncan.com
+copyright:          2025 Ian Duncan
+category:           Text, Regex
+build-type:         Simple
+extra-source-files:
+  README.md
+  CHANGELOG.md
+  cbits/*.h
+  cbits/*.c
+
+tested-with:
+  GHC == 9.4.8
+  GHC == 9.6.3
+  GHC == 9.8.1
+
+source-repository head
+  type:     git
+  location: https://github.com/iand675/fractal
+  subdir:   ecma262-regex
+
+common warnings
+  ghc-options:
+    -Wall
+    -Wcompat
+    -Widentities
+    -Wincomplete-uni-patterns
+    -Wincomplete-record-updates
+    -Wredundant-constraints
+    -Wnoncanonical-monad-instances
+    -Wmissing-export-lists
+    -Wpartial-fields
+    -Wmissing-deriving-strategies
+    -Wunused-packages
+    -fhide-source-paths
+
+common extensions
+  default-language: GHC2021
+  default-extensions:
+    OverloadedStrings
+    RecordWildCards
+    DeriveGeneric
+    DerivingStrategies
+    LambdaCase
+    BlockArguments
+
+library
+  import:           warnings, extensions
+  hs-source-dirs:   src
+  exposed-modules:
+    Text.Regex.ECMA262
+    Text.Regex.ECMA262.Internal
+  --  Text.Regex.ECMA262.Base  -- Temporarily disabled while fixing regex-base integration
+
+  build-depends:
+    , base       >= 4.17.0.0 && < 5
+    , bytestring >= 0.11 && < 0.13
+    , text       >= 2.0 && < 2.2
+    , regex-base >= 0.94 && < 0.95
+    , array      >= 0.5 && < 0.6
+
+  -- C sources from QuickJS libregexp
+  c-sources:
+    cbits/ecma262_regex_wrapper.c
+    cbits/utf8_utf16.c
+    cbits/libregexp.c
+    cbits/cutils.c
+    cbits/libunicode.c
+
+  include-dirs:     cbits
+  includes:
+    libregexp.h
+    cutils.h
+    libunicode.h
+    utf8_utf16.h
+
+  cc-options:
+    -std=c11
+    -O2
+    -DCONFIG_VERSION=\"2024-01-13\"
+    -DCONFIG_ALL_UNICODE
+    -D_GNU_SOURCE
+
+  -- Disable some warnings from the C code
+  if os(darwin)
+    cc-options:
+      -Wno-unused-parameter
+      -Wno-sign-compare
+      -Wno-implicit-fallthrough
+
+  if os(linux)
+    cc-options:
+      -Wno-unused-parameter
+      -Wno-sign-compare
+
+test-suite ecma262-regex-test
+  import:           warnings, extensions
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   test
+  main-is:          Spec.hs
+  other-modules:
+    Text.Regex.ECMA262Spec
+  --  Text.Regex.ECMA262.BaseSpec  -- Temporarily disabled while fixing regex-base integration
+
+  build-depends:
+    , base
+    , ecma262-regex
+    , bytestring
+    , text
+    , regex-base
+    , hspec       >= 2.10 && < 3
+    , QuickCheck  >= 2.14 && < 3
+
+  build-tool-depends:
+    hspec-discover:hspec-discover >= 2.10 && < 3
+
+  ghc-options:
+    -threaded
+    -rtsopts
+    -with-rtsopts=-N
+
+-- Example programs
+executable ecma262-regex-example
+  import:           warnings, extensions
+  hs-source-dirs:   examples
+  main-is:          Main.hs
+  build-depends:
+    , base
+    , ecma262-regex
+    , bytestring
+    , text
+
+  ghc-options:
+    -threaded
+    -rtsopts
+    -with-rtsopts=-N

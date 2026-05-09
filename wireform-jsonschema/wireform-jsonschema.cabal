@@ -1,0 +1,225 @@
+cabal-version:      3.0
+name:               wireform-jsonschema
+version:            0.1.0.0
+synopsis:           JSON Schema (draft-04 through 2020-12) for wireform
+description:        A type-safe, comprehensive library for JSON Schema (draft-04 through 2020-12).
+                    Features include:
+                    .
+                    * High-performance validation with detailed error reporting
+                    * Extensible vocabulary system for custom keywords
+                    * Multi-version schema support with automatic version detection
+                    * Code generation: parse a JSON Schema and emit Haskell types
+                    * Annotation-driven derivation via @wireform-derive@
+                    .
+                    Ported from @fractal-openapi@.
+license:            BSD-3-Clause
+author:             Ian Duncan
+maintainer:         ian@iankduncan.com
+category:           Data, Web
+build-type:         Simple
+extra-source-files: CHANGELOG.md
+data-files:         data/metaschemas/2019-09/*.json
+                  , data/metaschemas/2020-12/*.json
+                  , data/metaschemas/draft-04/*.json
+                  , data/metaschemas/draft-06/*.json
+                  , data/metaschemas/draft-07/*.json
+
+source-repository head
+  type:     git
+  location: https://github.com/iand675/wireform-
+  subdir:   wireform-jsonschema
+
+common warnings
+    ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates
+                 -Wincomplete-uni-patterns -Wmissing-home-modules
+                 -Wpartial-fields -Wredundant-constraints
+
+common extensions
+    default-extensions: OverloadedStrings
+                      , OverloadedRecordDot
+                      , RecordWildCards
+                      , DeriveGeneric
+                      , DerivingStrategies
+                      , DerivingVia
+                      , LambdaCase
+                      , GeneralizedNewtypeDeriving
+                      , RankNTypes
+                      , ScopedTypeVariables
+                      , BlockArguments
+                      , TypeApplications
+                      , GADTs
+                      , StandaloneDeriving
+                      , DeriveAnyClass
+
+library
+    import:           warnings, extensions
+    exposed-modules:  JsonPointer
+                    , JsonSchema
+                    , JsonSchema.Types
+                    , JsonSchema.Parser
+                    , JsonSchema.Parser.Extended
+                    , JsonSchema.Parser.Internal
+                    , JsonSchema.Renderer
+                    , JsonSchema.Validator
+                    , JsonSchema.Validator.Annotations
+                    , JsonSchema.Metadata
+                    , JsonSchema.Dialect
+                    , JsonSchema.Vocabulary
+                    , JsonSchema.ReferenceLoader
+                    , JsonSchema.EmbeddedMetaschemas
+                    , JsonSchema.EmbeddedMetaschemas.Raw
+                    , JsonSchema.MetaschemaValidation
+                    , JsonSchema.Regex
+                    -- Basic Keywords
+                    , JsonSchema.Keywords.Type
+                    , JsonSchema.Keywords.Enum
+                    , JsonSchema.Keywords.Const
+                    -- String Keywords
+                    , JsonSchema.Keywords.MinLength
+                    , JsonSchema.Keywords.MaxLength
+                    , JsonSchema.Keywords.Pattern
+                    , JsonSchema.Keywords.ContentMediaType
+                    , JsonSchema.Keywords.ContentEncoding
+                    -- Numeric Keywords
+                    , JsonSchema.Keywords.Minimum
+                    , JsonSchema.Keywords.Maximum
+                    , JsonSchema.Keywords.MultipleOf
+                    , JsonSchema.Keywords.ExclusiveMinimum
+                    , JsonSchema.Keywords.ExclusiveMaximum
+                    -- Array Keywords
+                    , JsonSchema.Keywords.MinItems
+                    , JsonSchema.Keywords.MaxItems
+                    , JsonSchema.Keywords.UniqueItems
+                    , JsonSchema.Keywords.Items
+                    , JsonSchema.Keywords.PrefixItems
+                    , JsonSchema.Keywords.Contains
+                    -- Object Keywords
+                    , JsonSchema.Keywords.Required
+                    , JsonSchema.Keywords.MinProperties
+                    , JsonSchema.Keywords.MaxProperties
+                    , JsonSchema.Keywords.Properties
+                    , JsonSchema.Keywords.PatternProperties
+                    , JsonSchema.Keywords.AdditionalProperties
+                    , JsonSchema.Keywords.Dependencies
+                    , JsonSchema.Keywords.PropertyNames
+                    , JsonSchema.Keywords.DependentRequired
+                    , JsonSchema.Keywords.DependentSchemas
+                    , JsonSchema.Keywords.UnevaluatedProperties
+                    , JsonSchema.Keywords.UnevaluatedItems
+                    , JsonSchema.Keywords.FormatKeyword
+                    -- Legacy/Compatibility Keywords
+                    , JsonSchema.Keywords.Numeric
+                    , JsonSchema.Keywords.String
+                    , JsonSchema.Keywords.Format
+                    -- Standard Registry
+                    , JsonSchema.Keywords.Standard
+                    , JsonSchema.Keywords.Common
+                    , JsonSchema.Keywords.Navigation
+                    , JsonSchema.Keywords.Ref
+                    -- Draft-04 Specific
+                    , JsonSchema.Keywords.Draft04.Minimum
+                    , JsonSchema.Keywords.Draft04.Maximum
+                    , JsonSchema.Keywords.Draft04.ExclusiveMinimum
+                    -- Applicator Keywords (composition and conditional)
+                    , JsonSchema.Keywords.AllOf
+                    , JsonSchema.Keywords.AnyOf
+                    , JsonSchema.Keywords.OneOf
+                    , JsonSchema.Keywords.Not
+                    , JsonSchema.Keywords.Conditional
+                    -- Pluggable Architecture Modules
+                    , JsonSchema.Keyword
+                    , JsonSchema.Keyword.Types
+                    , JsonSchema.Keyword.Compile
+                    , JsonSchema.Keyword.Validate
+                    , JsonSchema.Keyword.Monadic
+                    , JsonSchema.Vocabulary.Types
+                    , JsonSchema.Vocabulary.Registry
+                    , JsonSchema.Vocabulary.Validation
+                    , JsonSchema.Validator.Result
+                    , JsonSchema.Validator.Extended
+                    , JsonSchema.Codegen.Types
+                    -- wireform integration
+                    , JsonSchema.Class
+                    , JsonSchema.CodeGen
+                    , JsonSchema.Derive
+    build-depends:    base >= 4.17.0.0 && < 5
+                    , aeson >= 2.0 && < 3
+                    , text >= 2.0 && < 3
+                    , bytestring >= 0.11 && < 1
+                    , base64-bytestring >= 1.2 && < 2
+                    , containers >= 0.6 && < 1
+                    , unordered-containers >= 0.2 && < 1
+                    , vector >= 0.13 && < 1
+                    , scientific >= 0.3 && < 1
+                    , hashable >= 1.4 && < 2
+                    , yaml >= 0.11 && < 1
+                    , uri-bytestring >= 0.3 && < 1
+                    , uri-templater >= 1.0.0 && < 2
+                    , ecma262-regex
+                    , idn
+                    , wireform-derive
+
+                    , transformers >= 0.5 && < 1
+                    , template-haskell >= 2.19 && < 3
+                    , th-lift >= 0.8 && < 1
+                    , file-embed >= 0.0.15 && < 1
+                    , filepath >= 1.4 && < 2
+                    , mtl >= 2.2 && < 3
+                    , http-client >= 0.7 && < 1
+                    , http-client-tls >= 0.3 && < 1
+                    , network-uri >= 2.6 && < 3
+                    , uuid >= 1.3 && < 2
+                    , time >= 1.12 && < 2
+                    , timerep >= 2.1 && < 3
+                    , email-validate >= 2.3 && < 3
+                    , iproute >= 1.7 && < 2
+    hs-source-dirs:   src
+    default-language: GHC2021
+
+test-suite wireform-jsonschema-test
+    import:           warnings, extensions
+    default-language: GHC2021
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    other-modules:    JsonSchema.ParserSpec
+                    , JsonSchema.ValidatorSpec
+                    , JsonSchema.VocabularySpec
+                    , JsonSchema.DialectSpec
+                    , JsonSchema.DialectFormatSpec
+                    , JsonSchema.ComplianceSpec
+                    , JsonSchema.IntegrationSpec
+                    , JsonSchema.JsonPointerSpec
+                    , JsonSchema.EmbeddedMetaschemasSpec
+                    , JsonSchema.UnknownKeywordSpec
+                    , JsonSchema.Keyword.KeywordSpec
+                    , JsonSchema.Keyword.MonadicSpec
+                    , JsonSchema.Keyword.NavigationSpec
+                    , JsonSchema.Parser.ExtendedSpec
+                    , JsonSchema.Keywords.StandardSpec
+                    , JsonSchema.ParserDialectSpec
+                    , JsonSchema.Validator.ExtendedSpec
+                    , JsonSchema.Validator.AnnotationSpec
+                    , JsonSchema.Vocabulary.RegistrySpec
+                    , JsonSchema.Vocabulary.ValidationSpec
+                    , JsonSchema.Keywords.ApplicatorSpec
+                    , JsonSchema.TestHelpers
+    build-tool-depends: hspec-discover:hspec-discover >= 2.11 && < 3
+    build-depends:    base >= 4.17.0.0 && < 5
+                    , wireform-jsonschema
+                    , hspec >= 2.11 && < 3
+                    , hedgehog >= 1.4 && < 2
+                    , hspec-hedgehog >= 0.0.1 && < 1
+                    , QuickCheck >= 2.14 && < 3
+                    , aeson >= 2.0 && < 3
+                    , text >= 2.0 && < 3
+                    , bytestring >= 0.11 && < 1
+                    , base64-bytestring >= 1.2 && < 2
+                    , containers >= 0.6 && < 1
+                    , transformers >= 0.6 && < 1
+                    , mtl >= 2.2 && < 3
+                    , yaml >= 0.11 && < 1
+                    , filepath >= 1.4 && < 2
+                    , directory >= 1.3 && < 2
+                    , scientific >= 0.3 && < 1
+                    , vector >= 0.13 && < 1
