@@ -44,6 +44,7 @@ import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
+import qualified Data.Set as Set
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -135,12 +136,14 @@ recordSchema con = do
       requiredExp = ListE (mapMaybe snd fieldExprs)
   [|
       let props = Map.fromList $(pure propsExp)
-          req = $(pure requiredExp)
-          v = defaultSchemaValidation
-                { validationProperties = Just props
-                , validationRequired =
-                    if null req then Nothing else Just req
-                }
+          req  = $(pure requiredExp)
+          v    = defaultSchemaValidation
+                   { validationProperties = Just props
+                   , validationRequired =
+                       if null req
+                         then Nothing
+                         else Just (Set.fromList req)
+                   }
        in objectSchema $ defaultObjectSchemaData
             { objectSchemaDataType = Just (One ObjectType)
             , objectSchemaDataValidation = v
@@ -154,7 +157,6 @@ recordSchema con = do
         Nothing ->
           fail "deriveHasJsonSchema: positional fields are not supported \
                 \(use a record constructor)"
-      let keyT = T.pack key
       keyExp <- [| T.pack key |]
       schemaExp <- [| toJsonSchema (Proxy :: Proxy $(pure ty)) |]
       let entry = TupE [Just keyExp, Just schemaExp]
@@ -236,8 +238,8 @@ sumSchema cons = do
                         [ (T.pack "tag", $(pure tagSchemaExp)) ] |]
           mkRequiredExp =
             if hasContents
-              then [| [T.pack "tag", T.pack "contents"] |]
-              else [| [T.pack "tag"] |]
+              then [| Set.fromList [T.pack "tag", T.pack "contents"] |]
+              else [| Set.fromList [T.pack "tag"] |]
       [|
           let propsMap = $mkPropsExp
               requiredKeys = $mkRequiredExp

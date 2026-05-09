@@ -10,4 +10,6 @@ packages:
 package *
   optimization: 1
 
+tests: True
+
 constraints: text >= 2.1

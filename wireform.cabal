@@ -128,6 +128,7 @@ library
     Wireform.NDJSON
     Wireform.Fory
     Wireform.Kafka
+    Wireform.JsonSchema
   other-modules:
     Paths_wireform
   autogen-modules: Paths_wireform
@@ -160,6 +161,7 @@ library
     , wireform-ndjson
     , wireform-fory
     , wireform-kafka
+    , wireform-jsonschema
     , bytestring
     , text
     , vector

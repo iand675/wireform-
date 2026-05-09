@@ -89,10 +89,26 @@ localhostLoader version uri
   | otherwise =
       metaschemaLoader uri  -- Check for metaschemas
 
--- | Load from test-suite/json-schema-test-suite/remotes/ directory
+-- | The remote-schema search roots derived from the
+-- @JSON_SCHEMA_TEST_SUITE@ env var.
+envRemoteRoots :: IO [FilePath]
+envRemoteRoots = do
+  envOverride <- lookupEnv "JSON_SCHEMA_TEST_SUITE"
+  pure $ case envOverride of
+    Nothing -> []
+    Just p ->
+      [ p </> "remotes"
+      , p </> "json-schema-test-suite/remotes"
+      ]
+
+-- | Load from the JSON Schema official test-suite\'s @remotes\/@
+-- directory. Resolves either relative to the current working
+-- directory (so the existing @cabal test@ invocation in the package
+-- root keeps working) or, if @JSON_SCHEMA_TEST_SUITE@ is set, against
+-- that checkout\'s @remotes\/@ subtree.
 loadFromRemotes :: JsonSchemaVersion -> Text -> IO (Either Text Schema)
 loadFromRemotes version uri = do
-  -- Strip fragment from URI (e.g., "draft7/name.json#/definitions/orNull" -> "draft7/name.json")
+  envRemotes <- envRemoteRoots
   let (path, _) = splitUriFragment uri
   let versionDir = case version of
         Draft04 -> "draft4"
@@ -108,49 +124,26 @@ loadFromRemotes version uri = do
       -- Extract filename from path (handle subdirectories)
       filename = T.pack $ takeFileName (T.unpack path)
       
-      -- Try both with and without fractal-openapi/ prefix to support running from different directories
-      -- For draft4/06/07, also try v1/ directory as those use the v1 test fixtures
-      commonPath1 = T.pack $ "test-suite/json-schema-test-suite/remotes/" <> T.unpack path
-      commonPath2 = T.pack $ "fractal-openapi/test-suite/json-schema-test-suite/remotes/" <> T.unpack path
-      versionPath1 = T.pack $ "test-suite/json-schema-test-suite/remotes/" <> versionDir <> "/" <> T.unpack path
-      versionPath2 = T.pack $ "fractal-openapi/test-suite/json-schema-test-suite/remotes/" <> versionDir <> "/" <> T.unpack path
-      v1Path1 = T.pack $ "test-suite/json-schema-test-suite/remotes/v1/" <> T.unpack path
-      v1Path2 = T.pack $ "fractal-openapi/test-suite/json-schema-test-suite/remotes/v1/" <> T.unpack path
+      -- Search the local checkout (relative to cwd) and any directory
+      -- the @JSON_SCHEMA_TEST_SUITE@ env var points at.
+      remoteRoots :: [String]
+      remoteRoots =
+        envRemotes
+          ++ [ "test-suite/json-schema-test-suite/remotes"
+             , "wireform-jsonschema/test-suite/json-schema-test-suite/remotes"
+             ]
+      mkPath suffix = T.pack (suffix <> "/" <> T.unpack path)
+      mkInDir root suffix =
+        T.pack (root <> "/" <> suffix <> T.unpack path)
+      commonPaths    = map (\r -> mkPath r) remoteRoots
+      versionPaths   = map (\r -> mkInDir r (versionDir <> "/")) remoteRoots
+      v1Paths        = map (\r -> mkInDir r "v1/") remoteRoots
       
-      -- Also try paths with subdirectories preserved (e.g., "nested/foo-ref-string.json")
-      -- by trying them in version directories
-      subdirVersionPath1 = if T.any (== '/') path && not pathIncludesVersion
-                           then Just $ T.pack $ "test-suite/json-schema-test-suite/remotes/" <> versionDir <> "/" <> T.unpack path
-                           else Nothing
-      subdirVersionPath2 = if T.any (== '/') path && not pathIncludesVersion
-                           then Just $ T.pack $ "fractal-openapi/test-suite/json-schema-test-suite/remotes/" <> versionDir <> "/" <> T.unpack path
-                           else Nothing
-      subdirV1Path1 = if T.any (== '/') path && not pathIncludesVersion && (version == Draft04 || version == Draft06 || version == Draft07)
-                      then Just $ T.pack $ "test-suite/json-schema-test-suite/remotes/v1/" <> T.unpack path
-                      else Nothing
-      subdirV1Path2 = if T.any (== '/') path && not pathIncludesVersion && (version == Draft04 || version == Draft06 || version == Draft07)
-                      then Just $ T.pack $ "fractal-openapi/test-suite/json-schema-test-suite/remotes/v1/" <> T.unpack path
-                      else Nothing
-
-  -- Try paths with fallback: version-specific first, then v1 (for older drafts), then common
-  -- Include subdirectory paths if applicable
-  -- If path includes version directory, try it as-is first, then fallback to version-specific
-  let pathsToTry = if pathIncludesVersion
-                   then let basePaths = [commonPath1, commonPath2]
-                            -- Also try in version-specific directories (in case path is wrong)
-                            fallbackPaths = case version of
-                                Draft04 -> [versionPath1, versionPath2, v1Path1, v1Path2]
-                                Draft06 -> [versionPath1, versionPath2, v1Path1, v1Path2]
-                                Draft07 -> [versionPath1, versionPath2, v1Path1, v1Path2]
-                                _ -> [versionPath1, versionPath2]
-                        in basePaths ++ fallbackPaths
-                   else let basePaths = case version of
-                                Draft04 -> [versionPath1, versionPath2, v1Path1, v1Path2, commonPath1, commonPath2]
-                                Draft06 -> [versionPath1, versionPath2, v1Path1, v1Path2, commonPath1, commonPath2]
-                                Draft07 -> [versionPath1, versionPath2, v1Path1, v1Path2, commonPath1, commonPath2]
-                                _ -> [versionPath1, versionPath2, commonPath1, commonPath2]
-                            subdirPaths = catMaybes [subdirVersionPath1, subdirVersionPath2, subdirV1Path1, subdirV1Path2]
-                        in basePaths ++ subdirPaths
+      hasV1Fallback = version == Draft04 || version == Draft06 || version == Draft07
+      pathsToTry =
+        if pathIncludesVersion
+          then commonPaths ++ versionPaths ++ (if hasV1Fallback then v1Paths else [])
+          else versionPaths ++ (if hasV1Fallback then v1Paths else []) ++ commonPaths
 
   -- First try direct paths
   result <- tryPaths path pathsToTry pathsToTry
@@ -193,8 +186,11 @@ loadFromRemotes version uri = do
     -- Search for file in subdirectories with path preserved
     searchSubdirectoriesWithPath :: JsonSchemaVersion -> String -> Text -> IO (Either Text Schema)
     searchSubdirectoriesWithPath v vDir fullPath = do
-      let baseDirs = ["test-suite/json-schema-test-suite/remotes"
-                     , "fractal-openapi/test-suite/json-schema-test-suite/remotes"]
+      envRoots <- envRemoteRoots
+      let baseDirs = envRoots ++
+            [ "test-suite/json-schema-test-suite/remotes"
+            , "wireform-jsonschema/test-suite/json-schema-test-suite/remotes"
+            ]
           versionDirs = case v of
             Draft04 -> [vDir, "v1"]
             Draft06 -> [vDir, "v1"]
@@ -231,8 +227,11 @@ loadFromRemotes version uri = do
     -- Search for file in subdirectories
     searchSubdirectories :: JsonSchemaVersion -> String -> Text -> IO (Either Text Schema)
     searchSubdirectories v vDir fname = do
-      let baseDirs = ["test-suite/json-schema-test-suite/remotes"
-                     , "fractal-openapi/test-suite/json-schema-test-suite/remotes"]
+      envRoots <- envRemoteRoots
+      let baseDirs = envRoots ++
+            [ "test-suite/json-schema-test-suite/remotes"
+            , "wireform-jsonschema/test-suite/json-schema-test-suite/remotes"
+            ]
           versionDirs = case v of
             Draft04 -> [vDir, "v1"]
             Draft06 -> [vDir, "v1"]
@@ -499,15 +498,19 @@ runTestFile version filePath = describe fileLabel $ do
 -- Returns 'Nothing' if no test suite is available so the surrounding
 -- spec can skip silently — matching @wireform-toml@'s
 -- @TOML_TEST_SUITE@ / @wireform-yaml@'s @YAML_TEST_SUITE@ contracts.
+--
+-- A candidate path is only accepted if it contains the version
+-- subdirectories the upstream suite ships (so an env var pointing at
+-- the repo root and one pointing at @tests/@ both resolve correctly).
 findTestSuiteRoot :: IO (Maybe FilePath)
 findTestSuiteRoot = do
   envOverride <- lookupEnv "JSON_SCHEMA_TEST_SUITE"
   let candidates = case envOverride of
         Nothing -> defaultPaths
         Just p ->
-          [ p
-          , p </> "tests"
+          [ p </> "tests"
           , p </> "json-schema-test-suite/tests"
+          , p
           ] ++ defaultPaths
   findFirst candidates
   where
@@ -517,8 +520,19 @@ findTestSuiteRoot = do
       ]
     findFirst [] = pure Nothing
     findFirst (p:ps) = do
+      ok <- isUsableSuiteRoot p
+      if ok then pure (Just p) else findFirst ps
+
+    -- A directory counts as a usable suite root only if it contains a
+    -- versioned subdirectory the spec runner actually walks.
+    isUsableSuiteRoot p = do
       exists <- doesDirectoryExist p
-      if exists then pure (Just p) else findFirst ps
+      if not exists
+        then pure False
+        else
+          or <$>
+            traverse (\v -> doesDirectoryExist (p </> v))
+              ["draft4","draft6","draft7","draft2019-09","draft2020-12"]
 
 -- | Test files to exclude from the suite
 -- These are tests that are intentionally skipped due to language-specific behavior
