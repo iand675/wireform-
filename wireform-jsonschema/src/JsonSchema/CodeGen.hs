@@ -31,7 +31,7 @@ module JsonSchema.CodeGen
   ) where
 
 import qualified Data.Aeson as Aeson
-import Data.Char (isAlphaNum, isUpper, toLower, toUpper)
+import Data.Char (isAlphaNum, toLower, toUpper)
 import qualified Data.List.NonEmpty as NE
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -167,7 +167,9 @@ collectObject name o
 
   | Just (One ObjectType) <- objectSchemaDataType o
   , Just props <- validationProperties (objectSchemaDataValidation o)
-  = emitRecord name o props
+  = let req = maybe Set.empty id
+                (validationRequired (objectSchemaDataValidation o))
+     in emitRecord name o req props
 
   | Just oneOf <- objectSchemaDataOneOf o
   , all hasObjectShape (NE.toList oneOf)
@@ -207,8 +209,11 @@ emitEnum name values = do
       emit decl
       pure name
 
-emitRecord :: Text -> ObjectSchemaData -> Map Text Schema -> Codegen Text
-emitRecord name _ props = do
+-- | Emit a record declaration. Property keys not present in the
+-- @required@ set are wrapped in 'Maybe' so the Haskell shape reflects
+-- the schema's optionality.
+emitRecord :: Text -> ObjectSchemaData -> Set Text -> Map Text Schema -> Codegen Text
+emitRecord name _ required props = do
   seen <- isSeen name
   if seen
     then pure name
@@ -217,7 +222,11 @@ emitRecord name _ props = do
       fields <- traverse (\(k, sch) -> do
                             let childName = name <> sanitizeTypeName k
                             tyText <- collectSchema childName sch
-                            pure (k, tyText))
+                            let wrapped =
+                                  if Set.member k required
+                                    then tyText
+                                    else "Maybe " <> tyText
+                            pure (k, wrapped))
                          (Map.toList props)
       let prefix = camelDown name
           fieldLines = T.intercalate "\n  , "

@@ -177,19 +177,14 @@ recordSchemaJSON con = do
         Nothing -> fail "deriveHasJsonSchema: positional fields are not \
                         \supported (use a record constructor)"
       keyExp <- [| T.pack key |]
+      -- The inner instance for @Maybe a@ widens the @type@ keyword to
+      -- @[t, \"null\"]@; pass the field type through unchanged so we
+      -- pick that up.
       schemaJsonExp <-
-        [| renderSchema (toJsonSchema (Proxy :: Proxy $(pure (stripMaybe ty)))) |]
+        [| renderSchema (toJsonSchema (Proxy :: Proxy $(pure ty))) |]
       let entry = TupE [Just keyExp, Just schemaJsonExp]
           required = if isMaybeType ty then Nothing else Just keyExp
       pure (entry, required)
-
-    -- For required-field detection. The schema for a 'Maybe a' is
-    -- still emitted (as the inner schema with @null@ added to the
-    -- type union); the field just isn't listed in 'required'.
-    stripMaybe :: Type -> Type
-    stripMaybe t = case t of
-      AppT (ConT n) inner | n == ''Maybe -> inner
-      _ -> t
 
 resolveFieldKey :: Name -> Q String
 resolveFieldKey n = do
