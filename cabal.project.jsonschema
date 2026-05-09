@@ -4,7 +4,6 @@
 packages:
   wireform-jsonschema/
   wireform-derive/
-  idn/
   ecma262-regex/
 
 package *

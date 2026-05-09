@@ -156,7 +156,7 @@ library
                     , uri-bytestring >= 0.3 && < 1
                     , uri-templater >= 1.0.0 && < 2
                     , ecma262-regex
-                    , idn
+                    , idn >= 0.1.2 && < 0.2
                     , wireform-derive
 
                     , transformers >= 0.5 && < 1
