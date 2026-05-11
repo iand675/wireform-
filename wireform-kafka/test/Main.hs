@@ -98,6 +98,7 @@ import qualified Network.AuthSpec
 import qualified Network.ConnectionRetrySpec
 import qualified Network.TlsHandshakeSpec
 import qualified Network.TransportSpec
+import qualified Network.IoUringSpec
 import qualified Network.SaslReauthSpec
 
 main :: IO ()
@@ -209,6 +210,7 @@ networkTests = testGroup "Network"
   , Network.AuthSpec.authSpec
   , Network.TlsHandshakeSpec.tests
   , Network.TransportSpec.tests
+  , Network.IoUringSpec.tests
   , Network.SaslReauthSpec.tests
   , Network.OAuthOidcSpec.tests
   , Network.BootstrapSpec.tests

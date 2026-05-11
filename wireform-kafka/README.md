@@ -218,6 +218,44 @@ myConnectionConfig = defaultConnectionConfig
   }
 ```
 
+### Linux io_uring backend (optional, opt-in)
+
+When built with `-fio-uring`, the client exposes a
+`Kafka.Network.IoUring` module that replaces the standard
+`recv` / `send` syscall pair with a single `io_uring_enter`
+per round-trip on Linux 5.1+. The shim uses raw syscalls
+(no `liburing` dependency) and mmaps the SQ/CQ rings
+directly; on non-Linux hosts a stub is compiled instead so
+the FFI symbols stay linkable.
+
+```haskell
+import qualified Kafka.Network.IoUring as IoUring
+import qualified Kafka.Network.Transport as Transport
+import qualified Network.Socket as Socket
+
+-- Runtime probe: hardened kernels and containers with
+-- 'kernel.io_uring_disabled=2' will return False.
+ok <- IoUring.isIoUringSupported
+if ok
+  then IoUring.withIoUringRing 8 $ \ring -> do
+    -- 'sock' is a connected TCP / UDS socket — e.g., the
+    -- one a TLS-offload sidecar listener handed us.
+    transport <- IoUring.mkIoUringTransport ring sock "iour:broker-1"
+    -- 'transport' is a drop-in 'Transport' implementation;
+    -- read/write through it goes via io_uring.
+    pure transport
+  else
+    -- Kernel says no — fall back to a regular transport.
+    ...
+```
+
+Build and test with:
+
+```bash
+cabal build -fio-uring wireform-kafka
+cabal test  -fio-uring wireform-kafka:wireform-kafka-test
+```
+
 ## Testing
 
 The library includes comprehensive tests using Hedgehog for property-based testing:

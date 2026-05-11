@@ -48,6 +48,17 @@ flag rocksdb
     default: False
     manual: True
 
+flag io-uring
+    description:
+        Enable the Linux io_uring backend exposed through
+        Kafka.Network.IoUring. Builds against raw io_uring
+        syscalls (no liburing dependency) on Linux and falls
+        back to a stub on other platforms. Off by default so
+        non-Linux builds don't pull in the C shim's kernel
+        headers.
+    default: False
+    manual: True
+
 source-repository head
     type: git
     location: https://github.com/iand675/wireform-
@@ -91,6 +102,22 @@ library
     -- vDSO-style page read; no syscall).
     if !os(windows)
       c-sources: cbits/wireform_time.c
+    -- io_uring backend (Linux 5.1+). The flag picks between a
+    -- real implementation that issues raw io_uring syscalls and
+    -- a stub on non-Linux hosts. The Haskell wrapper exposes
+    -- 'Kafka.Network.IoUring.isIoUringSupported' so callers can
+    -- runtime-detect whether the running kernel will accept
+    -- 'io_uring_setup' even when the flag /is/ on (hardened
+    -- containers may have it disabled).
+    if flag(io-uring)
+        if os(linux)
+            c-sources:        cbits/wireform_iouring.c
+            install-includes: wireform_iouring.h
+        else
+            c-sources:        cbits/wireform_iouring_stub.c
+            install-includes: wireform_iouring.h
+        cpp-options:          -DWIREFORM_HAS_IOURING=1
+        exposed-modules:      Kafka.Network.IoUring
     -- -O3 lets the compiler inline simde_mm_crc32_u* into the CRC32C
     -- inner loop. -march=native picks up SSE4.2 / ARMv8.1 CRC32 on the
     -- build host so SIMDe emits the hardware instruction; for portable
@@ -725,6 +752,7 @@ test-suite wireform-kafka-test
         Network.ConnectionRetrySpec
         Network.TlsHandshakeSpec
         Network.TransportSpec
+        Network.IoUringSpec
         Network.SaslReauthSpec
         Network.ReauthDriverSpec
         Protocol.ApiVersionsSpec
@@ -777,6 +805,10 @@ test-suite wireform-kafka-test
         unordered-containers,
         uuid,
         vector
+    -- Mirror the library's io-uring flag so the test sees the
+    -- WIREFORM_HAS_IOURING macro when the FFI side is built in.
+    if flag(io-uring)
+        cpp-options: -DWIREFORM_HAS_IOURING=1
 
 test-suite wireform-kafka-conformance
     import: defaults

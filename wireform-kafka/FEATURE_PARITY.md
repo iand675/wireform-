@@ -143,6 +143,16 @@ with the implementation.
   - Socket buffer / Nagle / keepalive / max-idle / max-fails knobs.
   - Best-effort `isConnected` liveness probe (alive-idle case fixed in
     this branch).
+  - **io_uring transport** (`Kafka.Network.IoUring`, opt-in
+    via the `io-uring` cabal flag): replaces the `recv` /
+    `send` syscall pair with a single `io_uring_enter` per
+    round-trip on Linux 5.1+. Self-contained — no `liburing`
+    build dep; raw syscalls + mmap'd SQ/CQ rings. Runtime
+    probe (`isIoUringSupported`) detects kernel availability;
+    a stub C file is compiled on non-Linux hosts so the FFI
+    symbols stay linkable. Currently surfaces as a
+    `Kafka.Network.Transport.Transport`; pipeline integration
+    is staged.
 - API version negotiation:
   - `ApiVersionsRequest` on connect, `ApiVersionCache` per broker,
     `selectVersion` picks the highest version both sides understand.
