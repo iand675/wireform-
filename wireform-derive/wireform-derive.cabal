@@ -1,6 +1,6 @@
 cabal-version: 3.0
 name: wireform-derive
-version: 0.2.0.0
+version: 0.1.0.0
 synopsis: Annotation-driven Template Haskell deriver core for wireform
 description:
   Shared @Modifier@ annotation vocabulary and Template Haskell

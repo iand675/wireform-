@@ -3,11 +3,16 @@
 
 {- | Criterion benchmark: wireform vs proto-lens (real generated code).
 
+Wireform side uses @Proto.CodeGen@ output (@Proto.Bench.Wireform.Messages@)
+including the sorted-tag @inOrderStage@ decode fast path. Regenerate that
+module after editing @bench/compare/gen-wireform/Messages.proto@:
+
+> cabal run regen-compare-bench-wireform
+
 Run: cabal bench compare-bench
 -}
 module Main where
 
-import Control.DeepSeq (NFData (..))
 import Criterion.Main
 import Data.ByteString qualified as BS
 import Data.Int (Int32, Int64)
@@ -19,29 +24,29 @@ import Data.Vector qualified as V
 import Data.Vector.Unboxed qualified as VU
 import Lens.Family2 ((&), (.~))
 import Proto.Bench qualified as PL
+import Proto.Bench.Wireform.Messages qualified as W
 import Proto.Bench_Fields qualified as F
-import Proto.Decode qualified as H
-import Proto.Encode qualified as H
-import WireformTypes
+import Proto qualified as H
+import Proto qualified as H
 
 
-encSmallH :: HSmall -> BS.ByteString
-encSmallH = H.encodeMessageSized
+encSmallH :: W.Small -> BS.ByteString
+encSmallH = H.encodeMessage
 {-# NOINLINE encSmallH #-}
 
 
-encMediumH :: HMedium -> BS.ByteString
-encMediumH = H.encodeMessageSized
+encMediumH :: W.Medium -> BS.ByteString
+encMediumH = H.encodeMessage
 {-# NOINLINE encMediumH #-}
 
 
-encNestedH :: HWithNested -> BS.ByteString
-encNestedH = H.encodeMessageSized
+encNestedH :: W.WithNested -> BS.ByteString
+encNestedH = H.encodeMessage
 {-# NOINLINE encNestedH #-}
 
 
-encRepH :: HWithRepeated -> BS.ByteString
-encRepH = H.encodeMessageSized
+encRepH :: W.WithRepeated -> BS.ByteString
+encRepH = H.encodeMessage
 {-# NOINLINE encRepH #-}
 
 
@@ -118,7 +123,7 @@ main =
     ]
 
 
-decSmallH :: BS.ByteString -> Either H.DecodeError HSmall
+decSmallH :: BS.ByteString -> Either H.DecodeError W.Small
 decSmallH = H.decodeMessage
 {-# NOINLINE decSmallH #-}
 
@@ -128,8 +133,8 @@ decSmallP = PLC.decodeMessage
 {-# NOINLINE decSmallP #-}
 
 
-rtSmallH :: HSmall -> Either H.DecodeError HSmall
-rtSmallH m = H.decodeMessage (H.encodeMessageSized m)
+rtSmallH :: W.Small -> Either H.DecodeError W.Small
+rtSmallH m = H.decodeMessage (H.encodeMessage m)
 {-# NOINLINE rtSmallH #-}
 
 
@@ -138,7 +143,7 @@ rtSmallP m = PLC.decodeMessage (PLC.encodeMessage m)
 {-# NOINLINE rtSmallP #-}
 
 
-decMediumH :: BS.ByteString -> Either H.DecodeError HMedium
+decMediumH :: BS.ByteString -> Either H.DecodeError W.Medium
 decMediumH = H.decodeMessage
 {-# NOINLINE decMediumH #-}
 
@@ -148,8 +153,8 @@ decMediumP = PLC.decodeMessage
 {-# NOINLINE decMediumP #-}
 
 
-rtMediumH :: HMedium -> Either H.DecodeError HMedium
-rtMediumH m = H.decodeMessage (H.encodeMessageSized m)
+rtMediumH :: W.Medium -> Either H.DecodeError W.Medium
+rtMediumH m = H.decodeMessage (H.encodeMessage m)
 {-# NOINLINE rtMediumH #-}
 
 
@@ -158,7 +163,7 @@ rtMediumP m = PLC.decodeMessage (PLC.encodeMessage m)
 {-# NOINLINE rtMediumP #-}
 
 
-decNestedH :: BS.ByteString -> Either H.DecodeError HWithNested
+decNestedH :: BS.ByteString -> Either H.DecodeError W.WithNested
 decNestedH = H.decodeMessage
 {-# NOINLINE decNestedH #-}
 
@@ -168,8 +173,8 @@ decNestedP = PLC.decodeMessage
 {-# NOINLINE decNestedP #-}
 
 
-rtNestedH :: HWithNested -> Either H.DecodeError HWithNested
-rtNestedH m = H.decodeMessage (H.encodeMessageSized m)
+rtNestedH :: W.WithNested -> Either H.DecodeError W.WithNested
+rtNestedH m = H.decodeMessage (H.encodeMessage m)
 {-# NOINLINE rtNestedH #-}
 
 
@@ -178,7 +183,7 @@ rtNestedP m = PLC.decodeMessage (PLC.encodeMessage m)
 {-# NOINLINE rtNestedP #-}
 
 
-decRepH :: BS.ByteString -> Either H.DecodeError HWithRepeated
+decRepH :: BS.ByteString -> Either H.DecodeError W.WithRepeated
 decRepH = H.decodeMessage
 {-# NOINLINE decRepH #-}
 
@@ -188,26 +193,68 @@ decRepP = PLC.decodeMessage
 {-# NOINLINE decRepP #-}
 
 
--- wireform test values
+-- wireform test values (PrefixedFields codegen; keep in sync with proto-lens fixtures)
 
-smallHS :: HSmall
-smallHS = HSmall 42 "hello world" True
-
-
-mediumHS :: HMedium
-mediumHS = HMedium "benchmark title" 100 3.14159 "payload\x00\x01\x02" True 1708000000 "a medium description" 0.75
-
-
-nestedHS :: HWithNested
-nestedHS = HWithNested 99 (Just (HSmall 1 "inner" True)) "outer label"
+smallHS :: W.Small
+smallHS =
+  W.Small
+    { W.smallId = 42
+    , W.smallName = "hello world"
+    , W.smallActive = True
+    , W.smallUnknownFields = []
+    }
 
 
-repeatedHS :: HWithRepeated
+mediumHS :: W.Medium
+mediumHS =
+  W.Medium
+    { W.mediumTitle = "benchmark title"
+    , W.mediumCount = 100
+    , W.mediumScore = 3.14159
+    , W.mediumPayload = "payload\x00\x01\x02"
+    , W.mediumEnabled = True
+    , W.mediumTimestamp = 1708000000
+    , W.mediumDescription = "a medium description"
+    , W.mediumRatio = 0.75
+    , W.mediumUnknownFields = []
+    }
+
+
+nestedHS :: W.WithNested
+nestedHS =
+  W.WithNested
+    { W.withNestedId = 99
+    , W.withNestedInner =
+        Just
+          ( W.Small
+              { W.smallId = 1
+              , W.smallName = "inner"
+              , W.smallActive = True
+              , W.smallUnknownFields = []
+              }
+          )
+    , W.withNestedLabel = "outer label"
+    , W.withNestedUnknownFields = []
+    }
+
+
+repeatedHS :: W.WithRepeated
 repeatedHS =
-  HWithRepeated
-    (VU.fromList [1 .. 50])
-    (V.fromList (fmap (\i -> "tag_" <> T.pack (show i)) [1 .. 20 :: Int]))
-    (V.fromList [HSmall (fromIntegral i) ("item" <> T.pack (show i)) (even i) | i <- [1 .. 10 :: Int]])
+  W.WithRepeated
+    { W.withRepeatedValues = VU.fromList [1 .. 50]
+    , W.withRepeatedTags = V.fromList (fmap (\i -> "tag_" <> T.pack (show i)) [1 .. 20 :: Int])
+    , W.withRepeatedItems =
+        V.fromList
+          [ W.Small
+              { W.smallId = fromIntegral i
+              , W.smallName = "item" <> T.pack (show i)
+              , W.smallActive = even i
+              , W.smallUnknownFields = []
+              }
+          | i <- [1 .. 10 :: Int]
+          ]
+    , W.withRepeatedUnknownFields = []
+    }
 
 
 -- proto-lens test values (using the real generated field lenses)
@@ -260,7 +307,7 @@ repeatedPL =
       & F.vec'items .~ V.fromList (fmap mkItem [1 .. 10])
 
 
--- Pre-encoded bytes
+-- Pre-encoded bytes (wireform canonical encoding for the fixtures above)
 smallBytes, mediumBytes, nestedBytes, repeatedBytes :: BS.ByteString
 smallBytes = encSmallH smallHS
 mediumBytes = encMediumH mediumHS

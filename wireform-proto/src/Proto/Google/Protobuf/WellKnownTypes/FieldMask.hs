@@ -11,7 +11,7 @@
 -- Any manual changes will be overwritten the next time code
 -- generation is run.  To modify the types or instances, edit the
 -- @.proto@ source file and re-run the code generator.
-module Proto.Google.Protobuf.FieldMask where
+module Proto.Google.Protobuf.WellKnownTypes.FieldMask where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
@@ -19,43 +19,39 @@ import qualified Wireform.Builder as B
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Word (Word32, Word64)
+import Data.Word (Word8, Word32, Word64)
+import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
 import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as VU
 import GHC.Generics (Generic)
 import Control.DeepSeq (NFData(..))
 import Data.Hashable (Hashable(..))
-import Proto.Encode
-import Proto.Decode
+import Proto.Internal.Encode
+import Proto.Internal.Decode
+import Proto.Internal.GrowList (GrowList, emptyGrowList, snocGrowList, growListToVector)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Types as Aeson
 import qualified Data.Aeson.Key as AesonKey
 import qualified Data.Aeson.KeyMap as AesonKM
-import Proto.Internal.JSON (jsonObject, (.=:), parseFieldMaybe, bytesFieldToJSON, parseBytesFieldMaybe, bytesMapFieldToJSON, parseBytesMapFieldMaybe, protoBytesToJSON)
+import Proto.Internal.JSON (jsonObject, (.=:), parseFieldMaybe, bytesFieldToJSON, parseBytesFieldMaybe, bytesMapFieldToJSON, parseBytesMapFieldMaybe, protoBytesToJSON, OneofVariantNullSemantics (..), parseOneofVariants)
 import Data.Proxy (Proxy(..))
-import Proto.Registry (IsMessage)
 import Proto.Schema (ProtoMessage(..), SomeFieldDescriptor(..), FieldDescriptor(..), FieldTypeDescriptor(..), ScalarFieldType(..), FieldLabel'(..))
-import qualified Proto.Registry
+import Proto.Registry (IsMessage)
+import Proto.Registry qualified
 import qualified Proto.Extension
 import Proto.Internal.Wire (Tag(..), WireType(..))
 import Proto.Internal.Wire.Encode (putTag, putVarint, putFixed32, putFixed64,
   putFloat, putDouble, putText, putByteString, putLengthDelimited,
   putSVarint32, putSVarint64, putVarintSigned,
-  varintSize, tagSize, fieldMessageSize,
-  fieldVarintSize, fieldFixed32Size, fieldFixed64Size,
-  fieldBoolSize, fieldFloatSize, fieldDoubleSize,
-  fieldTextSize, fieldBytesSize,
-  fieldSVarint32Size, fieldSVarint64Size,
+  varintSize, tagSize,
   varintSize32, zigZag32, zigZag64)
 import Proto.Internal.Encode.Archetype (archVarint, archSVarint32, archSVarint64,
   archFixed32, archFixed64, archFloat, archDouble, archBool,
-  archString, archBytes, archSubmessage,
-  archVarintSize, archStringSize, archBytesSize, archBoolSize,
-  archFixed32Size, archFixed64Size, archSubmessageSize)
+  archString, archBytes, archSubmessage)
 
 -- | Serialized FileDescriptorProto for this .proto file.
--- Decode with @Proto.Google.Protobuf.Descriptor.decodeMessage@.
+-- Decode with @Proto.Decode.decodeMessage@.
 fileDescriptorProtoBytes :: ByteString
 fileDescriptorProtoBytes = "\x0a\x20\x67\x6f\x6f\x67\x6c\x65\x2f\x70\x72\x6f\x74\x6f\x62\x75\x66\x2f\x66\x69\x65\x6c\x64\x5f\x6d\x61\x73\x6b\x2e\x70\x72\x6f\x74\x6f\x12\x0f\x67\x6f\x6f\x67\x6c\x65\x2e\x70\x72\x6f\x74\x6f\x62\x75\x66\x22\x1a\x0a\x09\x46\x69\x65\x6c\x64\x4d\x61\x73\x6b\x12\x0d\x0a\x05\x70\x61\x74\x68\x73\x18\x01\x20\x03\x28\x09\x62\x06\x70\x72\x6f\x74\x6f\x33"
 
@@ -74,37 +70,38 @@ defaultFieldMask = FieldMask
   }
 
 instance MessageEncode FieldMask where
-  buildMessage msg =
+  buildSized msg =
     V.foldl' (\acc v -> acc <> archString 10 v) mempty msg.fieldMaskPaths
-    <> encodeUnknownFields msg.fieldMaskUnknownFields
-
-instance MessageSize FieldMask where
-  messageSize msg =
-    (V.foldl' (\acc v -> acc + fieldTextSize 1 v) 0 msg.fieldMaskPaths)
-    + unknownFieldsSize msg.fieldMaskUnknownFields
+    <> encodeUnknownFieldsSized msg.fieldMaskUnknownFields
 
 instance MessageDecode FieldMask where
   {-# INLINE messageDecoder #-}
-  messageDecoder = loop V.empty []
+  messageDecoder = stage_0 defaultFieldMask emptyGrowList
     where
-      loop acc_0 acc_unknown_ = withTagM
-        (pure (FieldMask {fieldMaskPaths = acc_0, fieldMaskUnknownFields = reverse acc_unknown_}))
+      stage_0 msg gl_0 =
+        inOrderStage1
+          (0xa :: Data.Word.Word8)
+          decodeFieldString
+          (\v -> stage_0 msg (snocGrowList gl_0 v))
+          (pure (case msg.fieldMaskUnknownFields of { [] -> msg { fieldMaskPaths = growListToVector gl_0 }; _ -> msg { fieldMaskPaths = growListToVector gl_0, fieldMaskUnknownFields = reverse (msg.fieldMaskUnknownFields) } }))
+          (loop msg gl_0)
+      loop msg gl_0 = withTagM
+        (pure (case msg.fieldMaskUnknownFields of { [] -> msg { fieldMaskPaths = growListToVector gl_0 }; _ -> msg { fieldMaskPaths = growListToVector gl_0, fieldMaskUnknownFields = reverse (msg.fieldMaskUnknownFields) } }))
         (\fn wt -> case fn of
           1 -> do
             v <- decodeFieldString
-            loop (acc_0 <> V.singleton v) acc_unknown_
+            loop msg (snocGrowList gl_0 v)
           _ -> do
-            uf <- captureUnknownField fn (toEnum wt)
-            loop acc_0 (uf : acc_unknown_))
+            uf <- captureUnknownField fn (Prelude.toEnum wt)
+            loop (msg { fieldMaskUnknownFields = (uf : msg.fieldMaskUnknownFields)}) gl_0)
 
-instance IsMessage FieldMask
-
-instance ProtoMessage FieldMask where
-  protoMessageName _ = "google.protobuf.FieldMask"
-  protoPackageName _ = "google.protobuf"
-  protoDefaultValue = defaultFieldMask
-  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
-  protoFieldDescriptors _ = Map.fromList
+-- | Field descriptors for 'FieldMask', keyed by proto field number.
+--
+-- Top-level CAF: allocated lazily on first force, shared on every
+-- subsequent 'protoFieldDescriptors' call (no per-call rebuild).
+fieldMaskFieldDescriptors :: IntMap.IntMap (SomeFieldDescriptor FieldMask)
+fieldMaskFieldDescriptors =
+  IntMap.fromList
     [ (1, SomeField FieldDescriptor
         { fdName = "paths"
         , fdNumber = 1
@@ -114,6 +111,15 @@ instance ProtoMessage FieldMask where
         , fdSet = \v m -> m { fieldMaskPaths = v }
         })
     ]
+
+instance ProtoMessage FieldMask where
+  protoMessageName _ = "google.protobuf.FieldMask"
+  protoPackageName _ = "google.protobuf"
+  protoDefaultValue = defaultFieldMask
+  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
+  protoFieldDescriptors _ = fieldMaskFieldDescriptors
+
+instance IsMessage FieldMask
 
 instance Aeson.ToJSON FieldMask where
   toJSON msg = jsonObject
@@ -143,8 +149,3 @@ instance Semigroup FieldMask where
 
 instance Monoid FieldMask where
   mempty = defaultFieldMask
-
--- | Register all message types defined in this module.
-registerModuleTypes :: Proto.Registry.TypeRegistry -> Proto.Registry.TypeRegistry
-registerModuleTypes =
-  Proto.Registry.registerMessage (Proxy :: Proxy FieldMask) .  id

@@ -14,8 +14,8 @@ import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Vector qualified as V
-import Proto.Decode qualified as PD
-import Proto.Encode qualified as PE
+import Proto qualified as PD
+import Proto qualified as PE
 import Test.Proto.Derive.Instances ()
 import Test.Proto.Derive.RegressionInstances (
   RegInventory (..),

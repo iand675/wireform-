@@ -6,8 +6,8 @@ module Test.Proto.Derive.TopEnum (tests) where
 import Data.ByteString qualified as BS
 import Data.Text qualified as T
 import Data.Vector qualified as V
-import Proto.Decode qualified as PD
-import Proto.Encode qualified as PE
+import Proto qualified as PD
+import Proto qualified as PE
 import Test.Proto.Derive.TopEnumInstances (
   Account (..),
   PackedBag (..),

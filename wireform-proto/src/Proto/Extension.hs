@@ -73,7 +73,7 @@ import GHC.Float (
   castWord32ToFloat,
   castWord64ToDouble,
  )
-import Proto.Decode (UnknownField (..))
+import Proto.Internal.Decode (UnknownField (..))
 
 
 -- ============================================================

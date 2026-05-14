@@ -50,9 +50,9 @@ module Proto.Schema (
 ) where
 
 import Data.ByteString (ByteString)
+import Data.IntMap.Strict (IntMap)
+import Data.IntMap.Strict qualified as IntMap
 import Data.Kind (Type)
-import Data.Map.Strict (Map)
-import Data.Map.Strict qualified as Map
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import GHC.TypeLits (Symbol)
@@ -74,7 +74,7 @@ class ProtoMessage a where
 
 
   -- | All field descriptors, keyed by field number.
-  protoFieldDescriptors :: Proxy a -> Map Int (SomeFieldDescriptor a)
+  protoFieldDescriptors :: Proxy a -> IntMap (SomeFieldDescriptor a)
 
 
   -- | The raw serialized FileDescriptorProto bytes.
@@ -217,7 +217,7 @@ data MethodDescriptor = MethodDescriptor
 -- | Look up a field descriptor by name.
 lookupFieldDescriptor :: ProtoMessage a => Text -> Proxy a -> Maybe (SomeFieldDescriptor a)
 lookupFieldDescriptor name p =
-  let descs = Map.elems (protoFieldDescriptors p)
+  let descs = IntMap.elems (protoFieldDescriptors p)
   in case filter (\(SomeField fd) -> fdName fd == name) descs of
       (d : _) -> Just d
       [] -> Nothing
@@ -225,14 +225,14 @@ lookupFieldDescriptor name p =
 
 -- | Look up a field descriptor by field number.
 fieldDescriptorByNumber :: ProtoMessage a => Int -> Proxy a -> Maybe (SomeFieldDescriptor a)
-fieldDescriptorByNumber num p = Map.lookup num (protoFieldDescriptors p)
+fieldDescriptorByNumber num p = IntMap.lookup num (protoFieldDescriptors p)
 
 
 -- | All field names in a message.
 messageFieldNames :: ProtoMessage a => Proxy a -> [Text]
-messageFieldNames p = fmap (\(SomeField fd) -> fdName fd) (Map.elems (protoFieldDescriptors p))
+messageFieldNames p = fmap (\(SomeField fd) -> fdName fd) (IntMap.elems (protoFieldDescriptors p))
 
 
 -- | All field numbers in a message.
 messageFieldNumbers :: ProtoMessage a => Proxy a -> [Int]
-messageFieldNumbers p = Map.keys (protoFieldDescriptors p)
+messageFieldNumbers p = IntMap.keys (protoFieldDescriptors p)

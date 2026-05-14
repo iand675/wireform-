@@ -29,7 +29,7 @@ encoder \/ decoder \/ size logic without going through @ANN@ +
 * Singular fields of one of the recognized scalar types
   (@Int32 \/ Int64 \/ Word32 \/ Word64 \/ Bool \/ Float \/ Double \/
   Text \/ ByteString@) or a submessage with existing
-  'MessageEncode' \/ 'MessageDecode' \/ 'MessageSize' instances.
+  'MessageEncode' \/ 'MessageDecode' instances.
 * @Maybe a@ for explicit field presence (proto2 optional or proto3
   @optional@).
 * Repeated containers — outer 'Data.Vector.Vector' / list \/
@@ -62,8 +62,8 @@ part of the contract.
 
 == Generated instances
 
-* 'MessageEncode' — @buildMessage@ with proto3 default-value skip.
-* 'MessageSize'   — mirror of the encoder for two-pass output.
+* 'MessageEncode' — @buildSized@ with proto3 default-value skip;
+  size is computed inline via the sized-builder machinery.
 * 'MessageDecode' — accumulator loop with field-number dispatch.
 * 'IsMessage'     — provides 'messageTypeName'. Defaults to the
   Haskell type's base name; override via the @customModifier
@@ -83,7 +83,6 @@ module Proto.TH.Derive (
   -- * Annotation-driven entry points
   deriveProto,
   deriveProtoEncode,
-  deriveProtoSize,
   deriveProtoDecode,
 
   -- * Pre-translated entry point (for IDL bridges)
@@ -130,15 +129,14 @@ import Wireform.Derive.TypeInfo
 -- Public entry points (annotation-driven)
 -- ---------------------------------------------------------------------------
 
-{- | Derive 'MessageEncode', 'MessageSize', 'MessageDecode', and
+{- | Derive 'MessageEncode', 'MessageDecode', and
 'IsMessage' for a record type.
 -}
 deriveProto :: Name -> Q [Dec]
 deriveProto nm = do
   enc <- deriveProtoEncode nm
-  siz <- deriveProtoSize nm
   dec <- deriveProtoDecode nm
-  pure (enc ++ siz ++ dec)
+  pure (enc ++ dec)
 
 
 -- | Derive only the 'MessageEncode' instance for a record type.
@@ -148,16 +146,6 @@ deriveProtoEncode nm = do
   fis <- protoFields ti
   let typ = applyTypeArgs (ConT (typeInfoName ti)) (typeInfoVarTypes ti)
   inst <- I.mkEncodeInstance typ fis
-  pure [inst]
-
-
--- | Derive only the 'MessageSize' instance for a record type.
-deriveProtoSize :: Name -> Q [Dec]
-deriveProtoSize nm = do
-  ti <- recordOnly nm =<< reifyTypeInfo nm
-  fis <- protoFields ti
-  let typ = applyTypeArgs (ConT (typeInfoName ti)) (typeInfoVarTypes ti)
-  inst <- I.mkSizeInstance typ fis
   pure [inst]
 
 
@@ -291,10 +279,10 @@ data TranslatedMessage = TranslatedMessage
   }
 
 
-{- | Derive 'MessageEncode', 'MessageSize', 'MessageDecode', and
-'IsMessage' for a 'TranslatedMessage' without consulting the
-reify graph. Intended for IDL-driven splices that synthesise a
-fresh @data@ declaration alongside the instance group.
+{- | Derive 'MessageEncode', 'MessageDecode', and 'IsMessage' for a
+'TranslatedMessage' without consulting the reify graph. Intended for
+IDL-driven splices that synthesise a fresh @data@ declaration alongside
+the instance group.
 -}
 deriveProtoFromTranslated :: TranslatedMessage -> Q [Dec]
 deriveProtoFromTranslated tm = do

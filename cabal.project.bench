@@ -1,0 +1,11 @@
+-- Minimal project file for running wireform-proto benchmarks without
+-- packages that require system libraries (lz4, zstd, snappy, etc.).
+-- Usage: cabal --project-file=cabal.project.bench bench accum-bench
+packages:
+  wireform-core/
+  wireform-derive/
+  wireform-columnar-core/
+  wireform-proto/
+
+package *
+  ghc-options: -fasm

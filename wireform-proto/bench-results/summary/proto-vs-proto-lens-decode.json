@@ -5,10 +5,10 @@
   "higherIsBetter": false,
   "groups": ["Small", "Medium", "Nested", "Repeated"],
   "series": [
-    {"name": "wireform-proto", "values": [20.74, 57.04, 48.60, 715.13]},
-    {"name": "proto-lens",     "values": [76.45, 198.42, 141.27, 2107.02]}
+    {"name": "wireform-proto", "values": [45.93, 110.8, 76.69, 1070.0]},
+    {"name": "proto-lens",     "values": [81.88, 204.5, 148.3, 2166.0]}
   ],
   "baseline": "wireform-proto",
-  "capturedAt": "2026-05-13T10:45:00Z",
+  "capturedAt": "2026-05-15T00:00:00Z",
   "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
 }

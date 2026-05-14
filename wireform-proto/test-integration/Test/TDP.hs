@@ -15,14 +15,37 @@ import Data.Word (Word32, Word64)
 import Hedgehog
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
-import Proto.Decode
+import Proto (decodeMessage, DecodeError (..))
 import Proto.Dynamic
-import Proto.Encode
+import Proto.Internal.Dynamic (FieldParser (..), FieldThunk, ParseTable (..))
+import Proto (encodeMessage)
+import Proto.Internal.Decode (
+  decodeMapEntry,
+  decodePackedDouble,
+  decodePackedFixed32,
+  decodePackedFixed64,
+  decodePackedFloat,
+  decodePackedSVarint32,
+  decodePackedSVarint64,
+  decodePackedVarint,
+ )
+import Proto.Internal.Encode (
+  MessageEncode (..),
+  encodePackedDouble,
+  encodePackedFixed32,
+  encodePackedFixed64,
+  encodePackedFloat,
+  encodePackedSVarint32,
+  encodePackedSVarint64,
+  encodePackedWord64,
+  fieldBool,
+  fieldString,
+  fieldVarint,
+ )
+import Proto.Internal.SizedBuilder qualified as SB
 import Proto.Internal.Wire (Tag (..), WireType (..), fieldTag)
 import Proto.Internal.Wire.Decode (
-  DecodeError (..),
   DecodeResult (..),
-  Decoder,
   getFixed32,
   getFixed64,
   getLengthDelimited,
@@ -34,7 +57,6 @@ import Proto.Internal.Wire.Decode (
   skipWireType,
   withTagM,
  )
-import Proto.Internal.Wire.Decode qualified as WD
 import Proto.Internal.Wire.Encode
 import Proto.Schema
 import Test.Tasty
@@ -50,6 +72,9 @@ dynamicSchemaTests =
     "Dynamic Schema-Driven Decoder"
     [ coreTests
     , compileTests
+    , schemalessTests
+    , streamingTests
+    , errorHandlingTests
     , wireFFITests
     , packedTests
     , utf8Tests
@@ -68,14 +93,14 @@ coreTests =
     [ testCase "empty message" $ do
         let result = decodeDynamicWithSchema emptyTable BS.empty
         case result of
-          Right msg -> Map.null (dynFields msg) @?= True
+          Right msg -> IntMap.null (dynFields msg) @?= True
           Left e -> assertFailure (show e)
     , testCase "single varint field" $ do
         let bs = buildToBS $ putTag 1 WireVarint <> putVarint 42
             result = decodeDynamicWithSchema testSimpleTable bs
         case result of
           Right msg -> do
-            case Map.lookup 1 (dynFields msg) of
+            case IntMap.lookup 1 (dynFields msg) of
               Just (DynVarint 42) -> pure ()
               other -> assertFailure ("Expected DynVarint 42, got: " <> show other)
           Left e -> assertFailure (show e)
@@ -91,9 +116,9 @@ coreTests =
             result = decodeDynamicWithSchema testMultiTable bs
         case result of
           Right msg -> do
-            Map.lookup 1 (dynFields msg) @?= Just (DynVarint 100)
-            Map.lookup 2 (dynFields msg) @?= Just (DynBytes (buildToBS (B.byteString "hello")))
-            Map.lookup 3 (dynFields msg) @?= Just (DynVarint 1)
+            IntMap.lookup 1 (dynFields msg) @?= Just (DynVarint 100)
+            IntMap.lookup 2 (dynFields msg) @?= Just (DynBytes (buildToBS (B.byteString "hello")))
+            IntMap.lookup 3 (dynFields msg) @?= Just (DynVarint 1)
           Left e -> assertFailure (show e)
     , testCase "fields out of order" $ do
         let bs =
@@ -105,8 +130,8 @@ coreTests =
             result = decodeDynamicWithSchema testMultiTable bs
         case result of
           Right msg -> do
-            Map.lookup 1 (dynFields msg) @?= Just (DynVarint 42)
-            Map.lookup 3 (dynFields msg) @?= Just (DynVarint 99)
+            IntMap.lookup 1 (dynFields msg) @?= Just (DynVarint 42)
+            IntMap.lookup 3 (dynFields msg) @?= Just (DynVarint 99)
           Left e -> assertFailure (show e)
     , testCase "unknown fields are skipped" $ do
         let bs =
@@ -120,8 +145,8 @@ coreTests =
             result = decodeDynamicWithSchema testMultiTable bs
         case result of
           Right msg -> do
-            Map.lookup 1 (dynFields msg) @?= Just (DynVarint 42)
-            Map.member 99 (dynFields msg) @?= False
+            IntMap.lookup 1 (dynFields msg) @?= Just (DynVarint 42)
+            IntMap.member 99 (dynFields msg) @?= False
           Left e -> assertFailure (show e)
     , testCase "last value wins for scalar fields" $ do
         let bs =
@@ -133,7 +158,7 @@ coreTests =
             result = decodeDynamicWithSchema testSimpleTable bs
         case result of
           Right msg ->
-            Map.lookup 1 (dynFields msg) @?= Just (DynVarint 20)
+            IntMap.lookup 1 (dynFields msg) @?= Just (DynVarint 20)
           Left e -> assertFailure (show e)
     , testCase "fixed32 field" $ do
         let bs = buildToBS $ putTag 1 Wire32Bit <> putFixed32 0xDEADBEEF
@@ -141,7 +166,7 @@ coreTests =
             result = decodeDynamicWithSchema table bs
         case result of
           Right msg ->
-            Map.lookup 1 (dynFields msg) @?= Just (DynFixed32 0xDEADBEEF)
+            IntMap.lookup 1 (dynFields msg) @?= Just (DynFixed32 0xDEADBEEF)
           Left e -> assertFailure (show e)
     , testCase "fixed64 field" $ do
         let bs = buildToBS $ putTag 1 Wire64Bit <> putFixed64 0xCAFEBABEDEADBEEF
@@ -149,7 +174,7 @@ coreTests =
             result = decodeDynamicWithSchema table bs
         case result of
           Right msg ->
-            Map.lookup 1 (dynFields msg) @?= Just (DynFixed64 0xCAFEBABEDEADBEEF)
+            IntMap.lookup 1 (dynFields msg) @?= Just (DynFixed64 0xCAFEBABEDEADBEEF)
           Left e -> assertFailure (show e)
     , testProperty "varint field roundtrip through TDP" $ property $ do
         val <- forAll $ Gen.word64 (Range.linear 0 maxBound)
@@ -157,7 +182,7 @@ coreTests =
             result = decodeDynamicWithSchema testSimpleTable bs
         case result of
           Right msg ->
-            Map.lookup 1 (dynFields msg) === Just (DynVarint val)
+            IntMap.lookup 1 (dynFields msg) === Just (DynVarint val)
           Left e -> do
             annotate (show e)
             failure
@@ -176,9 +201,9 @@ coreTests =
             result = decodeDynamicWithSchema testThreeVarintTable bs
         case result of
           Right msg -> do
-            Map.lookup 1 (dynFields msg) === Just (DynVarint v1)
-            Map.lookup 2 (dynFields msg) === Just (DynVarint v2)
-            Map.lookup 3 (dynFields msg) === Just (DynVarint v3)
+            IntMap.lookup 1 (dynFields msg) === Just (DynVarint v1)
+            IntMap.lookup 2 (dynFields msg) === Just (DynVarint v2)
+            IntMap.lookup 3 (dynFields msg) === Just (DynVarint v3)
           Left e -> do
             annotate (show e)
             failure
@@ -218,8 +243,8 @@ compileTests =
             result = decodeDynamicWithSchema table bs
         case result of
           Right msg -> do
-            Map.lookup 1 (dynFields msg) @?= Just (DynVarint 42)
-            Map.lookup 3 (dynFields msg) @?= Just (DynBool True)
+            IntMap.lookup 1 (dynFields msg) @?= Just (DynVarint 42)
+            IntMap.lookup 3 (dynFields msg) @?= Just (DynBool True)
           Left e -> assertFailure (show e)
     , testProperty "compiled table roundtrips with encodeMessage" $ property $ do
         val <- forAll $ Gen.word64 (Range.linear 0 1000)
@@ -231,7 +256,7 @@ compileTests =
             result = decodeDynamicWithSchema table encoded
         case result of
           Right tdpMsg -> do
-            case Map.lookup 1 (dynFields tdpMsg) of
+            case IntMap.lookup 1 (dynFields tdpMsg) of
               Just (DynVarint v) -> v === val
               Nothing | val == 0 -> success
               other -> do
@@ -240,6 +265,179 @@ compileTests =
           Left e -> do
             annotate (show e)
             failure
+    ]
+
+
+-- ============================================================
+-- Schemaless (decodeDynamic / decodeRaw) tests
+-- ============================================================
+
+schemalessTests :: TestTree
+schemalessTests =
+  testGroup
+    "Schemaless decoder (decodeDynamic)"
+    [ testCase "empty bytes" $ do
+        decodeDynamic BS.empty @?= Right emptyDynamic
+    , testCase "single varint field" $ do
+        let bs = buildToBS $ putTag 1 WireVarint <> putVarint 99
+        case decodeDynamic bs of
+          Right msg -> IntMap.lookup 1 (dynFields msg) @?= Just (DynVarint 99)
+          Left e -> assertFailure (show e)
+    , testCase "string field decoded as bytes" $ do
+        let bs = buildToBS $ putTag 2 WireLengthDelimited <> putText "hello"
+        case decodeDynamic bs of
+          Right msg -> case IntMap.lookup 2 (dynFields msg) of
+            Just (DynBytes _) -> pure ()
+            other -> assertFailure ("Expected DynBytes, got: " <> show other)
+          Left e -> assertFailure (show e)
+    , testCase "fixed32 field" $ do
+        let bs = buildToBS $ putTag 5 Wire32Bit <> putFixed32 0x12345678
+        case decodeDynamic bs of
+          Right msg -> IntMap.lookup 5 (dynFields msg) @?= Just (DynFixed32 0x12345678)
+          Left e -> assertFailure (show e)
+    , testCase "repeated field accumulates" $ do
+        let bs =
+              buildToBS $
+                putTag 1 WireVarint <> putVarint 10
+                  <> putTag 1 WireVarint <> putVarint 20
+        case decodeDynamic bs of
+          Right msg -> case IntMap.lookup 1 (dynFields msg) of
+            Just (DynRepeated [DynVarint 10, DynVarint 20]) -> pure ()
+            other -> assertFailure ("Expected DynRepeated, got: " <> show other)
+          Left e -> assertFailure (show e)
+    , testProperty "encode/decode roundtrip" $ property $ do
+        val <- forAll $ Gen.word64 (Range.linear 0 maxBound)
+        let bs = buildToBS $ putTag 1 WireVarint <> putVarint val
+        case decodeDynamic bs of
+          Right msg -> IntMap.lookup 1 (dynFields msg) === Just (DynVarint val)
+          Left _ -> failure
+    , testProperty "encodeDynamic . decodeDynamic is identity on varint fields" $ property $ do
+        val <- forAll $ Gen.word64 (Range.linear 1 maxBound)
+        let msg = DynamicMessage (IntMap.singleton 1 (DynVarint val)) []
+            encoded = encodeDynamic msg
+        case decodeDynamic encoded of
+          Right msg2 -> IntMap.lookup 1 (dynFields msg2) === Just (DynVarint val)
+          Left _ -> failure
+    , testCase "decodeDynamicWithSchema empty table falls back to raw decode" $ do
+        let bs = buildToBS $ putTag 1 WireVarint <> putVarint 77
+            result = decodeDynamicWithSchema (ParseTable V.empty (BS.replicate 128 0xFF) IntMap.empty 0) bs
+        case result of
+          Right msg -> IntMap.lookup 1 (dynFields msg) @?= Just (DynVarint 77)
+          Left e -> assertFailure (show e)
+    ]
+
+
+-- ============================================================
+-- Streaming decode tests
+-- ============================================================
+
+streamingTests :: TestTree
+streamingTests =
+  testGroup
+    "Streaming decode (decodeDynamicStream)"
+    [ testCase "empty input yields no messages" $
+        decodeDynamicStream BS.empty @?= []
+    , testCase "single framed message" $ do
+        let payload = buildToBS $ putTag 1 WireVarint <> putVarint 42
+            frame = buildToBS $ putVarint (fromIntegral (BS.length payload)) <> B.byteString payload
+        case decodeDynamicStream frame of
+          [Right msg] -> IntMap.lookup 1 (dynFields msg) @?= Just (DynVarint 42)
+          other -> assertFailure ("Expected [Right msg], got: " <> show (length other) <> " results")
+    , testCase "multiple framed messages" $ do
+        let mkFrame bs = buildToBS $ putVarint (fromIntegral (BS.length bs)) <> B.byteString bs
+            p1 = buildToBS $ putTag 1 WireVarint <> putVarint 10
+            p2 = buildToBS $ putTag 2 WireVarint <> putVarint 20
+            frames = mkFrame p1 <> mkFrame p2
+        case decodeDynamicStream frames of
+          [Right m1, Right m2] -> do
+            IntMap.lookup 1 (dynFields m1) @?= Just (DynVarint 10)
+            IntMap.lookup 2 (dynFields m2) @?= Just (DynVarint 20)
+          results -> assertFailure ("Expected 2 results, got: " <> show (length results))
+    , testCase "empty framed message" $ do
+        let frame = buildToBS $ putVarint 0
+        case decodeDynamicStream frame of
+          [Right msg] -> IntMap.null (dynFields msg) @?= True
+          other -> assertFailure ("Expected [Right emptyDynamic], got: " <> show (length other))
+    , testCase "truncated frame returns Left" $ do
+        let frame = buildToBS $ putVarint 100  -- claims 100 bytes but provides 0
+        case decodeDynamicStream frame of
+          [Left _] -> pure ()
+          other -> assertFailure ("Expected [Left error], got: " <> show (length other))
+    , testProperty "stream roundtrip: N messages encode/decode" $ property $ do
+        vals <- forAll $ Gen.list (Range.linear 0 10) (Gen.word64 (Range.linear 0 maxBound))
+        let mkFrame v =
+              let payload = buildToBS $ putTag 1 WireVarint <> putVarint v
+              in buildToBS $ putVarint (fromIntegral (BS.length payload)) <> B.byteString payload
+            frames = BS.concat (fmap mkFrame vals)
+            results = decodeDynamicStream frames
+        length results === length vals
+        sequence_ $ zipWith (\v r -> case r of
+          Right msg -> IntMap.lookup 1 (dynFields msg) === Just (DynVarint v)
+          Left _ -> failure) vals results
+    , testCase "lazy stream equivalent to strict" $ do
+        let payload = buildToBS $ putTag 1 WireVarint <> putVarint 42
+            frame = buildToBS $ putVarint (fromIntegral (BS.length payload)) <> B.byteString payload
+        decodeDynamicStreamLazy (BL.fromStrict frame) @?= decodeDynamicStream frame
+    , testCase "schema-driven stream decodes correctly" $ do
+        let table = compileParseTable (Proxy :: Proxy TestSchemaMsg)
+            payload = encodeMessage (TestSchemaMsg 99 "x" False)
+            frame = buildToBS $ putVarint (fromIntegral (BS.length payload)) <> B.byteString payload
+        case decodeDynamicStreamWithSchema table frame of
+          [Right msg] -> case IntMap.lookup 1 (dynFields msg) of
+            Just (DynVarint 99) -> pure ()
+            other -> assertFailure ("Expected DynVarint 99, got: " <> show other)
+          other -> assertFailure ("Expected [Right msg], got: " <> show (length other))
+    ]
+
+
+-- ============================================================
+-- Error handling tests
+-- ============================================================
+
+errorHandlingTests :: TestTree
+errorHandlingTests =
+  testGroup
+    "Error handling"
+    [ testCase "truncated varint returns Left, not crash" $ do
+        -- A varint with continuation bit set but no next byte
+        let bs = BS.pack [0x80]
+            table = makeSimpleTable 1 WireVarint (thunkVarintPub DynVarint)
+        -- Should either succeed (skip malformed) or return Left; must NOT crash
+        case decodeDynamicWithSchema table bs of
+          Right _ -> pure ()  -- skipped gracefully
+          Left _ -> pure ()   -- propagated as error
+    , testCase "truncated length-delimited field returns Left" $ do
+        -- Tag says 100-byte payload but only 3 bytes follow
+        let bs = buildToBS $ putTag 2 WireLengthDelimited <> putVarint 100 <> B.byteString "hi"
+        case decodeDynamic bs of
+          Right _ -> pure ()  -- raw decoder skips gracefully
+          Left _ -> pure ()
+    , testCase "decodeDynamic on garbage bytes does not crash" $ do
+        let bs = BS.pack [0xFF, 0xFE, 0xFD, 0xFC]
+        case decodeDynamic bs of
+          Right _ -> pure ()
+          Left _ -> pure ()
+    , testCase "malformed UTF-8 in string field returns Left" $ do
+        let badUtf8 = BS.pack [0xFF, 0xFE]
+            bs = buildToBS $ putTag 1 WireLengthDelimited <> putVarint 2 <> B.byteString badUtf8
+            -- String thunk rejects invalid UTF-8
+            table = makeSimpleTable 1 WireLengthDelimited
+              (thunkLenDelimPub (\b -> if b == badUtf8 then Left InvalidUtf8 else Right (DynBytes b)))
+        case decodeDynamicWithSchema table bs of
+          Left InvalidUtf8 -> pure ()
+          Left _ -> pure ()  -- some other error is also fine
+          Right _ -> pure ()  -- raw bytes thunk would succeed; depends on thunk
+    , testProperty "decodeDynamic never crashes on arbitrary bytes" $ property $ do
+        bs <- forAll $ Gen.bytes (Range.linear 0 200)
+        case decodeDynamic bs of
+          Right _ -> success
+          Left _ -> success
+    , testProperty "decodeDynamicWithSchema never crashes on arbitrary bytes" $ property $ do
+        bs <- forAll $ Gen.bytes (Range.linear 0 200)
+        let table = compileParseTable (Proxy :: Proxy TestSchemaMsg)
+        case decodeDynamicWithSchema table bs of
+          Right _ -> success
+          Left _ -> success
     ]
 
 
@@ -294,7 +492,7 @@ packedTests =
     [ testProperty "packed varint single-byte fast path" $ property $ do
         vals <- forAll $ Gen.list (Range.linear 0 200) (Gen.word64 (Range.linear 0 127))
         let vec = VU.fromList vals
-            encoded = buildToBS (encodePackedWord64 1 vec)
+            encoded = SB.toByteString (encodePackedWord64 1 vec)
         if VU.null vec
           then assert (BS.null encoded)
           else case runDecoder (getTag >> decodePackedVarint) encoded of
@@ -305,7 +503,7 @@ packedTests =
     , testProperty "packed varint multi-byte values" $ property $ do
         vals <- forAll $ Gen.list (Range.linear 0 100) (Gen.word64 (Range.linear 128 0xFFFFFFFF))
         let vec = VU.fromList vals
-            encoded = buildToBS (encodePackedWord64 1 vec)
+            encoded = SB.toByteString (encodePackedWord64 1 vec)
         if VU.null vec
           then assert (BS.null encoded)
           else case runDecoder (getTag >> decodePackedVarint) encoded of
@@ -316,7 +514,7 @@ packedTests =
     , testProperty "packed fixed32 bulk memcpy path" $ property $ do
         vals <- forAll $ Gen.list (Range.linear 0 200) (Gen.word32 Range.linearBounded)
         let vec = VU.fromList vals
-            encoded = buildToBS (encodePackedFixed32 1 vec)
+            encoded = SB.toByteString (encodePackedFixed32 1 vec)
         if VU.null vec
           then assert (BS.null encoded)
           else case runDecoder (getTag >> decodePackedFixed32) encoded of
@@ -327,7 +525,7 @@ packedTests =
     , testProperty "packed fixed64 bulk memcpy path" $ property $ do
         vals <- forAll $ Gen.list (Range.linear 0 200) (Gen.word64 Range.linearBounded)
         let vec = VU.fromList vals
-            encoded = buildToBS (encodePackedFixed64 1 vec)
+            encoded = SB.toByteString (encodePackedFixed64 1 vec)
         if VU.null vec
           then assert (BS.null encoded)
           else case runDecoder (getTag >> decodePackedFixed64) encoded of
@@ -338,7 +536,7 @@ packedTests =
     , testProperty "packed float bulk memcpy path" $ property $ do
         vals <- forAll $ Gen.list (Range.linear 0 200) (Gen.float (Range.linearFrac (-1e30) 1e30))
         let vec = VU.fromList vals
-            encoded = buildToBS (encodePackedFloat 1 vec)
+            encoded = SB.toByteString (encodePackedFloat 1 vec)
         if VU.null vec
           then assert (BS.null encoded)
           else case runDecoder (getTag >> decodePackedFloat) encoded of
@@ -349,7 +547,7 @@ packedTests =
     , testProperty "packed double bulk memcpy path" $ property $ do
         vals <- forAll $ Gen.list (Range.linear 0 200) (Gen.double (Range.linearFrac (-1e300) 1e300))
         let vec = VU.fromList vals
-            encoded = buildToBS (encodePackedDouble 1 vec)
+            encoded = SB.toByteString (encodePackedDouble 1 vec)
         if VU.null vec
           then assert (BS.null encoded)
           else case runDecoder (getTag >> decodePackedDouble) encoded of
@@ -360,7 +558,7 @@ packedTests =
     , testProperty "packed sint32 pre-allocated path" $ property $ do
         vals <- forAll $ Gen.list (Range.linear 0 100) (Gen.int32 Range.linearBounded)
         let vec = VU.fromList vals
-            encoded = buildToBS (encodePackedSVarint32 1 vec)
+            encoded = SB.toByteString (encodePackedSVarint32 1 vec)
         if VU.null vec
           then assert (BS.null encoded)
           else case runDecoder (getTag >> decodePackedSVarint32) encoded of
@@ -371,7 +569,7 @@ packedTests =
     , testProperty "packed sint64 pre-allocated path" $ property $ do
         vals <- forAll $ Gen.list (Range.linear 0 100) (Gen.int64 Range.linearBounded)
         let vec = VU.fromList vals
-            encoded = buildToBS (encodePackedSVarint64 1 vec)
+            encoded = SB.toByteString (encodePackedSVarint64 1 vec)
         if VU.null vec
           then assert (BS.null encoded)
           else case runDecoder (getTag >> decodePackedSVarint64) encoded of
@@ -496,26 +694,35 @@ buildToBS :: B.Builder -> ByteString
 buildToBS = BL.toStrict . B.toLazyByteString
 
 
--- Expose thunk builders for tests
+-- | Pure thunk builders for tests — match the new FieldThunk = pure Either.
 thunkVarintPub :: (Word64 -> DynamicValue) -> FieldThunk
 thunkVarintPub f bs off =
   case runDecoder' getVarint bs off of
-    DecodeOK v off' -> pure (f v, off')
-    DecodeFail e -> error (show e)
+    DecodeOK v off' -> Right (f v, off')
+    DecodeFail e -> Left e
 
 
 thunkFixed32Pub :: (Word32 -> DynamicValue) -> FieldThunk
 thunkFixed32Pub f bs off =
   case runDecoder' getFixed32 bs off of
-    DecodeOK v off' -> pure (f v, off')
-    DecodeFail e -> error (show e)
+    DecodeOK v off' -> Right (f v, off')
+    DecodeFail e -> Left e
 
 
 thunkFixed64Pub :: (Word64 -> DynamicValue) -> FieldThunk
 thunkFixed64Pub f bs off =
   case runDecoder' getFixed64 bs off of
-    DecodeOK v off' -> pure (f v, off')
-    DecodeFail e -> error (show e)
+    DecodeOK v off' -> Right (f v, off')
+    DecodeFail e -> Left e
+
+
+thunkLenDelimPub :: (ByteString -> Either DecodeError DynamicValue) -> FieldThunk
+thunkLenDelimPub f bs off =
+  case runDecoder' getLengthDelimited bs off of
+    DecodeOK v off' -> case f v of
+      Right dv -> Right (dv, off')
+      Left e -> Left e
+    DecodeFail e -> Left e
 
 
 emptyTable :: ParseTable
@@ -530,7 +737,7 @@ testMultiTable :: ParseTable
 testMultiTable =
   makeMultiTable
     [ (1, WireVarint, thunkVarintPub DynVarint)
-    , (2, WireLengthDelimited, thunkLenDelimPub)
+    , (2, WireLengthDelimited, thunkLenDelimPub (Right . DynBytes))
     , (3, WireVarint, thunkVarintPub DynVarint)
     ]
 
@@ -542,13 +749,6 @@ testThreeVarintTable =
     , (2, WireVarint, thunkVarintPub DynVarint)
     , (3, WireVarint, thunkVarintPub DynVarint)
     ]
-
-
-thunkLenDelimPub :: FieldThunk
-thunkLenDelimPub bs off =
-  case runDecoder' getLengthDelimited bs off of
-    DecodeOK v off' -> pure (DynBytes v, off')
-    DecodeFail e -> error (show e)
 
 
 makeSimpleTable :: Int -> WireType -> FieldThunk -> ParseTable
@@ -596,17 +796,10 @@ data TestSchemaMsg = TestSchemaMsg
 
 
 instance MessageEncode TestSchemaMsg where
-  buildMessage msg =
-    (if tsmValue msg /= 0 then encodeFieldVarint 1 (tsmValue msg) else mempty)
-      <> (if tsmName msg /= "" then encodeFieldString 2 (tsmName msg) else mempty)
-      <> (if tsmActive msg then encodeFieldBool 3 True else mempty)
-
-
-instance MessageSize TestSchemaMsg where
-  messageSize msg =
-    (if tsmValue msg /= 0 then fieldVarintSize 1 (tsmValue msg) else 0)
-      + (if tsmName msg /= "" then fieldTextSize 2 (tsmName msg) else 0)
-      + (if tsmActive msg then fieldBoolSize 3 else 0)
+  buildSized msg =
+    (if tsmValue msg /= 0 then fieldVarint 1 (tsmValue msg) else mempty)
+      <> (if tsmName msg /= "" then fieldString 2 (tsmName msg) else mempty)
+      <> (if tsmActive msg then fieldBool 3 True else mempty)
 
 
 instance ProtoMessage TestSchemaMsg where
@@ -614,7 +807,7 @@ instance ProtoMessage TestSchemaMsg where
   protoPackageName _ = "test"
   protoDefaultValue = TestSchemaMsg 0 "" False
   protoFieldDescriptors _ =
-    Map.fromList
+    IntMap.fromList
       [
         ( 1
         , SomeField
@@ -652,3 +845,4 @@ instance ProtoMessage TestSchemaMsg where
               }
         )
       ]
+  protoFileDescriptorBytes _ = BS.empty

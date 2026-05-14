@@ -46,8 +46,6 @@ module Proto.Internal.Derive (
   -- * Instance synthesis (no reification required)
   mkEncodeInstance,
   mkEncodeInstanceWith,
-  mkSizeInstance,
-  mkSizeInstanceWith,
   mkDecodeInstance,
   mkDecodeInstanceWith,
   mkSemigroupInstance,
@@ -86,12 +84,13 @@ import Data.Text.Lazy qualified as TL
 import Data.Vector qualified as V
 import Data.Word (Word32, Word64)
 import Language.Haskell.TH
-import Proto.Decode qualified as PD
-import Proto.Encode qualified as PE
+import Proto.Internal.Decode qualified as PD
+import Proto.Internal.Encode qualified as PE
 import Proto.Internal.Encode.Archetype qualified as PA
 import Proto.Internal.Wire (Tag (..))
 import Proto.Internal.Wire qualified as PWire
 import Proto.Internal.Wire.Decode qualified as PWD
+import Proto.Internal.SizedBuilder qualified as PSB
 import Proto.Internal.Wire.Encode qualified as PWE
 import Proto.Registry qualified as PReg
 import Proto.Repr (BytesAdapter (..), BytesRep (..), MapAdapter (..), RepeatedAdapter (..), StringAdapter (..), StringRep (..))
@@ -385,7 +384,7 @@ buildMessageBodyWith meta fs = do
         Just sel ->
           Just
             ( AppE
-                (VarE 'PD.encodeUnknownFields)
+                (VarE 'PD.encodeUnknownFieldsSized)
                 (AppE (VarE sel) (VarE msg))
             )
       allParts = parts <> maybeToList ufPart
@@ -481,28 +480,27 @@ mkEncodeInstance = mkEncodeInstanceWith defaultMessageMeta
 mkEncodeInstanceWith :: MessageMeta -> Type -> [ProtoField] -> Q Dec
 mkEncodeInstanceWith meta ty fs = do
   body <- buildMessageBodyWith meta fs
+  -- 'buildMessageBodyWith' now produces a 'SizedBuilder'-valued
+  -- lambda (every field encoder underneath has been migrated to
+  -- the sized archetypes), so this instance defines 'buildSized'
+  -- directly. 'buildMessage' falls out of the class default in
+  -- "Proto.Encode" via @SB.toBuilder . buildSized@ and
+  -- 'messageSize' via @SB.size . buildSized@; neither needs a
+  -- separate TH-emitted method.
   pure $
     InstanceD
       Nothing
       []
       (AppT (ConT ''PE.MessageEncode) ty)
-      [FunD 'PE.buildMessage [Clause [] (NormalB body) []]]
+      [FunD 'PE.buildSized [Clause [] (NormalB body) []]]
 
 
--- | Generate an 'PE.MessageSize' instance.
-mkSizeInstance :: Type -> [ProtoField] -> Q Dec
-mkSizeInstance = mkSizeInstanceWith defaultMessageMeta
-
-
-mkSizeInstanceWith :: MessageMeta -> Type -> [ProtoField] -> Q Dec
-mkSizeInstanceWith meta ty fs = do
-  body <- messageSizeBodyWith meta fs
-  pure $
-    InstanceD
-      Nothing
-      []
-      (AppT (ConT ''PE.MessageSize) ty)
-      [FunD 'PE.messageSize [Clause [] (NormalB body) []]]
+-- The old @mkSizeInstance@ / @mkSizeInstanceWith@ helpers (which
+-- emitted standalone @MessageSize@ instances) are gone — the
+-- 'MessageSize' class was removed, and the size pass is now fused
+-- into 'PE.buildSized' via 'mkEncodeInstance'. If you want the
+-- message's wire size you go through 'PE.messageSize' (which is
+-- @'SB.size' . 'PE.buildSized'@).
 
 
 {- | Generate a 'PD.MessageDecode' instance using @conName@ as the
@@ -688,11 +686,10 @@ synthesiseProtoInstancesWith
   -> Q [Dec]
 synthesiseProtoInstancesWith meta ty conName _protoName fs = do
   enc <- mkEncodeInstanceWith meta ty fs
-  siz <- mkSizeInstanceWith meta ty fs
   dec <- mkDecodeInstanceWith meta ty conName fs
   semi <- mkSemigroupInstanceWith meta ty conName fs
   mon <- mkMonoidInstanceWith meta ty conName fs
-  pure [enc, siz, dec, semi, mon]
+  pure [enc, dec, semi, mon]
 
 
 -- ---------------------------------------------------------------------------
@@ -746,11 +743,14 @@ encodeOne msg pf = do
       acc <- newName "acc"
       keyEnc <- encodeMapKeyE mks kV
       valEnc <- encodeMapValueE pf vV
+      -- 'mapField' takes the already-sized key and value
+      -- builders and produces a sized map entry (one length-prefixed
+      -- submessage per entry). Same shape as the pure-text codegen.
       let entry =
             AppE
               ( AppE
                   ( AppE
-                      (VarE 'PE.encodeMapField)
+                      (VarE 'PE.mapField)
                       (LitE (IntegerL (fromIntegral (pfTag pf))))
                   )
                   keyEnc
@@ -1081,64 +1081,104 @@ encodeSingleArchE pf tagInt v =
       PFScalar SString -> stringEncodeE (pfStringAdapter pf) tagInt v
       PFScalar SBytes -> bytesEncodeE (pfBytesAdapter pf) tagInt v
       PFSubmessage ->
-        [|
-          let !sz = PE.messageSize $var
-          in PA.archSubmessage $tagWord sz (PE.buildMessage $var)
-          |]
+        -- New shape: 'archSubmessage' takes the child's
+        -- 'SizedBuilder' directly. The size flows up from the
+        -- child's own 'buildSized' traversal, so there's no
+        -- separate @messageSize@ pre-pass.
+        [|PA.archSubmessage $tagWord (PE.buildSized $var)|]
       PFEnum ->
-        -- 'encodeFieldEnum' takes the proto field number (it computes
-        -- its own varint tag); we recover @fieldNumber = tagByte / 8@.
-        [|
-          PE.encodeFieldEnum
-            $(litE (integerL (fromIntegral (tagInt `quot` 8))))
-            $var
-          |]
+        -- 1-byte-tag enum field: bake the tag into 'archVarint'
+        -- (which returns 'SizedBuilder', carrying the enum's
+        -- varint byte count for the parent's size accumulator).
+        [|PA.archVarint $tagWord (fromIntegral (fromEnum $var))|]
 
 
 {- | Slow path: field number > 15, so the wire tag is two or more
-bytes. We dispatch through @Proto.Encode.encodeField*@, which
-takes a field number (Int) and varint-encodes the tag.
+bytes. We dispatch through @Proto.Encode.sizedField*@, which
+takes a field number (Int) and varint-encodes the tag while
+producing a 'SizedBuilder' that carries the fragment's byte
+count up to the enclosing message.
 -}
 encodeSingleSlowE :: ProtoField -> Name -> Q Exp
 encodeSingleSlowE pf v =
   let var = varE v
       fieldN = litE (integerL (fromIntegral (pfTag pf)))
   in case pfType pf of
-      PFScalar SInt32 -> [|PE.encodeFieldVarint $fieldN (fromIntegral ($var :: Int32))|]
-      PFScalar SInt64 -> [|PE.encodeFieldVarint $fieldN (fromIntegral ($var :: Int64))|]
-      PFScalar SUInt32 -> [|PE.encodeFieldVarint $fieldN (fromIntegral ($var :: Word32))|]
-      PFScalar SUInt64 -> [|PE.encodeFieldVarint $fieldN ($var :: Word64)|]
-      PFScalar SSInt32 -> [|PE.encodeFieldSVarint32 $fieldN ($var :: Int32)|]
-      PFScalar SSInt64 -> [|PE.encodeFieldSVarint64 $fieldN ($var :: Int64)|]
-      PFScalar SFixed32 -> [|PE.encodeFieldFixed32 $fieldN ($var :: Word32)|]
-      PFScalar SFixed64 -> [|PE.encodeFieldFixed64 $fieldN ($var :: Word64)|]
-      PFScalar SSFixed32 -> [|PE.encodeFieldFixed32 $fieldN (fromIntegral ($var :: Int32))|]
-      PFScalar SSFixed64 -> [|PE.encodeFieldFixed64 $fieldN (fromIntegral ($var :: Int64))|]
-      PFScalar SBool -> [|PE.encodeFieldBool $fieldN ($var :: Bool)|]
-      PFScalar SFloat -> [|PE.encodeFieldFloat $fieldN ($var :: Float)|]
-      PFScalar SDouble -> [|PE.encodeFieldDouble $fieldN ($var :: Double)|]
-      PFScalar SString -> [|$(stringEncode (pfStringAdapter pf)) $fieldN $var|]
-      PFScalar SBytes -> [|$(bytesEncode (pfBytesAdapter pf)) $fieldN $var|]
-      PFSubmessage -> [|PE.encodeFieldMessageSized $fieldN $var|]
-      PFEnum -> [|PE.encodeFieldEnum $fieldN $var|]
+      PFScalar SInt32 -> [|PE.fieldVarint $fieldN (fromIntegral ($var :: Int32))|]
+      PFScalar SInt64 -> [|PE.fieldVarint $fieldN (fromIntegral ($var :: Int64))|]
+      PFScalar SUInt32 -> [|PE.fieldVarint $fieldN (fromIntegral ($var :: Word32))|]
+      PFScalar SUInt64 -> [|PE.fieldVarint $fieldN ($var :: Word64)|]
+      PFScalar SSInt32 -> [|PE.fieldSVarint32 $fieldN ($var :: Int32)|]
+      PFScalar SSInt64 -> [|PE.fieldSVarint64 $fieldN ($var :: Int64)|]
+      PFScalar SFixed32 -> [|PE.fieldFixed32 $fieldN ($var :: Word32)|]
+      PFScalar SFixed64 -> [|PE.fieldFixed64 $fieldN ($var :: Word64)|]
+      PFScalar SSFixed32 -> [|PE.fieldFixed32 $fieldN (fromIntegral ($var :: Int32))|]
+      PFScalar SSFixed64 -> [|PE.fieldFixed64 $fieldN (fromIntegral ($var :: Int64))|]
+      PFScalar SBool -> [|PE.fieldBool $fieldN ($var :: Bool)|]
+      PFScalar SFloat -> [|PE.fieldFloat $fieldN ($var :: Float)|]
+      PFScalar SDouble -> [|PE.fieldDouble $fieldN ($var :: Double)|]
+      -- Slow-path (multi-byte tag) string / bytes: same trick as
+      -- 'stringEncodeE' / 'bytesEncodeE' — compose the adapter's
+      -- pre-existing @size@ and @encode@ pieces into a 'SizedBuilder'
+      -- with the tag-width correction.
+      PFScalar SString ->
+        [|
+          PSB.sized
+            ($(stringSize (pfStringAdapter pf)) $var + PWE.tagSize $fieldN - 1)
+            ($(stringEncode (pfStringAdapter pf)) $fieldN $var)
+          |]
+      PFScalar SBytes ->
+        [|
+          PSB.sized
+            ($(bytesSize (pfBytesAdapter pf)) $var + PWE.tagSize $fieldN - 1)
+            ($(bytesEncode (pfBytesAdapter pf)) $fieldN $var)
+          |]
+      PFSubmessage -> [|PE.fieldMessage $fieldN (PE.buildSized $var)|]
+      PFEnum ->
+        [|
+          PE.fieldVarint
+            $fieldN
+            (fromIntegral (fromEnum $var))
+          |]
 
 
-{- | Adapter-based string encoder. Splices the adapter's encode
-function with the field number.
+{- | Adapter-based string encoder. Returns a 'SizedBuilder' built
+from two adapter pieces:
+
+* the adapter's @'stringEncode'@ Q-spliced function — @Int -> a ->
+  Builder@ — emits the tag varint + length varint + UTF-8 bytes;
+* the adapter's @'stringSize'@ Q-spliced function — @a -> Int@ —
+  returns the wire byte count assuming a /one-byte/ tag.
+
+To produce a correct 'SizedBuilder' for /any/ field number we
+correct the size for the actual tag width: @stringSize val + tagSize
+fieldN - 1@. No materialisation, no extra allocation — just two
+existing adapter functions composed.
 -}
 stringEncodeE :: StringAdapter -> Int -> Name -> Q Exp
 stringEncodeE adapter tagInt v =
   let fieldN = litE (integerL (fromIntegral (tagInt `quot` 8)))
       var = varE v
-  in [|$(stringEncode adapter) $fieldN $var|]
+  in
+    [|
+      PSB.sized
+        ($(stringSize adapter) $var + PWE.tagSize $fieldN - 1)
+        ($(stringEncode adapter) $fieldN $var)
+      |]
 
 
--- | Adapter-based bytes encoder.
+-- | Adapter-based bytes encoder. Same shape as 'stringEncodeE',
+-- using 'bytesSize' \/ 'bytesEncode' instead.
 bytesEncodeE :: BytesAdapter -> Int -> Name -> Q Exp
 bytesEncodeE adapter tagInt v =
   let fieldN = litE (integerL (fromIntegral (tagInt `quot` 8)))
       var = varE v
-  in [|$(bytesEncode adapter) $fieldN $var|]
+  in
+    [|
+      PSB.sized
+        ($(bytesSize adapter) $var + PWE.tagSize $fieldN - 1)
+        ($(bytesEncode adapter) $fieldN $var)
+      |]
 
 
 {- | Encode a packed repeated scalar field. Walks the (possibly
@@ -1155,6 +1195,7 @@ encodePackedScalarE :: ProtoField -> Scalar -> Exp -> Q Exp
 encodePackedScalarE pf sc getter = do
   foldFnE <- repeatedFoldlE rep
   let tagN = fromIntegral (pfTag pf) :: Integer
+      fieldN = litE (integerL (fromIntegral (pfTag pf `quot` 8)))
   v <- newName "v"
   acc <- newName "acc"
   perSizeE <- packedElemSizeE sc v
@@ -1186,9 +1227,15 @@ encodePackedScalarE pf sc getter = do
       then mempty
       else
         let !payloadSize = ($(pure sizeE)) :: Int
-        in PWE.putTag $(litE (IntegerL tagN)) PWire.WireLengthDelimited
-            <> PWE.putVarint (fromIntegral payloadSize)
-            <> $(pure bytesE)
+        in PSB.sized
+            ( PWE.tagSize $fieldN
+                + PWE.varintSize (fromIntegral payloadSize)
+                + payloadSize
+            )
+            ( PWE.putTag $(litE (IntegerL tagN)) PWire.WireLengthDelimited
+                <> PWE.putVarint (fromIntegral payloadSize)
+                <> $(pure bytesE)
+            )
     |]
   where
     rep = case pfKind pf of
@@ -1294,6 +1341,7 @@ encodePackedEnumE :: ProtoField -> Exp -> Q Exp
 encodePackedEnumE pf getter = do
   foldFnE <- repeatedFoldlE rep
   let tagN = fromIntegral (pfTag pf) :: Integer
+      fieldN = litE (integerL (fromIntegral (pfTag pf `quot` 8)))
   v <- newName "v"
   acc <- newName "acc"
   let perSizeE =
@@ -1343,9 +1391,15 @@ encodePackedEnumE pf getter = do
       then mempty
       else
         let !payloadSize = ($(pure sizeE)) :: Int
-        in PWE.putTag $(litE (IntegerL tagN)) PWire.WireLengthDelimited
-            <> PWE.putVarint (fromIntegral payloadSize)
-            <> $(pure bytesE)
+        in PSB.sized
+            ( PWE.tagSize $fieldN
+                + PWE.varintSize (fromIntegral payloadSize)
+                + payloadSize
+            )
+            ( PWE.putTag $(litE (IntegerL tagN)) PWire.WireLengthDelimited
+                <> PWE.putVarint (fromIntegral payloadSize)
+                <> $(pure bytesE)
+            )
     |]
   where
     rep = case pfKind pf of

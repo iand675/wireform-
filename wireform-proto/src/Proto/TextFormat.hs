@@ -23,25 +23,32 @@ module Proto.TextFormat (
 
   -- * Parsing
   textToDynamic,
+  textToTyped,
 
   -- * Text format value type
   TextValue (..),
   TextField (..),
 ) where
 
+import Data.Aeson ((.=))
+import Data.Aeson qualified as A
+import Data.Aeson.Key qualified as AesonKey
 import Data.ByteString.Base16 qualified as Base16
+import Data.ByteString.Base64 qualified as B64
 import Data.ByteString.Lazy qualified as BL
 import Data.Char (isDigit)
 import Data.Int (Int64)
+import Data.IntMap.Strict qualified as IntMap
 import Data.Map.Strict qualified as Map
 import Data.Proxy (Proxy)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.Read qualified as TR
+import Data.Vector qualified as V
 import Data.Word (Word64)
 import Proto.Dynamic
-import Proto.Encode qualified as PE
+import Proto qualified as PE
 import Proto.Schema qualified as PS
 import Wireform.Builder qualified as BB
 
@@ -80,6 +87,10 @@ field-name keys (rather than the field-number keys
 'dynamicToTextPretty' produces). Resolves the names from the
 message's 'PS.ProtoMessage' descriptor.
 
+Returns 'Nothing' only if re-encoding the message and decoding it
+back as a dynamic message fails, which should never happen in
+practice for a well-formed value.
+
 Implementation: re-encodes the typed value to bytes (so we
 have a single source of truth for the wire shape), decodes
 those bytes as a 'DynamicMessage', and walks the result with
@@ -90,22 +101,22 @@ typedToTextPretty
    . (PE.MessageEncode a, PS.ProtoMessage a)
   => Proxy a
   -> a
-  -> Text
+  -> Maybe Text
 typedToTextPretty p msg =
   let !bytes = BL.toStrict (BB.toLazyByteString (PE.buildMessage msg))
   in case decodeDynamic bytes of
-      Left _ -> "" -- shouldn't happen: we just re-encoded a valid value
+      Left _ -> Nothing
       Right dyn ->
         let descriptors = PS.protoFieldDescriptors p
-            nameOf fn = case Map.lookup fn descriptors of
+            nameOf fn = case IntMap.lookup fn descriptors of
               Just (PS.SomeField fd) -> PS.fdName fd
               Nothing -> intToText fn
-        in renderDynNamed nameOf 0 dyn
+        in Just (renderDynNamed nameOf 0 dyn)
 
 
 renderDynNamed :: (Int -> Text) -> Int -> DynamicMessage -> Text
 renderDynNamed nameOf depth (DynamicMessage fs _) =
-  Map.foldlWithKey'
+  IntMap.foldlWithKey'
     ( \acc fn val ->
         acc <> renderDynField depth True (nameOf fn) val <> "\n"
     )
@@ -117,7 +128,7 @@ renderDyn :: Int -> Bool -> DynamicMessage -> Text
 renderDyn depth pretty (DynamicMessage fs _) =
   let sep = if pretty then "\n" else " "
       fieldTexts =
-        Map.foldlWithKey'
+        IntMap.foldlWithKey'
           ( \acc fn val ->
               acc <> renderDynField depth pretty (intToText fn) val <> sep
           )
@@ -179,6 +190,93 @@ textToDynamic t = case parseFields (T.strip t) of
   Left e -> Left e
 
 
+{- | Parse a proto text format (@pbtxt@) string into a typed message.
+
+Uses the 'PS.ProtoMessage' schema to map field names to field numbers
+and wire types, then converts through the proto3 JSON mapping
+(via 'fromJSON') to produce the typed value.
+
+Limitations:
+
+  * Bytes fields at the top level are handled correctly: the raw
+    string from the text format is re-encoded as base64 for the
+    JSON path. Bytes inside nested submessages are passed through
+    as-is; callers should pre-encode nested bytes values as base64.
+
+  * Proto text format extensions (@[foo.bar]: value@) and unknown
+    fields are silently ignored.
+
+  * Repeated fields with scalar payloads listed on a single line
+    (packed text format) are not supported; each element must appear
+    as a separate @field: value@ line.
+
+Returns 'Left' on parse failure or if 'fromJSON' rejects the value.
+-}
+textToTyped
+  :: forall a
+   . (A.FromJSON a, PS.ProtoMessage a)
+  => Proxy a
+  -> Text
+  -> Either String a
+textToTyped p src = do
+  (fields, _) <- parseFields (T.strip src)
+  let schema  = PS.protoFieldDescriptors p
+      nameMap = buildNameMap schema
+      jsonVal = textFieldsToJSON nameMap fields
+  case A.fromJSON jsonVal of
+    A.Error e   -> Left ("JSON decode failed: " <> e)
+    A.Success a -> Right a
+
+
+-- | Build a field-name → 'PS.FieldTypeDescriptor' map from the schema.
+buildNameMap :: IntMap.IntMap (PS.SomeFieldDescriptor a) -> Map.Map Text PS.FieldTypeDescriptor
+buildNameMap =
+  IntMap.foldl'
+    (\acc (PS.SomeField fd) -> Map.insert (PS.fdName fd) (PS.fdTypeDesc fd) acc)
+    Map.empty
+
+
+-- | Convert a list of text format fields to an Aeson 'A.Value' (always an Object).
+-- Repeated fields (multiple entries with the same name) are collected into an Array.
+textFieldsToJSON :: Map.Map Text PS.FieldTypeDescriptor -> [TextField] -> A.Value
+textFieldsToJSON nameMap fields =
+  let grouped =
+        foldl
+          (\acc tf -> Map.insertWith (<>) (tfName tf) [tfValue tf] acc)
+          Map.empty
+          fields
+  in A.object
+      [ AesonKey.fromText name .= valToJSON (Map.lookup name nameMap) vals
+      | (name, vals) <- Map.toList grouped
+      ]
+
+
+valToJSON :: Maybe PS.FieldTypeDescriptor -> [TextValue] -> A.Value
+valToJSON mftd vals =
+  let conv = textValueToJSON mftd
+  in case vals of
+      [v] -> conv v
+      vs  -> A.Array (V.fromList (fmap conv vs))
+
+
+textValueToJSON :: Maybe PS.FieldTypeDescriptor -> TextValue -> A.Value
+textValueToJSON mftd = \case
+  TVString s ->
+    case mftd of
+      Just (PS.ScalarType PS.BytesField) ->
+        -- Bytes in text format are raw strings; JSON needs base64.
+        A.String (TE.decodeUtf8 (B64.encode (TE.encodeUtf8 s)))
+      _ -> A.String s
+  TVNumber n  -> A.Number (realToFrac n)
+  TVInteger n -> A.Number (fromInteger n)
+  TVBool b    -> A.Bool b
+  TVIdent t   -> A.String t  -- enum name or bare identifier
+  TVMessage subfields ->
+    -- Nested message: recurse without sub-schema (bytes inside nested
+    -- messages are passed through as-is; callers should pre-encode them).
+    textFieldsToJSON Map.empty subfields
+
+
 fieldsToDynamic :: [TextField] -> DynamicMessage
 fieldsToDynamic tfs =
   let numbered =
@@ -188,7 +286,7 @@ fieldsToDynamic tfs =
               _ -> (0, textValueToDyn (tfValue tf))
           )
           tfs
-  in DynamicMessage (Map.fromList numbered) []
+  in DynamicMessage (IntMap.fromList numbered) []
 
 
 textValueToDyn :: TextValue -> DynamicValue

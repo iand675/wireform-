@@ -9,21 +9,17 @@ A 'TypeRegistry' maps fully-qualified proto type names to typed decoders
 and JSON codecs. It is passed explicitly rather than stored in global
 mutable state.
 
-== The 'IsMessage' marker
-
-'IsMessage' is a marker class — it has no methods of its own. Its job is
+'IsMessage' is a marker class; it has no methods of its own. Its job is
 to bundle together every typeclass a message needs in order to be
 'register'ed into a 'TypeRegistry':
 
-* 'MessageEncode' \/ 'MessageDecode' — wire codec.
-* 'ProtoMessage' — the FQN, package, and schema metadata.
-* 'Aeson.ToJSON' \/ 'Aeson.FromJSON' — JSON codec (proto3 canonical).
-* 'Typeable' — runtime type identity for 'lookupDecoder' downcasting.
+* 'MessageEncode' \/ 'MessageDecode' provide the wire codec.
+* 'ProtoMessage' provides the FQN, package, and schema metadata.
+* 'Aeson.ToJSON' \/ 'Aeson.FromJSON' provide the JSON codec.
+* 'Typeable' gives us runtime type identity for 'lookupDecoder' downcasting.
 
 Generated message types ship with an empty @instance IsMessage Foo@
-declaration that says "all of the above superclasses are in scope". The
-generated code does not need to mention any of the superclasses
-individually; the marker instance is the contract.
+declaration that says "all of the above superclasses are supported by the type". 
 
 == Discovering instances
 
@@ -42,10 +38,8 @@ myRegistry :: TypeRegistry
 myRegistry = $$discoverRegistry
 @
 
-Caveat: TH only sees instances that have already been compiled when the
-splice runs. Instances defined in the same module as @$$discoverRegistry@
-will not be picked up. Put the splice in a leaf module that imports the
-message modules.
+Caveat: TH only sees instances that are in scope when the
+splice runs.
 -}
 module Proto.Registry (
   -- * Marker class
@@ -81,10 +75,10 @@ import Data.Maybe (mapMaybe)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Typeable (Typeable, cast)
-import Language.Haskell.TH (Dec (..), Exp (..), Info (..), Name, Q, Type (..), mkName, reify)
+import Language.Haskell.TH (Dec (..), Exp (..), Info (..), Q, Type (..), mkName, reify)
 import Language.Haskell.TH.Syntax (Code, unsafeCodeCoerce)
-import Proto.Decode (DecodeError, MessageDecode (..), decodeMessage)
-import Proto.Encode (MessageEncode (..), encodeMessage)
+import Proto.Internal.Decode (DecodeError (..), MessageDecode (..), decodeMessage)
+import Proto.Internal.Encode (MessageEncode (..), encodeMessage)
 import Proto.Schema (ProtoMessage (..))
 
 
@@ -194,7 +188,7 @@ function when the requested Haskell type matches the registered type.
 -}
 lookupDecoder
   :: forall a
-   . (Typeable a, IsMessage a)
+   . (Typeable a)
   => Text
   -> TypeRegistry
   -> Maybe (ByteString -> Either DecodeError a)

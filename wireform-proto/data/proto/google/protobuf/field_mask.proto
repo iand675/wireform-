@@ -5,6 +5,8 @@ package google.protobuf;
 option java_package = "com.google.protobuf";
 option java_outer_classname = "FieldMaskProto";
 option go_package = "google.golang.org/protobuf/types/known/fieldmaskpb";
+option csharp_namespace = "Google.Protobuf.WellKnownTypes";
+option objc_class_prefix = "GPB";
 
 message FieldMask {
   repeated string paths = 1;

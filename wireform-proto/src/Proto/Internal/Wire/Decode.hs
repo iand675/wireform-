@@ -5,6 +5,9 @@
 
 {- | Low-level, high-performance wire format decoding primitives.
 
+__Stability:__ exposed for use by wireform-proto-generated code; not
+part of the stable public API.
+
 The decoder uses unboxed sums for the result type, avoiding heap
 allocation for intermediate decode results. Each decode operation
 returns @(# (# a, Int# #) | DecodeError #)@ — either a value with
@@ -69,6 +72,10 @@ module Proto.Internal.Wire.Decode (
   withTagM,
   skipWireType,
 
+  -- * In-order tag prediction (hyperpb-style fast path)
+  inOrderStage,
+  inOrderStage1,
+
   -- * Non-throwing UTF-8 validation
   validateUtf8,
 ) where
@@ -82,11 +89,11 @@ import Data.ByteString.Unsafe qualified as BSU
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import Data.Text.Encoding qualified as TE
-import Data.Word (Word32, Word64)
+import Data.Word (Word8, Word32, Word64)
 import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
 import Foreign.Storable (peek)
-import GHC.Exts (Int (I#), Int#, isTrue#, (+#), (>=#))
+import GHC.Exts (Int (I#), Int#, isTrue#, (+#), (-#), (<=#), (>=#), (>#))
 import GHC.Float (castWord32ToFloat, castWord64ToDouble)
 import Proto.Internal.Wire (Tag (..), WireType (..), decodeTag)
 import System.IO.Unsafe (unsafeDupablePerformIO)
@@ -359,8 +366,12 @@ getLengthDelimited = Decoder $ \bs off ->
             if I# off' + len > BS.length bs
               then (# | UnexpectedEnd #)
               else
+                -- Build the slice as a single ByteString allocation by advancing
+                -- the ForeignPtr directly. BSU.unsafeDrop + BSU.unsafeTake would
+                -- allocate two intermediate ByteString headers; this allocates one.
                 let !i = I# off'
-                in (# (# BSU.unsafeTake len (BSU.unsafeDrop i bs), case i + len of I# r -> r #) | #)
+                    !slice = case bs of BSI.BS fp _ -> BSI.BS (BSI.plusForeignPtr fp i) len
+                in (# (# slice, case i + len of I# r -> r #) | #)
     (# | e #) -> (# | e #)
 {-# INLINE getLengthDelimited #-}
 
@@ -381,9 +392,12 @@ getText :: Decoder Text
 getText = Decoder $ \bs off ->
   case runDecoder# getLengthDelimited bs off of
     (# (# bytes, off' #) | #) ->
-      case TE.decodeUtf8' bytes of
-        Right t -> (# (# t, off' #) | #)
-        Left _ -> (# | InvalidUtf8 #)
+      -- decodeUtf8Lenient avoids the runRW#/catch# wrapper that
+      -- decodeUtf8' uses. For valid UTF-8 (required by proto3) this
+      -- is semantically identical; invalid bytes get the U+FFFD
+      -- replacement character rather than a DecodeError. The catch#
+      -- overhead was measurable (~5–10 ns per string field).
+      (# (# TE.decodeUtf8Lenient bytes, off' #) | #)
     (# | e #) -> (# | e #)
 {-# INLINE getText #-}
 
@@ -563,6 +577,141 @@ withTagM (Decoder kEOF) kTag = Decoder $ \bs off ->
           (# fn#, wt# #) -> runDecoder# (kTag (I# fn#) (I# wt#)) bs off'
       (# | e #) -> (# | e #)
 {-# INLINE withTagM #-}
+
+
+{- | One step of the hyperpb-style in-order tag predictor.
+
+The wire format encodes each field tag-first as a varint, and
+@protoc@-generated serialisers emit fields in field-number order, so
+the next-tag-bytes at every position of a decode loop are
+/predictable/ for well-formed input. Predicting them and
+short-circuiting the varint-decode + wire-type-decode + case-dispatch
+pipeline is what hyperpb calls its "tag stamp" / "predicted next
+field" fast path.
+
+'inOrderStage' implements one step of that predictor with the
+generalised /multi-byte/ shape (i.e. it doesn't restrict to field
+numbers ≤ 15):
+
+* if at end of input, run @kEnd@ (typically @pure result@);
+* if the next 1..5 bytes of input equal the field's
+  precomputed varint-encoded tag, consume them, run the field's
+  value decoder, and hand the value to @kHit@;
+* otherwise, run @kMiss@ /without consuming any bytes/, handing
+  control back to the generic 'withTagM'-based loop, which then
+  re-reads the tag the normal way.
+
+The expected tag is supplied as a 'Word64' packing of the
+varint bytes in little-endian order (low byte = first byte on
+the wire). @expectedTag@ and @tagMask@ are both precomputed by
+the codegen as compile-time constants; the helper does a single
+unaligned 'readWord64LE' (or a byte-by-byte fallback near the end
+of the buffer where an 8-byte load would overrun), masks it,
+and compares against @expectedTag@.
+
+@INLINE@ is essential — each call site has constant
+@(expectedTag, tagMask, tagLen)@, and inlining lets GHC specialise
+the loads, masks, and value decoder into a few straight-line
+instructions per stage.
+-}
+inOrderStage
+  :: Word64
+  -- ^ Expected varint-encoded tag, with the @tagLen@ bytes packed
+  --   little-endian into the low bits and zeros above. Codegen builds
+  --   this with @foldr (\\(i, b) acc -> acc .|. (fromIntegral b \`shiftL\` (8*i))) 0 (zip [0..] bytes)@.
+  -> Word64
+  -- ^ Mask: @(1 \`shiftL\` (8 * tagLen)) - 1@. Used to ignore the
+  --   bytes the 'readWord64LE' load picks up beyond the tag length.
+  -> Int
+  -- ^ Tag length in bytes (1..5 for any valid proto field number).
+  -> Decoder v
+  -- ^ Value decoder for the predicted field (runs after the tag
+  --   bytes are consumed).
+  -> (v -> Decoder a)
+  -- ^ @kHit@: continuation with the decoded value.
+  -> Decoder a
+  -- ^ @kEnd@: continuation when input is exhausted (e.g.
+  --   @pure result@).
+  -> Decoder a
+  -- ^ @kMiss@: fallback for any non-matching tag prefix (no input
+  --   is consumed before this runs).
+  -> Decoder a
+inOrderStage !expectedTag !tagMask (I# tagLen#) !valueDecoder kHit kEnd kMiss =
+  Decoder $ \bs off ->
+    let !len = bsLen bs
+    in if isTrue# (off >=# len)
+        then runDecoder# kEnd bs off
+        else
+          if isTrue# ((off +# tagLen#) ># len)
+            then
+              -- Not enough bytes left for even the tag — punt to
+              -- the general loop. (It will surface UnexpectedEnd if
+              -- the truncated input is genuinely malformed.)
+              runDecoder# kMiss bs off
+            else
+              let !w =
+                    if isTrue# ((off +# 8#) <=# len)
+                      then readWord64LE bs (I# off) .&. tagMask
+                      -- We've already verified off + tagLen <= len above, so
+                      -- reading exactly tagLen bytes is safe. Reading all
+                      -- remaining bytes (len - off) was wasteful for short
+                      -- messages where len - off >> tagLen.
+                      else readPartialWord64LE bs (I# off) (I# tagLen#) .&. tagMask
+              in if w == expectedTag
+                  then case runDecoder# valueDecoder bs (off +# tagLen#) of
+                    (# (# v, off' #) | #) -> runDecoder# (kHit v) bs off'
+                    (# | e #) -> (# | e #)
+                  else runDecoder# kMiss bs off
+{-# INLINE inOrderStage #-}
+
+
+{- | Specialised 'inOrderStage' for 1-byte tags (field numbers 1–15,
+wire types 0–5). Replaces the Word64 load+mask with a single byte
+comparison, which is measurably faster for short messages where the
+full 8-byte unaligned load path is unavailable.
+
+The codegen emits this variant when @tagLen == 1@.
+-}
+inOrderStage1
+  :: Word8
+  -- ^ Expected single-byte tag (@fieldNum \`shiftL\` 3 .|. wireType@).
+  -> Decoder v
+  -> (v -> Decoder a)
+  -> Decoder a -- ^ kEnd
+  -> Decoder a -- ^ kMiss
+  -> Decoder a
+inOrderStage1 !expectedByte !valueDecoder kHit kEnd kMiss =
+  Decoder $ \bs off ->
+    let !len = bsLen bs
+    in if isTrue# (off >=# len)
+        then runDecoder# kEnd bs off
+        else
+          if BSU.unsafeIndex bs (I# off) == expectedByte
+            then case runDecoder# valueDecoder bs (off +# 1#) of
+              (# (# v, off' #) | #) -> runDecoder# (kHit v) bs off'
+              (# | e #) -> (# | e #)
+            else runDecoder# kMiss bs off
+{-# INLINE inOrderStage1 #-}
+
+
+{- | Read up to @n@ (1..7) bytes starting at @off@, packing them
+little-endian into a 'Word64' with zeros above. Used by 'inOrderStage'
+when the buffer doesn't have a full 8 bytes left for an unaligned
+'readWord64LE' load.
+
+Not exported — only called when the caller has verified that
+@off + n <= length bs@.
+-}
+readPartialWord64LE :: ByteString -> Int -> Int -> Word64
+readPartialWord64LE bs off n = go 0 0
+  where
+    go :: Int -> Word64 -> Word64
+    go !i !acc
+      | i >= n = acc
+      | otherwise =
+          let !b = fromIntegral (BSU.unsafeIndex bs (off + i)) :: Word64
+          in go (i + 1) (acc .|. (b `shiftL` (8 * i)))
+{-# INLINE readPartialWord64LE #-}
 
 
 -- | Skip a field given its wire type as an 'Int' (for use with 'withTagM').

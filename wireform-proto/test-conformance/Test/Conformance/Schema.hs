@@ -53,20 +53,20 @@ import Proto.Extension qualified as Ext
 -- reference @Proto.Google.Protobuf.X@ types; those modules must
 -- be in scope at the call site for GHC's renamer to resolve the
 -- spliced 'ConT' references. We bring them in unqualified so the
--- spliced ConT names ('Proto.Google.Protobuf.Timestamp.Timestamp'
+-- spliced ConT names ('Proto.Google.Protobuf.WellKnownTypes.Timestamp.Timestamp'
 -- etc., as constructed by 'Proto.TH.lookupWkt') resolve.
-import Proto.Google.Protobuf.Any (Any)
-import Proto.Google.Protobuf.Duration (Duration)
-import Proto.Google.Protobuf.Empty (Empty)
-import Proto.Google.Protobuf.FieldMask (FieldMask)
-import Proto.Google.Protobuf.Struct (
+import Proto.Google.Protobuf.WellKnownTypes.Any (Any)
+import Proto.Google.Protobuf.WellKnownTypes.Duration (Duration)
+import Proto.Google.Protobuf.WellKnownTypes.Empty (Empty)
+import Proto.Google.Protobuf.WellKnownTypes.FieldMask (FieldMask)
+import Proto.Google.Protobuf.WellKnownTypes.Struct (
   ListValue,
   NullValue (..),
   Struct,
   Value,
  )
-import Proto.Google.Protobuf.Timestamp (Timestamp)
-import Proto.Google.Protobuf.Wrappers (
+import Proto.Google.Protobuf.WellKnownTypes.Timestamp (Timestamp)
+import Proto.Google.Protobuf.WellKnownTypes.Wrappers (
   BoolValue,
   BytesValue,
   DoubleValue,

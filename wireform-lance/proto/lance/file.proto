@@ -162,7 +162,7 @@ message Field {
   bool nullable = 6;
 
   // optional field metadata (e.g. extension type name/parameters)
-  map<string, bytes> metadata = 10;  
+  map<string, bytes> metadata = 10;
 
   bool unenforced_primary_key = 12;
 

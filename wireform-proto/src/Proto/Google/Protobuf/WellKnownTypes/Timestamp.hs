@@ -11,7 +11,7 @@
 -- Any manual changes will be overwritten the next time code
 -- generation is run.  To modify the types or instances, edit the
 -- @.proto@ source file and re-run the code generator.
-module Proto.Google.Protobuf.Timestamp where
+module Proto.Google.Protobuf.WellKnownTypes.Timestamp where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
@@ -19,43 +19,39 @@ import qualified Wireform.Builder as B
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Word (Word32, Word64)
+import Data.Word (Word8, Word32, Word64)
+import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
 import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as VU
 import GHC.Generics (Generic)
 import Control.DeepSeq (NFData(..))
 import Data.Hashable (Hashable(..))
-import Proto.Encode
-import Proto.Decode
+import Proto.Internal.Encode
+import Proto.Internal.Decode
+import Proto.Internal.GrowList (GrowList, emptyGrowList, snocGrowList, growListToVector)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Types as Aeson
 import qualified Data.Aeson.Key as AesonKey
 import qualified Data.Aeson.KeyMap as AesonKM
-import Proto.Internal.JSON (jsonObject, (.=:), parseFieldMaybe, bytesFieldToJSON, parseBytesFieldMaybe, bytesMapFieldToJSON, parseBytesMapFieldMaybe, protoBytesToJSON)
+import Proto.Internal.JSON (jsonObject, (.=:), parseFieldMaybe, bytesFieldToJSON, parseBytesFieldMaybe, bytesMapFieldToJSON, parseBytesMapFieldMaybe, protoBytesToJSON, OneofVariantNullSemantics (..), parseOneofVariants)
 import Data.Proxy (Proxy(..))
-import Proto.Registry (IsMessage)
 import Proto.Schema (ProtoMessage(..), SomeFieldDescriptor(..), FieldDescriptor(..), FieldTypeDescriptor(..), ScalarFieldType(..), FieldLabel'(..))
-import qualified Proto.Registry
+import Proto.Registry (IsMessage)
+import Proto.Registry qualified
 import qualified Proto.Extension
 import Proto.Internal.Wire (Tag(..), WireType(..))
 import Proto.Internal.Wire.Encode (putTag, putVarint, putFixed32, putFixed64,
   putFloat, putDouble, putText, putByteString, putLengthDelimited,
   putSVarint32, putSVarint64, putVarintSigned,
-  varintSize, tagSize, fieldMessageSize,
-  fieldVarintSize, fieldFixed32Size, fieldFixed64Size,
-  fieldBoolSize, fieldFloatSize, fieldDoubleSize,
-  fieldTextSize, fieldBytesSize,
-  fieldSVarint32Size, fieldSVarint64Size,
+  varintSize, tagSize,
   varintSize32, zigZag32, zigZag64)
 import Proto.Internal.Encode.Archetype (archVarint, archSVarint32, archSVarint64,
   archFixed32, archFixed64, archFloat, archDouble, archBool,
-  archString, archBytes, archSubmessage,
-  archVarintSize, archStringSize, archBytesSize, archBoolSize,
-  archFixed32Size, archFixed64Size, archSubmessageSize)
+  archString, archBytes, archSubmessage)
 
 -- | Serialized FileDescriptorProto for this .proto file.
--- Decode with @Proto.Google.Protobuf.Descriptor.decodeMessage@.
+-- Decode with @Proto.Decode.decodeMessage@.
 fileDescriptorProtoBytes :: ByteString
 fileDescriptorProtoBytes = "\x0a\x1f\x67\x6f\x6f\x67\x6c\x65\x2f\x70\x72\x6f\x74\x6f\x62\x75\x66\x2f\x74\x69\x6d\x65\x73\x74\x61\x6d\x70\x2e\x70\x72\x6f\x74\x6f\x12\x0f\x67\x6f\x6f\x67\x6c\x65\x2e\x70\x72\x6f\x74\x6f\x62\x75\x66\x22\x2b\x0a\x09\x54\x69\x6d\x65\x73\x74\x61\x6d\x70\x12\x0f\x0a\x07\x73\x65\x63\x6f\x6e\x64\x73\x18\x01\x20\x01\x28\x03\x12\x0d\x0a\x05\x6e\x61\x6e\x6f\x73\x18\x02\x20\x01\x28\x05\x62\x06\x70\x72\x6f\x74\x6f\x33"
 
@@ -76,42 +72,49 @@ defaultTimestamp = Timestamp
   }
 
 instance MessageEncode Timestamp where
-  buildMessage msg =
+  buildSized msg =
     (if msg.timestampSeconds == 0 then mempty else archVarint 8 (fromIntegral msg.timestampSeconds))
     <> (if msg.timestampNanos == 0 then mempty else archVarint 16 (fromIntegral msg.timestampNanos))
-    <> encodeUnknownFields msg.timestampUnknownFields
-
-instance MessageSize Timestamp where
-  messageSize msg =
-    (if msg.timestampSeconds == 0 then 0 else archVarintSize (fromIntegral msg.timestampSeconds))
-    + (if msg.timestampNanos == 0 then 0 else archVarintSize (fromIntegral msg.timestampNanos))
-    + unknownFieldsSize msg.timestampUnknownFields
+    <> encodeUnknownFieldsSized msg.timestampUnknownFields
 
 instance MessageDecode Timestamp where
   {-# INLINE messageDecoder #-}
-  messageDecoder = loop 0 0 []
+  messageDecoder = stage_0 defaultTimestamp
     where
-      loop acc_0 acc_1 acc_unknown_ = withTagM
-        (pure (Timestamp {timestampSeconds = acc_0, timestampNanos = acc_1, timestampUnknownFields = reverse acc_unknown_}))
+      stage_0 msg =
+        inOrderStage1
+          (0x8 :: Data.Word.Word8)
+          (fromIntegral <$> decodeFieldVarint)
+          (\v -> stage_1 (msg { timestampSeconds = v}))
+          (pure (case msg.timestampUnknownFields of { [] -> msg; _ -> msg { timestampUnknownFields = reverse (msg.timestampUnknownFields) } }))
+          (loop msg)
+      stage_1 msg =
+        inOrderStage1
+          (0x10 :: Data.Word.Word8)
+          (fromIntegral <$> decodeFieldVarint)
+          (\v -> loop (msg { timestampNanos = v}))
+          (pure (case msg.timestampUnknownFields of { [] -> msg; _ -> msg { timestampUnknownFields = reverse (msg.timestampUnknownFields) } }))
+          (loop msg)
+      loop msg = withTagM
+        (pure (case msg.timestampUnknownFields of { [] -> msg; _ -> msg { timestampUnknownFields = reverse (msg.timestampUnknownFields) } }))
         (\fn wt -> case fn of
           1 -> do
             v <- (fromIntegral <$> decodeFieldVarint)
-            loop v acc_1 acc_unknown_
+            loop (msg { timestampSeconds = v})
           2 -> do
             v <- (fromIntegral <$> decodeFieldVarint)
-            loop acc_0 v acc_unknown_
+            loop (msg { timestampNanos = v})
           _ -> do
-            uf <- captureUnknownField fn (toEnum wt)
-            loop acc_0 acc_1 (uf : acc_unknown_))
+            uf <- captureUnknownField fn (Prelude.toEnum wt)
+            loop (msg { timestampUnknownFields = (uf : msg.timestampUnknownFields)}))
 
-instance IsMessage Timestamp
-
-instance ProtoMessage Timestamp where
-  protoMessageName _ = "google.protobuf.Timestamp"
-  protoPackageName _ = "google.protobuf"
-  protoDefaultValue = defaultTimestamp
-  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
-  protoFieldDescriptors _ = Map.fromList
+-- | Field descriptors for 'Timestamp', keyed by proto field number.
+--
+-- Top-level CAF: allocated lazily on first force, shared on every
+-- subsequent 'protoFieldDescriptors' call (no per-call rebuild).
+timestampFieldDescriptors :: IntMap.IntMap (SomeFieldDescriptor Timestamp)
+timestampFieldDescriptors =
+  IntMap.fromList
     [ (1, SomeField FieldDescriptor
         { fdName = "seconds"
         , fdNumber = 1
@@ -128,6 +131,15 @@ instance ProtoMessage Timestamp where
         , fdSet = \v m -> m { timestampNanos = v }
         })
     ]
+
+instance ProtoMessage Timestamp where
+  protoMessageName _ = "google.protobuf.Timestamp"
+  protoPackageName _ = "google.protobuf"
+  protoDefaultValue = defaultTimestamp
+  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
+  protoFieldDescriptors _ = timestampFieldDescriptors
+
+instance IsMessage Timestamp
 
 instance Aeson.ToJSON Timestamp where
   toJSON msg =
@@ -170,15 +182,10 @@ instance Proto.Extension.HasExtensions Timestamp where
 
 instance Semigroup Timestamp where
   a <> b = Timestamp
-    { timestampSeconds = b.timestampSeconds
-    , timestampNanos = b.timestampNanos
+    { timestampSeconds = if b.timestampSeconds == 0 then a.timestampSeconds else b.timestampSeconds
+    , timestampNanos = if b.timestampNanos == 0 then a.timestampNanos else b.timestampNanos
     , timestampUnknownFields = a.timestampUnknownFields <> b.timestampUnknownFields
     }
 
 instance Monoid Timestamp where
   mempty = defaultTimestamp
-
--- | Register all message types defined in this module.
-registerModuleTypes :: Proto.Registry.TypeRegistry -> Proto.Registry.TypeRegistry
-registerModuleTypes =
-  Proto.Registry.registerMessage (Proxy :: Proxy Timestamp) .  id

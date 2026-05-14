@@ -4,6 +4,9 @@
 
 {- | Proto3 canonical JSON encoding and decoding helpers.
 
+__Stability:__ exposed for use by wireform-proto-generated code; not
+part of the stable public API.
+
 Provides helpers for proto-canonical JSON representations:
 
 * 64-bit integers encoded as JSON strings (JavaScript precision limits)
@@ -70,6 +73,10 @@ module Proto.Internal.JSON (
   parseLazyBytesMapFieldMaybe,
   shortBytesMapFieldToJSON,
   parseShortBytesMapFieldMaybe,
+
+  -- * Oneof variant JSON
+  OneofVariantNullSemantics (..),
+  parseOneofVariants,
 ) where
 
 import Data.Aeson qualified as Aeson
@@ -88,6 +95,7 @@ import Data.Hashable (Hashable)
 import Data.Int (Int64)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (mapMaybe)
 import Data.Scientific (Scientific, fromFloatDigits, toBoundedInteger, toRealFloat)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -533,6 +541,65 @@ parseShortBytesMapFieldMaybe obj key = case AesonKM.lookup (AesonKey.fromText ke
     pairs <- traverse (\(k, v) -> (,) (AesonKey.toText k) <$> protoShortBytesFromJSON v) (AesonKM.toList o)
     pure (Just (Map.fromList pairs))
   Just _ -> fail ("Expected object for short-bytes map field: " <> T.unpack key)
+
+
+-- ---------------------------------------------------------------------------
+-- Oneof variant JSON helpers
+-- ---------------------------------------------------------------------------
+
+{- | Per-variant interpretation of JSON @null@ in a oneof. For most
+variants @null@ means "this variant is unset" (matching the proto3
+spec's "absent submessage" convention), so 'parseOneofVariants'
+skips that variant and continues looking. For the
+@google.protobuf.NullValue@ WKT, @null@ /is/ the variant's only
+inhabitant — the variant must be selected with the singleton enum
+value as its payload.
+-}
+data OneofVariantNullSemantics
+  = OneofVariantNullIsUnset
+  | OneofVariantNullIsValue
+
+
+{- | Parse the JSON encoding of a proto3 oneof.
+
+Proto3 JSON encodes a oneof inline at the /parent/ message level: only
+the selected variant's JSON name appears, mapped to that variant's
+payload. There is no enclosing object for the oneof itself.
+
+This helper drives the parser side. The caller supplies the parent
+@Aeson.Object@ and a list of @(jsonKey, nullSemantics, parser)@
+triples — one per variant. We scan the object for keys that match,
+apply the per-variant null filter, and produce:
+
+* @Nothing@ — no matching variant key present.
+* @Just v@ — exactly one matching variant key; @v@ is the parsed
+  Haskell-side oneof sum value.
+* a parser failure — more than one variant key present
+  (proto3-conformant: @OneofFieldDuplicate@ is an error).
+
+Used by both the pure-text codegen and the Template-Haskell
+codegen so the two paths share one source of truth.
+-}
+parseOneofVariants
+  :: Aeson.Object
+  -> [(Text, OneofVariantNullSemantics, Aeson.Value -> Aeson.Parser a)]
+  -> Aeson.Parser (Maybe a)
+parseOneofVariants obj variants =
+  let present = mapMaybe collect variants
+      collect (k, sem, p) = do
+        v <- AesonKM.lookup (AesonKey.fromText k) obj
+        if keep sem v then Just (k, v, p) else Nothing
+      keep OneofVariantNullIsUnset Aeson.Null = False
+      keep _ _ = True
+  in case present of
+      [] -> pure Nothing
+      [(_, v, p)] -> Just <$> p v
+      _ ->
+        fail
+          ( "Multiple oneof variants set: "
+              <> show (fmap (\(k, _, _) -> k) present)
+          )
+{-# INLINE parseOneofVariants #-}
 
 
 -- ---------------------------------------------------------------------------

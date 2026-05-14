@@ -137,9 +137,13 @@ resolve cfg cache visiting path = do
             case result of
               Left e -> pure (Left e)
               Right importMap -> do
-                let resolved =
+                -- For editions schemas, apply field_presence feature overrides so
+                -- that EXPLICIT/IMPLICIT/LEGACY_REQUIRED are reflected in fieldLabel.
+                -- This normalises the AST before it reaches any codegen path.
+                let pf' = applyEditionFieldPresence pf
+                    resolved =
                       ResolvedProto
-                        { rpFile = pf
+                        { rpFile = pf'
                         , rpPath = path
                         , rpImports = importMap
                         }

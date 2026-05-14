@@ -4,7 +4,11 @@ package google.protobuf;
 
 option java_package = "com.google.protobuf";
 option java_outer_classname = "TimestampProto";
+option java_multiple_files = true;
 option go_package = "google.golang.org/protobuf/types/known/timestamppb";
+option csharp_namespace = "Google.Protobuf.WellKnownTypes";
+option objc_class_prefix = "GPB";
+option cc_enable_arenas = true;
 
 message Timestamp {
   int64 seconds = 1;

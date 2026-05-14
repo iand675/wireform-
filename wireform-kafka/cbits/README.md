@@ -76,4 +76,3 @@ The CRC32C implementation is licensed under the MIT License. See [THIRD_PARTY_LI
 - [fast-crc32 GitHub Repository](https://github.com/corsix/fast-crc32)
 - [CRC32C on Wikipedia](https://en.wikipedia.org/wiki/Cyclic_redundancy_check)
 - [Intel® 64 and IA-32 Architectures Software Developer's Manual](https://software.intel.com/content/www/us/en/develop/articles/intel-sdm.html) (SSE4.2 CRC32 instructions)
-

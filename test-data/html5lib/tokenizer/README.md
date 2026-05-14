@@ -104,4 +104,3 @@ ways:
 -   Each test's expected output assumes that implementation is applying
     the tweaks given in the spec's "Coercing an HTML DOM into an
     infoset" section.
-

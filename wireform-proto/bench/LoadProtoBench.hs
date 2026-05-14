@@ -30,7 +30,7 @@ import Proto.TH (loadProto)
 import qualified Proto.Decode as PD
 import qualified Proto.Encode as PE
 import qualified Proto.Extension as Ext
-import Proto.Google.Protobuf.Timestamp (Timestamp(..), defaultTimestamp)
+import Proto.Google.Protobuf.WellKnownTypes.Timestamp (Timestamp(..), defaultTimestamp)
 
 -- TH-generated JSON instances carry a 'Given ExtensionRegistry' constraint
 -- for proto2 extensions; this bench schema has none, so satisfy it with
@@ -212,7 +212,7 @@ main = do
   putStrLn ""
 
   -- Direct Timestamp bench. The checked-in
-  -- Proto.Google.Protobuf.Timestamp uses a hand-edited
+  -- Proto.Google.Protobuf.WellKnownTypes.Timestamp uses a hand-edited
   -- 'loop_dispatch + loop_after_N + withTagM' state-machine shape
   -- that this benchmark measures against the codegen-emitted
   -- shape after regen.

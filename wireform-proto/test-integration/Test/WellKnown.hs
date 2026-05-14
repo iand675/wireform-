@@ -8,17 +8,17 @@ import Data.Vector qualified as V
 import Hedgehog
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
-import Proto.Decode
-import Proto.Encode
-import Proto.Google.Protobuf.Any
-import Proto.Google.Protobuf.Any.Util
-import Proto.Google.Protobuf.Duration
-import Proto.Google.Protobuf.Empty
-import Proto.Google.Protobuf.FieldMask
-import Proto.Google.Protobuf.SourceContext
-import Proto.Google.Protobuf.Struct
-import Proto.Google.Protobuf.Timestamp
-import Proto.Google.Protobuf.Wrappers
+import Proto
+import Proto
+import Proto.Google.Protobuf.WellKnownTypes.Any
+import Proto.Google.Protobuf.WellKnownTypes.Any.Util
+import Proto.Google.Protobuf.WellKnownTypes.Duration
+import Proto.Google.Protobuf.WellKnownTypes.Empty
+import Proto.Google.Protobuf.WellKnownTypes.FieldMask
+import Proto.Google.Protobuf.WellKnownTypes.SourceContext
+import Proto.Google.Protobuf.WellKnownTypes.Struct
+import Proto.Google.Protobuf.WellKnownTypes.Timestamp
+import Proto.Google.Protobuf.WellKnownTypes.Wrappers
 import Proto.Registry (TypeRegistry, emptyRegistry, lookupCodec, lookupDecoder, registerMessage)
 import Test.Tasty
 import Test.Tasty.HUnit hiding (assert)
@@ -237,19 +237,6 @@ wellKnownTests =
                           ]
                     }
             decodeMessage (encodeMessage lv) @?= Right lv
-        ]
-    , testGroup
-        "Exact-size encoding"
-        [ testProperty "encodeMessageSized matches encodeMessage for Timestamp" $ property $ do
-            s <- forAll $ Gen.int64 (Range.linear 0 1000000)
-            n <- forAll $ Gen.int32 (Range.linear 0 999999)
-            let msg = defaultTimestamp {timestampSeconds = s, timestampNanos = n}
-            encodeMessageSized msg === encodeMessage msg
-        , testProperty "encodeMessageSized matches encodeMessage for Duration" $ property $ do
-            s <- forAll $ Gen.int64 (Range.linear 0 1000000)
-            n <- forAll $ Gen.int32 (Range.linear 0 999999)
-            let msg = defaultDuration {durationSeconds = s, durationNanos = n}
-            encodeMessageSized msg === encodeMessage msg
         ]
     , testGroup
         "Hashable instances"

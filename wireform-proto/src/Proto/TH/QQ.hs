@@ -26,7 +26,7 @@ module Proto.TH.QQ (
 import Data.Text qualified as T
 import Language.Haskell.TH
 import Language.Haskell.TH.Quote
-import Proto.IDL.AST (stripSpans)
+
 import Proto.IDL.Parser (parseProtoFile, renderParseError)
 import Proto.TH (protoFileToDecls)
 

@@ -2,6 +2,9 @@
 
 {- | Church-encoded sized builder: fuses size calculation with serialization.
 
+__Stability:__ exposed for use by wireform-proto-generated code; not
+part of the stable public API.
+
 A 'SizedBuilder' carries both the computed byte size and the builder
 in a single value. This avoids the need for a separate size-computation
 pass when encoding submessages — the size is accumulated alongside

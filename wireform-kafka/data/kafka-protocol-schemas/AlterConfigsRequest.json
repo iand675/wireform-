@@ -23,7 +23,7 @@
   "validVersions": "0-2",
   "flexibleVersions": "2+",
   "fields": [
-    { "name": "Resources", "type": "[]AlterConfigsResource", "versions": "0+", 
+    { "name": "Resources", "type": "[]AlterConfigsResource", "versions": "0+",
       "about": "The updates for each resource.", "fields": [
       { "name": "ResourceType", "type": "int8", "versions": "0+", "mapKey": true,
         "about": "The resource type." },

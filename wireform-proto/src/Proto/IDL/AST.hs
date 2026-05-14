@@ -99,6 +99,10 @@ module Proto.IDL.AST (
   JsonFormatFeature (..),
   defaultFeatureSet,
   featuresForEdition,
+  applyFeatureOptions,
+  resolveFileFeatures,
+  resolveFieldFeatures,
+  applyEditionFieldPresence,
 
   -- * Phase conversion
   stripSpans,
@@ -858,6 +862,125 @@ featuresForEdition (Edition "2024") =
     { featureFieldPresence = ExplicitPresence
     }
 featuresForEdition _ = defaultFeatureSet
+
+
+{- | Apply @features.*@ option overrides from a list of 'OptionDef's onto
+a base 'FeatureSet'.
+
+Handles the options defined in @google/protobuf/descriptor.proto@
+(@features.field_presence@, @features.enum_type@,
+@features.repeated_field_encoding@, @features.utf8_validation@,
+@features.message_encoding@, @features.json_format@).
+
+Unknown feature names and unrecognised values are silently ignored so
+that a schema using a future edition feature does not break parsing.
+-}
+applyFeatureOptions :: [OptionDef] -> FeatureSet -> FeatureSet
+applyFeatureOptions opts base = foldr applyOne base opts
+  where
+    applyOne (OptionDef _ (OptionName parts) val) fs
+      | matchFeature "field_presence" parts =
+          case identOf val of
+            "IMPLICIT"      -> fs { featureFieldPresence = ImplicitPresence }
+            "EXPLICIT"      -> fs { featureFieldPresence = ExplicitPresence }
+            "LEGACY_REQUIRED" -> fs { featureFieldPresence = LegacyRequired }
+            _ -> fs
+      | matchFeature "enum_type" parts =
+          case identOf val of
+            "OPEN"   -> fs { featureEnumType = OpenEnum }
+            "CLOSED" -> fs { featureEnumType = ClosedEnum }
+            _ -> fs
+      | matchFeature "repeated_field_encoding" parts =
+          case identOf val of
+            "PACKED"   -> fs { featureRepeatedFieldEncoding = PackedEncoding }
+            "EXPANDED" -> fs { featureRepeatedFieldEncoding = ExpandedEncoding }
+            _ -> fs
+      | matchFeature "utf8_validation" parts =
+          case identOf val of
+            "VERIFY" -> fs { featureUtf8Validation = Utf8Verify }
+            "NONE"   -> fs { featureUtf8Validation = Utf8None }
+            _ -> fs
+      | matchFeature "message_encoding" parts =
+          case identOf val of
+            "LENGTH_PREFIXED" -> fs { featureMessageEncoding = LengthPrefixedEncoding }
+            "DELIMITED"       -> fs { featureMessageEncoding = DelimitedEncoding }
+            _ -> fs
+      | matchFeature "json_format" parts =
+          case identOf val of
+            "ALLOW"              -> fs { featureJsonFormat = JsonAllow }
+            "LEGACY_BEST_EFFORT" -> fs { featureJsonFormat = JsonLegacyBestEffort }
+            _ -> fs
+      | otherwise = fs
+
+    -- Match when the option name is [SimpleOption "features", SimpleOption key].
+    matchFeature :: Text -> [OptionNamePart] -> Bool
+    matchFeature key [SimpleOption "features", SimpleOption k] = k == key
+    matchFeature _ _ = False
+
+    identOf :: Constant -> Text
+    identOf (CIdent t) = t
+    identOf _ = ""
+
+
+-- | Resolve the effective 'FeatureSet' for a file given its syntax and
+-- any file-level @option features.*@ overrides.
+resolveFileFeatures :: Syntax -> [OptionDef] -> FeatureSet
+resolveFileFeatures (Editions ed) opts = applyFeatureOptions opts (featuresForEdition ed)
+resolveFileFeatures _ _ = defaultFeatureSet
+
+
+-- | Resolve the effective 'FeatureSet' for a field, inheriting from the
+-- parent 'FeatureSet' and applying any field-level @features.*@ overrides.
+resolveFieldFeatures :: FeatureSet -> [OptionDef] -> FeatureSet
+resolveFieldFeatures parent opts = applyFeatureOptions opts parent
+
+
+{- | Post-parse normalization pass for editions schemas.
+
+In editions, the @optional@\/@required@\/@repeated@ label keywords are
+absent from the syntax; field cardinality is controlled by
+@option features.field_presence@. This pass translates that feature back
+into 'fieldLabel' so that downstream codegen and TH paths see the same
+'FieldLabel' representation as they do for proto2\/proto3:
+
+  * @EXPLICIT@   — sets 'fieldLabel' to @Just Optional@ (has-bit tracking).
+  * @IMPLICIT@   — leaves 'fieldLabel' as @Nothing@ (proto3-style, zero = absent).
+  * @LEGACY_REQUIRED@ — sets 'fieldLabel' to @Just Required@.
+
+No-op for proto2 and proto3 files.
+-}
+applyEditionFieldPresence :: ProtoFile -> ProtoFile
+applyEditionFieldPresence pf = case protoSyntax pf of
+  Editions ed ->
+    let fileFs = resolveFileFeatures (Editions ed) (protoOptions pf)
+    in pf {protoTopLevels = fmap (applyTLPresence fileFs) (protoTopLevels pf)}
+  _ -> pf
+  where
+    applyTLPresence fs (TLMessage msg) = TLMessage (applyMsgPresence fs msg)
+    applyTLPresence _ tl = tl
+
+    applyMsgPresence fs msg =
+      msg {msgElements = fmap (applyElemPresence fs) (msgElements msg)}
+
+    applyElemPresence parentFs = \case
+      MEField fd ->
+        let fieldFs = resolveFieldFeatures parentFs (fieldOptions fd)
+        in MEField fd {fieldLabel = effectiveLabel (featureFieldPresence fieldFs) (fieldLabel fd)}
+      MEMessage inner ->
+        MEMessage (applyMsgPresence parentFs inner)
+      MEOneof od ->
+        -- Oneof fields do not participate in presence features (they are
+        -- always explicitly-tracked by the oneof index).
+        MEOneof od
+      other -> other
+
+    -- Translate a FieldPresenceFeature to the appropriate FieldLabel,
+    -- preserving existing Repeated labels and only adjusting singular fields.
+    effectiveLabel :: FieldPresenceFeature -> Maybe FieldLabel -> Maybe FieldLabel
+    effectiveLabel _               (Just Repeated) = Just Repeated
+    effectiveLabel ExplicitPresence _               = Just Optional
+    effectiveLabel ImplicitPresence _               = Nothing
+    effectiveLabel LegacyRequired   _               = Just Required
 
 
 -- -----------------------------------------------------------------------

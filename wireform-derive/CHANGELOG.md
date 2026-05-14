@@ -1,6 +1,6 @@
 # Changelog for wireform-derive
 
-## 0.2.0.0 -- 2026
+## 0.1.0.0 -- 2026-05-16
 
 Initial public release of the cross-format deriver core.
 

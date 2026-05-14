@@ -7,17 +7,18 @@ import Data.Word (Word64)
 import Hedgehog
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
-import Proto.Decode (MessageDecode (..))
+import Proto (MessageDecode (..))
 import Proto.Decode.Stream (
   IDecode (..),
   decodeMessageIncremental,
   decodeMessageLazy,
   decodeMessageStream,
  )
-import Proto.Encode (MessageEncode (..), MessageSize (..), encodeMessage, encodeMessageLazy, encodeMessageSized, encodeMessageStream, encodeMessageStreamSized)
+import Proto (MessageEncode (..), encodeMessage, encodeMessageLazy, encodeMessageStream, encodeMessageStreamSized)
+import Proto.Internal.Encode (fieldBool, fieldString, fieldVarint)
 import Proto.Internal.Wire (Tag (..), WireType (..))
 import Proto.Internal.Wire.Decode (DecodeError (..), Decoder, getTagOr, getText, getVarint, skipField)
-import Proto.Internal.Wire.Encode (fieldBoolSize, fieldTextSize, fieldVarintSize, putTag, putText, putVarint)
+import Proto.Internal.Wire.Encode (putVarint)
 import Test.Tasty
 import Test.Tasty.HUnit hiding (assert)
 import Test.Tasty.Hedgehog
@@ -46,9 +47,6 @@ lazyEncodeTests =
     [ testProperty "encodeMessageLazy matches strict" $ property $ do
         msg <- genSMsg
         BL.toStrict (encodeMessageLazy msg) === encodeMessage msg
-    , testProperty "encodeMessageLazy matches strict" $ property $ do
-        msg <- genSMsg
-        BL.toStrict (encodeMessageLazy msg) === encodeMessageSized msg
     , testProperty "encodeMessageLazy matches encodeMessageLazy" $ property $ do
         msg <- genSMsg
         encodeMessageLazy msg === encodeMessageLazy msg
@@ -252,17 +250,10 @@ data SMsg = SMsg
 
 
 instance MessageEncode SMsg where
-  buildMessage msg =
-    (if smValue msg /= 0 then putTag 1 WireVarint <> putVarint (smValue msg) else mempty)
-      <> (if smName msg /= "" then putTag 2 WireLengthDelimited <> putText (smName msg) else mempty)
-      <> (if smActive msg then putTag 3 WireVarint <> putVarint 1 else mempty)
-
-
-instance MessageSize SMsg where
-  messageSize msg =
-    (if smValue msg /= 0 then fieldVarintSize 1 (smValue msg) else 0)
-      + (if smName msg /= "" then fieldTextSize 2 (smName msg) else 0)
-      + (if smActive msg then fieldBoolSize 3 else 0)
+  buildSized msg =
+    (if smValue msg /= 0 then fieldVarint 1 (smValue msg) else mempty)
+      <> (if smName msg /= "" then fieldString 2 (smName msg) else mempty)
+      <> (if smActive msg then fieldBool 3 (smActive msg) else mempty)
 
 
 instance MessageDecode SMsg where

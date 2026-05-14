@@ -11,8 +11,8 @@ import Data.Map.Strict qualified as Map
 import Data.Text qualified as T
 import Data.Vector qualified as V
 import Data.Word (Word8)
-import Proto.Decode qualified as PD
-import Proto.Encode qualified as PE
+import Proto qualified as PD
+import Proto qualified as PE
 import Test.Proto.Derive.AutoInstances ()
 import Test.Proto.Derive.AutoTypes (
   AutoCard (..),

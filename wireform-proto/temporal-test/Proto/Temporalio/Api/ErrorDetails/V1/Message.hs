@@ -26,8 +26,8 @@ import qualified Data.Vector.Unboxed as VU
 import GHC.Generics (Generic)
 import Control.DeepSeq (NFData(..))
 import Data.Hashable (Hashable(..))
-import Proto.Encode
-import Proto.Decode
+import Proto
+import Proto
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Types as Aeson
 import qualified Data.Aeson.Key as AesonKey

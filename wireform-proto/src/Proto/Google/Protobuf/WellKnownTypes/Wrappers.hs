@@ -11,7 +11,7 @@
 -- Any manual changes will be overwritten the next time code
 -- generation is run.  To modify the types or instances, edit the
 -- @.proto@ source file and re-run the code generator.
-module Proto.Google.Protobuf.Wrappers where
+module Proto.Google.Protobuf.WellKnownTypes.Wrappers where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
@@ -19,43 +19,39 @@ import qualified Wireform.Builder as B
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Word (Word32, Word64)
+import Data.Word (Word8, Word32, Word64)
+import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
 import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as VU
 import GHC.Generics (Generic)
 import Control.DeepSeq (NFData(..))
 import Data.Hashable (Hashable(..))
-import Proto.Encode
-import Proto.Decode
+import Proto.Internal.Encode
+import Proto.Internal.Decode
+import Proto.Internal.GrowList (GrowList, emptyGrowList, snocGrowList, growListToVector)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Types as Aeson
 import qualified Data.Aeson.Key as AesonKey
 import qualified Data.Aeson.KeyMap as AesonKM
-import Proto.Internal.JSON (jsonObject, (.=:), parseFieldMaybe, bytesFieldToJSON, parseBytesFieldMaybe, bytesMapFieldToJSON, parseBytesMapFieldMaybe, protoBytesToJSON)
+import Proto.Internal.JSON (jsonObject, (.=:), parseFieldMaybe, bytesFieldToJSON, parseBytesFieldMaybe, bytesMapFieldToJSON, parseBytesMapFieldMaybe, protoBytesToJSON, OneofVariantNullSemantics (..), parseOneofVariants)
 import Data.Proxy (Proxy(..))
-import Proto.Registry (IsMessage)
 import Proto.Schema (ProtoMessage(..), SomeFieldDescriptor(..), FieldDescriptor(..), FieldTypeDescriptor(..), ScalarFieldType(..), FieldLabel'(..))
-import qualified Proto.Registry
+import Proto.Registry (IsMessage)
+import Proto.Registry qualified
 import qualified Proto.Extension
 import Proto.Internal.Wire (Tag(..), WireType(..))
 import Proto.Internal.Wire.Encode (putTag, putVarint, putFixed32, putFixed64,
   putFloat, putDouble, putText, putByteString, putLengthDelimited,
   putSVarint32, putSVarint64, putVarintSigned,
-  varintSize, tagSize, fieldMessageSize,
-  fieldVarintSize, fieldFixed32Size, fieldFixed64Size,
-  fieldBoolSize, fieldFloatSize, fieldDoubleSize,
-  fieldTextSize, fieldBytesSize,
-  fieldSVarint32Size, fieldSVarint64Size,
+  varintSize, tagSize,
   varintSize32, zigZag32, zigZag64)
 import Proto.Internal.Encode.Archetype (archVarint, archSVarint32, archSVarint64,
   archFixed32, archFixed64, archFloat, archDouble, archBool,
-  archString, archBytes, archSubmessage,
-  archVarintSize, archStringSize, archBytesSize, archBoolSize,
-  archFixed32Size, archFixed64Size, archSubmessageSize)
+  archString, archBytes, archSubmessage)
 
 -- | Serialized FileDescriptorProto for this .proto file.
--- Decode with @Proto.Google.Protobuf.Descriptor.decodeMessage@.
+-- Decode with @Proto.Decode.decodeMessage@.
 fileDescriptorProtoBytes :: ByteString
 fileDescriptorProtoBytes = "\x0a\x1e\x67\x6f\x6f\x67\x6c\x65\x2f\x70\x72\x6f\x74\x6f\x62\x75\x66\x2f\x77\x72\x61\x70\x70\x65\x72\x73\x2e\x70\x72\x6f\x74\x6f\x12\x0f\x67\x6f\x6f\x67\x6c\x65\x2e\x70\x72\x6f\x74\x6f\x62\x75\x66\x22\x1c\x0a\x0b\x44\x6f\x75\x62\x6c\x65\x56\x61\x6c\x75\x65\x12\x0d\x0a\x05\x76\x61\x6c\x75\x65\x18\x01\x20\x01\x28\x01\x22\x1b\x0a\x0a\x46\x6c\x6f\x61\x74\x56\x61\x6c\x75\x65\x12\x0d\x0a\x05\x76\x61\x6c\x75\x65\x18\x01\x20\x01\x28\x02\x22\x1b\x0a\x0a\x49\x6e\x74\x36\x34\x56\x61\x6c\x75\x65\x12\x0d\x0a\x05\x76\x61\x6c\x75\x65\x18\x01\x20\x01\x28\x03\x22\x1c\x0a\x0b\x55\x49\x6e\x74\x36\x34\x56\x61\x6c\x75\x65\x12\x0d\x0a\x05\x76\x61\x6c\x75\x65\x18\x01\x20\x01\x28\x04\x22\x1b\x0a\x0a\x49\x6e\x74\x33\x32\x56\x61\x6c\x75\x65\x12\x0d\x0a\x05\x76\x61\x6c\x75\x65\x18\x01\x20\x01\x28\x05\x22\x1c\x0a\x0b\x55\x49\x6e\x74\x33\x32\x56\x61\x6c\x75\x65\x12\x0d\x0a\x05\x76\x61\x6c\x75\x65\x18\x01\x20\x01\x28\x0d\x22\x1a\x0a\x09\x42\x6f\x6f\x6c\x56\x61\x6c\x75\x65\x12\x0d\x0a\x05\x76\x61\x6c\x75\x65\x18\x01\x20\x01\x28\x08\x22\x1c\x0a\x0b\x53\x74\x72\x69\x6e\x67\x56\x61\x6c\x75\x65\x12\x0d\x0a\x05\x76\x61\x6c\x75\x65\x18\x01\x20\x01\x28\x09\x22\x1b\x0a\x0a\x42\x79\x74\x65\x73\x56\x61\x6c\x75\x65\x12\x0d\x0a\x05\x76\x61\x6c\x75\x65\x18\x01\x20\x01\x28\x0c\x62\x06\x70\x72\x6f\x74\x6f\x33"
 
@@ -74,37 +70,38 @@ defaultDoubleValue = DoubleValue
   }
 
 instance MessageEncode DoubleValue where
-  buildMessage msg =
+  buildSized msg =
     (if msg.doubleValueValue == 0 then mempty else archDouble 9 msg.doubleValueValue)
-    <> encodeUnknownFields msg.doubleValueUnknownFields
-
-instance MessageSize DoubleValue where
-  messageSize msg =
-    (if msg.doubleValueValue == 0 then 0 else archFixed64Size)
-    + unknownFieldsSize msg.doubleValueUnknownFields
+    <> encodeUnknownFieldsSized msg.doubleValueUnknownFields
 
 instance MessageDecode DoubleValue where
   {-# INLINE messageDecoder #-}
-  messageDecoder = loop 0 []
+  messageDecoder = stage_0 defaultDoubleValue
     where
-      loop acc_0 acc_unknown_ = withTagM
-        (pure (DoubleValue {doubleValueValue = acc_0, doubleValueUnknownFields = reverse acc_unknown_}))
+      stage_0 msg =
+        inOrderStage1
+          (0x9 :: Data.Word.Word8)
+          decodeFieldDouble
+          (\v -> loop (msg { doubleValueValue = v}))
+          (pure (case msg.doubleValueUnknownFields of { [] -> msg; _ -> msg { doubleValueUnknownFields = reverse (msg.doubleValueUnknownFields) } }))
+          (loop msg)
+      loop msg = withTagM
+        (pure (case msg.doubleValueUnknownFields of { [] -> msg; _ -> msg { doubleValueUnknownFields = reverse (msg.doubleValueUnknownFields) } }))
         (\fn wt -> case fn of
           1 -> do
             v <- decodeFieldDouble
-            loop v acc_unknown_
+            loop (msg { doubleValueValue = v})
           _ -> do
-            uf <- captureUnknownField fn (toEnum wt)
-            loop acc_0 (uf : acc_unknown_))
+            uf <- captureUnknownField fn (Prelude.toEnum wt)
+            loop (msg { doubleValueUnknownFields = (uf : msg.doubleValueUnknownFields)}))
 
-instance IsMessage DoubleValue
-
-instance ProtoMessage DoubleValue where
-  protoMessageName _ = "google.protobuf.DoubleValue"
-  protoPackageName _ = "google.protobuf"
-  protoDefaultValue = defaultDoubleValue
-  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
-  protoFieldDescriptors _ = Map.fromList
+-- | Field descriptors for 'DoubleValue', keyed by proto field number.
+--
+-- Top-level CAF: allocated lazily on first force, shared on every
+-- subsequent 'protoFieldDescriptors' call (no per-call rebuild).
+doubleValueFieldDescriptors :: IntMap.IntMap (SomeFieldDescriptor DoubleValue)
+doubleValueFieldDescriptors =
+  IntMap.fromList
     [ (1, SomeField FieldDescriptor
         { fdName = "value"
         , fdNumber = 1
@@ -114,6 +111,15 @@ instance ProtoMessage DoubleValue where
         , fdSet = \v m -> m { doubleValueValue = v }
         })
     ]
+
+instance ProtoMessage DoubleValue where
+  protoMessageName _ = "google.protobuf.DoubleValue"
+  protoPackageName _ = "google.protobuf"
+  protoDefaultValue = defaultDoubleValue
+  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
+  protoFieldDescriptors _ = doubleValueFieldDescriptors
+
+instance IsMessage DoubleValue
 
 instance Aeson.ToJSON DoubleValue where
   toJSON msg = jsonObject
@@ -137,7 +143,7 @@ instance Proto.Extension.HasExtensions DoubleValue where
 
 instance Semigroup DoubleValue where
   a <> b = DoubleValue
-    { doubleValueValue = b.doubleValueValue
+    { doubleValueValue = if b.doubleValueValue == 0 then a.doubleValueValue else b.doubleValueValue
     , doubleValueUnknownFields = a.doubleValueUnknownFields <> b.doubleValueUnknownFields
     }
 
@@ -158,37 +164,38 @@ defaultFloatValue = FloatValue
   }
 
 instance MessageEncode FloatValue where
-  buildMessage msg =
+  buildSized msg =
     (if msg.floatValueValue == 0 then mempty else archFloat 13 msg.floatValueValue)
-    <> encodeUnknownFields msg.floatValueUnknownFields
-
-instance MessageSize FloatValue where
-  messageSize msg =
-    (if msg.floatValueValue == 0 then 0 else archFixed32Size)
-    + unknownFieldsSize msg.floatValueUnknownFields
+    <> encodeUnknownFieldsSized msg.floatValueUnknownFields
 
 instance MessageDecode FloatValue where
   {-# INLINE messageDecoder #-}
-  messageDecoder = loop 0 []
+  messageDecoder = stage_0 defaultFloatValue
     where
-      loop acc_0 acc_unknown_ = withTagM
-        (pure (FloatValue {floatValueValue = acc_0, floatValueUnknownFields = reverse acc_unknown_}))
+      stage_0 msg =
+        inOrderStage1
+          (0xd :: Data.Word.Word8)
+          decodeFieldFloat
+          (\v -> loop (msg { floatValueValue = v}))
+          (pure (case msg.floatValueUnknownFields of { [] -> msg; _ -> msg { floatValueUnknownFields = reverse (msg.floatValueUnknownFields) } }))
+          (loop msg)
+      loop msg = withTagM
+        (pure (case msg.floatValueUnknownFields of { [] -> msg; _ -> msg { floatValueUnknownFields = reverse (msg.floatValueUnknownFields) } }))
         (\fn wt -> case fn of
           1 -> do
             v <- decodeFieldFloat
-            loop v acc_unknown_
+            loop (msg { floatValueValue = v})
           _ -> do
-            uf <- captureUnknownField fn (toEnum wt)
-            loop acc_0 (uf : acc_unknown_))
+            uf <- captureUnknownField fn (Prelude.toEnum wt)
+            loop (msg { floatValueUnknownFields = (uf : msg.floatValueUnknownFields)}))
 
-instance IsMessage FloatValue
-
-instance ProtoMessage FloatValue where
-  protoMessageName _ = "google.protobuf.FloatValue"
-  protoPackageName _ = "google.protobuf"
-  protoDefaultValue = defaultFloatValue
-  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
-  protoFieldDescriptors _ = Map.fromList
+-- | Field descriptors for 'FloatValue', keyed by proto field number.
+--
+-- Top-level CAF: allocated lazily on first force, shared on every
+-- subsequent 'protoFieldDescriptors' call (no per-call rebuild).
+floatValueFieldDescriptors :: IntMap.IntMap (SomeFieldDescriptor FloatValue)
+floatValueFieldDescriptors =
+  IntMap.fromList
     [ (1, SomeField FieldDescriptor
         { fdName = "value"
         , fdNumber = 1
@@ -198,6 +205,15 @@ instance ProtoMessage FloatValue where
         , fdSet = \v m -> m { floatValueValue = v }
         })
     ]
+
+instance ProtoMessage FloatValue where
+  protoMessageName _ = "google.protobuf.FloatValue"
+  protoPackageName _ = "google.protobuf"
+  protoDefaultValue = defaultFloatValue
+  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
+  protoFieldDescriptors _ = floatValueFieldDescriptors
+
+instance IsMessage FloatValue
 
 instance Aeson.ToJSON FloatValue where
   toJSON msg = jsonObject
@@ -221,7 +237,7 @@ instance Proto.Extension.HasExtensions FloatValue where
 
 instance Semigroup FloatValue where
   a <> b = FloatValue
-    { floatValueValue = b.floatValueValue
+    { floatValueValue = if b.floatValueValue == 0 then a.floatValueValue else b.floatValueValue
     , floatValueUnknownFields = a.floatValueUnknownFields <> b.floatValueUnknownFields
     }
 
@@ -242,37 +258,38 @@ defaultInt64Value = Int64Value
   }
 
 instance MessageEncode Int64Value where
-  buildMessage msg =
+  buildSized msg =
     (if msg.int64ValueValue == 0 then mempty else archVarint 8 (fromIntegral msg.int64ValueValue))
-    <> encodeUnknownFields msg.int64ValueUnknownFields
-
-instance MessageSize Int64Value where
-  messageSize msg =
-    (if msg.int64ValueValue == 0 then 0 else archVarintSize (fromIntegral msg.int64ValueValue))
-    + unknownFieldsSize msg.int64ValueUnknownFields
+    <> encodeUnknownFieldsSized msg.int64ValueUnknownFields
 
 instance MessageDecode Int64Value where
   {-# INLINE messageDecoder #-}
-  messageDecoder = loop 0 []
+  messageDecoder = stage_0 defaultInt64Value
     where
-      loop acc_0 acc_unknown_ = withTagM
-        (pure (Int64Value {int64ValueValue = acc_0, int64ValueUnknownFields = reverse acc_unknown_}))
+      stage_0 msg =
+        inOrderStage1
+          (0x8 :: Data.Word.Word8)
+          (fromIntegral <$> decodeFieldVarint)
+          (\v -> loop (msg { int64ValueValue = v}))
+          (pure (case msg.int64ValueUnknownFields of { [] -> msg; _ -> msg { int64ValueUnknownFields = reverse (msg.int64ValueUnknownFields) } }))
+          (loop msg)
+      loop msg = withTagM
+        (pure (case msg.int64ValueUnknownFields of { [] -> msg; _ -> msg { int64ValueUnknownFields = reverse (msg.int64ValueUnknownFields) } }))
         (\fn wt -> case fn of
           1 -> do
             v <- (fromIntegral <$> decodeFieldVarint)
-            loop v acc_unknown_
+            loop (msg { int64ValueValue = v})
           _ -> do
-            uf <- captureUnknownField fn (toEnum wt)
-            loop acc_0 (uf : acc_unknown_))
+            uf <- captureUnknownField fn (Prelude.toEnum wt)
+            loop (msg { int64ValueUnknownFields = (uf : msg.int64ValueUnknownFields)}))
 
-instance IsMessage Int64Value
-
-instance ProtoMessage Int64Value where
-  protoMessageName _ = "google.protobuf.Int64Value"
-  protoPackageName _ = "google.protobuf"
-  protoDefaultValue = defaultInt64Value
-  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
-  protoFieldDescriptors _ = Map.fromList
+-- | Field descriptors for 'Int64Value', keyed by proto field number.
+--
+-- Top-level CAF: allocated lazily on first force, shared on every
+-- subsequent 'protoFieldDescriptors' call (no per-call rebuild).
+int64ValueFieldDescriptors :: IntMap.IntMap (SomeFieldDescriptor Int64Value)
+int64ValueFieldDescriptors =
+  IntMap.fromList
     [ (1, SomeField FieldDescriptor
         { fdName = "value"
         , fdNumber = 1
@@ -282,6 +299,15 @@ instance ProtoMessage Int64Value where
         , fdSet = \v m -> m { int64ValueValue = v }
         })
     ]
+
+instance ProtoMessage Int64Value where
+  protoMessageName _ = "google.protobuf.Int64Value"
+  protoPackageName _ = "google.protobuf"
+  protoDefaultValue = defaultInt64Value
+  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
+  protoFieldDescriptors _ = int64ValueFieldDescriptors
+
+instance IsMessage Int64Value
 
 instance Aeson.ToJSON Int64Value where
   toJSON msg = jsonObject
@@ -305,7 +331,7 @@ instance Proto.Extension.HasExtensions Int64Value where
 
 instance Semigroup Int64Value where
   a <> b = Int64Value
-    { int64ValueValue = b.int64ValueValue
+    { int64ValueValue = if b.int64ValueValue == 0 then a.int64ValueValue else b.int64ValueValue
     , int64ValueUnknownFields = a.int64ValueUnknownFields <> b.int64ValueUnknownFields
     }
 
@@ -326,37 +352,38 @@ defaultUInt64Value = UInt64Value
   }
 
 instance MessageEncode UInt64Value where
-  buildMessage msg =
+  buildSized msg =
     (if msg.uInt64ValueValue == 0 then mempty else archVarint 8 msg.uInt64ValueValue)
-    <> encodeUnknownFields msg.uInt64ValueUnknownFields
-
-instance MessageSize UInt64Value where
-  messageSize msg =
-    (if msg.uInt64ValueValue == 0 then 0 else archVarintSize msg.uInt64ValueValue)
-    + unknownFieldsSize msg.uInt64ValueUnknownFields
+    <> encodeUnknownFieldsSized msg.uInt64ValueUnknownFields
 
 instance MessageDecode UInt64Value where
   {-# INLINE messageDecoder #-}
-  messageDecoder = loop 0 []
+  messageDecoder = stage_0 defaultUInt64Value
     where
-      loop acc_0 acc_unknown_ = withTagM
-        (pure (UInt64Value {uInt64ValueValue = acc_0, uInt64ValueUnknownFields = reverse acc_unknown_}))
+      stage_0 msg =
+        inOrderStage1
+          (0x8 :: Data.Word.Word8)
+          decodeFieldVarint
+          (\v -> loop (msg { uInt64ValueValue = v}))
+          (pure (case msg.uInt64ValueUnknownFields of { [] -> msg; _ -> msg { uInt64ValueUnknownFields = reverse (msg.uInt64ValueUnknownFields) } }))
+          (loop msg)
+      loop msg = withTagM
+        (pure (case msg.uInt64ValueUnknownFields of { [] -> msg; _ -> msg { uInt64ValueUnknownFields = reverse (msg.uInt64ValueUnknownFields) } }))
         (\fn wt -> case fn of
           1 -> do
             v <- decodeFieldVarint
-            loop v acc_unknown_
+            loop (msg { uInt64ValueValue = v})
           _ -> do
-            uf <- captureUnknownField fn (toEnum wt)
-            loop acc_0 (uf : acc_unknown_))
+            uf <- captureUnknownField fn (Prelude.toEnum wt)
+            loop (msg { uInt64ValueUnknownFields = (uf : msg.uInt64ValueUnknownFields)}))
 
-instance IsMessage UInt64Value
-
-instance ProtoMessage UInt64Value where
-  protoMessageName _ = "google.protobuf.UInt64Value"
-  protoPackageName _ = "google.protobuf"
-  protoDefaultValue = defaultUInt64Value
-  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
-  protoFieldDescriptors _ = Map.fromList
+-- | Field descriptors for 'UInt64Value', keyed by proto field number.
+--
+-- Top-level CAF: allocated lazily on first force, shared on every
+-- subsequent 'protoFieldDescriptors' call (no per-call rebuild).
+uInt64ValueFieldDescriptors :: IntMap.IntMap (SomeFieldDescriptor UInt64Value)
+uInt64ValueFieldDescriptors =
+  IntMap.fromList
     [ (1, SomeField FieldDescriptor
         { fdName = "value"
         , fdNumber = 1
@@ -366,6 +393,15 @@ instance ProtoMessage UInt64Value where
         , fdSet = \v m -> m { uInt64ValueValue = v }
         })
     ]
+
+instance ProtoMessage UInt64Value where
+  protoMessageName _ = "google.protobuf.UInt64Value"
+  protoPackageName _ = "google.protobuf"
+  protoDefaultValue = defaultUInt64Value
+  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
+  protoFieldDescriptors _ = uInt64ValueFieldDescriptors
+
+instance IsMessage UInt64Value
 
 instance Aeson.ToJSON UInt64Value where
   toJSON msg = jsonObject
@@ -389,7 +425,7 @@ instance Proto.Extension.HasExtensions UInt64Value where
 
 instance Semigroup UInt64Value where
   a <> b = UInt64Value
-    { uInt64ValueValue = b.uInt64ValueValue
+    { uInt64ValueValue = if b.uInt64ValueValue == 0 then a.uInt64ValueValue else b.uInt64ValueValue
     , uInt64ValueUnknownFields = a.uInt64ValueUnknownFields <> b.uInt64ValueUnknownFields
     }
 
@@ -410,37 +446,38 @@ defaultInt32Value = Int32Value
   }
 
 instance MessageEncode Int32Value where
-  buildMessage msg =
+  buildSized msg =
     (if msg.int32ValueValue == 0 then mempty else archVarint 8 (fromIntegral msg.int32ValueValue))
-    <> encodeUnknownFields msg.int32ValueUnknownFields
-
-instance MessageSize Int32Value where
-  messageSize msg =
-    (if msg.int32ValueValue == 0 then 0 else archVarintSize (fromIntegral msg.int32ValueValue))
-    + unknownFieldsSize msg.int32ValueUnknownFields
+    <> encodeUnknownFieldsSized msg.int32ValueUnknownFields
 
 instance MessageDecode Int32Value where
   {-# INLINE messageDecoder #-}
-  messageDecoder = loop 0 []
+  messageDecoder = stage_0 defaultInt32Value
     where
-      loop acc_0 acc_unknown_ = withTagM
-        (pure (Int32Value {int32ValueValue = acc_0, int32ValueUnknownFields = reverse acc_unknown_}))
+      stage_0 msg =
+        inOrderStage1
+          (0x8 :: Data.Word.Word8)
+          (fromIntegral <$> decodeFieldVarint)
+          (\v -> loop (msg { int32ValueValue = v}))
+          (pure (case msg.int32ValueUnknownFields of { [] -> msg; _ -> msg { int32ValueUnknownFields = reverse (msg.int32ValueUnknownFields) } }))
+          (loop msg)
+      loop msg = withTagM
+        (pure (case msg.int32ValueUnknownFields of { [] -> msg; _ -> msg { int32ValueUnknownFields = reverse (msg.int32ValueUnknownFields) } }))
         (\fn wt -> case fn of
           1 -> do
             v <- (fromIntegral <$> decodeFieldVarint)
-            loop v acc_unknown_
+            loop (msg { int32ValueValue = v})
           _ -> do
-            uf <- captureUnknownField fn (toEnum wt)
-            loop acc_0 (uf : acc_unknown_))
+            uf <- captureUnknownField fn (Prelude.toEnum wt)
+            loop (msg { int32ValueUnknownFields = (uf : msg.int32ValueUnknownFields)}))
 
-instance IsMessage Int32Value
-
-instance ProtoMessage Int32Value where
-  protoMessageName _ = "google.protobuf.Int32Value"
-  protoPackageName _ = "google.protobuf"
-  protoDefaultValue = defaultInt32Value
-  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
-  protoFieldDescriptors _ = Map.fromList
+-- | Field descriptors for 'Int32Value', keyed by proto field number.
+--
+-- Top-level CAF: allocated lazily on first force, shared on every
+-- subsequent 'protoFieldDescriptors' call (no per-call rebuild).
+int32ValueFieldDescriptors :: IntMap.IntMap (SomeFieldDescriptor Int32Value)
+int32ValueFieldDescriptors =
+  IntMap.fromList
     [ (1, SomeField FieldDescriptor
         { fdName = "value"
         , fdNumber = 1
@@ -450,6 +487,15 @@ instance ProtoMessage Int32Value where
         , fdSet = \v m -> m { int32ValueValue = v }
         })
     ]
+
+instance ProtoMessage Int32Value where
+  protoMessageName _ = "google.protobuf.Int32Value"
+  protoPackageName _ = "google.protobuf"
+  protoDefaultValue = defaultInt32Value
+  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
+  protoFieldDescriptors _ = int32ValueFieldDescriptors
+
+instance IsMessage Int32Value
 
 instance Aeson.ToJSON Int32Value where
   toJSON msg = jsonObject
@@ -473,7 +519,7 @@ instance Proto.Extension.HasExtensions Int32Value where
 
 instance Semigroup Int32Value where
   a <> b = Int32Value
-    { int32ValueValue = b.int32ValueValue
+    { int32ValueValue = if b.int32ValueValue == 0 then a.int32ValueValue else b.int32ValueValue
     , int32ValueUnknownFields = a.int32ValueUnknownFields <> b.int32ValueUnknownFields
     }
 
@@ -494,37 +540,38 @@ defaultUInt32Value = UInt32Value
   }
 
 instance MessageEncode UInt32Value where
-  buildMessage msg =
+  buildSized msg =
     (if msg.uInt32ValueValue == 0 then mempty else archVarint 8 (fromIntegral msg.uInt32ValueValue))
-    <> encodeUnknownFields msg.uInt32ValueUnknownFields
-
-instance MessageSize UInt32Value where
-  messageSize msg =
-    (if msg.uInt32ValueValue == 0 then 0 else archVarintSize (fromIntegral msg.uInt32ValueValue))
-    + unknownFieldsSize msg.uInt32ValueUnknownFields
+    <> encodeUnknownFieldsSized msg.uInt32ValueUnknownFields
 
 instance MessageDecode UInt32Value where
   {-# INLINE messageDecoder #-}
-  messageDecoder = loop 0 []
+  messageDecoder = stage_0 defaultUInt32Value
     where
-      loop acc_0 acc_unknown_ = withTagM
-        (pure (UInt32Value {uInt32ValueValue = acc_0, uInt32ValueUnknownFields = reverse acc_unknown_}))
+      stage_0 msg =
+        inOrderStage1
+          (0x8 :: Data.Word.Word8)
+          (fromIntegral <$> decodeFieldVarint)
+          (\v -> loop (msg { uInt32ValueValue = v}))
+          (pure (case msg.uInt32ValueUnknownFields of { [] -> msg; _ -> msg { uInt32ValueUnknownFields = reverse (msg.uInt32ValueUnknownFields) } }))
+          (loop msg)
+      loop msg = withTagM
+        (pure (case msg.uInt32ValueUnknownFields of { [] -> msg; _ -> msg { uInt32ValueUnknownFields = reverse (msg.uInt32ValueUnknownFields) } }))
         (\fn wt -> case fn of
           1 -> do
             v <- (fromIntegral <$> decodeFieldVarint)
-            loop v acc_unknown_
+            loop (msg { uInt32ValueValue = v})
           _ -> do
-            uf <- captureUnknownField fn (toEnum wt)
-            loop acc_0 (uf : acc_unknown_))
+            uf <- captureUnknownField fn (Prelude.toEnum wt)
+            loop (msg { uInt32ValueUnknownFields = (uf : msg.uInt32ValueUnknownFields)}))
 
-instance IsMessage UInt32Value
-
-instance ProtoMessage UInt32Value where
-  protoMessageName _ = "google.protobuf.UInt32Value"
-  protoPackageName _ = "google.protobuf"
-  protoDefaultValue = defaultUInt32Value
-  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
-  protoFieldDescriptors _ = Map.fromList
+-- | Field descriptors for 'UInt32Value', keyed by proto field number.
+--
+-- Top-level CAF: allocated lazily on first force, shared on every
+-- subsequent 'protoFieldDescriptors' call (no per-call rebuild).
+uInt32ValueFieldDescriptors :: IntMap.IntMap (SomeFieldDescriptor UInt32Value)
+uInt32ValueFieldDescriptors =
+  IntMap.fromList
     [ (1, SomeField FieldDescriptor
         { fdName = "value"
         , fdNumber = 1
@@ -534,6 +581,15 @@ instance ProtoMessage UInt32Value where
         , fdSet = \v m -> m { uInt32ValueValue = v }
         })
     ]
+
+instance ProtoMessage UInt32Value where
+  protoMessageName _ = "google.protobuf.UInt32Value"
+  protoPackageName _ = "google.protobuf"
+  protoDefaultValue = defaultUInt32Value
+  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
+  protoFieldDescriptors _ = uInt32ValueFieldDescriptors
+
+instance IsMessage UInt32Value
 
 instance Aeson.ToJSON UInt32Value where
   toJSON msg = jsonObject
@@ -557,7 +613,7 @@ instance Proto.Extension.HasExtensions UInt32Value where
 
 instance Semigroup UInt32Value where
   a <> b = UInt32Value
-    { uInt32ValueValue = b.uInt32ValueValue
+    { uInt32ValueValue = if b.uInt32ValueValue == 0 then a.uInt32ValueValue else b.uInt32ValueValue
     , uInt32ValueUnknownFields = a.uInt32ValueUnknownFields <> b.uInt32ValueUnknownFields
     }
 
@@ -578,37 +634,38 @@ defaultBoolValue = BoolValue
   }
 
 instance MessageEncode BoolValue where
-  buildMessage msg =
+  buildSized msg =
     (if msg.boolValueValue == False then mempty else archBool 8 msg.boolValueValue)
-    <> encodeUnknownFields msg.boolValueUnknownFields
-
-instance MessageSize BoolValue where
-  messageSize msg =
-    (if msg.boolValueValue == False then 0 else archBoolSize)
-    + unknownFieldsSize msg.boolValueUnknownFields
+    <> encodeUnknownFieldsSized msg.boolValueUnknownFields
 
 instance MessageDecode BoolValue where
   {-# INLINE messageDecoder #-}
-  messageDecoder = loop False []
+  messageDecoder = stage_0 defaultBoolValue
     where
-      loop acc_0 acc_unknown_ = withTagM
-        (pure (BoolValue {boolValueValue = acc_0, boolValueUnknownFields = reverse acc_unknown_}))
+      stage_0 msg =
+        inOrderStage1
+          (0x8 :: Data.Word.Word8)
+          decodeFieldBool
+          (\v -> loop (msg { boolValueValue = v}))
+          (pure (case msg.boolValueUnknownFields of { [] -> msg; _ -> msg { boolValueUnknownFields = reverse (msg.boolValueUnknownFields) } }))
+          (loop msg)
+      loop msg = withTagM
+        (pure (case msg.boolValueUnknownFields of { [] -> msg; _ -> msg { boolValueUnknownFields = reverse (msg.boolValueUnknownFields) } }))
         (\fn wt -> case fn of
           1 -> do
             v <- decodeFieldBool
-            loop v acc_unknown_
+            loop (msg { boolValueValue = v})
           _ -> do
-            uf <- captureUnknownField fn (toEnum wt)
-            loop acc_0 (uf : acc_unknown_))
+            uf <- captureUnknownField fn (Prelude.toEnum wt)
+            loop (msg { boolValueUnknownFields = (uf : msg.boolValueUnknownFields)}))
 
-instance IsMessage BoolValue
-
-instance ProtoMessage BoolValue where
-  protoMessageName _ = "google.protobuf.BoolValue"
-  protoPackageName _ = "google.protobuf"
-  protoDefaultValue = defaultBoolValue
-  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
-  protoFieldDescriptors _ = Map.fromList
+-- | Field descriptors for 'BoolValue', keyed by proto field number.
+--
+-- Top-level CAF: allocated lazily on first force, shared on every
+-- subsequent 'protoFieldDescriptors' call (no per-call rebuild).
+boolValueFieldDescriptors :: IntMap.IntMap (SomeFieldDescriptor BoolValue)
+boolValueFieldDescriptors =
+  IntMap.fromList
     [ (1, SomeField FieldDescriptor
         { fdName = "value"
         , fdNumber = 1
@@ -618,6 +675,15 @@ instance ProtoMessage BoolValue where
         , fdSet = \v m -> m { boolValueValue = v }
         })
     ]
+
+instance ProtoMessage BoolValue where
+  protoMessageName _ = "google.protobuf.BoolValue"
+  protoPackageName _ = "google.protobuf"
+  protoDefaultValue = defaultBoolValue
+  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
+  protoFieldDescriptors _ = boolValueFieldDescriptors
+
+instance IsMessage BoolValue
 
 instance Aeson.ToJSON BoolValue where
   toJSON msg = jsonObject
@@ -641,7 +707,7 @@ instance Proto.Extension.HasExtensions BoolValue where
 
 instance Semigroup BoolValue where
   a <> b = BoolValue
-    { boolValueValue = b.boolValueValue
+    { boolValueValue = if b.boolValueValue == False then a.boolValueValue else b.boolValueValue
     , boolValueUnknownFields = a.boolValueUnknownFields <> b.boolValueUnknownFields
     }
 
@@ -662,37 +728,38 @@ defaultStringValue = StringValue
   }
 
 instance MessageEncode StringValue where
-  buildMessage msg =
+  buildSized msg =
     (if msg.stringValueValue == T.empty then mempty else archString 10 msg.stringValueValue)
-    <> encodeUnknownFields msg.stringValueUnknownFields
-
-instance MessageSize StringValue where
-  messageSize msg =
-    (if msg.stringValueValue == T.empty then 0 else archStringSize msg.stringValueValue)
-    + unknownFieldsSize msg.stringValueUnknownFields
+    <> encodeUnknownFieldsSized msg.stringValueUnknownFields
 
 instance MessageDecode StringValue where
   {-# INLINE messageDecoder #-}
-  messageDecoder = loop "" []
+  messageDecoder = stage_0 defaultStringValue
     where
-      loop acc_0 acc_unknown_ = withTagM
-        (pure (StringValue {stringValueValue = acc_0, stringValueUnknownFields = reverse acc_unknown_}))
+      stage_0 msg =
+        inOrderStage1
+          (0xa :: Data.Word.Word8)
+          decodeFieldString
+          (\v -> loop (msg { stringValueValue = v}))
+          (pure (case msg.stringValueUnknownFields of { [] -> msg; _ -> msg { stringValueUnknownFields = reverse (msg.stringValueUnknownFields) } }))
+          (loop msg)
+      loop msg = withTagM
+        (pure (case msg.stringValueUnknownFields of { [] -> msg; _ -> msg { stringValueUnknownFields = reverse (msg.stringValueUnknownFields) } }))
         (\fn wt -> case fn of
           1 -> do
             v <- decodeFieldString
-            loop v acc_unknown_
+            loop (msg { stringValueValue = v})
           _ -> do
-            uf <- captureUnknownField fn (toEnum wt)
-            loop acc_0 (uf : acc_unknown_))
+            uf <- captureUnknownField fn (Prelude.toEnum wt)
+            loop (msg { stringValueUnknownFields = (uf : msg.stringValueUnknownFields)}))
 
-instance IsMessage StringValue
-
-instance ProtoMessage StringValue where
-  protoMessageName _ = "google.protobuf.StringValue"
-  protoPackageName _ = "google.protobuf"
-  protoDefaultValue = defaultStringValue
-  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
-  protoFieldDescriptors _ = Map.fromList
+-- | Field descriptors for 'StringValue', keyed by proto field number.
+--
+-- Top-level CAF: allocated lazily on first force, shared on every
+-- subsequent 'protoFieldDescriptors' call (no per-call rebuild).
+stringValueFieldDescriptors :: IntMap.IntMap (SomeFieldDescriptor StringValue)
+stringValueFieldDescriptors =
+  IntMap.fromList
     [ (1, SomeField FieldDescriptor
         { fdName = "value"
         , fdNumber = 1
@@ -702,6 +769,15 @@ instance ProtoMessage StringValue where
         , fdSet = \v m -> m { stringValueValue = v }
         })
     ]
+
+instance ProtoMessage StringValue where
+  protoMessageName _ = "google.protobuf.StringValue"
+  protoPackageName _ = "google.protobuf"
+  protoDefaultValue = defaultStringValue
+  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
+  protoFieldDescriptors _ = stringValueFieldDescriptors
+
+instance IsMessage StringValue
 
 instance Aeson.ToJSON StringValue where
   toJSON msg = jsonObject
@@ -725,7 +801,7 @@ instance Proto.Extension.HasExtensions StringValue where
 
 instance Semigroup StringValue where
   a <> b = StringValue
-    { stringValueValue = b.stringValueValue
+    { stringValueValue = if b.stringValueValue == "" then a.stringValueValue else b.stringValueValue
     , stringValueUnknownFields = a.stringValueUnknownFields <> b.stringValueUnknownFields
     }
 
@@ -746,37 +822,38 @@ defaultBytesValue = BytesValue
   }
 
 instance MessageEncode BytesValue where
-  buildMessage msg =
+  buildSized msg =
     (if BS.null msg.bytesValueValue then mempty else archBytes 10 msg.bytesValueValue)
-    <> encodeUnknownFields msg.bytesValueUnknownFields
-
-instance MessageSize BytesValue where
-  messageSize msg =
-    (if BS.null msg.bytesValueValue then 0 else archBytesSize msg.bytesValueValue)
-    + unknownFieldsSize msg.bytesValueUnknownFields
+    <> encodeUnknownFieldsSized msg.bytesValueUnknownFields
 
 instance MessageDecode BytesValue where
   {-# INLINE messageDecoder #-}
-  messageDecoder = loop "" []
+  messageDecoder = stage_0 defaultBytesValue
     where
-      loop acc_0 acc_unknown_ = withTagM
-        (pure (BytesValue {bytesValueValue = acc_0, bytesValueUnknownFields = reverse acc_unknown_}))
+      stage_0 msg =
+        inOrderStage1
+          (0xa :: Data.Word.Word8)
+          decodeFieldBytes
+          (\v -> loop (msg { bytesValueValue = v}))
+          (pure (case msg.bytesValueUnknownFields of { [] -> msg; _ -> msg { bytesValueUnknownFields = reverse (msg.bytesValueUnknownFields) } }))
+          (loop msg)
+      loop msg = withTagM
+        (pure (case msg.bytesValueUnknownFields of { [] -> msg; _ -> msg { bytesValueUnknownFields = reverse (msg.bytesValueUnknownFields) } }))
         (\fn wt -> case fn of
           1 -> do
             v <- decodeFieldBytes
-            loop v acc_unknown_
+            loop (msg { bytesValueValue = v})
           _ -> do
-            uf <- captureUnknownField fn (toEnum wt)
-            loop acc_0 (uf : acc_unknown_))
+            uf <- captureUnknownField fn (Prelude.toEnum wt)
+            loop (msg { bytesValueUnknownFields = (uf : msg.bytesValueUnknownFields)}))
 
-instance IsMessage BytesValue
-
-instance ProtoMessage BytesValue where
-  protoMessageName _ = "google.protobuf.BytesValue"
-  protoPackageName _ = "google.protobuf"
-  protoDefaultValue = defaultBytesValue
-  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
-  protoFieldDescriptors _ = Map.fromList
+-- | Field descriptors for 'BytesValue', keyed by proto field number.
+--
+-- Top-level CAF: allocated lazily on first force, shared on every
+-- subsequent 'protoFieldDescriptors' call (no per-call rebuild).
+bytesValueFieldDescriptors :: IntMap.IntMap (SomeFieldDescriptor BytesValue)
+bytesValueFieldDescriptors =
+  IntMap.fromList
     [ (1, SomeField FieldDescriptor
         { fdName = "value"
         , fdNumber = 1
@@ -786,6 +863,15 @@ instance ProtoMessage BytesValue where
         , fdSet = \v m -> m { bytesValueValue = v }
         })
     ]
+
+instance ProtoMessage BytesValue where
+  protoMessageName _ = "google.protobuf.BytesValue"
+  protoPackageName _ = "google.protobuf"
+  protoDefaultValue = defaultBytesValue
+  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
+  protoFieldDescriptors _ = bytesValueFieldDescriptors
+
+instance IsMessage BytesValue
 
 instance Aeson.ToJSON BytesValue where
   toJSON msg = jsonObject
@@ -809,22 +895,9 @@ instance Proto.Extension.HasExtensions BytesValue where
 
 instance Semigroup BytesValue where
   a <> b = BytesValue
-    { bytesValueValue = b.bytesValueValue
+    { bytesValueValue = if b.bytesValueValue == "" then a.bytesValueValue else b.bytesValueValue
     , bytesValueUnknownFields = a.bytesValueUnknownFields <> b.bytesValueUnknownFields
     }
 
 instance Monoid BytesValue where
   mempty = defaultBytesValue
-
--- | Register all message types defined in this module.
-registerModuleTypes :: Proto.Registry.TypeRegistry -> Proto.Registry.TypeRegistry
-registerModuleTypes =
-  Proto.Registry.registerMessage (Proxy :: Proxy DoubleValue) .
-  Proto.Registry.registerMessage (Proxy :: Proxy FloatValue) .
-  Proto.Registry.registerMessage (Proxy :: Proxy Int64Value) .
-  Proto.Registry.registerMessage (Proxy :: Proxy UInt64Value) .
-  Proto.Registry.registerMessage (Proxy :: Proxy Int32Value) .
-  Proto.Registry.registerMessage (Proxy :: Proxy UInt32Value) .
-  Proto.Registry.registerMessage (Proxy :: Proxy BoolValue) .
-  Proto.Registry.registerMessage (Proxy :: Proxy StringValue) .
-  Proto.Registry.registerMessage (Proxy :: Proxy BytesValue) .  id

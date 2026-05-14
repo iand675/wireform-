@@ -25,7 +25,7 @@
   "validVersions": "1-2",
   "flexibleVersions": "2+",
   "fields": [
-    { "name": "Dirs", "type": "[]AlterReplicaLogDir", "versions": "0+", 
+    { "name": "Dirs", "type": "[]AlterReplicaLogDir", "versions": "0+",
       "about": "The alterations to make for each directory.", "fields": [
       { "name": "Path", "type": "string", "versions": "0+", "mapKey": true,
         "about": "The absolute directory path." },

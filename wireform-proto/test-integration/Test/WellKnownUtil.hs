@@ -16,16 +16,16 @@ import Test.Tasty
 import Test.Tasty.HUnit hiding (assert)
 import Test.Tasty.Hedgehog
 
-import Proto.Google.Protobuf.Timestamp
-import Proto.Google.Protobuf.Timestamp.Util
-import Proto.Google.Protobuf.Duration
-import Proto.Google.Protobuf.Duration.Util
-import Proto.Google.Protobuf.FieldMask
-import Proto.Google.Protobuf.FieldMask.Util
-import Proto.Google.Protobuf.Wrappers
-import Proto.Google.Protobuf.Wrappers.Util
-import Proto.Google.Protobuf.Struct
-import Proto.Google.Protobuf.Struct.Util
+import Proto.Google.Protobuf.WellKnownTypes.Timestamp
+import Proto.Google.Protobuf.WellKnownTypes.Timestamp.Util
+import Proto.Google.Protobuf.WellKnownTypes.Duration
+import Proto.Google.Protobuf.WellKnownTypes.Duration.Util
+import Proto.Google.Protobuf.WellKnownTypes.FieldMask
+import Proto.Google.Protobuf.WellKnownTypes.FieldMask.Util
+import Proto.Google.Protobuf.WellKnownTypes.Wrappers
+import Proto.Google.Protobuf.WellKnownTypes.Wrappers.Util
+import Proto.Google.Protobuf.WellKnownTypes.Struct
+import Proto.Google.Protobuf.WellKnownTypes.Struct.Util
 
 wellKnownUtilTests :: TestTree
 wellKnownUtilTests = testGroup "Well-Known Type Utilities"

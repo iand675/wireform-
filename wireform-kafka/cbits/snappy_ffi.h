@@ -24,4 +24,3 @@ size_t snappy_decompress_wrapper(const char* input, size_t input_length,
                                   char** output, size_t* output_length);
 
 #endif /* SNAPPY_FFI_H */
-

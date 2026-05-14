@@ -6,19 +6,6 @@ description:
   Cross-format SWAR / SIMD-accelerated primitives used by every
   @wireform-*@ format package.
   .
-  Modules:
-  .
-  * @Wireform.FFI@ -- C FFI surface: packed-varint pre-scan + decode,
-    SWAR UTF-8 validation, SIMD NUL / byte / ASCII / whitespace
-    scanners, SIMD JSON escape scanner, SIMD Iceberg bounds compare,
-    Arrow IPC buffer validation, endianness helpers.
-  * @Wireform.Encode.Direct@ -- shared direct-write encode buffer
-    used by the per-format encoders.
-  * @Wireform.Hash@ -- SIMD-accelerated hashing helpers.
-  .
-  Pulls in C sources (@cbits\/fast_decode.c@, @cbits\/fast_scan.c@,
-  @cbits\/wireform_hash_simd.c@) and the vendored @simde@ headers.
-  Contains no format-specific code.
 homepage: https://github.com/iand675/wireform-
 bug-reports: https://github.com/iand675/wireform-/issues
 license: BSD-3-Clause
@@ -74,10 +61,9 @@ library
              cbits/fast_scan.c
              cbits/wireform_hash_simd.c
   include-dirs: include/simde
-  cc-options: -O3
   build-depends:
     base >= 4.16 && < 5,
     bytestring >= 0.11 && < 0.13,
-    ghc-prim,
+    ghc-prim >= 0.10 && < 0.12,
     text >= 2.0 && < 2.2,
     vector >= 0.13 && < 0.14

@@ -16,7 +16,7 @@ For each message in the file the splice produces:
 
   * A record data type plus a @default\<TypeName\>@ value with all fields
     at their proto default values.
-  * @MessageEncode@ \/ @MessageSize@ \/ @MessageDecode@ wire codecs
+  * @MessageEncode@ \/ @MessageDecode@ wire codecs
     (via "Proto.Internal.Derive").
   * @HasExtensions@ (proto2 extension support).
   * 'Proto.Schema.ProtoMessage' schema metadata
@@ -139,7 +139,7 @@ import Proto.CodeGen (
   snakeToPascal,
  )
 import Proto.CodeGen.Hooks
-import Proto.Decode qualified as Decode
+import Proto.Internal.Decode qualified as Decode
 import Proto.Extension qualified as Ext
 import Proto.IDL.AST
 import Proto.IDL.Annotations (lookupSimpleOption, optionAsBool, optionAsString)
@@ -356,6 +356,7 @@ protoFileToDecls' naming cfg hooks pf = do
           , scPackage = Data.Maybe.fromMaybe T.empty (protoPackage pf)
           , scParents = []
           , scFieldNaming = naming
+          , scFileOptions = protoOptions pf
           }
   concat <$> mapM (topLevelToDecls scope cfg hooks) (protoTopLevels pf)
 
@@ -385,6 +386,9 @@ data ScopeCtx = ScopeCtx
   , scFieldNaming :: !FieldNaming
   -- ^ How to name record fields (prefixed with message name
   -- or bare).
+  , scFileOptions :: ![OptionDef]
+  -- ^ File-level option definitions. Used to resolve edition
+  -- feature overrides (e.g. @option features.repeated_field_encoding = EXPANDED@).
   }
 
 
@@ -501,6 +505,7 @@ messageToDecls' cfg hooks msg =
           , scPackage = T.empty
           , scParents = []
           , scFieldNaming = PrefixedFields
+          , scFileOptions = []
           }
   in messageToDecls'' scope cfg hooks msg
 
@@ -552,7 +557,7 @@ messageToDecls'' scopeCtx cfg hooks msg = do
   oneofDecs <- mkOneofDataDecs scopeCtx tyName fields
   dataDec <- mkDataDec scopeCtx tyName fields
   defaultDec <- mkDefaultDec scopeCtx tyName fields
-  -- All wire codecs (MessageEncode / MessageSize / MessageDecode)
+  -- All wire codecs (MessageEncode / MessageDecode)
   -- now come from 'Proto.Internal.Derive' via the IDL bridge,
   -- including oneofs (whose sum types are emitted by
   -- 'mkOneofDataDecs' just above). The bridge handles every
@@ -639,9 +644,9 @@ messageToDecls'' scopeCtx cfg hooks msg = do
     )
 
 
-{- | Synthesise the @MessageEncode \/ MessageSize \/ MessageDecode@
-triple via 'Proto.Internal.Derive.synthesiseProtoInstancesWith'
-with unknown-field preservation enabled. Used for every
+{- | Synthesise the @MessageEncode \/ MessageDecode@ pair via
+'Proto.Internal.Derive.synthesiseProtoInstancesWith' with
+unknown-field preservation enabled. Used for every
 'loadProto'-generated message.
 -}
 messageCodecsViaBridge :: Name -> [PDI.ProtoField] -> Q [Dec]
@@ -651,10 +656,9 @@ messageCodecsViaBridge tyName pfs = do
           { PDI.mmUnknownFieldsSel = Just (unknownFieldsName tyName)
           }
   enc <- PDI.mkEncodeInstanceWith meta (ConT tyName) pfs
-  siz <- PDI.mkSizeInstanceWith meta (ConT tyName) pfs
   dec <- PDI.mkDecodeInstanceWith meta (ConT tyName) tyName pfs
   semi <- PDI.mkSemigroupInstanceWith meta (ConT tyName) tyName pfs
-  pure [enc, siz, dec, semi]
+  pure [enc, dec, semi]
 
 
 messageHaddock :: MessageDef -> [FieldSpec] -> String
@@ -1026,9 +1030,9 @@ lookupWkt n = case T.unpack n of
     Just
       ( mkPGP "Struct" "NullValue"
       , -- NullValue is an enum; default is its single value.
-        mkName "Proto.Google.Protobuf.Struct.NullValue'NullValue"
+        mkName "Proto.Google.Protobuf.WellKnownTypes.Struct.NullValue'NullValue"
       )
-  -- Wrapper messages (all in Proto.Google.Protobuf.Wrappers).
+  -- Wrapper messages (all in Proto.Google.Protobuf.WellKnownTypes.Wrappers).
   "google.protobuf.DoubleValue" -> Just (mkPGP "Wrappers" "DoubleValue", defPGP "Wrappers" "DoubleValue")
   "google.protobuf.FloatValue" -> Just (mkPGP "Wrappers" "FloatValue", defPGP "Wrappers" "FloatValue")
   "google.protobuf.Int64Value" -> Just (mkPGP "Wrappers" "Int64Value", defPGP "Wrappers" "Int64Value")
@@ -1040,8 +1044,8 @@ lookupWkt n = case T.unpack n of
   "google.protobuf.BytesValue" -> Just (mkPGP "Wrappers" "BytesValue", defPGP "Wrappers" "BytesValue")
   _ -> Nothing
   where
-    mkPGP modSuffix tyN = mkName ("Proto.Google.Protobuf." <> modSuffix <> "." <> tyN)
-    defPGP modSuffix tyN = mkName ("Proto.Google.Protobuf." <> modSuffix <> ".default" <> tyN)
+    mkPGP modSuffix tyN = mkName ("Proto.Google.Protobuf.WellKnownTypes." <> modSuffix <> "." <> tyN)
+    defPGP modSuffix tyN = mkName ("Proto.Google.Protobuf.WellKnownTypes." <> modSuffix <> ".default" <> tyN)
 
 
 stringTypeQ :: StringAdapter -> Q Type
@@ -1752,12 +1756,16 @@ fieldSpecToProtoField scope parentTy (FSOneof name ofs) = do
 packedModeFor :: ScopeCtx -> [OptionDef] -> PDI.RepeatedMode
 packedModeFor scope opts =
   let explicit = lookupSimpleOption (T.pack "packed") opts >>= optionAsBool
+      -- For editions, apply file-level then field-level features.* overrides.
       defaultPacked = case scSyntax scope of
         Proto3 -> True
         Proto2 -> False
-        Editions ed -> case featureRepeatedFieldEncoding (featuresForEdition ed) of
-          PackedEncoding -> True
-          ExpandedEncoding -> False
+        Editions ed ->
+          let fileFs  = resolveFileFeatures (Editions ed) (scFileOptions scope)
+              fieldFs = resolveFieldFeatures fileFs opts
+          in case featureRepeatedFieldEncoding fieldFs of
+               PackedEncoding   -> True
+               ExpandedEncoding -> False
       packed = Data.Maybe.fromMaybe defaultPacked explicit
   in if packed then PDI.ModePacked else PDI.ModeUnpacked
 

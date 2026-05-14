@@ -55,8 +55,8 @@ case decodeMessage bytes of
   Left err -> print err
 ```
 
-For the other entry points, you can use inline `Proto.QQ`, Haskell-first
-`Proto.Derive`, on-disk output via `Proto.Setup`, the `protoc`
+For the other entry points, you can use inline `Proto.TH.QQ`, Haskell-first
+`Proto.TH.Derive`, on-disk output via `Proto.Setup`, the `protoc`
 plugin, or direct `Proto.CodeGen`.
 
 ---
@@ -85,14 +85,14 @@ generated files to commit. wireform's own parser handles the
 representations (see
 [Custom field representations](#custom-field-representations)).
 
-### `Proto.QQ`: inline quasi-quoter
+### `Proto.TH.QQ`: inline quasi-quoter
 
 For one-off messages or quick prototyping:
 
 ```haskell
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TemplateHaskell #-}
-import Proto.QQ (proto)
+import Proto.TH.QQ (proto)
 
 [proto|
   syntax = "proto3";
@@ -107,14 +107,14 @@ import Proto.QQ (proto)
 `SearchRequest` is now a regular Haskell type with
 encode/decode/JSON instances.
 
-### `Proto.Derive`: annotation-driven, no `.proto` file
+### `Proto.TH.Derive`: annotation-driven, no `.proto` file
 
 Define your Haskell types first, derive the wire format from
 annotations:
 
 ```haskell
 {-# LANGUAGE TemplateHaskell #-}
-import Proto.Derive (deriveProto, tag)
+import Proto.TH.Derive (deriveProto, tag)
 
 data Measurement = Measurement
   { sensorId    :: !Text
@@ -131,8 +131,7 @@ deriveProto ''Measurement
 ```
 
 Useful when the Haskell types are the source of truth and protobuf
-is just the serialisation format. You get `MessageEncode` /
-`MessageDecode` / `MessageSize` instances like every other path.
+is just the serialisation format. You get `MessageEncode` / `MessageDecode` instances like every other path.
 
 ### `Proto.Setup`: Cabal pre-build hook
 
@@ -216,8 +215,8 @@ as part of a larger pipeline.
 | Method | When to use it |
 |:---|:---|
 | `loadProto` | Most projects. Simple, no build setup. |
-| `Proto.QQ` | Quick prototyping, one-off messages, tests. |
-| `Proto.Derive` | Haskell types are the source of truth. |
+| `Proto.TH.QQ` | Quick prototyping, one-off messages, tests. |
+| `Proto.TH.Derive` | Haskell types are the source of truth. |
 | `Proto.Setup` | You want generated `.hs` files on disk. |
 | `protoc-gen-wireform` | Your build system already runs `protoc`. |
 | `Proto.CodeGen` | Custom tooling, full pipeline control. |
@@ -371,12 +370,12 @@ packages; proto-lens stays NCG. LLVM helps most on repeated fields
 
 | Operation | wireform-proto | proto-lens | ratio |
 | :-------- | -------------: | ---------: | ----: |
-| Small     |        25.5 ns |     146 ns | 5.71x |
-| Medium    |       53.10 ns |     272 ns | 5.04x |
-| Nested    |       44.10 ns |     321 ns | 7.13x |
-| Repeated  |         656 ns |    2701 ns | 4.12x |
+| Small     |        30.9 ns |     153 ns | 4.94x |
+| Medium    |        67.5 ns |     297 ns | 4.40x |
+| Nested    |        54.6 ns |     335 ns | 6.13x |
+| Repeated  |         786 ns |    2728 ns | 3.47x |
 
-<sub>Last run 2026-05-13 10:45:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-05-15 00:00:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:proto-vs-proto-lens-encode -->
 
 <!-- BEGIN_AUTOGEN bench:proto-vs-proto-lens-decode -->
@@ -387,12 +386,12 @@ packages; proto-lens stays NCG. LLVM helps most on repeated fields
 
 | Operation | wireform-proto | proto-lens | ratio |
 | :-------- | -------------: | ---------: | ----: |
-| Small     |        20.7 ns |    76.5 ns | 3.69x |
-| Medium    |        57.0 ns |     198 ns | 3.48x |
-| Nested    |        48.6 ns |     141 ns | 2.91x |
-| Repeated  |         715 ns |    2107 ns | 2.95x |
+| Small     |        45.9 ns |    81.9 ns | 1.78x |
+| Medium    |         111 ns |     204 ns | 1.85x |
+| Nested    |        76.7 ns |     148 ns | 1.93x |
+| Repeated  |        1070 ns |    2166 ns | 2.02x |
 
-<sub>Last run 2026-05-13 10:45:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-05-15 00:00:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:proto-vs-proto-lens-decode -->
 
 Encode and decode cost about the same. A 3-field message encodes
@@ -400,6 +399,24 @@ in ~23 ns and decodes in ~20 ns with LLVM. A 50-element
 packed-repeated field with nested submessages round-trips in about
 1 us. Builder output can be streamed directly to a `Handle` without
 materialising a `ByteString`.
+
+### Enabling LLVM
+
+Add `-fllvm` to both this package and `wireform-core` in your
+`cabal.project.local` (or the consuming package's `ghc-options`):
+
+```cabal
+package wireform-proto
+  ghc-options: -fllvm
+
+package wireform-core
+  ghc-options: -fllvm
+```
+
+LLVM must be installed and on `$PATH` (`llc`, `opt`). The improvement is largest on repeated
+fields (~27%) and nested message encode (~12%) where LLVM's loop
+optimiser and instruction scheduler outperform the native code
+generator.
 
 ---
 
@@ -487,15 +504,16 @@ set  (field @"name") "Bob" person  -- set
 
 ### gRPC codegen
 
-`Proto.GRPC` generates service/method type metadata. Wire framing
-and transport live in [`wireform-grpc`](../wireform-grpc/).
+`loadProto` (and the other code-generation entry points) generates typed
+service and method descriptor values alongside the message types. The
+`ServiceDef` / `MethodDef` types and all wire framing live in
+[`wireform-grpc`](../wireform-grpc/); `wireform-proto` generates the
+metadata that plugs into those types.
 
 ```haskell
-import Proto.GRPC (ServiceDef(..), MethodDef(..))
-
--- Generated:
--- grpcGreeterService :: ServiceDef
--- grpcSayHelloMethod :: MethodDef
+-- Generated by loadProto from a service definition:
+-- grpcGreeterService :: Network.GRPC.Common.ServiceDef
+-- grpcSayHelloMethod :: Network.GRPC.Common.MethodDef SayHelloRequest SayHelloResponse
 ```
 
 ---
@@ -504,7 +522,7 @@ import Proto.GRPC (ServiceDef(..), MethodDef(..))
 
 **2675 / 2675** tests pass against the official [upstream protobuf
 conformance suite][upstream-conformance] (`protocolbuffers/protobuf@v28.2`),
-covering proto3 and proto2 binary and JSON. Zero unexpected failures.
+covering proto3 and proto2 binary and JSON.
 
 [upstream-conformance]: https://github.com/protocolbuffers/protobuf/tree/main/conformance
 
@@ -531,7 +549,7 @@ full proto2/proto3 surface.
 **Optics integration:** wireform-proto generates plain records, so
 `OverloadedRecordDot` and pattern matching work out of the box.
 For lens-style access, `Proto.Lens` provides van Laarhoven lenses
-via a `field @"name"` combinator — compatible with both `lens` and
+via a `field @"name"` combinator, which are compatible with both `lens` and
 `microlens` with no dependency on either:
 
 ```haskell

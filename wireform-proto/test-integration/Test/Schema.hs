@@ -7,7 +7,7 @@ import Data.Int (Int32, Int64)
 import Test.Tasty
 import Test.Tasty.HUnit
 
-import Proto.Google.Protobuf.Timestamp
+import Proto.Google.Protobuf.WellKnownTypes.Timestamp
 
 schemaTests :: TestTree
 schemaTests = testGroup "Schema (generated record fields)"

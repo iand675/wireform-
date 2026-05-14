@@ -77,6 +77,7 @@ import Data.Foldable qualified as F
 import Data.Hashable (Hashable, hashWithSalt)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Int (Int32, Int64)
+import Data.IntMap.Strict qualified as IntMap
 import Data.Map.Strict qualified as Map
 import Data.Maybe qualified
 import Data.Reflection (Given, given)
@@ -89,15 +90,22 @@ import Data.Vector qualified as V
 import Data.Word (Word32, Word64)
 import GHC.IO.Unsafe (unsafePerformIO)
 import Language.Haskell.TH
-import Proto.Decode qualified as PD
-import Proto.Google.Protobuf.Any qualified
-import Proto.Google.Protobuf.Duration qualified
-import Proto.Google.Protobuf.Empty qualified
-import Proto.Google.Protobuf.FieldMask qualified
-import Proto.Google.Protobuf.Struct (NullValue (NullValue'NullValue))
-import Proto.Google.Protobuf.Struct qualified as PGS
-import Proto.Google.Protobuf.Timestamp qualified
-import Proto.Google.Protobuf.Wrappers qualified
+import Proto.Internal.Decode qualified as PD
+import Proto.Google.Protobuf.WellKnownTypes.Any qualified
+import Proto.Google.Protobuf.WellKnownTypes.Duration qualified
+import Proto.Google.Protobuf.WellKnownTypes.Empty qualified
+import Proto.Google.Protobuf.WellKnownTypes.FieldMask qualified
+import Proto.Google.Protobuf.WellKnownTypes.Struct (NullValue (NullValue'NullValue))
+import Proto.Google.Protobuf.WellKnownTypes.Struct qualified as PGS
+import Proto.Google.Protobuf.WellKnownTypes.Timestamp qualified
+import Proto.Google.Protobuf.WellKnownTypes.Wrappers qualified
+import Proto.Internal.JSON (
+  OneofVariantNullSemantics (
+    OneofVariantNullIsUnset,
+    OneofVariantNullIsValue
+  ),
+  parseOneofVariants,
+ )
 import Proto.Internal.JSON qualified as PJ
 import Proto.Internal.JSON qualified as PJI
 import Proto.Internal.JSON.Extension qualified as PJExt
@@ -360,7 +368,7 @@ mkProtoMessageInstance
   -> Q [Dec]
 mkProtoMessageInstance tyName fqName pkg defName fields = do
   descrEntries <- traverse (oneFieldDescriptor tyName) fields
-  let descrMap = AppE (VarE 'Map.fromList) (ListE descrEntries)
+  let descrMap = AppE (VarE 'IntMap.fromList) (ListE descrEntries)
       protoNameDec =
         FunD
           'PS.protoMessageName
@@ -1675,21 +1683,21 @@ wktVectorParserName w = case w of
 parseTimestampMaybe
   :: Aeson.Object
   -> Text
-  -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.Timestamp.Timestamp))
+  -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.WellKnownTypes.Timestamp.Timestamp))
 parseTimestampMaybe = parseWktMaybe WK.timestampFromJSON
 
 
 parseDurationMaybe
   :: Aeson.Object
   -> Text
-  -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.Duration.Duration))
+  -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.WellKnownTypes.Duration.Duration))
 parseDurationMaybe = parseWktMaybe WK.durationFromJSON
 
 
 parseFieldMaskMaybe
   :: Aeson.Object
   -> Text
-  -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.FieldMask.FieldMask))
+  -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.WellKnownTypes.FieldMask.FieldMask))
 parseFieldMaskMaybe = parseWktMaybe WK.fieldMaskFromJSON
 
 
@@ -1732,14 +1740,14 @@ parseListValueMaybe obj key = do
 parseAnyMaybe
   :: Aeson.Object
   -> Text
-  -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.Any.Any))
+  -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.WellKnownTypes.Any.Any))
 parseAnyMaybe = parseWktMaybe (WK.anyFromJSON WK.standardWktRegistry)
 
 
 parseEmptyMaybe
   :: Aeson.Object
   -> Text
-  -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.Empty.Empty))
+  -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.WellKnownTypes.Empty.Empty))
 parseEmptyMaybe = parseWktMaybe WK.emptyFromJSON
 
 
@@ -1747,39 +1755,39 @@ parseNullValueMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe PGS.N
 parseNullValueMaybe = parseWktMaybe WK.nullValueFromJSON
 
 
-parseBoolWrapperMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.Wrappers.BoolValue))
+parseBoolWrapperMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.WellKnownTypes.Wrappers.BoolValue))
 parseBoolWrapperMaybe = parseWktMaybe WK.unwrapBoolValue
 
 
-parseInt32WrapperMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.Wrappers.Int32Value))
+parseInt32WrapperMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.WellKnownTypes.Wrappers.Int32Value))
 parseInt32WrapperMaybe = parseWktMaybe WK.unwrapInt32Value
 
 
-parseInt64WrapperMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.Wrappers.Int64Value))
+parseInt64WrapperMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.WellKnownTypes.Wrappers.Int64Value))
 parseInt64WrapperMaybe = parseWktMaybe WK.unwrapInt64Value
 
 
-parseUInt32WrapperMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.Wrappers.UInt32Value))
+parseUInt32WrapperMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.WellKnownTypes.Wrappers.UInt32Value))
 parseUInt32WrapperMaybe = parseWktMaybe WK.unwrapUInt32Value
 
 
-parseUInt64WrapperMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.Wrappers.UInt64Value))
+parseUInt64WrapperMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.WellKnownTypes.Wrappers.UInt64Value))
 parseUInt64WrapperMaybe = parseWktMaybe WK.unwrapUInt64Value
 
 
-parseFloatWrapperMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.Wrappers.FloatValue))
+parseFloatWrapperMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.WellKnownTypes.Wrappers.FloatValue))
 parseFloatWrapperMaybe = parseWktMaybe WK.unwrapFloatValue
 
 
-parseDoubleWrapperMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.Wrappers.DoubleValue))
+parseDoubleWrapperMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.WellKnownTypes.Wrappers.DoubleValue))
 parseDoubleWrapperMaybe = parseWktMaybe WK.unwrapDoubleValue
 
 
-parseStringWrapperMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.Wrappers.StringValue))
+parseStringWrapperMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.WellKnownTypes.Wrappers.StringValue))
 parseStringWrapperMaybe = parseWktMaybe WK.unwrapStringValue
 
 
-parseBytesWrapperMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.Wrappers.BytesValue))
+parseBytesWrapperMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.WellKnownTypes.Wrappers.BytesValue))
 parseBytesWrapperMaybe = parseWktMaybe WK.unwrapBytesValue
 
 
@@ -1814,15 +1822,15 @@ parseWktMaybe parser obj key = do
 -- WKT vector parsers (repeated fields)
 -- ---------------------------------------------------------------------------
 
-parseTimestampVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.Timestamp.Timestamp))
+parseTimestampVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.WellKnownTypes.Timestamp.Timestamp))
 parseTimestampVectorMaybe = parseWktVectorMaybe WK.timestampFromJSON
 
 
-parseDurationVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.Duration.Duration))
+parseDurationVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.WellKnownTypes.Duration.Duration))
 parseDurationVectorMaybe = parseWktVectorMaybe WK.durationFromJSON
 
 
-parseFieldMaskVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.FieldMask.FieldMask))
+parseFieldMaskVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.WellKnownTypes.FieldMask.FieldMask))
 parseFieldMaskVectorMaybe = parseWktVectorMaybe WK.fieldMaskFromJSON
 
 
@@ -1860,11 +1868,11 @@ parseListValueVectorMaybe obj key = do
     Just _ -> fail "Expected JSON array for repeated ListValue"
 
 
-parseAnyVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.Any.Any))
+parseAnyVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.WellKnownTypes.Any.Any))
 parseAnyVectorMaybe = parseWktVectorMaybe (WK.anyFromJSON WK.standardWktRegistry)
 
 
-parseEmptyVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.Empty.Empty))
+parseEmptyVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.WellKnownTypes.Empty.Empty))
 parseEmptyVectorMaybe = parseWktVectorMaybe WK.emptyFromJSON
 
 
@@ -1872,39 +1880,39 @@ parseNullValueVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vec
 parseNullValueVectorMaybe = parseWktVectorMaybe WK.nullValueFromJSON
 
 
-parseBoolWrapperVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.Wrappers.BoolValue))
+parseBoolWrapperVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.WellKnownTypes.Wrappers.BoolValue))
 parseBoolWrapperVectorMaybe = parseWktVectorMaybe WK.unwrapBoolValue
 
 
-parseInt32WrapperVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.Wrappers.Int32Value))
+parseInt32WrapperVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.WellKnownTypes.Wrappers.Int32Value))
 parseInt32WrapperVectorMaybe = parseWktVectorMaybe WK.unwrapInt32Value
 
 
-parseInt64WrapperVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.Wrappers.Int64Value))
+parseInt64WrapperVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.WellKnownTypes.Wrappers.Int64Value))
 parseInt64WrapperVectorMaybe = parseWktVectorMaybe WK.unwrapInt64Value
 
 
-parseUInt32WrapperVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.Wrappers.UInt32Value))
+parseUInt32WrapperVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.WellKnownTypes.Wrappers.UInt32Value))
 parseUInt32WrapperVectorMaybe = parseWktVectorMaybe WK.unwrapUInt32Value
 
 
-parseUInt64WrapperVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.Wrappers.UInt64Value))
+parseUInt64WrapperVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.WellKnownTypes.Wrappers.UInt64Value))
 parseUInt64WrapperVectorMaybe = parseWktVectorMaybe WK.unwrapUInt64Value
 
 
-parseFloatWrapperVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.Wrappers.FloatValue))
+parseFloatWrapperVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.WellKnownTypes.Wrappers.FloatValue))
 parseFloatWrapperVectorMaybe = parseWktVectorMaybe WK.unwrapFloatValue
 
 
-parseDoubleWrapperVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.Wrappers.DoubleValue))
+parseDoubleWrapperVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.WellKnownTypes.Wrappers.DoubleValue))
 parseDoubleWrapperVectorMaybe = parseWktVectorMaybe WK.unwrapDoubleValue
 
 
-parseStringWrapperVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.Wrappers.StringValue))
+parseStringWrapperVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.WellKnownTypes.Wrappers.StringValue))
 parseStringWrapperVectorMaybe = parseWktVectorMaybe WK.unwrapStringValue
 
 
-parseBytesWrapperVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.Wrappers.BytesValue))
+parseBytesWrapperVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.WellKnownTypes.Wrappers.BytesValue))
 parseBytesWrapperVectorMaybe = parseWktVectorMaybe WK.unwrapBytesValue
 
 
@@ -2730,41 +2738,11 @@ isUnknownEnumFail = (unknownEnumFailPrefix `isPrefixOf`)
     isPrefixOf p s = take (length p) s == p
 
 
-{- | Per-variant interpretation of JSON @null@ for oneofs. For
-most variants, @null@ means "this variant is unset" (proto3
-spec). For a 'google.protobuf.NullValue' variant, @null@
-is the variant's value.
--}
-data OneofVariantNullSemantics
-  = OneofVariantNullIsUnset
-  | OneofVariantNullIsValue
-
-
-{- | Runtime helper backing 'buildOneofParseExp'. Lives outside
-the splice so the 'parseFnFor' table doesn't have to.
--}
-parseOneofVariants
-  :: Aeson.Object
-  -> [(Text, OneofVariantNullSemantics, Aeson.Value -> AesonT.Parser a)]
-  -> AesonT.Parser (Maybe a)
-parseOneofVariants obj variants =
-  let present =
-        [ (k, v, p)
-        | (k, sem, p) <- variants
-        , Just v <- [AesonKM.lookup (AesonKey.fromText k) obj]
-        , keep sem v
-        ]
-      keep OneofVariantNullIsUnset Aeson.Null = False
-      keep _ _ = True
-  in case present of
-      [] -> pure Nothing
-      [(_, v, p)] -> Just <$> p v
-      _ ->
-        fail
-          ( "Multiple oneof variants set: "
-              <> show (fmap (\(k, _, _) -> k) present)
-          )
-{-# INLINE parseOneofVariants #-}
+-- 'OneofVariantNullSemantics' and 'parseOneofVariants' moved to
+-- "Proto.Internal.JSON" so the pure-text codegen can share the
+-- helper. They're re-imported (and re-exported) here for
+-- back-compat with downstream code that referenced them via
+-- 'Proto.TH.Metadata'.
 
 
 -- ---------------------------------------------------------------------------

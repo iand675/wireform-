@@ -36,7 +36,7 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 import Data.Int (Int64)
 import Data.Word (Word64)
-import Proto.Decode (MessageDecode, decodeMessage)
+import Proto (MessageDecode, decodeMessage)
 import Proto.Internal.Wire.Decode (DecodeError (..))
 
 

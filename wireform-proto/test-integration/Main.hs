@@ -1,6 +1,9 @@
 module Main (main) where
 
 import Test.CodeGen (codeGenTests)
+import Test.Editions (editionsTests)
+import Test.Plugin (pluginTests)
+import Test.TextFormatParsed (textFormatParsedTests)
 import Test.Compat (compatTests)
 import Test.Hooks (hooksTests)
 import Test.JSON (jsonTests)
@@ -28,6 +31,9 @@ main =
       , wireTests
       , roundtripTests
       , codeGenTests
+      , pluginTests
+      , textFormatParsedTests
+      , editionsTests
       , wellKnownTests
       , wellKnownUtilTests
       , printInspectTests

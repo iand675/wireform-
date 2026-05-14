@@ -235,4 +235,3 @@ testMyFeature = do
   -- 4. Cleanup (delete topics, close connections)
   return ()
 ```
-

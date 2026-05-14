@@ -1,17 +1,34 @@
 {-# LANGUAGE BangPatterns #-}
 
-{- | Archetype-specialized encode functions for maximum performance.
+{- | Archetype-specialised encode functions for maximum performance.
 
-Inspired by hyperpb's ~200 archetype thunks: each function is
-specialized for a specific (field_number, wire_type, field_type)
-combination, with the tag byte baked in as a compile-time constant.
+__Stability:__ exposed for use by wireform-proto-generated code; not
+part of the stable public API.
 
-These avoid the overhead of:
-* Runtime tag computation (fieldTag fn wt)
-* putVarint branch chain for 1-byte tags
-* Wrapper function call chains (encodeFieldVarint -> putTag -> putVarint)
+Each function is specialised for a specific
+@(field_number, wire_type, field_type)@ combination, with the wire
+tag byte baked in as a compile-time constant. Generated code calls
+into these directly rather than going through the
+@encodeField*@ / @putTag@ wrapper chain.
 
-Generated code should use these directly for field numbers 1-15.
+== Sized builder return shape
+
+Every archetype here returns a 'SizedBuilder', not a raw 'Builder'.
+That means each fragment carries the exact wire byte count of what
+it will emit, so the parent message can:
+
+1. allocate its output buffer in one shot at exactly the right size,
+   and
+2. write a submessage's varint length prefix without a /separate/
+   @messageSize@ traversal of the inner message.
+
+The old "build a 'Builder', then do a separate size traversal to
+prefix the length, then emit" two-pass shape is gone — it was
+'O(N²)' on nested-message trees because each level re-traversed
+its subtree to compute the inner size, and the cost grew
+quadratically with nesting depth. With 'SizedBuilder' the size
+flows up the tree alongside the builder fragments in 'O(N)' total.
+See "Proto.Internal.SizedBuilder" for the underlying machinery.
 -}
 module Proto.Internal.Encode.Archetype (
   -- * Singular field archetypes (tag byte baked in)
@@ -31,7 +48,13 @@ module Proto.Internal.Encode.Archetype (
   archRepeatedString,
   archRepeatedSubmessage,
 
-  -- * Size archetypes
+  -- * Packed repeated archetypes
+  archPackedVarints,
+
+  -- * Legacy size-pass helpers (kept so already-generated modules
+  -- whose import lists still mention them keep compiling; new
+  -- generated code does not use these — the size is carried by
+  -- 'SizedBuilder' instead).
   archVarintSize,
   archStringSize,
   archBytesSize,
@@ -39,25 +62,13 @@ module Proto.Internal.Encode.Archetype (
   archFixed32Size,
   archFixed64Size,
   archSubmessageSize,
-
-  -- * Fused SizedBuilder archetypes (single-pass size+build)
-  sbArchVarint,
-  sbArchBool,
-  sbArchFixed32,
-  sbArchFixed64,
-  sbArchFloat,
-  sbArchDouble,
-  sbArchString,
-  sbArchBytes,
-  sbArchSubmessage,
-  sbArchPackedVarints,
 ) where
 
+import Data.Bits (shiftL, shiftR, xor)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
-import Data.Text.Encoding qualified as TE
 import Data.Text.Foreign qualified as TF
 import Data.Vector.Unboxed qualified as VU
 import Data.Word (Word32, Word64, Word8)
@@ -68,234 +79,131 @@ import Proto.Internal.Wire.Encode (
   putText,
   putVarint,
   varintSize,
-  zigZag32,
-  zigZag64,
  )
 import Wireform.Builder qualified as B
 
 
-{- | Archetype: varint field with baked tag byte.
-@archVarint tagByte value@ emits the tag + varint in ~2 instructions
-for the tag (single B.word8) + the varint.
--}
-archVarint :: Word8 -> Word64 -> B.Builder
-archVarint !tag !val = B.word8 tag <> putVarint val
+-- | Varint field. Tag byte + varint-encoded value.
+archVarint :: Word64 -> Word64 -> SizedBuilder
+archVarint !tag !val =
+  let !sz = varintSize tag + varintSize val
+  in sized sz (putVarint tag <> putVarint val)
 {-# INLINE archVarint #-}
 
 
--- | Archetype: ZigZag-encoded sint32 field with baked tag byte.
-archSVarint32 :: Word8 -> Int32 -> B.Builder
-archSVarint32 !tag !val = B.word8 tag <> putSVarint32 val
+-- | ZigZag-encoded sint32 field. Tag byte + zigzag-varint.
+archSVarint32 :: Word64 -> Int32 -> SizedBuilder
+archSVarint32 !tag !val =
+  -- ZigZag preserves varint width for the worst case; @putSVarint32@
+  -- writes the same number of bytes that @varintSize@ would
+  -- report for the post-zigzag value.
+  let !zz = zigZagW32 val
+      !sz = varintSize tag + varintSize (fromIntegral zz)
+  in sized sz (putVarint tag <> putSVarint32 val)
 {-# INLINE archSVarint32 #-}
 
 
--- | Archetype: ZigZag-encoded sint64 field with baked tag byte.
-archSVarint64 :: Word8 -> Int64 -> B.Builder
-archSVarint64 !tag !val = B.word8 tag <> putSVarint64 val
+-- | ZigZag-encoded sint64 field. Tag byte + zigzag-varint.
+archSVarint64 :: Word64 -> Int64 -> SizedBuilder
+archSVarint64 !tag !val =
+  let !zz = zigZagW64 val
+      !sz = varintSize tag + varintSize zz
+  in sized sz (putVarint tag <> putSVarint64 val)
 {-# INLINE archSVarint64 #-}
 
 
--- | Archetype: fixed32 field with baked tag byte (little-endian).
-archFixed32 :: Word8 -> Word32 -> B.Builder
-archFixed32 !tag !val = B.word8 tag <> B.word32LE val
+-- | fixed32 field (little-endian).
+archFixed32 :: Word64 -> Word32 -> SizedBuilder
+archFixed32 !tag !val =
+  sized (varintSize tag + 4) (putVarint tag <> B.word32LE val)
 {-# INLINE archFixed32 #-}
 
 
--- | Archetype: fixed64 field with baked tag byte (little-endian).
-archFixed64 :: Word8 -> Word64 -> B.Builder
-archFixed64 !tag !val = B.word8 tag <> B.word64LE val
+-- | fixed64 field (little-endian).
+archFixed64 :: Word64 -> Word64 -> SizedBuilder
+archFixed64 !tag !val =
+  sized (varintSize tag + 8) (putVarint tag <> B.word64LE val)
 {-# INLINE archFixed64 #-}
 
 
--- | Archetype: float field with baked tag byte (IEEE 754).
-archFloat :: Word8 -> Float -> B.Builder
-archFloat !tag !val = B.word8 tag <> B.floatLE val
+-- | IEEE 754 float field.
+archFloat :: Word64 -> Float -> SizedBuilder
+archFloat !tag !val =
+  sized (varintSize tag + 4) (putVarint tag <> B.floatLE val)
 {-# INLINE archFloat #-}
 
 
--- | Archetype: double field with baked tag byte (IEEE 754).
-archDouble :: Word8 -> Double -> B.Builder
-archDouble !tag !val = B.word8 tag <> B.doubleLE val
+-- | IEEE 754 double field.
+archDouble :: Word64 -> Double -> SizedBuilder
+archDouble !tag !val =
+  sized (varintSize tag + 8) (putVarint tag <> B.doubleLE val)
 {-# INLINE archDouble #-}
 
 
--- | Archetype: bool field with baked tag byte.
-archBool :: Word8 -> Bool -> B.Builder
-archBool !tag True = B.word8 tag <> B.word8 1
-archBool !tag False = B.word8 tag <> B.word8 0
+-- | bool field. Tag + single varint byte (0 or 1).
+archBool :: Word64 -> Bool -> SizedBuilder
+archBool !tag True = sized (varintSize tag + 1) (putVarint tag <> B.word8 1)
+archBool !tag False = sized (varintSize tag + 1) (putVarint tag <> B.word8 0)
 {-# INLINE archBool #-}
 
 
-{- | String archetype: tag + length varint + UTF-8 bytes.
+{- | UTF-8 string field. Tag + length varint + UTF-8 bytes.
 
-Delegates to 'putText', which streams the 'Text' 's bytes directly
-from its unpinned 'ByteArray#' into the builder buffer. This
-avoids the per-call pinned 'BS.ByteString' allocation and second
-copy that the naive @'B.byteString' . 'TE.encodeUtf8'@ form
-forces. See 'Proto.Internal.Wire.Encode.byteArraySliceBuilder' for the
-underlying primitive and rationale.
+The size pass reads the 'Text' record's byte length in O(1) via
+'TF.lengthWord8' (no allocation). The build pass streams the
+'Text' 's bytes straight from its unpinned 'ByteArray#' into the
+builder buffer via 'putText' — no intermediate pinned
+'BS.ByteString' copy.
 -}
-archString :: Word8 -> Text -> B.Builder
-archString !tag !val = B.word8 tag <> putText val
+archString :: Word64 -> Text -> SizedBuilder
+archString !tag !val =
+  let !len = TF.lengthWord8 val
+      !sz = varintSize tag + varintSize (fromIntegral len) + len
+  in sized sz (putVarint tag <> putText val)
 {-# INLINE archString #-}
 
 
--- | Archetype: bytes field with baked tag byte (length-delimited).
-archBytes :: Word8 -> ByteString -> B.Builder
+-- | bytes field (length-delimited). Tag + length varint + bytes.
+archBytes :: Word64 -> ByteString -> SizedBuilder
 archBytes !tag !val =
-  B.word8 tag <> putVarint (fromIntegral (BS.length val)) <> B.byteString val
+  let !len = BS.length val
+      !sz = varintSize tag + varintSize (fromIntegral len) + len
+  in sized sz (putVarint tag <> putVarint (fromIntegral len) <> B.byteString val)
 {-# INLINE archBytes #-}
 
 
-{- | Submessage archetype: tag + length varint + payload builder.
-Takes a pre-computed size and the builder for the submessage body.
+{- | Submessage field. Tag + (varint length + payload) wrapped from
+the already-sized inner builder.
+
+The inner 'SizedBuilder' has carried its byte count up from each
+of its fields' archetype calls, so this just wraps with one tag
+byte and lets 'withSubMessage' prepend the canonical length
+varint — no separate size traversal of the submessage tree.
 -}
-archSubmessage :: Word8 -> Int -> B.Builder -> B.Builder
-archSubmessage !tag !sz !body =
-  B.word8 tag <> putVarint (fromIntegral sz) <> body
+archSubmessage :: Word64 -> SizedBuilder -> SizedBuilder
+archSubmessage !tag inner =
+  sized (varintSize tag) (putVarint tag) <> withSubMessage inner
 {-# INLINE archSubmessage #-}
 
 
--- | Repeated string archetype: emits tag + string for each element.
-archRepeatedString :: Word8 -> Text -> B.Builder
+-- | Repeated string archetype — alias for 'archString' (one element).
+archRepeatedString :: Word64 -> Text -> SizedBuilder
 archRepeatedString = archString
 {-# INLINE archRepeatedString #-}
 
 
--- | Repeated submessage archetype.
-archRepeatedSubmessage :: Word8 -> Int -> B.Builder -> B.Builder
+-- | Repeated submessage archetype — alias for 'archSubmessage'.
+archRepeatedSubmessage :: Word64 -> SizedBuilder -> SizedBuilder
 archRepeatedSubmessage = archSubmessage
 {-# INLINE archRepeatedSubmessage #-}
 
 
--- Size archetypes: compute encoded size with tag included.
-
--- | Encoded size of a varint field including the 1-byte tag.
-archVarintSize :: Word64 -> Int
-archVarintSize !val = 1 + varintSize val
-{-# INLINE archVarintSize #-}
-
-
-{- | Encoded size of a text field with baked tag.
-
-Uses 'TF.lengthWord8' to read the 'Text' record's byte length in O(1)
-with no heap allocation.
+{- | Packed repeated varint field. Tag + total payload length
+varint + the concatenated value varints. Empty input emits
+nothing (proto3 packed encoding omits empty fields).
 -}
-archStringSize :: Text -> Int
-archStringSize !val =
-  let !len = TF.lengthWord8 val
-  in 1 + varintSize (fromIntegral len) + len
-{-# INLINE archStringSize #-}
-
-
--- | Encoded size of a bytes field including tag and length varint.
-archBytesSize :: ByteString -> Int
-archBytesSize !val =
-  let !len = BS.length val
-  in 1 + varintSize (fromIntegral len) + len
-{-# INLINE archBytesSize #-}
-
-
-archBoolSize :: Int
-archBoolSize = 2
-{-# INLINE archBoolSize #-}
-
-
-archFixed32Size :: Int
-archFixed32Size = 5
-{-# INLINE archFixed32Size #-}
-
-
-archFixed64Size :: Int
-archFixed64Size = 9
-{-# INLINE archFixed64Size #-}
-
-
--- | Submessage size: 1 (tag) + varint(payloadSize) + payloadSize
-archSubmessageSize :: Int -> Int
-archSubmessageSize !payloadSz = 1 + varintSize (fromIntegral payloadSz) + payloadSz
-{-# INLINE archSubmessageSize #-}
-
-
--- ============================================================
--- Fused SizedBuilder archetypes: compute size + build in ONE pass.
--- These eliminate the separate messageSize traversal.
--- ============================================================
-
--- | Fused varint field: computes size and builds in one shot.
-sbArchVarint :: Word8 -> Word64 -> SizedBuilder
-sbArchVarint !tag !val =
-  let !sz = 1 + varintSize val
-  in sized sz (B.word8 tag <> putVarint val)
-{-# INLINE sbArchVarint #-}
-
-
-sbArchBool :: Word8 -> Bool -> SizedBuilder
-sbArchBool !tag !val =
-  sized 2 (B.word8 tag <> B.word8 (if val then 1 else 0))
-{-# INLINE sbArchBool #-}
-
-
-sbArchFixed32 :: Word8 -> Word32 -> SizedBuilder
-sbArchFixed32 !tag !val =
-  sized 5 (B.word8 tag <> B.word32LE val)
-{-# INLINE sbArchFixed32 #-}
-
-
-sbArchFixed64 :: Word8 -> Word64 -> SizedBuilder
-sbArchFixed64 !tag !val =
-  sized 9 (B.word8 tag <> B.word64LE val)
-{-# INLINE sbArchFixed64 #-}
-
-
-sbArchFloat :: Word8 -> Float -> SizedBuilder
-sbArchFloat !tag !val =
-  sized 5 (B.word8 tag <> B.floatLE val)
-{-# INLINE sbArchFloat #-}
-
-
-sbArchDouble :: Word8 -> Double -> SizedBuilder
-sbArchDouble !tag !val =
-  sized 9 (B.word8 tag <> B.doubleLE val)
-{-# INLINE sbArchDouble #-}
-
-
-{- | Fused string field: size pass reads the 'Text' length slot
-directly via 'TF.lengthWord8' (no allocation), build pass streams
-the bytes through 'putText' which writes straight to the builder
-buffer (no intermediate pinned 'BS.ByteString'). The previous
-implementation forced 'TE.encodeUtf8' to materialise a pinned
-'BS.ByteString' just to read its length on every encode call --
-with this version both passes touch zero heap.
--}
-sbArchString :: Word8 -> Text -> SizedBuilder
-sbArchString !tag !val =
-  let !len = TF.lengthWord8 val
-      !sz = 1 + varintSize (fromIntegral len) + len
-  in sized sz (B.word8 tag <> putText val)
-{-# INLINE sbArchString #-}
-
-
-sbArchBytes :: Word8 -> ByteString -> SizedBuilder
-sbArchBytes !tag !val =
-  let !len = BS.length val
-      !sz = 1 + varintSize (fromIntegral len) + len
-  in sized sz (B.word8 tag <> putVarint (fromIntegral len) <> B.byteString val)
-{-# INLINE sbArchBytes #-}
-
-
--- | Fused submessage field: tag + withSubMessage on the payload SizedBuilder.
-sbArchSubmessage :: Word8 -> SizedBuilder -> SizedBuilder
-sbArchSubmessage !tag payload =
-  sized 1 (B.word8 tag) <> withSubMessage payload
-{-# INLINE sbArchSubmessage #-}
-
-
-{- | Fused packed varint field for Int32.
-Single pass: computes size and builds simultaneously.
--}
-sbArchPackedVarints :: Word8 -> VU.Vector Int32 -> SizedBuilder
-sbArchPackedVarints !tag vs
+archPackedVarints :: Word64 -> VU.Vector Int32 -> SizedBuilder
+archPackedVarints !tag vs
   | VU.null vs = mempty
   | otherwise =
       let (!packedSz, !packedBld) =
@@ -306,6 +214,66 @@ sbArchPackedVarints !tag vs
               )
               (0, mempty)
               vs
-          !totalSz = 1 + varintSize (fromIntegral packedSz) + packedSz
-      in sized totalSz (B.word8 tag <> putVarint (fromIntegral packedSz) <> packedBld)
-{-# INLINE sbArchPackedVarints #-}
+          !totalSz = varintSize tag + varintSize (fromIntegral packedSz) + packedSz
+      in sized totalSz (putVarint tag <> putVarint (fromIntegral packedSz) <> packedBld)
+{-# INLINE archPackedVarints #-}
+
+
+-- | ZigZag encoding for Int32 → Word32. Used only to compute the
+-- post-ZigZag varint byte count for the size pass; 'putSVarint32'
+-- emits the same encoding when the bytes go to the buffer.
+zigZagW32 :: Int32 -> Word32
+zigZagW32 n =
+  fromIntegral ((n `shiftL` 1) `xor` (n `shiftR` 31))
+{-# INLINE zigZagW32 #-}
+
+
+-- | ZigZag encoding for Int64 → Word64. Used only to compute the
+-- post-ZigZag varint byte count for the size pass; 'putSVarint64'
+-- emits the same encoding when the bytes go to the buffer.
+zigZagW64 :: Int64 -> Word64
+zigZagW64 n =
+  fromIntegral ((n `shiftL` 1) `xor` (n `shiftR` 63))
+{-# INLINE zigZagW64 #-}
+
+
+-- ============================================================
+-- Legacy size-pass helpers
+-- ============================================================
+--
+-- These were used by the pre-SizedBuilder codegen output. They're
+-- kept here so already-generated modules whose import lists still
+-- mention them continue to compile; freshly regenerated code
+-- doesn't import them.
+
+archVarintSize :: Word64 -> Int
+archVarintSize !val = varintSize val
+{-# INLINE archVarintSize #-}
+
+archStringSize :: Text -> Int
+archStringSize !val =
+  let !len = TF.lengthWord8 val
+  in varintSize (fromIntegral len) + len
+{-# INLINE archStringSize #-}
+
+archBytesSize :: ByteString -> Int
+archBytesSize !val =
+  let !len = BS.length val
+  in varintSize (fromIntegral len) + len
+{-# INLINE archBytesSize #-}
+
+archBoolSize :: Int
+archBoolSize = 1
+{-# INLINE archBoolSize #-}
+
+archFixed32Size :: Int
+archFixed32Size = 4
+{-# INLINE archFixed32Size #-}
+
+archFixed64Size :: Int
+archFixed64Size = 8
+{-# INLINE archFixed64Size #-}
+
+archSubmessageSize :: Int -> Int
+archSubmessageSize !payloadSz = varintSize (fromIntegral payloadSz) + payloadSz
+{-# INLINE archSubmessageSize #-}

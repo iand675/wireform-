@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright The Lance Authors
- 
+
 syntax = "proto3";
 
 package lance.file.v2;
@@ -46,7 +46,7 @@ import "google/protobuf/empty.proto";
 //       working with SIMD operations.  4096-byte alignment is common when
 //       working with direct I/O.  In order to ensure these buffers are aligned
 //       writers may need to insert padding before the buffers.
-//       
+//
 //       If direct I/O is required then most (but not all) fields described
 //       below must be sector aligned.  We have marked these fields with an
 //       asterisk for clarity.  Readers should assume there will be optional
@@ -191,7 +191,7 @@ message ColumnMetadata {
   // describe how statistics or dictionaries are stored in the column metadata.
   Encoding encoding = 1;
   // The pages in the column
-  repeated Page pages = 2;   
+  repeated Page pages = 2;
   // The file offsets of each of the column metadata buffers
   //
   // There may be zero buffers.

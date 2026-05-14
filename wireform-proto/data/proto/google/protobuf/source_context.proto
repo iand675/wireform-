@@ -5,6 +5,8 @@ package google.protobuf;
 option java_package = "com.google.protobuf";
 option java_outer_classname = "SourceContextProto";
 option go_package = "google.golang.org/protobuf/types/known/sourcecontextpb";
+option csharp_namespace = "Google.Protobuf.WellKnownTypes";
+option objc_class_prefix = "GPB";
 
 message SourceContext {
   string file_name = 1;

@@ -18,7 +18,7 @@ import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as AesonKey
 import Data.Aeson.KeyMap qualified as AesonKM
 import Data.Hashable (hash, hashWithSalt)
-import Data.Map.Strict qualified as Map
+import Data.IntMap.Strict qualified as IntMap
 import Data.Proxy (Proxy (..))
 import Data.Text qualified as T
 import Data.Vector qualified as V
@@ -46,7 +46,7 @@ tests =
             PS.protoDefaultValue @?= defaultAccount
         , testCase "Account field descriptors expose names + numbers" $ do
             let fields = PS.protoFieldDescriptors (Proxy :: Proxy Account)
-            Map.keys fields @?= [1, 2]
+            IntMap.keys fields @?= [1, 2]
             PS.messageFieldNumbers (Proxy :: Proxy Account) @?= [1, 2]
             let names = PS.messageFieldNames (Proxy :: Proxy Account)
             names @?= ["acct_name", "acct_status"]

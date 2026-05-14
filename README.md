@@ -6,7 +6,7 @@
 
 You need to serialize a thing. Maybe it's protobuf, because the team
 next door decided proto is what events look like. Maybe it's Avro,
-because Iceberg is involved. Maybe it's CBOR, because you need to 
+because Iceberg is involved. Maybe it's CBOR, because you need to
 do something with COSE. The exact format doesn't matter. The next ten minutes are
 roughly the same regardless.
 
@@ -34,16 +34,16 @@ the transitive footprint means you'll spend 20 minutes just compiling the depend
 **Will the API match the rest of your stack?** It will not. The same concepts end up
 with slightly different names in each library:
 
-`aeson` says `eitherDecodeStrict`. 
+`aeson` says `eitherDecodeStrict`.
 
-The CBOR library calls it `deserialiseFromBytes`. 
+The CBOR library calls it `deserialiseFromBytes`.
 
-The MsgPack library calls it `unpack`. 
+The MsgPack library calls it `unpack`.
 
 And so on.
 
-You end up doing this song and dance semi-regularly. After enough times you notice that 
-determining whether to trust libraries from random authors takes as 
+You end up doing this song and dance semi-regularly. After enough times you notice that
+determining whether to trust libraries from random authors takes as
 long as writing the library yourself.
 
 You repeatedly end up writing the same custom code over and over:
@@ -60,15 +60,15 @@ Wireform provides an ecosystem of roughly thirty format packages where
 every one shares the extremely performant core utilities (`wireform-core`),
 the same annotation-driven Template Haskell deriver (`wireform-derive`),
 aggressively complete test suites, and, where an upstream conformance
-suite exists, an opt-in test runner that wires it up. 
+suite exists, an opt-in test runner that wires it up.
 
-For example: 
+For example:
 
-- Protobuf runs against the official `protocolbuffers/protobuf` harness. 
-- TOML runs against `toml-test`. 
-- YAML runs against `yaml-test-suite`. 
-- Iceberg, Delta Lake, Hudi, and Lance round-trip through their respective Python or Rust readers. 
-- Fory tests against `pyfory`. 
+- Protobuf runs against the official `protocolbuffers/protobuf` harness.
+- TOML runs against `toml-test`.
+- YAML runs against `yaml-test-suite`.
+- Iceberg, Delta Lake, Hudi, and Lance round-trip through their respective Python or Rust readers.
+- Fory tests against `pyfory`.
 - Kafka clients test against a live broker.
 
 Our goal, with this project, is to have any package published on Hackage under the
@@ -80,13 +80,13 @@ is held to the standard that it is has to be as fast as, or faster than, hand-wr
 
 `wireform` as a project is unapologetically maximalist. If you need to
 parse, render, encode, decode, frame, or otherwise shuffles bytes
-between two systems, we want to support it. 
+between two systems, we want to support it.
 
 The current thirty packages are a starting
 point for the project, but new format packages are welcome and actively
 wanted, provided they clear the same bar the existing ones aspire to:
 
-- fast enough to rival C/Rust/Zig, minimal garbage collection overhead, 
+- fast enough to rival C/Rust/Zig, minimal garbage collection overhead,
 tested hard enough to prove it fully conforms with the format's official conformance suite (or, where no such
 suite exists, with an explicit interop test against another language's
 implementation)

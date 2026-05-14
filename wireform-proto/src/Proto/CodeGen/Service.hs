@@ -67,8 +67,7 @@ genServiceModule pkg prefix svc =
       , mempty
       , txt "import Data.ByteString (ByteString)"
       , txt "import Data.Text (Text)"
-      , txt "import Proto.Encode (MessageEncode, encodeMessage)"
-      , txt "import Proto.Decode (MessageDecode, decodeMessage)"
+      , txt "import Proto (MessageEncode, MessageDecode, encodeMessage, decodeMessage)"
       , mempty
       , vsep (genServiceDecls pkg [] svc)
       ]

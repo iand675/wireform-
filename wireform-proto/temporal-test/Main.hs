@@ -10,8 +10,8 @@ import qualified Data.ByteString.Lazy as BL
 import System.Exit (exitFailure, exitSuccess)
 import System.IO (hPutStrLn, stderr)
 
-import Proto.Encode (encodeMessage)
-import Proto.Decode (decodeMessage, DecodeError)
+import Proto (encodeMessage)
+import Proto (decodeMessage, DecodeError)
 
 import Proto.Temporalio.Api.Common.V1.Message
 import Proto.Temporalio.Api.Enums.V1.Common

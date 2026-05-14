@@ -9,8 +9,30 @@ import Data.Word (Word64)
 import Hedgehog
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
-import Proto.Decode
-import Proto.Encode
+import Proto
+import Proto.Internal.Decode (
+  captureUnknownField,
+  decodeFail,
+  decodeFieldLazyMessage,
+  decodeFieldMessage,
+  decodePackedDouble,
+  decodePackedFixed32,
+  decodePackedSVarint32,
+  decodePackedVarint,
+ )
+import Proto.Internal.Encode (
+  MessageEncode (..),
+  encodePackedDouble,
+  encodePackedFixed32,
+  encodePackedSVarint32,
+  encodePackedVarint,
+  fieldBool,
+  fieldBytes,
+  fieldDouble,
+  fieldMessage,
+  fieldString,
+  fieldVarint,
+ )
 import Proto.Internal.SizedBuilder qualified as SB
 import Proto.Internal.Wire (Tag (..), WireType (..))
 import Proto.Internal.Wire.Decode
@@ -178,7 +200,7 @@ roundtripTests =
         [ testProperty "packed varint roundtrip" $ property $ do
             vals <- forAll $ Gen.list (Range.linear 0 50) (Gen.word64 (Range.linear 0 maxBound))
             let vec = VU.fromList vals
-                encoded = buildToBS (encodePackedVarint 1 vec)
+                encoded = SB.toByteString (encodePackedVarint 1 vec)
             if VU.null vec
               then assert (BS.null encoded)
               else case runDecoder (getTag >> decodePackedVarint) encoded of
@@ -189,7 +211,7 @@ roundtripTests =
         , testProperty "packed fixed32 roundtrip" $ property $ do
             vals <- forAll $ Gen.list (Range.linear 0 50) (Gen.word32 Range.linearBounded)
             let vec = VU.fromList vals
-                encoded = buildToBS (encodePackedFixed32 1 vec)
+                encoded = SB.toByteString (encodePackedFixed32 1 vec)
             if VU.null vec
               then assert (BS.null encoded)
               else case runDecoder (getTag >> decodePackedFixed32) encoded of
@@ -200,7 +222,7 @@ roundtripTests =
         , testProperty "packed double roundtrip" $ property $ do
             vals <- forAll $ Gen.list (Range.linear 0 50) (Gen.double (Range.linearFrac (-1e100) 1e100))
             let vec = VU.fromList vals
-                encoded = buildToBS (encodePackedDouble 1 vec)
+                encoded = SB.toByteString (encodePackedDouble 1 vec)
             if VU.null vec
               then assert (BS.null encoded)
               else case runDecoder (getTag >> decodePackedDouble) encoded of
@@ -211,7 +233,7 @@ roundtripTests =
         , testProperty "packed sint32 roundtrip" $ property $ do
             vals <- forAll $ Gen.list (Range.linear 0 50) (Gen.int32 Range.linearBounded)
             let vec = VU.fromList vals
-                encoded = buildToBS (encodePackedSVarint32 1 vec)
+                encoded = SB.toByteString (encodePackedSVarint32 1 vec)
             if VU.null vec
               then assert (BS.null encoded)
               else case runDecoder (getTag >> decodePackedSVarint32) encoded of
@@ -324,35 +346,35 @@ roundtripTests =
         ]
     , testGroup
         "SizedBuilder (fused size+builder)"
-        [ testProperty "sizedFieldVarint size matches" $ property $ do
+        [ testProperty "fieldVarint size matches" $ property $ do
             fn <- forAll $ Gen.int (Range.linear 1 100)
             val <- forAll $ Gen.word64 (Range.linear 0 maxBound)
-            let sb = sizedFieldVarint fn val
+            let sb = fieldVarint fn val
                 bs = SB.toByteString sb
             BS.length bs === SB.size sb
-        , testProperty "sizedFieldString size matches" $ property $ do
+        , testProperty "fieldString size matches" $ property $ do
             fn <- forAll $ Gen.int (Range.linear 1 100)
             t <- forAll $ Gen.text (Range.linear 0 200) Gen.alphaNum
-            let sb = sizedFieldString fn t
+            let sb = fieldString fn t
                 bs = SB.toByteString sb
             BS.length bs === SB.size sb
-        , testProperty "sizedFieldMessage size matches" $ property $ do
+        , testProperty "fieldMessage size matches" $ property $ do
             val <- forAll $ Gen.word64 (Range.linear 0 1000)
             name <- forAll $ Gen.text (Range.linear 0 50) Gen.alphaNum
-            let innerSB = sizedFieldVarint 1 val <> sizedFieldString 2 name
-                outerSB = sizedFieldMessage 1 innerSB
+            let innerSB = fieldVarint 1 val <> fieldString 2 name
+                outerSB = fieldMessage 1 innerSB
                 bs = SB.toByteString outerSB
             BS.length bs === SB.size outerSB
-        , testProperty "sizedFieldBool size matches" $ property $ do
+        , testProperty "fieldBool size matches" $ property $ do
             fn <- forAll $ Gen.int (Range.linear 1 100)
             b <- forAll Gen.bool
-            let sb = sizedFieldBool fn b
+            let sb = fieldBool fn b
                 bs = SB.toByteString sb
             BS.length bs === SB.size sb
-        , testProperty "sizedFieldDouble size matches" $ property $ do
+        , testProperty "fieldDouble size matches" $ property $ do
             fn <- forAll $ Gen.int (Range.linear 1 100)
             d <- forAll $ Gen.double (Range.linearFrac (-1e100) 1e100)
-            let sb = sizedFieldDouble fn d
+            let sb = fieldDouble fn d
                 bs = SB.toByteString sb
             BS.length bs === SB.size sb
         ]
@@ -369,17 +391,10 @@ data TestMsg = TestMsg
 
 
 instance MessageEncode TestMsg where
-  buildMessage msg =
-    (if tmValue msg /= 0 then encodeFieldVarint 1 (tmValue msg) else mempty)
-      <> (if tmName msg /= "" then encodeFieldString 2 (tmName msg) else mempty)
-      <> (if tmActive msg then encodeFieldBool 3 True else mempty)
-
-
-instance MessageSize TestMsg where
-  messageSize msg =
-    (if tmValue msg /= 0 then fieldVarintSize 1 (tmValue msg) else 0)
-      + (if tmName msg /= "" then fieldTextSize 2 (tmName msg) else 0)
-      + (if tmActive msg then fieldBoolSize 3 else 0)
+  buildSized msg =
+    (if tmValue msg /= 0 then fieldVarint 1 (tmValue msg) else mempty)
+      <> (if tmName msg /= "" then fieldString 2 (tmName msg) else mempty)
+      <> (if tmActive msg then fieldBool 3 True else mempty)
 
 
 instance MessageDecode TestMsg where
@@ -404,15 +419,9 @@ data TestOuter = TestOuter
 
 
 instance MessageEncode TestOuter where
-  buildMessage msg =
-    (if toValue msg /= 0 then encodeFieldVarint 1 (toValue msg) else mempty)
-      <> maybe mempty (encodeFieldMessageSized 2) (toInner msg)
-
-
-instance MessageSize TestOuter where
-  messageSize msg =
-    (if toValue msg /= 0 then fieldVarintSize 1 (toValue msg) else 0)
-      + maybe 0 (fieldMessageSize 2 . messageSize) (toInner msg)
+  buildSized msg =
+    (if toValue msg /= 0 then fieldVarint 1 (toValue msg) else mempty)
+      <> maybe mempty (fieldMessage 2 . buildSized) (toInner msg)
 
 
 instance MessageDecode TestOuter where

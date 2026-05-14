@@ -157,7 +157,7 @@
                         "default": null
                      },
                      {
-                        "name":"maxEventTime", 
+                        "name":"maxEventTime",
                         "type":["null","long"],
                         "default": null
                      },

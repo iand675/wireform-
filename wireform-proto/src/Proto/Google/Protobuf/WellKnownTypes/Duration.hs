@@ -11,7 +11,7 @@
 -- Any manual changes will be overwritten the next time code
 -- generation is run.  To modify the types or instances, edit the
 -- @.proto@ source file and re-run the code generator.
-module Proto.Google.Protobuf.Duration where
+module Proto.Google.Protobuf.WellKnownTypes.Duration where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
@@ -19,43 +19,39 @@ import qualified Wireform.Builder as B
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Word (Word32, Word64)
+import Data.Word (Word8, Word32, Word64)
+import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
 import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as VU
 import GHC.Generics (Generic)
 import Control.DeepSeq (NFData(..))
 import Data.Hashable (Hashable(..))
-import Proto.Encode
-import Proto.Decode
+import Proto.Internal.Encode
+import Proto.Internal.Decode
+import Proto.Internal.GrowList (GrowList, emptyGrowList, snocGrowList, growListToVector)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Types as Aeson
 import qualified Data.Aeson.Key as AesonKey
 import qualified Data.Aeson.KeyMap as AesonKM
-import Proto.Internal.JSON (jsonObject, (.=:), parseFieldMaybe, bytesFieldToJSON, parseBytesFieldMaybe, bytesMapFieldToJSON, parseBytesMapFieldMaybe, protoBytesToJSON)
+import Proto.Internal.JSON (jsonObject, (.=:), parseFieldMaybe, bytesFieldToJSON, parseBytesFieldMaybe, bytesMapFieldToJSON, parseBytesMapFieldMaybe, protoBytesToJSON, OneofVariantNullSemantics (..), parseOneofVariants)
 import Data.Proxy (Proxy(..))
-import Proto.Registry (IsMessage)
 import Proto.Schema (ProtoMessage(..), SomeFieldDescriptor(..), FieldDescriptor(..), FieldTypeDescriptor(..), ScalarFieldType(..), FieldLabel'(..))
-import qualified Proto.Registry
+import Proto.Registry (IsMessage)
+import Proto.Registry qualified
 import qualified Proto.Extension
 import Proto.Internal.Wire (Tag(..), WireType(..))
 import Proto.Internal.Wire.Encode (putTag, putVarint, putFixed32, putFixed64,
   putFloat, putDouble, putText, putByteString, putLengthDelimited,
   putSVarint32, putSVarint64, putVarintSigned,
-  varintSize, tagSize, fieldMessageSize,
-  fieldVarintSize, fieldFixed32Size, fieldFixed64Size,
-  fieldBoolSize, fieldFloatSize, fieldDoubleSize,
-  fieldTextSize, fieldBytesSize,
-  fieldSVarint32Size, fieldSVarint64Size,
+  varintSize, tagSize,
   varintSize32, zigZag32, zigZag64)
 import Proto.Internal.Encode.Archetype (archVarint, archSVarint32, archSVarint64,
   archFixed32, archFixed64, archFloat, archDouble, archBool,
-  archString, archBytes, archSubmessage,
-  archVarintSize, archStringSize, archBytesSize, archBoolSize,
-  archFixed32Size, archFixed64Size, archSubmessageSize)
+  archString, archBytes, archSubmessage)
 
 -- | Serialized FileDescriptorProto for this .proto file.
--- Decode with @Proto.Google.Protobuf.Descriptor.decodeMessage@.
+-- Decode with @Proto.Decode.decodeMessage@.
 fileDescriptorProtoBytes :: ByteString
 fileDescriptorProtoBytes = "\x0a\x1e\x67\x6f\x6f\x67\x6c\x65\x2f\x70\x72\x6f\x74\x6f\x62\x75\x66\x2f\x64\x75\x72\x61\x74\x69\x6f\x6e\x2e\x70\x72\x6f\x74\x6f\x12\x0f\x67\x6f\x6f\x67\x6c\x65\x2e\x70\x72\x6f\x74\x6f\x62\x75\x66\x22\x2a\x0a\x08\x44\x75\x72\x61\x74\x69\x6f\x6e\x12\x0f\x0a\x07\x73\x65\x63\x6f\x6e\x64\x73\x18\x01\x20\x01\x28\x03\x12\x0d\x0a\x05\x6e\x61\x6e\x6f\x73\x18\x02\x20\x01\x28\x05\x62\x06\x70\x72\x6f\x74\x6f\x33"
 
@@ -76,42 +72,49 @@ defaultDuration = Duration
   }
 
 instance MessageEncode Duration where
-  buildMessage msg =
+  buildSized msg =
     (if msg.durationSeconds == 0 then mempty else archVarint 8 (fromIntegral msg.durationSeconds))
     <> (if msg.durationNanos == 0 then mempty else archVarint 16 (fromIntegral msg.durationNanos))
-    <> encodeUnknownFields msg.durationUnknownFields
-
-instance MessageSize Duration where
-  messageSize msg =
-    (if msg.durationSeconds == 0 then 0 else archVarintSize (fromIntegral msg.durationSeconds))
-    + (if msg.durationNanos == 0 then 0 else archVarintSize (fromIntegral msg.durationNanos))
-    + unknownFieldsSize msg.durationUnknownFields
+    <> encodeUnknownFieldsSized msg.durationUnknownFields
 
 instance MessageDecode Duration where
   {-# INLINE messageDecoder #-}
-  messageDecoder = loop 0 0 []
+  messageDecoder = stage_0 defaultDuration
     where
-      loop acc_0 acc_1 acc_unknown_ = withTagM
-        (pure (Duration {durationSeconds = acc_0, durationNanos = acc_1, durationUnknownFields = reverse acc_unknown_}))
+      stage_0 msg =
+        inOrderStage1
+          (0x8 :: Data.Word.Word8)
+          (fromIntegral <$> decodeFieldVarint)
+          (\v -> stage_1 (msg { durationSeconds = v}))
+          (pure (case msg.durationUnknownFields of { [] -> msg; _ -> msg { durationUnknownFields = reverse (msg.durationUnknownFields) } }))
+          (loop msg)
+      stage_1 msg =
+        inOrderStage1
+          (0x10 :: Data.Word.Word8)
+          (fromIntegral <$> decodeFieldVarint)
+          (\v -> loop (msg { durationNanos = v}))
+          (pure (case msg.durationUnknownFields of { [] -> msg; _ -> msg { durationUnknownFields = reverse (msg.durationUnknownFields) } }))
+          (loop msg)
+      loop msg = withTagM
+        (pure (case msg.durationUnknownFields of { [] -> msg; _ -> msg { durationUnknownFields = reverse (msg.durationUnknownFields) } }))
         (\fn wt -> case fn of
           1 -> do
             v <- (fromIntegral <$> decodeFieldVarint)
-            loop v acc_1 acc_unknown_
+            loop (msg { durationSeconds = v})
           2 -> do
             v <- (fromIntegral <$> decodeFieldVarint)
-            loop acc_0 v acc_unknown_
+            loop (msg { durationNanos = v})
           _ -> do
-            uf <- captureUnknownField fn (toEnum wt)
-            loop acc_0 acc_1 (uf : acc_unknown_))
+            uf <- captureUnknownField fn (Prelude.toEnum wt)
+            loop (msg { durationUnknownFields = (uf : msg.durationUnknownFields)}))
 
-instance IsMessage Duration
-
-instance ProtoMessage Duration where
-  protoMessageName _ = "google.protobuf.Duration"
-  protoPackageName _ = "google.protobuf"
-  protoDefaultValue = defaultDuration
-  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
-  protoFieldDescriptors _ = Map.fromList
+-- | Field descriptors for 'Duration', keyed by proto field number.
+--
+-- Top-level CAF: allocated lazily on first force, shared on every
+-- subsequent 'protoFieldDescriptors' call (no per-call rebuild).
+durationFieldDescriptors :: IntMap.IntMap (SomeFieldDescriptor Duration)
+durationFieldDescriptors =
+  IntMap.fromList
     [ (1, SomeField FieldDescriptor
         { fdName = "seconds"
         , fdNumber = 1
@@ -128,6 +131,15 @@ instance ProtoMessage Duration where
         , fdSet = \v m -> m { durationNanos = v }
         })
     ]
+
+instance ProtoMessage Duration where
+  protoMessageName _ = "google.protobuf.Duration"
+  protoPackageName _ = "google.protobuf"
+  protoDefaultValue = defaultDuration
+  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
+  protoFieldDescriptors _ = durationFieldDescriptors
+
+instance IsMessage Duration
 
 instance Aeson.ToJSON Duration where
   toJSON msg =
@@ -154,15 +166,10 @@ instance Proto.Extension.HasExtensions Duration where
 
 instance Semigroup Duration where
   a <> b = Duration
-    { durationSeconds = b.durationSeconds
-    , durationNanos = b.durationNanos
+    { durationSeconds = if b.durationSeconds == 0 then a.durationSeconds else b.durationSeconds
+    , durationNanos = if b.durationNanos == 0 then a.durationNanos else b.durationNanos
     , durationUnknownFields = a.durationUnknownFields <> b.durationUnknownFields
     }
 
 instance Monoid Duration where
   mempty = defaultDuration
-
--- | Register all message types defined in this module.
-registerModuleTypes :: Proto.Registry.TypeRegistry -> Proto.Registry.TypeRegistry
-registerModuleTypes =
-  Proto.Registry.registerMessage (Proxy :: Proxy Duration) .  id

@@ -105,7 +105,7 @@ data ProtoGenConfig = ProtoGenConfig
   , pgcModulePrefix :: T.Text
   -- ^ Haskell module prefix for generated code (e.g. @\"Proto.Gen\"@).
   , pgcLazySub :: Bool
-  -- ^ When 'True', generate lazy submessage decoders using 'Proto.Decode.LazyMessage'.
+  -- ^ When 'True', generate lazy submessage decoders using 'LazyMessage'.
   , pgcHooks :: CodeGenHooks
   -- ^ Codegen hooks that fire based on proto attributes.
   }

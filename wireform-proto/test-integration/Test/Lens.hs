@@ -7,7 +7,7 @@ import Data.Int (Int32, Int64)
 import Test.Tasty
 import Test.Tasty.HUnit
 
-import Proto.Google.Protobuf.Timestamp (Timestamp(..), defaultTimestamp)
+import Proto.Google.Protobuf.WellKnownTypes.Timestamp (Timestamp(..), defaultTimestamp)
 
 lensTests :: TestTree
 lensTests = testGroup "Proto.Lens (record field access)"

@@ -19,8 +19,8 @@ module Proto.Google.Protobuf.Any.Util (
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
-import Proto.Decode (DecodeError, decodeMessage)
-import Proto.Encode (encodeMessage)
+import Proto (DecodeError, decodeMessage)
+import Proto (encodeMessage)
 import Proto.Google.Protobuf.Any (Any (..))
 import Proto.Registry (IsMessage)
 import Proto.Schema (ProtoMessage (..))

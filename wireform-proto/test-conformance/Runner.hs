@@ -30,8 +30,8 @@ import Data.ByteString qualified as BS
 import Data.Proxy (Proxy (..))
 import Data.Text qualified as T
 import Data.Word (Word32)
-import Proto.Decode qualified as PD
-import Proto.Encode qualified as PE
+import Proto qualified as PD
+import Proto qualified as PE
 import Proto.Internal.JSON.WellKnown qualified as WK
 import Proto.Registry (AnyCodec (..), TypeRegistry, registerCodec)
 import System.IO (

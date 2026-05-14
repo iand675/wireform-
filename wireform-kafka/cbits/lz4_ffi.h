@@ -34,4 +34,3 @@ size_t lz4_decompress_wrapper(const char* input, size_t input_length,
                                char** output, size_t* output_length);
 
 #endif /* LZ4_FFI_H */
-

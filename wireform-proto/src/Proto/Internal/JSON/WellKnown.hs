@@ -3,6 +3,9 @@
 
 {- | Proto3 canonical JSON mapping for well-known types.
 
+__Stability:__ exposed for use by wireform-proto-generated code; not
+part of the stable public API.
+
 These functions provide the canonical conversions specified by the
 proto3 JSON specification.
 -}
@@ -80,15 +83,15 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.Read qualified as TR
 import Data.Vector qualified as V
-import Proto.Decode qualified as PD
-import Proto.Encode qualified as PE
-import Proto.Google.Protobuf.Any qualified as Any
-import Proto.Google.Protobuf.Duration
-import Proto.Google.Protobuf.Empty qualified as Empty
-import Proto.Google.Protobuf.FieldMask
-import Proto.Google.Protobuf.Struct
-import Proto.Google.Protobuf.Timestamp
-import Proto.Google.Protobuf.Wrappers qualified as W
+import Proto qualified as PD
+import Proto qualified as PE
+import Proto.Google.Protobuf.WellKnownTypes.Any qualified as Any
+import Proto.Google.Protobuf.WellKnownTypes.Duration
+import Proto.Google.Protobuf.WellKnownTypes.Empty qualified as Empty
+import Proto.Google.Protobuf.WellKnownTypes.FieldMask
+import Proto.Google.Protobuf.WellKnownTypes.Struct
+import Proto.Google.Protobuf.WellKnownTypes.Timestamp
+import Proto.Google.Protobuf.WellKnownTypes.Wrappers qualified as W
 import Proto.Registry (AnyCodec (..), TypeRegistry, emptyRegistry, lookupCodec, registerCodec)
 
 
@@ -765,7 +768,7 @@ emptyFromJSON _ = Left "Expected JSON Object for Empty"
 
 
 {- | 'NullValue' is the proto3 enum @NULL_VALUE = 0@; it serialises
-as JSON @null@. We import it from "Proto.Google.Protobuf.Struct"
+as JSON @null@. We import it from "Proto.Google.Protobuf.WellKnownTypes.Struct"
 (since that's where the codegen put it).
 -}
 nullValueToJSON :: NullValue -> Aeson.Value

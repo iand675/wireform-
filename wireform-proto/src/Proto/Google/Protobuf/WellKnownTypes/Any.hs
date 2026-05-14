@@ -11,7 +11,7 @@
 -- Any manual changes will be overwritten the next time code
 -- generation is run.  To modify the types or instances, edit the
 -- @.proto@ source file and re-run the code generator.
-module Proto.Google.Protobuf.Any where
+module Proto.Google.Protobuf.WellKnownTypes.Any where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
@@ -19,43 +19,39 @@ import qualified Wireform.Builder as B
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Word (Word32, Word64)
+import Data.Word (Word8, Word32, Word64)
+import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
 import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as VU
 import GHC.Generics (Generic)
 import Control.DeepSeq (NFData(..))
 import Data.Hashable (Hashable(..))
-import Proto.Encode
-import Proto.Decode
+import Proto.Internal.Encode
+import Proto.Internal.Decode
+import Proto.Internal.GrowList (GrowList, emptyGrowList, snocGrowList, growListToVector)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Types as Aeson
 import qualified Data.Aeson.Key as AesonKey
 import qualified Data.Aeson.KeyMap as AesonKM
-import Proto.Internal.JSON (jsonObject, (.=:), parseFieldMaybe, bytesFieldToJSON, parseBytesFieldMaybe, bytesMapFieldToJSON, parseBytesMapFieldMaybe, protoBytesToJSON)
+import Proto.Internal.JSON (jsonObject, (.=:), parseFieldMaybe, bytesFieldToJSON, parseBytesFieldMaybe, bytesMapFieldToJSON, parseBytesMapFieldMaybe, protoBytesToJSON, OneofVariantNullSemantics (..), parseOneofVariants)
 import Data.Proxy (Proxy(..))
-import Proto.Registry (IsMessage)
 import Proto.Schema (ProtoMessage(..), SomeFieldDescriptor(..), FieldDescriptor(..), FieldTypeDescriptor(..), ScalarFieldType(..), FieldLabel'(..))
-import qualified Proto.Registry
+import Proto.Registry (IsMessage)
+import Proto.Registry qualified
 import qualified Proto.Extension
 import Proto.Internal.Wire (Tag(..), WireType(..))
 import Proto.Internal.Wire.Encode (putTag, putVarint, putFixed32, putFixed64,
   putFloat, putDouble, putText, putByteString, putLengthDelimited,
   putSVarint32, putSVarint64, putVarintSigned,
-  varintSize, tagSize, fieldMessageSize,
-  fieldVarintSize, fieldFixed32Size, fieldFixed64Size,
-  fieldBoolSize, fieldFloatSize, fieldDoubleSize,
-  fieldTextSize, fieldBytesSize,
-  fieldSVarint32Size, fieldSVarint64Size,
+  varintSize, tagSize,
   varintSize32, zigZag32, zigZag64)
 import Proto.Internal.Encode.Archetype (archVarint, archSVarint32, archSVarint64,
   archFixed32, archFixed64, archFloat, archDouble, archBool,
-  archString, archBytes, archSubmessage,
-  archVarintSize, archStringSize, archBytesSize, archBoolSize,
-  archFixed32Size, archFixed64Size, archSubmessageSize)
+  archString, archBytes, archSubmessage)
 
 -- | Serialized FileDescriptorProto for this .proto file.
--- Decode with @Proto.Google.Protobuf.Descriptor.decodeMessage@.
+-- Decode with @Proto.Decode.decodeMessage@.
 fileDescriptorProtoBytes :: ByteString
 fileDescriptorProtoBytes = "\x0a\x19\x67\x6f\x6f\x67\x6c\x65\x2f\x70\x72\x6f\x74\x6f\x62\x75\x66\x2f\x61\x6e\x79\x2e\x70\x72\x6f\x74\x6f\x12\x0f\x67\x6f\x6f\x67\x6c\x65\x2e\x70\x72\x6f\x74\x6f\x62\x75\x66\x22\x26\x0a\x03\x41\x6e\x79\x12\x10\x0a\x08\x74\x79\x70\x65\x5f\x75\x72\x6c\x18\x01\x20\x01\x28\x09\x12\x0d\x0a\x05\x76\x61\x6c\x75\x65\x18\x02\x20\x01\x28\x0c\x62\x06\x70\x72\x6f\x74\x6f\x33"
 
@@ -76,42 +72,49 @@ defaultAny = Any
   }
 
 instance MessageEncode Any where
-  buildMessage msg =
+  buildSized msg =
     (if msg.anyTypeUrl == T.empty then mempty else archString 10 msg.anyTypeUrl)
     <> (if BS.null msg.anyValue then mempty else archBytes 18 msg.anyValue)
-    <> encodeUnknownFields msg.anyUnknownFields
-
-instance MessageSize Any where
-  messageSize msg =
-    (if msg.anyTypeUrl == T.empty then 0 else archStringSize msg.anyTypeUrl)
-    + (if BS.null msg.anyValue then 0 else archBytesSize msg.anyValue)
-    + unknownFieldsSize msg.anyUnknownFields
+    <> encodeUnknownFieldsSized msg.anyUnknownFields
 
 instance MessageDecode Any where
   {-# INLINE messageDecoder #-}
-  messageDecoder = loop "" "" []
+  messageDecoder = stage_0 defaultAny
     where
-      loop acc_0 acc_1 acc_unknown_ = withTagM
-        (pure (Any {anyTypeUrl = acc_0, anyValue = acc_1, anyUnknownFields = reverse acc_unknown_}))
+      stage_0 msg =
+        inOrderStage1
+          (0xa :: Data.Word.Word8)
+          decodeFieldString
+          (\v -> stage_1 (msg { anyTypeUrl = v}))
+          (pure (case msg.anyUnknownFields of { [] -> msg; _ -> msg { anyUnknownFields = reverse (msg.anyUnknownFields) } }))
+          (loop msg)
+      stage_1 msg =
+        inOrderStage1
+          (0x12 :: Data.Word.Word8)
+          decodeFieldBytes
+          (\v -> loop (msg { anyValue = v}))
+          (pure (case msg.anyUnknownFields of { [] -> msg; _ -> msg { anyUnknownFields = reverse (msg.anyUnknownFields) } }))
+          (loop msg)
+      loop msg = withTagM
+        (pure (case msg.anyUnknownFields of { [] -> msg; _ -> msg { anyUnknownFields = reverse (msg.anyUnknownFields) } }))
         (\fn wt -> case fn of
           1 -> do
             v <- decodeFieldString
-            loop v acc_1 acc_unknown_
+            loop (msg { anyTypeUrl = v})
           2 -> do
             v <- decodeFieldBytes
-            loop acc_0 v acc_unknown_
+            loop (msg { anyValue = v})
           _ -> do
-            uf <- captureUnknownField fn (toEnum wt)
-            loop acc_0 acc_1 (uf : acc_unknown_))
+            uf <- captureUnknownField fn (Prelude.toEnum wt)
+            loop (msg { anyUnknownFields = (uf : msg.anyUnknownFields)}))
 
-instance IsMessage Any
-
-instance ProtoMessage Any where
-  protoMessageName _ = "google.protobuf.Any"
-  protoPackageName _ = "google.protobuf"
-  protoDefaultValue = defaultAny
-  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
-  protoFieldDescriptors _ = Map.fromList
+-- | Field descriptors for 'Any', keyed by proto field number.
+--
+-- Top-level CAF: allocated lazily on first force, shared on every
+-- subsequent 'protoFieldDescriptors' call (no per-call rebuild).
+anyFieldDescriptors :: IntMap.IntMap (SomeFieldDescriptor Any)
+anyFieldDescriptors =
+  IntMap.fromList
     [ (1, SomeField FieldDescriptor
         { fdName = "type_url"
         , fdNumber = 1
@@ -128,6 +131,15 @@ instance ProtoMessage Any where
         , fdSet = \v m -> m { anyValue = v }
         })
     ]
+
+instance ProtoMessage Any where
+  protoMessageName _ = "google.protobuf.Any"
+  protoPackageName _ = "google.protobuf"
+  protoDefaultValue = defaultAny
+  protoFileDescriptorBytes _ = fileDescriptorProtoBytes
+  protoFieldDescriptors _ = anyFieldDescriptors
+
+instance IsMessage Any
 
 instance Aeson.ToJSON Any where
   toJSON msg = jsonObject
@@ -153,15 +165,10 @@ instance Proto.Extension.HasExtensions Any where
 
 instance Semigroup Any where
   a <> b = Any
-    { anyTypeUrl = b.anyTypeUrl
-    , anyValue = b.anyValue
+    { anyTypeUrl = if b.anyTypeUrl == "" then a.anyTypeUrl else b.anyTypeUrl
+    , anyValue = if b.anyValue == "" then a.anyValue else b.anyValue
     , anyUnknownFields = a.anyUnknownFields <> b.anyUnknownFields
     }
 
 instance Monoid Any where
   mempty = defaultAny
-
--- | Register all message types defined in this module.
-registerModuleTypes :: Proto.Registry.TypeRegistry -> Proto.Registry.TypeRegistry
-registerModuleTypes =
-  Proto.Registry.registerMessage (Proxy :: Proxy Any) .  id

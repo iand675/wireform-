@@ -3,6 +3,9 @@
 
 {- | Low-level, high-performance wire format encoding primitives.
 
+__Stability:__ exposed for use by wireform-proto-generated code; not
+part of the stable public API.
+
 All encoding is done via 'Wireform.Builder' for zero-copy
 concatenation and efficient output. Varint encoding is unrolled for
 common small values.

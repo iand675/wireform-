@@ -9,7 +9,7 @@ bytes. Most users only need 'decodeMessage'.
 == Quick start
 
 @
-import Proto.Decode
+import Proto.Internal.Decode
 
 case 'decodeMessage' rawBytes of
   Left err -> handleError err   -- 'DecodeError' with details
@@ -39,7 +39,7 @@ negative length prefixes, and custom errors from generated code.
 * __Unknown field preservation__: unrecognised fields are captured as
   'UnknownField' values for round-trip fidelity.
 -}
-module Proto.Decode (
+module Proto.Internal.Decode (
   -- * Decoding typeclass
   MessageDecode (..),
 
@@ -81,6 +81,7 @@ module Proto.Decode (
   UnknownField (..),
   captureUnknownField,
   encodeUnknownFields,
+  encodeUnknownFieldsSized,
 
   -- * Re-exports for generated code
   Decoder,
@@ -122,6 +123,8 @@ module Proto.Decode (
   -- * Monadic CPS tag dispatch (zero Tag allocation, for generated code)
   withTagM,
   skipWireType,
+  inOrderStage,
+  inOrderStage1,
 ) where
 
 import Control.DeepSeq (NFData (..))
@@ -146,6 +149,7 @@ import Foreign.Ptr (castPtr)
 import Foreign.Storable (Storable)
 import GHC.Exts (Int (I#))
 import GHC.Float (castWord32ToFloat, castWord64ToDouble)
+import Proto.Internal.SizedBuilder qualified as SB
 import Proto.Internal.Wire (Tag (..), WireType (..))
 import Proto.Internal.Wire.Decode
 import Proto.Internal.Wire.Encode (putFixed32, putFixed64, putLengthDelimited, putTag, putVarint, tagSize, varintSize)
@@ -247,7 +251,8 @@ decodeFieldMessage = Decoder $ \bs off ->
             if I# off' + len > BS.length bs
               then (# | UnexpectedEnd #)
               else
-                let !subBs = BSU.unsafeTake len (BSU.unsafeDrop (I# off') bs)
+                let !subBs = case bs of
+                      BSI.BS fp _ -> BSI.BS (BSI.plusForeignPtr fp (I# off')) len
                 in case runDecoder# messageDecoder subBs 0# of
                     (# (# a, subOff #) | #)
                       | I# subOff == len ->
@@ -527,11 +532,54 @@ decodeAllSVarint64 bs
           VU.unsafeFreeze mv
 
 
-{- | A lazily-decoded submessage. The raw bytes are captured during the
-parent message decode, but the actual submessage parsing is deferred
-until 'forceLazyMessage' is called. This is a key performance
-optimization from the Buf protobuf performance guide: if the consumer
-never accesses a submessage field, the decode cost is zero.
+{- | A lazily-decoded submessage.
+
+The parent message decode captures the submessage's raw bytes but does
+not parse them immediately. Parsing is deferred until 'forceLazyMessage'
+is called — so if you never access a particular submessage field, its
+decode cost is zero.
+
+== When to opt in
+
+Lazy decoding pays off when:
+
+* Your code path only inspects a subset of submessages (e.g. routing
+  middleware that reads a header field but forwards the body opaque).
+* The submessage is large and infrequently accessed.
+* You are decoding many messages in bulk and want to amortise heavy
+  submessage parsing.
+
+== How to opt in (text codegen)
+
+Pass @genLazySubmessages = True@ in 'Proto.CodeGen.GenerateOpts' when
+generating code.  Every submessage field in the generated types then
+has type @'LazyMessage' Foo@ instead of @Foo@.
+
+== Usage
+
+@
+-- Given a generated type with a lazy submessage field:
+--   data Envelope = Envelope { envelopeBody :: 'LazyMessage' Body, … }
+
+-- Decode the envelope — O(envelope fields), Body not parsed yet.
+case 'decodeMessage' raw of
+  Left err  -> handleError err
+  Right env ->
+    -- Force the body only if you actually need it:
+    case 'forceLazyMessage' (envelopeBody env) of
+      Left err  -> handleBodyError err
+      Right body -> use body
+@
+
+== Caveats
+
+* A 'LazyMessage' retains a reference to the slice of the original
+  input 'ByteString'.  If the input is large and you store
+  'LazyMessage' values long-term, consider forcing them promptly to
+  avoid holding onto the parent buffer.
+
+* 'Eq' compares the raw bytes, not the decoded value; two structurally
+  equal messages encoded differently will compare unequal.
 -}
 data LazyMessage a = LazyMessage
   { lazyRawBytes :: !ByteString
@@ -549,7 +597,12 @@ instance Eq a => Eq (LazyMessage a) where
   a == b = lazyRawBytes a == lazyRawBytes b
 
 
--- | Force a lazy message, decoding the raw bytes.
+{- | Force a 'LazyMessage', decoding the raw bytes.
+
+Returns @'Left' 'DecodeError'@ if the bytes are malformed.
+The result is memoised: calling 'forceLazyMessage' more than once on
+the same 'LazyMessage' does not repeat the decode work.
+-}
 forceLazyMessage :: LazyMessage a -> Either DecodeError a
 forceLazyMessage = lazyCached
 {-# INLINE forceLazyMessage #-}
@@ -626,6 +679,27 @@ encodeUnknownFields = foldMap encodeOne
       putTag fn Wire32Bit <> putFixed32 val
     encodeOne (UnknownLenDelim fn val) =
       putTag fn WireLengthDelimited <> putLengthDelimited val
+
+
+-- | 'encodeUnknownFields' fused with 'unknownFieldsSize'. The
+-- generated 'buildSized' methods append this fragment at the end of
+-- their @SizedBuilder@ chain so unknown fields contribute their
+-- exact byte count to the parent's wire size without a second pass.
+encodeUnknownFieldsSized :: [UnknownField] -> SB.SizedBuilder
+encodeUnknownFieldsSized = foldMap encodeOne
+  where
+    encodeOne :: UnknownField -> SB.SizedBuilder
+    encodeOne (UnknownVarint fn val) =
+      SB.sized (tagSize fn + varintSize val) (putTag fn WireVarint <> putVarint val)
+    encodeOne (UnknownFixed64 fn val) =
+      SB.sized (tagSize fn + 8) (putTag fn Wire64Bit <> putFixed64 val)
+    encodeOne (UnknownFixed32 fn val) =
+      SB.sized (tagSize fn + 4) (putTag fn Wire32Bit <> putFixed32 val)
+    encodeOne (UnknownLenDelim fn val) =
+      let !len = BS.length val
+          !sz = tagSize fn + varintSize (fromIntegral len) + len
+      in SB.sized sz (putTag fn WireLengthDelimited <> putLengthDelimited val)
+{-# INLINE encodeUnknownFieldsSized #-}
 
 
 -- | Decode a map entry (key=field1, value=field2) from a length-delimited chunk.

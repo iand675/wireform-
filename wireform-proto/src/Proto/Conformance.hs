@@ -21,7 +21,6 @@ module Proto.Conformance (
 
   -- * Conformance runner
   conformanceMain,
-  handleConformanceRequest,
 ) where
 
 import Control.DeepSeq (NFData)
@@ -32,8 +31,8 @@ import Data.Int (Int32)
 import Data.Text (Text)
 import Data.Word (Word32)
 import GHC.Generics (Generic)
-import Proto.Decode
-import Proto.Encode
+import Proto.Internal.Decode
+import Proto.Internal.Encode
 import Proto.Internal.Wire (Tag (..))
 import System.IO (BufferMode (..), hFlush, hSetBinaryMode, hSetBuffering, isEOF, stdin, stdout)
 
@@ -57,13 +56,13 @@ defaultConformanceRequest = ConformanceRequest "" 0 ""
 
 
 instance MessageEncode ConformanceRequest where
-  buildMessage cr =
-    (if BS.null (crPayload cr) then mempty else encodeFieldBytes 1 (crPayload cr))
+  buildSized cr =
+    (if BS.null (crPayload cr) then mempty else fieldBytes 1 (crPayload cr))
       <> ( if crRequestedOutputFormat cr == 0
             then mempty
-            else encodeFieldVarint 3 (fromIntegral (crRequestedOutputFormat cr))
+            else fieldVarint 3 (fromIntegral (crRequestedOutputFormat cr))
          )
-      <> (if crMessageType cr == "" then mempty else encodeFieldString 4 (crMessageType cr))
+      <> (if crMessageType cr == "" then mempty else fieldString 4 (crMessageType cr))
 
 
 instance MessageDecode ConformanceRequest where
@@ -103,13 +102,13 @@ defaultConformanceResponse = ConformanceResponse (Skipped "")
 
 
 instance MessageEncode ConformanceResponse where
-  buildMessage (ConformanceResponse r) = case r of
-    ParseError t -> encodeFieldString 1 t
-    RuntimeError t -> encodeFieldString 2 t
-    ProtobufPayload b -> encodeFieldBytes 3 b
-    JsonPayload t -> encodeFieldString 4 t
-    Skipped t -> encodeFieldString 5 t
-    SerializeError t -> encodeFieldString 6 t
+  buildSized (ConformanceResponse r) = case r of
+    ParseError t -> fieldString 1 t
+    RuntimeError t -> fieldString 2 t
+    ProtobufPayload b -> fieldBytes 3 b
+    JsonPayload t -> fieldString 4 t
+    Skipped t -> fieldString 5 t
+    SerializeError t -> fieldString 6 t
 
 
 instance MessageDecode ConformanceResponse where
@@ -187,7 +186,3 @@ encodeLE32 n =
     ]
 
 
--- | Default handler that does protobuf round-trip.
-handleConformanceRequest :: ConformanceRequest -> IO ConformanceResponse
-handleConformanceRequest _req =
-  pure (ConformanceResponse (Skipped "Not yet implemented"))

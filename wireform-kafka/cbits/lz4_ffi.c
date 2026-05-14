@@ -16,7 +16,7 @@ size_t lz4_compress_wrapper_level(const char* input, size_t input_length,
 
 /*
  * Compress data using LZ4 frame format with default compression level.
- * 
+ *
  * Returns the compressed size, or 0 on error.
  * The caller must free the output buffer.
  */
@@ -28,7 +28,7 @@ size_t lz4_compress_wrapper(const char* input, size_t input_length,
 /*
  * Compress data using LZ4 frame format with specified compression level.
  * Level 0 = fast mode (default), levels 1-16 = high compression mode.
- * 
+ *
  * Returns the compressed size, or 0 on error.
  * The caller must free the output buffer.
  */
@@ -38,11 +38,11 @@ size_t lz4_compress_wrapper_level(const char* input, size_t input_length,
     if (!input || !output || !output_length) {
         return 0;
     }
-    
+
     // Setup compression preferences
     LZ4F_preferences_t preferences;
     memset(&preferences, 0, sizeof(preferences));
-    
+
     // Set compression level
     // Level 0 = default fast mode
     // Levels 1-16 = high compression mode (mapped to LZ4HC levels)
@@ -54,33 +54,33 @@ size_t lz4_compress_wrapper_level(const char* input, size_t input_length,
         // Invalid level, use default
         preferences.compressionLevel = 0;
     }
-    
+
     // Get the maximum compressed length (includes frame header/footer)
     size_t max_compressed_length = LZ4F_compressFrameBound(input_length, &preferences);
-    
+
     // Allocate output buffer
     *output = (char*)malloc(max_compressed_length);
     if (!*output) {
         return 0;
     }
-    
+
     // Compress the data using the frame API with preferences
     size_t result = LZ4F_compressFrame(*output, max_compressed_length,
                                        input, input_length, &preferences);
-    
+
     if (LZ4F_isError(result)) {
         free(*output);
         *output = NULL;
         return 0;
     }
-    
+
     *output_length = result;
     return result;
 }
 
 /*
  * Decompress LZ4-compressed data (frame format).
- * 
+ *
  * Returns the decompressed size, or 0 on error.
  * The caller must free the output buffer.
  */
@@ -89,40 +89,39 @@ size_t lz4_decompress_wrapper(const char* input, size_t input_length,
     if (!input || !output || !output_length) {
         return 0;
     }
-    
+
     LZ4F_dctx* dctx;
     LZ4F_errorCode_t err = LZ4F_createDecompressionContext(&dctx, LZ4F_VERSION);
     if (LZ4F_isError(err)) {
         return 0;
     }
-    
+
     // Start with a reasonable buffer size (try 4x input size as heuristic)
     size_t output_capacity = input_length * 4;
     if (output_capacity < 64 * 1024) {
         output_capacity = 64 * 1024; // At least 64KB
     }
-    
+
     *output = (char*)malloc(output_capacity);
     if (!*output) {
         LZ4F_freeDecompressionContext(dctx);
         return 0;
     }
-    
+
     // Decompress
     size_t src_size = input_length;
     size_t dst_size = output_capacity;
     size_t result = LZ4F_decompress(dctx, *output, &dst_size,
                                      input, &src_size, NULL);
-    
+
     LZ4F_freeDecompressionContext(dctx);
-    
+
     if (LZ4F_isError(result)) {
         free(*output);
         *output = NULL;
         return 0;
     }
-    
+
     *output_length = dst_size;
     return dst_size;
 }
-

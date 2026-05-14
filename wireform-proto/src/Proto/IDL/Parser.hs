@@ -438,6 +438,19 @@ extensionsDecl :: Parser [ExtensionRange]
 extensionsDecl = do
   reserved "extensions"
   ranges <- extensionRange `sepBy1` comma
+  -- proto2 syntax allows a trailing options block, e.g.
+  --
+  --   extensions 1000 to max [
+  --     declaration = { number: 1000, full_name: ".foo", type: ".Foo" },
+  --     declaration = { ... }
+  --   ];
+  --
+  -- These options carry registration metadata (which is interesting
+  -- only to protoc / descriptor-pool consumers, not the wire codecs we
+  -- emit), so for now we parse-and-discard them rather than extending
+  -- 'ExtensionRange' with a new field. The names+numbers we *do* keep
+  -- are the only things downstream codegen looks at.
+  _opts <- fieldOptionList
   semi
   pure ranges
   where

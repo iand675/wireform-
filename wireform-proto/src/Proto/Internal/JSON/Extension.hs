@@ -4,6 +4,9 @@
 
 {- | Registry for proto2 extension JSON helpers.
 
+__Stability:__ exposed for use by wireform-proto-generated code; not
+part of the stable public API.
+
 Proto2 lets messages declare extension ranges:
 
 @
@@ -56,7 +59,7 @@ import Data.Scientific qualified as Sci
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Word (Word32, Word64)
-import Proto.Decode (UnknownField (..))
+import Proto.Internal.Decode (UnknownField (..))
 import Proto.Extension (
   ExtensionType (..),
   decodeExtensionValue,

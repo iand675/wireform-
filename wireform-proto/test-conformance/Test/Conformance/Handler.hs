@@ -45,8 +45,8 @@ import Data.Proxy (Proxy (..))
 import Data.Text qualified as T
 import Data.Text.Lazy qualified as TL
 import Data.Text.Lazy.Encoding qualified as TLE
-import Proto.Decode qualified as PD
-import Proto.Encode qualified as PE
+import Proto qualified as PD
+import Proto qualified as PE
 import Proto.Internal.JSON.Extension qualified as PJExt
 import Proto.TH.Metadata qualified as PTM
 import Proto.TextFormat qualified as PTF
@@ -167,13 +167,16 @@ serializeTAT fmt tm = case fmt of
                         (ConformanceResponse'Result'JsonPayload t)
                   }
   WireFormat'TextFormat -> trySerialize "TEXT_FORMAT" $ do
-    !pbtxt <- evaluate (PTF.typedToTextPretty (Proxy :: Proxy TestAllTypesProto3) tm)
-    pure
-      defaultConformanceResponse
-        { conformanceResponseResult =
-            Just
-              (ConformanceResponse'Result'TextPayload pbtxt)
-        }
+    pbtxt <- evaluate (PTF.typedToTextPretty (Proxy :: Proxy TestAllTypesProto3) tm)
+    case pbtxt of
+      Nothing -> pure (serializeError "TEXT_FORMAT: re-encode/decode failed")
+      Just t ->
+        pure
+          defaultConformanceResponse
+            { conformanceResponseResult =
+                Just
+                  (ConformanceResponse'Result'TextPayload t)
+            }
   WireFormat'Jspb -> pure (skipped "JSPB output not supported")
   WireFormat'Unspecified -> pure (serializeError "UNSPECIFIED requested_output_format")
   WireFormat'Unknown _ -> pure (serializeError "Unknown WireFormat enum value")
@@ -264,13 +267,16 @@ serializeTAT2 fmt tm = case fmt of
                         (ConformanceResponse'Result'JsonPayload t)
                   }
   WireFormat'TextFormat -> trySerialize "TEXT_FORMAT" $ do
-    !pbtxt <- evaluate (PTF.typedToTextPretty (Proxy :: Proxy TestAllTypesProto2) tm)
-    pure
-      defaultConformanceResponse
-        { conformanceResponseResult =
-            Just
-              (ConformanceResponse'Result'TextPayload pbtxt)
-        }
+    pbtxt <- evaluate (PTF.typedToTextPretty (Proxy :: Proxy TestAllTypesProto2) tm)
+    case pbtxt of
+      Nothing -> pure (serializeError "TEXT_FORMAT: re-encode/decode failed")
+      Just t ->
+        pure
+          defaultConformanceResponse
+            { conformanceResponseResult =
+                Just
+                  (ConformanceResponse'Result'TextPayload t)
+            }
   WireFormat'Jspb -> pure (skipped "JSPB output not supported")
   WireFormat'Unspecified -> pure (serializeError "UNSPECIFIED requested_output_format")
   WireFormat'Unknown _ -> pure (serializeError "Unknown WireFormat enum value")

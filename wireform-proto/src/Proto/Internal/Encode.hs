@@ -1,56 +1,64 @@
 {- | High-level encoding interface for protobuf messages.
 
 This is the primary module for serialising protobuf messages to bytes.
-Most users only need 'encodeMessage' (or 'encodeMessageSized' for
-maximum performance) and 'hPutMessage' for streaming to a file handle.
+Most users only need 'encodeMessage' for a strict 'ByteString',
+'encodeLazy' for a lazy one, or 'hPutMessage' to stream straight to a
+file handle.
 
 == Quick start
 
 @
-import Proto.Encode
+import Proto
 
--- Encode to a strict ByteString
+-- Encode to a strict ByteString (exact-size, single allocation).
 let bs = 'encodeMessage' myMsg
 
--- Encode with exact-size pre-allocation (fastest)
-let bs = 'encodeMessageSized' myMsg
+-- Encode to a lazy ByteString (chunks).
+let bsL = 'encodeLazy' myMsg
 
--- Stream directly to a Handle (no intermediate ByteString)
+-- Stream directly to a Handle, no intermediate ByteString.
 'hPutMessage' handle myMsg
 @
 
-== Typeclass approach
+== One-pass size+build
 
-Generated message types automatically get 'MessageEncode' and
-'MessageSize' instances via Template Haskell ('Proto.TH.loadProto').
-'MessageEncode' provides the 'buildMessage' method that produces a
-'Builder'; 'MessageSize' provides 'messageSize' for exact byte-count
-pre-computation.
+Generated message types implement 'MessageEncode', whose
+'buildMessage' method returns a
+'Proto.Internal.SizedBuilder.SizedBuilder' — a pair of @(size,
+Builder)@ that propagates the wire byte count up the message tree
+alongside the byte fragments. The exact size is known at every
+submessage boundary so the varint length prefix can be written
+inline without a separate @messageSize@ traversal.
 
-The two-pass optimisation (compute size, then encode) avoids
-materialising submessages to intermediate 'Data.ByteString.ByteString'
-values just to measure their length prefix. The size pass is pure
-arithmetic; the encode pass writes directly into the output buffer.
+The old two-pass shape ("compute @messageSize@ first, then
+@buildMessage@ a second time") is gone; it was 'O(N²)' on deeply
+nested messages because each level re-traversed its subtree to
+compute the inner size. The fused 'SizedBuilder' shape is 'O(N)'
+in the total number of fields.
+
+'messageSize' is still exported as a convenience function for
+external callers — it's @'Proto.Internal.SizedBuilder.size' .
+'buildMessage'@.
 
 == Field-level helpers
 
-The @encodeField*@ and @sizedField*@ families are used by generated
-code and are not normally called directly. The @encodeField*@ variants
-produce a 'Builder'; the @sizedField*@ variants produce a
-'Proto.Internal.SizedBuilder.SizedBuilder' that fuses the size computation with
-the builder for zero-allocation submessage encoding.
+The @encodeField*@ family in this module is used by generated code
+and returns 'Builder' fragments. Generated message encoders go
+through the archetypes in "Proto.Internal.Encode.Archetype"
+instead, which return 'SizedBuilder' fragments (so each call site
+carries its own byte count up the tree).
 -}
-module Proto.Encode (
+module Proto.Internal.Encode (
   -- * Builder type (re-exported from wireform-core)
   WB.Builder,
 
-  -- * Encoding typeclasses
+  -- * Encoding typeclass
   MessageEncode (..),
-  MessageSize (..),
+  buildMessage,
+  messageSize,
 
   -- * Running encoders (strict ByteString output)
   encodeMessage,
-  encodeMessageSized,
   encodeLazy,
 
   -- * Stream encoding (length-delimited framing)
@@ -97,25 +105,26 @@ module Proto.Encode (
   -- * Map field encoding
   encodeMapField,
 
-  -- * Optimized submessage encoding (size-aware)
+  -- * Submessage encoding helpers (used by generated code)
   encodeFieldMessageSized,
   encodeMapFieldSized,
+  mapField,
 
   -- * Raw builders
   messageToByteString,
 
-  -- * SizedBuilder-based encoding (fused size+builder)
-  sizedFieldVarint,
-  sizedFieldSVarint32,
-  sizedFieldSVarint64,
-  sizedFieldFixed32,
-  sizedFieldFixed64,
-  sizedFieldFloat,
-  sizedFieldDouble,
-  sizedFieldBool,
-  sizedFieldString,
-  sizedFieldBytes,
-  sizedFieldMessage,
+  -- * SizedBuilder-based field helpers (used by generated code)
+  fieldVarint,
+  fieldSVarint32,
+  fieldSVarint64,
+  fieldFixed32,
+  fieldFixed64,
+  fieldFloat,
+  fieldDouble,
+  fieldBool,
+  fieldString,
+  fieldBytes,
+  fieldMessage,
 ) where
 
 import Data.ByteString (ByteString)
@@ -131,6 +140,7 @@ import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (castPtr)
 import Foreign.Storable (Storable, sizeOf)
 import Proto.Internal.SizedBuilder (SizedBuilder, sized, toByteStringFromBuilder, withSubMessage)
+import Proto.Internal.SizedBuilder qualified as SB
 import Proto.Internal.Wire (WireType (..))
 import Proto.Internal.Wire.Encode
 import System.IO (Handle)
@@ -139,48 +149,64 @@ import Wireform.Builder qualified as B
 import Wireform.Builder qualified as WB
 
 
--- | Typeclass for types that can be encoded as protobuf messages.
-class MessageEncode a where
-  -- | Build the wire-format representation (fields only, no outer length prefix).
-  buildMessage :: a -> B.Builder
+{- | Typeclass for types that can be encoded as protobuf messages.
 
+The only method is 'buildSized', which returns a 'SizedBuilder' —
+byte fragments and their cumulative wire byte count, fused in a
+single pass. 'buildMessage' (a 'Builder' view) and 'messageSize'
+(an 'Int' view) are free standalone projections over the same
+fused traversal.
 
-{- | Typeclass for types whose wire-format size can be pre-computed.
-Implementing this enables the two-pass optimization for submessage encoding:
-compute sizes top-down, then encode in a single pass.
+The @MessageSize@ class that used to live next to 'MessageEncode'
+is /gone/. The wire byte count is read off 'buildSized' via
+'messageSize'. There is no longer a 'Builder'-returning method on
+the class: that path always involved materialising a 'Builder' to
+a 'ByteString' just to read the length, which lost the @O(N)@
+property on nested submessages. New encoders (generated and
+hand-written) all produce 'SizedBuilder' fragments; the byte
+count flows up the message tree for free alongside the bytes
+themselves.
 -}
-class MessageSize a where
-  -- | Compute the wire-format size in bytes (fields only, no outer length prefix).
-  messageSize :: a -> Int
+class MessageEncode a where
+  -- | Fused encoding: byte fragments + cumulative size in a single
+  -- pass.
+  buildSized :: a -> SizedBuilder
+
+
+-- | Plain 'Builder' view of an encoded message. Free projection
+-- of 'buildSized'.
+buildMessage :: MessageEncode a => a -> B.Builder
+buildMessage = SB.toBuilder . buildSized
+{-# INLINE buildMessage #-}
+
+
+-- | Wire-format size in bytes (fields only, no outer length prefix).
+-- Reads the size off the message's 'SizedBuilder' without a
+-- separate traversal.
+messageSize :: MessageEncode a => a -> Int
+messageSize = SB.size . buildSized
+{-# INLINE messageSize #-}
+
+
 
 
 {- | Encode a message to a strict 'ByteString'.
-When the message implements 'MessageSize', this allocates a single
-buffer of exactly the right size for zero-copy output.
+
+Uses 'buildSized' so the output buffer is allocated at exactly the
+right size in one shot — no growing-buffer reallocations.
 -}
 encodeMessage :: MessageEncode a => a -> ByteString
-encodeMessage = B.toStrictByteString . buildMessage
+encodeMessage = SB.toByteString . buildSized
 {-# INLINE encodeMessage #-}
-
-
-{- | Encode a message to a strict 'ByteString' with exact-size allocation.
-Requires 'MessageSize' to pre-compute the buffer size.
-Allocates a single ByteString of exactly the right length — no
-intermediate lazy chunks or recopying.
--}
-encodeMessageSized :: (MessageEncode a, MessageSize a) => a -> ByteString
-encodeMessageSized msg =
-  toByteStringFromBuilder (messageSize msg) (buildMessage msg)
-{-# INLINE encodeMessageSized #-}
 
 
 -- | Encode a message to a lazy 'ByteString' (useful for streaming).
 encodeLazy :: MessageEncode a => a -> BL.ByteString
-encodeLazy = B.toLazyByteString . buildMessage
+encodeLazy = SB.toLazyByteString . buildSized
 {-# INLINE encodeLazy #-}
 
 
-{- | Write a message directly to a 'Handle' without materializing an
+{- | Write a message directly to a 'Handle' without materialising an
 intermediate 'ByteString'. Uses fast-builder's streaming output.
 -}
 hPutMessage :: MessageEncode a => Handle -> a -> IO ()
@@ -270,24 +296,23 @@ encodeFieldBytes fn val =
 
 
 {- | Encode a submessage field. Materializes the submessage to calculate its length.
-Use 'encodeFieldMessageSized' when the message implements 'MessageSize'
-for better performance.
 -}
 encodeFieldMessage :: MessageEncode a => Int -> a -> B.Builder
 encodeFieldMessage fn msg =
-  let payload = messageToByteString (buildMessage msg)
-  in putTag fn WireLengthDelimited <> putLengthDelimited payload
+  let !sb = buildSized msg
+      !sz = SB.size sb
+  in putTag fn WireLengthDelimited
+      <> putVarint (fromIntegral sz)
+      <> SB.toBuilder sb
 {-# INLINE encodeFieldMessage #-}
 
 
-{- | Encode a submessage field using pre-computed size (no materialization).
-Two-pass: first compute size, then write tag + length + payload.
-This avoids allocating a temporary ByteString for the submessage.
--}
-encodeFieldMessageSized :: (MessageEncode a, MessageSize a) => Int -> a -> B.Builder
-encodeFieldMessageSized fn msg =
-  let sz = messageSize msg
-  in putTag fn WireLengthDelimited <> putVarint (fromIntegral sz) <> buildMessage msg
+-- | Pre-fused-builder synonym for 'encodeFieldMessage'. Kept under
+-- the old name because some downstream callers still reach for it.
+-- Both paths are now O(1) extra over @'buildMessage' msg@ (the
+-- size is just read from the 'SizedBuilder' rather than recomputed).
+encodeFieldMessageSized :: MessageEncode a => Int -> a -> B.Builder
+encodeFieldMessageSized = encodeFieldMessage
 {-# INLINE encodeFieldMessageSized #-}
 
 
@@ -298,41 +323,54 @@ encodeFieldEnum fn val =
 {-# INLINE encodeFieldEnum #-}
 
 
+{- | Shared @tag(LengthDelimited) || varint(payloadLen) || payload@
+framing for packed repeated scalars. Threads the precomputed payload
+byte count into the size component of the resulting 'SizedBuilder'
+so the caller doesn't traverse the payload twice.
+-}
+packedFrame :: Int -> Int -> B.Builder -> SizedBuilder
+packedFrame fn payloadSz inner =
+  SB.sized
+    (tagSize fn + varintSize (fromIntegral payloadSz) + payloadSz)
+    ( putTag fn WireLengthDelimited
+        <> putVarint (fromIntegral payloadSz)
+        <> inner
+    )
+{-# INLINE packedFrame #-}
+
+
 -- | Encode a packed repeated uint64 field. No conversion needed.
-encodePackedWord64 :: Int -> VU.Vector Word64 -> B.Builder
+encodePackedWord64 :: Int -> VU.Vector Word64 -> SizedBuilder
 encodePackedWord64 fn vals
   | VU.null vals = mempty
   | otherwise =
       let sz = VU.foldl' (\acc v -> acc + varintSize v) 0 vals
-      in putTag fn WireLengthDelimited
-          <> putVarint (fromIntegral sz)
-          <> VU.foldl' (\acc v -> acc <> putVarint v) mempty vals
+      in packedFrame fn sz
+          (VU.foldl' (\acc v -> acc <> putVarint v) mempty vals)
 {-# INLINE encodePackedWord64 #-}
 
 
 -- | Encode a packed repeated uint32 field. Uses native 32-bit varint encoding.
-encodePackedWord32 :: Int -> VU.Vector Word32 -> B.Builder
+encodePackedWord32 :: Int -> VU.Vector Word32 -> SizedBuilder
 encodePackedWord32 fn vals
   | VU.null vals = mempty
   | otherwise =
       let sz = VU.foldl' (\acc v -> acc + varintSize32 v) 0 vals
-      in putTag fn WireLengthDelimited
-          <> putVarint (fromIntegral sz)
-          <> VU.foldl' (\acc v -> acc <> putVarint32 v) mempty vals
+      in packedFrame fn sz
+          (VU.foldl' (\acc v -> acc <> putVarint32 v) mempty vals)
 {-# INLINE encodePackedWord32 #-}
 
 
 {- | Encode a packed repeated int64 field.
 Negative values use 10-byte two's complement.
 -}
-encodePackedInt64 :: Int -> VU.Vector Int64 -> B.Builder
+encodePackedInt64 :: Int -> VU.Vector Int64 -> SizedBuilder
 encodePackedInt64 fn vals
   | VU.null vals = mempty
   | otherwise =
       let sz = VU.foldl' (\acc v -> acc + varintSize (fromIntegral v)) 0 vals
-      in putTag fn WireLengthDelimited
-          <> putVarint (fromIntegral sz)
-          <> VU.foldl' (\acc v -> acc <> putVarint (fromIntegral v)) mempty vals
+      in packedFrame fn sz
+          (VU.foldl' (\acc v -> acc <> putVarint (fromIntegral v)) mempty vals)
 {-# INLINE encodePackedInt64 #-}
 
 
@@ -340,31 +378,29 @@ encodePackedInt64 fn vals
 Negative values are sign-extended to 64-bit and use 10-byte encoding per the
 protobuf spec.
 -}
-encodePackedInt32 :: Int -> VU.Vector Int32 -> B.Builder
+encodePackedInt32 :: Int -> VU.Vector Int32 -> SizedBuilder
 encodePackedInt32 fn vals
   | VU.null vals = mempty
   | otherwise =
       let sz = VU.foldl' (\acc v -> acc + varintSize (fromIntegral v :: Word64)) 0 vals
-      in putTag fn WireLengthDelimited
-          <> putVarint (fromIntegral sz)
-          <> VU.foldl' (\acc v -> acc <> putVarint (fromIntegral v)) mempty vals
+      in packedFrame fn sz
+          (VU.foldl' (\acc v -> acc <> putVarint (fromIntegral v)) mempty vals)
 {-# INLINE encodePackedInt32 #-}
 
 
 -- | Encode a packed repeated bool field. Each bool is a single varint byte.
-encodePackedBool :: Int -> VU.Vector Bool -> B.Builder
+encodePackedBool :: Int -> VU.Vector Bool -> SizedBuilder
 encodePackedBool fn vals
   | VU.null vals = mempty
   | otherwise =
       let sz = VU.length vals
-      in putTag fn WireLengthDelimited
-          <> putVarint (fromIntegral sz)
-          <> VU.foldl' (\acc v -> acc <> B.word8 (if v then 1 else 0)) mempty vals
+      in packedFrame fn sz
+          (VU.foldl' (\acc v -> acc <> B.word8 (if v then 1 else 0)) mempty vals)
 {-# INLINE encodePackedBool #-}
 
 
 -- | Legacy alias. Prefer the type-specific variants.
-encodePackedVarint :: Int -> VU.Vector Word64 -> B.Builder
+encodePackedVarint :: Int -> VU.Vector Word64 -> SizedBuilder
 encodePackedVarint = encodePackedWord64
 {-# INLINE encodePackedVarint #-}
 
@@ -373,50 +409,42 @@ encodePackedVarint = encodePackedWord64
 On LE platforms: the vector's backing store is already the wire bytes.
 We bulk-copy via a single B.byteString instead of N individual putFixed32.
 -}
-encodePackedFixed32 :: Int -> VU.Vector Word32 -> B.Builder
+encodePackedFixed32 :: Int -> VU.Vector Word32 -> SizedBuilder
 encodePackedFixed32 fn vals
   | VU.null vals = mempty
   | otherwise =
       let sz = VU.length vals * 4
-      in putTag fn WireLengthDelimited
-          <> putVarint (fromIntegral sz)
-          <> vectorToBuilder vals 4
+      in packedFrame fn sz (vectorToBuilder vals 4)
 {-# INLINE encodePackedFixed32 #-}
 
 
 -- | Encode a packed repeated fixed64 field.
-encodePackedFixed64 :: Int -> VU.Vector Word64 -> B.Builder
+encodePackedFixed64 :: Int -> VU.Vector Word64 -> SizedBuilder
 encodePackedFixed64 fn vals
   | VU.null vals = mempty
   | otherwise =
       let sz = VU.length vals * 8
-      in putTag fn WireLengthDelimited
-          <> putVarint (fromIntegral sz)
-          <> vectorToBuilder vals 8
+      in packedFrame fn sz (vectorToBuilder vals 8)
 {-# INLINE encodePackedFixed64 #-}
 
 
 -- | Encode a packed repeated float field.
-encodePackedFloat :: Int -> VU.Vector Float -> B.Builder
+encodePackedFloat :: Int -> VU.Vector Float -> SizedBuilder
 encodePackedFloat fn vals
   | VU.null vals = mempty
   | otherwise =
       let sz = VU.length vals * 4
-      in putTag fn WireLengthDelimited
-          <> putVarint (fromIntegral sz)
-          <> vectorToBuilder vals 4
+      in packedFrame fn sz (vectorToBuilder vals 4)
 {-# INLINE encodePackedFloat #-}
 
 
 -- | Encode a packed repeated double field.
-encodePackedDouble :: Int -> VU.Vector Double -> B.Builder
+encodePackedDouble :: Int -> VU.Vector Double -> SizedBuilder
 encodePackedDouble fn vals
   | VU.null vals = mempty
   | otherwise =
       let sz = VU.length vals * 8
-      in putTag fn WireLengthDelimited
-          <> putVarint (fromIntegral sz)
-          <> vectorToBuilder vals 8
+      in packedFrame fn sz (vectorToBuilder vals 8)
 {-# INLINE encodePackedDouble #-}
 
 
@@ -441,26 +469,24 @@ unboxedToStorable uv = VS.generate (VU.length uv) (VU.unsafeIndex uv)
 
 
 -- | Encode a packed repeated sint32 field.
-encodePackedSVarint32 :: Int -> VU.Vector Int32 -> B.Builder
+encodePackedSVarint32 :: Int -> VU.Vector Int32 -> SizedBuilder
 encodePackedSVarint32 fn vals
   | VU.null vals = mempty
   | otherwise =
       let sz = VU.foldl' (\acc v -> acc + varintSize (fromIntegral (zigZag32 v))) 0 vals
-      in putTag fn WireLengthDelimited
-          <> putVarint (fromIntegral sz)
-          <> VU.foldl' (\acc v -> acc <> putSVarint32 v) mempty vals
+      in packedFrame fn sz
+          (VU.foldl' (\acc v -> acc <> putSVarint32 v) mempty vals)
 {-# INLINE encodePackedSVarint32 #-}
 
 
 -- | Encode a packed repeated sint64 field.
-encodePackedSVarint64 :: Int -> VU.Vector Int64 -> B.Builder
+encodePackedSVarint64 :: Int -> VU.Vector Int64 -> SizedBuilder
 encodePackedSVarint64 fn vals
   | VU.null vals = mempty
   | otherwise =
       let sz = VU.foldl' (\acc v -> acc + varintSize (zigZag64 v)) 0 vals
-      in putTag fn WireLengthDelimited
-          <> putVarint (fromIntegral sz)
-          <> VU.foldl' (\acc v -> acc <> putSVarint64 v) mempty vals
+      in packedFrame fn sz
+          (VU.foldl' (\acc v -> acc <> putSVarint64 v) mempty vals)
 {-# INLINE encodePackedSVarint64 #-}
 
 
@@ -498,77 +524,96 @@ encodeMapFieldSized fn entrySz keyEnc valEnc =
 {-# INLINE encodeMapFieldSized #-}
 
 
+{- | 'encodeMapField' fused with size tracking: combine the key
+'SizedBuilder' and value 'SizedBuilder' into one length-prefixed
+entry. The entry's wire size comes directly from the
+'SizedBuilder' inputs — no @messageToByteString@ materialisation.
+Used by the generated 'buildSized' for @map\<K, V\>@ fields.
+-}
+mapField :: Int -> SizedBuilder -> SizedBuilder -> SizedBuilder
+mapField fn keyEnc valEnc =
+  let !innerSz = SB.size keyEnc + SB.size valEnc
+      !sz = tagSize fn + varintSize (fromIntegral innerSz) + innerSz
+      !bld =
+        putTag fn WireLengthDelimited
+          <> putVarint (fromIntegral innerSz)
+          <> SB.toBuilder keyEnc
+          <> SB.toBuilder valEnc
+  in sized sz bld
+{-# INLINE mapField #-}
+
+
 -- SizedBuilder-based field encoders: compute size and builder in one pass.
 -- These are the Church-encoded (fused) versions of the two-pass approach.
 
 -- | Encode a varint field, producing a SizedBuilder.
-sizedFieldVarint :: Int -> Word64 -> SizedBuilder
-sizedFieldVarint fn val =
+fieldVarint :: Int -> Word64 -> SizedBuilder
+fieldVarint fn val =
   sized (fieldVarintSize fn val) (putTag fn WireVarint <> putVarint val)
-{-# INLINE sizedFieldVarint #-}
+{-# INLINE fieldVarint #-}
 
 
 -- | Encode a sint32 field, producing a SizedBuilder.
-sizedFieldSVarint32 :: Int -> Int32 -> SizedBuilder
-sizedFieldSVarint32 fn val =
+fieldSVarint32 :: Int -> Int32 -> SizedBuilder
+fieldSVarint32 fn val =
   sized (fieldSVarint32Size fn val) (putTag fn WireVarint <> putSVarint32 val)
-{-# INLINE sizedFieldSVarint32 #-}
+{-# INLINE fieldSVarint32 #-}
 
 
 -- | Encode a sint64 field, producing a SizedBuilder.
-sizedFieldSVarint64 :: Int -> Int64 -> SizedBuilder
-sizedFieldSVarint64 fn val =
+fieldSVarint64 :: Int -> Int64 -> SizedBuilder
+fieldSVarint64 fn val =
   sized (fieldSVarint64Size fn val) (putTag fn WireVarint <> putSVarint64 val)
-{-# INLINE sizedFieldSVarint64 #-}
+{-# INLINE fieldSVarint64 #-}
 
 
 -- | Encode a fixed32 field, producing a SizedBuilder.
-sizedFieldFixed32 :: Int -> Word32 -> SizedBuilder
-sizedFieldFixed32 fn val =
+fieldFixed32 :: Int -> Word32 -> SizedBuilder
+fieldFixed32 fn val =
   sized (fieldFixed32Size fn) (putTag fn Wire32Bit <> putFixed32 val)
-{-# INLINE sizedFieldFixed32 #-}
+{-# INLINE fieldFixed32 #-}
 
 
 -- | Encode a fixed64 field, producing a SizedBuilder.
-sizedFieldFixed64 :: Int -> Word64 -> SizedBuilder
-sizedFieldFixed64 fn val =
+fieldFixed64 :: Int -> Word64 -> SizedBuilder
+fieldFixed64 fn val =
   sized (fieldFixed64Size fn) (putTag fn Wire64Bit <> putFixed64 val)
-{-# INLINE sizedFieldFixed64 #-}
+{-# INLINE fieldFixed64 #-}
 
 
 -- | Encode a float field, producing a SizedBuilder.
-sizedFieldFloat :: Int -> Float -> SizedBuilder
-sizedFieldFloat fn val =
+fieldFloat :: Int -> Float -> SizedBuilder
+fieldFloat fn val =
   sized (fieldFloatSize fn) (putTag fn Wire32Bit <> putFloat val)
-{-# INLINE sizedFieldFloat #-}
+{-# INLINE fieldFloat #-}
 
 
 -- | Encode a double field, producing a SizedBuilder.
-sizedFieldDouble :: Int -> Double -> SizedBuilder
-sizedFieldDouble fn val =
+fieldDouble :: Int -> Double -> SizedBuilder
+fieldDouble fn val =
   sized (fieldDoubleSize fn) (putTag fn Wire64Bit <> putDouble val)
-{-# INLINE sizedFieldDouble #-}
+{-# INLINE fieldDouble #-}
 
 
 -- | Encode a bool field, producing a SizedBuilder.
-sizedFieldBool :: Int -> Bool -> SizedBuilder
-sizedFieldBool fn val =
+fieldBool :: Int -> Bool -> SizedBuilder
+fieldBool fn val =
   sized (fieldBoolSize fn) (putTag fn WireVarint <> putVarint (if val then 1 else 0))
-{-# INLINE sizedFieldBool #-}
+{-# INLINE fieldBool #-}
 
 
 -- | Encode a string field, producing a SizedBuilder.
-sizedFieldString :: Int -> Text -> SizedBuilder
-sizedFieldString fn val =
+fieldString :: Int -> Text -> SizedBuilder
+fieldString fn val =
   sized (fieldTextSize fn val) (putTag fn WireLengthDelimited <> putText val)
-{-# INLINE sizedFieldString #-}
+{-# INLINE fieldString #-}
 
 
 -- | Encode a bytes field, producing a SizedBuilder.
-sizedFieldBytes :: Int -> ByteString -> SizedBuilder
-sizedFieldBytes fn val =
+fieldBytes :: Int -> ByteString -> SizedBuilder
+fieldBytes fn val =
   sized (fieldBytesSize fn val) (putTag fn WireLengthDelimited <> putByteString val)
-{-# INLINE sizedFieldBytes #-}
+{-# INLINE fieldBytes #-}
 
 
 {- | Encode a submessage field using SizedBuilder (fully fused, no materialization).
@@ -576,52 +621,49 @@ The submessage is provided as a SizedBuilder, which already knows its size.
 This means we never allocate a ByteString for the submessage — just prepend
 the tag and length prefix.
 -}
-sizedFieldMessage :: Int -> SizedBuilder -> SizedBuilder
-sizedFieldMessage fn submsg =
+fieldMessage :: Int -> SizedBuilder -> SizedBuilder
+fieldMessage fn submsg =
   let tagSB = sized (tagSize fn) (putTag fn WireLengthDelimited)
   in tagSB <> withSubMessage submsg
-{-# INLINE sizedFieldMessage #-}
+{-# INLINE fieldMessage #-}
 
 
 -- | Encode a message to a lazy 'ByteString'.
 encodeMessageLazy :: MessageEncode a => a -> BL.ByteString
-encodeMessageLazy = B.toLazyByteString . buildMessage
+encodeMessageLazy = SB.toLazyByteString . buildSized
 {-# INLINE encodeMessageLazy #-}
 
 
 {- | Encode a list of messages with length-delimited framing.
-Each message is preceded by a varint length prefix.
+Each message is preceded by a varint length prefix. The size for
+each frame comes from the message's 'SizedBuilder' directly, no
+intermediate materialisation.
 -}
 encodeMessageStream :: MessageEncode a => [a] -> BL.ByteString
-encodeMessageStream = B.toLazyByteString . foldMap buildMessageFramedMaterialized
+encodeMessageStream = B.toLazyByteString . foldMap buildMessageFramed
 
 
-{- | Like 'encodeMessageStream' but uses 'MessageSize' to avoid
-materialising each message for its length prefix.
--}
-encodeMessageStreamSized :: (MessageEncode a, MessageSize a) => [a] -> BL.ByteString
-encodeMessageStreamSized = B.toLazyByteString . foldMap buildMessageFramed
+-- | Synonym for 'encodeMessageStream' — both paths use the fused
+-- 'SizedBuilder' size now, so the old "Sized" variant is redundant.
+encodeMessageStreamSized :: MessageEncode a => [a] -> BL.ByteString
+encodeMessageStreamSized = encodeMessageStream
+{-# INLINE encodeMessageStreamSized #-}
 
 
 {- | Write a stream of messages directly to a 'Handle' with
 length-delimited framing.
 -}
-hPutMessageStream :: (MessageEncode a, MessageSize a) => Handle -> [a] -> IO ()
+hPutMessageStream :: MessageEncode a => Handle -> [a] -> IO ()
 hPutMessageStream h = WB.hPutBuilder h . foldMap buildMessageFramed
 
 
 {- | Build a single length-delimited frame: varint size prefix
-followed by the message payload.
+followed by the message payload. Reads the prefix size from the
+fused 'SizedBuilder' so there's no separate size traversal.
 -}
-buildMessageFramed :: (MessageEncode a, MessageSize a) => a -> B.Builder
+buildMessageFramed :: MessageEncode a => a -> B.Builder
 buildMessageFramed msg =
-  let !sz = messageSize msg
-  in putVarint (fromIntegral sz) <> buildMessage msg
+  let !sb = buildSized msg
+      !sz = SB.size sb
+  in putVarint (fromIntegral sz) <> SB.toBuilder sb
 {-# INLINE buildMessageFramed #-}
-
-
-buildMessageFramedMaterialized :: MessageEncode a => a -> B.Builder
-buildMessageFramedMaterialized msg =
-  let payload = B.toStrictByteString (buildMessage msg)
-  in putVarint (fromIntegral (BS.length payload))
-      <> B.byteStringCopy payload

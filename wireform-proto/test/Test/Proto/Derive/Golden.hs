@@ -19,7 +19,7 @@ import Data.ByteString qualified as BS
 import Data.Text qualified as T
 import Data.Vector qualified as V
 import Data.Word (Word8)
-import Proto.Encode qualified as PE
+import Proto qualified as PE
 import Test.Proto.Derive.RegressionInstances (
   RegInventory (..),
   RegItem (..),

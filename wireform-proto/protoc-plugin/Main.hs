@@ -5,11 +5,13 @@ Usage: protoc --plugin=protoc-gen-wireform=./protoc-gen-wireform --wireform_out=
 module Main where
 
 import Data.Map.Strict qualified as Map
+import Data.Maybe (fromMaybe)
 import Data.Text qualified as T
 import Data.Vector qualified as V
 import Proto.CodeGen
 import Proto.Google.Protobuf.Compiler.Plugin
-import Proto.Google.Protobuf.Descriptor
+import Proto.Google.Protobuf.Compiler.Plugin.Util (pluginMain)
+import Proto.Google.Protobuf.Reflection.Descriptor (FileDescriptorProto (..))
 import Proto.IDL.Descriptor (fileDescriptorToAST)
 import Proto.IDL.Parser.Resolver (ResolvedProto (..))
 
@@ -20,16 +22,16 @@ main = pluginMain handleRequest
 
 handleRequest :: CodeGeneratorRequest -> IO CodeGeneratorResponse
 handleRequest req = do
-  let requestedFiles = V.toList (cgrFileToGenerate req)
-      allProtos = V.toList (cgrProtoFile req)
-      opts = parsePluginOpts (cgrParameter req)
-      resolvedPairs = fmap fdpToResolved allProtos
+  let requestedFiles = V.toList (codeGeneratorRequestFileToGenerate req)
+      allProtos = V.toList (codeGeneratorRequestProtoFile req)
+      opts = parsePluginOpts (fromMaybe "" (codeGeneratorRequestParameter req))
+  let resolvedPairs = fmap fdpToResolved allProtos
       typeReg = buildTypeRegistry opts resolvedPairs
-      outputFiles = concatMap (generateForFile opts typeReg requestedFiles allProtos) allProtos
+      outputFiles = concatMap (generateForFile opts typeReg requestedFiles) allProtos
   pure
     defaultCodeGeneratorResponse
-      { cgrsFile = V.fromList outputFiles
-      , cgrsSupportedFeatures = 1
+      { codeGeneratorResponseFile = V.fromList outputFiles
+      , codeGeneratorResponseSupportedFeatures = Just 1
       }
 
 
@@ -39,7 +41,7 @@ parsePluginOpts _param = defaultGenerateOpts
 
 fdpToResolved :: FileDescriptorProto -> (FilePath, ResolvedProto)
 fdpToResolved fdp =
-  let path = T.unpack (fdpName fdp)
+  let path = T.unpack (fromMaybe "" (fileDescriptorProtoName fdp))
       pf = fileDescriptorToAST fdp
   in ( path
      , ResolvedProto {rpFile = pf, rpPath = path, rpImports = Map.empty}
@@ -50,16 +52,20 @@ generateForFile
   :: GenerateOpts
   -> TypeRegistry
   -> [T.Text]
-  -> [FileDescriptorProto]
   -> FileDescriptorProto
-  -> [CodeGeneratorResponseFile]
-generateForFile opts reg requestedFiles _allFdps fdp =
-  if fdpName fdp `elem` requestedFiles
+  -> [CodeGeneratorResponse'File]
+generateForFile opts reg requestedFiles fdp =
+  if fromMaybe "" (fileDescriptorProtoName fdp) `elem` requestedFiles
     then
-      let filePath = T.unpack (fdpName fdp)
+      let filePath = T.unpack (fromMaybe "" (fileDescriptorProtoName fdp))
           pf = fileDescriptorToAST fdp
           moduleName = moduleNameForProto opts filePath pf
           outputPath = T.replace "." "/" moduleName <> ".hs"
           content = generateModuleText opts reg filePath pf
-      in [CodeGeneratorResponseFile outputPath content]
+      in
+        [ defaultCodeGeneratorResponse'File
+            { codeGeneratorResponseFileName = Just outputPath
+            , codeGeneratorResponseFileContent = Just content
+            }
+        ]
     else []
