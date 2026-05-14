@@ -1,0 +1,82 @@
+cabal-version:      3.0
+name:               wireform-http2
+version:            0.1.0
+synopsis:           HTTP/2 implementation with redesigned concurrency primitives
+description:
+  A from-scratch HTTP/2 server and client implementing the architectural
+  improvements identified during wireform-grpc optimisation work:
+  .
+  * @OUnary@ output: HEADERS + DATA + trailers in one sender pass, no
+    re-enqueue round-trip.
+  * @TxWindow@ (IORef + MVar): connection-level flow control without STM.
+  * SPSC body channel: @IORef (Maybe ByteString)@ for unary, @TBQueue@
+    for streaming.
+  * Per-connection HPACK scratch array: avoids @IOArray@ allocation on
+    every decode call.
+  * No helper threads for non-streaming responses.
+license:            MIT
+author:             wireform
+maintainer:         wireform
+
+common warnings
+    ghc-options: -Wall -Wno-orphans
+
+library
+    import:           warnings
+    ghc-options:      -threaded -rtsopts
+    exposed-modules:
+      Network.HTTP2.New
+      Network.HTTP2.New.Types
+      Network.HTTP2.New.Flow
+      Network.HTTP2.New.Stream
+      Network.HTTP2.New.Output
+      Network.HTTP2.New.HPACK
+      Network.HTTP2.New.Frame
+      Network.HTTP2.New.Sender
+      Network.HTTP2.New.Receiver
+      Network.HTTP2.New.Server
+      Network.HTTP2.New.Client
+    hs-source-dirs:   src
+    default-language: GHC2021
+    ghc-options:
+      -O2
+      -funfolding-use-threshold=200
+    build-depends:
+        base                >= 4.17 && < 5
+      , bytestring
+      , containers
+      , network
+      , network-byte-order
+      , network-run
+      , stm
+      , http2
+      , hpack
+      , http-semantics
+      , http-types
+      , case-insensitive
+      , time-manager
+
+executable wireform-http2-server
+    import:           warnings
+    main-is:          Main.hs
+    hs-source-dirs:   server-exe
+    default-language: GHC2021
+    build-depends:
+        base
+      , wireform-http2
+      , bytestring
+      , network
+
+test-suite h2spec
+    import:           warnings
+    type:             exitcode-stdio-1.0
+    main-is:          Main.hs
+    hs-source-dirs:   test
+    default-language: GHC2021
+    ghc-options:      -threaded -rtsopts
+    build-depends:
+        base
+      , wireform-http2
+      , process
+      , bytestring
+      , network

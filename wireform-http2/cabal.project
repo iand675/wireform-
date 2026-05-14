@@ -1,0 +1,11 @@
+packages:
+  .
+  -- Vendored http2 fork (provides Network.HTTP2.Frame + Network.HPACK)
+  ../http2
+  ../http-semantics
+
+package wireform-http2
+  optimization: 2
+
+package http2
+  optimization: 2
