@@ -14,11 +14,9 @@ Kafka, Streams, and Riffle terminology is defined in the [Glossary](../glossary/
 :::
 
 :::note[TL;DR]
-- The commit boundary is `commitIntervalMs` (default 30 s), not a `COMMIT` statement. Read-committed downstream consumers see records with up to that much staleness.
-- IQ reads see the live in-memory store; they don't necessarily see writes atomically with the EOS commit cycle.
-- State is partitioned across instances. A query must route to the instance that owns the partition; `StreamsMetadata` + `KeyQueryMetadata` tell you which one.
-- Event time and processing time are different clocks. Windowed aggregations are event-time; processing-rate metrics are wall-clock.
-- Side effects in `peek` / `foreach` / `mapValuesM` replay on rewind. Use a two-phase commit sink or an idempotency token for exactly-once external effects.
+- The consistency boundary is the Streams commit cycle, usually `commitIntervalMs`, not an explicit `COMMIT` statement.
+- Queries read partitioned materialised state. Route by key, expect bounded staleness, and handle rebalances.
+- External side effects replay unless you make them idempotent or put them behind a two-phase commit sink.
 :::
 
 ## A vs. ACID
@@ -30,10 +28,9 @@ Kafka, Streams, and Riffle terminology is defined in the [Glossary](../glossary/
 | Isolation | Read-uncommitted by default; read-committed with `isolation.level = read_committed` on consumers; transactional state stores buffer writes until commit |
 | Durability | The Kafka log is durable; derived state is durable only after the changelog flush |
 
-The five operationally-interesting differences are: the **commit
-boundary**, the **read path freshness**, the **multi-instance
-distribution**, the **event-time vs processing-time distinction**,
-and the **replay-on-failure** model.
+The rest of this page works through the differences that usually
+surprise people coming from a database: commits, read freshness,
+partitioned ownership, time, and replay.
 
 ## 1. The commit boundary
 
@@ -62,33 +59,10 @@ extend to cross-task reads even within the same process.
 
 ### Why this matters operationally
 
-- A 30 s `commitIntervalMs` (default) means downstream
-  `read_committed` consumers see records with up to 30 s of
-  staleness.
-
-```mermaid
-sequenceDiagram
-  participant Up as Upstream producer
-  participant Eng as Streams engine
-  participant Store as State store
-  participant IQ as Interactive query
-  participant Down as read_committed consumer
-  Up->>Eng: record at t=0
-  Eng->>Store: put (buffered in txn store)
-  IQ->>Store: get
-  Store-->>IQ: pre-commit value (your call:\nread overlay or underlying?)
-  Note over Eng: ...more records...
-  Eng->>Eng: commit cycle at t=30s
-  Eng->>Down: records become visible
-  Eng->>Store: storeCommit drains txn buffer
-  IQ->>Store: get
-  Store-->>IQ: committed value
-```
- If your downstream service has tight SLAs, shorten
-  the interval or accept the staleness budget.
-- Interactive queries (`Kafka.Streams.InteractiveQueries`) read
-  from the **uncommitted** view of the state store by default —
-  see "Read path freshness" below for why.
+A 30 s `commitIntervalMs` means downstream `read_committed`
+consumers can be 30 s behind the stream thread. If that is too
+stale, lower the interval and pay the extra commit overhead.
+Interactive queries have their own read path, covered next.
 
 ## 2. Read path freshness
 
@@ -339,19 +313,6 @@ trade-off. You give up read-your-writes in exchange for unlimited
 horizontal write throughput, replayability, and the ability to
 materialise the same source data into many downstream views.
 
-## Mental-model tips
-
-- **Treat the Kafka log as the source of truth.** Everything else
-  is a materialised view.
-- **Treat the commit cycle as the consistency boundary.** Within
-  a cycle, things are in flux; between cycles, things are
-  durable.
-- **Don't expect a query to see what a write-then-read pair would
-  return.** Use IQ as a *debugger* or as a *bounded-staleness
-  cache*, not as a replacement for a query layer.
-- **Event time and processing time are different clocks.** Pick
-  one per concern and stick with it.
-- **For external-system effects, design idempotently or use 2PC.**
 
 ## Related reading
 

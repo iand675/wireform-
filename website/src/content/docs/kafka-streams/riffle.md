@@ -1,6 +1,6 @@
 ---
-title: "Riffle: Flink-class extensions to Streams"
-description: Overview of the Riffle extension tier — what it is, what's landed, and when to reach for each piece.
+title: "Riffle: optional Streams extensions"
+description: What Riffle adds on top of the Kafka Streams parity layer, and when each piece is worth using.
 sidebar:
   order: 1
   label: Riffle overview
@@ -10,30 +10,25 @@ sidebar:
 > the codename for the additive extension tier of
 > `wireform-kafka-streams` that sits beyond Apache Kafka Streams parity.
 
-Riffle is **not** an Apache Kafka project. It is a wireform-flavour
-roadmap layered on top of the parity port. The pitch is short:
-keep the Kafka-Streams shape (you write a `Topology` value, you
-deploy as a library inside your service, you join a consumer group,
-your state lives next to your service), but close the operational
-gaps that historically forced teams off Streams onto Flink.
+Riffle is the optional extension tier for `wireform-kafka-streams`.
+The base library keeps the Kafka Streams shape: a topology in your
+service, a consumer group for scale-out, and local state backed by
+Kafka. Riffle adds the pieces you tend to miss once the workload gets
+larger or more stateful.
 
-The single overriding constraint is **additivity**. Every Riffle
-feature is opt-in, ships as a new module or a new constructor, and
-does not break the operator-for-operator parity claim. Existing
-topologies keep compiling unchanged; existing runtime backends keep
-working. Selecting Riffle is a config toggle, a different smart
-constructor, or a different builder shape — never a forced
-migration.
+The rule is simple: every Riffle feature is opt-in. Existing
+topologies keep compiling, existing runtime backends keep working,
+and parity APIs stay parity APIs. You select a feature with a module,
+constructor, or config field rather than migrating the whole app.
 
 :::tip[Unfamiliar terms?]
 Acronyms and jargon used below are defined in the [Glossary](./glossary/).
 :::
 
 :::note[TL;DR]
-- Riffle is an *additive* extension tier on top of the parity Kafka Streams port. Opt in per feature; nothing changes for topologies that don't.
-- Closes the Flink-class gaps without leaving the library-deployment model: async I/O with backpressure + EOS, snapshot-based state recovery, two-phase commit to non-Kafka sinks, cross-source watermarks, key-group rescaling.
-- Six landed areas, listed below with the module to import for each.
-- Recommended adoption order at the bottom of this page if you're picking pieces incrementally.
+- Use Riffle when classic Streams is the right deployment model but one specific capability is missing.
+- Landed pieces: async I/O, snapshot-aware state, 2PC sinks, coordinated watermarks, key-groups, KIP-848 support, and a few operator-level upgrades.
+- You can adopt one piece and stop there.
 :::
 
 Read the design contract in
@@ -42,30 +37,19 @@ for the full design rationale and roadmap. This page is the
 operator-facing tour: what's landed, what each piece buys you, and
 where to dig in.
 
-## What it gets you, stacked
+## What it adds
 
-Compared to Kafka Streams classic, with everything below stacked on
-top:
+| If classic Streams gives you... | Riffle adds... |
+| ------------------------------- | -------------- |
+| Changelog replay for recovery | Snapshot-aware stores, so boot time is bounded by time since the last snapshot |
+| Blocking external calls in user code | Async I/O with bounded backpressure and EOS-aware draining |
+| Exactly-once only inside Kafka | Two-phase commit sinks for Postgres, Iceberg, S3, HTTP, and similar systems |
+| Per-task stream time | Coordinated watermarks with idleness and alignment groups |
+| Partition count as the parallelism ceiling | Key-groups that can move independently of Kafka partitions |
+| Stringly store access and fixed operator policies | Typed store refs, schema-versioned stores, event-time TTL, and explicit emit policies |
 
-- **Flink-class state durability and recovery** — recovery is
-  bounded by `time-since-last-snapshot`, not by state size.
-- **Flink-class async I/O** with bounded backpressure, EOS-correct
-  offset semantics, and ordered or unordered output.
-- **Flink-class cross-source watermarks** with idleness handling
-  and alignment groups.
-- **Flink-class two-phase commit to external sinks** (JDBC,
-  Iceberg, S3, HTTP) via a single user-extensible interface.
-- **Parallelism decoupled from partition count** via key-groups.
-- **Typed, composable topology surface** that the JVM Kafka
-  Streams Java API cannot express.
-
-Compared to running an actual Flink cluster, what Riffle keeps is:
-
-- The **library deployment model.** Your service contains the
-  topology — no separate JobManager / TaskManager fleet, no JAR
-  submission.
-- The **typed integration with application code.** The `Prim`
-  GADT is a first-class Haskell value, not a serialised JobGraph.
+You still deploy a service binary. There is no separate job manager,
+task-manager fleet, or submission step.
 
 ## Where Riffle plugs in
 
@@ -103,14 +87,10 @@ flowchart TB
   imp --> rt
 ```
 
-Riffle features either compile to *existing* `ProcessorSpec`
-shapes (async I/O lives inside one task) or to *new* spec
-shapes added alongside (snapshot-aware stores get their own
-`AnyStoreBuilder` constructor). New `Prim` constructors compile either to
-existing `ProcessorSpec` shapes (for Riffle features that reuse the
-single-task model — e.g. async I/O lives inside one task) or to
-new spec shapes added alongside (for features that need a new
-runtime concept — e.g. snapshot-aware stores).
+A Riffle feature either reuses an existing `ProcessorSpec` shape
+(async I/O still lives inside one task) or adds a new spec shape
+next to the old ones (snapshot-aware stores get their own
+`AnyStoreBuilder` constructor).
 
 ## Landed surface, by area
 
@@ -140,11 +120,11 @@ how this changes rollout windows.
 
 ### Async I/O as a first-class operator
 
-The single highest-leverage Phase-1 change. Closes the most-cited
-gap with Flink for I/O-bound enrichment workloads — the operator
-provides bounded backpressure, EOS-correct offset semantics,
-ordered or unordered output, per-request timeout + retry, and
-explicit failure policies.
+Use this when a topology spends most of its time waiting on HTTP,
+gRPC, SQL, or another external system. The operator gives you
+bounded backpressure, EOS-aware offset handling, ordered or
+unordered output, per-request timeouts, retries, and explicit
+failure policies.
 
 | Piece | Module |
 | ----- | ------ |
@@ -273,35 +253,17 @@ behaviour that survives unchanged.
 
 ### Property + chaos test surface
 
-Not a runtime feature, but the reason every item above can be
-relied on. `Streams.Properties.*` covers the cross-cutting
-correctness invariants the unit tests cannot:
-
-| Spec | What it tests |
-| ---- | ------------- |
-| `KVStoreSMSpec` | State-machine vs `Data.Map` model (in-memory + KIP-892 transactional store) |
-| `OptimizerEqSpec` | Optimised vs unoptimised topology output |
-| `WindowMathSpec` | 17 properties on tumbling / hopping / sliding / unlimited / session windows |
-| `EOSChaosSpec` | `runCommitCycle` schedule against a pure model, plus `getOffsets` throwing, `abortTxn` returning `Left`, `storeAbort` returning `Left` |
-| `WorkerPoolSMSpec` | Sequential pool dynamics |
-| `WorkerPoolConcurrentSpec` | Concurrent submit + add / remove conservation; sticky routing under concurrency |
-| `ObservabilityTopologySpec` | DAG JSON renderer round-trips |
-| `OrphanTopicsSpec` | Internal-topic detector edge cases |
-| `ChangelogReplaySpec` | Active/standby replication: interleaved replay equivalence, multi-replica convergence, promote-on-failover via 2nd-gen standby replay, per-store isolation on shared changelog |
-| `WatermarkSpec` | Stream-time = running-max under out-of-order input; backwards `advanceDriverStreamTime` is a no-op |
-| `AtLeastOnceRedeliverySpec` | Induced redelivery via `seekMC`; output multiset is a superset of the input multiset; per-value redelivery is bounded by rewind distance |
-
-Bugs the suite found during landing — `TransactionalStore`
-iterator bypassing buffered writes, `hoppingWindows` mis-alignment
-when `size < advance`, `WorkerPool.removePoolWorker` deadlock when
-the inbox wasn't fully drained, an unwrapped `getOffsets`
-exception in `runCommitCycle` that bypassed the abort path — were
-all fixed in the same PR as their tests.
+The Riffle pieces are covered by property and chaos tests under
+`Streams.Properties.*`: state-store models, optimiser equivalence,
+window math, EOS commit schedules, worker-pool routing, orphan-topic
+detection, changelog replay, watermarks, and redelivery behaviour.
+For operator-facing docs the important point is that the tests cover
+the cross-cutting invariants, not just the happy-path examples.
 
 ## Mapping problems to Riffle pieces
 
-A decision table for "I have X problem; which Riffle piece is the
-answer?":
+Start here when you know the operational problem but not the module
+name:
 
 | Problem | Riffle piece | Operator doc |
 | ------- | ------------ | ------------ |
@@ -324,41 +286,17 @@ answer?":
 
 ## Compatibility contract
 
-A topology that selects no Riffle features compiles to the same
-imperative graph today's parity-only compiler would emit, modulo
-diagnostics. Riffle features only kick in when the topology
-explicitly opts in.
+A topology that imports no Riffle features keeps the parity graph.
+Existing `Prim` constructors, builder calls, compile entry points,
+`EOSCoordinator`, `WorkerPool`, standby APIs, and timestamp
+extractors stay in place. New fields are optional and default to the
+old behaviour.
 
-Specifically:
-
-- Every existing `addSource` / `addSourceWith` / `addProcessor` /
-  `addStateStore*` / `addSink*` call compiles unchanged. Any new
-  `SourceSpec` / `ProcessorSpec` / `AnyStoreBuilder` field is
-  optional with a default that reproduces today's behaviour.
-- Every existing `Prim` constructor stays. New `Prim` constructors
-  are added; no existing constructor is removed or renamed.
-- `compile :: Topology Void o -> IO (o, Topo.Topology)` stays the
-  one entry point. `compileNoOptimize` / `compileWith` /
-  `compileWithOptimization` / `compileInBuilder` stay.
-- `EOSCoordinator` keeps its existing fields. New fields
-  (`preCommit2PC`, `commit2PC`, `abort2PC`) default to no-op via
-  `noopEOSCoordinator`.
-- `WorkerPool`'s `newWorkerPool` / `newWorkerPoolHashed` stay.
-  `newWorkerPoolKeyGrouped` is additive.
-- `StandbyTask` / `StandbyManager` keep their current API. The
-  Riffle pointer-mode backend uses them through the same surface.
-- `TimestampExtractor` and all five shipped extractors are
-  unchanged. `WatermarkStrategy` is a wrapper around an extractor.
-- All KIP-295 / KIP-307 / KIP-825 / KIP-418 / KIP-892 work is
-  preserved as-is. None of it overlaps with the Riffle additions;
-  both can coexist.
-
-This matters operationally because adopting Riffle is incremental.
-A team that runs a working parity-port topology can pick one
-feature at a time — for example, swap a problematic
-`mapValuesM`-on-HTTP for `asyncMapValues` — without touching the
-rest of the topology, and without committing to the entire
-extension tier.
+That is the whole adoption story: swap one `mapValuesM` call for
+`asyncMapValues`, or one store builder for a snapshot-aware builder,
+and leave the rest of the topology alone. The detailed design
+contract lives in
+[`RIFFLE_SPEC.md`](https://github.com/iand675/wireform-/blob/main/wireform-kafka/streams/RIFFLE_SPEC.md).
 
 ## What's deferred
 
@@ -416,7 +354,7 @@ You can stop at any step. Every step is an additive deploy.
 - [`RIFFLE_SPEC.md`](https://github.com/iand675/wireform-/blob/main/wireform-kafka/streams/RIFFLE_SPEC.md)
   — the canonical design contract with rationale per section.
 - [Topology evolution](./operating/topology-evolution/) — how
-  Riffle snapshot stores change rolling-deploy windows.
+  snapshot stores change rolling-deploy windows.
 - [Scaling and rebalancing](./operating/scaling/) — how key-groups
   and KIP-848 change the rebalance story.
 - [Exactly-once across Kafka and other systems](./operating/exactly-once/)

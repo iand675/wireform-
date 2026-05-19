@@ -253,16 +253,13 @@ data-processing system. With joins you can:
 The DSL operator is one line. The hard part is the
 co-partitioning discipline and the race-condition handling.
 
-## What you learned
+## What to keep in mind
 
-- Five join shapes; pick by combining left/right "is-it-a-stream"
-  and inner/left/outer.
-- Stream-table joins enrich events with current state.
-- Co-partitioning is the rule: same partition count and
-  partitioner, both sides. The library validates at startup.
-- Inner joins drop unmatched records; left joins emit `Nothing` so
-  you can decide downstream.
-- `globalTable` is the easy escape hatch for small reference data.
+Pick the join by the shape of the two sides: stream/stream,
+stream/table, table/table, foreign-key table/table, or GlobalKTable.
+Stream-table joins are the usual enrichment tool. Co-partitioning is
+the rule for distributed joins; `globalTable` is the escape hatch for
+small reference datasets.
 
 ## Next up
 

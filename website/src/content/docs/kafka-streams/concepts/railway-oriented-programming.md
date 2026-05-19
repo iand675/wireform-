@@ -15,10 +15,10 @@ or the **failure track**. Adjacent functions compose so the
 failure track flows around them; only success values reach the
 next operation.
 
-Kafka Streams isn't *labelled* ROP, but it's structurally a
-near-perfect fit. This page maps the metaphor onto the library
-and shows where every failure-handling surface in the API is a
-"track switch" you can think of as a ROP combinator.
+Kafka Streams is not usually described in those terms, but the
+mapping is useful: successful records continue downstream, and
+failed records move to a handler, DLQ, retry path, or task failure.
+This page points out where those switches live.
 
 :::tip[Unfamiliar terms?]
 Kafka, Streams, and Riffle terminology is defined in the [Glossary](../glossary/).
@@ -27,7 +27,7 @@ Kafka, Streams, and Riffle terminology is defined in the [Glossary](../glossary/
 :::note[TL;DR]
 - A streams topology *is* a two-track pipeline: success records flow downstream; failed records flow into the dead-letter or fail-task track.
 - Track switches sit at four surfaces: source deserialisation, processor exceptions, sink production, and async-I/O / 2PC outcomes.
-- The `Kafka.Streams.Pipeline` newtype has an `ArrowChoice` instance — the `(|||)` and `(+++)` operators are textbook ROP combinators over `Either`.
+- The `Kafka.Streams.Pipeline` newtype has an `ArrowChoice` instance; `(|||)` and `(+++)` give you explicit branching over `Either`.
 - The Riffle async-I/O `AsyncFailurePolicy` and `TwoPhaseSink` `SinkOutcome` types are both ROP-shaped: explicit `OK / Retryable / Fatal` results.
 - The DLQ pattern (KIP-1033) is the "failure track materialised as a Kafka topic" — a second stream you can process independently.
 :::
@@ -142,11 +142,10 @@ data SinkOutcome
                                     -- promoted to CommitFatal
 ```
 
-This is ROP done right. The sink reports its outcome on every
-operation (`tpsPrepare`, `tpsCommit`, `tpsAbort`); the runtime
-walks the appropriate path based on the variant. `SinkRetryable`
-is the railway switch that loops the train back; `SinkFatal` is
-the one that derails it.
+The sink reports an outcome for every operation (`tpsPrepare`,
+`tpsCommit`, `tpsAbort`), and the runtime chooses the next path from
+the constructor. `SinkRetryable` aborts the commit cycle and retries;
+`SinkFatal` stops the runtime for operator attention.
 
 ## The DLQ pattern: failure track as a topic
 
@@ -165,17 +164,10 @@ flowchart LR
   DLQ --> Inspect["Operator inspection\n(IQ / cat / search)"]
 ```
 
-Once you treat the DLQ as just another Kafka topic, the failure
-track gets all the same superpowers as the success track:
-
-- **Persistence and replay.** Bad records aren't dropped on the
-  floor; they wait until you fix the bug and reprocess them.
-- **Independent throughput.** A flood of bad records does not
-  block the success topology.
-- **Inspection.** You can `kafka-console-consumer` the DLQ to
-  see exactly what failed and why.
-- **Reprocessing topology.** Another streams app can consume the
-  DLQ, apply a fix, and re-publish to the original input.
+Once the DLQ is a Kafka topic, failed records become data you can
+inspect, retain, replay, and feed into a repair topology. The key
+is to give DLQ records the same care as success records: schema,
+keys, timestamps, and enough error context to reprocess them later.
 
 The KIP-1033 `ProcessingExceptionHandler` is the canonical hook
 for this: build a handler that wraps a producer and writes the
@@ -206,12 +198,11 @@ instance ArrowChoice Pipeline where
   (|||) :: Pipeline a c -> Pipeline b c -> Pipeline (Either a b) c
 ```
 
-The last two are *literally* the ROP `>>` (apply-on-success) and
-"merge tracks back together" combinators. If you've written F#
-ROP, the equivalence is exact.
+The last two are the pieces you want for two-track code: split the
+branches, run different pipelines, then merge them back into one
+output.
 
-A pipeline that does ROP in the shape Scott Wlaschin would
-recognise:
+A small example:
 
 ```haskell
 import Control.Arrow (arr, (>>>), (|||))
@@ -308,28 +299,12 @@ handlers at the right point.
 
 ## Why this lens helps
 
-Three concrete payoffs of thinking in ROP terms while you write
-Kafka Streams code:
-
-1. **You stop conflating "exception thrown" with "task dies."**
-   In parity Streams, an unhandled exception in a processor
-   *does* kill the task. Once you set up a `ProcessingExceptionHandler`
-   that routes to a DLQ, you're explicitly declaring "this is a
-   data-quality error, not a code error — keep going." That
-   distinction is much harder to make if you're thinking
-   imperatively about try/catch.
-2. **You stop using `mapValues` for fallible work.** A pure
-   `mapValues` has no failure track. The moment you have
-   `mapValues f` where `f` might throw, you've smuggled the
-   failure into the engine's exception path. Make it
-   `mapValues (toEither . f)` and route the `Either` explicitly,
-   or use `mapValuesM` if you genuinely need `IO` (and then
-   accept that the handler will fire).
-3. **You design your DLQ envelope up front.** ROP says "a value
-   on the failure track is just as much a value as one on the
-   success track." That means your DLQ records deserve schema,
-   keys, and timestamps the same as your output topic. Plan for
-   the reprocessing topology when you design the DLQ envelope.
+The useful habit is to decide which failures are data-quality
+failures and which are code failures. Route the first class to a DLQ
+or repair path; let the second stop the task. That also nudges you
+away from hiding fallible work inside pure-looking `mapValues` calls:
+return `Either`, branch explicitly, and design the DLQ envelope as a
+real event type.
 
 ## Related reading
 

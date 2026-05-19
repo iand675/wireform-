@@ -10,37 +10,24 @@ It tells you what works the same as the JVM, what works
 differently, and what isn't there yet — so you can decide
 whether the library fits your use case before writing code.
 
-> **Status**: feature-complete relative to Apache Kafka 4.0
-> Streams; ports JVM topologies one-to-one. The runtime drives
-> a real broker through `Kafka.Streams.Runtime` *and* an
-> in-process `TopologyTestDriver` for deterministic tests.
-> See **What's not yet there** below for the honest list of
-> remaining gaps.
+> **Status**: the DSL and runtime track Apache Kafka 4.0 Streams.
+> Most parity surfaces are implemented; the remaining gap is not an
+> operator, but a fixture: live-broker CI still exercises one process
+> at a time. The multi-instance rebalance path is covered by the
+> in-process harness.
 
 ---
 
 ## TL;DR
 
-| Area                          | Status                                                                                                     |
-| ----------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| Stateless DSL                 | **Full parity.** `filter` / `map` / `flatMap` / `selectKey` / `peek` / `branch` (`Branched.withFunction` / `withConsumer`) / `merge` / `to` / `print`. |
-| Stateful DSL                  | **Full parity.** `groupBy` / `count` / `reduce` / `aggregate` / `cogroup` (incl. `KGroupedTable` with subtractor). |
-| Windowing                     | **Full parity.** Tumbling / hopping / sliding / session windows; `suppress` (incl. `shutDownWhenFull` / `emitEarlyWhenFull`); `EmitStrategy`. |
-| Joins                         | **Full parity.** Stream-stream (windowed) with `StreamJoined`; stream-table; table-table; foreign-key with `TableJoined`; GlobalKTable; modern `JoinWindows.ofTimeDifferenceWithNoGrace` / `ofTimeDifferenceAndGrace`. |
-| Processor API                 | **Full parity.** `Processor`, `FixedKeyProcessor`, `ProcessorSupplier` with declared stores, `ProcessorContext` (incl. `appendHeader` / `requestCommit`), `Punctuator` (wall-clock + stream-time). |
-| State stores                  | **Full parity.** KV (in-mem + RocksDB + LRU — `Stores.lruMap`), Window (incl. `TimestampedWindowStore`), Session, Timestamped, Versioned (incl. `vkvDelete`). |
-| Side effects                  | **Full parity, plus typed IO variants.** Blocking `foreachStream` + non-blocking `foreachStreamAsync`. See the [SideEffects](#side-effects) section. |
-| Interactive Queries           | **Full parity.** Typed `Query` API; `WindowKeyQuery` / `WindowRangeQuery`; `VersionedKeyQuery` / `MultiVersionedKeyQuery`; `StreamsMetadata` / `KeyQueryMetadata` + `StoreQueryParameters` for cross-instance routing. |
-| Exception handlers            | **Full parity.** Production / processing / uncaught (REPLACE_THREAD / SHUTDOWN_CLIENT / SHUTDOWN_APPLICATION) handlers. |
-| Dynamic runtime               | **Full parity.** `addStreamThread` / `removeStreamThread`; `CloseOptions`; standby + global-restore listeners; `cleanUp()`; `metadataForLocalThreads` / `metricsAndState`. |
-| Exactly-once                  | **Wire-level path is in place.** Bound transactional producer + `EOSCoordinator` + transactional-store buffer that drains atomically with the producer commit. |
-| Schema Registry serdes        | **In place.** Avro / JSON-Schema / Protobuf payload serdes + Confluent envelope + transport-agnostic HTTP.  |
-| Standby tasks                 | **Live.** `Kafka.Streams.Runtime.StandbyTask` + `StandbyDriver`: the second-consumer changelog poll-loop dispatches into per-task replay; lag flows into the warmup-readiness map. |
-| Probing rebalance             | **Live.** The event loop calls `Consumer.requestRejoin` on the configured cadence when warmups are ready.   |
-| Multi-thread runtime          | **Yes.** `numStreamThreads > 1` spins up an N-worker pool; one consumer dispatches by `hash (topic, partition) mod N` so per-partition state stays coherent. |
-| Multi-instance rebalance      | **Yes.** `setRebalanceListener` + `ownedPartitions` + `standbyTasks` on `KafkaStreams` track partition transitions via the driver's `RebalanceEvent` channel. The native driver wires those events from `Kafka.Client.Consumer.setRebalanceListener`, which fires on every `subscribe` / re-subscribe / fenced-heartbeat (UNKNOWN_MEMBER_ID, FENCED_INSTANCE_ID = lost; everything else graceful = revoked). The standby-grace state machine runs end-to-end. |
-| Live-broker integration tests | `.github/workflows/wireform-kafka-integration.yml` spins up an `apache/kafka` KRaft broker (3.7 + 4.0) via docker compose and runs the live suite on every PR. |
-| GHC                           | **9.6.4 / 9.8.4 / 9.10.1 / 9.12.1** in CI.                                                                  |
+| Area | Status |
+| ---- | ------ |
+| DSL surface | Parity for stateless transforms, aggregations, windows, joins, Processor API, state stores, side effects, and Interactive Queries. |
+| Runtime | Real-broker runtime, in-process `TopologyTestDriver`, multi-thread worker pool, standby tasks, probing rebalance, lifecycle/listener hooks. |
+| Exactly-once | Transactional producer, `EOSCoordinator`, and transactional-store drain are wired. |
+| Schema Registry | Avro / JSON-Schema / Protobuf envelopes, compatibility probing, in-memory and HTTP-backed clients. |
+| Integration tests | KRaft live-broker PR fixture for Kafka 3.7 + 4.0; multi-instance rebalance currently covered by the mock harness. |
+| GHC | 9.6.4 / 9.8.4 / 9.10.1 / 9.12.1 in CI. |
 
 What follows is the user-facing scope: a section per operator
 family + a worked example, the runtime model, and an honest
@@ -260,12 +247,12 @@ end-to-end by [`Kafka.Streams.Examples.SideEffects`](examples/Kafka/Streams/Exam
   are not part of that transaction. A topology rewind on
   rebalance will replay them. If you need exactly-once for
   the side effect, gate it on a state-store-backed idempotency
-  token. **Same as the JVM.**
+  token. Same as the JVM.
 - **Order is per-task, not global.** On a single task, effects
   fire in topology order. With `numStreamThreads > 1` different
   keys may be processed concurrently across tasks. To force a
   global order, route through `repartition` to one partition
-  or sink to a topic and consume separately. **Same as the JVM.**
+  or sink to a topic and consume separately. Same as the JVM.
 
 ---
 
@@ -322,12 +309,11 @@ slightly differently. None are deal-breakers; they just exist.
      across local tasks.
 
    The tradeoffs vs. Java's per-thread model:
-   - **Less network overhead** — one consumer connection.
-   - **No store rebalance across workers within a process** —
-     a partition's state stays on whichever worker it first
-     hashed to. Multi-instance (multiple OS processes joining
-     the same group) is what you'd use to redistribute work
-     across a cluster, and that's the next milestone.
+   - **Less network overhead** — one consumer connection per process.
+   - **Stickier local state** — a partition's state stays on the worker
+     it first hashes to inside that process. Cross-process movement is
+     handled by group rebalances; live-broker CI for that path is still
+     pending.
 
 6. **`processStream` returns `IO ()`, not `KStream`.** The
    JVM `KStream.process(ProcessorSupplier, ...)` returns a
@@ -350,64 +336,14 @@ slightly differently. None are deal-breakers; they just exist.
 
 ## What's not yet there
 
-Honest list. Items here aren't unsupported in principle — they
-just haven't landed yet.
+The remaining parity gap is verification shape, not API surface:
+multi-instance rebalance works through the in-process mock harness,
+but CI does not yet run two OS processes against a live broker. The
+single-process Docker fixture in `.github/workflows/wireform-kafka-integration.yml`
+covers the real protocol path.
 
-- **Multi-process rebalance verification under a live broker.**
-  Single-process multi-thread works (`numStreamThreads > 1`),
-  the cross-instance rebalance code path is wired
-  (`setRebalanceListener` + `ownedPartitions` + `standbyTasks`
-  + the standby-grace state-machine + JoinGroup subscription-
-  metadata exchange), and the new
-  [`Kafka.Streams.Runtime.MultiInstanceMockHarness`](src/Kafka/Streams/Runtime/MultiInstanceMockHarness.hs)
-  exercises it end-to-end against an in-process mock cluster
-  (assignment split, partition migration on instance loss,
-  Hedgehog property over the assignor's coverage +
-  disjointness invariants — see
-  [`Streams.MultiInstanceRebalanceSpec`](test/Streams/MultiInstanceRebalanceSpec.hs)).
-  What's still pending is a multi-OS-process CI fixture that
-  joins two instances against an actual broker; the single-instance
-  Docker fixture in `.github/workflows/wireform-kafka-integration.yml`
-  covers the protocol path.
-
-Otherwise the streams runtime + DSL are **feature-complete
-relative to Apache Kafka 4.0 Streams**; tests cover every
-shipped operator end-to-end (391+ cases in
-`wireform-kafka-streams-test`).
-
-### Closed gaps
-
-The following parity gaps were previously listed as "not yet
-there" and have now landed; references for the reader:
-
-- **Schema Registry compatibility-mode probing.** The
-  `Kafka.Streams.Serde.SchemaRegistry.SchemaRegistryClient`
-  record gained two new methods: `srCompatibilityMode` (read
-  the per-subject policy — `NONE` / `BACKWARD` / `FORWARD` /
-  `FULL` / `*_TRANSITIVE`) and `srTestCompatibility` (ask
-  whether a candidate schema would pass the policy). The
-  HTTP-backed client wires `GET /config/{subject}` and
-  `POST /compatibility/subjects/{subject}/versions/latest`. A
-  `registrySerdeChecked` wrapper probes the policy once at
-  construction time and fails fast with `IncompatibleSchema`
-  before a producer publishes. See
-  [`Kafka.Streams.Serde.SchemaRegistry`](src/Kafka/Streams/Serde/SchemaRegistry.hs)
-  and its [HTTP sibling](src/Kafka/Streams/Serde/SchemaRegistry/Http.hs).
-- **`Printed.toFile` with log rotation.** The new
-  [`Kafka.Streams.Printed`](src/Kafka/Streams/Printed.hs)
-  module ships an `openRotatingHandle` / `closeRotatingHandle`
-  pair plus the `rotatingPrintStream` / `rotatingPrintToHandle`
-  sinks. Rotation policy covers size, age, and buffering; rolled
-  files take a UTC-suffixed archive name
-  (`stream.20260516T110942Z.log`) so the active path stays
-  stable for tail-style readers. The JVM
-  `org.apache.kafka.streams.kstream.Printed<K,V>` builder has a
-  direct port in
-  [`Kafka.Streams.Printed`](src/Kafka/Streams/Printed.hs):
-  `Printed.toSysOut` / `toErr` / `toHandle` / `toFile` /
-  `toRotatingFile` / `withLabel` / `withKeyValueMapper`, plus
-  bracket-form `withPrintedFile` / `withPrintedRotatingFile`
-  for deterministic shutdown.
+Otherwise the streams runtime and DSL are feature-complete relative
+to Apache Kafka 4.0 Streams.
 
 ### Haskell-native DSL façade
 
@@ -436,8 +372,8 @@ The original imperative API (`streamFromTopic` / `filterStream`
 
 **Good fit:**
 
-- You're building a streaming app in Haskell and don't want to
-  shell out to JVM Streams.
+- You're building a streaming app in Haskell and want to keep it in
+  the same runtime as the rest of the service.
 - You want exactly the JVM Kafka Streams operator surface but
   in Haskell (DSL parity is one-to-one).
 - Your topology is unit-testable through the in-process
@@ -451,10 +387,9 @@ The original imperative API (`streamFromTopic` / `filterStream`
 
 **Consider alternatives:**
 
-- You need to scale a single consumer group across many OS
-  processes today — the within-process multi-thread runtime
-  works, but cross-process rebalance hasn't landed; for a
-  multi-instance deployment JVM Streams is still the answer.
+- You require live-broker CI proof for multi-process rebalances
+  before adoption. The code path exists and is covered by the mock
+  harness, but the live fixture is still single-process.
 - You need bug-for-bug compatibility with Streams-the-product
   including its quirks. We aim for spec compliance, not
   bug-for-bug.

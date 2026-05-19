@@ -3,10 +3,10 @@
 This document is a class-by-class, method-by-method audit of the
 public surface of Apache Kafka 4.0's Java SDK against the
 Haskell `wireform-kafka` + `wireform-kafka-streams` libraries.
-It's the canonical answer to "do you have X?" — every public
-Java symbol is either mapped to a Haskell name or flagged as
-**MISSING** so a future user (or maintainer) can decide
-whether to fill the gap.
+Use it as a lookup table: find the Java symbol, then check the
+Haskell equivalent or the gap note. Historical audit sections are
+kept because they explain why some rows are more detailed than
+others, but the current status is what matters.
 
 Convention:
 
@@ -21,13 +21,15 @@ Companion files:
 - [`CONFIG_PARITY.md`](CONFIG_PARITY.md) — `librdkafka` config-knob parity.
 - [`streams/README.md`](streams/README.md) — operator-level parity for the streams DSL.
 
-## Audit history
+## How to read this file
 
-| Pass | Scope | Outcome |
-| ---- | ----- | ------- |
-| v1   | Top-level packages (`clients.producer`, `clients.consumer`, `clients.admin`, `streams`, `streams.kstream`, `streams.processor.api`, `streams.state`, `streams.errors`, `streams.query`, `common`, `common.errors`, `common.header`, `common.serialization`, `common.config`). Headline classes only. | Mapped the operator-level surface and named the obvious gaps. **Skimmed** in several places: didn't walk every method overload (`KafkaConsumer.subscribe` has 6 overloads, `commitSync` / `commitAsync` have 4 each, etc.), didn't drill into the `*Options` / `*Result` admin record families, didn't audit `Producer` / `Consumer` *interfaces* separate from the `KafkaProducer` / `KafkaConsumer` classes. |
-| v2   | Sub-packages missed in v1: `common.acl`, `common.resource`, `common.quota`, `common.metrics`, `streams.processor` (the non-`api` package), `streams.processor.assignment` (KIP-924 user-supplied task assignors), `streams.test`. Plus full-method drills on `Producer`, `Consumer`, `KafkaConsumer`, `KStream`, `KTable`, `KafkaStreams`, `StateRestoreListener`, `Stores`, `TaskAssignor`. | Surfaced a *lot* more gaps — the v2 sections below have ❌ entries the v1 pass would have called ✅. The audit is now honest at the method-overload level. |
-| v3   | Fill the v2 honest-list: wrap the `Admin.*` long-tail RPCs that take the v2-added carrying types; add the Consumer overload tail; stub KIP-714 telemetry-id getters. | Adds `Kafka.Client.AdminClient` long-tail (`createPartitions`, `describeCluster`, `listGroups`, `createAcls` / `describeAcls` / `deleteAcls`); adds `Kafka.Client.Consumer.clientInstanceId` + the consumer-overload-tail shims (`commitSyncOffsets`, `commitAsyncCallback`, `seekWithMetadata`, `enforceRebalanceWithReason`). |
+- The package tables near the top are the current lookup surface.
+- The drill-down sections below are intentionally more detailed:
+  they walk overloads, options/result families, and subpackages that
+  are easy to overstate in a headline parity table.
+- The gap lists are allowed to be blunt. A ❌ row is better than a
+  vague ✅ when a user is checking whether a Java call has a Haskell
+  home.
 
 ---
 
@@ -411,8 +413,7 @@ constructors.
 
 ## Summary of named gaps as of this audit
 
-The audit surfaces a handful of *named* gaps that this PR closes
-directly:
+The audit surfaced several named gaps that are now closed:
 
 - **`ConsumerRecords`** wrapper type → added as `Kafka.Client.Consumer.ConsumerRecords`.
 - **`ConsumerGroupMetadata`** + `groupMetadata()` → added.
@@ -434,18 +435,18 @@ What's left in the gap list (in order of likely user impact):
 7. `UnlimitedWindows`.
 8. `QueryConfig` (executionInfo flag).
 
-These are tracked as "honest list" gaps in this file. They are
+These remain tracked in this file. They are
 not blocking for the streams runtime + DSL parity (which is at
 100% for the kstream operator surface) or for the producer /
 consumer / transaction hot paths (which are at full parity).
 
 ---
 
-## v2 pass — drill-down on classes the headline audit skimmed
+## Detailed drill-down on classes the headline table compresses
 
-The headline audit above stops at the operator level. Going one
-level deeper exposes per-overload and sub-package gaps that
-weren't in v1. This section adds them.
+The headline tables above are intentionally compact. This section
+walks the overloads and subpackages where a single ✅ would hide too
+much detail.
 
 ### `Producer` *interface* (separate from `KafkaProducer`)
 
@@ -465,7 +466,7 @@ weren't in v1. This section adds them.
 
 ### `Consumer` *interface* (separate from `KafkaConsumer`)
 
-Every overload. The v1 audit collapsed these into a single ✅ per method name; the real story:
+Every overload is listed here because the Java method family is wider than the compact table suggests:
 
 | Java method | Status | Haskell |
 | ----------- | ------ | ------- |
@@ -516,7 +517,7 @@ Every overload. The v1 audit collapsed these into a single ✅ per method name; 
 
 ### `KStream` overload drill-down
 
-The v1 audit marked these ✅; the real story is overload-level:
+The overload-level detail matters here:
 
 | Java overload | Status | Haskell |
 | ------------- | ------ | ------- |
@@ -704,11 +705,11 @@ Full parity here would require porting the whole Java reporter / sensor framewor
 | `TopicPartitionReplica` | ✅ | `Kafka.Common.TopicPartitionReplica` (added) |
 | `Uuid` | ✅ | `Kafka.Common.Uuid` (alias of `Kafka.Client.TopicId.TopicId`) |
 
-### What's left after v2
+### Remaining gaps from the overload drill-down
 
 The high-confidence remaining gaps after this drill:
 
-1. **The long-tail `Admin.*` RPCs.** The protocol-level pairs exist; what's missing is the typed `*Options` / `*Result` wrapper that calls them. The v2 pass adds the *carrying* types (`AclBinding`, `ResourcePattern`, `ClientQuotaEntity`, etc.) the eventual wrappers will need, but doesn't add the wrappers themselves. Concrete missing operations: `createAcls`, `describeAcls`, `deleteAcls`, `createPartitions`, `alterPartitionReassignments`, `listPartitionReassignments`, `describeLogDirs`, `alterReplicaLogDirs`, `describeReplicaLogDirs`, `describeClientQuotas`, `alterClientQuotas`, `*DelegationToken*`, `*UserScramCredentials`, `addRaftVoter`, `removeRaftVoter`, `describeMetadataQuorum`, `unregisterBroker`, `describeFeatures`, `updateFeatures`, `describeProducers`, `fenceProducers`, `abortTransaction` (admin variant), `describeTransactions`, `listTransactions`, `describeClassicGroups`, `describeShareGroups`, `removeMembersFromConsumerGroup`, `listClientMetricsResources`, `listGroups()` (generic across types).
+1. **The long-tail `Admin.*` RPCs.** The protocol-level pairs exist; what's missing is the typed `*Options` / `*Result` wrapper that calls them. The detailed pass adds the *carrying* types (`AclBinding`, `ResourcePattern`, `ClientQuotaEntity`, etc.) the eventual wrappers will need, but doesn't add the wrappers themselves. Concrete missing operations: `createAcls`, `describeAcls`, `deleteAcls`, `createPartitions`, `alterPartitionReassignments`, `listPartitionReassignments`, `describeLogDirs`, `alterReplicaLogDirs`, `describeReplicaLogDirs`, `describeClientQuotas`, `alterClientQuotas`, `*DelegationToken*`, `*UserScramCredentials`, `addRaftVoter`, `removeRaftVoter`, `describeMetadataQuorum`, `unregisterBroker`, `describeFeatures`, `updateFeatures`, `describeProducers`, `fenceProducers`, `abortTransaction` (admin variant), `describeTransactions`, `listTransactions`, `describeClassicGroups`, `describeShareGroups`, `removeMembersFromConsumerGroup`, `listClientMetricsResources`, `listGroups()` (generic across types).
 2. **KIP-714 telemetry-id getters** on Producer / Consumer / KafkaStreams (`clientInstanceId(Duration)`, `registerMetricForSubscription` / `unregisterMetricFromSubscription`).
 3. **The `Consumer` overload tail.** Every `*Sync(... , Duration)` timeout overload, the `OffsetCommitCallback`-taking `commitAsync` variants, `subscribe(Pattern)` / `subscribe(SubscriptionPattern)`, `seek(TopicPartition, OffsetAndMetadata)`, `currentLag(TopicPartition)`, `enforceRebalance(String)`, `wakeup()`, `partitionsFor` / `listTopics` (the JVM puts these on the consumer; Haskell deflects to AdminClient).
 4. **`Producer.partitionsFor` / `Producer.metrics()` shape parity** (the `Map<MetricName, Metric>` shape).
@@ -723,11 +724,11 @@ The high-confidence remaining gaps after this drill:
 13. **`QueryConfig`** (the `executionInfo` flag).
 14. **`ByteBufferSerializer` / `ListSerializer`** as named built-ins.
 
-This is the v2 honest list. It's longer than v1's; the difference is the v1 list under-counted by treating each marquee class as a single ✅/❌ instead of walking its method matrix.
+This list is deliberately specific: each item names the API family that still needs a Haskell surface or an explicit decision not to port it.
 
 ---
 
-## v3 pass — fill the v2 honest-list
+## Follow-up pass on remaining gaps
 
 ### New admin RPCs in `Kafka.Client.AdminClient` long-tail
 
@@ -780,7 +781,7 @@ admin surface (and tracked as remaining gaps):
 
 ### Streams errors: per-exception discriminated constructors
 
-The v2 honest list called out a handful of Java exception
+The overload drill-down called out a handful of Java exception
 classes that the Haskell side folded into a single
 `StreamsException`. The new constructors mirror the JVM names,
 keeping a discriminated catch-by-type pattern available to
@@ -825,13 +826,13 @@ users:
 
 ---
 
-## Honest-list status (after v3a–v3e)
+## Current gaps and intentional omissions
 
-What's *still* missing on the Java SDK side, in priority order:
+Current status, grouped by why the item is not plain parity yet:
 
-### Closed in v4 (was: Pending due to missing protocol codegen)
+### Closed: protocol wrappers now exist
 
-The Java admin RPCs the v3-era honest-list called out as
+The Java admin RPCs previously called out as
 codegen-blocked have all been wrapped. The generated
 request/response pairs already existed in
 `Kafka.Protocol.Generated.*`; the wiring was the missing
@@ -848,7 +849,7 @@ piece.
 | `Admin.describeShareGroups(...)` (KIP-932) | `Kafka.Client.AdminClient.describeShareGroups` + `ShareGroupDescription` / `ShareGroupMember` | `ShareGroupDescribeRequest` / `ShareGroupDescribeResponse` |
 | `Admin.listClientMetricsResources()` (KIP-714) | `Kafka.Client.AdminClient.listClientMetricsResources` | `ListClientMetricsResourcesRequest` / `ListClientMetricsResourcesResponse` |
 
-### Closed in v4 (was: Pending runtime wiring)
+### Closed: runtime wiring now exists
 
 - **`TaskAssignor` plug-in (KIP-924).** `StreamsConfig` now
   carries `taskAssignor :: Maybe TaskAssignor`, and
@@ -935,12 +936,11 @@ without changing the call sites.
 The Producer + AdminClient + KafkaStreams variants of this
 getter are the analogous follow-ups.
 
-### What's left after v3
+### Remaining follow-ups
 
-Most of the v2 honest-list (KIP-924 user-pluggable `TaskAssignor`,
-the long Java metrics machinery, the per-error discriminated
-exceptions, the remaining `Admin.*` operations beyond the v3
-additions, full `Stores` factory cover, `ByteBufferSerializer` /
-`ListSerializer`, `UnlimitedWindows`, `QueryConfig`). Each of
-those is independently filloutable in the same shape as the v3
-pass.
+The remaining work is now small and separable: full Java-style
+metrics machinery, per-error discriminated exceptions, persistent
+store factory coverage, named `ByteBuffer` / `List` serdes,
+`UnlimitedWindows`, and any future decision to expose Java-shaped
+compatibility wrappers where the Haskell API already has a better
+typed equivalent.

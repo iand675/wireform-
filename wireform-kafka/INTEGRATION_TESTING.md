@@ -1,6 +1,6 @@
 # Integration Testing Guide
 
-This document describes how to run integration tests for the wireform-kafka library.
+Use this when you want the live-broker suite, not the in-process mock tests. The suite expects Kafka in KRaft mode and exercises the client against real sockets, metadata, transactions, and topic management.
 
 ## Prerequisites
 
@@ -114,7 +114,7 @@ kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic my-topic --f
 ## Stopping Kafka
 
 ```bash
-# Stop both Kafka and Zookeeper, and clean up data directories
+# Stop Kafka and clean up data directories
 stop-kafka
 ```
 
@@ -159,27 +159,20 @@ Integration tests involve real network I/O and Kafka operations, so they're natu
 - Verify no other processes are overwhelming the system
 - Consider running unit tests separately: `cabal test wireform-kafka:wireform-kafka-test`
 
-## Test Organization
+## Test organization
 
-Integration tests are in `test/Integration/`:
+Integration tests live under `test/Integration/` and are registered
+from `test/IntegrationSpec.hs`. Prefer adding a focused spec next to
+the existing live-broker coverage rather than building a second test
+harness.
 
-- `BasicSpec.hs` - Connection, metadata, basic produce/consume tests
-- Future: `ProducerSpec.hs` - Producer-specific integration tests
-- Future: `ConsumerSpec.hs` - Consumer-specific integration tests
-- Future: `TransactionSpec.hs` - Transaction coordinator tests
+## Continuous integration
 
-## Continuous Integration
-
-For CI environments, consider:
-
-1. Using Docker to run Kafka in KRaft mode:
-   ```bash
-   docker run -d -p 9092:9092 apache/kafka:latest
-   ```
-
-2. Using Testcontainers (requires Docker and supports KRaft mode)
-
-3. Setting appropriate timeouts for CI environments
+`.github/workflows/wireform-kafka-integration.yml` is the reference
+shape: start an `apache/kafka` KRaft broker with Docker Compose, wait
+for readiness, then run the integration suites with
+`WIREFORM_KAFKA_BROKER` set. Keep local scripts aligned with that
+workflow so failures reproduce cleanly.
 
 ## Development Workflow
 
@@ -203,36 +196,17 @@ ghcid --command "stack ghci wireform-kafka:wireform-kafka-integration" \
 stop-kafka
 ```
 
-## Writing New Integration Tests
+## Writing new integration tests
 
-When adding new integration tests:
+When adding live-broker coverage:
 
-1. Add test modules to `test/Integration/`
-2. Import and register them in `test/IntegrationSpec.hs`
-3. Ensure tests clean up after themselves (delete test topics, etc.)
-4. Use unique topic names to avoid conflicts between tests
-5. Add appropriate timeout handling for network operations
-6. Document any special setup requirements
+1. Add the spec under `test/Integration/`.
+2. Register it in `test/IntegrationSpec.hs`.
+3. Use unique topic names, preferably with the test name in the prefix.
+4. Clean up topics and close clients in bracketed setup/teardown.
+5. Keep network timeouts explicit; live Kafka failures should fail with
+   a useful message, not hang the suite.
 
-Example test template:
-
-```haskell
-module Integration.MyNewSpec (tests) where
-
-import Test.Tasty
-import Test.Tasty.HUnit
-
-tests :: TestTree
-tests = testGroup "My New Feature"
-  [ testCase "Does something useful" testMyFeature
-  ]
-
-testMyFeature :: Assertion
-testMyFeature = do
-  -- 1. Setup (create topics, prepare data)
-  -- 2. Execute operation
-  -- 3. Verify results
-  -- 4. Cleanup (delete topics, close connections)
-  return ()
-```
+Use the existing specs as templates; they already carry the right
+setup and cleanup shape.
 

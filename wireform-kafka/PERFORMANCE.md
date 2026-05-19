@@ -50,8 +50,8 @@ compressed encoder still cuts the non-codec overhead in half
 
 ## How we got here
 
-The work breaks down into seven independent commits, each with
-its own benchmark + cross-codec / round-trip property tests:
+The work breaks down into twelve independent changes, each with
+its own benchmark plus cross-codec or round-trip property tests:
 
 1. **`encodeRecordBatchWire`**. Replaces the
    `runPutS`-per-record/body/batch shape (102 separate Builder runs
@@ -188,21 +188,16 @@ per-record CPU cost:
 | **Total producer-side CPU / rec**  | ~150 ns    | **~302 ns**    |  2.0x |
 
 Decode is **faster** than the librdkafka envelope; encode is now
-**within 14%** of librdkafka after the SIMD/SWAR pass. The
-remaining producer-side gap is concentrated in the accumulator's
-STM transaction commit (~150 ns inherent) — closing it requires
-moving off STM.
-
-The accumulator's remaining 4.9× gap comes mostly from the STM
-transaction commit itself (~150 ns inherent in `atomically`) —
-closing the rest of the gap requires moving off STM, which is a
-bigger change.
+**within 14%** of librdkafka after the SIMD/SWAR pass. The remaining
+producer-side gap is concentrated in the accumulator, mostly the
+`atomically` commit cost. Closing that gap means replacing STM in the
+hot path, which is a larger design change.
 
 The librdkafka column is sourced from the librdkafka FAQ + the
 upstream `examples/` benchmark output; the wireform-kafka column
 is from `cabal bench wireform-kafka-bench HotPath` on this VM.
 
-### JVM client tricks already ported (and the ones we deferred)
+### JVM client tricks already ported
 
 The Java client has a long list of micro-optimisations that took
 years to accumulate. The ones that bought us the headline numbers
@@ -224,30 +219,10 @@ above:
 * Murmur2 partitioner — direct port of
   `org.apache.kafka.common.utils.Utils.murmur2(byte[])`.
 
-Deferred (would benefit from broker-driven measurement first):
+The deferred work is listed below in payoff order. All of it needs
+broker-driven measurement before it is worth complicating the hot path.
 
-* **Lazy `ConsumerRecords` iterator** — Java decodes records one
-  at a time as the user iterates; if the user only consumes K
-  out of N, the other N-K never get decoded. Our `poll` is eager.
-  Worth it for sparse-consumption workloads.
-* **`ProducerBatch` direct-buffer encoding** — Java's
-  RecordAccumulator hands out a pre-allocated `batch.size`
-  buffer per partition and writes records straight in. We
-  accumulate `Seq Record` first, then encode at flush time.
-* **`BufferPool` for receive buffers** — Java pools direct
-  ByteBuffers across requests to amortise the
-  `mallocForeignPtrBytes` cost. Our buffers are GC-collected.
-* **Per-broker request pipelining** — we have `Pipeline` but
-  the producer doesn't use it; would let multiple in-flight
-  produce requests to the same broker overlap network +
-  compression CPU.
-* **Adaptive per-partition `max.fetch.bytes`** — Java tracks
-  each partition's average response size and shrinks / grows
-  the per-partition cap accordingly.
-* **STM → IORef + per-partition mutex** for the accumulator —
-  shaves the ~150 ns `atomically` commit overhead.
-
-### Next pickups (in payoff order)
+### Remaining work, in payoff order
 
 1. **STM → `IORef + per-partition mutex`** for the accumulator
    (~150 ns of the 245 ns budget is `atomically`). Same shape as

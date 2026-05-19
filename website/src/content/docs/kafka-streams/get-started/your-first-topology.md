@@ -232,16 +232,12 @@ more likely to work against a real broker than one tested only
 through mock objects. The driver is a thin wrapper around the
 real runtime, not a separate implementation.
 
-## What you learned
+## What to keep in mind
 
-- Topologies are typed Haskell values.
-- `Topology Void ()` is the common shape: self-contained,
-  no upstream / downstream.
-- You compose stages with `>>>`.
-- The in-process test driver runs the real engine — no broker
-  needed.
-- `pipeInput` + `readOutput` is enough to drive a topology
-  end-to-end.
+A topology is a typed Haskell value, usually `Topology Void ()` for a
+self-contained app. Compose stages with `>>>`, then use the
+in-process test driver to push input records and read outputs without
+starting a broker.
 
 ## Next up
 

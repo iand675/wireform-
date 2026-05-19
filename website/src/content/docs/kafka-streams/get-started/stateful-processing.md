@@ -312,19 +312,14 @@ consumer:
 You inherit all of this for free as long as you stay inside the
 DSL.
 
-## What you learned
+## What to keep in mind
 
-- A state store is a per-task local KV structure backed by a
-  changelog topic.
-- `groupBy` re-keys via a repartition topic so aggregations land
-  on the right task.
-- `count`, `aggregate`, `reduce` build a KTable from a
-  KGroupedStream.
-- A KTable is derived state; the truth lives in the log.
-- IQ is the read-only view of the store from outside the
-  topology.
-- The library handles durability, replay, and standby; you just
-  declare the store.
+State stores are local, per-task structures backed by changelog
+topics. `groupBy` repartitions so each key reaches the right task;
+`count`, `aggregate`, and `reduce` turn grouped streams into KTables;
+Interactive Queries read those stores from outside the topology. The
+DSL is doing the durability, replay, and standby work around that
+model.
 
 ## Next up
 

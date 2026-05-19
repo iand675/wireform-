@@ -1,9 +1,10 @@
 # `wireform-kafka` tutorial
 
-A guided walkthrough that takes you from "zero" to a working
-producer, consumer, transactional pipeline, and Streams
-topology. Every example below is a complete Haskell file that
-runs against the in-process mock broker — no Docker required.
+A guided walkthrough from the client basics to a working producer,
+consumer, transaction, and Streams topology. The first client
+examples use a broker at `localhost:9092`; the mock-broker and
+Streams sections show how to work without Docker when you want fast
+local tests.
 
 > **Where this fits.** The [README](./README.md) is the
 > catalogue of features; [`CONCEPTS.md`](./CONCEPTS.md) is the
@@ -143,9 +144,9 @@ main = do
   print (length records)
 ```
 
-The mock cluster is the workhorse for unit tests in this
-package — 464 tests in `wireform-kafka-test` plus 304 in
-`wireform-kafka-streams-test` all run against it.
+The mock cluster is the workhorse for unit tests in this package:
+same client shape, no broker process, and deterministic fault
+injection when a test needs it.
 
 ## 5. Transactions
 
@@ -187,17 +188,11 @@ main = do
         pure ()
 ```
 
-What changed under the hood compared to a plain producer:
-
-  * `sendMessage` is rejected with a typed error unless the
-    bound transaction is in `T.InTransaction`.
-  * The first send to any (topic, partition) issues
-    `AddPartitionsToTxn` to the coordinator.
-  * Each outgoing record batch is stamped with the
-    transactional producer-id / epoch / sequence and the
-    `attrIsTransactional` bit is set.
-  * `closeProducer` aborts an open transaction before
-    shutdown (so `withProducer` does the right thing too).
+Compared with a plain producer, the bound transaction controls when
+sends are allowed and stamps every outgoing batch with the producer
+id, epoch, sequence, and transactional bit. `withProducer` also
+cleans up correctly: closing an open transactional producer aborts
+before shutdown.
 
 ## 6. A first Streams topology
 
@@ -278,33 +273,11 @@ log.
 
 ## 8. Multi-instance Streams
 
-A streams app running as N pods needs three things working
-together: lifecycle hooks that fire when partitions move,
-standbys that shadow active tasks so failover is fast, and
-cross-instance interactive-query routing so a user query
-reaches whatever pod owns the key.
-
-```haskell
-import Kafka.Streams.Runtime
-
--- Probing rebalance: tell the runtime a standby is caught up.
-reportWarmupLag    ks tid 0
-maybeIssueProbe <- streamThreadCount ks
-
--- Dynamic thread management:
-n  <- addStreamThread    ks
-n' <- removeStreamThread ks
-
--- Graceful close with leaveGroup=False (static membership):
-closeKafkaStreamsWith ks
-  defaultCloseOptions { leaveGroup = False }
-```
-
-Standby tasks (`Kafka.Streams.Runtime.StandbyTask` /
-`StandbyDriver`) shadow active state; the changelog poll loop
-keeps them caught up. Cross-instance IQ
-(`Kafka.Streams.Discovery.RemoteIQ`) routes user queries to
-whichever instance owns the key.
+A multi-instance Streams app needs three things to line up: partition
+movement hooks, standby tasks for fast failover, and a query layer
+that routes each key to the instance that owns it. The runtime exposes
+those pieces directly; the full operational treatment lives in
+`streams/README.md` and the website operations docs.
 
 ## 9. Schema Registry serdes
 
@@ -356,30 +329,13 @@ the librdkafka-shaped mirror of the same counters.
 
 ## 11. Where to look next
 
-  * **Configuration**: [`CONFIG_PARITY.md`](./CONFIG_PARITY.md)
-    is the librdkafka knob-by-knob mapping.
-  * **Live broker tests**:
-    `WIREFORM_KAFKA_BROKER=host:port cabal test wireform-kafka:wireform-kafka-integration`
-    runs the full transactional + produce/consume suite.
-  * **Mock cluster reference**: `wireform-kafka/src/Kafka/Client/Mock/`
-    is the source of truth for fault injection. The README in
-    that folder walks through every primitive.
-  * **Streams reference**: `wireform-kafka-streams` mirrors the
-    Java Streams DSL one combinator per name; the
-    `Kafka.Streams.*` modules each carry a header comment
-    pointing at the upstream Java equivalent.
-  * **Streams examples**: `wireform-kafka/streams/examples`
-    has runnable demos for every operator family (passthrough,
-    line-split, word-count, page-view region, temperature
-    window, top-articles, orders enrichment, fraud detection,
-    inventory FK-join, interactive queries, processor API,
-    branching, global table, cogroup, side effects) plus a
-    README mapping each demo back to its JVM equivalent.
-  * **Streams runtime benchmarks**:
-    `wireform-kafka:wireform-kafka-streams-bench` measures the
-    runtime hot paths in-process; numbers + reproduction recipe
-    live in `streams/bench/results/README.md`.
-  * **Exception handlers**: every production / processing /
-    uncaught handler is wired into the runtime; see the spec
-    in `streams/test/Streams/ExceptionHandlerSpec.hs` for the
-    public API + contract.
+- [`CONFIG_PARITY.md`](./CONFIG_PARITY.md) for the librdkafka-style
+  config mapping.
+- [`INTEGRATION_TESTING.md`](./INTEGRATION_TESTING.md) for the live
+  broker test workflow.
+- [`src/Kafka/Client/Mock/README.md`](./src/Kafka/Client/Mock/README.md)
+  for mock broker and fault-injection primitives.
+- [`streams/README.md`](./streams/README.md) for the Streams DSL and
+  runtime reference.
+- [`streams/examples/README.md`](./streams/examples/README.md) for the
+  runnable Streams examples.

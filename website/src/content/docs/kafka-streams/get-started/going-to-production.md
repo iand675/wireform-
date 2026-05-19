@@ -28,7 +28,8 @@ If you do nothing else, do these eight before deploying:
 7. **Test rebalance and restart** before they happen for real.
 8. **Decide whether you need [Riffle](../riffle/) extensions**.
 
-The rest of this page expands each one.
+The rest of this page gives you the short version and links out
+where the details matter.
 
 ## 1. Processing guarantee
 
@@ -86,17 +87,12 @@ Full discussion in
 ## 3. Standby replicas
 
 `numStandbyReplicas = 0` (the default) means each task's state
-lives on exactly one instance. When that instance drains, the
-next owner replays the *entire* changelog before serving — for a
-1 TB store on 100 MB/s replay, that's three hours of unavailability
-for any query against that task.
+lives on exactly one instance. When that instance drains, the next
+owner has to rebuild from the changelog before serving.
 
-**Set `numStandbyReplicas = 1`** for any non-trivial state. The
-runtime keeps warm replicas; failover becomes metadata-only and
-takes seconds, not hours.
-
-For zero-downtime rollouts of critical workloads, set it to 2 so
-each standby has its own standby.
+**Set `numStandbyReplicas = 1`** for any non-trivial state. Use `2`
+for workloads where a failed standby during a rollout would still be
+a real incident.
 
 ```haskell
 import qualified Kafka.Streams.Config as C
@@ -111,8 +107,9 @@ cfg = C.defaultStreamsConfig
   }
 ```
 
-Trade-off is 2× state-storage and 2× changelog write
-amplification per replica. Worth it.
+The trade-off is extra disk and changelog traffic for every
+replica. For stateful services, that is usually cheaper than cold
+replay during a deploy.
 
 Details: [Scaling — standby tasks](../../operating/scaling/#standby-tasks).
 
@@ -154,33 +151,17 @@ forM_ orphans $ \o ->
   warn ("orphan internal topic: " <> unTopicName (orphanTopic o))
 ```
 
-The detector only warns; it never deletes. Auto-deletion is a
-foot-gun (a misconfigured rollout would happily nuke live state).
-Make manual deletion an audited operator action.
+The detector only warns; it never deletes. Treat deletion as an
+audited operator action after the rollout has settled.
 
 Details:
 [Observability — orphan internal topics](../../operating/observability/#orphan-internal-topics).
 
 ## 6. Topology golden file
 
-Snapshot the topology JSON into your repo:
-
-```haskell
-import qualified Data.Aeson.Encode.Pretty as P
-import qualified Kafka.Streams.Observability.Topology as Obs
-
-writeGolden :: IO ()
-writeGolden = do
-  topo <- F.buildTopologyFrom myTopology
-  BL.writeFile "test/golden/topology.json"
-    (P.encodePretty (Obs.topologyDescription topo))
-```
-
-Add a test that fails if `myTopology` produces a different JSON.
-PRs that change the topology shape — even ones that look innocent
-— surface the diff explicitly. Reviewing the diff is your last
-line of defence against the "I added a `map` and now my changelog
-topic has a different name" class of bug.
+Snapshot the topology JSON into your repo and fail CI when it
+changes. That makes topology drift a code-review event instead of a
+surprise at deploy time.
 
 A diff touching `sources`, `stores`, or `edges` is a deploy you
 have to think about. A diff touching only `processors` (renumbered
@@ -281,34 +262,8 @@ main = do
   closeKafkaStreams ks
 ```
 
-## What you learned
-
-- The eight things to set up before a production deploy.
-- The trade-offs of each `processingGuarantee`.
-- Why naming every stateful operator matters across deploys.
-- The minimum metrics and listeners to wire up.
-- The decision tree for whether to reach for Riffle.
-
 ## Where to go from here
 
-You've finished the tutorial. The rest of these docs are organised
-by what you'll need them for:
-
-| If you're... | Read |
-| ------------ | ---- |
-| Designing a rolling deploy | [Topology evolution](../../operating/topology-evolution/) |
-| Sizing your cluster | [Scaling and rebalancing](../../operating/scaling/) |
-| Deploying to Kubernetes or another container runtime | [Running in containers](../../operating/containers/) |
-| Writing to a non-Kafka sink with EOS | [Exactly-once across systems](../../operating/exactly-once/) |
-| Building your observability | [Observability](../../operating/observability/) |
-| Trying to understand IQ semantics | [Visibility versus ACID](../../operating/visibility/) |
-| On-call for a streams app | [Runbooks](../../operating/runbooks/) |
-| Enriching from an external system | [Enrichment](../../guides/enrichment/) |
-| Curious what auto-optimisation does | [Topology optimization](../../concepts/topology-optimization/) |
-| Wondering what you can change at runtime | [Dynamic topology changes](../../concepts/dynamic-topology/) |
-| Looking at Riffle for the first time | [Riffle: Flink-class extensions](../../riffle/) |
-| Hitting an unfamiliar term | [Glossary](../../glossary/) |
-
-The [Overview page](../../) has the operator-facing map of everything.
-
-Welcome to streams.
+You've finished the tutorial. The [overview page](../../) is the map
+for the rest of the docs: operations, concepts, guides, runbooks, and
+the glossary.

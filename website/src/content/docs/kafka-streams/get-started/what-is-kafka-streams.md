@@ -35,10 +35,10 @@ Compare with the alternatives:
 | Kafka Streams (this) | Library | Built-in (local + replicated) | Stateful pipelines that stay close to your service code |
 | Flink | Separate cluster | Built-in (cluster-managed) | Heavy stateful processing, ML feature stores, large jobs |
 
-If you want Flink's correctness story without the cluster, you're
-in the right place. (The Riffle extensions described in
-[Riffle: Flink-class extensions](../riffle/) close most of the gaps
-that historically forced teams off Streams onto Flink.)
+If you want stateful stream processing without running a separate
+processing cluster, this is the space Kafka Streams occupies. Riffle
+adds a few extensions for workloads that need more than classic
+Streams; you can ignore it until one of those limits matters.
 
 ## The mental model
 
@@ -138,23 +138,14 @@ go deeper on each one.
 
 ## Two layers: parity and Riffle
 
-The library has two layers. You can opt into the second one
-per-feature, not as a whole.
+The base layer is the Kafka Streams 4.0 port: the familiar KStream,
+KTable, join, window, store, and runtime surfaces in Haskell.
 
-- **Parity layer** — operator-for-operator port of Apache Kafka
-  Streams 4.0. Everything the JVM client does, this does, with the
-  same names and semantics. If you've used Kafka Streams in Java,
-  the API will look familiar.
-- **Riffle layer** — additive extensions that close the gaps
-  people typically hit before they leave Streams for Flink. Things
-  like async I/O with backpressure, snapshot-based state recovery,
-  two-phase commit to external systems, cross-source watermarks,
-  key-group rescaling.
-
-You can ignore Riffle until you need it. Each Riffle feature is a
-new module or a new constructor; selecting it doesn't change
-anything else about your topology. See
-[Riffle: Flink-class extensions](../riffle/) for the full tour.
+Riffle is optional. It adds async I/O, snapshot-backed recovery,
+external two-phase commit, coordinated watermarks, and key-group
+rescaling. Each piece is opt-in through a module or constructor, so
+a parity-only topology keeps the parity-only behaviour. See the
+[Riffle overview](../riffle/) when one of those problems shows up.
 
 ## Quick vocabulary
 

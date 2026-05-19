@@ -5,7 +5,10 @@ sidebar:
   order: 6
 ---
 
-A Kafka Streams app fails in ways that a stateless HTTP service does not, and many of those failures are invisible to standard request-latency dashboards. This page enumerates every observability surface the library exposes and what each one tells you.
+A Kafka Streams app can be healthy from an HTTP-latency point of view
+while its topology is stalled, replaying, dropping records, or leaking
+old internal topics. This page covers the surfaces that make those
+failures visible.
 
 :::tip[Unfamiliar terms?]
 Kafka, Streams, and Riffle terminology is defined in the [Glossary](../glossary/).
@@ -171,24 +174,11 @@ because different teams want different per-node aggregation.
 
 ### Golden-file test pattern
 
-```haskell
-import qualified Data.Aeson.Encode.Pretty as P
-import qualified Kafka.Streams.Observability.Topology as Obs
-
-testTopologyShape :: IO ()
-testTopologyShape = do
-  topo <- buildTopologyFrom myTopology
-  let actual = P.encodePretty (Obs.topologyDescription topo)
-  expected <- BL.readFile "test/golden/topology.json"
-  unless (actual == expected) $
-    error "Topology shape changed — review and update the golden file."
-```
-
-A diff that touches `sources`, `stores`, or `edges` is a deploy you
-have to think about. A diff that touches only `processors`
-(renumbered unnamed nodes) is harmless unless any of the
-renumbered nodes own state. See
-[Topology evolution](./topology-evolution/) for the full story.
+Capture `topologyDescription` in a golden file and fail CI when it
+changes. Diffs touching `sources`, `stores`, or `edges` deserve a
+deploy review; processor-only renumbering is harmless only when no
+renumbered processor owns state. See
+[Topology evolution](./topology-evolution/) for the full pattern.
 
 ## Orphan internal topics
 
@@ -227,9 +217,9 @@ The detector excludes:
 
 Anything left over with the framework's `-changelog` or
 `-repartition` suffix that isn't in the expected set is reported
-as an orphan. The detector does not delete; auto-deletion is a
-foot-gun (a misconfigured rollout would happily delete live
-state). Make manual deletion a documented operator action.
+as an orphan. The detector does not delete. Treat deletion as a documented
+operator action after you have confirmed no live instance still
+expects the topic.
 
 ### What to do with orphans
 
@@ -364,23 +354,10 @@ trace id. The header survives `repartition`, `through`, and `sink
 
 ## The minimum viable observability bundle
 
-If you're standing up a new Kafka Streams service, wire these
-five things before going to production:
-
-1. **Periodic `dumpMetrics` poll → your push gateway.** With at
-   least the four metrics in the "always alert" table.
-2. **Topology JSON golden-file in CI.** Catches accidental
-   topology drift before deploy.
-3. **Orphan-topic detector on startup.** Logged as a warning,
-   counted as a metric.
-4. **`LagListener` publishing per-task warmup lag.** Plot it; gate
-   rollouts on it.
-5. **`setStateListener` mirroring the state machine.** So you can
-   see the rebalance churn during an incident.
-
-Once those are in, layer on IQ for debugging, the live topology
-overlay for ops dashboards, and tracing for cross-topic
-correlation.
+For a new service, wire metrics polling, a topology golden file, the
+orphan-topic detector, `LagListener`, and `setStateListener` before
+the first production deploy. Add IQ, live topology overlays, and
+tracing once the basics are flowing.
 
 ## Related reading
 

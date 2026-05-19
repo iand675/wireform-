@@ -278,8 +278,7 @@ viaKtls = defaultConnectionConfig
 
 The connection pool is still keyed by the logical broker address —
 per-broker SASL state and request pipelining work normally when
-several brokers fan in to the same sidecar socket. See
-"Kafka.Network.TlsOffload" for the full configuration surface.
+several brokers fan in to the same sidecar socket. See `Kafka.Network.TlsOffload` for the full configuration surface.
 
 ## Security
 
@@ -291,13 +290,10 @@ several brokers fan in to the same sidecar socket. See
 ## Observability
 
 - OpenTelemetry instrumentation via `Kafka.Telemetry.OpenTelemetry`,
-  built on top of
-  [`hs-opentelemetry-api`](https://hackage.haskell.org/package/hs-opentelemetry-api).
-  Real producer / consumer / transaction spans with the
-  messaging semantic-convention attributes set, plus trace-context
-  propagation across producer → consumer hops over Kafka
-  record headers.
-- librdkafka-compatible JSON stats via `Kafka.Telemetry.StatsJson`.
+  including producer, consumer, and transaction spans plus trace-context
+  propagation through Kafka record headers.
+- librdkafka-compatible JSON stats via `Kafka.Telemetry.StatsJson` for
+  dashboards that already understand that shape.
 - Producer / consumer interceptors for per-record telemetry.
 
 ## Testing

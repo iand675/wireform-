@@ -100,10 +100,9 @@ forM_ (detectOrphans topo appId broker) $ \o ->
   warn ("orphan internal topic: " <> unTopicName (orphanTopic o))
 ```
 
-The detector does **not** delete anything. Auto-deletion of orphans
-is a foot-gun: a misconfigured rollout (wrong `applicationId`, two
-overlapping deploys) would happily nuke live state. Make it a manual,
-audited operator action.
+The detector does **not** delete anything. Deletion should be a
+manual, audited operator action after you know no live instance still
+expects the topic.
 
 **Rule three: run a topology-shape diff in CI.** The
 `Kafka.Streams.Observability.Topology.topologyDescription` function
@@ -306,9 +305,8 @@ start. Use it when:
   on disk.
 
 `cleanUp` does **not** touch broker-side topics. The runtime owns the
-local directory; the broker owns the changelog. Auto-deletion of
-broker topics on `cleanUp` would be a foot-gun for the same reasons
-as auto-deleting orphans.
+local directory; the broker owns the changelog. Broker topic deletion
+needs the same manual review as orphan-topic cleanup.
 
 ## Multi-version coexistence during the rollout window
 

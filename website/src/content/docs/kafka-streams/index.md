@@ -6,16 +6,14 @@ sidebar:
   label: Overview
 ---
 
-`wireform-kafka-streams` is a Haskell library for building
-streaming applications on top of Apache Kafka. It mirrors the
-Apache Kafka Streams DSL one-to-one and layers an additive
-extension tier — **Riffle** — on top, closing the operational
-gaps that historically pushed teams toward Flink.
+`wireform-kafka-streams` is a Haskell library for Kafka-backed
+streaming apps. You write a topology as ordinary Haskell, run it
+inside your service, and let Kafka provide the durable log.
 
-You'll write topologies as ordinary Haskell values, run them
-inside your service (no separate cluster), and lean on Kafka for
-durability and ordering. The library handles the rest: state
-stores, joins, windowing, exactly-once, rebalancing.
+The library mirrors the Apache Kafka Streams DSL and adds optional
+Riffle extensions for the cases where classic Streams starts to
+feel tight: async I/O, faster state recovery, external commits,
+watermarks, and key-group rescaling.
 
 ## Where to start
 
@@ -23,7 +21,7 @@ stores, joins, windowing, exactly-once, rebalancing.
 | --------- | ----- |
 | Want it running in 5 minutes | [Quickstart](./get-started/quickstart/) |
 | Are new to Kafka Streams | [Tutorial part 1: What is Kafka Streams?](./get-started/what-is-kafka-streams/) |
-| Have used JVM Kafka Streams before | Skim [Riffle: Flink-class extensions](./riffle/), then jump to [Operations](#operations) |
+| Have used JVM Kafka Streams before | Start with [Operations](#operations); skim [Riffle](./riffle/) only if you need the extensions |
 | Need to ship to production | [Tutorial part 5: Going to production](./get-started/going-to-production/) |
 | Are reading an alert | [Runbooks](./operating/runbooks/) |
 | Hit a term you don't know | [Glossary](./glossary/) |
@@ -49,23 +47,20 @@ driver — no Kafka broker required.
 5. **[Going to production](./get-started/going-to-production/)** —
    the eight things to set up before deploying for real.
 
-## Riffle: the extensions tier
+## Riffle: optional extensions
 
-The library has two layers. You can ignore the second until you
-need it.
+The base layer is the Kafka Streams 4.0 port. Riffle is the set of
+extras you reach for when an operational problem needs more than
+classic Streams gives you.
 
 | Layer | What |
 | ----- | ---- |
 | **Parity** | Operator-for-operator port of Apache Kafka Streams 4.0 |
-| **Riffle** | Additive Flink-class extensions: async I/O with backpressure, snapshot-based state recovery, two-phase commit to non-Kafka sinks, cross-source watermarks, key-group rescaling |
+| **Riffle** | Async I/O, snapshot-backed recovery, two-phase commit sinks, coordinated watermarks, and key-group rescaling |
 
-Riffle features are strictly additive. A topology using nothing
-from Riffle compiles to byte-for-byte the same graph as the
-parity-only compiler. Each feature is a new module or a new
-smart constructor; opting in for one doesn't change anything
-else.
-
-Tour: [Riffle: Flink-class extensions](./riffle/).
+If you never import a Riffle module, nothing changes about the
+compiled graph. If one of those problems is yours, read the
+[Riffle overview](./riffle/).
 
 ## Operations
 
@@ -93,16 +88,9 @@ material organised by the question you have in front of you:
 
 ## Quick context
 
-Three sentences for orientation:
-
-- A **topology** is a typed Haskell value of type `Topology i o`,
-  composed with `Control.Category.(>>>)`. The library compiles it
-  to an imperative runtime graph at the boundary.
-- The runtime is a **library**, not a cluster. Your service binary
-  contains the topology; scaling out means running more processes
-  in the same consumer group.
-- State stores live **next to** your service (local disk or
-  memory), backed by Kafka **changelog topics** for durability and
-  by **standby tasks** for fast failover.
+A topology is a typed Haskell value that compiles to a runtime graph.
+The runtime is a library, not a cluster: scaling out means running
+more service processes in the same consumer group. State stores live
+next to those processes and recover from Kafka changelog topics.
 
 That's enough to start the [tutorial](./get-started/what-is-kafka-streams/).
