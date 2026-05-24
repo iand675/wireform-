@@ -83,7 +83,6 @@ library
     Network.HTTP1.Server
     Network.HTTP1.Client
     Network.HTTP1.Client.Pool
-  other-modules:
     Network.HTTP1.Internal.Ascii
   c-sources:
     cbits/http1_scan.c
