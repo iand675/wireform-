@@ -144,8 +144,8 @@ responseHeaderPreservationTest = testCase "custom response headers preserved" $
     Right r <- sendRequest (clientCfg port) (mkReq GET "/" port BodyEmpty [])
     responseStatus r @?= OK
     let hdrs = responseHeaders r
-    lookup "X-Custom" hdrs @?= Just "test-value"
-    lookup "X-Another" hdrs @?= Just "another-value"
+    lookup "x-custom" hdrs @?= Just "test-value"
+    lookup "x-another" hdrs @?= Just "another-value"
     _ <- bodyOf r
     pure ()
   where

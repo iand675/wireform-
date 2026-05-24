@@ -346,7 +346,7 @@ readRequestHeadFrom t startPos = do
     Left e               -> Left e
     Right (block, nextPos) ->
       let !blockCopy = BS.copy block
-      in case Classic.parseRequest blockCopy of
+      in case Classic.parseRequestLower blockCopy of
         Right ok -> Right (ok, nextPos)
         Left  e  -> Left (ReadParse e)
 {-# INLINE readRequestHeadFrom #-}
@@ -375,7 +375,7 @@ readResponseHeadFrom t startPos reqMethod = do
     Left e               -> Left e
     Right (block, nextPos) ->
       let !blockCopy = BS.copy block
-      in case Classic.parseResponse reqMethod blockCopy of
+      in case Classic.parseResponseLower reqMethod blockCopy of
         Right ok -> Right (ok, nextPos)
         Left  e  -> Left (ReadParse e)
 {-# INLINE readResponseHeadFrom #-}

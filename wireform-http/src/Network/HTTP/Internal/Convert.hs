@@ -38,8 +38,6 @@ import qualified Data.ByteString as BS
 import qualified Data.CaseInsensitive as CI
 import Data.CaseInsensitive.Unsafe (unsafeMk)
 
-import Network.HTTP1.Internal.Ascii (asciiLower)
-
 import qualified Network.HTTP1.Types as H1
 import qualified Network.HTTP2.Server as H2S
 
@@ -79,11 +77,12 @@ toHttp1Headers :: U.Headers -> H1.Headers
 toHttp1Headers = map $ \(n, v) -> (CI.original n, v)
 
 -- | Wrap HTTP/1 header names in case-insensitive wrappers.
--- Uses the CI constructor directly with a fast ASCII lowercase
--- to avoid the redundant allocation that CI.mk's foldCase would do
--- on an already-mostly-lowercase name.
+-- Header names are already lowercased in-place during parsing
+-- (by parseOneHeader's SIMD lowercaseInPlace), so unsafeMk is
+-- correct and avoids any fold allocation. The name ByteStrings
+-- share the same ForeignPtr as the parsed header block.
 fromHttp1Headers :: H1.Headers -> U.Headers
-fromHttp1Headers = map $ \(n, v) -> (mkCIAscii n, v)
+fromHttp1Headers = map $ \(n, v) -> (unsafeMk n, v)
 
 toHttp1Body :: U.Body -> H1.Body
 toHttp1Body = \case
@@ -226,18 +225,6 @@ toHttp2Response r = do
         U.BodyStream p  -> H2S.ResponseBodyStream p
     , H2S.responseTrailers = toHttp2Headers trs
     }
-
--- | Build a CI ByteString from an ASCII HTTP/1 header name.
--- Uses the SSE2-accelerated asciiLower (16 bytes/cycle) for the
--- fold, then unsafeMk to avoid the redundant BS.map toLower that
--- CI.mk would run. The result loses original wire casing — both
--- the original and foldedCase fields hold the lowered form. This
--- is correct for header comparison and matches HTTP/2 semantics;
--- HTTP/1 re-encoding via toHttp1Headers uses CI.original which
--- will emit the lowered name.
-mkCIAscii :: ByteString -> CI.CI ByteString
-mkCIAscii n = unsafeMk (asciiLower n)
-{-# INLINE mkCIAscii #-}
 
 fromHttp2Response :: H2S.Response -> Response
 fromHttp2Response r = Response

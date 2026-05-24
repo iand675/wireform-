@@ -38,8 +38,11 @@ module Network.HTTP1.Parser
 
     -- * Parsers
   , parseRequest
+  , parseRequestLower
   , parseResponse
+  , parseResponseLower
   , parseHeaderBlock
+  , parseHeaderBlockLower
   , parseRequestLine
   , parseStatusLine
 
@@ -77,10 +80,13 @@ import qualified Data.ByteString.Unsafe as BSU
 import Data.Word (Word64, Word8)
 import Foreign.C.Types (CInt (..))
 import Foreign.Marshal.Alloc (alloca)
-import Foreign.Ptr (Ptr, castPtr)
+import Foreign.Ptr (Ptr, castPtr, plusPtr)
 import Foreign.Storable (peek)
 import GHC.Generics (Generic)
 import System.IO.Unsafe (unsafePerformIO)
+
+import qualified Data.ByteString.Internal as BSI
+import Foreign.ForeignPtr (withForeignPtr)
 
 import Network.HTTP1.Internal.Ascii (asciiIeq)
 import Network.HTTP1.Types
@@ -93,6 +99,9 @@ foreign import ccall unsafe "hs_http1_find_non_token"
 
 foreign import ccall unsafe "hs_http1_find_non_fieldvalue"
   c_find_non_fv :: Ptr () -> CInt -> CInt -> CInt
+
+foreign import ccall unsafe "hs_http1_to_lower_ascii"
+  c_to_lower_ascii :: Ptr () -> Ptr () -> CInt -> IO ()
 
 ------------------------------------------------------------------------
 -- Errors
@@ -216,9 +225,26 @@ parseHeaderBlock raw = go 0 []
     go !off acc
       | off >= len = Right (reverse acc)
       | BSU.unsafeIndex raw off == 0x20 || BSU.unsafeIndex raw off == 0x09 =
-          -- obs-fold: an indented line continuing the previous header.
           Left ParseInvalidHeaderValue
       | otherwise = parseOneHeader raw off >>= \(hdr, off') -> go off' (hdr : acc)
+
+-- | Like 'parseHeaderBlock' but lowercases header names in-place
+-- using the SSE2 lowerer. The input MUST be an owned copy (e.g.
+-- from 'BS.copy') — not a slice of shared or read-only memory.
+-- The resulting name ByteStrings share the same ForeignPtr as the
+-- input, with zero extra allocation for the fold.
+parseHeaderBlockLower :: ByteString -> Either ParseError Headers
+parseHeaderBlockLower raw = go 0 []
+  where
+    !len = BS.length raw
+    go !off acc
+      | off >= len = Right (reverse acc)
+      | BSU.unsafeIndex raw off == 0x20 || BSU.unsafeIndex raw off == 0x09 =
+          Left ParseInvalidHeaderValue
+      | otherwise =
+          let !nameEnd = findNonToken raw off
+          in unsafePerformIO (lowercaseInPlace raw off nameEnd) `seq`
+             parseOneHeader raw off >>= \(hdr, off') -> go off' (hdr : acc)
 
 parseOneHeader :: ByteString -> Int -> Either ParseError (Header, Int)
 parseOneHeader raw off0 =
@@ -266,6 +292,18 @@ parseOneHeader raw off0 =
 {-# INLINE sliceBS #-}
 sliceBS :: ByteString -> Int -> Int -> ByteString
 sliceBS bs s e = BSU.unsafeTake (e - s) (BSU.unsafeDrop s bs)
+
+-- | Lowercase bytes in [off, end) of a ByteString in-place using the
+-- SSE2 lowerer. ONLY safe when the ByteString is an owned copy (not
+-- a slice of shared memory). Used on the BS.copy'd header block.
+{-# INLINE lowercaseInPlace #-}
+lowercaseInPlace :: ByteString -> Int -> Int -> IO ()
+lowercaseInPlace (BSI.BS fp _) off end =
+  let !n = end - off
+  in if n <= 0 then pure ()
+     else withForeignPtr fp $ \base ->
+       let !p = base `plusPtr` off
+       in c_to_lower_ascii (castPtr p) (castPtr p) (fromIntegral n)
 
 {-# INLINE skipOws #-}
 skipOws :: ByteString -> Int -> Int -> Int
@@ -417,6 +455,18 @@ parseRequest block = do
   framing <- requestFraming meth ver hdrs
   Right (Request meth tgt ver hdrs BodyEmpty (pure []), framing)
 
+-- | Like 'parseRequest' but lowercases header names in-place.
+-- The input MUST be an owned mutable copy (e.g. from 'BS.copy').
+parseRequestLower :: ByteString -> Either ParseError (Request, Framing)
+parseRequestLower block = do
+  let (line, rest) = splitFirstLine block
+  (meth, tgt, ver) <- parseRequestLine line
+  validateTarget meth tgt
+  hdrs <- parseHeaderBlockLower rest
+  validateHost ver hdrs
+  framing <- requestFraming meth ver hdrs
+  Right (Request meth tgt ver hdrs BodyEmpty (pure []), framing)
+
 -- | RFC 9112 § 3.2: HTTP\/1.1 requests MUST contain exactly one Host
 -- header. We also validate the value: no userinfo (@user\@host@), no
 -- path (@host\/foo@), no NUL, no whitespace, non-empty.
@@ -498,6 +548,16 @@ parseResponse reqMethod block = do
   let (line, rest) = splitFirstLine block
   (ver, st, _reason) <- parseStatusLine line
   hdrs <- parseHeaderBlock rest
+  framing <- responseFraming reqMethod ver st hdrs
+  Right (Response st ver hdrs BodyEmpty (pure []), framing)
+
+-- | Like 'parseResponse' but lowercases header names in-place.
+-- The input MUST be an owned mutable copy.
+parseResponseLower :: Method -> ByteString -> Either ParseError (Response, Framing)
+parseResponseLower reqMethod block = do
+  let (line, rest) = splitFirstLine block
+  (ver, st, _reason) <- parseStatusLine line
+  hdrs <- parseHeaderBlockLower rest
   framing <- responseFraming reqMethod ver st hdrs
   Right (Response st ver hdrs BodyEmpty (pure []), framing)
 
