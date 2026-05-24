@@ -173,20 +173,31 @@ defaultServerConfig = ServerConfig
 -- ---------------------------------------------------------------------------
 
 -- | Inject @Server@ and @Date@ headers when the handler hasn't set
--- them already. Idempotent.
+-- them already.  Single pass over the header list to check both.
 addServerDefaults :: ServerConfig -> Response -> IO Response
 addServerDefaults cfg r0 = do
-  date <- if serverEmitDate cfg && not (U.hasHeader U.hDate hdrs0)
+  let hdrs0 = responseHeaders r0
+      (!hasDate, !hasServer) = scanForDateServer hdrs0
+  date <- if serverEmitDate cfg && not hasDate
             then do
               t <- getCurrentTime
               pure [(U.hDate, formatHttpDate t)]
             else pure []
   let server = case serverNameToken cfg of
-        Just tok | not (U.hasHeader U.hServer hdrs0) -> [(U.hServer, tok)]
-        _                                            -> []
+        Just tok | not hasServer -> [(U.hServer, tok)]
+        _                       -> []
   pure r0 { responseHeaders = hdrs0 <> server <> date }
+
+-- | Single pass: check for Date and Server headers simultaneously.
+scanForDateServer :: U.Headers -> (Bool, Bool)
+scanForDateServer = go False False
   where
-    hdrs0 = responseHeaders r0
+    go !d !s [] = (d, s)
+    go !d !s ((n, _) : rest)
+      | d && s    = (d, s)
+      | not d && n == U.hDate   = go True s    rest
+      | not s && n == U.hServer = go d    True rest
+      | otherwise               = go d    s    rest
 
 -- | Build a response to @OPTIONS *@ that advertises the methods the
 -- server understands. Sets @Allow@ and a no-body 200.

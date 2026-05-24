@@ -65,6 +65,7 @@ import System.IO.Unsafe (unsafePerformIO)
 import qualified Wireform.Builder as B
 
 import Network.HTTP1.Headers
+import Network.HTTP1.Internal.Ascii (asciiIeq)
 import Network.HTTP1.Method
 import Network.HTTP1.Status
 import Network.HTTP1.Types
@@ -230,8 +231,7 @@ headersBuilder = foldMap emit
 augmentRequestHeaders :: Method -> Version -> Headers -> Body -> Headers
 augmentRequestHeaders meth ver hdrs body =
   let
-    hasCL = hHas "content-length" hdrs
-    hasTE = hHas "transfer-encoding" hdrs
+    !(hasCL, hasTE) = scanFramingPresence hdrs
   in
     if hasCL || hasTE
       then hdrs
@@ -259,9 +259,13 @@ augmentRequestHeaders meth ver hdrs body =
     shouldAddZeroCL _ = False
 
 -- | Same idea for responses, with the status code factored in.
+-- Scans the header list once to check for content-length,
+-- transfer-encoding, and date simultaneously (avoids the 3× O(n)
+-- scans the naive version would do).
 augmentResponseHeaders :: Status -> Version -> Headers -> Body -> Headers
 augmentResponseHeaders st ver hdrs body = withDate (framingAugmented)
   where
+    !(hasCL, hasTE, hasDate) = scanResponsePresence hdrs
     framingAugmented
       | bodyForbidden = hdrs
       | hasCL || hasTE = hdrs
@@ -275,9 +279,6 @@ augmentResponseHeaders st ver hdrs body = withDate (framingAugmented)
           BodyPreEncoded _ -> hdrs
           BodyFile fb ->
             hdrs <> [("Content-Length", decimalBS (toInteger (fbLength fb)))]
-    hasCL = hHas "content-length" hdrs
-    hasTE = hHas "transfer-encoding" hdrs
-    hasDate = hHas "date" hdrs
     sc = statusCode st
     bodyForbidden =
          (sc >= 100 && sc < 200)
@@ -286,6 +287,29 @@ augmentResponseHeaders st ver hdrs body = withDate (framingAugmented)
     withDate hs
       | hasDate = hs
       | otherwise = ("Date", cachedHttpDate ()) : hs
+
+-- | Single-pass scan for content-length and transfer-encoding.
+scanFramingPresence :: Headers -> (Bool, Bool)
+scanFramingPresence = go False False
+  where
+    go !cl !te [] = (cl, te)
+    go !cl !te _ | cl && te = (cl, te)
+    go !cl !te ((n, _) : rest)
+      | not cl && asciiIeq n "content-length"    = go True te   rest
+      | not te && asciiIeq n "transfer-encoding" = go cl   True rest
+      | otherwise                                = go cl   te   rest
+
+-- | Single-pass scan for content-length, transfer-encoding, and date.
+scanResponsePresence :: Headers -> (Bool, Bool, Bool)
+scanResponsePresence = go False False False
+  where
+    go !cl !te !dt [] = (cl, te, dt)
+    go !cl !te !dt _ | cl && te && dt = (cl, te, dt)
+    go !cl !te !dt ((n, _) : rest)
+      | not cl && asciiIeq n "content-length"    = go True te   dt   rest
+      | not te && asciiIeq n "transfer-encoding" = go cl   True dt   rest
+      | not dt && asciiIeq n "date"              = go cl   te   True rest
+      | otherwise                                = go cl   te   dt   rest
 
 ------------------------------------------------------------------------
 -- Cached Date header
