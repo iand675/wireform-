@@ -1,11 +1,11 @@
 cabal-version: 3.0
 name: wireform-network
 version: 0.1.0.0
-synopsis: Transport implementations for wireform-core (recv, io_uring)
+synopsis: Transport implementations for wireform-core (recv, send, io_uring)
 description:
-  Socket-based transport implementations for the wireform parser.
-  Provides @withRecvTransport@ (cross-platform) and @withIOUringTransport@
-  (Linux only, requires liburing).
+  Socket-based transport implementations for the wireform parser and
+  encoder.  Provides @withRecvTransport@ / @withSendTransport@ (cross-
+  platform) and @withIOUringTransport@ (Linux only, requires liburing).
   .
   Depends on @wireform-core@ for the parser, magic ring, and transport
   abstraction. Users with custom transports (pipes, shared memory, etc.)

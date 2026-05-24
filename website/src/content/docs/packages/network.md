@@ -81,7 +81,23 @@ withSendReservation :: SendTransport -> Int -> (Ptr Word8 -> Int -> IO Int) -> I
 sendByteString      :: SendTransport -> ByteString -> IO ()
 sendByteStringMany  :: SendTransport -> [ByteString] -> IO ()
 sendBuilder         :: SendTransport -> Builder -> IO ()
+sendBuilderDirect   :: SendTransport -> Builder -> IO ()
+withSendCork        :: SendTransport -> (SendTransport -> IO a) -> IO a
 ```
+
+`sendBuilderDirect` runs a `Builder` directly into the send ring
+via the `RingSink` data sink (in `Wireform.Builder.FastBuilder`).
+No intermediate `ByteString` allocation or memcpy — the builder
+writes into the ring's double-mapped memory, publishing in chunks
+when the region fills. `sendBuilder` delegates to
+`sendBuilderDirect` by default; `sendBuilderViaByteString` is the
+old materialize-then-copy path, retained for benchmarks.
+
+`withSendCork` defers `sendPublishHead` so multiple sends
+(headers + body, multi-frame batch) coalesce into a single
+publish — one `sendmsg` / one io_uring SQE. The cork is
+demand-driven: it only breaks when the ring is genuinely full
+and needs a drain to continue.
 
 ### Duplex (paired on one wire)
 

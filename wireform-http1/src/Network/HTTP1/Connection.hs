@@ -222,7 +222,9 @@ connectionSendBytes conn = sendByteString (connectionSend conn)
 connectionSendMany :: Connection -> [ByteString] -> IO ()
 connectionSendMany conn = sendByteStringMany (connectionSend conn)
 
--- | Materialise + stage a 'B.Builder' into the send ring.
+-- | Direct ring write of a 'B.Builder' into the send ring
+-- (no intermediate 'ByteString').  Delegates to 'sendBuilder'
+-- which uses 'sendBuilderDirect' under the hood.
 connectionSendBuilder :: Connection -> B.Builder -> IO ()
 connectionSendBuilder conn = sendBuilder (connectionSend conn)
 

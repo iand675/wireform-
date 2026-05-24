@@ -122,7 +122,7 @@ main =
 | `wireform-http1` | `Network.HTTP1.Parser` | SIMD-accelerated request/response parsing |
 | `wireform-http1` | `Network.HTTP1.StreamingReader` | Magic-ring head + body readers (SIMD CRLFCRLF scanner on the ring + classic `parseRequest`) |
 | `wireform-http1` | `Network.HTTP1.TLS` | `tls`-package bridge for HTTP/1 (legacy path); use [`Wireform.Network.TLS.OpenSSL`](/packages/network/#tls-on-ring-via-openssl) for the ring-direct path |
-| `wireform-http2` | `Network.HTTP2.Connection` | Flow control, stream table, HPACK state, magic-ring recv |
+| `wireform-http2` | `Network.HTTP2.Connection` | Flow control, stream table, HPACK state, magic-ring recv + send |
 | `wireform-http2` | `Network.HTTP2.Frame` | Zero-copy frame encode/decode |
 | `wireform-http2` | `Network.HTTP2.Frame.StreamingReader` | Magic-ring frame reader (9-byte header + payload slice, single `transportLoadHead` per frame) |
 | `wireform-http2` | `Network.HTTP2.HPACK` | Header compression with C Huffman codec |

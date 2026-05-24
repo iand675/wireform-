@@ -17,8 +17,8 @@ buffer, allocation-free hot loops.
 | --------------------------------------- | ---- |
 | `Network.HTTP2.Frame`                   | RFC 9113 frame layer — DATA, HEADERS, PRIORITY, SETTINGS, PING, GOAWAY, WINDOW_UPDATE, RST_STREAM, CONTINUATION, PUSH_PROMISE. Pattern-synonym ADT + zero-copy decode/encode. |
 | `Network.HTTP2.HPACK`                   | RFC 7541 HPACK encode/decode with a hand-tuned C Huffman codec (`cbits/hpack_huffman.c`) and a static + dynamic table. |
-| `Network.HTTP2.Connection`              | Per-connection state: settings, flow-control windows, stream table, HPACK encoder/decoder, send lock, pinned send + recv buffers. Talks to the outside world through a `Transport`. |
-| `Network.HTTP2.Transport`               | I/O abstraction the connection layer runs on top of: send-all + send-many + recv-into-Ptr + close. `socketTransport` is the default for plain TCP; `bufferedRecvTransport` is the bridge used by the TLS layer. |
+| `Network.HTTP2.Connection`              | Per-connection state: settings, flow-control windows, stream table, HPACK encoder/decoder, send lock, magic-ring recv + send transports. Talks to the outside world through a `Transport`. |
+| `Network.HTTP2.Transport`               | I/O abstraction the connection layer runs on top of: pointer-based `tSendFn` + `tRecvBuf` + close. `socketTransport` is the default for plain TCP; TLS transports supply matching pointer-based callbacks via OpenSSL. `mkConnection` builds a `SendTransport` (magic ring) on top of `tSendFn`. |
 | `Network.HTTP2.Client`                  | Cleartext HTTP/2 client (h2c) over a TCP socket. |
 | `Network.HTTP2.Server`                  | Cleartext HTTP/2 server (h2c) over a TCP socket. |
 | `Network.HTTP2.TLS`                     | Shared TLS plumbing: the `h2` ALPN identifier, the `ALPNFailed` exception, and `tlsTransport` (wraps a `Network.TLS.Context` as a wireform-http2 `Transport`). |

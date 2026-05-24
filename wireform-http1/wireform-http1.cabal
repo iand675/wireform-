@@ -21,7 +21,7 @@ description:
     the final coding, reject CR \/ LF \/ NUL inside header values).
   .
   Designed to be merged with @wireform-http2@ behind a shared
-  @Connection@\/@Recv\/SendBuffer@ surface; the two libraries are
+  @Connection@\/@DuplexTransport@ surface; the two libraries are
   parallel implementations of the same shape for now.
 
 homepage: https://github.com/iand675/wireform-

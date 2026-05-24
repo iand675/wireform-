@@ -28,9 +28,11 @@ sources live in `cbits/` and the vendored [simde][simde] headers in
 
 `Wireform.Builder` is the shared byte builder used by all wireform
 format packages. It supports O(1) concatenation, direct `Handle`
-output without intermediate `ByteString` allocation, and streaming
+output without intermediate `ByteString` allocation, streaming
 transforms (compression, encryption) that process chunks as the
-builder produces them.
+builder produces them, and direct ring write via `RingSink` (the
+builder-side counterpart of `sendBuilderDirect` in
+`Wireform.Transport.Send`).
 
 Based on [fast-builder](https://github.com/takano-akio/fast-builder)
 by Takano Akio (public domain).

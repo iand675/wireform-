@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+* `Wireform.Builder.FastBuilder` -- new `RingSink` data sink variant.
+  The builder writes directly into a `SendTransport`'s double-mapped
+  ring buffer with no intermediate `ByteString` allocation or memcpy.
+  On overflow, already-written bytes are published and the builder
+  continues into freshly-available ring space.
+
+* `Wireform.Transport.Send` -- new `sendBuilderDirect`: the default
+  builder→ring path.  `sendBuilder` now delegates to it.  The old
+  materialize-then-copy path is `sendBuilderViaByteString` (retained
+  for benchmarks).
+
+* `Wireform.Transport.Send` -- new `withSendCork`: defers
+  `sendPublishHead` so multiple sends batch into one publish (one
+  `sendmsg` / one io_uring SQE).  Demand-driven: only breaks cork
+  when the ring is genuinely full.
+
 * `Wireform.Ring` -- gave `MagicRing` a phantom type parameter `s`
   modelled after `Control.Monad.ST.ST`.  `withMagicRing` is now
   rank-2 (`Int -> (forall s. MagicRing s -> IO a) -> IO a`), which

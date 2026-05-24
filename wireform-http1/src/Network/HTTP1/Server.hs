@@ -414,8 +414,8 @@ streamChunkedWithTrailers conn producer trailers = loop
   where
     -- The empty-trailers branch reuses 'streamChunked' rather than
     -- calling 'encodeLastChunkWithTrailers []' so the wire bytes go
-    -- out as a single 'B.byteString' append (= one 'tSendAll' call
-    -- on a small buffer). That difference shouldn't matter on a
+    -- out as a single 'B.byteString' append (= one send-ring
+    -- publish on a small buffer). That difference shouldn't matter on a
     -- well-behaved peer, but it does interact with the
     -- recv-buffered single-shot client used by 'sendRequest', which
     -- closes its bracketed connection as soon as the high-level

@@ -81,6 +81,10 @@ connectionGet conn n
 connectionPut :: Connection -> ByteString -> IO ()
 connectionPut conn = sendByteString (duplexSend (connDuplex conn))
 
+-- | Stage a builder directly into the send ring (no intermediate
+-- 'ByteString' allocation).  Uses 'sendBuilderDirect' — the builder
+-- writes into the ring's double-mapped memory via the 'RingSink'
+-- data sink.
 connectionPutBuilder :: Connection -> WB.Builder -> IO ()
 connectionPutBuilder conn b =
   sendBuilderDirect (duplexSend (connDuplex conn)) b

@@ -230,3 +230,31 @@ that take a destination buffer; the `tls` package does not.  To get
 TLS to the same shape we'd need either upstream surface changes,
 a new record-layer implementation on top of crypton, or Linux kTLS
 — see the three options above.
+
+## Send-side pipeline
+
+The send path is the mirror image of recv.  Encoders write frame
+data into a double-mapped send ring; a consumer loop drains the
+ring to the wire via `sendmsg` or `SSL_write_ex`.
+
+```
+Builder / sendByteString / hand-written encoder
+   │  writes into send ring at [head, head+n)
+   ▼
+SendTransport  (magic ring, double-mapped)
+   │  sendPublishHead(newHead)
+   ▼
+inline send loop  (sendmsg / SSL_write_ex)
+   │  advances tail as bytes drain
+   ▼
+wire
+```
+
+`sendBuilderDirect` runs the builder directly into the ring via
+the `RingSink` data sink — no intermediate `ByteString` allocation.
+`withSendCork` defers publishing so headers + body coalesce into
+a single `sendmsg` / io_uring SQE.
+
+For TLS, the send consumer calls `SSL_write_ex` via the same
+OpenSSL FFI used on the recv side.  The data flows from the
+send ring (plaintext) through `libssl` (encryption) to the socket.
