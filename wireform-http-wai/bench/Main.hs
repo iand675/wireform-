@@ -20,6 +20,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.CaseInsensitive as CI
 import Data.CaseInsensitive (mk)
 import qualified "http-types" Network.HTTP.Types as WAIHttp
 import qualified "http-client" Network.HTTP.Client as HC
@@ -106,11 +107,13 @@ helloApp _req respond =
 
 headersApp :: Wai.Application
 headersApp _req respond =
-  respond $ Wai.responseLBS WAIHttp.status200
-    ([ (mk (BS8.pack ("X-Header-" <> show i)), BS8.pack ("value-" <> show i))
-     | i <- [1..20 :: Int]
-     ] <> [("Content-Type", "text/plain")])
-    "ok"
+  respond $ Wai.responseLBS WAIHttp.status200 prebuiltHeaders "ok"
+
+prebuiltHeaders :: [(CI.CI BS.ByteString, BS.ByteString)]
+prebuiltHeaders =
+  [ (mk (BS8.pack ("X-Header-" <> show i)), BS8.pack ("value-" <> show i))
+  | i <- [1..20 :: Int]
+  ] <> [("Content-Type", "text/plain")]
 
 ------------------------------------------------------------------------
 -- wireform keep-alive path (persistent connection)
