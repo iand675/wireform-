@@ -192,6 +192,32 @@ test-suite wireform-grpc-test-minimal
     , bytestring >= 0.10.12 && < 0.13
     , wireform-core == 0.1.*
 
+test-suite wireform-grpc-conformance
+  import:          lang, common-executable-flags
+  type:            exitcode-stdio-1.0
+  hs-source-dirs:  test-conformance
+  main-is:         Main.hs
+  other-modules:
+      Proto.Interop
+      Interop.API
+      Interop.Server
+      Interop.Client
+      Interop.SelfTest
+  build-depends:
+    , wireform-grpc
+    , wireform-proto
+    , wireform-core
+    , grpc-spec
+    , bytestring >= 0.10.12 && < 0.13
+    , data-default >= 0.7 && < 0.9
+    , deepseq >= 1.4 && < 1.6
+    , reflection >= 2.1 && < 2.2
+    , text >= 1.2 && < 2.2
+    , vector >= 0.13 && < 0.14
+  default-extensions:
+      OverloadedStrings
+      TypeApplications
+
 Flag build-stress-test
   description: Build the stress test
   default: False

@@ -1,0 +1,38 @@
+// Copyright 2015-2016 gRPC authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+import "grpc/testing/empty.proto";
+import "grpc/testing/messages.proto";
+
+package grpc.testing;
+
+service TestService {
+  rpc EmptyCall(grpc.testing.Empty) returns (grpc.testing.Empty);
+  rpc UnaryCall(SimpleRequest) returns (SimpleResponse);
+  rpc StreamingOutputCall(StreamingOutputCallRequest)
+      returns (stream StreamingOutputCallResponse);
+  rpc StreamingInputCall(stream StreamingInputCallRequest)
+      returns (StreamingInputCallResponse);
+  rpc FullDuplexCall(stream StreamingOutputCallRequest)
+      returns (stream StreamingOutputCallResponse);
+  rpc HalfDuplexCall(stream StreamingOutputCallRequest)
+      returns (stream StreamingOutputCallResponse);
+  rpc UnimplementedCall(grpc.testing.Empty) returns (grpc.testing.Empty);
+}
+
+service UnimplementedService {
+  rpc UnimplementedCall(grpc.testing.Empty) returns (grpc.testing.Empty);
+}

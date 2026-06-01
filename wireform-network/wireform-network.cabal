@@ -59,6 +59,7 @@ library
     Wireform.Network.TLS.Config
   c-sources:
     cbits/wireform_openssl.c
+    cbits/pinning.c
   install-includes:
     wireform_openssl.h
   include-dirs:
