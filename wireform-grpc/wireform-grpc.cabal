@@ -211,7 +211,6 @@ test-suite wireform-grpc-conformance
     , bytestring >= 0.10.12 && < 0.13
     , data-default >= 0.7 && < 0.9
     , deepseq >= 1.4 && < 1.6
-    , reflection >= 2.1 && < 2.2
     , text >= 1.2 && < 2.2
     , network >= 3.2.4 && < 3.3
     , stm >= 2.5 && < 2.6

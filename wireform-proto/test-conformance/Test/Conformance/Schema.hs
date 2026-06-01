@@ -1,5 +1,4 @@
 {-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-missing-export-lists #-}
 {-# OPTIONS_GHC -Wno-unused-imports -Wno-unused-matches -Wno-unused-top-binds -Wno-orphans -Wno-missing-signatures #-}
 
@@ -43,7 +42,6 @@ import Data.ByteString (ByteString)
 import Data.Hashable (Hashable)
 import Data.Int (Int32, Int64)
 import Data.Map.Strict qualified as Map
-import Data.Reflection (Given (..))
 import Data.Sequence qualified as Seq
 import Data.Text (Text)
 import Data.Vector qualified as V
@@ -78,7 +76,6 @@ import Proto.Google.Protobuf.Wrappers (
   UInt32Value,
   UInt64Value,
  )
-import Proto.Internal.JSON.Extension (ExtensionRegistry, emptyExtensionRegistry)
 import Proto.TH (loadProto)
 
 
@@ -106,13 +103,6 @@ _keepWkts
      )
   -> ()
 _keepWkts _ = ()
-
-
--- The conformance protos have no proto2 extensions, but the TH-generated
--- JSON instances carry a Given ExtensionRegistry constraint. Satisfy it
--- with an empty registry.
-instance Given ExtensionRegistry where
-  given = emptyExtensionRegistry
 
 
 -- The wire protocol the upstream conformance_test_runner uses.

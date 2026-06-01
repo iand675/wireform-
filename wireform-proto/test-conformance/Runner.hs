@@ -46,6 +46,7 @@ import System.IO (
   stdin,
   stdout,
  )
+import Proto.TH.Metadata (withExtensionRegistry)
 import Test.Conformance.Handler (handleRequest)
 import Test.Conformance.Schema (
   ConformanceResponse,
@@ -82,8 +83,8 @@ main = do
   -- an ExtensionRegistry value per extend block; pass it via
   -- Data.Reflection.give so the Generated ToJSON/FromJSON instances
   -- can pick it up.
-  let _reg = registerExt_protobuf_test_messages_proto2_extension_int32
-  loop
+  let extReg = registerExt_protobuf_test_messages_proto2_extension_int32
+  withExtensionRegistry extReg loop
   where
     loop = do
       eof <- isEOF

@@ -1,19 +1,15 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# OPTIONS_GHC -Wno-orphans #-}
 
 -- | Generated protobuf types for gRPC interop testing.
+--
+-- UndecidableInstances is required because the TH-generated ToJSON/FromJSON
+-- instances carry a @Given ExtensionRegistry@ constraint (for proto2 extension
+-- JSON support). At call sites, use @give registry $ ...@ to satisfy it.
 module Proto.Interop where
 
-import Data.Reflection (Given(..))
-import Proto.Internal.JSON.Extension (ExtensionRegistry, emptyExtensionRegistry)
 import Proto.TH
-
--- Proto3 messages have no extensions; satisfy the Generated JSON
--- instances' Given constraint with an empty registry.
-instance Given ExtensionRegistry where
-  given = emptyExtensionRegistry
 
 $(loadProtoWith defaultLoadOpts
     { loIncludeDirs = ["test-conformance/proto/"]

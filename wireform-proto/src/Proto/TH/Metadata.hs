@@ -48,6 +48,11 @@ module Proto.TH.Metadata (
   OneofValueShape (..),
   WktShape (..),
 
+  -- * Extension registry
+  globalExtensionRegistryRef,
+  setGlobalExtensionRegistry,
+  withExtensionRegistry,
+
   -- * Internal helpers used by spliced code
 
   -- | Re-exported so the splice doesn't have to qualify them
@@ -79,7 +84,6 @@ import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Int (Int32, Int64)
 import Data.Map.Strict qualified as Map
 import Data.Maybe qualified
-import Data.Reflection (Given, given)
 import Data.Scientific qualified as Sci
 import Data.Sequence (Seq)
 import Data.Sequence qualified as Seq
@@ -495,9 +499,35 @@ runtime registry into the [(Text, Aeson.Value)] form
 'PJ.jsonObject' wants. INLINE so the splice's call site
 collapses cleanly when the message has no unknown fields.
 -}
-extEntries :: Given PJExt.ExtensionRegistry => Text -> [PD.UnknownField] -> [(Text, Aeson.Value)]
+{-# NOINLINE globalExtensionRegistryRef #-}
+globalExtensionRegistryRef :: IORef PJExt.ExtensionRegistry
+globalExtensionRegistryRef = unsafePerformIO (newIORef PJExt.emptyExtensionRegistry)
+
+
+-- | Set the global extension registry used by generated JSON instances.
+-- Call this before any JSON encoding/decoding of proto2 messages with extensions.
+-- For scoped usage, prefer 'withExtensionRegistry'.
+setGlobalExtensionRegistry :: PJExt.ExtensionRegistry -> IO ()
+setGlobalExtensionRegistry = writeIORef globalExtensionRegistryRef
+
+
+-- | Run an action with a specific extension registry in scope.
+-- This sets the global registry for the duration of the action,
+-- then restores the previous value.
+withExtensionRegistry :: PJExt.ExtensionRegistry -> IO a -> IO a
+withExtensionRegistry reg action = do
+  prev <- readIORef globalExtensionRegistryRef
+  writeIORef globalExtensionRegistryRef reg
+  result <- action
+  writeIORef globalExtensionRegistryRef prev
+  pure result
+
+
+extEntries :: Text -> [PD.UnknownField] -> [(Text, Aeson.Value)]
 extEntries _ [] = []
-extEntries fqn xs = PJExt.extensionEntriesForJson (given :: PJExt.ExtensionRegistry) fqn xs
+extEntries fqn xs =
+  let reg = unsafePerformIO (readIORef globalExtensionRegistryRef)
+  in PJExt.extensionEntriesForJson reg fqn xs
 {-# INLINE extEntries #-}
 
 
@@ -1085,7 +1115,7 @@ message without an @extend@ block), bypass the per-key walk
 entirely.
 -}
 extDrain
-  :: Given PJExt.ExtensionRegistry => Text -> Aeson.Object -> Either String [PD.UnknownField]
+  :: Text -> Aeson.Object -> Either String [PD.UnknownField]
 extDrain parentFqn obj
   | not (PJExt.parentHasExtensions reg parentFqn) = Right []
   | otherwise =
@@ -1097,7 +1127,7 @@ extDrain parentFqn obj
           Right xs -> Right (reverse xs)
           Left e -> Left e
   where
-    reg = given :: PJExt.ExtensionRegistry
+    reg = unsafePerformIO (readIORef globalExtensionRegistryRef)
     foldlEither _ z [] = Right z
     foldlEither f z (x : xs) = case f z x of
       Right z' -> foldlEither f z' xs
