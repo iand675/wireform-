@@ -69,7 +69,9 @@ import Control.Exception (Exception)
 import Data.Hashable (Hashable)
 import Data.IORef (newIORef, atomicModifyIORef', writeIORef)
 import Data.Int (Int64)
+import Data.String (IsString (..))
 import Data.Text (Text)
+import qualified Data.Text as T
 import GHC.Generics (Generic)
 
 import Kafka.Streams.Time (Timestamp)
@@ -82,6 +84,13 @@ import Kafka.Streams.Types (TopicName)
 newtype StoreName = StoreName { unStoreName :: Text }
   deriving stock (Eq, Ord, Show, Generic)
   deriving anyclass (Hashable)
+
+-- | String literals desugar to 'StoreName' under
+-- @OverloadedStrings@ (consistent with 'storeName', which
+-- likewise does not enforce the Java charset rules — the
+-- topology validator catches conflicts).
+instance IsString StoreName where
+  fromString = StoreName . T.pack
 
 storeName :: Text -> StoreName
 storeName = StoreName
@@ -167,7 +176,7 @@ data WindowedKey k = WindowedKey
   { wkKey         :: !k
   , wkWindowStart :: !Timestamp
   }
-  deriving stock (Eq, Ord, Show, Generic)
+  deriving stock (Eq, Ord, Show, Generic, Functor, Foldable, Traversable)
 
 -- | Iterator over windows of a single key (matches @WindowStoreIterator@).
 type WindowStoreIterator v = KeyValueIterator Timestamp v
@@ -191,7 +200,7 @@ data SessionKey k = SessionKey
   , skStart :: !Timestamp
   , skEnd   :: !Timestamp
   }
-  deriving stock (Eq, Ord, Show, Generic)
+  deriving stock (Eq, Ord, Show, Generic, Functor, Foldable, Traversable)
 
 -- | Session store. Sessions can be merged when a new record extends a
 -- previous one; the store offers 'ssFindSessions' to discover all

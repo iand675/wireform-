@@ -86,6 +86,15 @@ data Header = Header
 newtype Headers = Headers { headerEntries :: Seq Header }
   deriving stock (Eq, Show, Generic)
 
+-- | Concatenation, preserving order and duplicate keys (Kafka
+-- permits duplicates). Lets two header sets be merged with '<>'.
+instance Semigroup Headers where
+  Headers a <> Headers b = Headers (a <> b)
+
+-- | 'mempty' is the empty header set.
+instance Monoid Headers where
+  mempty = emptyHeaders
+
 emptyHeaders :: Headers
 emptyHeaders = Headers Seq.empty
 
@@ -173,6 +182,12 @@ data RecordMetadata = RecordMetadata
 newtype NodeName = NodeName { unNodeName :: Text }
   deriving stock (Eq, Ord, Show, Generic)
   deriving anyclass (Hashable)
+
+-- | String literals desugar to 'NodeName' under
+-- @OverloadedStrings@, matching the existing 'TopicName'
+-- treatment so node names can be written inline.
+instance IsString NodeName where
+  fromString = NodeName . Text.pack
 
 nodeName :: Text -> NodeName
 nodeName = NodeName

@@ -64,6 +64,14 @@ import GHC.Generics (Generic)
 newtype Timestamp = Timestamp { unTimestamp :: Int64 }
   deriving stock (Eq, Ord, Show, Generic)
 
+-- | The representable range, so generic code can reach the
+-- @-1@-aware extremes without importing 'minTimestamp' \/
+-- 'maxTimestamp' by name. @'minBound' = 'minTimestamp'@,
+-- @'maxBound' = 'maxTimestamp'@.
+instance Bounded Timestamp where
+  minBound = minTimestamp
+  maxBound = maxTimestamp
+
 -- | Sentinel for "no timestamp set".
 noTimestamp :: Timestamp
 noTimestamp = Timestamp (-1)
@@ -98,6 +106,20 @@ utcTimeToTimestamp t =
 newtype Duration = Duration { unDuration :: Int64 }
   deriving stock (Eq, Ord, Show, Generic)
 
+-- | Durations add: @d1 <> d2@ is the combined span (e.g. window
+-- size plus grace period). Both operands are already
+-- non-negative so the sum stays non-negative and the
+-- smart-constructor invariant is preserved.
+instance Semigroup Duration where
+  Duration a <> Duration b = Duration (a + b)
+  {-# INLINE (<>) #-}
+
+-- | 'mempty' is the zero duration, the additive identity. Lets
+-- a list of durations be combined with 'mconcat'.
+instance Monoid Duration where
+  mempty = Duration 0
+  {-# INLINE mempty #-}
+
 -- Smart constructors keep the invariant @>= 0@. Java throws on
 -- negatives; we clamp at zero rather than throw because pure code
 -- handles that more gracefully and the practical effect is the same
@@ -126,7 +148,7 @@ data TimestampType
   = CreateTime
   | LogAppendTime
   | NoTimestampType
-  deriving stock (Eq, Show, Generic)
+  deriving stock (Eq, Ord, Show, Enum, Bounded, Generic)
 
 -- | Stream-time tracking. Streams maintains a per-task monotonic
 -- watermark equal to the maximum timestamp seen on that task so far.
@@ -134,6 +156,20 @@ data TimestampType
 -- wall-clock.
 newtype StreamTime = StreamTime { unStreamTime :: Timestamp }
   deriving stock (Eq, Ord, Show, Generic)
+
+-- | Stream time only ever advances, so it combines by 'max' —
+-- the same rule as 'advanceStreamTime'. This makes folding the
+-- per-partition stream times of a task into its watermark a
+-- plain 'mconcat' / 'foldMap'.
+instance Semigroup StreamTime where
+  StreamTime a <> StreamTime b = StreamTime (max a b)
+  {-# INLINE (<>) #-}
+
+-- | 'mempty' is 'initialStreamTime' (the minimum timestamp), the
+-- identity for 'max'.
+instance Monoid StreamTime where
+  mempty = initialStreamTime
+  {-# INLINE mempty #-}
 
 initialStreamTime :: StreamTime
 initialStreamTime = StreamTime minTimestamp
