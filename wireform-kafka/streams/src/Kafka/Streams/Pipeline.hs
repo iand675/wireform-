@@ -55,10 +55,15 @@
 -- 'Data.Profunctor.Rep.Representable' (@'Rep' = IO@). So
 -- @dimap@ \/ @lmap@ \/ @rmap@ (and the optics built on them)
 -- re-shape its types, and @traverse'@ \/ @wander@ lift it over
--- a 'Traversable' or a van-Laarhoven traversal. (The dual
--- 'Data.Profunctor.Closed' \/ 'Data.Profunctor.Mapping' \/
--- 'Data.Profunctor.Cochoice' are not available: 'IO' is neither
--- 'Distributive' nor 'Traversable'.)
+-- a 'Traversable' or a van-Laarhoven traversal. Over its output
+-- it is 'Functor' \/ 'Applicative' \/ 'Monad' and, inheriting
+-- 'IO''s instances, 'Control.Applicative.Alternative' \/
+-- 'Control.Monad.MonadPlus' (exception-fallback semantics).
+-- This is the complete set of @'Data.Profunctor.Star' IO@
+-- instances; the only ones a generic 'Star' has that 'Pipeline'
+-- lacks are those needing 'IO' to be 'Distributive'
+-- ('Data.Profunctor.Closed' \/ 'Data.Profunctor.Mapping') or
+-- 'Traversable' ('Data.Profunctor.Cochoice'), which it is not.
 module Kafka.Streams.Pipeline
   ( -- * Pipeline
     Pipeline (..)
@@ -93,9 +98,10 @@ module Kafka.Streams.Pipeline
   , liftPure
   ) where
 
+import Control.Applicative (Alternative (..))
 import Control.Arrow (Arrow (..), ArrowChoice (..))
 import Control.Category (Category (..))
-import Control.Monad ((>=>))
+import Control.Monad (MonadPlus (..), (>=>))
 import Data.Profunctor (Choice (..), Profunctor (..), Strong (..))
 import Data.Profunctor.Rep (Representable (..))
 import Data.Profunctor.Sieve (Sieve (..))
@@ -265,6 +271,21 @@ instance Monad (Pipeline a) where
   Pipeline m >>= k = Pipeline $ \a -> do
     !b <- m a
     runPipeline (k b) a
+
+-- | 'Alternative' inherited pointwise from 'IO''s instance:
+-- 'empty' is a pipeline that always fails (an 'IO' exception),
+-- and @p \<|\> q@ runs @p@ on the input and, /if it throws an
+-- 'IOError'/, runs @q@ on the same input (the 'IO' fallback
+-- semantics from @GHC.Base@). Mirrors @'Alternative' ('Star' IO
+-- a)@.
+instance Alternative (Pipeline a) where
+  empty = Pipeline (const empty)
+  Pipeline f <|> Pipeline g = Pipeline (\a -> f a <|> g a)
+
+-- | 'MonadPlus' with the same exception-fallback semantics as
+-- the 'Alternative' instance (@'mzero' = 'empty'@,
+-- @'mplus' = '(<|>)'@). Mirrors @'MonadPlus' ('Star' IO a)@.
+instance MonadPlus (Pipeline a)
 
 -- | 'applyPipeline' is the canonical way to run a pipeline
 -- against a stream. It's a synonym for 'runPipeline' chosen
