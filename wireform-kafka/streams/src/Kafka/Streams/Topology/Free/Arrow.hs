@@ -36,7 +36,9 @@
 -- == What's reusable
 --
 --   * The 'FreeArrow' GADT with its Category, Arrow, ArrowChoice,
---     Applicative, Monad, Semigroup, and Monoid instances.
+--     Applicative, Monad, Semigroup, and Monoid instances, plus
+--     the 'Data.Profunctor.Profunctor' \/ 'Data.Profunctor.Strong'
+--     \/ 'Data.Profunctor.Choice' hierarchy.
 --   * The profunctor-shaped helpers ('lmapFA', 'rmapFA', 'dimapFA').
 --   * The reader-shaped helpers ('askInputFA', 'localInputFA',
 --     'applyValueFA').
@@ -113,6 +115,7 @@ import Control.Monad ((>=>))
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NE
+import Data.Profunctor (Choice (..), Profunctor (..), Strong (..))
 import Data.Text (Text)
 import qualified Data.Text as T
 
@@ -291,6 +294,40 @@ instance Semigroup o => Semigroup (FreeArrow p i o) where
 
 instance Monoid o => Monoid (FreeArrow p i o) where
   mempty = Arr (const mempty)
+
+----------------------------------------------------------------------
+-- Profunctor / Strong / Choice
+----------------------------------------------------------------------
+
+-- | A 'FreeArrow' is a profunctor: contravariant in its input,
+-- covariant in its output. 'dimap' \/ 'lmap' \/ 'rmap' are the
+-- pure-function pre\/post-composition helpers (see 'dimapFA',
+-- 'lmapFA', 'rmapFA') exposed under their canonical class names
+-- so callers can program against the @profunctors@ vocabulary
+-- (and the optics built on top of it) when wiring topology
+-- fragments together.
+instance Profunctor (FreeArrow p) where
+  dimap = dimapFA
+  lmap  = lmapFA
+  rmap  = rmapFA
+
+-- | 'Strong' threads an untouched component alongside the wire,
+-- reusing the 'Arrow' product combinators 'First' \/ 'Second'.
+-- @'first'' = 'first'@ and @'second'' = 'second'@; spelling them
+-- out as the profunctor methods lets 'FreeArrow' be used with
+-- strength-based optics (lenses).
+instance Strong (FreeArrow p) where
+  first'  = First
+  second' = Second
+
+-- | 'Choice' routes one side of a sum through the arrow and
+-- passes the other through untouched, reusing the 'ArrowChoice'
+-- combinators 'LeftT' \/ 'RightT'. @'left'' = 'left'@ and
+-- @'right'' = 'right'@; this is what lets 'FreeArrow' drive
+-- prism-based optics.
+instance Choice (FreeArrow p) where
+  left'  = LeftT
+  right' = RightT
 
 ----------------------------------------------------------------------
 -- Profunctor / Reader helpers (standalone — no class deps)

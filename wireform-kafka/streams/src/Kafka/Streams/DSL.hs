@@ -129,6 +129,8 @@ module Kafka.Streams.DSL
 
 import Prelude hiding (concatMap, filter, map, mapM)
 
+import Control.Monad.IO.Class (MonadIO (..))
+import Control.Monad.Reader.Class (MonadReader (..))
 import Data.Int (Int64)
 import Data.Text (Text)
 
@@ -166,10 +168,13 @@ import Kafka.Streams.Types (Record (..), TopicName, topicName)
 -- call. Operations register a new node in the underlying
 -- mutable builder; the 'Streams' value records the work to do.
 --
--- Implemented as a hand-rolled @ReaderT StreamsBuilder IO@ to
--- avoid pulling @mtl@ into the @wireform-kafka-streams@ tree —
--- the package already keeps its dependency closure minimal so
--- it can compile in restricted contexts.
+-- Structurally a @ReaderT StreamsBuilder IO@. Rather than wrap
+-- the transformer we keep the explicit newtype (so error
+-- messages and Haddock say @Streams@) and provide the standard
+-- @mtl@ instances by hand: 'MonadIO' for 'liftIO' and
+-- 'MonadReader' 'StreamsBuilder' for 'ask' \/ 'local' \/
+-- 'reader'. That means @Streams@ inter-operates with any
+-- @mtl@-polymorphic helper a caller already has.
 newtype Streams a = Streams { unStreams :: StreamsBuilder -> IO a }
 
 instance Functor Streams where
@@ -188,12 +193,24 @@ instance Monad Streams where
     unStreams (k a) b
   {-# INLINE (>>=) #-}
 
--- | Lift an arbitrary 'IO' action into 'Streams'. The same
--- shape as @Control.Monad.IO.Class.liftIO@ but spelled out so
--- the module doesn't require @mtl@.
-liftIO :: IO a -> Streams a
-liftIO m = Streams (\_ -> m)
-{-# INLINE liftIO #-}
+-- | Lift an arbitrary 'IO' action into 'Streams'. This is the
+-- real @mtl@ 'Control.Monad.IO.Class.liftIO' (re-exported for
+-- convenience), so a value built with @mtl@-polymorphic
+-- 'MonadIO' code drops straight into a topology builder.
+instance MonadIO Streams where
+  liftIO m = Streams (\_ -> m)
+  {-# INLINE liftIO #-}
+
+-- | The reader environment is the implicit 'StreamsBuilder'.
+-- 'ask' hands it back, 'local' runs a sub-action against a
+-- transformed builder, and 'reader' projects a value out of it.
+instance MonadReader StreamsBuilder Streams where
+  ask = Streams pure
+  {-# INLINE ask #-}
+  local f (Streams g) = Streams (g . f)
+  {-# INLINE local #-}
+  reader f = Streams (pure . f)
+  {-# INLINE reader #-}
 
 -- | Run a topology-builder action and return the assembled
 -- 'Topo.Topology'. Equivalent to @newStreamsBuilder@ +

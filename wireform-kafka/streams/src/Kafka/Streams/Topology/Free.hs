@@ -500,11 +500,13 @@ module Kafka.Streams.Topology.Free
     -- * Profunctor- and Reader-shaped helpers
     --
     -- 'Topology' is a profunctor (contravariant in the input,
-    -- covariant in the output). The methods are exposed as
-    -- standalone functions rather than 'Data.Profunctor.Profunctor'
-    -- typeclass instances to keep this package's dependency
-    -- closure minimal. Users who want the typeclasses can write
-    -- orphan instances in their own modules.
+    -- covariant in the output). Since @'Topology' = 'FreeArrow'
+    -- 'Prim'@, the full 'Data.Profunctor.Profunctor' \/
+    -- 'Data.Profunctor.Strong' \/ 'Data.Profunctor.Choice'
+    -- hierarchy is available directly (the instances live on
+    -- 'FreeArrow' in "Kafka.Streams.Topology.Free.Arrow"). The
+    -- @*T@ functions below are kept as named aliases for callers
+    -- who prefer them over the class methods.
   , lmapT
   , rmapT
   , dimapT

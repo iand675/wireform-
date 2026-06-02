@@ -42,6 +42,12 @@
 -- @+++@, @|||@) works on it. Combined with the typed smart
 -- constructors below this is enough to express most static
 -- topology fragments as pure values.
+--
+-- It additionally has the 'Data.Profunctor.Profunctor' \/
+-- 'Data.Profunctor.Strong' \/ 'Data.Profunctor.Choice'
+-- hierarchy, so @dimap@ \/ @lmap@ \/ @rmap@ (and the optics
+-- built on them) can re-shape a pipeline's input and output
+-- types.
 module Kafka.Streams.Pipeline
   ( -- * Pipeline
     Pipeline (..)
@@ -79,6 +85,7 @@ module Kafka.Streams.Pipeline
 import Control.Arrow (Arrow (..), ArrowChoice (..))
 import Control.Category (Category (..))
 import Control.Monad ((>=>))
+import Data.Profunctor (Choice (..), Profunctor (..), Strong (..))
 import Prelude hiding (id, (.))
 
 import qualified Kafka.Streams.KStream as KS
@@ -165,6 +172,30 @@ instance ArrowChoice Pipeline where
   Pipeline f ||| Pipeline g = Pipeline $ \case
     Left a  -> f a
     Right b -> g b
+
+-- | 'Profunctor' over @('a' -> IO 'b')@: 'lmap' adjusts the
+-- input with a pure function, 'rmap' the output. Lets pipelines
+-- be re-shaped to fit a surrounding composition without leaving
+-- the 'Pipeline' vocabulary (and lets them be driven by the
+-- optics built on @profunctors@).
+instance Profunctor Pipeline where
+  dimap f g (Pipeline h) = Pipeline (fmap g . h . f)
+  lmap f (Pipeline h)    = Pipeline (h . f)
+  rmap g (Pipeline h)    = Pipeline (fmap g . h)
+
+-- | 'Strong' — carry a component past the pipeline untouched.
+-- Agrees with the 'Arrow' product combinators: @'first'' =
+-- 'first'@, @'second'' = 'second'@.
+instance Strong Pipeline where
+  first'  = first
+  second' = second
+
+-- | 'Choice' — run the pipeline on one branch of a sum and pass
+-- the other through. Agrees with 'ArrowChoice': @'left'' =
+-- 'left'@, @'right'' = 'right'@.
+instance Choice Pipeline where
+  left'  = left
+  right' = right
 
 -- | 'Functor' over the output type.
 instance Functor (Pipeline a) where
