@@ -199,8 +199,9 @@ joinKStreamGlobalKTable keyMap joiner s g = do
     { kstreamBuilder    = b
     , kstreamParent     = nm
     , kstreamKeySerde   = kstreamKeySerde s
-    , kstreamValueSerde = error
-        "GlobalKTable join: pass Produced with a value Serde to a downstream sink"
+      -- Join output value type is the joiner's choice; downstream
+      -- sink supplies the serde via 'Produced'.
+    , kstreamValueSerde = Nothing
     }
 
 -- | Left-join a stream with a global table.
@@ -232,7 +233,7 @@ leftJoinKStreamGlobalKTable keyMap joiner s g = do
     { kstreamBuilder    = b
     , kstreamParent     = nm
     , kstreamKeySerde   = kstreamKeySerde s
-    , kstreamValueSerde = serde
+    , kstreamValueSerde = Just serde
     }
 
 data GMode v vg v' where

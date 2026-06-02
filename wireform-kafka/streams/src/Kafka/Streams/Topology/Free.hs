@@ -515,13 +515,12 @@ module Kafka.Streams.Topology.Free
 
     -- * Errors
   --
-  -- Lazy errors the builder can surface when a downstream
-  -- operation forces a field that wasn't fully populated
-  -- upstream (the only situations where the AST is itself well-
-  -- typed but partial). 'TopologyFreeError' is an 'Exception'
-  -- so callers can 'Control.Exception.try' the offending action.
+  -- 'TopologyFreeError' is an 'Exception' so callers can
+  -- 'Control.Exception.try' the offending action. The only
+  -- remaining condition is 'VoidInputForced' (a library-bug
+  -- guard); serdes are no longer deferred — an edge that has no
+  -- default serde simply carries 'Nothing'.
   , TopologyFreeError (..)
-  , SerdeSide (..)
   ) where
 
 import Prelude hiding (id, filter, (.))
@@ -1294,26 +1293,19 @@ sourceMultiCompile b ts c = do
   pure (KS.KStream
           { KS.kstreamBuilder    = b
           , KS.kstreamParent     = nm
-          , KS.kstreamKeySerde   = consumedKeySerde c
-          , KS.kstreamValueSerde = consumedValueSerde c
+          , KS.kstreamKeySerde   = Just (consumedKeySerde c)
+          , KS.kstreamValueSerde = Just (consumedValueSerde c)
           })
 
 -- | Promote an aggregation handle to a real 'KTable'.
 --
 -- The 'CountedTableLocal' handle the existing DSL returns from
 -- aggregations is a thin wrapper around a 'KTable' — it just
--- doesn't carry the serdes. We extract the serdes from the
--- supplied 'Materialized'. If they're absent the corresponding
--- 'KTable' field becomes a /deferred/ 'TopologyFreeError' —
--- matching the existing 'KTable' lazy-serde behaviour after
--- @mapValues@ etc. Downstream @to@\/@join@ that forces the
--- serde will raise the exception at the actual use site.
---
--- Unlike a bare 'error', the deferred thunk uses
--- 'TopologyFreeError' so callers who want to surface friendlier
--- diagnostics can catch it (via 'Control.Exception.evaluate' on
--- the thunk, or by wrapping the downstream operation in
--- 'Control.Exception.try').
+-- doesn't carry the serdes. We take the serdes straight from the
+-- supplied 'Materialized'; when it doesn't carry one the
+-- corresponding 'KTable' field is simply 'Nothing' (this edge has
+-- no default serde), and a downstream @to@\/@join@ supplies its
+-- own via 'Produced'\/'Materialized'.
 handleToKTable
   :: Materialized k v
   -> KGS.CountedTableLocal k v
@@ -1322,45 +1314,20 @@ handleToKTable m h = KT.KTable
   { KT.ktableNode       = KGS.ctlNode h
   , KT.ktableStore      = KGS.ctlStore h
   , KT.ktableBuilder    = KGS.ctlBuilder h
-  , KT.ktableKeySerde   =
-      case Mat.matKeySerde m of
-        Just s  -> s
-        Nothing -> Exception.throw (MissingMaterializedSerde KeySide)
-  , KT.ktableValueSerde =
-      case Mat.matValueSerde m of
-        Just s  -> s
-        Nothing -> Exception.throw (MissingMaterializedSerde ValueSide)
+  , KT.ktableKeySerde   = Mat.matKeySerde m
+  , KT.ktableValueSerde = Mat.matValueSerde m
   }
 
--- | Whether the missing serde was the key or value side of the
--- 'Materialized'.
-data SerdeSide = KeySide | ValueSide
-  deriving stock (Eq, Show, Generic)
-
 -- | The (small) set of partial conditions the Free topology builder
--- can land in. All currently land /lazily/: they aren't raised at
--- AST-construction time, only when a downstream operation forces
--- the affected field (typically @to@, @join@, or @repartition@
--- asking for a serde, or the runtime asking for a Void input on a
--- topology that bypassed the smart constructors).
+-- can land in. The only remaining one is a library-bug guard:
+-- serdes are no longer deferred (an edge with no default serde
+-- carries 'Nothing'), so there is no missing-serde exception.
 --
 -- Because 'TopologyFreeError' is an 'Exception.Exception' callers
 -- can catch it via 'Control.Exception.try' \/
--- 'Control.Exception.evaluate', rather than the bare 'error' calls
--- that preceded this type. Pattern-match on the constructor to
--- decide whether the user can fix the call site
--- ('MissingMaterializedSerde') or it's a library bug
--- ('VoidInputForced').
+-- 'Control.Exception.evaluate'.
 data TopologyFreeError
-  = -- | An aggregation result was promoted to a 'KTable' but the
-    -- supplied 'Materialized' didn't carry the named serde. Supply
-    -- one via @'Mat.withKeySerde'@ or @'Mat.withValueSerde'@ when
-    -- constructing the 'Materialized', /or/ ensure the downstream
-    -- operation that forced the serde gets it through @Produced@
-    -- (for sinks) \/ @Joined@ (for joins) instead of relying on
-    -- the @KTable@'s embedded serde.
-    MissingMaterializedSerde !SerdeSide
-  | -- | A 'Source' (or any closed-input) primitive inspected its
+  = -- | A 'Source' (or any closed-input) primitive inspected its
     -- 'Void' input. By construction sources never look at the
     -- void; if you see this exception, please file a bug. The
     -- 'Text' is the location label from the compile entry point.
@@ -2317,11 +2284,11 @@ tap = FA.tap
 -- /JVM equivalent:/ @KStream.toTable(Materialized)@.
 --
 -- The 'Materialized' carries the store name, optional key /
--- value serdes (downstream operations that need them will
--- raise 'MissingMaterializedSerde' if absent), and the
--- changelog config. The resulting 'KTable' shares its state
--- store with any other operation referencing the same
--- 'StoreName'.
+-- value serdes (when absent, the resulting 'KTable' edge simply
+-- carries no default serde — 'Nothing' — and a downstream sink /
+-- join supplies its own), and the changelog config. The
+-- resulting 'KTable' shares its state store with any other
+-- operation referencing the same 'StoreName'.
 toTable :: Ord k => Materialized k v -> Topology (KStream k v) (KTable k v)
 toTable = liftPrim . ToTableT
 
@@ -3444,8 +3411,8 @@ transformStream prefix stores sup ks' vs' =
     pure KS.KStream
       { KS.kstreamBuilder    = b
       , KS.kstreamParent     = nm
-      , KS.kstreamKeySerde   = ks'
-      , KS.kstreamValueSerde = vs'
+      , KS.kstreamKeySerde   = Just ks'
+      , KS.kstreamValueSerde = Just vs'
       }
 
 ----------------------------------------------------------------------

@@ -80,8 +80,15 @@ data KTable k v = KTable
   { ktableNode    :: !Topo.NodeName
   , ktableStore   :: !StoreName
   , ktableBuilder :: !StreamsBuilder
-  , ktableKeySerde   :: ~(Serde k)
-  , ktableValueSerde :: ~(Serde v)
+  , ktableKeySerde   :: !(Maybe (Serde k))
+    -- ^ Key codec inherited from upstream, when known. 'Nothing'
+    -- on edges whose type is downstream's choice (e.g. a
+    -- table–table join or @transformValues@ output); those obtain
+    -- their serde from a 'Materialized' \/ 'Produced' at the
+    -- boundary that actually serializes.
+  , ktableValueSerde :: !(Maybe (Serde v))
+    -- ^ Value codec inherited from upstream, when known. See
+    -- 'ktableKeySerde'.
   }
 
 -- | Materialise a topic as a 'KTable'. Each (key,value)
@@ -123,8 +130,8 @@ tableFromTopic b topic c m = do
     { ktableNode       = procNm
     , ktableStore      = storeNm
     , ktableBuilder    = b
-    , ktableKeySerde   = consumedKeySerde c
-    , ktableValueSerde = consumedValueSerde c
+    , ktableKeySerde   = Just (consumedKeySerde c)
+    , ktableValueSerde = Just (consumedValueSerde c)
     }
 
 sourceTableProcessor
@@ -283,7 +290,7 @@ mapValuesTable f m parent = do
     , ktableStore      = storeNm
     , ktableBuilder    = b
     , ktableKeySerde   = ktableKeySerde parent
-    , ktableValueSerde = serde
+    , ktableValueSerde = Just serde
     }
 
 -- | Stateful value-only transform on a 'KTable'. Mirrors
@@ -383,8 +390,10 @@ transformValuesTable supplier extraStores m parent = do
     , ktableStore      = storeNm
     , ktableBuilder    = b
     , ktableKeySerde   = ktableKeySerde parent
-    , ktableValueSerde = error
-        "KTable.transformValues: pass Materialized with serde to set output"
+      -- Output value type is the transformer's choice; no default
+      -- serde on this edge. Supply one via a 'Materialized' if the
+      -- result is materialized/serialized downstream.
+    , ktableValueSerde = Nothing
     }
 
 mapValueTableProcessor
@@ -426,7 +435,9 @@ mapValueTableProcessor sn f = do
 -- The resulting stream is a 'Kafka.Streams.KStream.KStream' but
 -- we don't import that module here to avoid a cycle; the runtime
 -- 'Kafka.Streams' umbrella re-exports a sibling helper.
-toStreamTable :: KTable k v -> (Topo.NodeName, StreamsBuilder, Serde k, Serde v)
+toStreamTable
+  :: KTable k v
+  -> (Topo.NodeName, StreamsBuilder, Maybe (Serde k), Maybe (Serde v))
 toStreamTable kt =
   ( ktableNode kt
   , ktableBuilder kt
@@ -566,8 +577,9 @@ buildKTableKTableJoin prefix m mode tl tr = do
     , ktableStore      = outStoreNm
     , ktableBuilder    = b
     , ktableKeySerde   = ktableKeySerde tl
-    , ktableValueSerde = error
-        "KTable-KTable join: pass Materialized with serde to set output"
+      -- Join output value type is the joiner's choice; no default
+      -- serde on this edge. Supply one via a 'Materialized'.
+    , ktableValueSerde = Nothing
     }
 
 -- The left side processor receives a v1; looks up the right store
