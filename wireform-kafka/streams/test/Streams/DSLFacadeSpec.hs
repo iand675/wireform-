@@ -4,11 +4,14 @@
 -- builder-implicit façade with the @|>@ pipe operator.
 module Streams.DSLFacadeSpec (tests) where
 
+import Control.Category ((>>>))
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Text as T
 import Data.Text (Text)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
+
+import qualified Kafka.Streams.Pipeline as P
 
 import Kafka.Streams.Imperative
   ( Timestamp (..)
@@ -27,6 +30,7 @@ tests = testGroup "Kafka.Streams.DSL (builder-implicit façade)"
   [ dsl_pipe_chain
   , dsl_multiple_branches
   , dsl_table_join
+  , dsl_pipeline_fragment
   ]
 
 bytes :: Text -> BSC.ByteString
@@ -82,6 +86,31 @@ dsl_multiple_branches =
     lgR <- readKeyValuesToList lgT
     [v | Right (_, v) <- upR] @?= ["HI", "HELLO", "WORLD!"]
     [v | Right (_, v) <- lgR] @?= ["hello", "world!"]
+    closeDriver driver
+
+-- | A first-class 'P.Pipeline' fragment (built with the
+-- 'Control.Category.>>>' arrow vocabulary) can be spliced
+-- straight into a @|>@ chain via the 'S.PipeInto' instance for
+-- 'P.Pipeline', interleaved with ordinary @b -> Streams c@
+-- steps. Confirms the two composition styles compose.
+dsl_pipeline_fragment :: TestTree
+dsl_pipeline_fragment =
+  testCase "a reusable Pipeline fragment splices into a |> chain" $ do
+    let normalise :: P.Pipeline (S.KStream Text Text) (S.KStream Text Text)
+        normalise = P.pmapValues T.toUpper
+                >>> P.pfilter (\r -> S.recordValue r /= "")
+    topo <- S.build $ do
+      src <- S.source "in" textSerde textSerde
+      src S.|> normalise
+          S.|> S.sink "out" textSerde textSerde
+
+    driver <- newDriver topo "dsl-pipeline-fragment"
+    pipeInput driver (topicName "in") (Just "k1") (bytes "hello") (ts 0) 0
+    pipeInput driver (topicName "in") (Just "k2") (bytes "")      (ts 1) 0
+    pipeInput driver (topicName "in") (Just "k3") (bytes "world") (ts 2) 0
+    let outT = createOutputTopic driver (topicName "out") textSerde textSerde
+    rs <- readKeyValuesToList outT
+    [v | Right (_, v) <- rs] @?= ["HELLO", "WORLD"]
     closeDriver driver
 
 -- | Stream-table inner join inside the DSL. Exercises 'S.table',

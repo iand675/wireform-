@@ -33,10 +33,12 @@
 --      S.sink \"out\" textSerde textSerde out
 --    @
 --
--- 3. A pipe operator '|>' for left-to-right chains. It accepts
---    either a pure value @a@ or an action @Streams a@ on the
---    left, dispatching via the 'Pipe' class, so the same
---    operator works on the head and tail of a chain.
+-- 3. A pipe operator '|>' for left-to-right chains. The left
+--    side is either a pure value @a@ or an action @Streams a@
+--    (dispatched via the 'Pipe' class), so the same operator
+--    works on the head and tail of a chain. The right side is
+--    any 'PipeInto' target — a @b -> Streams c@ continuation or
+--    a first-class 'Kafka.Streams.Pipeline.Pipeline' fragment.
 --
 -- 4. An alternative 'into' / 'with' vocabulary for sinks
 --    that reads naturally at call sites: @src `into` \"out\"@.
@@ -125,6 +127,8 @@ module Kafka.Streams.DSL
   , (|>)
   , (<|)
   , Pipe (..)
+  , PipeInto (..)
+  , Pipeline
   ) where
 
 import Prelude hiding (concatMap, filter, map, mapM)
@@ -148,6 +152,7 @@ import qualified Kafka.Streams.KTable as KT
 import Kafka.Streams.KTable (KTable)
 import Kafka.Streams.Materialized (Materialized)
 import qualified Kafka.Streams.Materialized as Mat
+import Kafka.Streams.Pipeline (Pipeline, runPipeline)
 import Kafka.Streams.Produced (Produced, produced)
 import Kafka.Streams.Serde (HasSerde, Serde)
 import Kafka.Streams.StreamsBuilder
@@ -560,9 +565,15 @@ outerJoin j w jo a b = liftIO (KS.outerJoinKStreamKStream j w jo a b)
 -- Pipe operator
 ----------------------------------------------------------------------
 
--- | A class lifting either a pure value @a@ or a 'Streams' action
--- producing @a@ into the 'Streams' monad. Used so the same '|>'
--- operator works on the head and the tail of a chain.
+-- | The /source/ side of a pipe: lift either a pure value @a@
+-- or a 'Streams' action producing @a@ into the 'Streams' monad.
+-- Used so the same '|>' operator works on the head and the tail
+-- of a chain.
+--
+-- The catch-all instance is 'pure' (a pure value); the
+-- 'Streams' instance is the identity. The functional dependency
+-- @a -> b@ recovers the carried type so the rest of the chain
+-- type-checks.
 class Pipe a b | a -> b where
   toStreams :: a -> Streams b
 
@@ -572,18 +583,50 @@ instance Pipe (Streams a) a where
 instance {-# OVERLAPPABLE #-} (a ~ b) => Pipe a b where
   toStreams = pure
 
--- | Left-to-right pipe. The right-hand side is a 'Streams'
--- continuation; the left-hand side is either a pure value or
--- another 'Streams' action. Type inference selects via 'Pipe'.
+-- | The /target/ side of a pipe: anything that can consume a
+-- @b@ and produce a @'Streams' c@. The functional dependency
+-- @t -> b c@ pins both ends down from the step itself, so the
+-- two instances never overlap (they have distinct outermost
+-- type constructors, @(->)@ vs 'Pipeline') and no
+-- @OVERLAPPING@ \/ @OVERLAPPABLE@ pragmas are needed.
+--
+-- Instances:
+--
+--   * @b -> 'Streams' c@ — a plain Kleisli continuation, the
+--     classic right-hand side (e.g. @'map' f@, @'filter' p@,
+--     @'sink' …@).
+--   * @'Pipeline' b c@ — a first-class, reusable topology
+--     fragment (see "Kafka.Streams.Pipeline"). It runs in 'IO',
+--     so it's lifted with 'liftIO'. This lets pre-built
+--     'Pipeline' values be spliced straight into a @|>@ chain:
+--
+--     @
+--     normalise :: 'Pipeline' ('KStream' Text Text) ('KStream' Text Text)
+--     src |> normalise |> 'sink' \"out\" textSerde textSerde
+--     @
+class PipeInto t b c | t -> b c where
+  pipeInto :: t -> b -> Streams c
+
+instance PipeInto (b -> Streams c) b c where
+  pipeInto = id
+
+instance PipeInto (Pipeline b c) b c where
+  pipeInto p = liftIO . runPipeline p
+
+-- | Left-to-right pipe. The left-hand side is either a pure
+-- value or another 'Streams' action (dispatched via 'Pipe'); the
+-- right-hand side is any 'PipeInto' target — a @b -> 'Streams' c@
+-- continuation or a first-class 'Pipeline'.
 --
 -- @
 -- src |> map T.toUpper |> filter (\\r -> recordValue r /= \"\")
+-- src |> myReusablePipeline |> sink \"out\" ks vs
 -- @
-(|>) :: Pipe a b => a -> (b -> Streams c) -> Streams c
-a |> f = toStreams a >>= f
+(|>) :: (Pipe a b, PipeInto t b c) => a -> t -> Streams c
+a |> t = toStreams a >>= pipeInto t
 infixl 1 |>
 
 -- | Right-to-left form of '|>'.
-(<|) :: Pipe a b => (b -> Streams c) -> a -> Streams c
-f <| a = a |> f
+(<|) :: (Pipe a b, PipeInto t b c) => t -> a -> Streams c
+t <| a = a |> t
 infixr 1 <|
