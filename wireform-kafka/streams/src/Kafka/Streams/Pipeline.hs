@@ -1,7 +1,10 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE InstanceSigs #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeFamilies #-}
 
 -- |
 -- Module      : Kafka.Streams.Pipeline
@@ -43,11 +46,19 @@
 -- constructors below this is enough to express most static
 -- topology fragments as pure values.
 --
--- It additionally has the 'Data.Profunctor.Profunctor' \/
--- 'Data.Profunctor.Strong' \/ 'Data.Profunctor.Choice'
--- hierarchy, so @dimap@ \/ @lmap@ \/ @rmap@ (and the optics
--- built on them) can re-shape a pipeline's input and output
--- types.
+-- A 'Pipeline' is exactly @'Data.Profunctor.Star' IO@, so it
+-- carries the profunctor hierarchy that an @IO@-effected 'Star'
+-- supports: 'Data.Profunctor.Profunctor' \/
+-- 'Data.Profunctor.Strong' \/ 'Data.Profunctor.Choice' \/
+-- 'Data.Profunctor.Traversing.Traversing', plus
+-- 'Data.Profunctor.Sieve.Sieve' and
+-- 'Data.Profunctor.Rep.Representable' (@'Rep' = IO@). So
+-- @dimap@ \/ @lmap@ \/ @rmap@ (and the optics built on them)
+-- re-shape its types, and @traverse'@ \/ @wander@ lift it over
+-- a 'Traversable' or a van-Laarhoven traversal. (The dual
+-- 'Data.Profunctor.Closed' \/ 'Data.Profunctor.Mapping' \/
+-- 'Data.Profunctor.Cochoice' are not available: 'IO' is neither
+-- 'Distributive' nor 'Traversable'.)
 module Kafka.Streams.Pipeline
   ( -- * Pipeline
     Pipeline (..)
@@ -86,6 +97,9 @@ import Control.Arrow (Arrow (..), ArrowChoice (..))
 import Control.Category (Category (..))
 import Control.Monad ((>=>))
 import Data.Profunctor (Choice (..), Profunctor (..), Strong (..))
+import Data.Profunctor.Rep (Representable (..))
+import Data.Profunctor.Sieve (Sieve (..))
+import Data.Profunctor.Traversing (Traversing (..))
 import Prelude hiding (id, (.))
 
 import qualified Kafka.Streams.KStream as KS
@@ -197,6 +211,38 @@ instance Choice Pipeline where
   left'  = left
   right' = right
 
+-- | 'Traversing' — lift a pipeline over any 'Traversable'
+-- container. @'traverse'' p@ runs @p@ on every element
+-- (left-to-right, in 'IO') and rebuilds the structure; @wander@
+-- runs @p@ at every focus of an arbitrary van-Laarhoven
+-- traversal. This is what lets a single-record fragment be
+-- applied to a batch, or driven by a lens-style @Traversal@.
+--
+-- Viable because the underlying effect is 'IO', which is
+-- 'Applicative' (the only requirement 'Star' places on
+-- 'Traversing'). The dual 'Data.Profunctor.Cochoice' \/
+-- 'Data.Profunctor.Closed' \/ 'Data.Profunctor.Mapping' are
+-- /not/ available: they need 'IO' to be 'Traversable' \/
+-- 'Distributive', which it is not.
+instance Traversing Pipeline where
+  traverse' (Pipeline f) = Pipeline (traverse f)
+  wander w (Pipeline f)  = Pipeline (w f)
+
+-- | 'Sieve' — a 'Pipeline' /is/ its underlying @a -> IO b@
+-- (it's @'Data.Profunctor.Star' IO@), so @'sieve' =
+-- 'runPipeline'@.
+instance Sieve Pipeline IO where
+  sieve = runPipeline
+
+-- | 'Representable' — the representation is 'IO', and
+-- 'tabulate' is just the 'Pipeline' constructor. Together with
+-- the 'Sieve' instance this records that 'Pipeline' is exactly
+-- the representable profunctor on 'IO', so generic
+-- 'Sieve' \/ 'Representable' code works on it unchanged.
+instance Representable Pipeline where
+  type Rep Pipeline = IO
+  tabulate = Pipeline
+
 -- | 'Functor' over the output type.
 instance Functor (Pipeline a) where
   fmap f (Pipeline g) = Pipeline (fmap f . g)
@@ -209,6 +255,16 @@ instance Applicative (Pipeline a) where
     !g <- f a
     !v <- x a
     pure (g v)
+
+-- | 'Monad' over the output, threading the same input through
+-- both steps (the @ReaderT a IO@ monad). Completes the
+-- 'Functor' \/ 'Applicative' \/ 'Monad' trio; the continuation
+-- sees the original input, so @p >>= k@ is "run @p@, then run
+-- @k result@ on the same input".
+instance Monad (Pipeline a) where
+  Pipeline m >>= k = Pipeline $ \a -> do
+    !b <- m a
+    runPipeline (k b) a
 
 -- | 'applyPipeline' is the canonical way to run a pipeline
 -- against a stream. It's a synonym for 'runPipeline' chosen
