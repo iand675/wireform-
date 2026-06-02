@@ -990,6 +990,7 @@ test-suite wireform-kafka-conformance
     build-depends:
         base,
         wireform-kafka,
+        wireform-kafka-protocol,
         bytestring,
         containers,
         stm,
@@ -1014,6 +1015,7 @@ test-suite wireform-kafka-integration
     build-depends:
         base,
         wireform-kafka,
+        wireform-kafka-protocol,
         bytestring,
         containers,
         tasty                     >= 1.4   && < 1.6,

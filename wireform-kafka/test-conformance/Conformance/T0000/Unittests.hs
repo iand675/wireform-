@@ -30,7 +30,7 @@ tests = testGroup "0000-unittests"
   [ testCase "default consumer config has sensible knobs" $ do
       let cfg = C.defaultConsumerConfig
       assertBool "non-empty client id" (not (T.null (C.consumerClientId cfg)))
-      C.consumerSessionTimeoutMs   cfg @?= 10000
+      C.consumerSessionTimeoutMs   cfg @?= 45000   -- KIP-735
       C.consumerHeartbeatIntervalMs cfg @?= 3000
       C.consumerMaxPollRecords     cfg @?= 500
       C.consumerMaxPollIntervalMs  cfg @?= 300000
