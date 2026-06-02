@@ -21,6 +21,7 @@
 -- pool and reproduce identically under @--hedgehog-seed@.
 module Streams.AsyncIOSpec (tests) where
 
+import Control.Concurrent (yield)
 import qualified Control.Concurrent.Async as Async
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
@@ -1347,29 +1348,52 @@ observer_hook_failure_surfaces_but_other_records_continue =
           }
         f v = pure (T.toUpper v)
     (driver, _) <- buildAsyncDriverState cfg f
-    -- For a deposit-hook-counting test we keep the driver's
-    -- own deposit TVar separate by using a different ctor.
-    mapM_ (\v -> pipeInput driver "in"
-                  Nothing (bytes v) t0 0) ["x", "y", "z"]
-    atomically $ do
-      n <- readTVar callCount
-      if n >= 3 then pure () else retry
-    -- The second deposit's hook threw; the failure is captured.
-    -- A drain re-throws it. The remaining records "X" and "Z"
-    -- still flow downstream via the punctuator-triggered
-    -- drain, because the worker kept running.
-    result <- Exception.try (commitDriver driver)
-                :: IO (Either Exception.SomeException ())
-    case result of
-      Left _  -> pure ()
-      Right _ ->
-        assertBool "expected hook failure to surface on drain" False
-    -- The collected records up to the failure should include
-    -- the first deposit ("X") at minimum.
+    -- The deposit hook for the 2nd record throws; the worker
+    -- captures the failure into its failure-TVar (slightly /after/
+    -- it bumps the deposit counter), and a later drain re-throws
+    -- it. With 'DrainOnEntry' that re-throw can land on a
+    -- subsequent record's entry (inside 'pipeInput') OR on the
+    -- commit drain — and which one wins is a scheduling race. So
+    -- we tolerate the failure surfacing at /any/ drain point and,
+    -- if it hasn't surfaced during the feed, drain until it does
+    -- (bounded; the hook always eventually captures). This keeps
+    -- the test deterministic without depending on the exact drain
+    -- that re-throws.
+    let isHookBang :: Exception.SomeException -> Bool
+        isHookBang e = "hook-bang" `T.isInfixOf` T.pack (show e)
+        -- Run @io@; swallow the expected hook failure (reporting
+        -- 'True') and re-raise anything unexpected.
+        tolerate :: IO () -> IO Bool
+        tolerate io = do
+          r <- Exception.try io :: IO (Either Exception.SomeException ())
+          case r of
+            Right _                  -> pure False
+            Left e | isHookBang e    -> pure True
+                   | otherwise       -> Exception.throwIO e
+        drainUntilFailure :: Int -> IO Bool
+        drainUntilFailure 0 = pure False
+        drainUntilFailure k = do
+          surfaced <- tolerate (commitDriver driver)
+          if surfaced
+            then pure True
+            else yield >> drainUntilFailure (k - 1)
+    fedFailures <- mapM
+      (\v -> tolerate (pipeInput driver "in" Nothing (bytes v) t0 0))
+      ["x", "y", "z"]
+    -- Ensure the failure has surfaced exactly once and the buffers
+    -- are flushed.
+    surfaced <-
+      if or fedFailures
+        then tolerate (commitDriver driver) >> pure True
+        else drainUntilFailure 10000
+    assertBool
+      "expected the throwing deposit hook to surface on a drain" surfaced
+    -- The worker kept running, so at least the first deposit ("X")
+    -- still flows downstream.
     out <- readOutput driver "out"
     let observed = map (unbytes . crValue) out
     assertBool
-      ("expected at least one record forwarded; got "
+      ("expected the worker to keep forwarding records; got "
          <> show observed)
       (not (null observed))
     closeDriver driver
