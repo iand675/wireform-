@@ -683,6 +683,7 @@ test-suite wireform-kafka-streams-test
         directory,
         filepath,
         hedgehog                  >= 1.2   && < 2,
+        profunctors               >= 5.6   && < 5.7,
         stm,
         tasty                     >= 1.4   && < 1.6,
         tasty-hedgehog            >= 1.4   && < 1.8,

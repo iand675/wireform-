@@ -497,19 +497,18 @@ module Kafka.Streams.Topology.Free
   , prettyPrint
   , prettyPrintDeep
 
-    -- * Profunctor- and Reader-shaped helpers
+    -- * Reader-shaped helpers
     --
     -- 'Topology' is a profunctor (contravariant in the input,
     -- covariant in the output). Since @'Topology' = 'FreeArrow'
     -- 'Prim'@, the full 'Data.Profunctor.Profunctor' \/
     -- 'Data.Profunctor.Strong' \/ 'Data.Profunctor.Choice'
     -- hierarchy is available directly (the instances live on
-    -- 'FreeArrow' in "Kafka.Streams.Topology.Free.Arrow"). The
-    -- @*T@ functions below are kept as named aliases for callers
-    -- who prefer them over the class methods.
-  , lmapT
-  , rmapT
-  , dimapT
+    -- 'FreeArrow' in "Kafka.Streams.Topology.Free.Arrow"); use
+    -- 'Data.Profunctor.lmap' \/ 'Data.Profunctor.rmap' \/
+    -- 'Data.Profunctor.dimap' to re-shape a topology's wire
+    -- types. The reader-shaped helpers below have no class
+    -- equivalent.
   , askInput
   , localInput
   , applyT
@@ -530,6 +529,7 @@ import Prelude hiding (id, filter, (.))
 import Control.Arrow ((&&&))
 import Control.Category (Category (..), (>>>))
 import qualified Control.Exception as Exception
+import Data.Profunctor (rmap)
 import Data.Hashable (Hashable)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty)
@@ -997,22 +997,6 @@ data Prim i o where
 liftPrim :: Prim i o -> Topology i o
 liftPrim = FA.lift
 {-# INLINE liftPrim #-}
-
--- | Pre-compose with a pure function (contravariant in the input).
--- Equivalent to 'Data.Profunctor.lmap'.
-lmapT :: (a -> b) -> Topology b c -> Topology a c
-lmapT = FA.lmapFA
-
--- | Post-compose with a pure function (covariant in the output).
--- Equivalent to 'Data.Profunctor.rmap' and to 'fmap' on the
--- 'FreeArrow' 'Functor' instance.
-rmapT :: (c -> d) -> Topology b c -> Topology b d
-rmapT = FA.rmapFA
-
--- | Pre- and post-compose with pure functions. Equivalent to
--- 'Data.Profunctor.dimap'.
-dimapT :: (a -> b) -> (c -> d) -> Topology b c -> Topology a d
-dimapT = FA.dimapFA
 
 -- | The input wire is the \"environment\" of the topology reader
 -- monad. @askInput@ is just 'Cat.id'; the alias exists so
@@ -3305,7 +3289,7 @@ withEmitStrategy
   :: TWKS.EmitStrategy
   -> Topology a (TWKS.WindowedTableHandle k v)
   -> Topology a (TWKS.WindowedTableHandle k v)
-withEmitStrategy e = rmapT (TWKS.withEmitStrategy e)
+withEmitStrategy e = rmap (TWKS.withEmitStrategy e)
 
 ----------------------------------------------------------------------
 -- Configurable suppression (JVM @Suppressed@ buffer config)

@@ -18,6 +18,7 @@ import qualified Control.Arrow
 import Control.Arrow ((&&&), (***), (>>>))
 import qualified Control.Category as Cat
 import Control.Exception (try, evaluate)
+import Data.Profunctor (dimap)
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.HashMap.Strict as HMap
 import Data.Int (Int64)
@@ -1738,17 +1739,17 @@ test_monoid_unit_output_is_no_op =
     closeDriver driver
 
 ----------------------------------------------------------------------
--- 43. Profunctor: lmapT / rmapT / dimapT compose appropriately
+-- 43. Profunctor: dimap composes appropriately on a Topology
 ----------------------------------------------------------------------
 
 test_profunctor_dimap_works :: TestTree
 test_profunctor_dimap_works =
-  testCase "dimapT pre/post-composes pure functions on a topology" $ do
+  testCase "dimap pre/post-composes pure functions on a topology" $ do
     let inner :: F.Topology Int Int
         inner = Control.Arrow.arr (+ 1)
 
         wrapped :: F.Topology Text Text
-        wrapped = F.dimapT T.length (T.pack . show) inner
+        wrapped = dimap T.length (T.pack . show) inner
 
         -- compileNoOptimize so we can sanity-check that dimap is
         -- 3 nodes (lmap Arr + inner + rmap Arr) without surprising
@@ -1759,10 +1760,10 @@ test_profunctor_dimap_works =
     -- The optimised count should be 1 — the chain of pure functions
     -- collapses into a single Arr (since 'inner' itself is an Arr).
     F.countNodes (F.optimize wrapped) @?= 1
-    -- Unoptimised, dimapT added two Arr wrappers and a Compose around
+    -- Unoptimised, dimap added two Arr wrappers and a Compose around
     -- the inner.
     assertBool
-      ("expected dimapT to wrap; unwrapped=" <> show nInner
+      ("expected dimap to wrap; unwrapped=" <> show nInner
         <> " wrapped=" <> show nWrapped)
       (nWrapped > nInner)
 
