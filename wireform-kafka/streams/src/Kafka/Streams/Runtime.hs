@@ -109,6 +109,7 @@ module Kafka.Streams.Runtime
   , ksPool
   ) where
 
+import Control.Concurrent (yield)
 import Control.Concurrent.Async (Async, async, cancel, waitCatch)
 import Control.Concurrent.STM
 import Control.Monad (forM_, unless)
@@ -534,6 +535,14 @@ eventLoop :: KafkaStreams -> StreamDriver -> Engine -> IO ()
 eventLoop ks driver engine = go
   where
     go = do
+      -- Cooperative yield each iteration so a busy loop (notably
+      -- @pollMs == 0@, used by the in-process driver / tests) can't
+      -- monopolise a capability and starve sibling threads — e.g. a
+      -- freshly-forked stream thread from another concurrently
+      -- running instance. Negligible against a real @poll@ that
+      -- blocks for @pollMs@; the fix matters when @poll@ returns
+      -- immediately.
+      yield
       status <- readTVarIO (ksStatus ks)
       unless (status == StreamsClosing || status == StreamsClosed) $ do
         drainRebalances ks driver
@@ -641,6 +650,7 @@ multiEventLoop :: KafkaStreams -> StreamDriver -> WorkerPool -> IO ()
 multiEventLoop ks driver pool = go
   where
     go = do
+      yield  -- cooperative fairness; see 'eventLoop'
       status <- readTVarIO (ksStatus ks)
       unless (status == StreamsClosing || status == StreamsClosed) $ do
         drainRebalances ks driver
@@ -743,13 +753,36 @@ closeKafkaStreams ks = closeKafkaStreamsWith ks defaultCloseOptions
 streamsStatus :: KafkaStreams -> IO StreamsStatus
 streamsStatus = readTVarIO . ksStatus
 
--- | Block until 'streamsStatus' reaches the given target. Used by
--- tests for deterministic state-transition assertions; no
--- 'threadDelay'.
+-- | Block until 'streamsStatus' reaches the given @target@ /or/ the
+-- instance settles into a /final/ state ('StreamsClosed' or
+-- 'StreamsError') from which @target@ can no longer be reached —
+-- whichever happens first.
+--
+-- This mirrors the terminal-awareness 'awaitTicks' already has, and
+-- exists for the same reason: a plain @retry until cur == target@
+-- deadlocks when the runtime races past (or dies before) the
+-- awaited state. Under parallel load a fatal record can drive
+-- @StreamsRunning -> StreamsError@ before a waiter on
+-- @StreamsRunning@ observes it, after which the exact-equality wait
+-- would 'retry' forever.
+--
+-- 'StreamsClosing' is deliberately /not/ treated as final: it always
+-- proceeds to 'StreamsClosed' (see 'closeKafkaStreamsWith'), so
+-- @'awaitState' ks 'StreamsClosed'@ still waits through it rather
+-- than returning early.
+--
+-- Returns @()@ in both the reached-target and settled-elsewhere
+-- cases; a caller that must distinguish them follows up with
+-- 'streamsStatus'. (Used by tests for deterministic,
+-- 'threadDelay'-free state coordination.)
 awaitState :: KafkaStreams -> StreamsStatus -> IO ()
 awaitState ks target = atomically $ do
   cur <- readTVar (ksStatus ks)
-  if cur == target
+  let isFinal = case cur of
+        StreamsClosed  -> True
+        StreamsError _ -> True
+        _              -> False
+  if cur == target || isFinal
     then pure ()
     else retry
 
