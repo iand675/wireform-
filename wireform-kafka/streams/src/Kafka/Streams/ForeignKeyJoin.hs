@@ -285,7 +285,7 @@ buildFKJoin _prefix extractor mode m kl kr = do
     , ktableStore      = outNm
     , ktableBuilder    = b
     , ktableKeySerde   = ktableKeySerde kl
-    , ktableValueSerde = Just serde
+    , ktableValueSerde = serde
     }
 
 -- | Trivial passthrough used as the FK-join's output anchor so

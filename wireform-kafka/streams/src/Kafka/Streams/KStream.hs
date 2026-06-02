@@ -137,7 +137,6 @@ module Kafka.Streams.KStream
   ) where
 
 import qualified Control.Concurrent.Async
-import Control.Applicative ((<|>))
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
@@ -221,19 +220,8 @@ import Kafka.Streams.Types
 data KStream k v = KStream
   { kstreamBuilder    :: !StreamsBuilder
   , kstreamParent     :: !Topo.NodeName
-  , kstreamKeySerde   :: !(Maybe (Serde k))
-    -- ^ The key codec /inherited from upstream/, when one is known.
-    -- 'Nothing' means "this edge doesn't carry a default key serde"
-    -- (e.g. a join output, whose key/value types are the joiner's
-    -- choice). Intermediate edges are never serialized — only
-    -- sinks, repartitions, and changelog-backed stores are — and
-    -- those obtain their serde from their own config ('Produced' \/
-    -- 'Repartitioned' \/ 'Materialized') or 'HasSerde'. The field is
-    -- purely an ergonomic default for the serde-omitting variants of
-    -- those boundary operations.
-  , kstreamValueSerde :: !(Maybe (Serde v))
-    -- ^ The value codec inherited from upstream, when known. See
-    -- 'kstreamKeySerde'.
+  , kstreamKeySerde   :: ~(Serde k)
+  , kstreamValueSerde :: ~(Serde v)
   }
 
 ----------------------------------------------------------------------
@@ -269,8 +257,8 @@ streamFromTopic b topic c = do
   pure KStream
     { kstreamBuilder    = b
     , kstreamParent     = nm
-    , kstreamKeySerde   = Just (consumedKeySerde c)
-    , kstreamValueSerde = Just (consumedValueSerde c)
+    , kstreamKeySerde   = consumedKeySerde c
+    , kstreamValueSerde = consumedValueSerde c
     }
 
 -- | Subscribe to every broker topic matching the supplied
@@ -307,8 +295,8 @@ streamFromPattern b pattern c = do
   pure KStream
     { kstreamBuilder    = b
     , kstreamParent     = nm
-    , kstreamKeySerde   = Just (consumedKeySerde c)
-    , kstreamValueSerde = Just (consumedValueSerde c)
+    , kstreamKeySerde   = consumedKeySerde c
+    , kstreamValueSerde = consumedValueSerde c
     }
 
 ----------------------------------------------------------------------
@@ -326,8 +314,8 @@ attachProcessor
   :: KStream k v
   -> T.Text
   -> IO (Processor k v)
-  -> Maybe (Serde k')
-  -> Maybe (Serde v')
+  -> Serde k'
+  -> Serde v'
   -> IO (KStream k' v')
 attachProcessor parent prefix supplier ks' vs' = do
   let b = kstreamBuilder parent
@@ -433,7 +421,7 @@ mapValuesMWith vs' f s =
   attachProcessor s "KSTREAM-MAPVALUES"
     (mapValuesProc @k @v @v' f)
     (kstreamKeySerde s)
-    (Just vs')
+    vs'
 
 -- Processor whose input is @Record k v@ and that forwards a
 -- @Record k v'@ via 'ctxForward'. The forward type is universally
@@ -507,8 +495,8 @@ mapKeyValueMWith
 mapKeyValueMWith ks' vs' f s =
   attachProcessor s "KSTREAM-MAP"
     (mapKVProc @k @v @k' @v' f)
-    (Just ks')
-    (Just vs')
+    ks'
+    vs'
 
 mapKVProc
   :: forall k v k' v'
@@ -582,8 +570,8 @@ mapRecordMWith
 mapRecordMWith ks' vs' f s =
   attachProcessor s "KSTREAM-MAPRECORD"
     (mapRecordProc f)
-    (Just ks')
-    (Just vs')
+    ks'
+    vs'
 
 mapRecordProc
   :: forall k v k' v'
@@ -627,7 +615,7 @@ concatMapValuesWith vs' f s =
   attachProcessor s "KSTREAM-FLATMAPVALUES"
     (concatMapValuesProc @k @v @v' f)
     (kstreamKeySerde s)
-    (Just vs')
+    vs'
 
 concatMapValuesProc
   :: forall k v v'
@@ -679,8 +667,8 @@ concatMapKeyValueWith
 concatMapKeyValueWith ks' vs' f s =
   attachProcessor s "KSTREAM-FLATMAP"
     (concatMapKVProc @k @v @k' @v' f)
-    (Just ks')
-    (Just vs')
+    ks'
+    vs'
 
 concatMapKVProc
   :: forall k v k' v'
@@ -795,7 +783,7 @@ selectKeyWith
 selectKeyWith ks' f s =
   attachProcessor s "KSTREAM-SELECTKEY"
     (selectKeyProc @k @v @k' f)
-    (Just ks')
+    ks'
     (kstreamValueSerde s)
 
 selectKeyProc
@@ -1012,7 +1000,7 @@ joinKStreamKTable joiner _j s tab = do
     { kstreamBuilder    = b
     , kstreamParent     = nm
     , kstreamKeySerde   = kstreamKeySerde s
-    , kstreamValueSerde = Just serde
+    , kstreamValueSerde = serde
     }
 
 -- | Left join: stream records always emit, with @Nothing@ on
@@ -1045,7 +1033,7 @@ leftJoinKStreamKTable joiner _j s tab = do
     { kstreamBuilder    = b
     , kstreamParent     = nm
     , kstreamKeySerde   = kstreamKeySerde s
-    , kstreamValueSerde = Just serde
+    , kstreamValueSerde = serde
     }
 
 -- | The join processor. The KTable side has already updated its store
@@ -1282,10 +1270,8 @@ buildWindowJoin sl sr jw prefix mkLeftProc mkRightProc = do
     { kstreamBuilder    = b
     , kstreamParent     = mergeNm
     , kstreamKeySerde   = kstreamKeySerde sl
-      -- A join output's value type is the joiner's choice; this edge
-      -- carries no default value serde. Downstream sinks/repartitions
-      -- supply their own (via Produced/Repartitioned/Materialized).
-    , kstreamValueSerde = Nothing
+    , kstreamValueSerde = error
+        "KStream-KStream join: downstream value Serde unset; supply via to/through"
     }
 
 -- | Build a single side's join processor.
@@ -1396,7 +1382,7 @@ transformValuesStream
   -> KStream k v
   -> IO (KStream k v')
 transformValuesStream prefix _stores supplier vs s =
-  attachProcessor s prefix supplier (kstreamKeySerde s) (Just vs)
+  attachProcessor s prefix supplier (kstreamKeySerde s) vs
 
 ----------------------------------------------------------------------
 -- KStream -> KTable conversion
@@ -1445,9 +1431,11 @@ mkKTableFromStream
   :: Topo.NodeName
   -> Kafka.Streams.State.Store.StoreName
   -> StreamsBuilder
-  -> Maybe (Serde k) -> Maybe (Serde v)
+  -> Serde k -> Serde v
   -> KTable k v
 mkKTableFromStream nm sn b ks vs =
+  -- KTable is a record with non-strict serde fields (we made them
+  -- lazy so the builder can stitch deferred error placeholders).
   Kafka.Streams.KTable.KTable nm sn b ks vs
 
 toTableProc
@@ -1534,10 +1522,10 @@ repartitionWith cfg s = do
   pure KStream
     { kstreamBuilder    = b
     , kstreamParent     = nm
-      -- Prefer the serde the 'Repartitioned' config supplies; fall
-      -- back to whatever the upstream edge carried (possibly none).
-    , kstreamKeySerde   = cfg.keySerde   <|> kstreamKeySerde s
-    , kstreamValueSerde = cfg.valueSerde <|> kstreamValueSerde s
+    , kstreamKeySerde   =
+        maybe (kstreamKeySerde s) id cfg.keySerde
+    , kstreamValueSerde =
+        maybe (kstreamValueSerde s) id cfg.valueSerde
     }
 
 ----------------------------------------------------------------------
@@ -1701,7 +1689,7 @@ mapValuesNamed nm f s = do
     { kstreamBuilder    = b
     , kstreamParent     = nodeNm
     , kstreamKeySerde   = kstreamKeySerde s
-    , kstreamValueSerde = Just serde
+    , kstreamValueSerde = serde
     }
 
 -- | 'mapKeyValue' with an explicit topology node name.
@@ -1721,8 +1709,8 @@ mapKeyValueNamed nm f s = do
   pure KStream
     { kstreamBuilder    = b
     , kstreamParent     = nodeNm
-    , kstreamKeySerde   = Just serde
-    , kstreamValueSerde = Just serde
+    , kstreamKeySerde   = serde
+    , kstreamValueSerde = serde
     }
 
 -- | 'peekStream' with an explicit topology node name.
@@ -1772,7 +1760,7 @@ selectKeyNamed nm f s = do
   pure KStream
     { kstreamBuilder    = b
     , kstreamParent     = nodeNm
-    , kstreamKeySerde   = Just serde
+    , kstreamKeySerde   = serde
     , kstreamValueSerde = kstreamValueSerde s
     }
 
@@ -1822,7 +1810,7 @@ mapValuesMNamed nm f s = do
     { kstreamBuilder    = b
     , kstreamParent     = nodeNm
     , kstreamKeySerde   = kstreamKeySerde s
-    , kstreamValueSerde = Just serde
+    , kstreamValueSerde = serde
     }
 
 -- | 'mapKeyValueM' with an explicit topology node name.
@@ -1841,8 +1829,8 @@ mapKeyValueMNamed nm f s = do
   pure KStream
     { kstreamBuilder    = b
     , kstreamParent     = nodeNm
-    , kstreamKeySerde   = Just serde
-    , kstreamValueSerde = Just serde
+    , kstreamKeySerde   = serde
+    , kstreamValueSerde = serde
     }
 
 -- | 'mapRecord' with an explicit topology node name.
@@ -1871,8 +1859,8 @@ mapRecordMNamed nm f s = do
   pure KStream
     { kstreamBuilder    = b
     , kstreamParent     = nodeNm
-    , kstreamKeySerde   = Just serde
-    , kstreamValueSerde = Just serde
+    , kstreamKeySerde   = serde
+    , kstreamValueSerde = serde
     }
 
 -- | 'concatMapValues' with an explicit topology node name.
@@ -1892,7 +1880,7 @@ concatMapValuesNamed nm f s = do
     { kstreamBuilder    = b
     , kstreamParent     = nodeNm
     , kstreamKeySerde   = kstreamKeySerde s
-    , kstreamValueSerde = Just serde
+    , kstreamValueSerde = serde
     }
 
 -- | 'concatMapKeyValue' with an explicit topology node name.
@@ -1911,8 +1899,8 @@ concatMapKeyValueNamed nm f s = do
   pure KStream
     { kstreamBuilder    = b
     , kstreamParent     = nodeNm
-    , kstreamKeySerde   = Just serde
-    , kstreamValueSerde = Just serde
+    , kstreamKeySerde   = serde
+    , kstreamValueSerde = serde
     }
 
 -- | 'valuesStream' with an explicit topology node name.
@@ -1929,7 +1917,7 @@ valuesStreamNamed nm s = do
   pure KStream
     { kstreamBuilder    = b
     , kstreamParent     = nodeNm
-    , kstreamKeySerde   = Just serde
+    , kstreamKeySerde   = serde
     , kstreamValueSerde = kstreamValueSerde s
     }
 
@@ -2032,7 +2020,7 @@ processValuesStream prefix stores supplier vs s = do
     { kstreamBuilder    = b
     , kstreamParent     = nm
     , kstreamKeySerde   = kstreamKeySerde s
-    , kstreamValueSerde = Just vs
+    , kstreamValueSerde = vs
     }
 
 ----------------------------------------------------------------------
@@ -2208,7 +2196,7 @@ valuesStream s = do
   pure KStream
     { kstreamBuilder    = b
     , kstreamParent     = nm
-    , kstreamKeySerde   = Just serde
+    , kstreamKeySerde   = serde
     , kstreamValueSerde = kstreamValueSerde s
     }
 

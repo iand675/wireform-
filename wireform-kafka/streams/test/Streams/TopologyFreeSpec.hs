@@ -17,6 +17,7 @@ module Streams.TopologyFreeSpec (tests) where
 import qualified Control.Arrow
 import Control.Arrow ((&&&), (***), (>>>))
 import qualified Control.Category as Cat
+import Control.Exception (try, evaluate)
 import Data.Profunctor (dimap)
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.HashMap.Strict as HMap
@@ -1411,18 +1412,16 @@ test_optimize_pushes_arr_through_fork =
       (after == 1 && before > 1)
 
 ----------------------------------------------------------------------
--- 35. A missing-serde Materialized yields an absent (Nothing) edge serde
+-- 35. Typed exception on a missing-serde Materialized
 ----------------------------------------------------------------------
 
 test_missing_serde_throws_typed_exception :: TestTree
 test_missing_serde_throws_typed_exception =
-  testCase "an aggregation KTable with no Materialized serde carries Nothing" $ do
+  testCase "forcing an aggregation KTable's missing serde raises TopologyFreeError" $ do
     -- A Materialized with no serdes set. The aggregation succeeds at
-    -- compile time; the resulting KTable simply carries no default
-    -- value serde on its edge ('Nothing') rather than a deferred
-    -- exception thunk. A downstream sink/join supplies the serde
-    -- (via Produced/Materialized) at the point it actually
-    -- serializes.
+    -- compile time, but the resulting KTable's serde fields are
+    -- deferred 'TopologyFreeError' thunks. Forcing one of them
+    -- should yield a catchable exception, not an opaque 'error'.
     let unset :: Materialized Text Int64
         unset = Mat.materializedAs (storeName "missing-serde-store")
 
@@ -1433,9 +1432,15 @@ test_missing_serde_throws_typed_exception =
             >>> F.count unset
 
     (kt, _topo) <- F.compile topology
-    case ktableValueSerde kt of
-      Nothing -> pure ()
-      Just _  -> error "expected the missing value serde to be Nothing"
+    -- Force the value-serde field; expect TopologyFreeError.
+    result <- try (evaluate (ktableValueSerde kt))
+    case result of
+      Left (F.MissingMaterializedSerde F.ValueSide) -> pure ()
+      Left other  ->
+        error ("expected MissingMaterializedSerde ValueSide, got: "
+                <> show other)
+      Right _ ->
+        error "expected the missing value serde to raise an exception"
 
 ----------------------------------------------------------------------
 -- 36-38. EOS atomicity of Fork / ForkN / Tap topologies

@@ -188,16 +188,17 @@ doStreamFromWindowedHandle h kserde vserde = do
             Topo.AnyProcessor (windowedAsStreamProc @k @v (wthStore h))
         , Topo.processorSpecStores   = [wthStore h]
         }
-  -- The composite @WindowedKey k@ has no default serde on this
-  -- edge; downstream sinks supply a WindowedKey-aware serde via
-  -- 'Produced'. 'kserde' (the inner key serde) is retained only
-  -- conceptually here.
+  -- 'kserde' is retained only conceptually; downstream sinks will
+  -- typically supply a WindowedKey-aware composite serde via
+  -- 'Produced' rather than relying on the KStream-carried one,
+  -- hence the explicit error placeholder.
   let _ = kserde
   pure KStream
     { kstreamBuilder    = b
     , kstreamParent     = nm
-    , kstreamKeySerde   = Nothing
-    , kstreamValueSerde = Just vserde
+    , kstreamKeySerde   = error
+        "streamFromWindowedHandle: WindowedKey serde unset; supply one to to/through"
+    , kstreamValueSerde = vserde
     }
 
 windowedAsStreamProc
@@ -831,8 +832,8 @@ streamFromSessionWindowedHandle h kserde vserde =
   pure KStream
     { kstreamBuilder    = SWKS.swthBuilder h
     , kstreamParent     = SWKS.swthNode h
-    , kstreamKeySerde   = Just kserde
-    , kstreamValueSerde = Just vserde
+    , kstreamKeySerde   = kserde
+    , kstreamValueSerde = vserde
     }
 
 ----------------------------------------------------------------------

@@ -163,7 +163,7 @@ asyncMapValuesWith vs' cfg f s =
   KS.attachProcessor s (aioName cfg)
     (asyncMapValuesProc cfg f)
     (kstreamKeySerde s)
-    (Just vs')
+    vs'
 
 -- | Async analogue of 'Kafka.Streams.KStream.mapKeyValueM'. May
 -- change both key and value; the new types' default serdes are
@@ -189,8 +189,8 @@ asyncMapKeyValueWith
 asyncMapKeyValueWith ks' vs' cfg f s =
   KS.attachProcessor s (aioName cfg)
     (asyncMapKeyValueProc cfg f)
-    (Just ks')
-    (Just vs')
+    ks'
+    vs'
 
 -- | Async analogue of 'Kafka.Streams.KStream.concatMapValues' but
 -- with effectful expansion: each input record yields zero or more
@@ -218,7 +218,7 @@ asyncConcatMapValuesWith vs' cfg f s =
   KS.attachProcessor s (aioName cfg)
     (asyncConcatMapValuesProc cfg f)
     (kstreamKeySerde s)
-    (Just vs')
+    vs'
 
 ----------------------------------------------------------------------
 -- Processor builders
