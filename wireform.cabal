@@ -75,6 +75,7 @@ common defaults
     DeriveAnyClass
     OverloadedStrings
     LambdaCase
+    DataKinds
 
 -- Multi-format code generation CLI
 executable wireform-gen

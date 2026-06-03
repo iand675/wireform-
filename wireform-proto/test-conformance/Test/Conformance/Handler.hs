@@ -176,7 +176,7 @@ serializeTAT fmt tm = case fmt of
         }
   WireFormat'Jspb -> pure (skipped "JSPB output not supported")
   WireFormat'Unspecified -> pure (serializeError "UNSPECIFIED requested_output_format")
-  WireFormat'Unknown _ -> pure (serializeError "Unknown WireFormat enum value")
+  WireFormat''Unrecognized _ -> pure (serializeError "Unknown WireFormat enum value")
 
 
 {- | Wrap an IO action that builds a 'ConformanceResponse' so
@@ -273,7 +273,7 @@ serializeTAT2 fmt tm = case fmt of
         }
   WireFormat'Jspb -> pure (skipped "JSPB output not supported")
   WireFormat'Unspecified -> pure (serializeError "UNSPECIFIED requested_output_format")
-  WireFormat'Unknown _ -> pure (serializeError "Unknown WireFormat enum value")
+  WireFormat''Unrecognized _ -> pure (serializeError "Unknown WireFormat enum value")
 
 
 hasUnknownFields2 :: TestAllTypesProto2 -> Bool

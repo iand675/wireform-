@@ -53,6 +53,7 @@ helloHandler _ = pure Response
   , responseBody    = BodyBytes "hello"
   , responseTrailers = pure []
   , responseH2StreamId = 0
+  , responsePushPromises = pure []
   , responseCancel = pure ()
   }
 
@@ -66,6 +67,7 @@ echoHandler req = do
     , responseBody    = BodyBytes body
     , responseTrailers = pure []
     , responseH2StreamId = 0
+    , responsePushPromises = pure []
     , responseCancel = pure ()
     }
 
@@ -86,6 +88,7 @@ streamHandler nChunks _ = do
             pure (Just chunk)
     , responseTrailers = pure []
     , responseH2StreamId = 0
+    , responsePushPromises = pure []
     , responseCancel = pure ()
     }
 

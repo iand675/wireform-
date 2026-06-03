@@ -261,6 +261,7 @@ testHandlerToWaiBasic = testCase "200 response round-trips" $ do
         , U.responseBody       = U.BodyBytes "ok"
         , U.responseTrailers   = pure []
         , U.responseH2StreamId = 0
+        , U.responsePushPromises = pure []
         , U.responseCancel     = pure ()
         }
       app = handlerToWai handler
@@ -292,6 +293,7 @@ testHandlerToWaiStream = testCase "streaming body round-trips" $ do
                 pure (Just c)
         , U.responseTrailers   = pure []
         , U.responseH2StreamId = 0
+        , U.responsePushPromises = pure []
         , U.responseCancel     = pure ()
         }
       app = handlerToWai handler

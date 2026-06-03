@@ -19,7 +19,6 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text as T
 import qualified Data.Vector as V
-import GHC.Generics (Generic)
 import System.CPUTime (getCPUTime)
 import System.IO (hFlush, stdout)
 import Text.Printf (printf)
@@ -41,14 +40,6 @@ instance Given ExtensionRegistry where
 
 -- A small inline schema covering the common shapes.
 $(loadProto "bench/Bench.proto")
-
--- All loadProto-generated record types already derive Generic;
--- bolt on NFData via Generic for the bench's deepseq forcing.
-deriving anyclass instance NFData Person
-deriving anyclass instance NFData Numbers
-deriving anyclass instance NFData Status
-deriving anyclass instance NFData Choice
-deriving anyclass instance NFData Choice'Choice
 
 ------------------------------------------------------------------------
 -- Test inputs
@@ -195,7 +186,7 @@ main = do
   putStrLn "Status enum (open-enum representation):"
   let !sKnown   = sampleStatus
       !sBytesK  = PE.encodeMessage sKnown
-      !sUnknown = sampleStatus { personStatus = Status'Unknown 12345 }
+      !sUnknown = sampleStatus { personStatus = Status''Unrecognized 12345 }
       !sBytesU  = PE.encodeMessage sUnknown
   bench "encode known enum"   (\_ -> PE.encodeMessage sKnown) BS.length
   bench "decode known enum"

@@ -1055,6 +1055,7 @@ benchmark wireform-kafka-bench
     build-depends:
         base,
         wireform-kafka,
+        wireform-kafka-protocol,
         async,
         binary,
         bytestring,

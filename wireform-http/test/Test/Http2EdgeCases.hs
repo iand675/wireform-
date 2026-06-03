@@ -114,6 +114,7 @@ streamingLargeBody = testCase "streaming 256 KiB response body" $
                 pure (Just chunk)
         , responseTrailers = pure []
         , responseH2StreamId = 0
+        , responsePushPromises = pure []
         , responseCancel = pure ()
         }
 
@@ -223,6 +224,7 @@ emptyStreamingResponse = testCase "streaming body that immediately returns Nothi
       , responseBody    = BodyStream (pure Nothing)
       , responseTrailers = pure []
       , responseH2StreamId = 0
+      , responsePushPromises = pure []
       , responseCancel = pure ()
       }
 
@@ -303,6 +305,7 @@ resp status body = Response
   , responseBody     = if BS.null body then BodyEmpty else BodyBytes body
   , responseTrailers = pure []
   , responseH2StreamId = 0
+  , responsePushPromises = pure []
   , responseCancel = pure ()
   }
 

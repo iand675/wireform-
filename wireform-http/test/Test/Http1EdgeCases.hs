@@ -101,6 +101,7 @@ noContent204 = testCase "204 No Content has no body" $
       , responseBody    = BodyEmpty
       , responseTrailers = pure []
       , responseH2StreamId = 0
+      , responsePushPromises = pure []
       , responseCancel = pure ()
       }
 
@@ -177,6 +178,7 @@ streamingLargeBody = testCase "streaming 5-chunk response body" $
               (h:t) -> writeIORef ref t >> pure (Just h)
         , responseTrailers = pure []
         , responseH2StreamId = 0
+        , responsePushPromises = pure []
         , responseCancel = pure ()
         }
 
@@ -300,6 +302,7 @@ resp status body = Response
   , responseBody     = if BS.null body then BodyEmpty else BodyBytes body
   , responseTrailers = pure []
   , responseH2StreamId = 0
+  , responsePushPromises = pure []
   , responseCancel = pure ()
   }
 

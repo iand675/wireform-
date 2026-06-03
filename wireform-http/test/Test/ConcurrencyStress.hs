@@ -278,6 +278,7 @@ resp200 ver body = Response
   , responseBody     = if BS.null body then BodyEmpty else BodyBytes body
   , responseTrailers = pure []
   , responseH2StreamId = 0
+  , responsePushPromises = pure []
   , responseCancel = pure ()
   }
 

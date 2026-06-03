@@ -85,6 +85,7 @@ streamingResponse = testCase "streaming response body arrives chunk-wise" $
               (h:t) -> writeIORef ref t >> pure (Just h)
         , responseTrailers = pure []
         , responseH2StreamId = 0
+        , responsePushPromises = pure []
         , responseCancel = pure ()
         }
 
@@ -211,6 +212,7 @@ resp200 body = Response
   , responseBody     = if BS.null body then BodyEmpty else BodyBytes body
   , responseTrailers = pure []
   , responseH2StreamId = 0
+  , responsePushPromises = pure []
   , responseCancel = pure ()
   }
 

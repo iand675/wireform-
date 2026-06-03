@@ -66,6 +66,7 @@ common defaults
     DeriveAnyClass
     OverloadedStrings
     LambdaCase
+    DataKinds
 
 library
   import: defaults

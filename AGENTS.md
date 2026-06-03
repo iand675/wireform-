@@ -47,6 +47,6 @@ Subsequent builds reuse `~/.cabal/store` and are much faster.
 
 ### Gotchas
 
-- **`cabal build all` and proto TH targets:** On some checkouts, `wireform-proto` components `exe:wireform-conformance-runner` and `test:wireform-proto-derive-test` can fail Template Haskell expansion (`Illegal type: … Perhaps you intended to use DataKinds`) while the rest of the workspace still builds. Umbrella tests and examples (`wireform-test`, `example-derive`, format packages) are unaffected; treat proto conformance executables as optional until that is fixed upstream.
+- **`loadProto` splices need `DataKinds`:** Any Cabal stanza that calls `loadProto` must enable `DataKinds` (wired into `wireform.cabal` / `wireform-proto.cabal` defaults). Open-enum wire values use a synthetic `Type''Unrecognized` constructor, not `Type'Unknown`.
 - **First build is slow** — use `-j2` on small cloud VMs; see [agents.md — Toolchain](agents.md#toolchain).
 - **Heavy optional flags** (`+python-interop`, `+dataframe-bridge`, etc.) are off by default; see the Cabal flags table in [agents.md](agents.md#cabal-flags-worth-knowing).

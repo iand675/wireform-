@@ -76,9 +76,9 @@ tests =
             PS.fromProtoEnumValue 0 @?= Just Status'StatusUnspecified
             PS.fromProtoEnumValue 1 @?= Just Status'StatusActive
             -- Open-enum representation: an unknown wire value
-            -- now round-trips through the synthetic 'Unknown'
+            -- now round-trips through the synthetic 'Unrecognized'
             -- variant rather than disappearing as 'Nothing'.
-            PS.fromProtoEnumValue 99 @?= Just (Status'Unknown 99)
+            PS.fromProtoEnumValue 99 @?= Just (Status''Unrecognized 99)
         , testCase "protoEnumValues lists every declared value" $ do
             let values = PS.protoEnumValues (Proxy :: Proxy Status)
             values

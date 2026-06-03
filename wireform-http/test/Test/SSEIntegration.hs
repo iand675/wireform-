@@ -300,6 +300,7 @@ serverError5xx = testCase "server 500 surfaces as SseUnexpectedStatus" $ do
         , Msg.responseBody       = TB.BodyEmpty
         , Msg.responseTrailers   = pure []
         , Msg.responseH2StreamId = 0
+        , Msg.responsePushPromises = pure []
         , Msg.responseCancel     = pure ()
         }
   withTestServer http1Only handler $ \port -> do
@@ -324,6 +325,7 @@ serverWrongContentType =
         , Msg.responseBody       = TB.BodyBytes "not an event stream"
         , Msg.responseTrailers   = pure []
         , Msg.responseH2StreamId = 0
+        , Msg.responsePushPromises = pure []
         , Msg.responseCancel     = pure ()
         }
   withTestServer http1Only handler $ \port -> do
@@ -521,6 +523,7 @@ withSseServerOn ver cap mkBody producer = withTestServer ver handler
         , Msg.responseBody       = mkBody ch
         , Msg.responseTrailers   = pure []
         , Msg.responseH2StreamId = 0
+        , Msg.responsePushPromises = pure []
         , Msg.responseCancel     = pure ()
         }
 
