@@ -3,7 +3,9 @@ version: "3.8"
 # Live-broker Docker fixture for the wireform-kafka integration
 # suite.  Bring up with:
 #
-#   docker compose -f wireform-kafka/test-integration/docker-compose.yml up -d
+#   ./scripts/kafka-docker.sh start
+#   # or: docker compose -f wireform-kafka/test-integration/docker-compose.yml up -d
+#       ./scripts/kafka-docker.sh wait-ready
 #   WIREFORM_KAFKA_BROKER=localhost:9092 cabal test \
 #     wireform-kafka:wireform-kafka-integration \
 #     wireform-kafka:wireform-kafka-streams-integration

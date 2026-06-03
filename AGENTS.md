@@ -37,13 +37,33 @@ Subsequent builds reuse `~/.cabal/store` and are much faster.
 - `cabal run example-msgpack` — schema-less roundtrip
 - `cabal run payments-pipeline -- demo` — Kafka Streams topology in `TopologyTestDriver` (no broker)
 
-### Optional services
+### Kafka (live broker)
+
+Integration tests and `payments-pipeline server` need a broker on **localhost:9092**. The repo ships a single-node KRaft fixture:
+
+```bash
+# Requires Docker (see wireform-kafka/test-integration/docker-compose.yml).
+# On cloud VMs you may need: sudo ./scripts/kafka-docker.sh …
+./scripts/kafka-docker.sh start    # up + CI-style readiness + test topics
+./scripts/kafka-docker.sh status
+export WIREFORM_KAFKA_BROKER=localhost:9092
+cabal test wireform-kafka:wireform-kafka-integration \
+         wireform-kafka:wireform-kafka-streams-integration
+./scripts/kafka-docker.sh stop     # down -v
+```
+
+`start` runs the same three readiness stages as `.github/workflows/wireform-kafka-integration.yml` (admin API, transaction coordinator, partition leaders) and pre-creates topics the suites expect. Plain `docker compose up -d` alone often races the Haskell tests.
+
+**payments-pipeline (full path):** with the broker running, `cabal run payments-pipeline -- server 50051 localhost:9092` and `cabal run payments-pipeline -- client localhost 50051` in another shell.
+
+Without Docker, use `nix develop` and `start-kafka` (see `wireform-kafka/INTEGRATION_TESTING.md`).
+
+### Other optional services
 
 | Service | Start | Notes |
 |---------|--------|--------|
-| Kafka (integration tests) | `docker compose -f wireform-kafka/test-integration/docker-compose.yml up -d` | Then `WIREFORM_KAFKA_BROKER=localhost:9092` for relevant `cabal test` targets |
 | Docs site | `cd website && npm install && npm run dev` | http://localhost:4321/wireform-/ |
-| Nix dev shell | `nix develop` or `nix develop .#ghc98` | Alternative to ghcup; provides fourmolu, prek, native libs |
+| Nix dev shell | `nix develop` or `nix develop .#ghc98` | Alternative to ghcup; provides fourmolu, prek, native libs, `start-kafka` |
 
 ### Gotchas
 
