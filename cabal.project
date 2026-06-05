@@ -49,6 +49,7 @@ packages:
   wireform-stats/
   wireform-cel/
   wireform-protovalidate/
+  wireform-tty/
   examples/payments-pipeline/
 
 package *

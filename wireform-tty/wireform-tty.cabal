@@ -1,0 +1,103 @@
+cabal-version: 3.0
+name: wireform-tty
+version: 0.1.0.0
+synopsis: Type-safe terminal UI toolkit: styling, text reflow, and an Elm-architecture runtime
+description:
+  A type-safe terminal user interface toolkit, ported faithfully from the Go
+  Bubble Tea ecosystem (bubbletea / lipgloss / bubbles / reflow) but given
+  straightforward, brand-free module names:
+
+  * @TTY.Style@ — declarative terminal styling (colors, borders, padding,
+    margins, alignment, joining, placement). Includes the @termenv@ color
+    model and the @go-colorful@ HSLuv color degradation used for
+    truecolor -> 256 -> 16 color conversion.
+  * @TTY.Text.*@ — ANSI-aware text reflowing: word-wrap, hard-wrap, truncate,
+    indent, padding, dedent.
+  * @TTY.Program@ — The Elm Architecture runtime. Unlike the Go original,
+    where @Msg = interface{}@ (dynamic), this port is parameterized over a
+    concrete message type, so the runtime loop never goes through
+    @Data.Dynamic@ / @Typeable@.
+  * @TTY.Widget.*@ — reusable components: key bindings, help, spinner, text
+    input, paginator, progress, viewport, cursor, stopwatch, timer.
+
+license: BSD-3-Clause
+license-file: LICENSE
+author: Ian Duncan
+maintainer: ian@iankduncan.com
+copyright: 2026 Ian Duncan
+build-type: Simple
+
+common defaults
+  ghc-options:
+    -Wall
+    -Wcompat
+    -Widentities
+    -Wincomplete-record-updates
+    -Wincomplete-uni-patterns
+    -Wpartial-fields
+    -Wredundant-constraints
+  default-language: GHC2021
+  default-extensions:
+    StrictData
+    DerivingStrategies
+    OverloadedStrings
+    LambdaCase
+
+library
+  import: defaults
+  hs-source-dirs: src
+  exposed-modules:
+    TTY.Ansi
+    TTY.Color
+    TTY.Color.HSLuv
+    TTY.Style
+    TTY.Style.Border
+    TTY.Style.Color
+    TTY.Text.Wrap
+    TTY.Text.HardWrap
+    TTY.Text.Truncate
+    TTY.Text.Indent
+    TTY.Text.Padding
+    TTY.Text.Dedent
+    TTY.Program
+    TTY.Program.Key
+    TTY.Program.Mouse
+    TTY.Program.Command
+    TTY.Program.Runtime
+    TTY.Widget.Key
+    TTY.Widget.Help
+    TTY.Widget.Spinner
+    TTY.Widget.TextInput
+    TTY.Widget.Paginator
+    TTY.Widget.Progress
+    TTY.Widget.Viewport
+    TTY.Widget.Cursor
+    TTY.Widget.Stopwatch
+    TTY.Widget.Timer
+    TTY.Widget.RuneUtil
+  build-depends:
+    base >= 4.16 && < 5,
+    text >= 2.0 && < 2.2,
+    bytestring >= 0.11 && < 0.13,
+    containers >= 0.6 && < 0.9,
+    time >= 1.11 && < 1.15,
+    stm >= 2.5 && < 2.6,
+    unix >= 2.7 && < 2.9
+
+test-suite wireform-tty-test
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is: Main.hs
+  other-modules:
+    Test.TTY.Style
+    Test.TTY.Color
+    Test.TTY.Text
+    Test.TTY.Program
+    Test.TTY.Widget
+  build-depends:
+    base,
+    wireform-tty,
+    text,
+    containers,
+    sydtest
