@@ -42,7 +42,13 @@ inferSyntax input =
   let stripped = T.dropWhile isLineBreak input
   in if T.isPrefixOf "ISA" stripped
        then inferIsaSyntax stripped
-       else Right defaultSyntax
+       else if T.isPrefixOf "UNA" stripped
+         then inferUnaSyntax stripped
+         else if T.isPrefixOf "UNB" stripped
+           then Right edifactSyntax
+           else if T.isPrefixOf "MSH" stripped
+             then inferHL7Syntax stripped
+             else Right defaultSyntax
 
 inferIsaSyntax :: Text -> Either String Syntax
 inferIsaSyntax input
@@ -104,3 +110,36 @@ parseElement syn t
 parseSegmentElement :: Syntax -> Text -> Int -> Text -> Element
 parseSegmentElement _ "ISA" 15 t = Simple t
 parseSegmentElement syn _ _ t = parseElement syn t
+
+inferUnaSyntax :: Text -> Either String Syntax
+inferUnaSyntax input
+  | T.length input < 9 =
+      Left "EDI.Decode: UNA service string advice is too short"
+  | otherwise =
+      let repetition = T.index input 7
+      in Right Syntax
+          { componentSeparator = T.index input 3
+          , elementSeparator = T.index input 4
+          , repetitionSeparator = if repetition == ' ' then Nothing else Just repetition
+          , segmentTerminator = T.index input 8
+          }
+
+edifactSyntax :: Syntax
+edifactSyntax = Syntax
+  { elementSeparator = '+'
+  , componentSeparator = ':'
+  , repetitionSeparator = Nothing
+  , segmentTerminator = '\''
+  }
+
+inferHL7Syntax :: Text -> Either String Syntax
+inferHL7Syntax input
+  | T.length input < 6 =
+      Left "EDI.Decode: HL7 MSH segment is too short to infer delimiters"
+  | otherwise =
+      Right Syntax
+        { elementSeparator = T.index input 3
+        , componentSeparator = T.index input 4
+        , repetitionSeparator = Just (T.index input 5)
+        , segmentTerminator = '\r'
+        }

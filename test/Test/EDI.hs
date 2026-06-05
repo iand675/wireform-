@@ -12,8 +12,10 @@ import Test.Syd
 import Test.Syd.Hedgehog ()
 
 import qualified EDI.Decode as Decode
+import qualified EDI.EDIFACT as EDIFACT
 import qualified EDI.Encode as Encode
 import qualified EDI.Query as Query
+import qualified EDI.Standard as Standard
 import qualified EDI.Validation as Validation
 import EDI.Value
 import qualified EDI.X12 as X12
@@ -22,6 +24,8 @@ ediTests :: Spec
 ediTests = describe "EDI" $ sequence_
   [ decodeTests
   , encodeTests
+  , standardTests
+  , edifactTests
   , queryTests
   , validationTests
   , x12Tests
@@ -127,6 +131,60 @@ encodeTests = describe "encode" $ sequence_
         `shouldBe` "A^B^C>D!"
   ]
 
+standardTests :: Spec
+standardTests = describe "standards registry" $ sequence_
+  [ it "has profiles for every named standard family" $
+      V.map Standard.profileStandard Standard.allStandards `shouldBe`
+        V.fromList
+          [ Standard.UNEDIFACT
+          , Standard.ANSIASCX12
+          , Standard.GS1EDI
+          , Standard.TRADACOMS
+          , Standard.ODETTE
+          , Standard.VDA
+          , Standard.HL7
+          , Standard.HIPAA
+          , Standard.IATACargoIMP
+          , Standard.NCPDPScript
+          , Standard.NCPDPTelecom
+          , Standard.EDIGAS
+          ]
+  , it "detects representative payloads for each standard family" $ do
+      Standard.detectStandard edifactSample `shouldBe` Just Standard.UNEDIFACT
+      Standard.detectStandard x12Sample `shouldBe` Just Standard.ANSIASCX12
+      Standard.detectStandard gs1Sample `shouldBe` Just Standard.GS1EDI
+      Standard.detectStandard tradacomsSample `shouldBe` Just Standard.TRADACOMS
+      Standard.detectStandard odetteSample `shouldBe` Just Standard.ODETTE
+      Standard.detectStandard vdaSample `shouldBe` Just Standard.VDA
+      Standard.detectStandard hl7Sample `shouldBe` Just Standard.HL7
+      Standard.detectStandard hipaaSample `shouldBe` Just Standard.HIPAA
+      Standard.detectStandard cargoImpSample `shouldBe` Just Standard.IATACargoIMP
+      Standard.detectStandard ncpdpScriptSample `shouldBe` Just Standard.NCPDPScript
+      Standard.detectStandard ncpdpTelecomSample `shouldBe` Just Standard.NCPDPTelecom
+      Standard.detectStandard edigasSample `shouldBe` Just Standard.EDIGAS
+  ]
+
+edifactTests :: Spec
+edifactTests = describe "EDIFACT" $ sequence_
+  [ it "parses UNA service string advice" $
+      EDIFACT.parseServiceStringAdvice "UNA:+.? '" `shouldBe`
+        Right EDIFACT.defaultServiceStringAdvice
+  , it "decodes release-escaped separators" $ do
+      doc <- either expectationFailure pure (EDIFACT.decodeEDIFACT edifactSample)
+      bgm <- either expectationFailure pure (Query.requireSegmentByTag "BGM" doc)
+      Query.requireElementText 1 bgm `shouldBe` Right "PO+123"
+  , it "validates UNB/UNH/UNT/UNZ counts and references" $ do
+      doc <- either expectationFailure pure (EDIFACT.decodeEDIFACT edifactSample)
+      env <- either (expectationFailure . show) pure (EDIFACT.parseEdifactEnvelope doc)
+      V.length (EDIFACT.edifactMessages env) `shouldBe` 1
+      EDIFACT.validateEdifact doc `shouldBe` Right ()
+  , it "reports EDIFACT message reference mismatches" $ do
+      doc <- either expectationFailure pure (EDIFACT.decodeEDIFACT (T.replace "UNT+3+1" "UNT+3+2" edifactSample))
+      case EDIFACT.validateEdifact doc of
+        Left errs -> V.any isEdifactControlMismatch errs `shouldBe` True
+        Right () -> expectationFailure "expected EDIFACT control-reference validation failure"
+  ]
+
 propertyRoundtrips :: Spec
 propertyRoundtrips = describe "property roundtrips" $ sequence_
   [ it "round-trips generated simple interchanges" $ property $ do
@@ -157,6 +215,54 @@ genElementChar =
 isControlMismatch :: X12.X12Error -> Bool
 isControlMismatch (X12.X12ControlNumberMismatch _ _ _) = True
 isControlMismatch _ = False
+
+isEdifactControlMismatch :: EDIFACT.EdifactError -> Bool
+isEdifactControlMismatch (EDIFACT.EdifactControlReferenceMismatch _ _ _) = True
+isEdifactControlMismatch _ = False
+
+edifactSample :: Text
+edifactSample =
+  "UNA:+.? 'UNB+UNOC:3+SENDER+RECEIVER+260605:1914+1'UNH+1+ORDERS:D:96A:UN'BGM+220+PO?+123'UNT+3+1'UNZ+1+1'"
+
+gs1Sample :: Text
+gs1Sample =
+  "UNB+UNOC:3+5412345000013:14+8798765432106:14+260605:1914+1'UNH+1+ORDERS:D:96A:UN:EAN008'UNT+2+1'UNZ+1+1'"
+
+tradacomsSample :: Text
+tradacomsSample =
+  "STX=ANA:1+5012345000000:STORE+5098765000000:SUPPLIER+260605:1914+1'"
+
+odetteSample :: Text
+odetteSample =
+  "UNB+UNOC:3+OEM+SUPPLIER+260605:1914+1'UNH+1+DELINS:D:96A:UN:ODETTE'UNT+2+1'UNZ+1+1'"
+
+vdaSample :: Text
+vdaSample =
+  "VDA4905 0000000001"
+
+hl7Sample :: Text
+hl7Sample =
+  "MSH|^~\\&|LAB|A|EHR|B|202606051914||ADT^A01|1|P|2.5\rPID|1||12345\r"
+
+hipaaSample :: Text
+hipaaSample =
+  "ISA*00*          *00*          *ZZ*SENDER         *ZZ*RECEIVER       *260605*1914*U*00501*000000001*0*T*:~GS*HC*SENDER*RECEIVER*20260605*1914*1*X*005010X222A1~ST*837*0001~SE*2*0001~GE*1*1~IEA*1*000000001~"
+
+cargoImpSample :: Text
+cargoImpSample =
+  "FWB/16\n"
+
+ncpdpScriptSample :: Text
+ncpdpScriptSample =
+  "<SCRIPT><Header><To>pharmacy</To></Header></SCRIPT>"
+
+ncpdpTelecomSample :: Text
+ncpdpTelecomSample =
+  "NCPDP B1 claim billing"
+
+edigasSample :: Text
+edigasSample =
+  "UNB+UNOC:3+SHIPPER+TSO+260605:1914+1'UNH+1+NOMINT:D:01B:UN:EDIGAS'UNT+2+1'UNZ+1+1'"
 
 x12Sample :: Text
 x12Sample =

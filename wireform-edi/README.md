@@ -7,9 +7,10 @@
 
 Electronic Data Interchange (EDI) segment tooling for Haskell. The package
 models delimiter syntax explicitly, parses ordered segments into a dynamic ADT,
-infers X12 delimiters from `ISA` headers, validates envelopes and control
-numbers, generates accepted 997 acknowledgements, and exposes annotation-driven
-Template Haskell deriving for typed segment records.
+infers X12 delimiters from `ISA` headers, understands UN/EDIFACT `UNA`
+service strings, validates envelopes and control numbers, generates accepted
+997 acknowledgements, and exposes annotation-driven Template Haskell deriving
+for typed segment records.
 
 This package is part of the [wireform](https://github.com/iand675/wireform-)
 monorepo and shares its annotation deriver and testing discipline with every
@@ -75,12 +76,20 @@ deriveEDI ''NameSegment
 | `EDI.Value` | `Syntax`, `Interchange`, `Segment`, and `Element` ADTs |
 | `EDI.Encode` | Text and UTF-8 rendering |
 | `EDI.Decode` | Parser with X12 `ISA` delimiter inference |
+| `EDI.EDIFACT` | UN/EDIFACT `UNA` parsing, release-aware decoding, and UNB/UNH/UNT/UNZ validation |
 | `EDI.Class` | `ToEDI` / `FromEDI` and field-level scalar classes |
 | `EDI.Derive` | Template Haskell deriver for typed segment records |
 | `EDI.Encoding` | Small builder wrapper used by encoders |
 | `EDI.Query` | Segment lookup, element access, and tag counting helpers |
+| `EDI.Standard` | Profiles and detection for UN/EDIFACT, X12, GS1 EDI, TRADACOMS, ODETTE, VDA, HL7, HIPAA, IATA Cargo-IMP, NCPDP SCRIPT, NCPDP Telecom, and EDIGAS |
 | `EDI.Validation` | Generic delimiter-safety and structural validation |
 | `EDI.X12` | X12 envelope grouping, control validation, and 997 acknowledgements |
+
+`EDI.Standard` covers standards that are not all the same physical syntax.
+Delimiter-separated families get a `Syntax`; XML-oriented families like NCPDP
+SCRIPT and fixed-width families like VDA are registered and detectable, but
+their payload-specific parsers belong in dedicated modules before the dynamic
+`Segment` ADT can represent them losslessly.
 
 ## Testing
 
@@ -89,9 +98,9 @@ cabal test wireform-edi:wireform-edi-derive-test
 cabal test wireform-test --test-show-details=streaming
 ```
 
-The tests cover dynamic segment parsing, X12 delimiter inference, envelope
-validation, 997 generation, encode/decode round-trips, and TH-derived segment
-codecs.
+The tests cover dynamic segment parsing, standard-family detection, EDIFACT
+release-character decoding, X12 delimiter inference, envelope validation, 997
+generation, encode/decode round-trips, and TH-derived segment codecs.
 
 ## License
 

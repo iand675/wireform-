@@ -7,9 +7,10 @@ sidebar:
 
 `wireform-edi` implements delimiter-sensitive EDI segment streams. It models
 the concrete interchange syntax, decodes ordered segments into a dynamic ADT,
-infers X12 delimiters from `ISA` headers, validates X12 envelopes and control
-counts, generates accepted 997 acknowledgements, and derives typed codecs for
-segment records through the shared `wireform-derive` annotation vocabulary.
+infers X12 delimiters from `ISA` headers, parses UN/EDIFACT `UNA` service
+strings, validates EDIFACT and X12 envelopes, generates accepted 997
+acknowledgements, and derives typed codecs for segment records through the
+shared `wireform-derive` annotation vocabulary.
 
 ## Key features
 
@@ -17,6 +18,10 @@ segment records through the shared `wireform-derive` annotation vocabulary.
 - **Explicit syntax** for element, component, repetition, and segment
   delimiters
 - **X12 `ISA` delimiter inference** when decoding full interchanges
+- **UN/EDIFACT helpers** for `UNA`, release-character decoding, and
+  UNB/UNH/UNT/UNZ control validation
+- **Standards registry** for UN/EDIFACT, X12, GS1 EDI, TRADACOMS, ODETTE,
+  VDA, HL7, HIPAA, IATA Cargo-IMP, NCPDP SCRIPT, NCPDP Telecom, and EDIGAS
 - **Query helpers** for tag lookup, element access, and segment counts
 - **Validation** for delimiter safety plus X12 control numbers and segment counts
 - **997 acknowledgement generation** for accepted functional groups
@@ -48,8 +53,10 @@ decoded = Decode.decode encoded
 |--------|---------|
 | `EDI.Value` | `Syntax`, `Interchange`, `Segment`, and `Element` |
 | `EDI.Encode` / `EDI.Decode` | Low-level text encode and decode |
+| `EDI.EDIFACT` | UN/EDIFACT service strings, decoding, and envelope validation |
 | `EDI.Class` | `ToEDI` / `FromEDI` plus scalar element classes |
 | `EDI.Derive` | Template Haskell deriver with `wireform-derive` annotations |
 | `EDI.Query` | Segment and element lookup helpers |
+| `EDI.Standard` | Standard profiles and detection |
 | `EDI.Validation` | Generic structural validation |
 | `EDI.X12` | X12 envelope parsing, validation, and 997 generation |

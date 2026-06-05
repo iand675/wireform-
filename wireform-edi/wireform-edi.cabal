@@ -35,9 +35,11 @@ library
     EDI.Class
     EDI.Decode
     EDI.Derive
+    EDI.EDIFACT
     EDI.Encode
     EDI.Encoding
     EDI.Query
+    EDI.Standard
     EDI.Validation
     EDI.Value
     EDI.X12
