@@ -1,0 +1,68 @@
+cabal-version: 3.0
+name: wireform-edi
+version: 0.1.0.0
+synopsis: EDI interchange encoding/decoding
+license: BSD-3-Clause
+license-file: LICENSE
+author: Ian Duncan
+maintainer: ian@iankduncan.com
+copyright: 2026 Ian Duncan
+build-type: Simple
+
+common defaults
+  ghc-options:
+    -Wall
+    -Wcompat
+    -Widentities
+    -Wincomplete-record-updates
+    -Wincomplete-uni-patterns
+    -Wpartial-fields
+    -Wredundant-constraints
+    -O2
+  default-language: GHC2021
+  default-extensions:
+    StrictData
+    DerivingStrategies
+    DeriveGeneric
+    DeriveAnyClass
+    OverloadedStrings
+    LambdaCase
+
+library
+  import: defaults
+  hs-source-dirs: src
+  exposed-modules:
+    EDI.Class
+    EDI.Decode
+    EDI.Derive
+    EDI.Encode
+    EDI.Encoding
+    EDI.Value
+  build-depends:
+    base >= 4.16 && < 5,
+    wireform-derive,
+    bytestring >= 0.11 && < 0.13,
+    text >= 2.0 && < 2.2,
+    vector >= 0.13 && < 0.14,
+    deepseq >= 1.4 && < 1.6,
+    template-haskell >= 2.18 && < 2.24
+
+test-suite wireform-edi-derive-test
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is: Main.hs
+  other-modules:
+    Test.EDI.Derive
+    Test.EDI.Derive.Types
+    Test.EDI.Derive.Instances
+  default-extensions:
+    ScopedTypeVariables
+    TemplateHaskell
+  build-depends:
+    base,
+    wireform-edi,
+    wireform-derive,
+    text,
+    vector,
+    sydtest

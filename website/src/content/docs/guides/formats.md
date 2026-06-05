@@ -52,6 +52,7 @@ ADT for dynamic messages.
 | HTML5 | `wireform-html` | `HTML.Class` | Spec-compliant tree builder, CSS selectors (`HTML.Selector`), streaming rewriter (`HTML.Rewriter`) |
 | YAML | `wireform-yaml` | `YAML.Class` | YAML 1.2, 100% yaml-test-suite conformance, annotated AST, JSON bridge |
 | TOML | `wireform-toml` | `TOML.Class` | TOML 1.0/1.1, toml-test conformant |
+| EDI | `wireform-edi` | `EDI.Class` | X12-style segment streams, ISA delimiter inference, TH-derived segment records |
 | CSV | `wireform-csv` | `CSV.Class` | CSV / TSV / pipe-separated |
 | NDJSON | `wireform-ndjson` | `NDJSON.Class` | Newline-delimited JSON, incremental decoder |
 

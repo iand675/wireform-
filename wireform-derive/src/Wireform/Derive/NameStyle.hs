@@ -114,7 +114,7 @@ resolveIdiomatic b = go
 -- * 'backendTOML' → 'SnakeCase'.
 -- * 'backendXML' → 'PascalCase'.
 -- * 'backendCBOR' / 'backendMsgPack' / 'backendThrift' / 'backendBinary' /
---   'backendCSV' / 'backendTextFormat' → 'NoStyle' (selector base used
+--   'backendCSV' / 'backendEDI' / 'backendTextFormat' → 'NoStyle' (selector base used
 --   verbatim).
 --
 -- Downstream backends not listed here fall through to 'NoStyle'.
@@ -141,6 +141,7 @@ idiomaticFor b
   | b == backendThrift      = NoStyle
   | b == backendBinary      = NoStyle
   | b == backendCSV         = NoStyle
+  | b == backendEDI         = NoStyle
   | b == backendTextFormat  = NoStyle
   | b == backendASN1        = NoStyle  -- ASN.1 names are positional
   | b == backendBencode     = NoStyle  -- byte-string keys, verbatim

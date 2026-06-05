@@ -137,6 +137,7 @@ only need CBOR, you only build CBOR.
 | [`wireform-toml`](wireform-toml/README.md) | TOML 1.0/1.1 |
 | [`wireform-yaml`](wireform-yaml/README.md) | YAML 1.2 (100% conformance, no C deps, billion-laughs hardened) |
 | [`wireform-edn`](wireform-edn/README.md) | Extensible Data Notation |
+| [`wireform-edi`](wireform-edi/README.md) | Electronic Data Interchange segment streams |
 | [`wireform-bencode`](wireform-bencode/README.md) | BitTorrent bencode |
 | [`wireform-csv`](wireform-csv/README.md) | CSV / TSV |
 | [`wireform-ndjson`](wireform-ndjson/README.md) | Newline-delimited JSON |

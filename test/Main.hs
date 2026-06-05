@@ -23,6 +23,7 @@ import Test.Arrow.RecordProperties (arrowRecordProperties)
 import Test.Columnar (columnarFacadeTests)
 import Test.Columnar.Properties (columnarPropertyTests)
 import Test.EDN (ednTests)
+import Test.EDI (ediTests)
 import Test.MsgPackRPC (msgPackRPCTests)
 import Test.CBORDiagnostic (cborDiagnosticTests)
 import Test.Streaming (streamingTests)
@@ -75,6 +76,7 @@ main = sydTest $ describe "wireform" $ sequence_
   , columnarFacadeTests
   , columnarPropertyTests
   , ednTests
+  , ediTests
   , classTests
   , msgPackRPCTests
   , cborDiagnosticTests
