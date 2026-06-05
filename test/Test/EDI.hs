@@ -102,7 +102,7 @@ x12Tests = describe "X12 helpers" $ sequence_
       Query.countSegments "AK5" ack `shouldBe` 1
       Query.countSegments "AK9" ack `shouldBe` 1
       Encode.encode ack `shouldBe`
-        "ISA*00*          *00*          *ZZ*RECEIVER       *ZZ*SENDER         *260605*1914*U*004010*000000002*0*T*:~GS*FA*RECEIVER*SENDER*20260605*1914*2*X*004010~ST*997*0001~AK1*PO*1~AK2*850*0001~AK5*A~AK9*A*1*1*1~SE*6*0001~GE*1*2~IEA*1*000000002~"
+        "ISA*00*          *00*          *ZZ*RECEIVER       *ZZ*SENDER         *260605*1914*U*00401*000000002*0*T*:~GS*FA*RECEIVER*SENDER*20260605*1914*2*X*004010~ST*997*0001~AK1*PO*1~AK2*850*0001~AK5*A~AK9*A*1*1*1~SE*6*0001~GE*1*2~IEA*1*000000002~"
   ]
 
 encodeTests :: Spec
@@ -160,7 +160,7 @@ isControlMismatch _ = False
 
 x12Sample :: Text
 x12Sample =
-  "ISA*00*          *00*          *ZZ*SENDER         *ZZ*RECEIVER       *260605*1914*U*004010*000000001*0*T*:~GS*PO*SENDER*RECEIVER*20260605*1914*1*X*004010~ST*850*0001~BEG*00*SA*12345~SE*3*0001~GE*1*1~IEA*1*000000001~"
+  "ISA*00*          *00*          *ZZ*SENDER         *ZZ*RECEIVER       *260605*1914*U*00401*000000001*0*T*:~GS*PO*SENDER*RECEIVER*20260605*1914*1*X*004010~ST*850*0001~BEG*00*SA*12345~SE*3*0001~GE*1*1~IEA*1*000000001~"
 
 ackSettings :: X12.AckSettings
 ackSettings = X12.defaultAckSettings
@@ -172,7 +172,8 @@ ackSettings = X12.defaultAckSettings
   , X12.ackInterchangeControlNumber = "2"
   , X12.ackGroupControlNumber = "2"
   , X12.ackTransactionControlNumber = "0001"
-  , X12.ackVersion = "004010"
+  , X12.ackInterchangeVersion = "00401"
+  , X12.ackGroupVersion = "004010"
   }
 
 isaSample :: Text

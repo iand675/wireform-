@@ -69,7 +69,8 @@ data AckSettings = AckSettings
   , ackInterchangeControlNumber :: !Text
   , ackGroupControlNumber :: !Text
   , ackTransactionControlNumber :: !Text
-  , ackVersion :: !Text
+  , ackInterchangeVersion :: !Text
+  , ackGroupVersion :: !Text
   }
   deriving stock (Show, Eq)
 
@@ -86,7 +87,8 @@ defaultAckSettings = AckSettings
   , ackInterchangeControlNumber = "000000001"
   , ackGroupControlNumber = "1"
   , ackTransactionControlNumber = "0001"
-  , ackVersion = "004010"
+  , ackInterchangeVersion = "00401"
+  , ackGroupVersion = "004010"
   }
 
 parseX12Envelope :: Interchange -> Either (Vector X12Error) X12Envelope
@@ -289,37 +291,37 @@ ackTransactionSet settings ix group =
     control = indexedControl (ackTransactionControlNumber settings) ix
     txCount = V.length (groupTransactions group)
     segmentCount = 4 + (2 * txCount)
-    st = seg "ST" [Simple "997", Simple control]
+    st = makeSegment "ST" [Simple "997", Simple control]
     ak1 =
-      seg
+      makeSegment
         "AK1"
         [ Simple (fieldOrBlank 0 (groupGS group))
         , Simple (fieldOrBlank 5 (groupGS group))
         ]
     ak9 =
-      seg
+      makeSegment
         "AK9"
         [ Simple "A"
         , Simple (intText txCount)
         , Simple (intText txCount)
         , Simple (intText txCount)
         ]
-    se = seg "SE" [Simple (intText segmentCount), Simple control]
+    se = makeSegment "SE" [Simple (intText segmentCount), Simple control]
 
 ackForTransaction :: TransactionSet -> Vector Segment
 ackForTransaction tx =
   V.fromList
-    [ seg
+        [ makeSegment
         "AK2"
         [ Simple (fieldOrBlank 0 (transactionST tx))
         , Simple (fieldOrBlank 1 (transactionST tx))
         ]
-    , seg "AK5" [Simple "A"]
+    , makeSegment "AK5" [Simple "A"]
     ]
 
 ackISA :: AckSettings -> Segment
 ackISA settings =
-  seg
+  makeSegment
     "ISA"
     [ Simple "00"
     , Simple (fixed 10 "")
@@ -332,7 +334,7 @@ ackISA settings =
     , Simple (ackDateYYMMDD settings)
     , Simple (ackTimeHHMM settings)
     , Simple "U"
-    , Simple (ackVersion settings)
+    , Simple (ackInterchangeVersion settings)
     , Simple (fixedLeftZero 9 (ackInterchangeControlNumber settings))
     , Simple "0"
     , Simple "T"
@@ -341,7 +343,7 @@ ackISA settings =
 
 ackGS :: AckSettings -> Segment
 ackGS settings =
-  seg
+  makeSegment
     "GS"
     [ Simple "FA"
     , Simple (ackSenderId settings)
@@ -350,19 +352,19 @@ ackGS settings =
     , Simple (ackTimeHHMM settings)
     , Simple (ackGroupControlNumber settings)
     , Simple "X"
-    , Simple (ackVersion settings)
+    , Simple (ackGroupVersion settings)
     ]
 
 ackGE :: AckSettings -> Int -> Segment
 ackGE settings txSetCount =
-  seg "GE" [Simple (intText txSetCount), Simple (ackGroupControlNumber settings)]
+  makeSegment "GE" [Simple (intText txSetCount), Simple (ackGroupControlNumber settings)]
 
 ackIEA :: AckSettings -> Segment
 ackIEA settings =
-  seg "IEA" [Simple "1", Simple (fixedLeftZero 9 (ackInterchangeControlNumber settings))]
+  makeSegment "IEA" [Simple "1", Simple (fixedLeftZero 9 (ackInterchangeControlNumber settings))]
 
-seg :: Text -> [Element] -> Segment
-seg tag elems = Segment tag (V.fromList elems)
+makeSegment :: Text -> [Element] -> Segment
+makeSegment tag elems = Segment tag (V.fromList elems)
 
 fieldOrBlank :: Int -> Segment -> Text
 fieldOrBlank ix segValue =

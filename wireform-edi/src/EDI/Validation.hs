@@ -46,17 +46,19 @@ validationErrors doc =
 
 validateSegment :: Syntax -> Int -> Segment -> [ValidationError]
 validateSegment syn ix seg =
-  tagErrors <> concat (V.ifoldr (\elemIx elemValue acc -> validateElement syn ix elemIx elemValue : acc) [] (segmentElements seg))
+  tagErrors <> concat (V.ifoldr (\elemIx elemValue acc -> validateElement syn (segmentTag seg) ix elemIx elemValue : acc) [] (segmentElements seg))
   where
     tagErrors =
       if T.null (segmentTag seg)
         then [EmptySegmentTag ix]
         else delimiterErrors syn ix (-1) (segmentTag seg)
 
-validateElement :: Syntax -> Int -> Int -> Element -> [ValidationError]
-validateElement syn segIx elemIx (Simple t) =
+validateElement :: Syntax -> Text -> Int -> Int -> Element -> [ValidationError]
+validateElement _ "ISA" _ elemIx (Simple _)
+  | elemIx == 10 || elemIx == 15 = []
+validateElement syn _ segIx elemIx (Simple t) =
   simpleDelimiterErrors syn segIx elemIx t
-validateElement syn segIx elemIx (Composite parts)
+validateElement syn _ segIx elemIx (Composite parts)
   | V.null parts = [EmptyCompositeElement segIx elemIx]
   | otherwise =
       concat (V.foldr (\part acc -> delimiterErrors syn segIx elemIx part : acc) [] parts)
