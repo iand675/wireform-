@@ -92,10 +92,15 @@ parseSegment syn raw =
       | T.null rest -> Right (Segment tag V.empty)
       | otherwise ->
           let fields = T.split (== elementSeparator syn) (T.drop 1 rest)
-          in Right (Segment tag (V.fromList (map (parseElement syn) fields)))
+              elems = zipWith (parseSegmentElement syn tag) [0 :: Int ..] fields
+          in Right (Segment tag (V.fromList elems))
 
 parseElement :: Syntax -> Text -> Element
 parseElement syn t
   | T.any (== componentSeparator syn) t =
       Composite (V.fromList (T.split (== componentSeparator syn) t))
   | otherwise = Simple t
+
+parseSegmentElement :: Syntax -> Text -> Int -> Text -> Element
+parseSegmentElement _ "ISA" 15 t = Simple t
+parseSegmentElement syn _ _ t = parseElement syn t

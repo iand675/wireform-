@@ -13,7 +13,6 @@ module EDI.Derive
   ) where
 
 import Data.Coerce (coerce)
-import Data.Foldable (foldlM)
 import qualified Data.Text as T
 import qualified Data.Vector as V
 import Language.Haskell.TH
@@ -95,12 +94,13 @@ fieldElement varExp (FieldInfo mSel _) = do
     then pure []
     else do
       let getter = appE (varE selName) varExp
-          encoded =
-            case miCoerce mi of
-              Nothing -> [| E.toEDIElement $getter |]
-              Just _ -> [| E.toEDIElement (coerce $getter) |]
-      elemExp <- encoded
-      pure [elemExp]
+      encoded <-
+        case miCoerce mi of
+          Nothing -> [| E.toEDIElement $getter |]
+          Just target -> do
+            coercedValue <- sigE [| coerce $getter |] (conT target)
+            [| E.toEDIElement $(pure coercedValue) |]
+      pure [encoded]
 
 toEDIEnum :: [ConInfo] -> Q Exp
 toEDIEnum cs = do
@@ -180,7 +180,7 @@ buildSequence seg conName = go 0 []
       vName <- newName "v"
       (elemParser, advance) <- fieldParser seg pos f
       rest <- go (pos + advance) (vName : acc) fs
-      [| $(pure elemParser) >>= \$(varP vName) -> $(pure rest) |]
+      [| $(pure elemParser) >>= \ $(varP vName) -> $(pure rest) |]
 
 fieldParser :: Name -> Int -> FieldInfo -> Q (Exp, Int)
 fieldParser seg pos (FieldInfo mSel _) = do
@@ -196,14 +196,22 @@ fieldParser seg pos (FieldInfo mSel _) = do
         pure (e, 0)
     else do
       let posLit = litE (integerL (fromIntegral pos))
-          base =
+          parseAs :: Maybe Name -> Q Exp
+          parseAs Nothing =
             [| case elementAt $posLit $(varE seg) of
                  Nothing -> Left ("EDI.Derive: segment missing element at index "
                                   ++ show ($posLit :: Int))
                  Just elemValue -> E.fromEDIElement elemValue |]
+          parseAs (Just target) =
+            [| case elementAt $posLit $(varE seg) of
+                 Nothing -> Left ("EDI.Derive: segment missing element at index "
+                                  ++ show ($posLit :: Int))
+                 Just elemValue -> E.fromEDIElement elemValue :: Either String $(conT target) |]
       e <- case miCoerce mi of
-        Nothing -> base
-        Just _ -> [| fmap coerce $base |]
+        Nothing -> parseAs Nothing
+        Just target -> do
+          parsed <- parseAs (Just target)
+          [| fmap coerce $(pure parsed) |]
       pure (e, 1)
 
 fromEDIEnum :: [ConInfo] -> Q Exp
@@ -280,7 +288,7 @@ sumBody seg conName arity =
                                       ++ show ($posLit :: Int))
                      Just elemValue -> E.fromEDIElement elemValue |]
           rest <- build (ix + 1) (value : acc)
-          [| $parser >>= \$(varP value) -> $(pure rest) |]
+          [| $parser >>= \ $(varP value) -> $(pure rest) |]
 
 segmentTagFor :: ConInfo -> Q Exp
 segmentTagFor c = do
