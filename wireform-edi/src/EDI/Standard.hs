@@ -10,7 +10,6 @@ module EDI.Standard
   , standardName
   ) where
 
-import Data.Char (toUpper)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Vector (Vector)

@@ -272,7 +272,10 @@ splitReleased release delimiter = finish . T.foldl' step initial
   where
     initial = SplitState False T.empty []
     step (SplitState escaping current chunks) ch
-      | escaping = SplitState False (T.snoc current ch) chunks
+      | escaping && (ch == delimiter || ch == release) =
+          SplitState False (T.snoc current ch) chunks
+      | escaping =
+          SplitState False (T.snoc (T.snoc current release) ch) chunks
       | ch == release = SplitState True current chunks
       | ch == delimiter = SplitState False T.empty (current : chunks)
       | otherwise = SplitState False (T.snoc current ch) chunks
