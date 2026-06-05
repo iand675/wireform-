@@ -37,7 +37,10 @@ library
     EDI.Derive
     EDI.Encode
     EDI.Encoding
+    EDI.Query
+    EDI.Validation
     EDI.Value
+    EDI.X12
   build-depends:
     base >= 4.16 && < 5,
     wireform-derive,

@@ -5,10 +5,11 @@
 > [!CAUTION]
 > wireform is in heavy development and has not been published to Hackage yet. APIs may change.
 
-Electronic Data Interchange (EDI) segment parsing and rendering for Haskell.
-The package models delimiter syntax explicitly, parses ordered segments into a
-dynamic ADT, infers X12 delimiters from `ISA` headers, and exposes
-annotation-driven Template Haskell deriving for typed segment records.
+Electronic Data Interchange (EDI) segment tooling for Haskell. The package
+models delimiter syntax explicitly, parses ordered segments into a dynamic ADT,
+infers X12 delimiters from `ISA` headers, validates envelopes and control
+numbers, generates accepted 997 acknowledgements, and exposes annotation-driven
+Template Haskell deriving for typed segment records.
 
 This package is part of the [wireform](https://github.com/iand675/wireform-)
 monorepo and shares its annotation deriver and testing discipline with every
@@ -77,6 +78,9 @@ deriveEDI ''NameSegment
 | `EDI.Class` | `ToEDI` / `FromEDI` and field-level scalar classes |
 | `EDI.Derive` | Template Haskell deriver for typed segment records |
 | `EDI.Encoding` | Small builder wrapper used by encoders |
+| `EDI.Query` | Segment lookup, element access, and tag counting helpers |
+| `EDI.Validation` | Generic delimiter-safety and structural validation |
+| `EDI.X12` | X12 envelope grouping, control validation, and 997 acknowledgements |
 
 ## Testing
 
@@ -85,8 +89,9 @@ cabal test wireform-edi:wireform-edi-derive-test
 cabal test wireform-test --test-show-details=streaming
 ```
 
-The tests cover dynamic segment parsing, X12 delimiter inference, encode/decode
-round-trips, and TH-derived segment codecs.
+The tests cover dynamic segment parsing, X12 delimiter inference, envelope
+validation, 997 generation, encode/decode round-trips, and TH-derived segment
+codecs.
 
 ## License
 

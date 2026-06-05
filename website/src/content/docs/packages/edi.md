@@ -7,8 +7,9 @@ sidebar:
 
 `wireform-edi` implements delimiter-sensitive EDI segment streams. It models
 the concrete interchange syntax, decodes ordered segments into a dynamic ADT,
-infers X12 delimiters from `ISA` headers, and derives typed codecs for segment
-records through the shared `wireform-derive` annotation vocabulary.
+infers X12 delimiters from `ISA` headers, validates X12 envelopes and control
+counts, generates accepted 997 acknowledgements, and derives typed codecs for
+segment records through the shared `wireform-derive` annotation vocabulary.
 
 ## Key features
 
@@ -16,6 +17,9 @@ records through the shared `wireform-derive` annotation vocabulary.
 - **Explicit syntax** for element, component, repetition, and segment
   delimiters
 - **X12 `ISA` delimiter inference** when decoding full interchanges
+- **Query helpers** for tag lookup, element access, and segment counts
+- **Validation** for delimiter safety plus X12 control numbers and segment counts
+- **997 acknowledgement generation** for accepted functional groups
 - **Template Haskell deriving** via `deriveEDI`
 - **Field-level scalar classes** for positional segment elements
 
@@ -46,3 +50,6 @@ decoded = Decode.decode encoded
 | `EDI.Encode` / `EDI.Decode` | Low-level text encode and decode |
 | `EDI.Class` | `ToEDI` / `FromEDI` plus scalar element classes |
 | `EDI.Derive` | Template Haskell deriver with `wireform-derive` annotations |
+| `EDI.Query` | Segment and element lookup helpers |
+| `EDI.Validation` | Generic structural validation |
+| `EDI.X12` | X12 envelope parsing, validation, and 997 generation |
