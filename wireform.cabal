@@ -132,6 +132,7 @@ test-suite wireform-test
     Test.Columnar.Gen
     Test.Columnar.Properties
     Test.EDN
+    Test.EDI
     Test.MsgPackRPC
     Test.CBORDiagnostic
     Test.Streaming
@@ -185,6 +186,7 @@ test-suite wireform-test
     , wireform-orc
     , wireform-iceberg
     , wireform-edn
+    , wireform-edi
     , wireform-bencode
     , wireform-toml
     , wireform-yaml

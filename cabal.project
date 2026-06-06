@@ -30,6 +30,7 @@ packages:
   wireform-lance/
   wireform-hudi/
   wireform-edn/
+  wireform-edi/
   wireform-bencode/
   wireform-toml/
   wireform-yaml/

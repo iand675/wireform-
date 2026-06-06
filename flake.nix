@@ -82,6 +82,7 @@
           wireform-arrow             = ./wireform-arrow;
           wireform-iceberg           = ./wireform-iceberg;
           wireform-edn               = ./wireform-edn;
+          wireform-edi               = ./wireform-edi;
           wireform-bencode           = ./wireform-bencode;
           wireform-toml              = ./wireform-toml;
           wireform-csv               = ./wireform-csv;
