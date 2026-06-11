@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8" /><title>Wireform.Core.Schema</title></head>
+<body>
+
+<div id="module-header">
+  <p class="caption">Wireform.Core.Schema</p>
+</div>
+
+<div id="description">
+  <div class="doc">
+    <p>Cross-format schema representation. The <code>Schema</code> tree is the
+    common ground every IDL parser produces (<code>.proto</code>,
+    <code>.avsc</code>, <code>.thrift</code>, <code>.fbs</code>, etc.) and
+    every codegen consumes.</p>
+  </div>
+</div>
+
+<div id="synopsis">
+  <ul class="details-toggle">
+    <li>data <a href="#t:Schema">Schema</a></li>
+    <li>data <a href="#t:Field">Field</a></li>
+    <li><a href="#v:lookupField">lookupField</a> :: Text -&gt; Schema -&gt; Maybe Field</li>
+  </ul>
+</div>
+
+<div id="interface">
+  <h1>Top-level types</h1>
+
+  <div class="top" id="t:Schema">
+    <p class="src"><span class="keyword">data</span> <a class="def">Schema</a> <a href="src/Wireform.Core.Schema.html#Schema" class="link">Source</a></p>
+    <div class="doc">
+      <p>A schema is a name plus a list of fields, each field having a wire
+      tag, a type, and optional metadata. This is intentionally a small
+      lowest-common-denominator: format-specific extensions are carried in
+      <code>annotations</code>.</p>
+    </div>
+    <div class="subs constructors">
+      <dt class="src">Schema { name :: !Text, fields :: !(Vector Field), annotations :: !(Map Text Text) }</dt>
+    </div>
+  </div>
+
+  <div class="top" id="t:Field">
+    <p class="src"><span class="keyword">data</span> <a class="def">Field</a> <a href="src/Wireform.Core.Schema.html#Field" class="link">Source</a></p>
+    <div class="doc"><p>A single field in a schema.</p></div>
+    <div class="subs fields">
+      <p class="caption">Fields</p>
+      <dt class="src">fieldName :: !Text</dt>
+      <dd class="doc"><p>Identifier as it appears in the IDL.</p></dd>
+      <dt class="src">fieldTag :: !Word32</dt>
+      <dd class="doc"><p>Wire tag (where applicable).</p></dd>
+      <dt class="src">fieldType :: !PrimType</dt>
+      <dd class="doc"><p>Resolved primitive type.</p></dd>
+      <dt class="src">fieldOptional :: !Bool</dt>
+    </div>
+  </div>
+
+  <h1>Lookup helpers</h1>
+
+  <div class="top" id="v:lookupField">
+    <p class="src"><a class="def">lookupField</a> :: Text -&gt; Schema -&gt; Maybe Field <a href="src/Wireform.Core.Schema.html#lookupField" class="link">Source</a></p>
+    <div class="doc"><p>O(log n) field lookup by name.</p></div>
+  </div>
+</div>
+
+</body></html>

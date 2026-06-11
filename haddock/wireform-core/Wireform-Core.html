@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Wireform.Core</title>
+</head>
+<body>
+<div id="package-header"><p class="caption">wireform-core-0.1.0.0: Wire format primitives for wireform</p></div>
+
+<div id="content">
+<div id="module-header">
+  <table class="info">
+    <tr><th>License</th><td>BSD-3-Clause</td></tr>
+    <tr><th>Maintainer</th><td>iand675@gmail.com</td></tr>
+    <tr><th>Stability</th><td>experimental</td></tr>
+  </table>
+  <p class="caption">Wireform.Core</p>
+</div>
+
+<div id="description">
+  <p class="caption">Description</p>
+  <div class="doc">
+    <p>The umbrella module of <code>wireform-core</code>. Re-exports the
+    pieces every backend needs: the wire <code>Decoder</code>, the encode-side
+    <code>Builder</code>, and the schema-tagged <code>Value</code> type.</p>
+    <p>Format-specific modules live under <code>Wireform.Proto</code>,
+    <code>Wireform.Avro</code>, etc.</p>
+  </div>
+</div>
+
+<div id="synopsis">
+  <p class="caption">Synopsis</p>
+  <ul class="details-toggle">
+    <li>data <a href="#t:Decoder">Decoder</a> a</li>
+    <li><a href="#v:runDecoder">runDecoder</a> :: Decoder a -&gt; ByteString -&gt; Either DecodeError a</li>
+    <li>data <a href="#t:Value">Value</a></li>
+    <li>class <a href="#t:Encode">Encode</a> a where</li>
+  </ul>
+</div>
+
+<div id="interface">
+  <h1>The decoder monad</h1>
+
+  <div class="top" id="t:Decoder">
+    <p class="src"><span class="keyword">data</span> <a href="#" class="def">Decoder</a> a <a href="src/Wireform.Core.Decoder.html#Decoder" class="link">Source</a></p>
+    <div class="doc">
+      <p>The core wire decoder. Wraps a strict <code>ByteString</code> + offset
+      and returns <code>Either DecodeError a</code> with the new offset.</p>
+      <p>Decoders are <em>strict</em>; there is no laziness on the success path.</p>
+    </div>
+    <div class="subs instances">
+      <details class="instances"><summary>Instances</summary>
+        <div class="src clearfix">Functor Decoder</div>
+        <div class="src clearfix">Applicative Decoder</div>
+        <div class="src clearfix">Monad Decoder</div>
+      </details>
+    </div>
+  </div>
+
+  <div class="top" id="v:runDecoder">
+    <p class="src"><a href="#" class="def">runDecoder</a> :: <a class="link">Decoder</a> a -&gt; ByteString -&gt; Either DecodeError a <a href="src/Wireform.Core.Decoder.html#runDecoder" class="link">Source</a></p>
+    <div class="doc">
+      <p>Run a <code>Decoder</code> on a complete <code>ByteString</code>,
+      returning either the decoded value or the first error encountered.</p>
+    </div>
+  </div>
+
+  <h1>Schema-tagged values</h1>
+
+  <div class="top" id="t:Value">
+    <p class="src"><span class="keyword">data</span> <a href="#" class="def">Value</a> <a href="src/Wireform.Core.Value.html#Value" class="link">Source</a></p>
+    <div class="doc">
+      <p>A schema-tagged value. Every wireform format can decode <em>into</em>
+      <code>Value</code> and encode <em>out of</em> it; format conversion is
+      a few lines of <code>Map</code> manipulation.</p>
+    </div>
+    <div class="subs constructors">
+      <p class="caption">Constructors</p>
+      <dt class="src">VBool !Bool</dt>
+      <dd class="doc"><p>Boolean.</p></dd>
+      <dt class="src">VInt !Int64</dt>
+      <dd class="doc"><p>Signed 64-bit integer.</p></dd>
+      <dt class="src">VBytes !ByteString</dt>
+      <dd class="doc"><p>Opaque byte string.</p></dd>
+      <dt class="src">VText !Text</dt>
+      <dd class="doc"><p>UTF-8 text.</p></dd>
+      <dt class="src">VList !(Vector Value)</dt>
+      <dd class="doc"><p>Homogeneous (or heterogeneous) ordered sequence.</p></dd>
+      <dt class="src">VRecord !(Map Text Value)</dt>
+      <dd class="doc"><p>Named-field record.</p></dd>
+    </div>
+  </div>
+
+  <h1>Encode</h1>
+
+  <div class="top" id="t:Encode">
+    <p class="src"><span class="keyword">class</span> <a href="#" class="def">Encode</a> a <span class="keyword">where</span> <a href="src/Wireform.Core.Encode.html#Encode" class="link">Source</a></p>
+    <div class="doc">
+      <p>Types that know how to encode themselves to a wireform
+      <code>Builder</code>. Every format-specific class
+      (<code>ToProto</code>, <code>ToAvro</code>, <code>ToMsgPack</code>, ...)
+      is a thin specialisation of this.</p>
+    </div>
+    <div class="subs methods">
+      <p class="caption">Methods</p>
+      <dt class="src">encode :: a -&gt; Builder</dt>
+      <dd class="doc"><p>Encode a value into a <code>Builder</code>.</p></dd>
+    </div>
+  </div>
+
+</div>
+</div>
+</body></html>

@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8" /><title>Wireform.Core.Decoder</title></head>
+<body>
+
+<div id="module-header"><p class="caption">Wireform.Core.Decoder</p></div>
+
+<div id="description">
+  <div class="doc">
+    <p>Low-level decoder primitives. Most users go through the format-specific
+    wrappers (<code>Wireform.Proto.Decode</code>,
+    <code>Wireform.MsgPack.Decode</code>, &hellip;); this module is the
+    plumbing.</p>
+  </div>
+</div>
+
+<div id="synopsis">
+  <ul class="details-toggle">
+    <li><a href="#v:getVarint">getVarint</a> :: Decoder Word64</li>
+    <li><a href="#v:getText">getText</a> :: Int -&gt; Decoder Text</li>
+    <li><a href="#v:withTag">withTag</a> :: Decoder Word64 -&gt; (Word64 -&gt; Decoder a) -&gt; Decoder a</li>
+  </ul>
+</div>
+
+<div id="interface">
+  <h1>Primitives</h1>
+
+  <div class="top" id="v:getVarint">
+    <p class="src"><a class="def">getVarint</a> :: Decoder Word64 <a href="src/Wireform.Core.Decoder.html#getVarint" class="link">Source</a></p>
+    <div class="doc"><p>Decode an LEB128-encoded varint. Allocation-free on the hot path.</p></div>
+  </div>
+
+  <div class="top" id="v:getText">
+    <p class="src"><a class="def">getText</a> :: Int -&gt; Decoder Text <a href="src/Wireform.Core.Decoder.html#getText" class="link">Source</a></p>
+    <div class="doc"><p>Read <code>n</code> bytes and validate as UTF-8.</p></div>
+  </div>
+
+  <h1>Combinators</h1>
+
+  <div class="top" id="v:withTag">
+    <p class="src"><a class="def">withTag</a> :: Decoder Word64 -&gt; (Word64 -&gt; Decoder a) -&gt; Decoder a <a href="src/Wireform.Core.Decoder.html#withTag" class="link">Source</a></p>
+    <div class="doc"><p>CPS-style tag dispatch. Read a wire tag, then run a continuation
+    that knows what to do with each value (statically inlined by GHC).</p></div>
+  </div>
+
+</div>
+</body></html>

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8" /><title>Wireform.Proto</title></head>
+<body>
+<div id="module-header"><p class="caption">Wireform.Proto</p></div>
+<div id="description">
+  <div class="doc">
+    <p>Protocol Buffers support. Wraps <code>Wireform.Core</code> with proto-3
+    semantics and provides <code>encodeMessage</code> /
+    <code>decodeMessage</code>.</p>
+  </div>
+</div>
+<div id="synopsis">
+  <ul class="details-toggle">
+    <li><a href="#v:encodeMessage">encodeMessage</a> :: Message a =&gt; a -&gt; ByteString</li>
+    <li><a href="#v:decodeMessage">decodeMessage</a> :: Message a =&gt; ByteString -&gt; Either DecodeError a</li>
+    <li>class <a href="#t:Message">Message</a> a where</li>
+  </ul>
+</div>
+<div id="interface">
+  <h1>Top-level API</h1>
+  <div class="top" id="v:encodeMessage">
+    <p class="src"><a class="def">encodeMessage</a> :: Message a =&gt; a -&gt; ByteString <a href="src/Wireform.Proto.html#encodeMessage" class="link">Source</a></p>
+    <div class="doc"><p>Encode any <code>Message</code>-instance value to its proto3 wire form.</p></div>
+  </div>
+  <div class="top" id="v:decodeMessage">
+    <p class="src"><a class="def">decodeMessage</a> :: Message a =&gt; ByteString -&gt; Either DecodeError a <a href="src/Wireform.Proto.html#decodeMessage" class="link">Source</a></p>
+    <div class="doc"><p>Inverse of <code>encodeMessage</code>.</p></div>
+  </div>
+  <div class="top" id="t:Message">
+    <p class="src"><span class="keyword">class</span> <a class="def">Message</a> a <span class="keyword">where</span> <a href="src/Wireform.Proto.html#Message" class="link">Source</a></p>
+    <div class="doc"><p>The type-class implemented by every protobuf message.</p></div>
+    <div class="subs methods">
+      <dt class="src">messageEncoder :: a -&gt; Builder</dt>
+      <dt class="src">messageDecoder :: Decoder a</dt>
+    </div>
+  </div>
+</div>
+</body></html>

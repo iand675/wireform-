@@ -1,0 +1,1 @@
+/* placeholder so the ingester recognises this directory as Haddock output */
