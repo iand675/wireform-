@@ -213,6 +213,62 @@ membership changed, or update `wireform-kafka-protocol.cabal` manually.
 
 ## Performance
 
+### Performance bar (completion criterion)
+
+A format implementation is **not complete** until its hot paths (encode,
+decode, the codegen'd record path) match or beat equivalent compiled-language
+implementations — Rust serde / Go / C++ / the format's own reference library.
+Acceptable outcomes, in order:
+
+1. **Equal or faster** than the reference. This is the target.
+2. **Within 2× of the reference** — acceptable *only* when the gap is intrinsic
+   (a GHC runtime tax with no zero-cost workaround, or a semantic the reference
+   skips). Justify it in the PR: point at the GHC core / profile that explains
+   the bottleneck and list what you tried. A silent 2× gap is a failure.
+3. **Slower than 2×** — not acceptable. Rework until (1), or until you can
+   justify (2) with evidence.
+
+Measure with the package's `bench/` criterion target (every per-format package
+has one; run it via `scripts/run-benchmarks.py --only <target>`). REPL
+micro-benchmarks and "it feels fast" don't count — the committed criterion
+harness does. Compare bytes-allocated (`+RTS -T` / `-s`) as well as wall time;
+allocation drives GC, which drives throughput on real inputs.
+
+### Inspecting GHC core
+
+Low allocation is a requirement, not an aspiration — and you cannot eyeball it
+from the source. Read GHC's core output frequently while implementing or
+touching any hot path:
+
+```bash
+# dump core for one module to a .dump-simpl file beside the source
+cabal exec -- ghc -fforce-recomp -O2 -ddump-simpl -ddump-to-file \
+  -dsuppress-all wireform-cbor/src/CBOR/Decode.hs
+# or attach the flags to a normal build of a package
+cabal build wireform-cbor --ghc-options="-ddump-simpl -ddump-to-file -dsuppress-all"
+```
+
+What to look for on the steady-state path:
+
+- **No heap allocation.** Each boxed `Int` / `Maybe` / `Either`, each `$f...`
+  dictionary, and each closure handed to a higher-order combinator is a heap
+  object. A tight loop should be `Int#` / `Word#` / unboxed tuples
+  `(# ..., Int# #)` / unlifted `$w` workers — not boxed types.
+- **Non-allocating workers** (`$w...` definitions taking unboxed args). A `let`
+  binding a thunk, or a call to an allocating wrapper, inside the loop body
+  means it allocates per iteration.
+- **SpecConstr / specialisation fired** — `$s...` names mean GHC specialised
+  away a dictionary or a known call shape.
+- **Inlining actually fired** — a residual `... @$Type ... ($fDict ...)`
+  application means you're paying dynamic dispatch instead of a statically
+  resolved call.
+
+If the core shows allocation on a hot path, fix it *before* claiming the work
+done — add `{-# INLINE #-}` / `INLINE[~N]` pragmas, adopt the unboxed-sum /
+`Int#` shapes in [Allocation discipline](#allocation-discipline), or restructure
+so GHC can specialise. The dump is the ground truth; allocation-driven
+regressions are invisible in a source review.
+
 ### Allocation discipline
 
 - **Unboxed sums** for finite branching (success / failure / end-of-input).
@@ -505,11 +561,12 @@ the `Wireform.Derive.Extension.BackendModifier` typeclass — see
 ## HTTP wire-format libraries (`hermes`)
 
 The `hermes/` package is the **canonical home for HTTP header
-parsing and rendering** in this monorepo. It is vendored from
-`MercuryTechnologies/hermes` and rebranded under the wireform
-umbrella, but it has not been forked in spirit: when the wire
-grammar of an HTTP construct needs to be touched, the change goes
-in `hermes`, not in a downstream `wireform-http*` module.
+parsing and rendering** in this monorepo. It originated as a vendor of
+`MercuryTechnologies/hermes` (same author) and has since diverged
+substantially — it is now a maintained fork, and this copy is the source of
+truth for the wireform stack (the standalone upstream lags it). When the wire
+grammar of an HTTP construct needs to be touched, the change goes in
+`hermes`, not in a downstream `wireform-http*` module.
 
 ### What hermes owns
 
