@@ -26,6 +26,7 @@ module Wireform.Stats.SVG (
   -- * Render
   renderBarChart,
   renderBarChartBoth,
+  renderBarChartAdaptive,
 ) where
 
 import Data.ByteString (ByteString)
@@ -57,22 +58,19 @@ data BarChart = BarChart
   { chartTitle :: !Text
   -- ^ Chart title rendered above the plot area.
   , chartSubtitle :: !(Maybe Text)
-  {- ^ Optional subtitle rendered below the title (e.g. timestamp,
-  toolchain).
-  -}
+  -- ^ Optional subtitle rendered below the title (e.g. timestamp,
+  --   toolchain).
   , chartUnit :: !Text
   -- ^ Unit string for the y-axis (e.g. @"ns"@, @"µs"@, @"MB/s"@).
   , chartGroups :: ![GroupLabel]
   -- ^ Group labels along the x-axis. Order is preserved.
   , chartSeries :: ![Series]
-  {- ^ Series, one per legend entry. Each 'Series' carries one
-  value per 'GroupLabel'; mismatched lengths are clipped to the
-  shorter side and padded with @0@ otherwise.
-  -}
+  -- ^ Series, one per legend entry. Each 'Series' carries one
+  --   value per 'GroupLabel'; mismatched lengths are clipped to the
+  --   shorter side and padded with @0@ otherwise.
   , chartHigherIsBetter :: !Bool
-  {- ^ Used for the subtitle hint ("higher is better" /
-  "lower is better"). Doesn't affect rendering otherwise.
-  -}
+  -- ^ Used for the subtitle hint ("higher is better" /
+  --   "lower is better"). Doesn't affect rendering otherwise.
   }
   deriving stock (Eq, Show)
 
@@ -183,17 +181,69 @@ renderBarChartBoth chart =
   )
 
 
+{- | Render a chart to a single, self-contained SVG that adapts to the
+reader's @prefers-color-scheme@ at view time.
+
+The @\<picture\>@ / two-file trick the READMEs use works on
+github.com but not when the SVG is inlined into a plain-markdown
+Starlight page (raw @\<img src\>@ would need a base-aware URL into
+@public/@, which Astro does not rewrite). Instead we stack a full
+light chart and a full dark chart inside one @\<svg\>@ and toggle
+visibility with an embedded @\<style\>@ media query, so the same
+bytes can be dropped straight into the page with no asset wiring.
+
+Emitted without an XML declaration so it inlines cleanly inside
+HTML/markdown.
+-}
+renderBarChartAdaptive :: BarChart -> ByteString
+renderBarChartAdaptive chart =
+  XE.encodePretty 2 (Document Nothing (adaptiveRoot chart))
+
+
+adaptiveRoot :: BarChart -> Node
+adaptiveRoot chart =
+  el
+    "svg"
+    [ ("xmlns", "http://www.w3.org/2000/svg")
+    , ("viewBox", "0 0 " <> tshow' canvasW <> " " <> tshow' canvasH)
+    , ("width", tshow' canvasW)
+    , ("height", tshow' canvasH)
+    , ("role", "img")
+    , ("font-family", "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Helvetica, Arial, sans-serif")
+    , ("font-size", "12")
+    ]
+    [ el "title" [] [text_ (chartTitle chart)]
+    , el "style" [] [text_ adaptiveStyle]
+    , el "g" [("class", "wf-light")] (svgChildren lightTheme chart)
+    , el "g" [("class", "wf-dark")] (svgChildren darkTheme chart)
+    ]
+
+
+{- | Show the light layer by default; swap to the dark layer when the
+reader prefers a dark color scheme.
+-}
+adaptiveStyle :: Text
+adaptiveStyle =
+  ".wf-dark{display:none}"
+    <> "@media (prefers-color-scheme:dark){"
+    <> ".wf-light{display:none}.wf-dark{display:inline}}"
+
+
 -- ---------------------------------------------------------------------------
 -- Layout
 -- ---------------------------------------------------------------------------
 
--- Chart canvas is fixed at 720 x 360 with a margin block so the
+-- Chart canvas is fixed at 720 x 400 with a margin block so the
 -- plot area sits at (80, 60) -> (700, 320). Bar widths derive from
--- group count and series count.
+-- group count and series count. The 80px band below the plot area
+-- is split into two rows: the x-axis group labels sit just under
+-- the axis, and the legend gets its own row near the bottom edge so
+-- the two never collide (even with five groups and long series
+-- names).
 
 canvasW, canvasH :: Double
 canvasW = 720
-canvasH = 360
+canvasH = 400
 
 
 plotL, plotT, plotR, plotB :: Double
@@ -223,16 +273,24 @@ svgRoot theme chart =
     , ("font-family", "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Helvetica, Arial, sans-serif")
     , ("font-size", "12")
     ]
-    [ background theme
-    , title theme chart
-    , subtitle theme chart
-    , axes theme chart
-    , yTicks theme chart
-    , bars theme chart
-    , barLabels theme chart
-    , groupLabels theme chart
-    , legend theme chart
-    ]
+    (svgChildren theme chart)
+
+
+{- | The ordered drawing layers for one themed chart, shared by the
+single-theme 'svgRoot' and the stacked 'adaptiveRoot'.
+-}
+svgChildren :: Theme -> BarChart -> [Node]
+svgChildren theme chart =
+  [ background theme
+  , title theme chart
+  , subtitle theme chart
+  , axes theme chart
+  , yTicks theme chart
+  , bars theme chart
+  , barLabels theme chart
+  , groupLabels theme chart
+  , legend theme chart
+  ]
 
 
 -- | Element constructor with attribute pairs.
@@ -289,14 +347,14 @@ subtitle theme chart =
       pieces = [direction, chartUnit chart] ++ maybe [] (: []) (chartSubtitle chart)
       txt = T.intercalate " · " pieces
   in el
-       "text"
-       [ ("x", tshow' (canvasW / 2))
-       , ("y", "44")
-       , ("text-anchor", "middle")
-       , ("font-size", "11")
-       , ("fill", themeMuted theme)
-       ]
-       [text_ txt]
+      "text"
+      [ ("x", tshow' (canvasW / 2))
+      , ("y", "44")
+      , ("text-anchor", "middle")
+      , ("font-size", "11")
+      , ("fill", themeMuted theme)
+      ]
+      [text_ txt]
 
 
 axes :: Theme -> BarChart -> Node
@@ -333,28 +391,28 @@ yTicks theme chart =
             y = plotB - p * plotH
         in [ -- gridline (skip the axis itself)
              if p > 0
-               then
-                 el_
-                   "line"
-                   [ ("x1", tshow' plotL)
-                   , ("y1", tshow' y)
-                   , ("x2", tshow' plotR)
-                   , ("y2", tshow' y)
-                   , ("stroke", themeGrid theme)
-                   , ("stroke-width", "1")
-                   , ("stroke-dasharray", "2 3")
-                   ]
-               else el "g" [] []
+              then
+                el_
+                  "line"
+                  [ ("x1", tshow' plotL)
+                  , ("y1", tshow' y)
+                  , ("x2", tshow' plotR)
+                  , ("y2", tshow' y)
+                  , ("stroke", themeGrid theme)
+                  , ("stroke-width", "1")
+                  , ("stroke-dasharray", "2 3")
+                  ]
+              else el "g" [] []
            , -- label
              el
-               "text"
-               [ ("x", tshow' (plotL - 8))
-               , ("y", tshow' (y + 4))
-               , ("text-anchor", "end")
-               , ("font-size", "10")
-               , ("fill", themeMuted theme)
-               ]
-               [text_ (formatNumber v)]
+              "text"
+              [ ("x", tshow' (plotL - 8))
+              , ("y", tshow' (y + 4))
+              , ("text-anchor", "end")
+              , ("font-size", "10")
+              , ("fill", themeMuted theme)
+              ]
+              [text_ (formatNumber v)]
            ]
   in el "g" [] (concatMap tickAt ticks)
 
@@ -377,14 +435,14 @@ bars theme chart =
             yTop = plotB - barH
             color = cycleNth palette si
         in el_
-             "rect"
-             [ ("x", tshow' xLeft)
-             , ("y", tshow' yTop)
-             , ("width", tshow' (max 0 (barW - 2)))
-             , ("height", tshow' (max 0 barH))
-             , ("rx", "2")
-             , ("fill", color)
-             ]
+            "rect"
+            [ ("x", tshow' xLeft)
+            , ("y", tshow' yTop)
+            , ("width", tshow' (max 0 (barW - 2)))
+            , ("height", tshow' (max 0 barH))
+            , ("rx", "2")
+            , ("fill", color)
+            ]
       everyBar = do
         gi <- [0 .. nGroups - 1]
         sIdx <- zip [0 :: Int ..] series
@@ -409,14 +467,14 @@ barLabels theme chart =
             barH = if yMax == 0 then 0 else (v / yMax) * plotH
             yTop = plotB - barH
         in el
-             "text"
-             [ ("x", tshow' xMid)
-             , ("y", tshow' (yTop - 4))
-             , ("text-anchor", "middle")
-             , ("font-size", "10")
-             , ("fill", themeForeground theme)
-             ]
-             [text_ (formatNumber v)]
+            "text"
+            [ ("x", tshow' xMid)
+            , ("y", tshow' (yTop - 4))
+            , ("text-anchor", "middle")
+            , ("font-size", "10")
+            , ("fill", themeForeground theme)
+            ]
+            [text_ (formatNumber v)]
       everyLabel = do
         gi <- [0 .. nGroups - 1]
         sIdx <- zip [0 :: Int ..] series
@@ -432,14 +490,14 @@ groupLabels theme chart =
       lab gi g =
         let xMid = plotL + (fromIntegral gi + 0.5) * groupW
         in el
-             "text"
-             [ ("x", tshow' xMid)
-             , ("y", tshow' (plotB + 16))
-             , ("text-anchor", "middle")
-             , ("font-size", "11")
-             , ("fill", themeForeground theme)
-             ]
-             [text_ g]
+            "text"
+            [ ("x", tshow' xMid)
+            , ("y", tshow' (plotB + 18))
+            , ("text-anchor", "middle")
+            , ("font-size", "11")
+            , ("fill", themeForeground theme)
+            ]
+            [text_ g]
   in el "g" [] (zipWith lab [0 :: Int ..] groups)
 
 
@@ -460,7 +518,7 @@ legend theme chart =
       legendItem (si, (x, s)) =
         el
           "g"
-          [("transform", "translate(" <> tshow' x <> ", " <> tshow' (canvasH - 16) <> ")")]
+          [("transform", "translate(" <> tshow' x <> ", " <> tshow' (canvasH - 18) <> ")")]
           [ el_
               "rect"
               [ ("x", "0")
@@ -495,17 +553,17 @@ niceMax :: [Double] -> Double
 niceMax xs =
   let m = maximum (0 : xs)
   in if m <= 0
-       then 1
-       else
-         let exp10 = 10 ** fromIntegral (floor (logBase 10 m) :: Int)
-             frac = m / exp10
-             nice
-               | frac <= 1.0 = 1.0
-               | frac <= 2.0 = 2.0
-               | frac <= 2.5 = 2.5
-               | frac <= 5.0 = 5.0
-               | otherwise = 10.0
-         in nice * exp10
+      then 1
+      else
+        let exp10 = 10 ** fromIntegral (floor (logBase 10 m) :: Int)
+            frac = m / exp10
+            nice
+              | frac <= 1.0 = 1.0
+              | frac <= 2.0 = 2.0
+              | frac <= 2.5 = 2.5
+              | frac <= 5.0 = 5.0
+              | otherwise = 10.0
+        in nice * exp10
 
 
 formatNumber :: Double -> Text

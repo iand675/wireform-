@@ -90,7 +90,7 @@ wireform-gen bond -i schema.bond -o src/Gen/
 | Person | 162 ns | 185 ns |
 | [Person] x 100 | 15.7 µs | 2.1 µs |
 
-Decode is structurally lazy at the Value layer -- the 100-element list decode resolves only the outer container, deferring per-element materialization until access. This makes random-access patterns fast for large payloads.
+Decode is structurally lazy at the Value layer: the 100-element list decode resolves only the outer container, deferring per-element materialization until access. This makes random-access patterns fast for large payloads.
 
 Criterion, GHC 9.8.4, Apple Silicon. See `wireform-bond/bench-results/` for raw data.
 

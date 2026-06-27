@@ -5,7 +5,7 @@ sidebar:
   order: 1
 ---
 
-This guide gets you running your first streaming topology in about five minutes. You will not need to install Kafka, set up Docker, or configure any network. The library includes an in-process test driver that simulates a full Kafka cluster inside your Haskell process.
+Run your first streaming topology in about five minutes. No Kafka install, no Docker, no network setup. The library includes an in-process test driver that simulates a full Kafka cluster inside your Haskell process.
 
 ## What you need
 
@@ -14,20 +14,13 @@ This guide gets you running your first streaming topology in about five minutes.
 
 If you do not have these, install them via [ghcup](https://www.haskell.org/ghcup/) or your package manager.
 
-## Why use a test driver?
+## Why a test driver?
 
-Normally, testing a streaming application requires a running Kafka cluster, managing topics, and cleaning up state between tests. The `TopologyTestDriver` included with this library lets you:
-
-- Run topologies in milliseconds instead of seconds
-- Test without network dependencies
-- Write unit tests that run in CI without infrastructure
-- Debug by feeding specific records and observing outputs
-
-Think of it like an in-memory database for testing. The driver behaves like a real Kafka cluster but lives entirely in your process.
+Normally, testing a streaming application requires a running Kafka cluster, topic management, and state cleanup between tests. The `TopologyTestDriver` included with this library runs topologies in milliseconds instead of seconds, with no network dependencies, so you can write unit tests that run in CI without infrastructure. The driver behaves like a real Kafka cluster but lives entirely in your process.
 
 ## Step 1: Run the word-count demo
 
-The word-count example is the "hello world" of stream processing. It reads lines of text, splits them into words, and counts how many times each word appears. This demonstrates stateful processing: the application remembers counts between records.
+The word-count example is the "hello world" of stream processing. It reads lines of text, splits them into words, and counts how many times each word appears. The application remembers counts between records.
 
 Clone the repository and run the example:
 
@@ -91,7 +84,7 @@ Read this as a data pipeline, left to right:
 5. **`toStream`**: Converts the internal table format back to a stream of updates
 6. **`sink`**: Writes the count updates to a topic named "streams-wordcount-output"
 
-The key insight: `count` maintains state. It remembers previous counts and updates them as new words arrive. This state survives restarts because Kafka Streams automatically persists it to a hidden topic.
+`count` maintains state. It remembers previous counts and updates them as new words arrive. This state survives restarts because Kafka Streams automatically persists it to a hidden topic.
 
 ## Step 3: Explore other examples
 
@@ -126,7 +119,7 @@ Each example includes source code in `wireform-kafka/streams/examples/Kafka/Stre
 
 ## Where to go next
 
-You have two paths from here:
+Two paths from here:
 
 **Explore more examples**: Run through the demos above, read their source code, and modify them to see what happens.
 

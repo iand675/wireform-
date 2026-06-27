@@ -5,11 +5,9 @@ sidebar:
   order: 4
 ---
 
-**Why this pattern matters:** Stream processing involves continuous data flow where individual records can fail for many reasons (bad format, missing lookup key, validation errors). Without a systematic approach to handling these failures, you either silently drop data (bad) or crash your entire pipeline on every error (also bad). Railway-oriented programming gives you a structured way to handle failures without losing either records or your sanity.
+Stream processing is continuous data flow. Individual records fail for all sorts of reasons: bad format, missing lookup key, validation error. Without a systematic approach to those failures you end up either silently dropping data or crashing the pipeline on every error. Railway-oriented programming splits processing into a success track and a failure track, then handles each at a well-defined boundary.
 
-## The core idea
-
-Imagine a railway track that splits into two parallel lines: one for successfully processed records, one for failures. Your topology can switch records between these tracks based on validation results, then handle each track appropriately at the end.
+The name comes from the two-track metaphor. You don't handle errors where they occur. You route them to a separate track and decide what to do with them at the commit cycle or the sink.
 
 ```mermaid
 flowchart LR
@@ -20,27 +18,19 @@ flowchart LR
     Err --> SinkErr["Sink to DLQ / retry topic"]
 ```
 
-**The key insight:** Don't handle errors where they occur. Route them to a separate track and decide what to do with them at a well-defined boundary (typically the commit cycle or the sink).
-
 ## When you need this pattern
 
-**Use railway-oriented programming when:**
+Use it when:
+
 - Individual records can fail validation but the stream must continue
 - You need to route failures to a dead-letter queue for later inspection
 - You want to track failure rates separately from success rates
 - Some failures are retryable (transient) while others are permanent (poison pills)
 - You need to preserve the original record context for debugging failures
 
-**Don't use it when:**
-- Any failure is truly catastrophic (use fail-fast instead)
-- You can fix errors inline without losing semantics
-- The processing is inherently all-or-nothing
+Don't use it when any failure is truly catastrophic (fail fast instead), when you can fix errors inline without losing semantics, or when processing is inherently all-or-nothing.
 
-## The three components
-
-A railway-oriented pipeline has three parts: splitting, routing, and reconciling.
-
-### 1. Splitting: Create the two-track structure
+## Splitting: create the two-track structure
 
 Use `Either` or a custom result type to represent success/failure:
 
@@ -58,9 +48,9 @@ data RecordContext = RecordContext
   }
 ```
 
-**Why preserve context:** When a record fails processing six months from now, you need to know exactly what input caused the failure. The original key, value, and position are essential for debugging.
+Preserve the original key, value, and position. When a record fails six months from now, you need to know exactly what input caused it.
 
-### 2. Routing: Process each track separately
+## Routing: process each track separately
 
 Transform your topology to handle both tracks:
 
@@ -86,9 +76,9 @@ errorRecords = validated |>> flatMap (\case
   )
 ```
 
-**Why flatMap for splitting:** Kafka Streams doesn't have a native "split" operation. `flatMap` with pattern matching lets you route records to zero or one output tracks based on your result type.
+Kafka Streams doesn't have a native "split" operation. `flatMap` with pattern matching routes records to zero or one output tracks based on your result type.
 
-### 3. Reconciling: Handle each track at sinks
+## Reconciling: handle each track at sinks
 
 Send success records to your main output and failures to a dead-letter queue:
 
@@ -104,11 +94,11 @@ errorPipeline = errorRecords
   |>> sink "errors-dlq" errorSerde errorSerde
 ```
 
-**Why separate DLQ topics:** Errors need different handling than success records. They may need manual review, automated retry, or special retention policies. A separate topic lets you apply different processing logic without complicating your main pipeline.
+Errors need different handling than success records: manual review, automated retry, special retention. A separate topic lets you apply different processing logic without complicating the main pipeline.
 
 ## Practical example: Enrichment with validation
 
-A common use case: enriching records from an external API, where some lookups fail:
+A common use case: enriching records from an external API, where some lookups fail.
 
 ```haskell
 -- Input: user events with IDs to enrich
@@ -147,7 +137,7 @@ errorPipeline = errorEvents
   |>> sink "enrichment-failures" serde serde
 ```
 
-**What this buys you:** Your main pipeline continues processing even when enrichment fails for some records. Failed enrichments go to a separate topic where you can retry them later, investigate the missing data, or adjust your processing logic.
+The main pipeline continues processing even when enrichment fails for some records. Failed enrichments go to a separate topic where you can retry them, investigate the missing data, or adjust processing logic.
 
 ## Error classification: Retryable vs permanent
 
@@ -172,7 +162,7 @@ routeByErrorType errors =
   in (retryable, permanent)
 ```
 
-**Why classify:** Retryable errors might succeed on a second attempt. Permanent errors will fail forever and need manual intervention or schema fixes. Treating them differently prevents infinite retry loops and alert fatigue.
+Retryable errors might succeed on a second attempt. Permanent errors will fail forever and need manual intervention or schema fixes. Treating them differently prevents infinite retry loops and alert fatigue.
 
 ## Integration with exactly-once semantics
 
@@ -190,7 +180,7 @@ combinedPipeline =
     (errorEvents |>> sink "dlq" serde serde)
 ```
 
-**Why atomicity matters:** Without transactional guarantees, a failure between the two sinks could send a record to the output topic without its corresponding error going to the DLQ (or vice versa). You'd have inconsistent state that's hard to reconcile.
+Without transactional guarantees, a failure between the two sinks could send a record to the output topic without its corresponding error going to the DLQ (or vice versa). You end up with inconsistent state that's hard to reconcile.
 
 ## Metrics and monitoring
 
@@ -206,7 +196,8 @@ validated |>> mapValues (\result ->
   )
 ```
 
-**Key metrics to watch:**
+Key metrics:
+
 - **Error rate:** What percentage of records fail? Sudden spikes indicate upstream changes or downstream outages.
 - **Error type distribution:** Are errors mostly transient (network) or permanent (validation)? This drives whether you need retry logic or schema fixes.
 - **DLQ depth:** How many errors are pending? Growing DLQ without draining suggests a systematic problem.
@@ -282,7 +273,7 @@ prop_errorRecordsRouted = property $ do
   assert (errorContext (head dlq) == originalContext invalidInput)
 ```
 
-**Why test both tracks:** It's easy to accidentally drop records on the error track (by returning `[]` in the wrong place). Explicit tests verify the routing logic works correctly.
+It is easy to accidentally drop records on the error track by returning `[]` in the wrong place. Explicit tests verify the routing logic.
 
 ## When to stop using this pattern
 

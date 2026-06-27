@@ -13,7 +13,7 @@ const formats = [
 ---
 
 {hero && (
-  <section class="wf-hero">
+  <section class="wf-hero" data-has-hero>
     <div class="wf-hero__grid" aria-hidden="true"></div>
 
     <div class="wf-hero__content">
@@ -89,8 +89,15 @@ const formats = [
     color: var(--sl-color-text);
   }
 
+  .wf-hero__title {
+    font-family: var(--wf-font-display, var(--sl-font));
+  }
+
   .wf-hero__title--accent {
-    color: var(--wf-primary);
+    background-image: linear-gradient(120deg, var(--wf-hero-from, var(--wf-primary)), var(--wf-hero-to, var(--wf-sky, var(--wf-primary))));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
   }
 
   .wf-hero__tagline {
@@ -118,6 +125,7 @@ const formats = [
     letter-spacing: -0.005em;
     text-decoration: none;
     border: 1px solid var(--wf-primary);
+    border-radius: var(--wf-radius-card, 8px);
     background: transparent;
     color: var(--wf-primary);
     transition: all var(--wf-transition);
@@ -166,12 +174,13 @@ const formats = [
 
   .wf-hero__tag {
     display: inline-block;
-    padding: 3px 8px;
+    padding: 3px 9px;
     font-family: var(--sl-font-mono);
     font-size: 0.68rem;
     letter-spacing: 0.02em;
     color: var(--wf-muted);
     border: 1px solid var(--sl-color-hairline);
+    border-radius: var(--wf-radius, 6px);
     transition: all var(--wf-transition);
   }
 

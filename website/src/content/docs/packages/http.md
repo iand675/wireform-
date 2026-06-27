@@ -27,12 +27,12 @@ The stack spans three packages:
 - **HTTP/2 multiplexing** with exact-size allocation and zero-copy frame
   reads off a [magic ring transport](../network/)
 - **Magic-ring receive path** (shared with `wireform-kafka` via
-  [`wireform-network`](../network/)) — recv bytes land directly
+  [`wireform-network`](../network/)): recv bytes land directly
   in a double-mapped pinned buffer; the parser reads zero-copy slices.
   15-51% faster end-to-end than the classic `RecvBuffer` shape; see the
   [benchmarks](../network/#benchmarks-faster-than-the-classic-recv-path)
 - **HPACK** with a hand-tuned C Huffman codec
-- **Direct OpenSSL TLS** (`Wireform.Network.TLS.OpenSSL`) — decrypts
+- **Direct OpenSSL TLS** (`Wireform.Network.TLS.OpenSSL`): decrypts
   plaintext straight into the magic ring with no `ByteString`
   intermediate; the pure-Haskell `tls` bridge stays available for
   deployments that can't add a `libssl` system dep

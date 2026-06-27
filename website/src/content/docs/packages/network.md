@@ -6,16 +6,16 @@ sidebar:
 ---
 
 `wireform-network` is the receive-side infrastructure shared by every
-networked wireform package. It owns the **magic-ring transport** — a
+networked wireform package. It owns the **magic-ring transport**: a
 double-mapped pinned buffer that the kernel writes recv data into and that
 the wireform parser reads decoded values out of, with no intermediate
 `ByteString` allocation and no per-call malloc. Built on top of it:
 
-* `withRecvTransport` / `withRecvBufTransport` / `newRecvBufTransport` —
+* `withRecvTransport` / `withRecvBufTransport` / `newRecvBufTransport`:
   the magic-ring `Wireform.Transport` constructors used by
   `wireform-kafka`, `wireform-http1`, and `wireform-http2` as the
   exclusive read path.
-* `Wireform.Network.TLS.OpenSSL` — direct OpenSSL FFI that decrypts
+* `Wireform.Network.TLS.OpenSSL`: direct OpenSSL FFI that decrypts
   TLS plaintext into a caller-supplied pointer (i.e. the magic ring's
   backing memory), so the entire socket → TLS → parser pipeline runs
   copy-free.
@@ -25,7 +25,7 @@ the wireform parser reads decoded values out of, with no intermediate
 The classic Haskell socket recv path allocates a fresh pinned
 `ByteString` per `recv()` call, hands it to the parser, and lets the
 GC free it later. Parsers that need more bytes than fit in one
-`recv()` then concatenate chunks — another allocation and copy. For a
+`recv()` then concatenate chunks, another allocation and copy. For a
 parser that processes hundreds of thousands of small frames per
 second (Kafka pipelining, HTTP/2 streams, HTTP/1.1 keep-alive) those
 allocations dominate.
@@ -188,8 +188,8 @@ For HTTP/2 the per-frame cost is dominated by the (already cheap)
 9-byte header decode + payload slice; the magic ring path wins on
 medium and large frames and is at parity on very small ones. The
 small +9% on 100 small frames is criterion's per-batch overhead
-divided across a small constant cost; the 1000-frame number — where
-the per-frame cost is unambiguous — is a 1.5 % win.
+divided across a small constant cost; the 1000-frame number (where
+the per-frame cost is unambiguous) is a 1.5 % win.
 
 ### Kafka
 
@@ -205,7 +205,7 @@ fresh `ByteString`s per frame (one for the length prefix, one for
 the body) and walks the body's first 4 bytes through `runGet` to
 extract the correlation id. The wireform pipeline parses the
 length + correlation id with `anyInt32be` twice and returns a
-zero-copy `takeBs` slice for the body — that's about 2.5–2.8×
+zero-copy `takeBs` slice for the body. That's about 2.5-2.8×
 faster end-to-end.
 
 ### Reproducing the numbers

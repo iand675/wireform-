@@ -7,18 +7,20 @@ sidebar:
 
 Exactly-once semantics (EOS) on Kafka itself is well understood. The library uses a transactional producer, `TxnOffsetCommit`, and KIP-892 transactional state stores. You enable this with `processingGuarantee = ExactlyOnceP`.
 
-However, this only covers writes to Kafka topics. What about writes to Postgres, S3, Iceberg, or HTTP endpoints? These require the two-phase commit sink contract to maintain exactly-once guarantees across systems. This page explains how both work.
+However, this only covers writes to Kafka topics. Writes to Postgres, S3, Iceberg, or HTTP endpoints require the two-phase commit sink contract to maintain exactly-once guarantees across systems.
 
 :::tip[Unfamiliar terms?]
 Kafka, Streams, and Riffle terminology is defined in the [Glossary](../glossary/).
 :::
 
 :::note[TL;DR]
+
 - The commit cycle has six ordered steps: `beginTxn → flush → commitOffsets → preCommit2PC → commitTxn → commit2PC → storeCommit`.
 - A `TwoPhaseSink` has five operations: `tpsStage`, `tpsPrepare`, `tpsCommit`, `tpsAbort`, `tpsRecover`. All must be idempotent.
 - Failure at `commit2PC` (after Kafka already committed) is the only fatal case. The stranded `SinkTxnId` is resolved by `tpsRecover` on next boot.
 - Reference sinks ship in core (in-memory, filesystem, HTTP echo). Production adapters for JDBC, Iceberg, S3 live in separate packages.
 - Async I/O operators get EOS for free. The pre-commit drain hook ensures all in-flight requests complete before commit.
+
 :::
 
 ## The commit cycle
@@ -184,7 +186,6 @@ sequenceDiagram
   Run->>Sink: tpsCommit(SinkTxnId1)\nor tpsAbort(SinkTxnId1)
   Sink-->>Run: SinkOK
 ```
-
 
 ```haskell
 withTwoPhaseSinks

@@ -5,13 +5,11 @@ sidebar:
   order: 2
 ---
 
-When you write a topology, you describe what processing should happen. The compiler transforms this into an efficient execution plan. This guide explains what optimizations happen automatically, which ones you control, and how to verify the result.
+Your source code describes intent. The compiler rewrites the topology into an efficient execution plan while preserving semantics. This page covers what happens automatically, what you control, and how to verify the result.
 
 ## Why topologies get optimized
 
-Your source code describes intent. The runtime needs efficiency. The compiler bridges this gap by rewriting your topology while preserving its semantics.
-
-**Example:** You write three separate `map` operations:
+Write three separate `map` operations:
 
 ```haskell
 source "input" serde serde
@@ -21,16 +19,9 @@ source "input" serde serde
   >>> sink "output" serde serde
 ```
 
-Running this literally would:
-1. Allocate intermediate records after each map
-2. Traverse the stream three times
-3. Add synchronization overhead between steps
-
-The compiler fuses these into a single pass that applies all three functions to each record once. Same result, better performance.
+Running this literally would allocate intermediate records after each map, traverse the stream three times, and add synchronization overhead between steps. The compiler fuses them into a single pass that applies all three functions to each record once. Same result, better performance.
 
 ## Two optimization layers
-
-The compiler works at two levels:
 
 | Layer | What it does | Enabled by default? |
 | ----- | ------------- | ------------------- |
@@ -45,7 +36,7 @@ These rewrites reduce node count and eliminate overhead. They run automatically 
 
 ### Operator fusion
 
-**What it does:** Combine adjacent operators of the same type.
+Combine adjacent operators of the same type.
 
 | Pattern | Becomes | Benefit |
 |---------|---------|---------|
@@ -53,7 +44,6 @@ These rewrites reduce node count and eliminate overhead. They run automatically 
 | Two `filter` | One `filter` with AND of predicates | Check once, not twice |
 | `mapValues` then `filter` | Fused predicate | No intermediate allocations |
 
-**Example:**
 ```haskell
 -- You write
 source >>> mapValues upper >>> filter (not . null) >>> sink
@@ -64,9 +54,7 @@ source >>> mapAndFilter (\v -> let u = upper v in (not (null u), u)) >>> sink
 
 ### Repartition optimization
 
-**What it does:** Remove or reorder shuffles.
-
-Repartitioning (redistributing records by key) is expensive. It requires network I/O to Kafka. The compiler eliminates unnecessary repartitions:
+Remove or reorder shuffles. Repartitioning is expensive: it requires network I/O to Kafka. The compiler eliminates unnecessary repartitions:
 
 | Pattern | Action | Why |
 |---------|--------|-----|
@@ -76,7 +64,7 @@ Repartitioning (redistributing records by key) is expensive. It requires network
 
 ### Identity elimination
 
-**What it does:** Remove no-op operations.
+Remove no-op operations:
 
 ```haskell
 -- These disappear entirely
@@ -87,9 +75,7 @@ through "same-topic"   -- Reads what it just wrote
 
 ### Auto-insert missing repartitions
 
-**What it does:** Add required shuffles you forgot.
-
-Stateful operations (`count`, `aggregate`, `reduce`) need records partitioned by key. If your topology would process mis-partitioned records, the compiler inserts a repartition automatically.
+Add required shuffles you forgot. Stateful operations (`count`, `aggregate`, `reduce`) need records partitioned by key. If your topology would process mis-partitioned records, the compiler inserts a repartition automatically.
 
 ```haskell
 -- You write (potentially buggy)
@@ -111,9 +97,10 @@ These changes affect the internal topic layout on your Kafka brokers. They are d
 | `MERGE_REPARTITION_TOPICS` | Combine adjacent repartitions into one | Complex topologies with many shuffles |
 | `SINGLE_STORE_SELF_JOIN` | Use one store instead of two for self-joins | Stream-stream self-joins |
 
-**Why these are opt-in:** They change which internal topics exist. Rolling out a topology with different optimization settings than before can orphan topics or require state migration.
+They change which internal topics exist. Rolling out a topology with different optimization settings than before can orphan topics or require state migration.
 
-**How to enable:**
+To enable:
+
 ```haskell
 import qualified Kafka.Streams.Topology.Optimization as Opt
 
@@ -139,7 +126,7 @@ stats <- Opt.optimizationStats myTopology
 --   }
 ```
 
-**When to check:** If performance surprises you, verify what the compiler produced.
+Check this when performance surprises you.
 
 ### Disable optimizations (for debugging)
 
@@ -148,7 +135,7 @@ topo <- Opt.compileNoOptimize myTopology
 -- Compile exactly what you wrote, no rewrites
 ```
 
-**Use when:** You suspect an optimization is buggy or want to compare optimized vs unoptimized behavior.
+Use when you suspect an optimization is buggy or want to compare optimized vs unoptimized behavior.
 
 ### Golden-file testing
 
@@ -167,30 +154,19 @@ This fails CI if your source changes produce a different compiled shape.
 
 ## When optimizations don't happen
 
-The compiler deliberately avoids some fusions to preserve semantics:
+The compiler deliberately avoids some fusions to preserve semantics.
 
 ### Async boundaries
 
-Two async I/O operators stay separate because:
-- Each has independent timeout/retry config
-- Each has its own backpressure buffer
-- Merging would hide which call is failing
-
-**Workaround:** If you want one async worker, write one `asyncMapValues` with composed logic.
+Two async I/O operators stay separate. Each has independent timeout/retry config, its own backpressure buffer, and merging would hide which call is failing. If you want one async worker, write one `asyncMapValues` with composed logic.
 
 ### Side-effect ordering
 
-Peek operations stay in place because:
-- Side effects (logging, metrics) have observable order
-- Moving them would change when they fire
-- This would break debugging and monitoring
+Peek operations stay in place. Side effects (logging, metrics) have observable order, and moving them would change when they fire. That breaks debugging and monitoring.
 
 ### Post-async sync work
 
-A sync `mapValues` after an `asyncMapValues` stays separate because:
-- The sync work runs on the stream thread anyway
-- Keeping it distinct clarifies the async boundary
-- The overhead is minimal (just function call)
+A sync `mapValues` after an `asyncMapValues` stays separate. The sync work runs on the stream thread anyway, the overhead is just a function call, and keeping it distinct clarifies the async boundary.
 
 ## Common issues and fixes
 

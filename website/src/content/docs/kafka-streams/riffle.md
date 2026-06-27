@@ -6,11 +6,11 @@ sidebar:
   label: Extended features
 ---
 
-Kafka Streams is deliberately minimal. It gives you stateful stream processing as a library -- no cluster to deploy, no job submission system, no resource manager. You compile your topology into your application binary, start it, and the framework handles partition assignment, state management, and offset tracking. That simplicity is its main advantage over heavier systems like Flink.
+Kafka Streams is deliberately minimal. It gives you stateful stream processing as a library: no cluster to deploy, no job submission system, no resource manager. You compile your topology into your application binary, start it, and the framework handles partition assignment, state management, and offset tracking. That simplicity is its main advantage over heavier systems like Flink.
 
 But the simplicity has a cost. As your application grows, you start hitting walls that the base Kafka Streams model wasn't designed to solve. Your enrichment calls block the stream thread. Your state stores take 45 minutes to recover after a restart. Your exactly-once guarantees evaporate the moment you write to Postgres. Your windows stall because one partition stopped producing. You need 64-way parallelism but your topic only has 12 partitions.
 
-These aren't edge cases. They're the normal trajectory of a stream processing application that started simple and grew. In the JVM Kafka Streams ecosystem, each of these problems has a different workaround -- custom thread pools, manual state checkpointing, outbox patterns, polling hacks. Flink solves most of them natively, but Flink is a distributed cluster you have to operate.
+These aren't edge cases. They're the normal trajectory of a stream processing application that started simple and grew. In the JVM Kafka Streams ecosystem, each of these problems has a different workaround: custom thread pools, manual state checkpointing, outbox patterns, polling hacks. Flink solves most of them natively, but Flink is a distributed cluster you have to operate.
 
 Riffle is a set of opt-in extensions that solve these problems while keeping the library model. Every feature is independent, every feature is additive, and a topology that uses none of them compiles to the same imperative graph as base Kafka Streams.
 
@@ -47,7 +47,7 @@ asyncMapValues
   (\record -> callEnrichmentAPI (rvValue record))
 ```
 
-`aioMaxConcurrency` caps how many requests are in flight at once -- this is your backpressure knob. `aioOutputMode` controls whether results are emitted in input order (safer, slightly slower) or as they complete (higher throughput when order doesn't matter). `aioFailurePolicy` determines whether a failed request skips the record, retries, or shuts down the task.
+`aioMaxConcurrency` caps how many requests are in flight at once; this is your backpressure knob. `aioOutputMode` controls whether results are emitted in input order (safer, slightly slower) or as they complete (higher throughput when order doesn't matter). `aioFailurePolicy` determines whether a failed request skips the record, retries, or shuts down the task.
 
 Exactly-once semantics are preserved through a drain mechanism: before any offset commit, the runtime blocks the stream thread until every in-flight async request completes. This ensures that committed offsets always reflect fully-processed records, even though the processing happened concurrently on other threads.
 
@@ -59,15 +59,15 @@ Full walkthrough with capacity sizing: [Enrichment via external systems](../guid
 
 ### The problem
 
-Kafka Streams maintains state by writing every state change to a changelog topic. When a task starts -- whether it's a fresh deploy, a rebalance, or a crash recovery -- it replays the entire changelog from offset zero to rebuild the state store.
+Kafka Streams maintains state by writing every state change to a changelog topic. When a task starts (a fresh deploy, a rebalance, or a crash recovery), it replays the entire changelog from offset zero to rebuild the state store.
 
-This design is elegant and correct, but recovery time scales with state size. A state store holding 50 GB of data means replaying 50 GB of changelog records, which can take 30-60 minutes depending on your broker throughput and record complexity. On a rolling deploy with 20 instances, each one waits its turn. What should be a 5-minute deploy becomes a multi-hour operation.
+This design is sound and correct, but recovery time scales with state size. A state store holding 50 GB of data means replaying 50 GB of changelog records, which can take 30-60 minutes depending on your broker throughput and record complexity. On a rolling deploy with 20 instances, each one waits its turn. What should be a 5-minute deploy becomes a multi-hour operation.
 
 Standby replicas help (they pre-replicate state so that a rebalanced task can start from a warm copy), but they double your state storage requirements and still need to catch up on any records written since the last replication cycle.
 
 ### The solution
 
-Riffle adds snapshot-based recovery. The runtime periodically checkpoints the entire state store to a durable object store -- local filesystem for development, S3 or GCS or Azure Blob for production. The changelog still exists and still captures every write, but it now acts as a write-ahead log between snapshots rather than the sole recovery mechanism.
+Riffle adds snapshot-based recovery. The runtime periodically checkpoints the entire state store to a durable object store: local filesystem for development, S3 or GCS or Azure Blob for production. The changelog still exists and still captures every write, but it now acts as a write-ahead log between snapshots rather than the sole recovery mechanism.
 
 On restart, the runtime:
 
@@ -83,7 +83,7 @@ Riffle provides several store backends depending on how much state you have and 
 
 **Hot + cold tiered KV** is for state that exceeds local disk. Recent entries live in a fast local tier; older entries live in cold storage (typically S3). Reads probe the hot tier first and fall through to cold, promoting accessed entries back to hot. Import from `Kafka.Streams.State.KeyValue.Tiered`.
 
-**Remote KV** eliminates local state entirely. The store lives in a remote system (matching the shape of FoundationDB, TiKV, or DynamoDB). Node restart becomes a metadata operation -- there's no state to recover, just a connection to re-establish. Import from `Kafka.Streams.State.KeyValue.Remote`.
+**Remote KV** eliminates local state entirely. The store lives in a remote system (matching the shape of FoundationDB, TiKV, or DynamoDB). Node restart becomes a metadata operation: there's no state to recover, just a connection to re-establish. Import from `Kafka.Streams.State.KeyValue.Remote`.
 
 **Pointer-mode standby** is for environments where standby replicas are too expensive to maintain as full copies. Instead of replicating the entire state, the standby tracks a `(snapshotId, offset)` pair. When promoted to active, it fetches the snapshot and replays from the offset. Import from `Kafka.Streams.Runtime.StandbyTask`.
 
@@ -95,7 +95,7 @@ See [Topology evolution](../operating/topology-evolution/) for how snapshot stor
 
 Kafka's exactly-once semantics (EOS) work through transactional producers. The stream thread reads records, processes them, writes output records and offset commits in a single atomic transaction. If the transaction commits, both the output and the offsets are visible. If it aborts, neither is.
 
-This guarantee holds as long as the output goes to Kafka. The moment your sink is an external system -- a Postgres INSERT, an Iceberg table append, an S3 file upload, an HTTP POST -- the atomicity breaks. There are two separate systems now, and no single transaction spans both.
+This guarantee holds as long as the output goes to Kafka. The moment your sink is an external system (a Postgres INSERT, an Iceberg table append, an S3 file upload, an HTTP POST), the atomicity breaks. There are two separate systems now, and no single transaction spans both.
 
 Consider what happens during a crash:
 
@@ -131,13 +131,13 @@ Operator walkthrough: [Exactly-once across Kafka and other systems](../operating
 
 ### The problem
 
-Kafka Streams tracks "stream time" per task -- it's the maximum timestamp seen so far across all records processed by that task. Windowed operators use stream time to decide when a window is complete and can be emitted.
+Kafka Streams tracks "stream time" per task: the maximum timestamp seen so far across all records processed by that task. Windowed operators use stream time to decide when a window is complete and can be emitted.
 
 This works well when you have a single source with a steady record rate. It breaks in two important ways:
 
 **Mixed-rate joins.** You're joining a high-volume clickstream (thousands of records per second) with a low-volume user-update stream (a few records per minute). Stream time advances rapidly on the clickstream side. The user-update side barely moves. Any window that spans both sources can't close until the slow side catches up, which might take minutes. Meanwhile, the fast side accumulates unbounded state.
 
-**Idle partitions.** A partition stops producing records entirely -- maybe the upstream producer crashed, maybe traffic naturally dried up on that shard. Stream time for that partition freezes. Any window that includes that partition will never close, because the watermark never advances past the last record.
+**Idle partitions.** A partition stops producing records entirely. Maybe the upstream producer crashed; maybe traffic naturally dried up on that shard. Stream time for that partition freezes. Any window that includes that partition will never close, because the watermark never advances past the last record.
 
 Both of these are well-known problems in stream processing. Flink solves them with a global watermark mechanism. Base Kafka Streams doesn't have one.
 
@@ -154,7 +154,7 @@ addSourceWith "clicks" (consumed & withWatermarkStrategy clickStrategy)
 addSourceWith "users"  (consumed & withWatermarkStrategy userStrategy)
 ```
 
-`boundedOutOfOrderness` says "timestamps might arrive up to N seconds late; hold the watermark back by that much." `withIdleness` says "if this source produces no records for 60 seconds, stop waiting for it -- exclude it from the global watermark calculation."
+`boundedOutOfOrderness` says "timestamps might arrive up to N seconds late; hold the watermark back by that much." `withIdleness` says "if this source produces no records for 60 seconds, stop waiting for it and exclude it from the global watermark calculation."
 
 The coordinator tracks the minimum watermark across all active (non-idle) sources. When a window's end time falls below the global watermark, the window can safely close and emit results. Fast sources can optionally be backpressured via alignment groups to prevent them from racing too far ahead of slow sources.
 
@@ -225,15 +225,15 @@ Every Riffle feature is independent. You can adopt one without adopting any of t
 
 8. **Switch to key-group dispatch** when you hit the partition-count parallelism ceiling and can't or don't want to repartition topics.
 
-You can stop at any step. Every step is an additive deploy -- you're never committed to the full set.
+You can stop at any step. Every step is an additive deploy; you're never committed to the full set.
 
 ## Related reading
 
-- [Enrichment via external systems](../guides/enrichment/) -- async I/O walkthrough with capacity sizing
-- [Topology evolution](../operating/topology-evolution/) -- how snapshot stores change rolling deploys
-- [Scaling and rebalancing](../operating/scaling/) -- key-groups and rebalance
-- [Exactly-once across Kafka and other systems](../operating/exactly-once/) -- the 2PC sink contract
-- [Observability](../operating/observability/) -- topology JSON, orphan detection, live overlays
-- [Visibility versus ACID databases](../operating/visibility/) -- watermarks and event-time TTL
-- [Topology optimization](../concepts/topology-optimization/) -- including the `optFuseSyncIntoAsync` fusion rule
-- [`RIFFLE_SPEC.md`](https://github.com/iand675/wireform-/blob/main/wireform-kafka/streams/RIFFLE_SPEC.md) -- design contract with per-section rationale
+- [Enrichment via external systems](../guides/enrichment/): async I/O walkthrough with capacity sizing
+- [Topology evolution](../operating/topology-evolution/): how snapshot stores change rolling deploys
+- [Scaling and rebalancing](../operating/scaling/): key-groups and rebalance
+- [Exactly-once across Kafka and other systems](../operating/exactly-once/): the 2PC sink contract
+- [Observability](../operating/observability/): topology JSON, orphan detection, live overlays
+- [Visibility versus ACID databases](../operating/visibility/): watermarks and event-time TTL
+- [Topology optimization](../concepts/topology-optimization/): including the `optFuseSyncIntoAsync` fusion rule
+- [`RIFFLE_SPEC.md`](https://github.com/iand675/wireform-/blob/main/wireform-kafka/streams/RIFFLE_SPEC.md): design contract with per-section rationale

@@ -6,32 +6,19 @@ sidebar:
   label: 5. Going to production
 ---
 
-You've written a topology, given it state, and joined two streams.
-Going from that to a production deploy is mostly about
-**operational concerns**: things that don't show up in the test
-driver but bite you in production if you ignore them.
+You've written a topology, given it state, and joined two streams. Going from that to a production deploy is mostly about **operational concerns**: things that don't show up in the test driver but bite you in production if you ignore them.
 
 ## Why production is different from the test driver
 
-The test driver gives you a controlled environment where:
-- Everything runs in a single process
-- State lives in memory and disappears when the process exits
-- There are no network partitions, broker unavailability, or slow consumers
-- Exactly one thread processes everything, so there are no race conditions
+The test driver gives you a controlled environment where everything runs in a single process, state lives in memory and disappears when the process exits, there are no network partitions or broker unavailability or slow consumers, and exactly one thread processes everything so there are no race conditions.
 
-Production is the opposite. Your topology will run across multiple
-instances, each with multiple threads. Network issues happen. Brokers
-restart. Consumers fall behind. State must survive restarts. The
-checklist below addresses the gaps between "it works in the test driver"
-and "it runs reliably in production."
+Production is the opposite. Your topology will run across multiple instances, each with multiple threads. Network issues happen. Brokers restart. Consumers fall behind. State must survive restarts. The checklist below addresses the gaps between "it works in the test driver" and "it runs reliably in production."
 
 ## The eight things you need
 
-Each item below prevents a specific class of production incident. If you
-do nothing else, do these eight before deploying:
+Each item below prevents a specific class of production incident:
 
-1. **Pick a [processing guarantee](#1-processing-guarantee)** -
-   at-least-once or exactly-once.
+1. **Pick a [processing guarantee](#1-processing-guarantee)**: at-least-once or exactly-once.
 2. **Name every stateful operator** explicitly.
 3. **Set `numStandbyReplicas` to at least 1**.
 4. **Wire metrics to your observability stack**.
@@ -44,12 +31,7 @@ The rest of this page expands each one.
 
 ## 1. Processing guarantee
 
-**Why this matters:** In the test driver, every record is processed exactly once
-because there's only one thread and no failures. In production, instances
-restart, network partitions happen, and the consumer group rebalances. Without
-an explicit choice, you might get duplicate records (at-least-once) when a task
-fails over, or you might pay overhead you don't need (exactly-once) for
-idempotent workloads.
+In the test driver, every record is processed exactly once because there's only one thread and no failures. In production, instances restart, network partitions happen, and the consumer group rebalances. Without an explicit choice, you might get duplicate records (at-least-once) when a task fails over, or pay overhead you don't need (exactly-once) for idempotent workloads.
 
 `StreamsConfig.processingGuarantee` picks between:
 
@@ -75,27 +57,13 @@ That's where the Riffle two-phase-commit sink interface comes in.
 
 ## 2. Name every stateful operator
 
-**Why this matters:** Auto-generated names change when you add or remove
-operators in your topology. When a name changes, the runtime creates a new
-internal topic (changelog or repartition) and abandons the old one. Your
-previous state is orphaned, queries return empty results, and you have zombie
-topics consuming disk forever. Pinning names prevents this deployment hazard.
+Auto-generated names change when you add or remove operators in your topology. When a name changes, the runtime creates a new internal topic (changelog or repartition) and abandons the old one. Your previous state is orphaned, queries return empty results, and you have zombie topics consuming disk forever.
 
-The library generates names for unnamed operators automatically.
-Those names become part of the **internal topic** layout:
-`<applicationId>-<storeName>-changelog`,
-`<applicationId>-<nodeName>-repartition`.
+The library generates names for unnamed operators automatically. Those names become part of the **internal topic** layout: `<applicationId>-<storeName>-changelog`, `<applicationId>-<nodeName>-repartition`.
 
-If you reshuffle your topology (insert a new `map` upstream of an
-existing aggregation, for example), the auto-generated names can
-shift: which means the broker creates *new* internal topics and
-abandons the old ones. The old ones don't go away; they sit on the
-broker holding your previous state.
+If you reshuffle your topology (insert a new `map` upstream of an existing aggregation, for example), the auto-generated names can shift. The broker creates *new* internal topics and abandons the old ones. The old ones don't go away; they sit on the broker holding your previous state.
 
-**Rule:** every operator that owns a state store should pass an
-explicit `Named` or a custom `materializedAs (storeName "...")`.
-Anything that creates a repartition topic (`repartition`,
-`through`) should also have a stable name.
+Every operator that owns a state store should pass an explicit `Named` or a custom `materializedAs (storeName "...")`. Anything that creates a repartition topic (`repartition`, `through`) should also have a stable name.
 
 ```haskell
 -- Good: pinned names
@@ -110,11 +78,7 @@ Full discussion in
 
 ## 3. Standby replicas
 
-**Why this matters:** Without standbys, when an instance restarts (deploy,
-failure, or scale-up), the new owner of each task must replay the entire
-changelog from the beginning. For large state stores this takes hours, during
-which that partition is unavailable for interactive queries and processes
-records slowly. Standbys keep warm replicas so failover is near-instant.
+Without standbys, when an instance restarts (deploy, failure, or scale-up), the new owner of each task must replay the entire changelog from the beginning. For large state stores this takes hours, during which that partition is unavailable for interactive queries and processes records slowly. Standbys keep warm replicas so failover is near-instant.
 
 `numStandbyReplicas = 0` (the default) means each task's state
 lives on exactly one instance. When that instance drains, the
@@ -149,12 +113,7 @@ Details: [Scaling: standby tasks](../../operating/scaling/#standby-tasks).
 
 ## 4. Metrics
 
-**Why this matters:** In the test driver, you see every record. In production,
-you have hundreds of thousands of records per second across multiple
-instances. Without metrics, you have no visibility into whether processing is
-keeping up, whether commits are succeeding, or whether records are being
-silently dropped. The four metrics in the table below catch the most common
-production incidents.
+In the test driver, you see every record. In production, you have hundreds of thousands of records per second across multiple instances. Without metrics, you have no visibility into whether processing is keeping up, whether commits are succeeding, or whether records are being silently dropped. The four metrics in the table below catch the most common production incidents.
 
 `Kafka.Streams.Metrics.dumpMetrics` returns a snapshot of every
 counter, gauge, and duration stat the runtime records. Wire it to
@@ -177,11 +136,7 @@ Full list and patterns:
 
 ## 5. Orphan-topic detector
 
-**Why this matters:** Deployments that rename operators (even accidentally)
-leave behind internal topics that nobody is using but everyone is paying for.
-A 100-partition changelog topic with 7-day retention consumes significant disk.
-Over months, these orphans accumulate. Detecting them at startup lets you
-clean up before they become a budget line item.
+Deployments that rename operators (even accidentally) leave behind internal topics that nobody is using but everyone is paying for. A 100-partition changelog topic with 7-day retention consumes significant disk. Over months, these orphans accumulate. Detecting them at startup lets you clean up before they become a budget line item.
 
 When you rename a stateful operator (or accidentally renumber its
 auto-generated name), the old internal topic on the broker becomes
@@ -207,12 +162,7 @@ Details:
 
 ## 6. Topology golden file
 
-**Why this matters:** Code review can't catch topology changes that accidentally
-shift auto-generated names. A seemingly innocent refactor (adding a `map`
-upstream of an aggregation) can renumber every subsequent operator, causing
-all internal topics to be recreated and state to be lost. A golden file test
-fails the build when the topology shape changes, forcing explicit review of
-the diff.
+Code review can't catch topology changes that accidentally shift auto-generated names. A seemingly innocent refactor (adding a `map` upstream of an aggregation) can renumber every subsequent operator, causing all internal topics to be recreated and state to be lost. A golden file test fails the build when the topology shape changes, forcing explicit review of the diff.
 
 Snapshot the topology JSON into your repo:
 
@@ -227,11 +177,7 @@ writeGolden = do
     (P.encodePretty (Obs.topologyDescription topo))
 ```
 
-Add a test that fails if `myTopology` produces a different JSON.
-PRs that change the topology shape: even ones that look innocent
-- surface the diff explicitly. Reviewing the diff is your last
-line of defence against the "I added a `map` and now my changelog
-topic has a different name" class of bug.
+Add a test that fails if `myTopology` produces a different JSON. Even innocent-looking PRs surface the diff explicitly. Reviewing the diff is your last line of defence against the "I added a `map` and now my changelog topic has a different name" class of bug.
 
 A diff touching `sources`, `stores`, or `edges` is a deploy you
 have to think about. A diff touching only `processors` (renumbered
@@ -242,13 +188,7 @@ full classification.
 
 ## 7. Test rebalance and restart
 
-**Why this matters:** The test driver runs everything in one thread with no
-failure injection. Production has network partitions, broker restarts, rolling
-deploys, and consumer group rebalances. These events trigger code paths your
-unit tests never exercise. Testing rebalance and restart scenarios before
-they happen in production reveals whether your state stores recover correctly,
-whether your external resources clean up properly, and whether your exactly-once
-guarantees hold under failure.
+The test driver runs everything in one thread with no failure injection. Production has network partitions, broker restarts, rolling deploys, and consumer group rebalances. These events trigger code paths your unit tests never exercise. Testing rebalance and restart scenarios before they happen in production reveals whether your state stores recover correctly, whether your external resources clean up properly, and whether your exactly-once guarantees hold under failure.
 
 The test driver runs one task in one thread. Production runs
 multiple tasks across multiple instances. The gap between them
@@ -273,12 +213,7 @@ exercised in its full mode. This includes partition handoff and replay.
 
 ## 8. Do you need Riffle?
 
-**Why this matters:** The base Kafka Streams library handles most workloads well,
-but it has limitations. External API calls block the stream thread. Exactly-once
-semantics only work for Kafka-to-Kafka pipelines. Large state stores take hours
-to replay. You can't scale past your partition count. Riffle extensions address
-these specific gaps. Knowing when to reach for them prevents you from fighting
-the library or accepting operational pain you don't need to endure.
+The base Kafka Streams library handles most workloads well, but it has limitations. External API calls block the stream thread. Exactly-once semantics only work for Kafka-to-Kafka pipelines. Large state stores take hours to replay. You can't scale past your partition count. Riffle extensions address these specific gaps.
 
 Riffle is the extensions tier. You can ignore it until a parity
 limitation bites. Common signs you'll want it:
@@ -347,13 +282,9 @@ main = do
   closeKafkaStreams ks
 ```
 
-## What you learned
+## Recap
 
-- The eight things to set up before a production deploy.
-- The trade-offs of each `processingGuarantee`.
-- Why naming every stateful operator matters across deploys.
-- The minimum metrics and listeners to wire up.
-- The decision tree for whether to reach for Riffle.
+The eight things to set up before a production deploy. The trade-offs of each `processingGuarantee`. Why naming every stateful operator matters across deploys. The minimum metrics and listeners to wire up. The decision tree for whether to reach for Riffle.
 
 ## Where to go from here
 
