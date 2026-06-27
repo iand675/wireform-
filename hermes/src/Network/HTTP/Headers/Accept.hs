@@ -1,3 +1,15 @@
+{- |
+@Accept@ — a request header by which a client lists the media types
+(MIME types) it is willing to receive in the response, each with an
+optional @;q=@ quality weight expressing relative preference. Servers
+use it for proactive content negotiation, selecting the best matching
+representation to return (or replying @406 Not Acceptable@ when none is
+acceptable).
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-12.5.1>
+
+See also: "Network.HTTP.Headers.AcceptCharset", "Network.HTTP.Headers.AcceptEncoding", "Network.HTTP.Headers.AcceptLanguage", "Network.HTTP.Headers.ContentType", "Network.HTTP.Headers.Vary".
+-}
 module Network.HTTP.Headers.Accept (
   Accept (..),
   acceptParser,

@@ -149,9 +149,9 @@ unit_basic :: Spec
 unit_basic = it "Basic realm" $
   case parseOk "Basic realm=\"example\"" of
     Right [ch] -> do
-      (W.challengeScheme ch) `shouldBe` (scheme "Basic")
+      W.challengeScheme ch `shouldBe` scheme "Basic"
       case W.challengeContents ch of
-        W.ChallengeParams ps -> (length ps) `shouldBe` 1
+        W.ChallengeParams ps -> length ps `shouldBe` 1
         _ -> error "expected ChallengeParams"
     other -> error ("unexpected parse result: " <> show other)
 
@@ -161,14 +161,14 @@ unit_multi_challenge =
   it "multi-challenge values" $
     let raw = "Basic realm=\"x\", Bearer realm=\"y\", scope=\"r\""
     in case parseOk raw of
-         Right [b, br] -> do
-           (W.challengeScheme b) `shouldBe` (scheme "Basic")
-           (W.challengeScheme br) `shouldBe` (scheme "Bearer")
-           case W.challengeContents br of
-             W.ChallengeParams ps ->
-               (length ps) `shouldBe` 2
-             _ -> error "expected ChallengeParams for Bearer"
-         other -> error ("expected exactly two challenges, got: " <> show other)
+        Right [b, br] -> do
+          W.challengeScheme b `shouldBe` scheme "Basic"
+          W.challengeScheme br `shouldBe` scheme "Bearer"
+          case W.challengeContents br of
+            W.ChallengeParams ps ->
+              length ps `shouldBe` 2
+            _ -> error "expected ChallengeParams for Bearer"
+        other -> error ("expected exactly two challenges, got: " <> show other)
 
 
 unit_token68 :: Spec
@@ -187,17 +187,17 @@ unit_digest_qop_list =
           "Digest realm=\"api\", qop=\"auth,auth-int\", nonce=\"abc\", \
           \algorithm=SHA-256, opaque=\"o\""
     in case parseOk raw of
-         Right [ch] -> case W.challengeContents ch of
-           W.ChallengeParams ps ->
-             (length ps) `shouldBe` 5
-           _ -> error "expected ChallengeParams"
-         other -> error ("expected one challenge, got: " <> show other)
+        Right [ch] -> case W.challengeContents ch of
+          W.ChallengeParams ps ->
+            length ps `shouldBe` 5
+          _ -> error "expected ChallengeParams"
+        other -> error ("expected one challenge, got: " <> show other)
 
 
 unit_empty_list_form :: Spec
 unit_empty_list_form = it "RFC 9110 §5.6.1 stacked-comma form" $
   case parseOk ", Basic realm=\"x\" ,," of
-    Right [ch] -> (W.challengeScheme ch) `shouldBe` (scheme "Basic")
+    Right [ch] -> W.challengeScheme ch `shouldBe` scheme "Basic"
     other -> error ("expected one challenge, got: " <> show other)
 
 
@@ -206,8 +206,8 @@ unit_quoted_with_comma = it "comma inside quoted-string is not a separator" $
   case parseOk "Bearer realm=\"a, b\"" of
     Right [ch] -> case W.challengeContents ch of
       W.ChallengeParams [(k, W.CredentialParamString s)] -> do
-        k `shouldBe` (st "realm")
-        (bytesOfRFC8941 s) `shouldBe` "a, b"
+        k `shouldBe` st "realm"
+        bytesOfRFC8941 s `shouldBe` "a, b"
       _ -> error "expected single quoted param"
     other -> error ("expected one challenge, got: " <> show other)
 
@@ -221,13 +221,13 @@ unit_quoted_escape_render = it "renderer escapes \" and \\ in quoted-string" $ d
           , W.challengeContents = W.ChallengeParams [paramString "realm" v]
           }
       out = render [ch]
-  (if ("\\\"" `BS.isInfixOf` out) then pure () else expectationFailure ("backslash-quote in: " <> show out))
-  (if ("\\\\" `BS.isInfixOf` out) then pure () else expectationFailure ("double-backslash in: " <> show out))
+  (if "\\\"" `BS.isInfixOf` out then pure () else expectationFailure ("backslash-quote in: " <> show out))
+  (if "\\\\" `BS.isInfixOf` out then pure () else expectationFailure ("double-backslash in: " <> show out))
   -- And the round-trip recovers the original payload.
   case parseOk out of
     Right [ch'] -> case W.challengeContents ch' of
       W.ChallengeParams [(_, W.CredentialParamString s)] ->
-        (bytesOfRFC8941 s) `shouldBe` v
+        bytesOfRFC8941 s `shouldBe` v
       _ -> error "expected single quoted param after round-trip"
     other -> error ("round-trip parse failed: " <> show other)
 

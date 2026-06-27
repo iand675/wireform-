@@ -33,7 +33,7 @@ unit_satisfied :: Spec
 unit_satisfied = it "satisfied bytes/total" $
   case parseOk "bytes 0-499/1234" of
     Right (CR.ContentRange unit (CR.RangeRespSatisfied 0 499 (Just 1234))) ->
-      unit `shouldBe` (ST.fromString "bytes")
+      unit `shouldBe` ST.fromString "bytes"
     other -> error (show other)
 
 
@@ -58,7 +58,7 @@ unit_render_satisfied =
           CR.ContentRange
             (ST.fromString "bytes")
             (CR.RangeRespSatisfied 0 99 (Just 200))
-    in (render v) `shouldBe` "bytes 0-99/200"
+    in render v `shouldBe` "bytes 0-99/200"
 
 
 unit_render_unsatisfied :: Spec
@@ -68,7 +68,7 @@ unit_render_unsatisfied =
           CR.ContentRange
             (ST.fromString "bytes")
             (CR.RangeRespUnsatisfied (Just 4096))
-    in (render v) `shouldBe` "bytes */4096"
+    in render v `shouldBe` "bytes */4096"
 
 
 -- Property: satisfied form round-trips for arbitrary positions.

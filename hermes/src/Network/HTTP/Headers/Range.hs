@@ -1,7 +1,14 @@
 {-# LANGUAGE TemplateHaskell #-}
 
 {- |
-RFC 9110 §14.2 @Range@ — a range request specifier.
+@Range@ is a request header by which a client asks for only one or more
+sub-ranges of the target resource instead of the whole representation,
+typically to resume an interrupted download or to fetch large media
+incrementally. The range unit is almost always @bytes@; a server that
+honours the request answers @206 Partial Content@ with a matching
+@Content-Range@, while one that ignores it returns the full @200@ response.
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-14.2>
 
 == Grammar
 
@@ -21,6 +28,8 @@ other-range-unit = token
 The @bytes-unit@ form is the only one in widespread use; this
 module supports it natively (typed positions) and surfaces other
 units as raw 'RawRange' for callers that need them.
+
+See also: "Network.HTTP.Headers.AcceptRanges", "Network.HTTP.Headers.ContentRange", "Network.HTTP.Headers.IfRange".
 -}
 module Network.HTTP.Headers.Range (
   Range (..),
@@ -51,10 +60,9 @@ import qualified Network.HTTP.Headers.Rendering.Util as R
 
 -- | A single byte-range spec.
 data ByteRange
-  = {- | @first-pos \"-\" [last-pos]@. @ByteRangeInt 0 (Just 499)@
-    means \"bytes 0\u2013499 inclusive\"; @ByteRangeInt 500
-    Nothing@ means \"from byte 500 to end\".
-    -}
+  = -- | @first-pos \"-\" [last-pos]@. @ByteRangeInt 0 (Just 499)@
+    --     means \"bytes 0\u2013499 inclusive\"; @ByteRangeInt 500
+    --     Nothing@ means \"from byte 500 to end\".
     ByteRangeInt !Word64 !(Maybe Word64)
   | -- | @\"-\" suffix-length@. \"The last N bytes\".
     ByteRangeSuffix !Word64
@@ -125,7 +133,7 @@ byteRangesParser :: ParserT st String (NonEmpty ByteRange)
 byteRangesParser = rangesetSepBy byteRange
   where
     byteRange =
-      ((ByteRangeSuffix . fromIntegral) <$> ($(char '-') *> anyAsciiDecimalWord))
+      (ByteRangeSuffix . fromIntegral <$> ($(char '-') *> anyAsciiDecimalWord))
         <|> intRange
 
     intRange = do

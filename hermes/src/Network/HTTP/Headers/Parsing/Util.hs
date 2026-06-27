@@ -4,7 +4,6 @@
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE UnboxedSums #-}
 {-# LANGUAGE UnboxedTuples #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 
@@ -25,6 +24,7 @@ import Data.CharSet (CharSet)
 import qualified Data.CharSet as CharSet
 import Data.CharSet.Posix.Ascii
 import Data.Fixed
+import Data.Functor (($>))
 import Data.List.NonEmpty (NonEmpty)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -291,9 +291,8 @@ rfc8941Integer = do
   pure res
   where
     baseVal = do
-      sign <- ($(char '-') *> pure negate) <|> pure id
-      res <- anyAsciiDecimalWord
-      pure $ sign $ fromIntegral res
+      sign <- ($(char '-') $> negate) <|> pure id
+      sign . fromIntegral <$> anyAsciiDecimalWord
 {-# INLINE rfc8941Integer #-}
 
 
@@ -340,11 +339,11 @@ rfc8941Token = withByteString tokenParser $ \_ bs -> do
 rfc8941Boolean :: ParserT st e Bool
 rfc8941Boolean =
   $( switch
-       [|
-         case _ of
-           "?0" -> pure True
-           "?1" -> pure False
-         |]
+      [|
+        case _ of
+          "?0" -> pure True
+          "?1" -> pure False
+        |]
    )
 {-# INLINE rfc8941Boolean #-}
 
@@ -380,12 +379,12 @@ mkRFC8941String t =
 rfc8941ItemValue :: ParserT st String ItemValue
 rfc8941ItemValue =
   asum
-    [ (Integer <$> rfc8941Integer)
-    , (Decimal <$> rfc8941Decimal)
-    , (String <$> rfc8941String)
-    , (Token <$> rfc8941Token)
-    , (Binary <$> rfc8941Binary)
-    , (Boolean <$> rfc8941Boolean)
+    [ Integer <$> rfc8941Integer
+    , Decimal <$> rfc8941Decimal
+    , String <$> rfc8941String
+    , Token <$> rfc8941Token
+    , Binary <$> rfc8941Binary
+    , Boolean <$> rfc8941Boolean
     ]
 
 
@@ -426,10 +425,9 @@ knownRfc8941Parameter k t = do
       $(char ';')
       ows
       _ <- $(k)
-      paramValue <- optional $ do
+      optional $ do
         $(char '=')
         itemValueTypeParser t
-      pure paramValue
     |]
 {-# INLINE knownRfc8941Parameter #-}
 

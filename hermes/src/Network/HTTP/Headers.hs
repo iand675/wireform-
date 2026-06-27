@@ -1,6 +1,6 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableSuperClasses #-}
 
@@ -46,13 +46,12 @@ import Network.HTTP.Headers.Settings
 --   , headerValue :: {-# UNPACK #-} !ByteString
 --   }
 
-data HeaderMap = HeaderMap
-  { headerMapToMap :: {-# UNPACK #-} !(HashMap HeaderFieldName (NonEmpty BS.ByteString))
-  {- ^ Internal invariant: fields are stored in reverse order. They're reversed when
-  they're looked up.
-
-  TODO: Benchmark against using Seq instead of NonEmpty.
-  -}
+newtype HeaderMap = HeaderMap
+  { headerMapToMap :: HashMap HeaderFieldName (NonEmpty BS.ByteString)
+  -- ^ Internal invariant: fields are stored in reverse order. They're reversed when
+  --   they're looked up.
+  --
+  --   TODO: Benchmark against using Seq instead of NonEmpty.
   }
   deriving stock (Eq)
 
@@ -100,7 +99,7 @@ setRawHeader name value (HeaderMap m) = HeaderMap $ Map.insert name (NE.reverse 
 
 {- | Build a 'HeaderMap' from a list of headers.
 
-This is the format used by the 'http-types' and 'wai', so it's useful for
+This is the format used by the @http-types@ and @wai@, so it's useful for
 integrating with those libraries.
 -}
 headerMapFromList :: [(CI BS.ByteString, BS.ByteString)] -> HeaderMap
@@ -117,7 +116,7 @@ headerMapToList (HeaderMap m) = concatMap f $ Map.toList m
   where
     f (name, values) =
       let ciName = toCIByteString name
-      in map (\value -> (ciName, value)) $ NE.toList values
+      in map (ciName,) $ NE.toList values
 
 
 data HeaderCardinality = ZeroOrOne | One | ZeroOrMore | OneOrMore
@@ -181,10 +180,9 @@ When defining a new instance, you should generally use a newtype wrapper
 or brand new data type
 -}
 class Typeable a => KnownHeader a where
-  {- | The type of errors that can occur when parsing a given header.
-
-  When possible, it is recommended to use a more specific type than 'String'.
-  -}
+  -- | The type of errors that can occur when parsing a given header.
+  --
+  --   When possible, it is recommended to use a more specific type than 'String'.
   type ParseFailure a :: Type
 
 
@@ -192,23 +190,21 @@ class Typeable a => KnownHeader a where
   type Direction a :: HeaderIsRequestOrResponse
 
 
-  {- | Parse a value from one or more headers with the same header name.
-
-  Some headers like 'Set-Cookie' can be split across multiple headers,
-  so we must accommodate that.
-
-  The order of the headers is preserved relative to how they were received.
-
-  This function won't be called if the header is not present in the request.
-  -}
+  -- | Parse a value from one or more headers with the same header name.
+  --
+  --   Some headers like 'Set-Cookie' can be split across multiple headers,
+  --   so we must accommodate that.
+  --
+  --   The order of the headers is preserved relative to how they were received.
+  --
+  --   This function won't be called if the header is not present in the request.
   parseFromHeaders :: HeaderSettings -> NonEmpty BS.ByteString -> Either (ParseFailure a) a
 
 
-  {- | Similarly to 'parseFromHeaders', we might need to render a value to multiple headers
-  with the same header name.
-
-  If the header can be safely omitted, return '[]'. Otherwise, return a non-empty list of headers.
-  -}
+  -- | Similarly to 'parseFromHeaders', we might need to render a value to multiple headers
+  --   with the same header name.
+  --
+  --   If the header can be safely omitted, return '[]'. Otherwise, return a non-empty list of headers.
   renderToHeaders :: HeaderSettings -> a -> HeaderRenderingResult (Cardinality a)
 
 

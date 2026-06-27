@@ -1,5 +1,4 @@
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE OverloadedStrings #-}
 
 {- | Mason-compatible builder surface, backed by
 @Wireform.Builder@ from @wireform-core@.

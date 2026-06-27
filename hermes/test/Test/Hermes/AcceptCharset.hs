@@ -29,7 +29,7 @@ unit_simple :: Spec
 unit_simple = it "single charset" $
   case parseOk "utf-8" of
     Right (AC.AcceptCharset [AC.WeightedCharset c 1]) ->
-      c `shouldBe` (ST.fromString "utf-8")
+      c `shouldBe` ST.fromString "utf-8"
     other -> error ("unexpected parse: " <> show other)
 
 
@@ -43,7 +43,7 @@ unit_weighted_list = it "weighted list with wildcard" $
             , AC.WeightedCharset star 0
             ]
         ) ->
-        star `shouldBe` (ST.fromString "*")
+        star `shouldBe` ST.fromString "*"
     other -> error ("unexpected parse: " <> show other)
 
 
@@ -57,8 +57,8 @@ unit_round_trip =
             ]
         bs = render v
     in case parseOk bs of
-         Right v' -> v' `shouldBe` v
-         Left err -> error err
+        Right v' -> v' `shouldBe` v
+        Left err -> error err
 
 
 tests :: Spec

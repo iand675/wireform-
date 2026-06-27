@@ -31,15 +31,15 @@ unit_none = it "literal none disables ranges" $ do
   case parseOk "none" of
     Right AR.AcceptRangesNone -> pure () :: IO ()
     other -> error (show other)
-  (render AR.AcceptRangesNone) `shouldBe` "none"
+  render AR.AcceptRangesNone `shouldBe` "none"
 
 
 unit_units :: Spec
 unit_units = it "unit list" $
   case parseOk "bytes, custom-unit" of
     Right (AR.AcceptRangesUnits (a :| [b])) -> do
-      a `shouldBe` (ST.fromString "bytes")
-      b `shouldBe` (ST.fromString "custom-unit")
+      a `shouldBe` ST.fromString "bytes"
+      b `shouldBe` ST.fromString "custom-unit"
     other -> error (show other)
 
 
@@ -47,7 +47,7 @@ unit_render_units :: Spec
 unit_render_units =
   it "render unit list" $
     let v = AR.AcceptRangesUnits (ST.fromString "bytes" :| [ST.fromString "rows"])
-    in (render v) `shouldBe` "bytes, rows"
+    in render v `shouldBe` "bytes, rows"
 
 
 tests :: Spec

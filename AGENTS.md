@@ -593,3 +593,9 @@ hermes module above already covers the same ground:
 
 Touching hermes is fine — it ships from this monorepo. Avoid
 forking grammars across packages.
+
+When you add or touch a `Network.HTTP.Headers.<Name>` module, give it a
+module-level Haddock block that follows the **header module documentation
+standard** (plain-English explainer + spec autolink + a `See also:` block of
+`"Network.HTTP.Headers.*"` cross-references to related headers). The full
+standard lives in [`hermes/PROJECT_GUIDE.md`](hermes/PROJECT_GUIDE.md#module-documentation-standard).

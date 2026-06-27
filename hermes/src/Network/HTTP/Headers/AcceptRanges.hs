@@ -1,8 +1,13 @@
 {-# LANGUAGE TemplateHaskell #-}
 
 {- |
-RFC 9110 §14.3 @Accept-Ranges@ — the server's advertisement of
-which range-units it accepts (or the literal @none@).
+@Accept-Ranges@ is a response header by which a server advertises whether
+it supports range requests on the target resource, naming the range units
+it accepts (most commonly @bytes@) or the literal @none@ to signal that
+range requests are not supported. Clients consult it to decide whether they
+can fetch partial content, e.g. to resume an interrupted download.
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-14.3>
 
 == Grammar
 
@@ -11,6 +16,8 @@ Accept-Ranges     = acceptable-ranges
 acceptable-ranges = 1#range-unit / \"none\"
 range-unit        = bytes-unit / other-range-unit
 @
+
+See also: "Network.HTTP.Headers.Range", "Network.HTTP.Headers.ContentRange", "Network.HTTP.Headers.IfRange".
 -}
 module Network.HTTP.Headers.AcceptRanges (
   AcceptRanges (..),

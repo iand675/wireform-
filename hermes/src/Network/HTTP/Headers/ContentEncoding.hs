@@ -1,3 +1,14 @@
+{- |
+@Content-Encoding@ lists the content codings (e.g. @gzip@, @br@, @zstd@) that
+have been applied to the representation on top of its media type, in the order
+they were applied; the recipient reverses them to recover the original data. It
+is representation metadata that may appear on both requests and responses, and
+is the counterpart to the @Accept-Encoding@ negotiation header.
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-8.4>
+
+See also: "Network.HTTP.Headers.ContentType", "Network.HTTP.Headers.ContentLanguage", "Network.HTTP.Headers.AcceptEncoding", "Network.HTTP.Headers.TransferEncoding".
+-}
 module Network.HTTP.Headers.ContentEncoding where
 
 import qualified Data.List.NonEmpty as NE

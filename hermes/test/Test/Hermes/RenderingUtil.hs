@@ -65,11 +65,11 @@ unit_escape_quote =
     let v = mkVal "a\"b"
         out = renderToBytes v
     in do
-         out `shouldBe` "\"a\\\"b\""
-         -- Parser recovers the original payload.
-         case parseValue out of
-           Right v' -> (ST.toByteString (unsafeToRFC8941String v')) `shouldBe` (ST.toByteString (unsafeToRFC8941String v))
-           Left err -> error err
+        out `shouldBe` "\"a\\\"b\""
+        -- Parser recovers the original payload.
+        case parseValue out of
+          Right v' -> ST.toByteString (unsafeToRFC8941String v') `shouldBe` ST.toByteString (unsafeToRFC8941String v)
+          Left err -> error err
 
 
 unit_escape_backslash :: Spec
@@ -78,10 +78,10 @@ unit_escape_backslash =
     let v = mkVal "a\\b"
         out = renderToBytes v
     in do
-         out `shouldBe` "\"a\\\\b\""
-         case parseValue out of
-           Right v' -> (ST.toByteString (unsafeToRFC8941String v')) `shouldBe` (ST.toByteString (unsafeToRFC8941String v))
-           Left err -> error err
+        out `shouldBe` "\"a\\\\b\""
+        case parseValue out of
+          Right v' -> ST.toByteString (unsafeToRFC8941String v') `shouldBe` ST.toByteString (unsafeToRFC8941String v)
+          Left err -> error err
 
 
 unit_double_escape :: Spec
@@ -90,8 +90,8 @@ unit_double_escape =
     let v = mkVal "a\"b\\c"
         out = renderToBytes v
     in do
-         (if ("\\\"" `BS.isInfixOf` out) then pure () else expectationFailure ("\\\" in " <> show out))
-         (if ("\\\\" `BS.isInfixOf` out) then pure () else expectationFailure ("\\\\ in " <> show out))
+        (if "\\\"" `BS.isInfixOf` out then pure () else expectationFailure ("\\\" in " <> show out))
+        (if "\\\\" `BS.isInfixOf` out then pure () else expectationFailure ("\\\\ in " <> show out))
 
 
 tests :: Spec

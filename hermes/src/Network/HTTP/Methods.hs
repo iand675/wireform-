@@ -1,5 +1,4 @@
 {-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE StandaloneDeriving #-}
 
 module Network.HTTP.Methods where
 
@@ -291,3 +290,40 @@ Part of WebDAV Versioning
 -}
 mVersionControl :: Method
 mVersionControl = "VERSION-CONTROL"
+
+
+{- | UNCHECKOUT method - Cancels a CHECKOUT, restoring the pre-checkout state.
+Defined in RFC 3253 (WebDAV Versioning)
+-}
+mUncheckout :: Method
+mUncheckout = "UNCHECKOUT"
+
+
+{- | UNLINK method - Removes relationships between resources.
+Historic (RFC 2068); paired with LINK.
+-}
+mUnlink :: Method
+mUnlink = "UNLINK"
+
+
+{- | UNLOCK method - Removes a lock from the specified resource.
+Defined in RFC 4918 Section 9.11 (WebDAV)
+-}
+mUnlock :: Method
+mUnlock = "UNLOCK"
+
+
+{- | PRI method - Reserved by HTTP\/2 for the connection preface; never sent
+as a real request method.
+Defined in RFC 9113 (formerly RFC 7540) Section 3.4
+-}
+mPri :: Method
+mPri = "PRI"
+
+
+{- | QUERY method - Safe, idempotent method that carries a request body
+describing a query, returning a representation of the result.
+Defined in RFC 9XXX (HTTP QUERY Method); registered with IANA.
+-}
+mQuery :: Method
+mQuery = "QUERY"

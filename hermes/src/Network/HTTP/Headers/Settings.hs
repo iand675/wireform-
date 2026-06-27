@@ -7,7 +7,7 @@ Many browsers and web servers vary how they handle headers, so
 this type allows you to define how you want to handle headers
 in your application to accommodate these differences.
 -}
-data HeaderSettings = HeaderSettings
+newtype HeaderSettings = HeaderSettings
   { maxHeaderSize :: Int
   }
 

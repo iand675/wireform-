@@ -1,3 +1,18 @@
+{- |
+The @Location@ response header gives a single URI reference whose meaning
+depends on the status code: with a @3xx@ redirect it names where the user
+agent should go next, and with a @201 (Created)@ response it identifies the
+resource that was created. It may be relative and is resolved against the
+request target.
+
+@
+Location = URI-reference
+@
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-10.2.2>
+
+See also: "Network.HTTP.Headers.ContentLocation", "Network.HTTP.Headers.Refresh", "Network.HTTP.Headers.Link", "Network.HTTP.Headers.Referer".
+-}
 module Network.HTTP.Headers.Location (
   Location (..),
   locationParser,

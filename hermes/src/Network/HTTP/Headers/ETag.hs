@@ -1,5 +1,15 @@
 {-# LANGUAGE TemplateHaskell #-}
 
+{- | The @ETag@ response header field provides the entity-tag of the selected
+representation: an opaque validator, either strong or @W/@-prefixed weak, that
+the origin server changes whenever the representation changes. Clients echo it
+in conditional requests so caches can be revalidated and concurrent updates
+detected without transferring the whole representation.
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-8.8.3>
+
+See also: "Network.HTTP.Headers.LastModified", "Network.HTTP.Headers.IfMatch", "Network.HTTP.Headers.IfNoneMatch", "Network.HTTP.Headers.IfRange", "Network.HTTP.Headers.Date".
+-}
 module Network.HTTP.Headers.ETag (
   ETag (..),
   EntityTag (..),

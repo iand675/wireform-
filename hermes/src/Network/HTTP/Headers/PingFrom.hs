@@ -1,3 +1,14 @@
+{- |
+The @Ping-From@ request header is part of hyperlink auditing: when a user
+follows a link whose @ping@ attribute lists audit URLs, the browser sends a
+@POST@ to each of them, and @Ping-From@ carries the URL of the document that
+contained the hyperlink. It is a de-facto header defined by the WHATWG HTML
+standard rather than an IANA-registered field.
+
+Spec (WHATWG HTML, hyperlink auditing): <https://html.spec.whatwg.org/multipage/links.html#hyperlink-auditing>
+
+See also: "Network.HTTP.Headers.PingTo", "Network.HTTP.Headers.Referer", "Network.HTTP.Headers.Origin".
+-}
 module Network.HTTP.Headers.PingFrom where
 
 import qualified Data.List.NonEmpty as NE

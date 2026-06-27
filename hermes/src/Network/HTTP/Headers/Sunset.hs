@@ -1,3 +1,18 @@
+{- |
+The @Sunset@ response header signals that a resource is expected to become
+unresponsive at a specific point in time — typically used to announce that an
+API endpoint will be deprecated and removed. Its value is a single HTTP-date,
+and an accompanying @Link@ with @rel="sunset"@ may point to a human-readable
+explanation.
+
+@
+Sunset = HTTP-date
+@
+
+Spec: <https://www.rfc-editor.org/rfc/rfc8594>
+
+See also: "Network.HTTP.Headers.Link", "Network.HTTP.Headers.RetryAfter", "Network.HTTP.Headers.Date".
+-}
 module Network.HTTP.Headers.Sunset (
   Sunset (..),
   sunsetParser,

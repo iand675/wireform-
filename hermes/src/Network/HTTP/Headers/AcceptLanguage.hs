@@ -1,6 +1,17 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 
+{- |
+@Accept-Language@ — a request header by which a client states which
+natural languages (language tags such as @en@, @en-US@, or @fr@) it
+prefers for the response, each with an optional @;q=@ quality weight.
+Servers use it for proactive content negotiation of localized
+representations.
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-12.5.4>
+
+See also: "Network.HTTP.Headers.Accept", "Network.HTTP.Headers.AcceptCharset", "Network.HTTP.Headers.AcceptEncoding", "Network.HTTP.Headers.ContentLanguage", "Network.HTTP.Headers.Vary".
+-}
 module Network.HTTP.Headers.AcceptLanguage (
   AcceptLanguage (..),
   WeightedLanguage (..),
@@ -71,21 +82,21 @@ weightParser = flip (<|>) (pure 1) $ do
   where
     qValue =
       $( switch
-           [|
-             case _ of
-               "0." -> withSpan anyAsciiDecimalWord $ \d (Span (Pos start) (Pos end)) -> do
-                 let d' = fromIntegral d
-                 case end - start of
-                   1 -> pure $! d' / 10
-                   2 -> pure $! d' / 100
-                   3 -> pure $! d' / 1000
-                   _ -> err "Too many digits after the decimal point in q-value"
-               "0" -> pure 0
-               "1.000" -> pure 1
-               "1.00" -> pure 1
-               "1.0" -> pure 1
-               "1" -> pure 1
-             |]
+          [|
+            case _ of
+              "0." -> withSpan anyAsciiDecimalWord $ \d (Span (Pos start) (Pos end)) -> do
+                let d' = fromIntegral d
+                case end - start of
+                  1 -> pure $! d' / 10
+                  2 -> pure $! d' / 100
+                  3 -> pure $! d' / 1000
+                  _ -> err "Too many digits after the decimal point in q-value"
+              "0" -> pure 0
+              "1.000" -> pure 1
+              "1.00" -> pure 1
+              "1.0" -> pure 1
+              "1" -> pure 1
+            |]
        )
 
 

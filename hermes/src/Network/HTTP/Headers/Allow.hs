@@ -1,6 +1,16 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 
+{- |
+The @Allow@ response header lists the HTTP methods a target resource
+supports. Servers must send it in a @405 (Method Not Allowed)@ response and
+may send it otherwise (for example, to answer an @OPTIONS@ request); an empty
+field value advertises that the resource currently allows no methods at all.
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-10.2.1>
+
+See also: "Network.HTTP.Headers.AcceptPatch", "Network.HTTP.Headers.AcceptPost", "Network.HTTP.Headers.AccessControlAllowMethods", "Network.HTTP.Headers.AccessControlRequestMethod".
+-}
 module Network.HTTP.Headers.Allow (
   Allow (..),
   HttpMethod (..),
@@ -63,19 +73,19 @@ instance KnownHeader Allow where
 httpMethodParser :: ParserT st e HttpMethod
 httpMethodParser =
   $( switch
-       [|
-         case _ of
-           "GET" -> pure GET
-           "HEAD" -> pure HEAD
-           "POST" -> pure POST
-           "PUT" -> pure PUT
-           "DELETE" -> pure DELETE
-           "CONNECT" -> pure CONNECT
-           "OPTIONS" -> pure OPTIONS
-           "TRACE" -> pure TRACE
-           "PATCH" -> pure PATCH
-           _ -> CustomMethod <$> rfc9110Token
-         |]
+      [|
+        case _ of
+          "GET" -> pure GET
+          "HEAD" -> pure HEAD
+          "POST" -> pure POST
+          "PUT" -> pure PUT
+          "DELETE" -> pure DELETE
+          "CONNECT" -> pure CONNECT
+          "OPTIONS" -> pure OPTIONS
+          "TRACE" -> pure TRACE
+          "PATCH" -> pure PATCH
+          _ -> CustomMethod <$> rfc9110Token
+        |]
    )
 
 

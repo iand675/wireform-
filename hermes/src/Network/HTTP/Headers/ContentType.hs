@@ -1,3 +1,14 @@
+{- |
+@Content-Type@ states the media type of the associated representation — for
+example @text/html; charset=utf-8@ or @application/json@ — so the recipient
+knows how to interpret the body, including parameters such as @charset@ or the
+multipart @boundary@. It is representation metadata used on both requests and
+responses.
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-8.3>
+
+See also: "Network.HTTP.Headers.ContentEncoding", "Network.HTTP.Headers.ContentLanguage", "Network.HTTP.Headers.ContentDisposition", "Network.HTTP.Headers.Accept".
+-}
 module Network.HTTP.Headers.ContentType (
   ContentType (..),
   contentTypeParser,

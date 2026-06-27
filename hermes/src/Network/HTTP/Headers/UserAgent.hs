@@ -1,5 +1,21 @@
 {-# LANGUAGE TemplateHaskell #-}
 
+{- |
+The @User-Agent@ request header identifies the client software making the
+request — a whitespace-separated sequence of @product@ identifiers (each a
+@token@ with an optional @\/version@) interspersed with @comment@s — letting
+servers tailor responses or gather statistics. It shares its grammar with the
+@Server@ response header.
+
+@
+User-Agent = product *( RWS ( product / comment ) )
+product    = token [ "/" product-version ]
+@
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-10.1.5>
+
+See also: "Network.HTTP.Headers.Server", "Network.HTTP.Headers.From", "Network.HTTP.Headers.AcceptCH".
+-}
 module Network.HTTP.Headers.UserAgent where
 
 import qualified Data.List.NonEmpty as NE

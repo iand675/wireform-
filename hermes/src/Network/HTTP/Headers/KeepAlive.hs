@@ -1,5 +1,26 @@
 {-# LANGUAGE TemplateHaskell #-}
 
+{- |
+@Keep-Alive@ — a request and response header that hints how a persistent
+connection should be managed, carrying a @timeout@ (minimum idle seconds
+the connection should stay open) and\/or @max@ (maximum further requests
+the connection will accept before closing). It only takes effect
+alongside @Connection: keep-alive@ on HTTP\/1.x and is prohibited in
+HTTP\/2 and HTTP\/3. This field is de facto rather than IANA-registered:
+it originates in the obsolete HTTP\/1.0 keep-alive proposal and is
+documented chiefly by MDN.
+
+== Grammar
+
+@
+Keep-Alive       = #keep-alive-param
+keep-alive-param = token "=" ( token \/ quoted-string )
+@
+
+Spec (de facto): <https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Keep-Alive>
+
+See also: "Network.HTTP.Headers.Connection", "Network.HTTP.Headers.Close".
+-}
 module Network.HTTP.Headers.KeepAlive (
   KeepAlive (..),
   keepAliveParser,
@@ -17,7 +38,7 @@ import Network.HTTP.Headers.Rendering.Util (shortText)
 
 
 -- | Keep-Alive header contains parameters like timeout and max.
-data KeepAlive = KeepAlive {keepAliveParams :: [(ST.ShortText, ST.ShortText)]}
+newtype KeepAlive = KeepAlive {keepAliveParams :: [(ST.ShortText, ST.ShortText)]}
   deriving stock (Eq, Show)
 
 

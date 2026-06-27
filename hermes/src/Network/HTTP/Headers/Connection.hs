@@ -1,5 +1,26 @@
 {-# LANGUAGE TemplateHaskell #-}
 
+{- |
+RFC 9110 §7.6.1 @Connection@ — a hop-by-hop control field listing
+connection options for the current connection. Each option is either a
+directive governing the connection itself (notably @close@, and the
+legacy @keep-alive@) or the name of another header field that applies
+only to this hop and must be stripped by intermediaries before
+forwarding. It is both a request and response header and is forbidden in
+HTTP/2 and HTTP/3.
+
+== Grammar
+
+@
+Connection        = #connection-option
+connection-option = token
+@
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-7.6.1>
+
+See also: "Network.HTTP.Headers.Close", "Network.HTTP.Headers.KeepAlive",
+"Network.HTTP.Headers.Upgrade", "Network.HTTP.Headers.TE".
+-}
 module Network.HTTP.Headers.Connection (
   Connection (..),
   connectionParser,

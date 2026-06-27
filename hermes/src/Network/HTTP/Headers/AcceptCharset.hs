@@ -1,17 +1,22 @@
 {-# LANGUAGE TemplateHaskell #-}
 
 {- |
-Parser and renderer for @Accept-Charset@ (RFC 9110 §12.5.2).
+@Accept-Charset@ — a request header by which a client indicated which
+character encodings (charsets) it was willing to accept in the
+response, each with an optional @;q=@ quality weight.
 
-The header is **deprecated** by RFC 9110 (servers SHOULD ignore
-it; clients SHOULD NOT send it because UTF-8 is now the de-facto
-universal encoding). It still appears on the wire for legacy
-services, so we ship a parser \/ renderer for completeness.
+The header is **deprecated** by RFC 9110 (servers SHOULD ignore it;
+clients SHOULD NOT send it, because UTF-8 is now the de-facto universal
+encoding). It still appears on the wire for legacy services, so we ship
+a parser \/ renderer for completeness.
 
-Wire syntax mirrors 'AcceptLanguage': a comma-separated list of
-charset tokens, each optionally followed by @;q=value@. The token
-@*@ is allowed and stands for \"any other charset not explicitly
-listed\".
+Wire syntax mirrors "Network.HTTP.Headers.AcceptLanguage": a comma-separated list of charset
+tokens, each optionally followed by @;q=value@. The token @*@ is allowed
+and stands for \"any other charset not explicitly listed\".
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-12.5.2>
+
+See also: "Network.HTTP.Headers.Accept", "Network.HTTP.Headers.AcceptEncoding", "Network.HTTP.Headers.AcceptLanguage", "Network.HTTP.Headers.ContentType", "Network.HTTP.Headers.Vary".
 -}
 module Network.HTTP.Headers.AcceptCharset (
   AcceptCharset (..),
@@ -21,6 +26,7 @@ module Network.HTTP.Headers.AcceptCharset (
 ) where
 
 import Control.Monad.Combinators (sepBy)
+import Data.Functor (($>))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
@@ -72,12 +78,12 @@ acceptCharsetParser = AcceptCharset <$> (weightedCharsetParser `sepBy` $(char ',
     weightedCharsetParser = do
       ows
       tag <-
-        ($(char '*') *> pure (ST.fromString "*"))
+        ($(char '*') $> ST.fromString "*")
           <|> rfc9110Token
-      -- \^ The parens around the @*>@ are mandatory.  Wireform's
-      -- 'Wireform.Parser.(<|>)' is @infixr 6@ while 'Applicative.(*>)'
+      -- \^ The parens around the @$>@ are mandatory.  Wireform's
+      -- 'Wireform.Parser.(<|>)' is @infixr 6@ while 'Data.Functor.($>)'
       -- is @infixl 4@; without the parens this would group as
-      -- @$(char '*') *> (pure \"*\" \<|\> rfc9110Token)@, which
+      -- @$(char '*') $> (ST.fromString \"*\" \<|\> rfc9110Token)@, which
       -- requires @*@ to match before the alternative is even
       -- considered.
       w <- weightParser
@@ -98,21 +104,21 @@ weightParser = flip (<|>) (pure 1) $ do
   where
     qValue =
       $( switch
-           [|
-             case _ of
-               "0." -> withSpan anyAsciiDecimalWord $ \d (Span (Pos start) (Pos end)) -> do
-                 let d' = fromIntegral d
-                 case end - start of
-                   1 -> pure $! d' / 10
-                   2 -> pure $! d' / 100
-                   3 -> pure $! d' / 1000
-                   _ -> err "Too many digits after the decimal point in q-value"
-               "0" -> pure 0
-               "1.000" -> pure 1
-               "1.00" -> pure 1
-               "1.0" -> pure 1
-               "1" -> pure 1
-             |]
+          [|
+            case _ of
+              "0." -> withSpan anyAsciiDecimalWord $ \d (Span (Pos start) (Pos end)) -> do
+                let d' = fromIntegral d
+                case end - start of
+                  1 -> pure $! d' / 10
+                  2 -> pure $! d' / 100
+                  3 -> pure $! d' / 1000
+                  _ -> err "Too many digits after the decimal point in q-value"
+              "0" -> pure 0
+              "1.000" -> pure 1
+              "1.00" -> pure 1
+              "1.0" -> pure 1
+              "1" -> pure 1
+            |]
        )
 
 

@@ -1,5 +1,20 @@
 {-# LANGUAGE TemplateHaskell #-}
 
+{- |
+The @Host@ request header carries the target URI's authority — the host and
+optional port the request is addressed to — letting a single server (or
+intermediary) distinguish the many origins it may serve on one IP address.
+It is mandatory in HTTP\/1.1; in HTTP\/2 and HTTP\/3 it corresponds to the
+@:authority@ pseudo-header.
+
+@
+Host = uri-host [ ":" port ]
+@
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-7.2>
+
+See also: "Network.HTTP.Headers.AltUsed", "Network.HTTP.Headers.Via", "Network.HTTP.Headers.XForwardedHost", "Network.HTTP.Headers.Forwarded".
+-}
 module Network.HTTP.Headers.Host (
   Host (..),
   hostParser,

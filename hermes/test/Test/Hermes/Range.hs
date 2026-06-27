@@ -73,7 +73,7 @@ unit_render =
                    , R.ByteRangeSuffix 50
                    ]
             )
-    in (render v) `shouldBe` "bytes=0-99,200-,-50"
+    in render v `shouldBe` "bytes=0-99,200-,-50"
 
 
 -- ---------------------------------------------------------------------------

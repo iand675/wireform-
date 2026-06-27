@@ -28,63 +28,260 @@ library
       cbits/url_decode.c
   cc-options: -O3
   exposed-modules:
-      Network.HTTP.Headers.Mason
-      Network.HTTP.URL.Decode
       Network.HTTP.ContentCoding
       Network.HTTP.ContentNegotiation
       Network.HTTP.Headers
+      Network.HTTP.Headers.AIM
+      Network.HTTP.Headers.ALPN
+      Network.HTTP.Headers.AMPCacheTransform
       Network.HTTP.Headers.Accept
+      Network.HTTP.Headers.AcceptAdditions
+      Network.HTTP.Headers.AcceptCH
       Network.HTTP.Headers.AcceptCharset
+      Network.HTTP.Headers.AcceptDatetime
       Network.HTTP.Headers.AcceptEncoding
+      Network.HTTP.Headers.AcceptFeatures
       Network.HTTP.Headers.AcceptLanguage
+      Network.HTTP.Headers.AcceptPatch
+      Network.HTTP.Headers.AcceptPost
       Network.HTTP.Headers.AcceptRanges
+      Network.HTTP.Headers.AcceptSignature
+      Network.HTTP.Headers.AccessControlAllowCredentials
+      Network.HTTP.Headers.AccessControlAllowHeaders
+      Network.HTTP.Headers.AccessControlAllowMethods
+      Network.HTTP.Headers.AccessControlAllowOrigin
+      Network.HTTP.Headers.AccessControlExposeHeaders
+      Network.HTTP.Headers.AccessControlMaxAge
+      Network.HTTP.Headers.AccessControlRequestHeaders
+      Network.HTTP.Headers.AccessControlRequestMethod
       Network.HTTP.Headers.Age
       Network.HTTP.Headers.Allow
+      Network.HTTP.Headers.AltSvc
+      Network.HTTP.Headers.AltUsed
+      Network.HTTP.Headers.Alternates
+      Network.HTTP.Headers.ApplyToRedirectRef
+      Network.HTTP.Headers.AuthenticationControl
+      Network.HTTP.Headers.AuthenticationInfo
       Network.HTTP.Headers.Authorization
+      Network.HTTP.Headers.CDNCacheControl
+      Network.HTTP.Headers.CDNLoop
       Network.HTTP.Headers.CacheControl
       Network.HTTP.Headers.CacheStatus
+      Network.HTTP.Headers.CalDAVTimezones
+      Network.HTTP.Headers.CalManagedID
+      Network.HTTP.Headers.CapsuleProtocol
+      Network.HTTP.Headers.CertNotAfter
+      Network.HTTP.Headers.CertNotBefore
+      Network.HTTP.Headers.ClearSiteData
+      Network.HTTP.Headers.ClientCert
+      Network.HTTP.Headers.ClientCertChain
+      Network.HTTP.Headers.Close
+      Network.HTTP.Headers.ConfigurationContext
       Network.HTTP.Headers.Connection
+      Network.HTTP.Headers.ContentBase
+      Network.HTTP.Headers.ContentDigest
       Network.HTTP.Headers.ContentDisposition
       Network.HTTP.Headers.ContentEncoding
+      Network.HTTP.Headers.ContentID
+      Network.HTTP.Headers.ContentLanguage
       Network.HTTP.Headers.ContentLength
+      Network.HTTP.Headers.ContentLocation
+      Network.HTTP.Headers.ContentMD5
       Network.HTTP.Headers.ContentRange
+      Network.HTTP.Headers.ContentScriptType
+      Network.HTTP.Headers.ContentSecurityPolicy
+      Network.HTTP.Headers.ContentSecurityPolicyReportOnly
+      Network.HTTP.Headers.ContentStyleType
       Network.HTTP.Headers.ContentType
+      Network.HTTP.Headers.ContentVersion
       Network.HTTP.Headers.Cookie
+      Network.HTTP.Headers.Cookie2
+      Network.HTTP.Headers.CrossOriginEmbedderPolicy
+      Network.HTTP.Headers.CrossOriginEmbedderPolicyReportOnly
+      Network.HTTP.Headers.CrossOriginOpenerPolicy
+      Network.HTTP.Headers.CrossOriginOpenerPolicyReportOnly
+      Network.HTTP.Headers.CrossOriginResourcePolicy
+      Network.HTTP.Headers.DASL
+      Network.HTTP.Headers.DAV
+      Network.HTTP.Headers.DNT
+      Network.HTTP.Headers.DPoP
+      Network.HTTP.Headers.DPoPNonce
       Network.HTTP.Headers.Date
+      Network.HTTP.Headers.DefaultStyle
+      Network.HTTP.Headers.DeltaBase
+      Network.HTTP.Headers.Depth
+      Network.HTTP.Headers.DerivedFrom
+      Network.HTTP.Headers.Destination
+      Network.HTTP.Headers.DifferentialID
+      Network.HTTP.Headers.Digest
+      Network.HTTP.Headers.EDIINTFeatures
       Network.HTTP.Headers.ETag
+      Network.HTTP.Headers.EarlyData
+      Network.HTTP.Headers.Expect
+      Network.HTTP.Headers.ExpectCT
       Network.HTTP.Headers.Expires
+      Network.HTTP.Headers.Ext
+      Network.HTTP.Headers.Forwarded
       Network.HTTP.Headers.From
+      Network.HTTP.Headers.GetProfile
+      Network.HTTP.Headers.HTTP2Settings
       Network.HTTP.Headers.HeaderFieldName
+      Network.HTTP.Headers.Hobareg
       Network.HTTP.Headers.Host
+      Network.HTTP.Headers.IM
+      Network.HTTP.Headers.If
       Network.HTTP.Headers.IfMatch
       Network.HTTP.Headers.IfModifiedSince
       Network.HTTP.Headers.IfNoneMatch
+      Network.HTTP.Headers.IfRange
+      Network.HTTP.Headers.IfScheduleTagMatch
       Network.HTTP.Headers.IfUnmodifiedSince
+      Network.HTTP.Headers.IncludeReferredTokenBindingID
+      Network.HTTP.Headers.Isolation
       Network.HTTP.Headers.KeepAlive
+      Network.HTTP.Headers.Label
+      Network.HTTP.Headers.LastEventID
       Network.HTTP.Headers.LastModified
+      Network.HTTP.Headers.Link
       Network.HTTP.Headers.Location
+      Network.HTTP.Headers.LockToken
+      Network.HTTP.Headers.MIMEVersion
+      Network.HTTP.Headers.Man
+      Network.HTTP.Headers.Mason
+      Network.HTTP.Headers.MaxForwards
+      Network.HTTP.Headers.MementoDatetime
+      Network.HTTP.Headers.Meter
+      Network.HTTP.Headers.MethodCheck
+      Network.HTTP.Headers.MethodCheckExpires
+      Network.HTTP.Headers.NEL
+      Network.HTTP.Headers.Negotiate
+      Network.HTTP.Headers.ODataEntityId
+      Network.HTTP.Headers.ODataIsolation
+      Network.HTTP.Headers.ODataMaxVersion
+      Network.HTTP.Headers.ODataVersion
+      Network.HTTP.Headers.OSCORE
+      Network.HTTP.Headers.OSLCCoreVersion
+      Network.HTTP.Headers.Opt
+      Network.HTTP.Headers.OptionalWWWAuthenticate
+      Network.HTTP.Headers.OrderingType
       Network.HTTP.Headers.Origin
-      Network.HTTP.Headers.Range
+      Network.HTTP.Headers.OriginAgentCluster
+      Network.HTTP.Headers.Overwrite
+      Network.HTTP.Headers.P3P
+      Network.HTTP.Headers.PEP
+      Network.HTTP.Headers.PEPInfo
+      Network.HTTP.Headers.PICSLabel
       Network.HTTP.Headers.Parsing.Util
+      Network.HTTP.Headers.PermissionsPolicy
       Network.HTTP.Headers.PingFrom
       Network.HTTP.Headers.PingTo
+      Network.HTTP.Headers.Position
+      Network.HTTP.Headers.Pragma
+      Network.HTTP.Headers.Prefer
+      Network.HTTP.Headers.PreferenceApplied
+      Network.HTTP.Headers.Priority
+      Network.HTTP.Headers.ProfileObject
+      Network.HTTP.Headers.Protocol
+      Network.HTTP.Headers.ProtocolInfo
+      Network.HTTP.Headers.ProtocolQuery
+      Network.HTTP.Headers.ProtocolRequest
       Network.HTTP.Headers.ProxyAuthenticate
+      Network.HTTP.Headers.ProxyAuthenticationInfo
       Network.HTTP.Headers.ProxyAuthorization
+      Network.HTTP.Headers.ProxyFeatures
+      Network.HTTP.Headers.ProxyInstruction
+      Network.HTTP.Headers.ProxyStatus
+      Network.HTTP.Headers.PublicHeader
+      Network.HTTP.Headers.PublicKeyPins
+      Network.HTTP.Headers.PublicKeyPinsReportOnly
+      Network.HTTP.Headers.Range
+      Network.HTTP.Headers.RedirectRef
       Network.HTTP.Headers.Referer
+      Network.HTTP.Headers.RefererRoot
+      Network.HTTP.Headers.Refresh
       Network.HTTP.Headers.Rendering.Util
+      Network.HTTP.Headers.RepeatabilityClientID
+      Network.HTTP.Headers.RepeatabilityFirstSent
+      Network.HTTP.Headers.RepeatabilityRequestID
+      Network.HTTP.Headers.RepeatabilityResult
+      Network.HTTP.Headers.ReplayNonce
+      Network.HTTP.Headers.ReportingEndpoints
+      Network.HTTP.Headers.ReprDigest
       Network.HTTP.Headers.RetryAfter
+      Network.HTTP.Headers.Safe
+      Network.HTTP.Headers.SaveData
+      Network.HTTP.Headers.ScheduleReply
+      Network.HTTP.Headers.ScheduleTag
+      Network.HTTP.Headers.SecGPC
+      Network.HTTP.Headers.SecPurpose
+      Network.HTTP.Headers.SecTokenBinding
+      Network.HTTP.Headers.SecWebSocketAccept
+      Network.HTTP.Headers.SecWebSocketExtensions
+      Network.HTTP.Headers.SecWebSocketKey
+      Network.HTTP.Headers.SecWebSocketProtocol
+      Network.HTTP.Headers.SecWebSocketVersion
+      Network.HTTP.Headers.SecurityScheme
       Network.HTTP.Headers.Server
+      Network.HTTP.Headers.ServerTiming
       Network.HTTP.Headers.SetCookie
+      Network.HTTP.Headers.SetCookie2
+      Network.HTTP.Headers.SetProfile
       Network.HTTP.Headers.Settings
+      Network.HTTP.Headers.Signature
+      Network.HTTP.Headers.SignatureInput
+      Network.HTTP.Headers.Slug
+      Network.HTTP.Headers.SoapAction
+      Network.HTTP.Headers.StatusURI
+      Network.HTTP.Headers.StrictTransportSecurity
       Network.HTTP.Headers.Sunset
+      Network.HTTP.Headers.SurrogateCapability
+      Network.HTTP.Headers.SurrogateControl
+      Network.HTTP.Headers.TCN
+      Network.HTTP.Headers.TE
+      Network.HTTP.Headers.TTL
+      Network.HTTP.Headers.Timeout
+      Network.HTTP.Headers.TimingAllowOrigin
+      Network.HTTP.Headers.Topic
+      Network.HTTP.Headers.Traceparent
+      Network.HTTP.Headers.Tracestate
+      Network.HTTP.Headers.Trailer
       Network.HTTP.Headers.TransferEncoding
+      Network.HTTP.Headers.URI
+      Network.HTTP.Headers.Upgrade
+      Network.HTTP.Headers.Urgency
       Network.HTTP.Headers.UserAgent
+      Network.HTTP.Headers.VariantVary
       Network.HTTP.Headers.Vary
+      Network.HTTP.Headers.Via
       Network.HTTP.Headers.WWWAuthenticate
+      Network.HTTP.Headers.WantContentDigest
+      Network.HTTP.Headers.WantDigest
+      Network.HTTP.Headers.WantReprDigest
+      Network.HTTP.Headers.Warning
+      Network.HTTP.Headers.XContentTypeOptions
+      Network.HTTP.Headers.XCorrelationID
+      Network.HTTP.Headers.XDNSPrefetchControl
+      Network.HTTP.Headers.XDownloadOptions
+      Network.HTTP.Headers.XForwardedFor
+      Network.HTTP.Headers.XForwardedHost
+      Network.HTTP.Headers.XForwardedPort
+      Network.HTTP.Headers.XForwardedProto
+      Network.HTTP.Headers.XFrameOptions
+      Network.HTTP.Headers.XHttpMethodOverride
+      Network.HTTP.Headers.XPermittedCrossDomainPolicies
+      Network.HTTP.Headers.XPoweredBy
+      Network.HTTP.Headers.XRealIP
+      Network.HTTP.Headers.XRequestID
+      Network.HTTP.Headers.XRequestStart
+      Network.HTTP.Headers.XRobotsTag
+      Network.HTTP.Headers.XTraceID
+      Network.HTTP.Headers.XUACompatible
+      Network.HTTP.Headers.XXSSProtection
       Network.HTTP.Methods
       Network.HTTP.Path
       Network.HTTP.QueryParameters
       Network.HTTP.Status
+      Network.HTTP.URL.Decode
       Network.HTTP.Versions
       Network.IPAddress
       Network.Mailbox
@@ -144,12 +341,65 @@ test-suite hermes-tests
   other-modules:
       Test.Hermes.AcceptCharset
       Test.Hermes.AcceptEncoding
+      Test.Hermes.AcceptPatchPost
       Test.Hermes.AcceptRanges
+      Test.Hermes.Alpn
+      Test.Hermes.AltSvc
+      Test.Hermes.AtomPub
+      Test.Hermes.Caching
+      Test.Hermes.CalDav
+      Test.Hermes.Capsule
+      Test.Hermes.Cdn
+      Test.Hermes.ClientCert
+      Test.Hermes.ClientHints
+      Test.Hermes.Conditional
+      Test.Hermes.ContentMeta
       Test.Hermes.ContentRange
+      Test.Hermes.Cors
+      Test.Hermes.CrossOrigin
+      Test.Hermes.Csp
+      Test.Hermes.DefactoCorrelation
+      Test.Hermes.DefactoForwarding
+      Test.Hermes.DefactoMisc
+      Test.Hermes.DefactoSecurity
+      Test.Hermes.DeltaEncoding
+      Test.Hermes.Digest
+      Test.Hermes.Expect
+      Test.Hermes.Forwarded
+      Test.Hermes.Framing
+      Test.Hermes.IPAddress
+      Test.Hermes.Link
+      Test.Hermes.Mailbox
+      Test.Hermes.Memento
+      Test.Hermes.MiscProvisional
+      Test.Hermes.OAuthDpop
+      Test.Hermes.OData
+      Test.Hermes.ObsoleteContent
+      Test.Hermes.ObsoleteCookie
+      Test.Hermes.ObsoleteMan
+      Test.Hermes.ObsoleteProfile
+      Test.Hermes.ObsoleteProtocol
+      Test.Hermes.PermissionsPolicy
+      Test.Hermes.Pkp
+      Test.Hermes.Prefer
+      Test.Hermes.Priority
       Test.Hermes.ProxyAuthenticate
       Test.Hermes.Range
       Test.Hermes.RenderingUtil
+      Test.Hermes.Reporting
+      Test.Hermes.SecurityMisc
+      Test.Hermes.Server
+      Test.Hermes.Signature
+      Test.Hermes.Sse
+      Test.Hermes.Surrogate
+      Test.Hermes.TCN
+      Test.Hermes.TokenBinding
+      Test.Hermes.Tracing
       Test.Hermes.WWWAuthenticate
+      Test.Hermes.WebDavCore
+      Test.Hermes.WebDavExt
+      Test.Hermes.WebPush
+      Test.Hermes.WebSocket
   default-extensions:
       DataKinds
       DerivingStrategies
@@ -168,4 +418,7 @@ test-suite hermes-tests
     , sydtest-hedgehog
     , hermes
     , text-short
+    , text
+    , time
+    , containers
   default-language: Haskell2010

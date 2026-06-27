@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 module Network.HTTP.QueryParameters where
 
 import Data.Bit

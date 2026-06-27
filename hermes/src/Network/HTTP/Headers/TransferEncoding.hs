@@ -1,5 +1,26 @@
 {-# LANGUAGE TemplateHaskell #-}
 
+{- |
+RFC 9112 §6.1 @Transfer-Encoding@ — names the transfer codings (e.g.
+@chunked@, @gzip@, @deflate@) applied to the message body to form the
+payload, in the order they were applied; the recipient reverses them to
+recover the content. When present, @chunked@ must come last and delimits
+the body in place of @Content-Length@. It is a request and response
+header, primarily an HTTP\/1.1 mechanism, and is forbidden in HTTP\/2 and
+HTTP\/3.
+
+== Grammar
+
+@
+Transfer-Encoding = #transfer-coding
+transfer-coding   = token *( OWS ";" OWS transfer-parameter )
+@
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9112#section-6.1>
+
+See also: "Network.HTTP.Headers.TE", "Network.HTTP.Headers.Trailer",
+"Network.HTTP.Headers.ContentLength", "Network.HTTP.Headers.ContentEncoding".
+-}
 module Network.HTTP.Headers.TransferEncoding (
   TransferEncoding (..),
   transferEncodingParser,

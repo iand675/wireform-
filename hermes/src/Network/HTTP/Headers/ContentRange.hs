@@ -1,9 +1,13 @@
 {-# LANGUAGE TemplateHaskell #-}
 
 {- |
-RFC 9110 §14.4 @Content-Range@ — server response indicating which
-portion of the selected representation is contained in the
-response payload.
+@Content-Range@ is a response header sent with a @206 Partial Content@
+(or @416 Range Not Satisfiable@) reply to indicate which portion of the
+selected representation the message body carries, together with the total
+length of the complete representation. It is the server's answer to a
+client's @Range@ request.
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-14.4>
 
 == Grammar
 
@@ -19,6 +23,8 @@ complete-length     = 1*DIGIT
 The @bytes@ form is by far the most common; we surface it
 typed. Other units are exposed as raw bytes so callers can route
 them through their own logic.
+
+See also: "Network.HTTP.Headers.Range", "Network.HTTP.Headers.AcceptRanges", "Network.HTTP.Headers.IfRange".
 -}
 module Network.HTTP.Headers.ContentRange (
   ContentRange (..),
@@ -53,11 +59,10 @@ data RangeResp
       , rangeLast :: !Word64
       , rangeTotal :: !(Maybe Word64)
       }
-  | {- | For 416 responses. @rangeTotal@ is 'Just' iff the server
-    actually knew the complete length and sent it (the
-    @*\\/N@ form); @Nothing@ if the server emitted the
-    @*\\/*@ form (rare but seen in the wild).
-    -}
+  | -- | For 416 responses. @rangeTotal@ is 'Just' iff the server
+    --     actually knew the complete length and sent it (the
+    --     @*\\/N@ form); @Nothing@ if the server emitted the
+    --     @*\\/*@ form (rare but seen in the wild).
     RangeRespUnsatisfied {rangeTotal :: !(Maybe Word64)}
   deriving stock (Eq, Show)
 

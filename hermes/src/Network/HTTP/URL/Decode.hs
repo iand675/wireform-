@@ -59,6 +59,7 @@ module Network.HTTP.URL.Decode (
 
 import Control.DeepSeq (NFData)
 import Control.Exception (Exception)
+import Control.Monad (unless)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BSI
@@ -109,9 +110,8 @@ foreign import ccall unsafe "hermes_url_decode"
 
 -- | What went wrong while percent-decoding.
 data URLDecodeError
-  = {- | Input ends with @\'%\'@ or @\'%H\'@ without the second
-    hex digit.
-    -}
+  = -- | Input ends with @\'%\'@ or @\'%H\'@ without the second
+    --     hex digit.
     TruncatedEscape
   | -- | An escape contained a byte that wasn't a hex digit.
     InvalidHexDigit
@@ -264,7 +264,7 @@ skipBytesWhile p = skipMany consumeIfMatch
   where
     consumeIfMatch =
       withAnyWord8 $ \w ->
-        if p w then pure () else empty
+        unless (p w) empty
 
 
 -- ---------------------------------------------------------------------------

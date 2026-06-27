@@ -4,6 +4,7 @@
 module Network.HTTP.ContentNegotiation where
 
 import Control.Monad.Combinators (sepBy)
+import Data.Functor (($>))
 import qualified Data.Text.Short as ST
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
@@ -33,8 +34,8 @@ data MediaType = MediaType
 
 mediaTypeParser :: ParserT st e MediaType
 mediaTypeParser = do
-  let mediaTypeStar = $(string "*/*") *> pure (MediaType mempty mempty)
-      mediaTypeWithoutSubtype = MediaType <$> rfc9110Token <*> ($(string "/*") *> pure mempty)
+  let mediaTypeStar = $(string "*/*") $> MediaType mempty mempty
+      mediaTypeWithoutSubtype = MediaType <$> rfc9110Token <*> ($(string "/*") $> mempty)
       mediaTypeWithSubtype = MediaType <$> rfc9110Token <*> ($(char '/') *> rfc9110Token)
   mediaTypeStar <|> mediaTypeWithoutSubtype <|> mediaTypeWithSubtype
 
@@ -58,29 +59,28 @@ weightParser = flip (<|>) (pure 1) $ do
   where
     qValue =
       $( switch
-           [|
-             case _ of
-               "0." -> withSpan anyAsciiDecimalWord $ \d (Span (Pos start) (Pos end)) -> do
-                 let d' = fromIntegral d
-                 case end - start of
-                   1 -> pure $! d' / 10
-                   2 -> pure $! d' / 100
-                   3 -> pure $! d' / 1000
-                   _ -> err "Too many digits after the decimal point in q-value"
-               "0" -> pure 0
-               "1.000" -> pure 1
-               "1.00" -> pure 1
-               "1.0" -> pure 1
-               "1" -> pure 1
-             |]
+          [|
+            case _ of
+              "0." -> withSpan anyAsciiDecimalWord $ \d (Span (Pos start) (Pos end)) -> do
+                let d' = fromIntegral d
+                case end - start of
+                  1 -> pure $! d' / 10
+                  2 -> pure $! d' / 100
+                  3 -> pure $! d' / 1000
+                  _ -> err "Too many digits after the decimal point in q-value"
+              "0" -> pure 0
+              "1.000" -> pure 1
+              "1.00" -> pure 1
+              "1.0" -> pure 1
+              "1" -> pure 1
+            |]
        )
 
 
 weightedMediaRangeParser :: ParserT st String WeightedMediaRange
 weightedMediaRangeParser = do
   mr <- mediaRangeParser
-  mw <- weightParser
-  pure $ WeightedMediaRange mr mw
+  WeightedMediaRange mr <$> weightParser
 
 
 weightedMediaRangesParser :: ParserT st String [WeightedMediaRange]

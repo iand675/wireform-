@@ -1,14 +1,27 @@
 {- |
-RFC 9110 §11.7.1 @Proxy-Authenticate@.
+@Proxy-Authenticate@ — a response header sent by an intermediary proxy
+on a @407 Proxy Authentication Required@ response to challenge the client
+for credentials to the proxy itself (rather than the origin server). It
+is the proxy-tier counterpart of @WWW-Authenticate@ and carries the same
+comma-separated @#challenge@ list.
 
-The grammar is identical to @WWW-Authenticate@ (RFC 9110
-§11.6.1); only the field name and HTTP-semantic role differ
-(it's the proxy-tier challenge that pairs with @407 Proxy
-Authentication Required@ instead of the origin-tier @401@).
-We reuse the parser and renderer from
-"Network.HTTP.Headers.WWWAuthenticate" wholesale and just wrap
-the result in a distinct newtype so the 'KnownHeader' instance
-can pin the right 'HeaderFieldName'.
+== Grammar (RFC 9110 §11.7.1)
+
+@
+Proxy-Authenticate = #challenge
+@
+
+The grammar is identical to @WWW-Authenticate@ (RFC 9110 §11.6.1); only
+the field name and HTTP-semantic role differ.  We reuse the parser and
+renderer from "Network.HTTP.Headers.WWWAuthenticate" wholesale and wrap
+the result in a distinct newtype so the 'KnownHeader' instance can pin
+the right 'HeaderFieldName'.
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-11.7.1>
+
+See also: "Network.HTTP.Headers.WWWAuthenticate",
+"Network.HTTP.Headers.ProxyAuthorization",
+"Network.HTTP.Headers.ProxyAuthenticationInfo".
 -}
 module Network.HTTP.Headers.ProxyAuthenticate (
   ProxyAuthenticate (..),

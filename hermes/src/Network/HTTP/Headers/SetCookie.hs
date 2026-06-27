@@ -1,6 +1,21 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 
+{- |
+Module      : Network.HTTP.Headers.SetCookie
+Description : The @Set-Cookie@ response header (RFC 6265)
+
+The @Set-Cookie@ response header instructs the user agent to store a piece of
+state — a @name=value@ pair plus optional attributes such as @Expires@,
+@Max-Age@, @Domain@, @Path@, @Secure@, @HttpOnly@, and @SameSite@ — and to send
+it back on matching future requests via @Cookie@. A single response may emit
+several @Set-Cookie@ lines, so the header is modelled with cardinality
+'ZeroOrMore' through the 'SetCookies' wrapper. It is a response-only header.
+
+Spec: <https://www.rfc-editor.org/rfc/rfc6265#section-4.1>
+
+See also: "Network.HTTP.Headers.Cookie", "Network.HTTP.Headers.SetCookie2", "Network.HTTP.Headers.Cookie2", "Network.HTTP.Headers.ClearSiteData".
+-}
 module Network.HTTP.Headers.SetCookie (
   SetCookie (..),
   SameSitePolicy (..),
@@ -10,6 +25,7 @@ module Network.HTTP.Headers.SetCookie (
 ) where
 
 import qualified Data.ByteString as B
+import Data.Functor (($>))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
 import Data.Time.Clock (UTCTime)
@@ -115,28 +131,28 @@ setCookieParser = do
       path <- rfc9110Token <|> quotedString
       pure $ \sc -> sc {setCookiePath = Just path}
 
-    secureAttr = $(string "Secure") *> pure (\sc -> sc {setCookieSecure = True})
+    secureAttr = $(string "Secure") $> (\sc -> sc {setCookieSecure = True})
 
-    httpOnlyAttr = $(string "HttpOnly") *> pure (\sc -> sc {setCookieHttpOnly = True})
+    httpOnlyAttr = $(string "HttpOnly") $> (\sc -> sc {setCookieHttpOnly = True})
 
     sameSiteAttr = do
       $(string "SameSite")
       $(char '=')
       policy <-
         $( switch
-             [|
-               case _ of
-                 "Strict" -> pure SameSiteStrict
-                 "Lax" -> pure SameSiteLax
-                 "None" -> pure SameSiteNone
-               |]
+            [|
+              case _ of
+                "Strict" -> pure SameSiteStrict
+                "Lax" -> pure SameSiteLax
+                "None" -> pure SameSiteNone
+              |]
          )
       pure $ \sc -> sc {setCookieSameSite = Just policy}
 
 
 buildSetCookie :: ST.ShortText -> ST.ShortText -> [SetCookie -> SetCookie] -> SetCookie
-buildSetCookie name value attributes =
-  foldr ($) (SetCookie name value Nothing Nothing Nothing Nothing False False Nothing) attributes
+buildSetCookie name value =
+  foldr ($) (SetCookie name value Nothing Nothing Nothing Nothing False False Nothing)
 
 
 renderSetCookie :: SetCookie -> M.Builder

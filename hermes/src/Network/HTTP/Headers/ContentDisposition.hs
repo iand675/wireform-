@@ -1,5 +1,16 @@
 {-# LANGUAGE TemplateHaskell #-}
 
+{- |
+@Content-Disposition@ tells a user agent how to present the enclosed
+representation: rendered @inline@ in the page or offered as an @attachment@ to
+download, optionally suggesting a @filename@. In HTTP it is chiefly a response
+header; the same field also labels the individual parts of a
+@multipart/form-data@ request body.
+
+Spec: <https://www.rfc-editor.org/rfc/rfc6266#section-4>
+
+See also: "Network.HTTP.Headers.ContentType", "Network.HTTP.Headers.ContentEncoding", "Network.HTTP.Headers.ContentLanguage", "Network.HTTP.Headers.ContentLocation".
+-}
 module Network.HTTP.Headers.ContentDisposition (
   ContentDisposition (..),
   contentDispositionParser,

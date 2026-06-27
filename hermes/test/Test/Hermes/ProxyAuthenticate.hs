@@ -30,8 +30,8 @@ unit_smoke :: Spec
 unit_smoke = it "Proxy-Authenticate roundtrip" $
   case parseOk "Basic realm=\"corp\", Digest realm=\"api\", qop=\"auth\", nonce=\"n\"" of
     Right (P.ProxyAuthenticate [b, d]) -> do
-      (W.challengeScheme b) `shouldBe` (W.AuthScheme (ST.fromString "Basic"))
-      (W.challengeScheme d) `shouldBe` (W.AuthScheme (ST.fromString "Digest"))
+      W.challengeScheme b `shouldBe` W.AuthScheme (ST.fromString "Basic")
+      W.challengeScheme d `shouldBe` W.AuthScheme (ST.fromString "Digest")
     other -> error ("unexpected parse: " <> show other)
 
 

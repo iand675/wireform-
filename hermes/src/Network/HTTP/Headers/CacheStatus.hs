@@ -1,6 +1,18 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TemplateHaskell #-}
 
+{- |
+@Cache-Status@ is a response header by which each cache on the response path
+records how it handled the request — whether the response was a hit, was
+forwarded toward the origin, was stored, or was collapsed with another
+in-flight request. It is an RFC 8941 structured field whose value is a list of
+entries, one per cache, each identified by the cache's name and annotated with
+parameters such as @hit@, @fwd@, @fwd-status@, @ttl@, and @key@, giving
+operators end-to-end visibility into caching behaviour along the path.
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9211>
+
+See also: "Network.HTTP.Headers.CacheControl", "Network.HTTP.Headers.Age", "Network.HTTP.Headers.Via", "Network.HTTP.Headers.ProxyStatus".
+-}
 module Network.HTTP.Headers.CacheStatus (
   CacheStatus (..),
   CacheStatusEntry (..),
@@ -70,17 +82,14 @@ data Forward
     Method
   | -- | The cache did not contain any responses that matched the request URI.
     UriMiss
-  | {- | The cache contained a response that matched the request URI, but it could not select a response based
-    upon this request's header fields and stored Vary header fields.
-    -}
+  | -- | The cache contained a response that matched the request URI, but it could not select a response based
+    --     upon this request's header fields and stored Vary header fields.
     VaryMiss
-  | {- | The cache did not contain any responses that could be used to satisfy this request
-    (to be used when an implementation cannot distinguish between uri-miss and vary-miss).
-    -}
+  | -- | The cache did not contain any responses that could be used to satisfy this request
+    --     (to be used when an implementation cannot distinguish between uri-miss and vary-miss).
     Miss
-  | {- | The cache was able to select a fresh response for the request, but the request's
-    semantics (e.g., Cache-Control request directives) did not allow its use.
-    -}
+  | -- | The cache was able to select a fresh response for the request, but the request's
+    --     semantics (e.g., Cache-Control request directives) did not allow its use.
     Request
   | -- | The cache was able to select a response for the request, but it was stale.
     Stale

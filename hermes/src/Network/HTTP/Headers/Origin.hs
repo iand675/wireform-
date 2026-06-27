@@ -1,6 +1,18 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-partial-fields #-}
 
+{- |
+@Origin@ request header naming the origin (scheme, host, and optional port — but
+never a path) that caused the request. Browsers attach it to CORS requests and to
+all requests with unsafe methods (@POST@, @PUT@, etc.), letting the server decide
+whether to honour the cross-origin access and what to return in
+@Access-Control-Allow-Origin@. The serialized value may be the literal @null@ for
+opaque origins (e.g. @data:@ URLs or sandboxed iframes).
+
+Spec: <https://www.rfc-editor.org/rfc/rfc6454#section-7>
+
+See also: "Network.HTTP.Headers.AccessControlAllowOrigin", "Network.HTTP.Headers.AccessControlAllowCredentials", "Network.HTTP.Headers.Referer", "Network.HTTP.Headers.CrossOriginResourcePolicy", "Network.HTTP.Headers.Host".
+-}
 module Network.HTTP.Headers.Origin (
   Origin (..),
   OriginValue (..),
@@ -8,6 +20,7 @@ module Network.HTTP.Headers.Origin (
   renderOrigin,
 ) where
 
+import Data.Functor (($>))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
 import Data.Word (Word16)
@@ -62,7 +75,7 @@ originParser :: ParserT st String Origin
 originParser = OriginHeader <$> originValueParser
   where
     originValueParser = nullOrigin <|> specificOrigin
-    nullOrigin = $(string "null") *> pure OriginNull
+    nullOrigin = $(string "null") $> OriginNull
     specificOrigin = do
       scheme <- rfc9110Token
       $(string "://")

@@ -8,8 +8,8 @@ import qualified Data.Vector.Fusion.Bundle as F
 import GHC.IsList
 
 
-data Path = Path
-  { pathPieces :: {-# UNPACK #-} !(F.Bundle V.Vector Text)
+newtype Path = Path
+  { pathPieces :: F.Bundle V.Vector Text
   }
 
 

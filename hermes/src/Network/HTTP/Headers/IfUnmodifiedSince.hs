@@ -1,3 +1,14 @@
+{- | The @If-Unmodified-Since@ precondition request header makes a method
+conditional on the selected representation /not/ having changed since the given
+HTTP-date. If it has been modified, the origin server responds
+@412 (Precondition Failed)@ and does not apply the request. It is the
+date-based analogue of @If-Match@, used to guard unsafe methods such as @PUT@
+against lost updates when only a @Last-Modified@ timestamp is available.
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-13.1.4>
+
+See also: "Network.HTTP.Headers.IfModifiedSince", "Network.HTTP.Headers.IfMatch", "Network.HTTP.Headers.LastModified", "Network.HTTP.Headers.ETag", "Network.HTTP.Headers.Date".
+-}
 module Network.HTTP.Headers.IfUnmodifiedSince where
 
 import qualified Data.List.NonEmpty as NE

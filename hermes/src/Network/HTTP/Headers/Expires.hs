@@ -1,3 +1,16 @@
+{- |
+@Expires@ is a response header giving the absolute date\/time after which the
+response is considered stale. It is the original HTTP\/1.0 freshness control:
+caches use it to decide whether a stored response may be reused without
+revalidation. When the response also carries a @Cache-Control: max-age@ (or
+@s-maxage@) directive, that directive takes precedence over @Expires@. A date
+in the past — conventionally the single character @0@ — marks the response as
+already stale.
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9111#section-5.3>
+
+See also: "Network.HTTP.Headers.CacheControl", "Network.HTTP.Headers.Age", "Network.HTTP.Headers.Date", "Network.HTTP.Headers.LastModified".
+-}
 module Network.HTTP.Headers.Expires (
   Expires (..),
   expiresParser,

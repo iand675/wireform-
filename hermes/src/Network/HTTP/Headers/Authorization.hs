@@ -1,5 +1,26 @@
 {-# LANGUAGE TemplateHaskell #-}
 
+{- |
+@Authorization@ — the request header a client uses to present
+credentials to an origin server, typically answering a
+@WWW-Authenticate@ challenge (though it may be sent pre-emptively). It
+carries a single @credentials@ value: an auth-scheme (e.g. @Basic@,
+@Bearer@, @Digest@) followed by either a @token68@ blob or a
+comma-separated @auth-param@ list.
+
+== Grammar (RFC 9110 §11.6.2)
+
+@
+Authorization = credentials
+credentials   = auth-scheme [ 1*SP ( token68 / #auth-param ) ]
+@
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-11.6.2>
+
+See also: "Network.HTTP.Headers.WWWAuthenticate",
+"Network.HTTP.Headers.ProxyAuthorization",
+"Network.HTTP.Headers.AuthenticationInfo", "Network.HTTP.Headers.DPoP".
+-}
 module Network.HTTP.Headers.Authorization (
   Authorization (..),
   Credentials (..),
@@ -92,8 +113,8 @@ renderCredentials = \case
       R.shortText key
         <> M.char7 '='
         <> ( case val of
-               CredentialParamToken tok -> R.shortText tok
-               CredentialParamString str -> R.rfc8941String str
+              CredentialParamToken tok -> R.shortText tok
+              CredentialParamString str -> R.rfc8941String str
            )
 
 

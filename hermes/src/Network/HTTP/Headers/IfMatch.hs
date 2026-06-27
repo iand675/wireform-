@@ -1,11 +1,22 @@
 {-# LANGUAGE TemplateHaskell #-}
 
+{- | The @If-Match@ precondition request header makes a method conditional on the
+target resource's current entity-tag. The server proceeds only when @*@ is
+given (any current representation exists) or one of the listed strong
+entity-tags matches; otherwise it responds @412 (Precondition Failed)@. It is
+most often used to prevent lost updates on @PUT@ and @DELETE@.
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-13.1.1>
+
+See also: "Network.HTTP.Headers.IfNoneMatch", "Network.HTTP.Headers.IfUnmodifiedSince", "Network.HTTP.Headers.ETag", "Network.HTTP.Headers.IfRange", "Network.HTTP.Headers.IfModifiedSince".
+-}
 module Network.HTTP.Headers.IfMatch (
   IfMatch (..),
 ) where
 
 import Control.Monad.Combinators.NonEmpty (sepBy1)
 import qualified Data.ByteString as B
+import Data.Functor (($>))
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NE
 import Network.HTTP.Headers
@@ -45,7 +56,7 @@ instance KnownHeader IfMatch where
 
 ifMatchParser :: ParserT st e IfMatch
 ifMatchParser =
-  ($(string "*") *> pure IfMatchAnyCurrentRepresentation)
+  ($(string "*") $> IfMatchAnyCurrentRepresentation)
     <|> (IfMatchEntityTags <$> entityTagParser `sepBy1` (ows *> $(char ',') *> ows))
 
 

@@ -1,3 +1,18 @@
+{- |
+The @Retry-After@ response header tells the client how long to wait before
+making a follow-up request. It accompanies a @503 (Service Unavailable)@ or
+@429 (Too Many Requests)@ response to say when the service should be back, and
+a @3xx@ redirect to say how long the resource is expected to be unavailable.
+The value is either a number of seconds (@delta-seconds@) or an HTTP-date.
+
+@
+Retry-After = HTTP-date / delta-seconds
+@
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-10.2.3>
+
+See also: "Network.HTTP.Headers.Refresh", "Network.HTTP.Headers.Sunset", "Network.HTTP.Headers.Date".
+-}
 module Network.HTTP.Headers.RetryAfter (
   RetryAfter (..),
   retryAfterParser,

@@ -1,5 +1,19 @@
 {-# LANGUAGE TemplateHaskell #-}
 
+{- |
+Module      : Network.HTTP.Headers.Cookie
+Description : The @Cookie@ request header (RFC 6265)
+
+The @Cookie@ request header returns to the origin server the state it previously
+stored on the user agent via @Set-Cookie@. The client sends it on subsequent
+requests as a semicolon-separated list of @name=value@ pairs whose domain and
+path match the request target, letting the server recognise a session, login,
+or remembered preferences. It is a request-only header.
+
+Spec: <https://www.rfc-editor.org/rfc/rfc6265#section-4.2>
+
+See also: "Network.HTTP.Headers.SetCookie", "Network.HTTP.Headers.Cookie2", "Network.HTTP.Headers.SetCookie2", "Network.HTTP.Headers.ClearSiteData".
+-}
 module Network.HTTP.Headers.Cookie (
   Cookie (..),
   CookiePair (..),

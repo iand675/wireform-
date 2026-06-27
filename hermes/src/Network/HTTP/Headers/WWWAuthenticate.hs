@@ -2,8 +2,11 @@
 {-# LANGUAGE TupleSections #-}
 
 {- |
-RFC 9110 §11.6.1 @WWW-Authenticate@ — the response-side challenge
-list for HTTP authentication.
+@WWW-Authenticate@ — the response header an origin server sends on a
+@401 Unauthorized@ response to challenge the client for credentials,
+naming one or more acceptable authentication schemes (e.g. @Basic@,
+@Bearer@, @Digest@) and their parameters (such as @realm@). The client
+answers with a matching @Authorization@ request header.
 
 == Grammar (RFC 9110 §11.6.1)
 
@@ -43,6 +46,13 @@ list to consume.
 * The @auth-scheme@ \/ @auth-param@ vocabulary is shared with
   "Network.HTTP.Headers.Authorization" so the request and
   response sides speak the same parameter types.
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-11.6.1>
+
+See also: "Network.HTTP.Headers.Authorization",
+"Network.HTTP.Headers.ProxyAuthenticate",
+"Network.HTTP.Headers.OptionalWWWAuthenticate",
+"Network.HTTP.Headers.AuthenticationInfo".
 -}
 module Network.HTTP.Headers.WWWAuthenticate (
   -- * Types
@@ -97,19 +107,16 @@ data AuthChallenge = AuthChallenge
 
 -- | The shape of a challenge's payload.
 data ChallengeContents
-  = {- | Just the scheme (rare; some legacy schemes can omit
-    everything after the scheme name).
-    -}
+  = -- | Just the scheme (rare; some legacy schemes can omit
+    --     everything after the scheme name).
     ChallengeBare
-  | {- | Single @token68@ payload (used for schemes like @Bearer@
-    that may carry a single opaque token, though the
-    challenge form usually still provides parameters).
-    -}
+  | -- | Single @token68@ payload (used for schemes like @Bearer@
+    --     that may carry a single opaque token, though the
+    --     challenge form usually still provides parameters).
     ChallengeToken68 !ByteString
-  | {- | @auth-param@ list, in document order.  Parameter names are
-    case-insensitive per RFC 9110 §11.2; we preserve the
-    on-the-wire spelling so renderers can round-trip.
-    -}
+  | -- | @auth-param@ list, in document order.  Parameter names are
+    --     case-insensitive per RFC 9110 §11.2; we preserve the
+    --     on-the-wire spelling so renderers can round-trip.
     ChallengeParams ![(ShortText, CredentialParam)]
   deriving stock (Eq, Show)
 

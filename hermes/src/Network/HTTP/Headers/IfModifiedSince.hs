@@ -1,3 +1,13 @@
+{- | The @If-Modified-Since@ precondition request header makes a @GET@ or @HEAD@
+conditional on the selected representation having changed since the given
+HTTP-date, normally a previously received @Last-Modified@ value. If it has not
+changed, the origin server responds @304 (Not Modified)@ with no body, saving
+bandwidth on cache revalidation.
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-13.1.3>
+
+See also: "Network.HTTP.Headers.LastModified", "Network.HTTP.Headers.IfUnmodifiedSince", "Network.HTTP.Headers.IfNoneMatch", "Network.HTTP.Headers.ETag", "Network.HTTP.Headers.Date".
+-}
 module Network.HTTP.Headers.IfModifiedSince (
   IfModifiedSince (..),
   renderIfModifiedSince,

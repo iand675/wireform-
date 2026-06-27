@@ -211,7 +211,32 @@ When adding new headers:
 2. Create a new module for the header
 3. Implement parsing and rendering
 4. Add tests
-5. Document RFC references
+5. Document the module to the standard below
+
+### Module documentation standard
+
+Every header module (`Network.HTTP.Headers.<Name>`) MUST open with a
+module-level Haddock block (after any `{-# LANGUAGE #-}` pragmas, before
+the `module … (` line) containing, in order:
+
+1. **Explainer** — a one-to-three sentence plain-English description: what
+   the header conveys, whether it is a request and/or response header, and
+   when it is used. Write for an engineer who doesn't know this specific
+   header.
+2. **Spec link** — a markdown autolink to the defining spec, e.g.
+   `Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-10.1.1>`. Use the
+   precise RFC/section (or WHATWG/W3C/OASIS) URL. For de-facto, non-IANA
+   headers, say so plainly and link the best available reference.
+3. **`See also:`** — 2–6 Haddock module links to the most related headers,
+   written as double-quoted module names, e.g.
+   `See also: "Network.HTTP.Headers.Accept", "Network.HTTP.Headers.Vary".`
+   Cross-link the families that belong together (content negotiation,
+   conditionals/validators, range, auth, caching, CORS / cross-origin
+   isolation, integrity digests, etc.).
+
+A detailed `== Grammar` section is encouraged for non-trivial wire formats
+but is optional. Keep the block tight — explainer + spec + See also is the
+floor, not a place to pad.
 
 ## References
 

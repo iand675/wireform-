@@ -7,12 +7,17 @@ a cache key when content negotiation is in use.
 
 The same Vary header value should be used on all responses for a given URL,
 including 304 Not Modified responses and the "default" response.
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-12.5.5>
+
+See also: "Network.HTTP.Headers.Accept", "Network.HTTP.Headers.AcceptEncoding", "Network.HTTP.Headers.AcceptLanguage", "Network.HTTP.Headers.ContentType", "Network.HTTP.Headers.CacheControl".
 -}
 module Network.HTTP.Headers.Vary where
 
 import Control.Monad.Combinators.NonEmpty
 import qualified Data.ByteString as B
 import Data.Foldable1
+import Data.Functor (($>))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text.Short as ST
 import Network.HTTP.Headers
@@ -60,7 +65,7 @@ runVaryParser bs = case runParser parseVary bs of
 parseVary :: ParserT st String Vary
 parseVary = Vary <$> ((star <|> hdr) `sepBy1` (ows *> $(char ',') *> ows))
   where
-    star = $(char '*') *> pure VaryAll
+    star = $(char '*') $> VaryAll
     hdr = VaryHeader . headerFieldName . ST.toText <$> fieldName
 
 

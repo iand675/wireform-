@@ -1,3 +1,23 @@
+{- |
+RFC 9110 §8.6 @Content-Length@ — gives the size of the message body, in
+octets, as a non-negative decimal integer. On a message with content it
+states the length of the enclosed body; on a body-less message (e.g. a
+@HEAD@ response) it anticipates the length the equivalent @GET@ would
+return. It is a request and response header and acts as an alternative to
+@Transfer-Encoding@ for determining message-body length; the two are
+mutually exclusive.
+
+== Grammar
+
+@
+Content-Length = 1*DIGIT
+@
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9110#section-8.6>
+
+See also: "Network.HTTP.Headers.TransferEncoding", "Network.HTTP.Headers.TE",
+"Network.HTTP.Headers.ContentRange".
+-}
 module Network.HTTP.Headers.ContentLength (
   ContentLength (..),
   contentLengthParser,

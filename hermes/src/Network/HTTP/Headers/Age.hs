@@ -1,3 +1,15 @@
+{- |
+@Age@ is a response header giving a cache's estimate, in seconds, of how long
+ago the origin server generated (or last successfully validated) the response
+now being served. A value of @0@ implies a fresh response straight from the
+origin; a positive value means the response came from a shared cache. Clients
+and intermediaries combine it with @Cache-Control@ and @Expires@ when
+computing a stored response's remaining freshness lifetime.
+
+Spec: <https://www.rfc-editor.org/rfc/rfc9111#section-5.1>
+
+See also: "Network.HTTP.Headers.CacheControl", "Network.HTTP.Headers.Expires", "Network.HTTP.Headers.CacheStatus", "Network.HTTP.Headers.Date".
+-}
 module Network.HTTP.Headers.Age (
   Age (..),
   parseAge,

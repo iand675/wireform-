@@ -4,7 +4,7 @@
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 
 {- |
-Module      : Network.HTTP.CacheControl
+Module      : Network.HTTP.Headers.CacheControl
 Description : Representation of HTTP Cache-Control directives
 
 Currently targeting: HTTPWG RFC 9111
@@ -60,6 +60,8 @@ request with If-None-Match (using ETag) or If-Modified-Since (using Last-Modifie
 
 Server Response: The server either confirms the resource hasn't changed (with a 304 Not Modified response, allowing the cache to reuse the response) or sends a new version of the resource.
 This system, while complex, enables efficient, flexible, and scalable web content delivery, minimizing unnecessary data transfers while ensuring users receive up-to-date content.
+
+See also: "Network.HTTP.Headers.Expires", "Network.HTTP.Headers.Age", "Network.HTTP.Headers.Pragma", "Network.HTTP.Headers.CDNCacheControl", "Network.HTTP.Headers.Vary", "Network.HTTP.Headers.ETag".
 -}
 module Network.HTTP.Headers.CacheControl (
   CacheControl (..),
@@ -119,7 +121,7 @@ instance KnownHeader CacheControl where
   type Direction CacheControl = 'RequestAndResponse
 
 
-  parseFromHeaders _ neHeaders = (CacheControl . sconcat) <$> traverse parseCacheControlHeader neHeaders
+  parseFromHeaders _ neHeaders = CacheControl . sconcat <$> traverse parseCacheControlHeader neHeaders
   renderToHeaders _ = pure . BL.toStrict . BB.toLazyByteString . directivesBuilder . cacheControlDirectives
   headerName _ = hCacheControl
 
@@ -134,13 +136,11 @@ Note that this type is not exhaustive and may not include all possible directive
 data CacheControlDirective
   = -- | Indicates the response can be cached by any cache.
     Public
-  | {- | The response is for a single user and should not be stored by shared caches.
-    Optional field names can specify parts of the response intended for a single user.
-    -}
+  | -- | The response is for a single user and should not be stored by shared caches.
+    --     Optional field names can specify parts of the response intended for a single user.
     Private (Maybe ShortText)
-  | {- | Forces caches to validate the response with the origin server before reuse.
-    Optional field names can specify parts of the response to always validate.
-    -}
+  | -- | Forces caches to validate the response with the origin server before reuse.
+    --     Optional field names can specify parts of the response to always validate.
     NoCache (Maybe ShortText)
   | -- | Directs caches not to store the response or request.
     NoStore
@@ -227,33 +227,32 @@ updatePresence directive presence = case directive of
 -- Function to check for well-known directive conflicts based on the tracked presence.
 checkConflicts :: DirectivePresence -> Validation (NonEmpty String) DirectivePresence
 checkConflicts p@DirectivePresence {..} =
-  pure p
-    <* foldMap1
+  p
+    <$ foldMap1
       validationNel
-      ( ( when
-            (hasPrivate && hasPublic)
-            (Left "private conflicts with public.")
-        )
+      ( when
+          (hasPrivate && hasPublic)
+          (Left "private conflicts with public.")
           :| [ when
-                 ( hasNoStore
-                     && or
-                       [ hasPrivate
-                       , hasPublic
-                       , hasMaxAge
-                       , hasSMaxAge
-                       , hasMustRevalidate
-                       , hasProxyRevalidate
-                       , hasStaleWhileRevalidate
-                       , hasStaleIfError
-                       ]
-                 )
-                 (Left "no-store conflicts with directives that imply storage.")
+                ( hasNoStore
+                    && or
+                      [ hasPrivate
+                      , hasPublic
+                      , hasMaxAge
+                      , hasSMaxAge
+                      , hasMustRevalidate
+                      , hasProxyRevalidate
+                      , hasStaleWhileRevalidate
+                      , hasStaleIfError
+                      ]
+                )
+                (Left "no-store conflicts with directives that imply storage.")
              , when
-                 (hasPrivate && hasSMaxAge)
-                 (Left "private conflicts with s-maxage since proxies should not be storing content.")
+                (hasPrivate && hasSMaxAge)
+                (Left "private conflicts with s-maxage since proxies should not be storing content.")
              , when
-                 (hasImmutable && (hasStaleWhileRevalidate || hasStaleIfError))
-                 (Left "immutable conflicts with directives that imply stale content.")
+                (hasImmutable && (hasStaleWhileRevalidate || hasStaleIfError))
+                (Left "immutable conflicts with directives that imply stale content.")
              ]
       )
 
@@ -284,13 +283,13 @@ usableRequestDirectives = foldr split mempty
     split dir ds =
       let valid = addValidDirective dir ds
       in case dir of
-           Public -> valid
-           NoCache _ -> valid
-           NoStore -> valid
-           MaxAge _ -> valid
-           NoTransform -> valid
-           Unknown k mv -> addUnknownDirective k mv ds
-           _ -> addInvalidDirective dir ds
+          Public -> valid
+          NoCache _ -> valid
+          NoStore -> valid
+          MaxAge _ -> valid
+          NoTransform -> valid
+          Unknown k mv -> addUnknownDirective k mv ds
+          _ -> addInvalidDirective dir ds
 
 
 usableResponseDirectives :: Foldable t => t CacheControlDirective -> UsableDirectives
@@ -299,19 +298,19 @@ usableResponseDirectives = foldr split mempty
     split dir ds =
       let valid = addValidDirective dir ds
       in case dir of
-           Public -> valid
-           Private _ -> valid
-           NoCache _ -> valid
-           NoStore -> valid
-           MaxAge _ -> valid
-           SMaxAge _ -> valid
-           MustRevalidate -> valid
-           ProxyRevalidate -> valid
-           NoTransform -> valid
-           Immutable -> valid
-           StaleWhileRevalidate _ -> valid
-           StaleIfError _ -> valid
-           Unknown k mv -> addUnknownDirective k mv ds
+          Public -> valid
+          Private _ -> valid
+          NoCache _ -> valid
+          NoStore -> valid
+          MaxAge _ -> valid
+          SMaxAge _ -> valid
+          MustRevalidate -> valid
+          ProxyRevalidate -> valid
+          NoTransform -> valid
+          Immutable -> valid
+          StaleWhileRevalidate _ -> valid
+          StaleIfError _ -> valid
+          Unknown k mv -> addUnknownDirective k mv ds
 
 
 numericDirective :: (Word -> CacheControlDirective) -> ParserT st e CacheControlDirective
@@ -327,24 +326,24 @@ optStringDirective f = option (f Nothing) (f . Just <$> ($(char '=') *> (rfc9110
 directiveParser :: ParserT st e CacheControlDirective
 directiveParser =
   $( switch
-       [|
-         case _ of
-           "public" -> pure Public
-           "private" -> optStringDirective Private
-           "no-cache" -> optStringDirective NoCache
-           "no-store" -> pure NoStore
-           "max-age" -> numericDirective MaxAge
-           "s-maxage" -> numericDirective SMaxAge
-           "must-revalidate" -> pure MustRevalidate
-           "proxy-revalidate" -> pure ProxyRevalidate
-           "no-transform" -> pure NoTransform
-           "immutable" -> pure Immutable
-           "stale-while-revalidate" -> numericDirective StaleWhileRevalidate
-           "stale-if-error" -> numericDirective StaleIfError
-           _ -> do
-             k <- rfc9110Token
-             option (Unknown k Nothing) (Unknown k . Just <$> ($(char '=') *> (rfc9110Token <|> quotedString)))
-         |]
+      [|
+        case _ of
+          "public" -> pure Public
+          "private" -> optStringDirective Private
+          "no-cache" -> optStringDirective NoCache
+          "no-store" -> pure NoStore
+          "max-age" -> numericDirective MaxAge
+          "s-maxage" -> numericDirective SMaxAge
+          "must-revalidate" -> pure MustRevalidate
+          "proxy-revalidate" -> pure ProxyRevalidate
+          "no-transform" -> pure NoTransform
+          "immutable" -> pure Immutable
+          "stale-while-revalidate" -> numericDirective StaleWhileRevalidate
+          "stale-if-error" -> numericDirective StaleIfError
+          _ -> do
+            k <- rfc9110Token
+            option (Unknown k Nothing) (Unknown k . Just <$> ($(char '=') *> (rfc9110Token <|> quotedString)))
+        |]
    )
 
 

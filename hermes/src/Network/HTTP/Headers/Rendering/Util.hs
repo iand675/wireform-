@@ -68,7 +68,7 @@ rfc8941Token = shortText . unsafeToRFC8941Token
 
 
 rfc8941Decimal :: Milli -> M.Builder
-rfc8941Decimal (MkFixed i) = case (i `divMod` 1000) of
+rfc8941Decimal (MkFixed i) = case i `divMod` 1000 of
   (d, m) -> M.integerDec d <> M.char7 '.' <> M.integerDec m
 {-# INLINE rfc8941Decimal #-}
 

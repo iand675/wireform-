@@ -47,7 +47,7 @@ unit_q1_followed_by_more :: Spec
 unit_q1_followed_by_more = it "q=1.0 followed by another entry" $
   case parseOk "br;q=1.0, gzip;q=0.5, *;q=0" of
     Right (AE.AcceptEncoding xs) ->
-      (length xs) `shouldBe` 3
+      length xs `shouldBe` 3
     other -> error (show other)
 
 
@@ -55,12 +55,12 @@ unit_multi_with_q :: Spec
 unit_multi_with_q = it "multi-coding with q values" $
   case parseOk "br;q=1.0, gzip;q=0.5, *;q=0" of
     Right (AE.AcceptEncoding [b, g, w]) -> do
-      (AE.encodingTag b) `shouldBe` (AE.NamedEncoding CC.Brotli)
-      (AE.encodingWeight b) `shouldBe` 1
-      (AE.encodingTag g) `shouldBe` (AE.NamedEncoding CC.GZip)
-      (AE.encodingWeight g) `shouldBe` 0.5
-      (AE.encodingTag w) `shouldBe` AE.AnyEncoding
-      (AE.encodingWeight w) `shouldBe` 0
+      AE.encodingTag b `shouldBe` AE.NamedEncoding CC.Brotli
+      AE.encodingWeight b `shouldBe` 1
+      AE.encodingTag g `shouldBe` AE.NamedEncoding CC.GZip
+      AE.encodingWeight g `shouldBe` 0.5
+      AE.encodingTag w `shouldBe` AE.AnyEncoding
+      AE.encodingWeight w `shouldBe` 0
     other -> error ("unexpected parse: " <> show other)
 
 
@@ -72,7 +72,7 @@ unit_render_omits_q1 =
             [ AE.WeightedEncoding (AE.NamedEncoding CC.GZip) 1
             , AE.WeightedEncoding (AE.NamedEncoding CC.Brotli) 0.8
             ]
-    in (render v) `shouldBe` "gzip, br;q=0.8"
+    in render v `shouldBe` "gzip, br;q=0.8"
 
 
 -- ---------------------------------------------------------------------------
