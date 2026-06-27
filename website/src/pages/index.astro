@@ -1,5 +1,16 @@
 ---
 import Landing from '../layouts/Landing.astro';
+import FaultyTerminalBackground from '../components/FaultyTerminalBackground.astro';
+import GlassSurface from '../components/GlassSurface.astro';
+import { codeToHtml } from 'shiki';
+
+// Build-time syntax highlighting (dual theme so code follows the page's
+// light/dark state). Matches the themes Starlight uses for its doc pages.
+const highlight = (code, lang = 'haskell') =>
+  codeToHtml(code, {
+    lang,
+    themes: { light: 'github-light', dark: 'github-dark-default' },
+  });
 
 const formats = [
   'Protocol Buffers', 'Avro', 'Thrift', 'MessagePack', 'CBOR', 'BSON',
@@ -9,161 +20,288 @@ const formats = [
   'Delta Lake', 'Hudi', 'Lance',
 ];
 
+const categories = [
+  { tag: 'Schema & IDL', items: 'Protobuf · Avro · Thrift · Bond · Cap\u2019n Proto · FlatBuffers · ASN.1' },
+  { tag: 'Binary values', items: 'CBOR · MessagePack · BSON · Ion · Bencode · Fory' },
+  { tag: 'Text & markup', items: 'XML · HTML5 · YAML · TOML · CSV · EDN' },
+  { tag: 'Analytics & lake', items: 'Parquet · Arrow · ORC · Iceberg · Delta · Hudi · Lance' },
+  { tag: 'Messaging', items: 'Kafka · gRPC · HTTP/1·2 · WebSocket' },
+  { tag: 'Validation', items: 'CEL · protovalidate' },
+];
+
 const sections = [
   {
+    eyebrow: 'One deriver, every backend',
     title: 'Derive once, serialize everywhere',
-    text: 'Define your type, add the formats you need, and you\'re done. The same annotation vocabulary works across every backend.',
+    text: 'Define your type once and add the formats you need. The same annotation vocabulary — field overrides, rename, map keys — drives every backend, so a pattern learned in one format carries straight over to the next.',
     code: `data Person = Person { name :: !Text, age :: !Int }
   deriving stock (Show, Eq, Generic)
-  deriving anyclass (ToMsgPack, FromMsgPack, ToCBOR, FromCBOR, ToYAML, FromYAML)`,
+  deriving anyclass (ToMsgPack, FromMsgPack,
+                     ToCBOR,   FromCBOR,
+                     ToYAML,   FromYAML)`,
   },
   {
-    title: 'Generate types from any schema language',
-    text: 'Point wireform-gen at a schema file and get idiomatic Haskell — or use a Template Haskell splice and skip the CLI entirely.',
-    code: `-- No protoc binary needed. No generated files to commit.
+    eyebrow: 'Schema languages',
+    title: 'Generate types from any IDL',
+    text: 'Point wireform-gen at a schema file and get idiomatic Haskell — or use a Template Haskell splice and skip the CLI. No protoc binary, no generated files to commit.',
+    code: `-- Template Haskell: read the .proto at compile time
 $(loadProto "proto/person.proto")
 
--- Or use the CLI for any of 10 schema languages.
--- $ wireform-gen proto  -i api.proto     -o gen/
--- $ wireform-gen avro   -i user.avsc     -o gen/
--- $ wireform-gen thrift -i service.thrift -o gen/`,
+-- Or the wireform-gen CLI for 8 schema languages:
+--   wireform-gen proto  -i api.proto       -o gen/
+--   wireform-gen avro   -i user.avsc       -o gen/
+--   wireform-gen thrift -i service.thrift  -o gen/`,
   },
   {
+    eyebrow: 'Documents',
     title: 'Real XML and HTML processing',
-    text: 'A fast XML parser with XPath and XSLT. A fully spec-compliant HTML5 tree builder with CSS selectors and a streaming rewriter.',
-    code: `-- CSS selectors on parsed HTML, just like the browser
-let articles = querySelectorAll "article.post > h2" document
+    text: 'A fast, spec-compliant XML parser with XPath queries and XSLT, and a full HTML5 tree builder with CSS selectors and a streaming rewriter.',
+    code: `-- CSS selectors on parsed HTML, like the browser
+let headings = querySelectorAll doc "article.post > h2"
 
--- XPath queries on XML
+-- XPath-style queries over the XML DOM
 let titles = query "//book/title" catalog`,
   },
   {
-    title: 'Analytics without the JVM',
-    text: 'Read and write Parquet, Arrow, and ORC files. Query Iceberg tables through REST, Glue, or Hadoop catalogs. No Spark required.',
-    code: `rows <- readParquet "events.parquet"
-  & filterPredicate (col "status" .== lit "active")
-  & selectColumns ["user_id", "event_type", "timestamp"]`,
+    eyebrow: 'Lake formats',
+    title: 'Analytics without leaving Haskell',
+    text: 'Read and write Parquet, Arrow, and ORC. Query Iceberg, Delta, Hudi, and Lance tables through native readers with predicate pushdown and column projection. No Spark, no Python bridge, no extra runtimes.',
+    code: `-- Column projection + predicate pushdown, in pure Haskell
+let iter = decodeProjectedFilteredIter
+             pf
+             (Just ["user_id", "event_type", "timestamp"])
+             (col "status" .== lit "active")`,
   },
   {
+    eyebrow: 'Streaming & RPC',
     title: 'Kafka and gRPC, built in',
-    text: 'A full Kafka client with producers, consumers, transactions, and a Streams DSL. A native gRPC implementation with bidirectional streaming.',
-    code: `produce producer "events" (avroEncode event)
-
-withTransaction consumer $ \\records ->
-  for_ records processEvent`,
+    text: 'A full native Kafka client — producers, consumers, transactions, consumer groups — plus a Kafka Streams DSL. A from-scratch gRPC implementation with bidirectional streaming.',
+    code: `-- Produce, then process inside a transaction
+withTransaction producer $ \\tx ->
+  for_ events (produce tx "orders")`,
   },
 ];
 
 const base = import.meta.env.BASE_URL;
+
+// Pre-render highlighted HTML for each code example at build time.
+const sectionBlocks = await Promise.all(
+  sections.map(async (s) => ({
+    ...s,
+    html: await highlight(s.code, s.lang ?? 'haskell'),
+  })),
+);
 ---
 
 <Landing
   title="wireform — one Haskell ecosystem for every format and protocol"
   description="Serialization, codegen, streaming, messaging, and analytics under one roof."
 >
-  <!-- Nav -->
-  <nav class="fixed top-0 inset-x-0 z-50 border-b border-line bg-paper/88 backdrop-blur-sm">
-    <div class="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
-      <a href={base} class="font-bold text-lg tracking-tight text-ink no-underline">
-        wire<span class="text-primary">form</span>
-      </a>
-      <div class="flex items-center gap-6 text-sm">
-        <a href={`${base}guides/getting-started`} class="text-muted hover:text-ink transition-colors no-underline">Docs</a>
-        <a href={`${base}guides/formats`} class="text-muted hover:text-ink transition-colors no-underline">Formats</a>
-        <a href="https://github.com/iand675/wireform-" class="text-muted hover:text-ink transition-colors no-underline">GitHub</a>
+  <FaultyTerminalBackground />
+
+  <!-- Nav: floating liquid-glass bar (react-bits GlassSurface, ported) -->
+  <nav class="fixed top-3 inset-x-0 z-50 px-4 sm:px-6">
+    <GlassSurface
+      width="100%"
+      height={56}
+      borderRadius={16}
+      backgroundOpacity={0.6}
+      backdropBlur={8}
+      saturation={1.4}
+      class="wf-nav-glass max-w-6xl mx-auto"
+    >
+      <div class="w-full px-5 flex items-center justify-between">
+        <a href={base} class="font-display font-bold text-lg tracking-tight text-ink no-underline">
+          wire<span class="text-primary">form</span>
+        </a>
+        <div class="flex items-center gap-5 sm:gap-7 text-sm">
+          <a href={`${base}guides/getting-started`} class="text-muted hover:text-ink transition-colors no-underline">Docs</a>
+          <a href={`${base}guides/formats`} class="text-muted hover:text-ink transition-colors no-underline">Formats</a>
+          <a href={`${base}kafka-streams`} class="hidden sm:inline text-muted hover:text-ink transition-colors no-underline">Kafka Streams</a>
+          <a href="https://github.com/iand675/wireform-" class="text-muted hover:text-ink transition-colors no-underline">GitHub</a>
+        </div>
       </div>
-    </div>
+    </GlassSurface>
   </nav>
 
   <main class="max-w-6xl mx-auto px-6 pt-28 pb-24">
     <!-- Hero -->
-    <section class="relative pb-16 border-b border-line">
-      <!-- Paper grid -->
-      <div
-        class="absolute inset-0 pointer-events-none opacity-40"
-        style="background-image: linear-gradient(rgba(0,0,0,0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(0,0,0,0.06) 1px, transparent 1px); background-size: 32px 32px; mask-image: radial-gradient(ellipse at center, black 25%, transparent 75%); -webkit-mask-image: radial-gradient(ellipse at center, black 25%, transparent 75%);"
-        aria-hidden="true"
-      />
-
+    <section class="relative pb-16">
       <div class="relative max-w-3xl">
-        <div class="mb-6 inline-flex items-center gap-2 px-3 py-1.5 text-xs font-mono tracking-wide uppercase border border-accent/30 text-accent bg-accent/5">
+        <div class="mb-6 inline-flex items-center gap-2 px-3 py-1.5 text-xs font-mono tracking-wide uppercase border border-primary/30 text-primary bg-card rounded-md">
           In heavy development — not yet on Hackage
         </div>
 
-        <h1 class="text-4xl sm:text-5xl font-bold tracking-tight leading-tight">
-          One ecosystem.{' '}
-          <span class="text-primary">Every format and protocol.</span>
+        <h1 class="font-display text-4xl sm:text-6xl font-bold tracking-tight leading-[1.05]">
+          One ecosystem.<br />
+          <span
+            class="bg-clip-text text-transparent"
+            style="background-image: linear-gradient(120deg, var(--wf-hero-from), var(--wf-hero-to));"
+          >Every format and protocol.</span>
         </h1>
 
-        <p class="mt-5 text-lg text-muted max-w-xl leading-relaxed">
-          Stop gluing together thirty packages. wireform gives you serialization,
-          codegen, streaming, messaging, and analytics under one roof — with APIs
-          that actually rhyme.
+        <p class="mt-6 text-lg sm:text-xl text-muted max-w-2xl leading-relaxed">
+          Stop gluing together forty unrelated packages. wireform gives you
+          serialization, codegen, streaming, messaging, and lake-format
+          analytics on a single, SIMD-accelerated core — with one consistent
+          set of APIs across every format.
         </p>
 
-        <div class="mt-8 flex flex-wrap gap-2">
+        <div class="mt-9 flex flex-wrap gap-3">
           <a
             href={`${base}guides/getting-started`}
-            class="inline-flex items-center gap-2 px-5 py-3 text-sm font-semibold bg-primary text-paper border border-primary hover:bg-primary-dark transition-colors no-underline"
+            class="group inline-flex items-center gap-2 px-5 py-3 text-sm font-semibold bg-primary text-paper rounded-lg border border-primary hover:bg-primary-dark hover:shadow-lg hover:-translate-y-0.5 transition-all no-underline"
           >
-            Get started <span>&rarr;</span>
+            Get started <span class="transition-transform group-hover:translate-x-0.5">&rarr;</span>
           </a>
           <a
             href={`${base}guides/formats`}
-            class="inline-flex items-center gap-2 px-5 py-3 text-sm font-semibold text-primary border border-primary hover:bg-primary hover:text-paper transition-colors no-underline"
+            class="inline-flex items-center gap-2 px-5 py-3 text-sm font-semibold text-primary bg-card border border-line hover:border-primary/40 hover:bg-card rounded-lg transition-all no-underline"
           >
             Format catalogue
           </a>
         </div>
       </div>
 
+      <!-- Stats strip -->
+      <div class="relative mt-14 grid grid-cols-2 sm:grid-cols-4 gap-px bg-line-strong rounded-xl overflow-hidden border border-line-strong">
+        <div class="bg-paper px-5 py-5">
+          <div class="font-display text-3xl font-bold text-ink">40+</div>
+          <div class="mt-1 text-xs font-mono uppercase tracking-wider text-muted">format packages</div>
+        </div>
+        <div class="bg-paper px-5 py-5">
+          <div class="font-display text-3xl font-bold text-ink">1</div>
+          <div class="mt-1 text-xs font-mono uppercase tracking-wider text-muted">shared core</div>
+        </div>
+        <div class="bg-paper px-5 py-5">
+          <div class="font-display text-3xl font-bold text-ink">1</div>
+          <div class="mt-1 text-xs font-mono uppercase tracking-wider text-muted">deriver vocabulary</div>
+        </div>
+        <div class="bg-paper px-5 py-5">
+          <div class="font-display text-3xl font-bold text-ink">0</div>
+          <div class="mt-1 text-xs font-mono uppercase tracking-wider text-muted">codegen binaries needed</div>
+        </div>
+      </div>
+
       <!-- Format tags -->
-      <div class="mt-10 flex flex-wrap gap-1 max-w-3xl">
-        {formats.map(f => (
-          <span class="px-2 py-0.5 text-xs font-mono text-muted border border-line hover:border-primary/30 hover:text-primary transition-colors">
-            {f}
-          </span>
+      <div class="relative mt-10">
+        <div class="text-xs font-mono uppercase tracking-wider text-muted mb-3">Supported formats</div>
+        <div class="flex flex-wrap gap-1.5 max-w-4xl">
+          {formats.map(f => (
+            <span class="px-2.5 py-1 text-xs font-mono text-muted bg-card border border-line rounded-md hover:border-primary/40 hover:text-primary transition-colors">
+              {f}
+            </span>
+          ))}
+        </div>
+      </div>
+    </section>
+
+    <!-- Category overview -->
+    <section class="py-16">
+      <h2 class="font-display text-2xl font-semibold tracking-tight">What's in the box</h2>
+      <p class="mt-2 text-muted max-w-xl">Every package draws on the same optimized core and the same annotation deriver. Pick one format or all of them — you only build what you import.</p>
+      <div class="mt-8 grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        {categories.map(c => (
+          <div class="p-5 bg-card border border-line rounded-xl hover:border-primary/30 hover:-translate-y-0.5 transition-all" style="box-shadow: var(--wf-shadow);">
+            <div class="text-xs font-mono uppercase tracking-wider text-primary">{c.tag}</div>
+            <div class="mt-2 text-sm text-ink leading-relaxed">{c.items}</div>
+          </div>
         ))}
       </div>
     </section>
 
     <!-- Feature sections -->
-    {sections.map((s, i) => (
-      <section class:list={["py-16", i < sections.length - 1 && "border-b border-line"]}>
-        <div class="grid md:grid-cols-[1fr_1.2fr] gap-10 items-start">
+    {sectionBlocks.map((s, i) => (
+      <section class="py-16">
+        <div class:list={["grid md:grid-cols-[1fr_1.15fr] gap-10 items-start", i % 2 === 1 && "md:[&>*:first-child]:order-2"]}>
           <div>
-            <h2 class="text-2xl font-semibold tracking-tight">{s.title}</h2>
+            <div class="text-xs font-mono uppercase tracking-wider text-primary mb-2">{s.eyebrow}</div>
+            <h2 class="font-display text-2xl sm:text-3xl font-semibold tracking-tight">{s.title}</h2>
             <p class="mt-3 text-muted leading-relaxed max-w-md">{s.text}</p>
           </div>
-          <pre class="bg-card border border-line p-5 text-sm font-mono leading-relaxed overflow-x-auto"><code>{s.code}</code></pre>
+          <div class="wf-codeblock bg-card border border-line rounded-xl overflow-hidden" style="box-shadow: var(--wf-shadow);" set:html={s.html} />
         </div>
       </section>
     ))}
 
     <!-- CTA -->
-    <section class="pt-16 border-t border-line">
-      <p class="text-muted max-w-md">
-        Add wireform to your project and start building.
-        No external tools, no runtime dependencies, no JVM.
-      </p>
-      <a
-        href={`${base}guides/getting-started`}
-        class="inline-flex items-center gap-2 mt-4 text-sm font-semibold text-primary hover:text-primary-dark transition-colors no-underline"
-      >
-        Read the getting started guide &rarr;
-      </a>
+    <section class="pt-16">
+      <div class="max-w-2xl">
+        <h2 class="font-display text-2xl sm:text-3xl font-semibold tracking-tight">Add wireform to your project</h2>
+        <p class="mt-3 text-muted max-w-md">
+          No external tools, no codegen binaries, no extra runtimes. One core,
+          one deriver, forty-plus formats — all native Haskell.
+        </p>
+        <a
+          href={`${base}guides/getting-started`}
+          class="inline-flex items-center gap-2 mt-5 px-5 py-3 text-sm font-semibold bg-primary text-paper rounded-lg border border-primary hover:bg-primary-dark hover:shadow-lg hover:-translate-y-0.5 transition-all no-underline"
+        >
+          Read the getting started guide &rarr;
+        </a>
+      </div>
     </section>
   </main>
 
   <!-- Footer -->
-  <footer class="border-t border-line">
-    <div class="max-w-6xl mx-auto px-6 py-8 flex justify-between items-end">
-      <span class="font-mono text-xs tracking-widest uppercase text-muted">
-        wireform · open source · haskell
-      </span>
-      <span class="font-mono text-xs tracking-wider uppercase text-muted">
-        Space Grotesk &amp; JetBrains Mono
-      </span>
+  <footer class="border-t border-line bg-paper-2">
+    <div class="max-w-6xl mx-auto px-6 py-14">
+      <div class="grid gap-10 md:grid-cols-[1.5fr_1fr_1fr_1fr]">
+        <!-- Brand -->
+        <div>
+          <a href={base} class="font-display font-bold text-xl tracking-tight text-ink no-underline">
+            wire<span class="text-primary">form</span>
+          </a>
+          <p class="mt-3 text-sm text-muted leading-relaxed max-w-xs">
+            One Haskell ecosystem for serialization, codegen, streaming,
+            messaging, and lake-format analytics.
+          </p>
+          <div class="mt-4 inline-flex items-center gap-2 px-2.5 py-1 text-xs font-mono uppercase tracking-wider border border-line rounded-md text-muted">
+            <span class="size-1.5 rounded-full bg-emerald-500"></span>
+            In heavy development
+          </div>
+        </div>
+
+        <!-- Docs -->
+        <div>
+          <div class="text-xs font-mono uppercase tracking-wider text-muted mb-3">Docs</div>
+          <ul class="space-y-2 text-sm">
+            <li><a href={`${base}guides/getting-started`} class="text-ink hover:text-primary transition-colors no-underline">Getting started</a></li>
+            <li><a href={`${base}guides/formats`} class="text-ink hover:text-primary transition-colors no-underline">Format catalogue</a></li>
+            <li><a href={`${base}concepts`} class="text-ink hover:text-primary transition-colors no-underline">Concepts</a></li>
+            <li><a href={`${base}kafka-streams`} class="text-ink hover:text-primary transition-colors no-underline">Kafka Streams</a></li>
+          </ul>
+        </div>
+
+        <!-- Formats -->
+        <div>
+          <div class="text-xs font-mono uppercase tracking-wider text-muted mb-3">Formats</div>
+          <ul class="space-y-2 text-sm">
+            <li><a href={`${base}packages/proto`} class="text-ink hover:text-primary transition-colors no-underline">Protocol Buffers</a></li>
+            <li><a href={`${base}packages/avro`} class="text-ink hover:text-primary transition-colors no-underline">Avro</a></li>
+            <li><a href={`${base}packages/parquet`} class="text-ink hover:text-primary transition-colors no-underline">Parquet</a></li>
+            <li><a href={`${base}packages/kafka`} class="text-ink hover:text-primary transition-colors no-underline">Kafka</a></li>
+          </ul>
+        </div>
+
+        <!-- Project -->
+        <div>
+          <div class="text-xs font-mono uppercase tracking-wider text-muted mb-3">Project</div>
+          <ul class="space-y-2 text-sm">
+            <li><a href="https://github.com/iand675/wireform-" class="text-ink hover:text-primary transition-colors no-underline">GitHub</a></li>
+            <li><a href="https://github.com/iand675/wireform-/blob/main/CHANGELOG.md" class="text-ink hover:text-primary transition-colors no-underline">Changelog</a></li>
+            <li><a href="https://github.com/iand675/wireform-/issues" class="text-ink hover:text-primary transition-colors no-underline">Issues</a></li>
+            <li><a href={`https://github.com/iand675/wireform-/blob/main/README.md`} class="text-ink hover:text-primary transition-colors no-underline">README</a></li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Colophon strip -->
+      <div class="mt-12 pt-6 border-t border-line flex flex-wrap gap-3 justify-between items-center">
+        <span class="font-mono text-xs tracking-wider text-muted">
+          © {new Date().getFullYear()} wireform · open source · Haskell
+        </span>
+
+      </div>
     </div>
   </footer>
 </Landing>

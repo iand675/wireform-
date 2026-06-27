@@ -1,616 +1,737 @@
 /*
- * Wireform Design System — Deep Teal theme for Starlight.
+ * Wireform Design System v2 — Indigo / Sky on cool neutrals.
  *
- * Tokens from the brand system:
- *   Primary: #0a4a6e (deep teal)
- *   Accent:  #c5512d (rust)
- *   Third:   #d4a017 (ochre)
- *   Paper:   #efece4
- *   Ink:     #1a1d24
+ *   Primary: #4f46e5 (indigo-600)      — links, accents, active states
+ *   Sky:     #0ea5e9 (sky-500)         — gradient pair, highlights
+ *   Ink:     #0e1320                   — primary text (light)
+ *   Surface: #ffffff / #f6f7fb         — cards, sidebar
  *
- * Typography: Space Grotesk (display + body) / JetBrains Mono (code + labels)
- * Geometry:   Sharp corners, single-pixel borders, 8px grid
+ * Typography: Sora (display) / Inter (body) / JetBrains Mono (code + labels)
+ * Geometry:   6px control radius, 10px card radius, single-pixel hairlines
  */
 
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+@import url("https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap");
 
 :root {
-  --sl-font: 'Space Grotesk', system-ui, sans-serif;
-  --sl-font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+	--sl-font: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+	--sl-font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+	--wf-font-display: "Sora", "Inter", system-ui, sans-serif;
 
-  --wf-radius: 0px;
-  --wf-radius-card: 4px;
-  --wf-transition: 150ms ease;
+	--wf-radius: 6px;
+	--wf-radius-card: 10px;
+	--wf-transition: 140ms ease;
 }
 
 /* ------------------------------------------------------------------ */
-/* Light theme (primary — the paper aesthetic)                        */
+/* Light theme (primary)                                              */
 /* ------------------------------------------------------------------ */
-:root[data-theme='light'] {
-  --sl-color-bg: #efece4;
-  --sl-color-bg-nav: rgba(239, 236, 228, 0.88);
-  --sl-color-bg-sidebar: #efece4;
-  --sl-color-bg-inline-code: #f6f4ee;
-  --sl-color-hairline: rgba(0, 0, 0, 0.12);
-  --sl-color-hairline-light: rgba(0, 0, 0, 0.08);
-  --sl-color-hairline-shade: rgba(0, 0, 0, 0.06);
-  --sl-color-text: #1a1d24;
-  --sl-color-text-accent: #0a4a6e;
-  --sl-color-accent: #0a4a6e;
-  --sl-color-accent-high: #073952;
-  --sl-color-accent-low: #e8f0f5;
-  --wf-surface: #f6f4ee;
-  --wf-surface-2: #ffffff;
-  --wf-muted: #6a6660;
-  --wf-primary: #0a4a6e;
-  --wf-accent: #c5512d;
-  --wf-third: #d4a017;
-  --wf-glow: rgba(10, 74, 110, 0.06);
-  --wf-card-hover-border: rgba(10, 74, 110, 0.3);
+:root,
+:root[data-theme="light"] {
+	--sl-color-bg: #ffffff;
+	--sl-color-bg-nav: rgba(255, 255, 255, 0.82);
+	--sl-color-bg-sidebar: #fbfbfd;
+	--sl-color-bg-inline-code: #f1f2f7;
+	--sl-color-hairline: rgba(15, 23, 42, 0.1);
+	--sl-color-hairline-light: rgba(15, 23, 42, 0.06);
+	--sl-color-hairline-shade: rgba(15, 23, 42, 0.04);
+	--sl-color-text: #0e1320;
+	--sl-color-text-accent: #4f46e5;
+	--sl-color-accent: #4f46e5;
+	--sl-color-accent-high: #3730a3;
+	--sl-color-accent-low: #eef0fc;
+
+	--wf-surface: #f6f7fb;
+	--wf-surface-2: #ffffff;
+	--wf-muted: #5b6573;
+	--wf-primary: #4f46e5;
+	--wf-primary-dark: #3730a3;
+	--wf-sky: #0ea5e9;
+	--wf-glow: rgba(79, 70, 229, 0.06);
+	--wf-card-hover-border: rgba(79, 70, 229, 0.35);
+	--wf-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04);
+	--wf-shadow-md: 0 4px 16px rgba(15, 23, 42, 0.06);
 }
 
 /* ------------------------------------------------------------------ */
 /* Dark theme                                                         */
 /* ------------------------------------------------------------------ */
-:root[data-theme='dark'] {
-  --sl-color-bg: #121416;
-  --sl-color-bg-nav: rgba(18, 20, 22, 0.88);
-  --sl-color-bg-sidebar: #121416;
-  --sl-color-bg-inline-code: #1a1d24;
-  --sl-color-hairline: rgba(255, 255, 255, 0.1);
-  --sl-color-hairline-light: rgba(255, 255, 255, 0.06);
-  --sl-color-hairline-shade: rgba(255, 255, 255, 0.04);
-  --sl-color-text: #e0ded8;
-  --sl-color-text-accent: #5ba8d4;
-  --sl-color-accent: #5ba8d4;
-  --sl-color-accent-high: #8cc5e5;
-  --sl-color-accent-low: #0a4a6e;
-  --wf-surface: #181b1f;
-  --wf-surface-2: #1e2228;
-  --wf-muted: #8a8680;
-  --wf-primary: #5ba8d4;
-  --wf-accent: #e07050;
-  --wf-third: #e0b840;
-  --wf-glow: rgba(91, 168, 212, 0.06);
-  --wf-card-hover-border: rgba(91, 168, 212, 0.3);
+:root[data-theme="dark"] {
+	--sl-color-bg: #0b0e14;
+	--sl-color-bg-nav: rgba(11, 14, 20, 0.82);
+	--sl-color-bg-sidebar: #0d1017;
+	--sl-color-bg-inline-code: #161a24;
+	--sl-color-hairline: rgba(255, 255, 255, 0.09);
+	--sl-color-hairline-light: rgba(255, 255, 255, 0.06);
+	--sl-color-hairline-shade: rgba(255, 255, 255, 0.04);
+	--sl-color-text: #e7e9ef;
+	--sl-color-text-accent: #a5b4fc;
+	--sl-color-accent: #a5b4fc;
+	--sl-color-accent-high: #c7d2fe;
+	--sl-color-accent-low: #1e1b4b;
+
+	--wf-surface: #13171f;
+	--wf-surface-2: #1a1f2b;
+	--wf-muted: #9aa3b2;
+	--wf-primary: #a5b4fc;
+	--wf-primary-dark: #c7d2fe;
+	--wf-sky: #38bdf8;
+	--wf-glow: rgba(165, 180, 252, 0.07);
+	--wf-card-hover-border: rgba(165, 180, 252, 0.35);
+	--wf-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+	--wf-shadow-md: 0 4px 16px rgba(0, 0, 0, 0.35);
 }
 
 html {
-  font-feature-settings: 'ss01', 'cv11';
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+	font-feature-settings: "cv11", "ss01";
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+	scroll-behavior: smooth;
 }
 
 body {
-  font-family: var(--sl-font);
-  letter-spacing: -0.005em;
+	font-family: var(--sl-font);
+	letter-spacing: -0.006em;
 }
 
 ::selection {
-  background: rgba(10, 74, 110, 0.2);
+	background: rgba(79, 70, 229, 0.22);
 }
-:root[data-theme='dark'] ::selection {
-  background: rgba(91, 168, 212, 0.25);
+:root[data-theme="dark"] ::selection {
+	background: rgba(165, 180, 252, 0.28);
 }
 
 /* ------------------------------------------------------------------ */
 /* Header                                                             */
 /* ------------------------------------------------------------------ */
 header.header {
-  border-bottom-color: var(--sl-color-hairline);
-  backdrop-filter: saturate(140%) blur(12px);
-  background-color: var(--sl-color-bg-nav);
+	border-bottom-color: var(--sl-color-hairline);
+	backdrop-filter: saturate(160%) blur(14px);
+	background-color: var(--sl-color-bg-nav);
 }
 
 .site-title {
-  font-weight: 700 !important;
-  letter-spacing: -0.03em !important;
+	font-family: var(--wf-font-display) !important;
+	font-weight: 700 !important;
+	letter-spacing: -0.02em !important;
 }
 
 /* ------------------------------------------------------------------ */
-/* Sidebar                                                            */
+/* Sidebar  (the bit that needed the most love)                       */
 /* ------------------------------------------------------------------ */
-starlight-sidebar-state-persist,
 .sidebar-pane {
-  border-right: 1px solid var(--sl-color-hairline);
+	border-right: 1px solid var(--sl-color-hairline);
+	background: var(--sl-color-bg-sidebar);
 }
 
-.sidebar-content ul ul {
-  border-left: 1px solid var(--sl-color-hairline);
-  margin-left: 0.5rem;
-  padding-left: 0.5rem;
+.sidebar-content {
+	padding-block: 1.25rem 2rem;
 }
 
+/* Top-level groups ("Overview", "Packages", "Kafka Streams", …) */
+.sidebar-content > nav > ul > li > summary,
+.sidebar-content > ul > li > summary {
+	font-family: var(--wf-font-display);
+	font-size: 0.72rem;
+	font-weight: 700;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--sl-color-text);
+	padding: 0.85rem 0.5rem 0.4rem;
+	margin-top: 0.35rem;
+}
+
+.sidebar-content > nav > ul > li:first-child > summary,
+.sidebar-content > ul > li:first-child > summary {
+	margin-top: 0;
+}
+
+/* Sub-group headers ("Infrastructure", "HTTP", …) */
+.sidebar-content summary {
+	font-family: var(--sl-font);
+	font-size: 0.78rem;
+	font-weight: 600;
+	letter-spacing: 0;
+	text-transform: none;
+	color: var(--wf-muted);
+	padding: 0.45rem 0.5rem;
+	border-radius: var(--wf-radius);
+	transition:
+		background-color var(--wf-transition),
+		color var(--wf-transition);
+}
+.sidebar-content summary:hover {
+	background: var(--wf-surface);
+	color: var(--sl-color-text);
+}
+
+/* Indentation is Starlight's job: its sublist links carry
+   padding-inline: calc(1rem * var(--depth) + .5rem), which steps in once per
+   nested level. We don't add any margin/padding of our own here. The only
+   thing we override is to strip the leftover vertical guide lines that some
+   sidebar variants draw with border-inline-start on the nested <li>. */
+.sidebar-content ul ul li {
+	border-inline-start: 0;
+}
+
+/* Leaf links. We set only the block (vertical) padding for our rhythm and
+   leave the inline (horizontal) padding to Starlight, so its depth-based
+   indentation keeps working — don't use the `padding` shorthand here, it
+   would clobber Starlight's padding-inline and flatten the indentation. */
 .sidebar-content a {
-  border-radius: var(--wf-radius);
-  font-size: 0.84rem;
-  padding: 0.3rem 0.55rem;
-  transition: background-color var(--wf-transition), color var(--wf-transition);
+	display: block;
+	border-radius: var(--wf-radius);
+	font-size: 0.85rem;
+	line-height: 1.4;
+	padding-block: 0.4rem;
+	margin: 1px 0;
+	color: var(--sl-color-text);
+	opacity: 0.82;
+	transition:
+		background-color var(--wf-transition),
+		color var(--wf-transition),
+		opacity var(--wf-transition);
 }
 
 .sidebar-content a:hover {
-  background-color: var(--wf-surface);
+	background: var(--wf-surface);
+	opacity: 1;
 }
 
-.sidebar-content a[aria-current='page'] {
-  background-color: color-mix(in srgb, var(--sl-color-accent) 12%, transparent);
-  color: var(--sl-color-text-accent);
-  font-weight: 600;
+/* Active page: block highlight only (no left accent bar — the tinted block
+   is the cue, and the bar read as a doubled line next to it). */
+.sidebar-content a[aria-current="page"] {
+	position: relative;
+	background: var(--sl-color-accent-low);
+	color: var(--sl-color-text-accent);
+	font-weight: 600;
+	opacity: 1;
 }
 
-.sidebar-content summary {
-  font-family: var(--sl-font-mono);
-  font-size: 0.68rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--wf-muted);
+/* Keep collapsed-group disclosure arrows aligned */
+.sidebar-content summary svg,
+.sidebar-content summary .collapse-toggle {
+	opacity: 0.6;
 }
 
 /* ------------------------------------------------------------------ */
 /* Content                                                            */
 /* ------------------------------------------------------------------ */
 .content-panel {
-  padding-block: 2rem;
+	padding-block: 2.25rem;
 }
 
 .sl-markdown-content {
-  --sl-text-h1: 1.9rem;
-  --sl-text-h2: 1.38rem;
-  --sl-text-h3: 1.1rem;
-  font-size: 0.95rem;
-  line-height: 1.72;
+	--sl-text-h1: 2rem;
+	--sl-text-h2: 1.45rem;
+	--sl-text-h3: 1.12rem;
+	font-size: 0.96rem;
+	line-height: 1.72;
 }
 
-.sl-markdown-content :is(h1, h2, h3, h4) {
-  letter-spacing: -0.025em;
-  font-weight: 600;
+.sl-markdown-content h1 {
+	font-family: var(--wf-font-display);
+	letter-spacing: -0.025em;
+	font-weight: 700;
+}
+.sl-markdown-content :is(h2, h3, h4) {
+	font-family: var(--wf-font-display);
+	letter-spacing: -0.02em;
+	font-weight: 600;
 }
 
 .sl-markdown-content :is(h2, h3) {
-  scroll-margin-top: 6rem;
+	scroll-margin-top: 6rem;
 }
 
+/* Headers: no underline rule between sections (it read as an awkward divider),
+   and a bit more breathing room beneath each heading so the following text
+   isn't cramped against it. */
 .sl-markdown-content h2 {
-  margin-top: 2.5rem;
-  padding-bottom: 0.4rem;
-  border-bottom: 1px solid var(--sl-color-hairline);
+	margin-top: 2.75rem;
+	margin-bottom: 1.15rem;
+}
+.sl-markdown-content h3 {
+	margin-top: 2rem;
+	margin-bottom: 0.7rem;
+}
+.sl-markdown-content h4 {
+	margin-top: 1.6rem;
+	margin-bottom: 0.55rem;
 }
 
-.sl-markdown-content :not(a) > code {
-  background: var(--sl-color-bg-inline-code);
-  border: 1px solid var(--sl-color-hairline);
-  border-radius: var(--wf-radius);
-  padding: 0.1rem 0.35rem;
-  font-size: 0.84em;
+/* INLINE code only. The `:not(:where(.not-content *))` guard is essential:
+   without it this rule also matches the block <code> inside Expressive Code
+   (whose <pre> is `:not(a)`), adding inline padding + a border to it. That
+   stray ~14px was what forced a horizontal scrollbar on every code block.
+   EC frames carry `.not-content`, so this excludes them. */
+.sl-markdown-content :not(a) > code:not(:where(.not-content *)) {
+	background: var(--sl-color-bg-inline-code);
+	border: 1px solid var(--sl-color-hairline-light);
+	border-radius: 4px;
+	padding: 0.1rem 0.36rem;
+	font-size: 0.84em;
+	color: var(--sl-color-text);
 }
 
 .sl-markdown-content blockquote {
-  border-left: 2px solid var(--wf-primary);
-  background: color-mix(in srgb, var(--wf-primary) 5%, transparent);
-  border-radius: 0;
-  padding: 0.75rem 1rem;
+	border-left: 3px solid var(--wf-primary);
+	background: var(--sl-color-accent-low);
+	border-radius: 0 var(--wf-radius) var(--wf-radius) 0;
+	padding: 0.8rem 1.05rem;
 }
 
 /* Tables */
 .sl-markdown-content table {
-  font-size: 0.88rem;
-  border-collapse: separate;
-  border-spacing: 0;
-  border: 1px solid var(--sl-color-hairline);
-  border-radius: var(--wf-radius);
-  overflow: hidden;
-  width: 100%;
+	font-size: 0.88rem;
+	line-height: 1.5;
+	border-collapse: separate;
+	border-spacing: 0;
+	border: 1px solid var(--sl-color-hairline);
+	border-radius: var(--wf-radius-card);
+	overflow: hidden;
+	width: 100%;
+	box-shadow: var(--wf-shadow-sm);
+}
+
+/* Starlight forces `display: block; overflow: auto` on tables (so very wide
+   tables scroll). That defeats `width: 100%` column filling — the table box
+   shrinks to its content and leaves empty space on the right. Our docs tables
+   are prose (text wraps), so restore real table layout to fill the width.
+   Same selector/specificity as Starlight's rule; this loads later so it wins. */
+.sl-markdown-content table:not(:where(.not-content *)) {
+	display: table;
+	width: 100%;
+	table-layout: auto;
 }
 
 .sl-markdown-content th {
-  background: var(--wf-surface);
-  font-family: var(--sl-font-mono);
-  font-weight: 600;
-  font-size: 0.68rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--wf-muted);
+	background: var(--wf-surface);
+	font-family: var(--sl-font-mono);
+	font-weight: 600;
+	font-size: 0.68rem;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--wf-muted);
 }
 
 .sl-markdown-content td {
-  border-top: 1px solid var(--sl-color-hairline);
+	border-top: 1px solid var(--sl-color-hairline-light);
 }
 
 .sl-markdown-content :is(th, td) {
-  padding: 0.55rem 0.75rem;
-  text-align: left;
+	padding: 0.6rem 0.85rem;
+	text-align: left;
+	/* Starlight gives every cell a border-bottom; we separate rows with the
+	   td border-top below instead. Drop Starlight's so rows don't get a
+	   doubled line, and the last row doesn't show a stray divider inside the
+	   table's own bottom border. */
+	border-bottom: 0;
+}
+
+/* Starlight zeroes the inline-start padding of the first cell (its default
+   table is borderless / flush-left). We draw a bordered card around the
+   table, so restore the padding — otherwise the first column is jammed
+   against the border and looks squished. */
+.sl-markdown-content table :is(th, td):first-child {
+	padding-inline-start: 0.85rem;
 }
 
 .sl-markdown-content tr:hover td {
-  background: var(--wf-glow);
+	background: var(--wf-glow);
 }
 
 /* Links */
 .sl-markdown-content a:not(.card a) {
-  color: var(--wf-primary);
-  text-decoration-color: color-mix(in srgb, var(--wf-primary) 35%, transparent);
-  text-underline-offset: 0.15em;
-  transition: text-decoration-color var(--wf-transition);
+	color: var(--wf-primary);
+	text-decoration-color: color-mix(in srgb, var(--wf-primary) 38%, transparent);
+	text-underline-offset: 0.16em;
+	transition: text-decoration-color var(--wf-transition);
 }
 .sl-markdown-content a:not(.card a):hover {
-  text-decoration-color: var(--wf-primary);
+	text-decoration-color: var(--wf-primary);
 }
 
 /* ------------------------------------------------------------------ */
 /* Cards                                                              */
 /* ------------------------------------------------------------------ */
 .card-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 17rem), 1fr));
-  gap: 0.75rem;
-  margin-block: 1.25rem;
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(min(100%, 17rem), 1fr));
+	gap: 0.85rem;
+	margin-block: 1.25rem;
 }
 
 .card {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  padding: 1.1rem 1.15rem;
-  background: var(--wf-surface);
-  border: 1px solid var(--sl-color-hairline);
-  border-radius: var(--wf-radius-card);
-  transition: border-color var(--wf-transition), background-color var(--wf-transition);
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+	padding: 1.15rem 1.2rem;
+	background: var(--wf-surface-2);
+	border: 1px solid var(--sl-color-hairline);
+	border-radius: var(--wf-radius-card);
+	box-shadow: var(--wf-shadow-sm);
+	transition:
+		border-color var(--wf-transition),
+		background-color var(--wf-transition),
+		transform var(--wf-transition),
+		box-shadow var(--wf-transition);
 }
 
 .card:hover {
-  border-color: var(--wf-card-hover-border);
-  background: var(--wf-surface-2);
+	border-color: var(--wf-card-hover-border);
+	transform: translateY(-2px);
+	box-shadow: var(--wf-shadow-md);
 }
 
 .card a {
-  text-decoration: none;
+	text-decoration: none;
 }
 
 .card .title {
-  font-weight: 600;
-  font-size: 0.93rem;
-  letter-spacing: -0.01em;
+	font-family: var(--wf-font-display);
+	font-weight: 600;
+	font-size: 0.95rem;
+	letter-spacing: -0.01em;
 }
 
 .card .desc {
-  color: var(--wf-muted);
-  font-size: 0.84rem;
-  line-height: 1.55;
-}
-
-/* ------------------------------------------------------------------ */
-/* Starlight overrides                                                */
-/* ------------------------------------------------------------------ */
-[data-page-title],
-.page-title {
-  letter-spacing: -0.03em;
+	color: var(--wf-muted);
+	font-size: 0.85rem;
+	line-height: 1.55;
 }
 
 /* ------------------------------------------------------------------ */
 /* Haddock-style API page                                             */
 /* ------------------------------------------------------------------ */
 .haddock-module {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
+	display: flex;
+	flex-direction: column;
+	gap: 0.75rem;
 }
 
 .haddock-module .module-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem 1.25rem;
-  font-family: var(--sl-font-mono);
-  font-size: 0.78rem;
-  color: var(--wf-muted);
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem 1.25rem;
+	font-family: var(--sl-font-mono);
+	font-size: 0.78rem;
+	color: var(--wf-muted);
 }
 
 .haddock-module .module-meta strong {
-  color: var(--wf-primary);
-  font-weight: 500;
-  margin-right: 0.4em;
+	color: var(--wf-primary);
+	font-weight: 500;
+	margin-right: 0.4em;
 }
 
 .decl {
-  margin-block: 1.25rem;
-  padding: 0.9rem 1rem;
-  background: var(--wf-surface);
-  border: 1px solid var(--sl-color-hairline);
-  border-radius: var(--wf-radius);
-  transition: border-color var(--wf-transition);
+	margin-block: 1.25rem;
+	padding: 0.95rem 1.05rem;
+	background: var(--wf-surface-2);
+	border: 1px solid var(--sl-color-hairline);
+	border-radius: var(--wf-radius-card);
+	box-shadow: var(--wf-shadow-sm);
+	transition:
+		border-color var(--wf-transition),
+		box-shadow var(--wf-transition);
 }
 
 .decl:hover {
-  border-color: var(--wf-card-hover-border);
+	border-color: var(--wf-card-hover-border);
+	box-shadow: var(--wf-shadow-md);
 }
 
 .decl > .decl-header {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.5rem 0.75rem;
-  font-family: var(--sl-font-mono);
-  font-size: 0.92rem;
-  line-height: 1.55;
-  margin: 0;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 0.5rem 0.75rem;
+	font-family: var(--sl-font-mono);
+	font-size: 0.92rem;
+	line-height: 1.55;
+	margin: 0;
 }
 
 .decl > .decl-header .keyword {
-  color: var(--wf-primary);
-  font-weight: 500;
+	color: var(--wf-primary);
+	font-weight: 500;
 }
 
 .decl > .decl-header .name {
-  font-weight: 600;
+	font-weight: 600;
 }
 
 .decl > .decl-header a.source {
-  margin-left: auto;
-  font-size: 0.68rem;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--wf-muted);
-  text-decoration: none;
-  border: 1px solid var(--sl-color-hairline);
-  padding: 0.15rem 0.5rem;
-  border-radius: var(--wf-radius);
-  transition: all var(--wf-transition);
+	margin-left: auto;
+	font-size: 0.68rem;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--wf-muted);
+	text-decoration: none;
+	border: 1px solid var(--sl-color-hairline);
+	padding: 0.15rem 0.5rem;
+	border-radius: var(--wf-radius);
+	transition: all var(--wf-transition);
 }
 
 .decl > .decl-header a.source:hover {
-  color: var(--wf-primary);
-  border-color: var(--wf-primary);
+	color: var(--wf-primary);
+	border-color: var(--wf-primary);
 }
 
 .decl .decl-body {
-  margin-top: 0.6rem;
-  padding-top: 0.6rem;
-  border-top: 1px solid var(--sl-color-hairline);
-  font-size: 0.9rem;
+	margin-top: 0.65rem;
+	padding-top: 0.65rem;
+	border-top: 1px solid var(--sl-color-hairline-light);
+	font-size: 0.9rem;
 }
 
 .decl .constructors,
 .decl .fields,
 .decl .methods {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  margin-top: 0.6rem;
-  padding: 0.6rem 0.8rem;
-  background: var(--sl-color-bg);
-  border: 1px solid var(--sl-color-hairline);
-  border-radius: var(--wf-radius);
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+	margin-top: 0.6rem;
+	padding: 0.65rem 0.85rem;
+	background: var(--sl-color-bg);
+	border: 1px solid var(--sl-color-hairline-light);
+	border-radius: var(--wf-radius);
 }
 
 .decl .constructors h4,
 .decl .fields h4,
 .decl .methods h4 {
-  margin: 0;
-  font-size: 0.68rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--wf-muted);
+	margin: 0;
+	font-size: 0.68rem;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--wf-muted);
 }
 
 .decl .constructor,
 .decl .field,
 .decl .method {
-  font-family: var(--sl-font-mono);
-  font-size: 0.85rem;
+	font-family: var(--sl-font-mono);
+	font-size: 0.85rem;
 }
 
 .decl .field .name,
 .decl .method .name,
 .decl .constructor .name {
-  font-weight: 600;
+	font-weight: 600;
 }
 
 .decl .doc {
-  color: var(--sl-color-text);
-  opacity: 0.85;
-  font-size: 0.88rem;
-  line-height: 1.6;
+	color: var(--sl-color-text);
+	opacity: 0.85;
+	font-size: 0.88rem;
+	line-height: 1.6;
 }
 
 .decl .doc :is(p, ul, ol):first-child {
-  margin-top: 0;
+	margin-top: 0;
 }
 
 /* Synopsis */
 .synopsis {
-  margin-block: 1rem 1.5rem;
-  padding: 0.85rem 1rem;
-  background: var(--wf-surface);
-  border: 1px solid var(--sl-color-hairline);
-  border-radius: var(--wf-radius);
-  font-family: var(--sl-font-mono);
-  font-size: 0.83rem;
-  line-height: 1.7;
+	margin-block: 1rem 1.5rem;
+	padding: 0.9rem 1.05rem;
+	background: var(--wf-surface-2);
+	border: 1px solid var(--sl-color-hairline);
+	border-radius: var(--wf-radius-card);
+	box-shadow: var(--wf-shadow-sm);
+	font-family: var(--sl-font-mono);
+	font-size: 0.83rem;
+	line-height: 1.7;
 }
 
 .synopsis h2 {
-  margin: 0 0 0.5rem;
-  font-size: 0.68rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--wf-muted);
+	margin: 0 0 0.5rem;
+	font-family: var(--wf-font-display);
+	font-size: 0.68rem;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--wf-muted);
 }
 
 .synopsis ul {
-  margin: 0;
-  padding-left: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
+	margin: 0;
+	padding-left: 0;
+	list-style: none;
+	display: flex;
+	flex-direction: column;
+	gap: 0.25rem;
 }
 
 .synopsis a {
-  color: var(--sl-color-text);
-  text-decoration: none;
-  border-bottom: 1px dashed transparent;
-  transition: all var(--wf-transition);
+	color: var(--sl-color-text);
+	text-decoration: none;
+	border-bottom: 1px dashed transparent;
+	transition: all var(--wf-transition);
 }
 
 .synopsis a:hover {
-  color: var(--wf-primary);
-  border-bottom-color: currentColor;
+	color: var(--wf-primary);
+	border-bottom-color: currentColor;
 }
 
 /* Module index */
 .module-index {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 22rem), 1fr));
-  gap: 0.75rem;
-  margin-block: 1rem;
-  padding: 0;
-  list-style: none;
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(min(100%, 22rem), 1fr));
+	gap: 0.75rem;
+	margin-block: 1rem;
+	padding: 0;
+	list-style: none;
 }
 
 .module-index li {
-  border: 1px solid var(--sl-color-hairline);
-  border-radius: var(--wf-radius);
-  padding: 0.7rem 0.9rem;
-  background: var(--wf-surface);
-  transition: border-color var(--wf-transition);
+	border: 1px solid var(--sl-color-hairline);
+	border-radius: var(--wf-radius);
+	padding: 0.7rem 0.9rem;
+	background: var(--wf-surface-2);
+	box-shadow: var(--wf-shadow-sm);
+	transition: border-color var(--wf-transition);
 }
 
 .module-index li:hover {
-  border-color: var(--wf-card-hover-border);
+	border-color: var(--wf-card-hover-border);
 }
 
 .module-index a {
-  font-family: var(--sl-font-mono);
-  font-size: 0.85rem;
-  color: var(--sl-color-text);
-  text-decoration: none;
+	font-family: var(--sl-font-mono);
+	font-size: 0.85rem;
+	color: var(--sl-color-text);
+	text-decoration: none;
 }
 
 .module-index .desc {
-  font-size: 0.78rem;
-  color: var(--wf-muted);
-  margin-top: 0.25rem;
+	font-size: 0.78rem;
+	color: var(--wf-muted);
+	margin-top: 0.25rem;
 }
 
 /* ------------------------------------------------------------------ */
-/* Feature sections (landing page)                                    */
+/* Feature sections (landing-ish markdown)                            */
 /* ------------------------------------------------------------------ */
 .sl-markdown-content .wf-section {
-  padding: 2.5rem 0 2rem;
-  border-bottom: 1px solid var(--sl-color-hairline);
+	padding: 2.75rem 0 2.25rem;
+	border-bottom: 1px solid var(--sl-color-hairline);
 }
 
 .sl-markdown-content .wf-section:last-of-type {
-  border-bottom: none;
-  padding-bottom: 1rem;
+	border-bottom: none;
+	padding-bottom: 1rem;
 }
 
 .sl-markdown-content .wf-section h2 {
-  font-size: 1.45rem;
-  margin-top: 0;
-  padding-bottom: 0;
-  border-bottom: none;
+	font-family: var(--wf-font-display);
+	font-size: 1.5rem;
+	margin-top: 0;
+	padding-bottom: 0;
+	border-bottom: none;
 }
 
 .sl-markdown-content .wf-section > p {
-  max-width: 52ch;
+	max-width: 52ch;
 }
 
 /* Closing CTA */
 .sl-markdown-content .wf-cta {
-  padding: 2.5rem 0 0.5rem;
-  border-top: 1px solid var(--sl-color-hairline);
+	padding: 2.75rem 0 0.5rem;
+	border-top: 1px solid var(--sl-color-hairline);
 }
 
 .sl-markdown-content .wf-cta > p {
-  max-width: 48ch;
-  color: var(--wf-muted);
-  margin-bottom: 0.25rem;
+	max-width: 48ch;
+	color: var(--wf-muted);
+	margin-bottom: 0.25rem;
 }
 
 .sl-markdown-content .wf-cta > p:last-of-type {
-  color: var(--sl-color-text);
+	color: var(--sl-color-text);
 }
 
 .sl-markdown-content .wf-cta > p:last-of-type a {
-  font-weight: 600;
+	font-weight: 600;
 }
 
 /* ------------------------------------------------------------------ */
 /* Starlight component overrides                                      */
 /* ------------------------------------------------------------------ */
-
 .starlight-aside {
-  border-radius: var(--wf-radius) !important;
-  border-width: 1px !important;
-  border-left-width: 3px !important;
+	border-radius: var(--wf-radius) !important;
+	border-width: 1px !important;
+	border-left-width: 3px !important;
 }
 
 .pagination-links a {
-  border-radius: var(--wf-radius-card) !important;
-  transition: all var(--wf-transition) !important;
+	border-radius: var(--wf-radius-card) !important;
+	box-shadow: var(--wf-shadow-sm);
+	transition: all var(--wf-transition) !important;
 }
 
 .pagination-links a:hover {
-  border-color: var(--wf-card-hover-border) !important;
+	border-color: var(--wf-card-hover-border) !important;
+	transform: translateY(-1px);
 }
 
 [data-has-hero] .pagination-links {
-  display: none !important;
+	display: none !important;
 }
 
 starlight-toc a {
-  font-size: 0.82rem;
-  transition: color var(--wf-transition);
+	font-size: 0.82rem;
+	transition: color var(--wf-transition);
 }
 
 site-search button {
-  border-radius: var(--wf-radius-card) !important;
+	border-radius: var(--wf-radius-card) !important;
 }
 
 /* ------------------------------------------------------------------ */
 /* Code blocks                                                        */
 /* ------------------------------------------------------------------ */
+/* Let Expressive Code draw its own frame; we just feed it our design tokens
+   through its sanctioned CSS variables instead of overriding .frame/pre with
+   !important (which produced double borders and box-model fights). */
 .expressive-code {
-  margin-block: 1.25rem;
-}
-
-.expressive-code .frame {
-  border: 1px solid var(--sl-color-hairline) !important;
-  border-radius: var(--wf-radius-card) !important;
+	margin-block: 1.25rem;
+	--ec-brdCol: var(--sl-color-hairline);
+	--ec-brdRad: var(--wf-radius-card);
+	--ec-frm-frameBoxShdCssVal: var(--wf-shadow-sm);
 }
 
 /* ------------------------------------------------------------------ */
 /* Badges                                                             */
 /* ------------------------------------------------------------------ */
 .sl-badge {
-  border-radius: var(--wf-radius);
-  font-family: var(--sl-font-mono);
-  font-size: 0.68rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+	border-radius: var(--wf-radius);
+	font-family: var(--sl-font-mono);
+	font-size: 0.68rem;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
 }
 
 /* ------------------------------------------------------------------ */
-/* Smooth scroll & motion                                             */
+/* Motion + focus                                                     */
 /* ------------------------------------------------------------------ */
-html {
-  scroll-behavior: smooth;
-}
-
 @media (prefers-reduced-motion: reduce) {
-  html { scroll-behavior: auto; }
-  *, *::before, *::after {
-    animation-duration: 0.01ms !important;
-    transition-duration: 0.01ms !important;
-  }
+	html {
+		scroll-behavior: auto;
+	}
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		transition-duration: 0.01ms !important;
+	}
 }
 
-/* ------------------------------------------------------------------ */
-/* Focus                                                              */
-/* ------------------------------------------------------------------ */
 :focus-visible {
-  outline: 2px solid var(--wf-primary);
-  outline-offset: 2px;
+	outline: 2px solid var(--wf-primary);
+	outline-offset: 2px;
+	border-radius: 3px;
 }

@@ -13,6 +13,7 @@ sidebar:
 **New to Kafka Streams?** [Quickstart](./get-started/quickstart/) → [What is Kafka Streams?](./get-started/what-is-kafka-streams/) → [Your first topology](./get-started/your-first-topology/)
 
 **Have a specific problem?**
+
 - Calling external APIs from my topology → [Enrichment guide](./guides/enrichment/)
 - Deploying to production → [Going to production](./get-started/going-to-production/)
 - Exactly-once to Postgres/S3/etc → [Exactly-once guide](./operating/exactly-once/)
@@ -64,7 +65,7 @@ See [Extended features](./riffle/) for details.
 - [Glossary](./glossary/): Definitions for all terminology
 - [Dynamic topology changes](./concepts/dynamic-topology/): What you can change at runtime versus what requires a restart
 
-## Three key facts
+## How it fits together
 
 - A **topology** is a typed Haskell value (`Topology input output`) composed with `Control.Category.(>>>)`. Like a function `input -> output`, it transforms streams. Common pattern: `Topology Void ()` for topologies that read from and write to Kafka topics.
 - The runtime is a **library**, not a cluster. Your service contains the topology; scaling means running more processes in the same consumer group.

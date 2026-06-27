@@ -6,20 +6,13 @@ sidebar:
   label: 4. Joins and tables
 ---
 
-So far each tutorial has had one input stream. Real streaming
-pipelines combine multiple. You'll often hear "I have an event,
-and I need to enrich it with metadata that lives somewhere else."
+Each tutorial so far has had one input stream. Real streaming pipelines combine multiple. A common pattern: an event arrives, and you need to enrich it with metadata that lives somewhere else.
 
-That's a **join**. In this part you'll join a stream of page
-views against a table of user profiles, so each enriched view
-carries the user's region alongside the page they hit.
+That's a **join**. In this part you join a stream of page views against a table of user profiles, so each enriched view carries the user's region alongside the page they hit.
 
 ## What you'll learn
 
-- The five join shapes Kafka Streams gives you.
-- When to use each.
-- The one rule both sides must obey (co-partitioning).
-- How to handle "user appears before profile" race conditions.
+The five join shapes Kafka Streams gives you, when to use each, the one rule both sides must obey (co-partitioning), and how to handle "user appears before profile" race conditions.
 
 ## Build it
 
@@ -152,33 +145,17 @@ stream-table joins. The imperative builder uses
 `joinKStreamKTable`; the Free helpers re-skin the names for the
 arrow-style composition.
 
-## The one rule you can't break: co-partitioning
+## Co-partitioning
 
-For any join other than `Global` and `ForeignKey`, **both sides
-must be co-partitioned**:
+For any join other than `Global` and `ForeignKey`, **both sides must be co-partitioned**: same partition count and same key partitioner. Each task owns one partition of each input. If `alice` on the views side lands on partition 3 but `alice` on the users side lands on partition 7, the task that holds the views will never see the user record.
 
-- Same partition count.
-- Same key partitioner.
+The library validates this at startup. A mismatch throws a topology validation error before the runtime starts; you'll see something like `CoPartitioningRequired { left = "PageViews", right = "UserProfiles" }`.
 
-The reason: each task owns one partition of each input. If `alice`
-on the views side lands on partition 3 but `alice` on the users
-side lands on partition 7, the task that holds the views will
-never see the user record.
+Three ways to satisfy it:
 
-The library validates this at startup. A mismatch throws a topology
-validation error before the runtime starts; you'll see something
-like `CoPartitioningRequired { left = "PageViews", right =
-"UserProfiles" }`.
-
-How to satisfy it:
-
-1. **Provision both topics with the same partition count up front.**
-   The simplest fix.
-2. **Repartition one side** to match the other. Use `repartition` or
-   `through` to publish to an internal topic with the right partition
-   count.
-3. **Use `globalTable`** if the right side is small. A GlobalKTable
-   replicates to every instance, so co-partitioning is irrelevant.
+1. **Provision both topics with the same partition count up front.** Simplest fix.
+2. **Repartition one side** to match the other. Use `repartition` or `through` to publish to an internal topic with the right partition count.
+3. **Use `globalTable`** if the right side is small. A GlobalKTable replicates to every instance, so co-partitioning is irrelevant.
 
 GlobalKTables are the easy way out for small reference data. If
 your `UserProfiles` table is, say, 50k rows total, just use
@@ -186,8 +163,7 @@ your `UserProfiles` table is, say, 50k rows total, just use
 
 ## Race conditions
 
-Notice the demo populates `UserProfiles` *before* sending page
-views. That's deliberate. The order matters.
+The demo populates `UserProfiles` *before* sending page views. The order matters.
 
 Three scenarios for "view for alice arrives before alice's profile":
 
@@ -197,19 +173,13 @@ Three scenarios for "view for alice arrives before alice's profile":
 | View arrives first, profile never arrives | Inner join silently drops the view |
 | View arrives first, profile arrives later | The earlier view is still dropped; subsequent views are enriched |
 
-The last one is the surprise: **a stream-table join only sees the
-table value at the time the stream record arrives**. It doesn't
-"go back" and emit the missing record when the profile shows up.
+The last one is the surprise. **A stream-table join only sees the table value at the time the stream record arrives.** It doesn't "go back" and emit the missing record when the profile shows up.
 
-Your options:
+Three options:
 
-- **Use a `leftJoin`** to emit a `Nothing` for the right side when
-  the table is empty. Downstream code decides what to do.
-- **Sequence the producers** so profiles arrive before views.
-  Works if you control both upstream.
-- **Buffer the view**, look up the profile, retry if missing. Use
-  the [Processor API](../../glossary/#processor-api) to keep a
-  small "pending views" store keyed by user.
+- **Use a `leftJoin`** to emit a `Nothing` for the right side when the table is empty. Downstream code decides what to do.
+- **Sequence the producers** so profiles arrive before views. Works if you control both upstream.
+- **Buffer the view**, look up the profile, retry if missing. Use the [Processor API](../../glossary/#processor-api) to keep a small "pending views" store keyed by user.
 
 `leftJoin` is the standard answer:
 
@@ -244,37 +214,18 @@ currentUserRegion =
 per key. The same idea works for any aggregation: `count`,
 `aggregate`, `reduce` all produce `KTable`s you can join against.
 
-## Why this matters
+## Why joins matter
 
-Joins are where streams stop being "fancy logs" and become a real
-data-processing system. With joins you can:
+Joins are where streams stop being "fancy logs" and become a real data-processing system. You can enrich events with reference data (page views + user info), correlate events across streams (orders + payments), detect patterns (fraud: failed login on stream A, success on stream B within 30 seconds), or aggregate across denormalised tables (per-order total = order × line-items via foreign-key join).
 
-- **Enrich** events with reference data (page views + user info).
-- **Correlate** events across streams (orders + payments).
-- **Detect** patterns (fraud: failed login on stream A, success on
-  stream B within 30 seconds).
-- **Aggregate** across denormalised tables (per-order total =
-  order × line-items via foreign-key join).
+The DSL operator is one line. The hard part is co-partitioning discipline and race-condition handling.
 
-The DSL operator is one line. The hard part is the
-co-partitioning discipline and the race-condition handling.
+## Recap
 
-## What you learned
-
-- Five join shapes; pick by combining left/right "is-it-a-stream"
-  and inner/left/outer.
-- Stream-table joins enrich events with current state.
-- Co-partitioning is the rule: same partition count and
-  partitioner, both sides. The library validates at startup.
-- Inner joins drop unmatched records; left joins emit `Nothing` so
-  you can decide downstream.
-- `globalTable` is the easy escape hatch for small reference data.
+Five join shapes; pick by combining left/right "is-it-a-stream" and inner/left/outer. Stream-table joins enrich events with current state. Co-partitioning is the rule: same partition count and partitioner, both sides, validated at startup. Inner joins drop unmatched records; left joins emit `Nothing` so you can decide downstream. `globalTable` is the easy escape hatch for small reference data.
 
 ## Next up
 
-You've now seen the three things Kafka Streams is good for:
-moving records, computing per-key state, and combining streams.
-The last part of the tutorial bridges to operations: what you
-need to think about to run this in production.
+You've now seen the three things Kafka Streams is good at: moving records, computing per-key state, and combining streams. The last part of the tutorial bridges to operations: what you need to think about to run this in production.
 
 [Continue to Tutorial 5: Going to production →](../going-to-production/)

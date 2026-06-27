@@ -9,18 +9,20 @@ As your data volume grows, you need more processing power. Kafka Streams gives y
 
 **Vertical scaling** (more threads) is easiest but hits CPU/memory limits. **Horizontal scaling** (more processes) works well but is capped by your topic's partition count. **Key-group scaling** (an optional extension) removes that partition limit entirely.
 
-This page explains all three approaches, when to use each, and how the rebalance protocol keeps things running smoothly as you scale.
+This page covers all three approaches, when to use each, and how the rebalance protocol keeps assignments consistent as you scale.
 
 :::tip[Unfamiliar terms?]
 Kafka, Streams, and Riffle terminology is defined in the [Glossary](../glossary/).
 :::
 
 :::note[TL;DR]
+
 - Standard parallelism is capped at `numStreamThreads × instances × partition_count`. Key-group routing (optional) decouples it from partition count entirely.
 - Three dispatch modes: `DispatchPartition` (default), `DispatchHashed`, `DispatchKeyGroup` (for scaling past partitions).
 - `numStandbyReplicas >= 1` is the difference between metadata-only failover and a full changelog replay.
 - KIP-848 incremental rebalance: tasks are never double-owned during a transfer.
 - `addStreamThread` / `removeStreamThread` reshape in-process workers without triggering a broker-side rebalance.
+
 :::
 
 ## The three axes

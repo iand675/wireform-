@@ -5,7 +5,7 @@ sidebar:
   order: 6
 ---
 
-A Kafka Streams application can fail in ways that traditional HTTP services do not. The failures are often invisible to standard metrics like request latency or error rates. This guide explains how to observe your application effectively.
+A Kafka Streams application can fail in ways that traditional HTTP services do not. The failures are often invisible to standard metrics like request latency or error rates.
 
 ## Why streaming observability is different
 
@@ -34,7 +34,7 @@ Plus **interactive queries** for debugging: looking directly at your state store
 
 ## The metrics registry
 
-**Why this matters:** Unlike HTTP services where you can see failures in request
+Unlike HTTP services where you can see failures in request
 logs, streaming applications process records continuously in the background.
 Without metrics, you have no visibility into whether records are being processed,
 dropped, or stalled. The registry is the foundation of all observability.
@@ -154,6 +154,7 @@ The detector compares your current topology against actual topics on the broker.
 ### Why this matters
 
 Orphan topics cause two problems:
+
 1. **Storage cost**: Unbounded growth of unused data
 2. **Confusion**: During incidents, operators cannot tell which topics are live
 
@@ -174,7 +175,7 @@ R.setLagListener streams $ \lags ->
     publishMetric (makeLagGauge lag)
 ```
 
-Key insight: if a standby's lag exceeds `acceptableRecoveryLag`, it will not be promoted during failover. The new active will replay from the changelog instead, which takes time.
+If a standby's lag exceeds `acceptableRecoveryLag`, it will not be promoted during failover. The new active will replay from the changelog instead, which takes time.
 
 ### Alert thresholds
 

@@ -18,7 +18,7 @@ Haskell.
 | Wire protocol | `Kafka.Protocol.*` | Varints, compact strings, tagged fields, CRC32C (hardware-accelerated), version negotiation |
 | Generated messages | `Kafka.Protocol.Generated.*` | One module per Kafka API key, emitted from upstream JSON schemas by `kafka-codegen` |
 | Networking | `Kafka.Network.*` | TCP / TLS connections, SASL handshake (PLAIN, SCRAM-SHA-256/512, OAUTHBEARER, AWS MSK IAM) |
-| Magic-ring transport | `Kafka.Network.RingTransport`, `Kafka.Network.FrameParser` | Bridges a broker `Network.Connection` onto the [`wireform-network`](../network/) magic-ring transport; streaming frame parser reads zero-copy slices off the ring (60-65 % faster end-to-end than the classic per-frame `connectionGetExact` + `runGet` shape — see the [benchmarks](../network/#kafka)) |
+| Magic-ring transport | `Kafka.Network.RingTransport`, `Kafka.Network.FrameParser` | Bridges a broker `Network.Connection` onto the [`wireform-network`](../network/) magic-ring transport; streaming frame parser reads zero-copy slices off the ring (60-65 % faster end-to-end than the classic per-frame `connectionGetExact` + `runGet` shape; see the [benchmarks](../network/#kafka)) |
 | Compression | `Kafka.Compression.*`, `Kafka.Compression.Ring` | gzip, snappy, lz4, zstd record-batch codecs; the `Ring` variant takes a raw `Ptr Word8` source (e.g. a ring slice) and writes plaintext straight into a caller-supplied destination magic ring via direct `libz` / `liblz4` / `libzstd` / `libsnappy` FFI |
 | High-level client | `Kafka.Client.*` | Producer, Consumer, AdminClient, Transaction |
 | Mock broker | `Kafka.Client.Mock.*` | Deterministic in-process broker for tests |

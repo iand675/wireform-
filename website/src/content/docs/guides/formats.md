@@ -24,10 +24,10 @@ These formats define types in a schema language and generate Haskell code.
 | Protocol Buffers | `wireform-proto` | `loadProto` TH / `wireform-gen proto` / `protoc` plugin | `Proto.GRPC` framing; full gRPC via `wireform-grpc` |
 | Avro | `wireform-avro` | `wireform-gen avro` | Avro IPC (`Avro.Protocol`), container files (`Avro.Container`) |
 | Thrift | `wireform-thrift` | `wireform-gen thrift` | Binary + Compact protocol (`Thrift.Message`) |
-| Bond | `wireform-bond` | `wireform-gen bond` | — |
-| Cap'n Proto | `wireform-capnproto` | `wireform-gen capnp` | — |
-| FlatBuffers | `wireform-flatbuffers` | `wireform-gen fbs` | — |
-| ASN.1 | `wireform-asn1` | `wireform-gen asn1` | — |
+| Bond | `wireform-bond` | `wireform-gen bond` | none |
+| Cap'n Proto | `wireform-capnproto` | `wireform-gen capnp` | none |
+| FlatBuffers | `wireform-flatbuffers` | `wireform-gen fbs` | none |
+| ASN.1 | `wireform-asn1` | `wireform-gen asn1` | none |
 
 ## Binary value formats
 
@@ -42,7 +42,7 @@ ADT for dynamic messages.
 | Ion | `wireform-ion` | `Ion.Class` | ISL schema + codegen |
 | EDN | `wireform-edn` | `EDN.Class` | Clojure/Datomic format |
 | Bencode | `wireform-bencode` | `Bencode.Class` | BitTorrent serialization |
-| Fory | `wireform-fory` | — | Apache Fory xlang format (interop-tested against pyfory) |
+| Fory | `wireform-fory` | none | Apache Fory xlang format (interop-tested against pyfory) |
 
 ## Text & markup formats
 
@@ -62,10 +62,10 @@ ADT for dynamic messages.
 | Parquet | `wireform-parquet` | Full | Full | All encodings, snappy/zstd/lz4/brotli compression, bloom filters, page index, encryption, predicate pushdown, Arrow bridge |
 | Arrow IPC | `wireform-arrow` | Full | Full | Schema framing, record batch materialization, zstd/lz4 compression |
 | ORC | `wireform-orc` | Full | Partial | Integer RLE v1/v2, snappy/zstd/lz4 compression, predicate evaluator |
-| Iceberg | `wireform-iceberg` | Full | — | Schema evolution, partition transforms, deletion vectors, Puffin statistics, catalog clients (REST, Glue, Hadoop, SQL) |
-| Delta Lake | `wireform-delta` | Partial | — | Transaction log, checkpoints, time travel |
-| Hudi | `wireform-hudi` | Partial | — | Timeline reader, copy-on-write |
-| Lance | `wireform-lance` | Partial | — | Data files, manifests, dataset versions |
+| Iceberg | `wireform-iceberg` | Full | none | Schema evolution, partition transforms, deletion vectors, Puffin statistics, catalog clients (REST, Glue, Hadoop, SQL) |
+| Delta Lake | `wireform-delta` | Partial | none | Transaction log, checkpoints, time travel |
+| Hudi | `wireform-hudi` | Partial | none | Timeline reader, copy-on-write |
+| Lance | `wireform-lance` | Partial | none | Data files, manifests, dataset versions |
 
 ## Messaging & RPC
 
@@ -81,9 +81,9 @@ don't import them directly, but they're good to know about.
 
 | Package | What it does |
 |---------|--------------|
-| `wireform-core` | FFI/SIMD primitives shared across formats — packed varint decode, UTF-8 validation, byte/whitespace/JSON scanning |
+| `wireform-core` | FFI/SIMD primitives shared across formats: packed varint decode, UTF-8 validation, byte/whitespace/JSON scanning |
 | `wireform-derive` | Annotation vocabulary for Generic deriving. One set of annotations (`rename`, `tag`, `skip`, `defaults`, `flatten`, etc.) works across all 25+ backends. |
-| `wireform-columnar` | Shared columnar primitives — pull-based iterators, predicate pushdown, mmap-aware file loading, SIMD bit-unpacking |
+| `wireform-columnar` | Shared columnar primitives: pull-based iterators, predicate pushdown, mmap-aware file loading, SIMD bit-unpacking |
 
 ## Conformance
 

@@ -1,0 +1,378 @@
+---
+/**
+ * GlassSurface.astro
+ *
+ * The GlassSurface "liquid glass" effect from react-bits
+ * (DavidHDev/react-bits, MIT), ported to a dependency-free Astro island.
+ *
+ * The technique is unchanged from upstream: an SVG `feDisplacementMap`
+ * chromatic-aberration filter is driven by a procedurally generated
+ * displacement map (an inline data-URI SVG), exposed to the element through
+ * `backdrop-filter: url(#glass-filter)`. Browsers that don't support SVG
+ * backdrop filters (Safari / Firefox) fall back to a plain blurred
+ * `backdrop-filter` — same as the React component.
+ *
+ * Differences vs the React original:
+ *  - No React: the per-instance unique ids are minted at build time, and the
+ *    displacement-map regeneration + feature detection run in a small vanilla
+ *    `<script>` driven by `data-*` attributes (same approach as
+ *    FaultyTerminalBackground.astro).
+ *  - `width` / `height` accept any CSS length (numbers become `px`), so the
+ *    surface can be a fixed pill OR a full-width `100%` bar (used by the nav).
+ *  - Children are provided via `<slot />`.
+ *
+ * The CSS, the SVG filter graph, and the displacement-map SVG are otherwise
+ * byte-for-byte the upstream component.
+ */
+export interface Props {
+  width?: number | string;
+  height?: number | string;
+  borderRadius?: number;
+  borderWidth?: number;
+  brightness?: number;
+  opacity?: number;
+  blur?: number;
+  displace?: number;
+  backgroundOpacity?: number;
+  /** Extra Gaussian blur (px) applied to the backdrop on the SVG-filter
+   *  path, so content scrolling behind the surface is frosted/readable.
+   *  Upstream has no equivalent (default 0 keeps the original look). */
+  backdropBlur?: number;
+  saturation?: number;
+  distortionScale?: number;
+  redOffset?: number;
+  greenOffset?: number;
+  blueOffset?: number;
+  xChannel?: 'R' | 'G' | 'B';
+  yChannel?: 'R' | 'G' | 'B';
+  mixBlendMode?: string;
+  class?: string;
+  style?: string;
+}
+
+const {
+  width = 200,
+  height = 80,
+  borderRadius = 20,
+  borderWidth = 0.07,
+  brightness = 50,
+  opacity = 0.93,
+  blur = 11,
+  displace = 0,
+  backgroundOpacity = 0,
+  backdropBlur = 0,
+  saturation = 1,
+  distortionScale = -180,
+  redOffset = 0,
+  greenOffset = 10,
+  blueOffset = 20,
+  xChannel = 'R',
+  yChannel = 'G',
+  mixBlendMode = 'difference',
+  class: className = '',
+  style = '',
+} = Astro.props;
+
+// Per-instance unique ids (minted at build time — replaces React's useId()).
+const uid = Math.random().toString(36).slice(2, 10);
+const filterId = `glass-filter-${uid}`;
+const redGradId = `red-grad-${uid}`;
+const blueGradId = `blue-grad-${uid}`;
+
+const cssLen = (v: number | string) => (typeof v === 'number' ? `${v}px` : v);
+
+const containerStyle = [
+  `width:${cssLen(width)}`,
+  `height:${cssLen(height)}`,
+  `border-radius:${borderRadius}px`,
+  `--glass-frost:${backgroundOpacity}`,
+  `--glass-blur:${backdropBlur}px`,
+  `--glass-saturation:${saturation}`,
+  `--filter-id:url(#${filterId})`,
+  style,
+]
+  .filter(Boolean)
+  .join(';');
+---
+
+<div
+  class:list={['glass-surface', className]}
+  style={containerStyle}
+  data-glass
+  data-filter-id={filterId}
+  data-red-grad-id={redGradId}
+  data-blue-grad-id={blueGradId}
+  data-border-radius={borderRadius}
+  data-border-width={borderWidth}
+  data-brightness={brightness}
+  data-opacity={opacity}
+  data-blur={blur}
+  data-displace={displace}
+  data-distortion-scale={distortionScale}
+  data-red-offset={redOffset}
+  data-green-offset={greenOffset}
+  data-blue-offset={blueOffset}
+  data-x-channel={xChannel}
+  data-y-channel={yChannel}
+  data-mix-blend-mode={mixBlendMode}
+>
+  <svg class="glass-surface__filter" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <filter
+        id={filterId}
+        color-interpolation-filters="sRGB"
+        x="0%"
+        y="0%"
+        width="100%"
+        height="100%"
+      >
+        <feImage data-feimage x="0" y="0" width="100%" height="100%" preserveAspectRatio="none" result="map" />
+
+        <feDisplacementMap data-channel="red" in="SourceGraphic" in2="map" result="dispRed" />
+        <feColorMatrix
+          in="dispRed"
+          type="matrix"
+          values="1 0 0 0 0
+                  0 0 0 0 0
+                  0 0 0 0 0
+                  0 0 0 1 0"
+          result="red"
+        />
+
+        <feDisplacementMap data-channel="green" in="SourceGraphic" in2="map" result="dispGreen" />
+        <feColorMatrix
+          in="dispGreen"
+          type="matrix"
+          values="0 0 0 0 0
+                  0 1 0 0 0
+                  0 0 0 0 0
+                  0 0 0 1 0"
+          result="green"
+        />
+
+        <feDisplacementMap data-channel="blue" in="SourceGraphic" in2="map" result="dispBlue" />
+        <feColorMatrix
+          in="dispBlue"
+          type="matrix"
+          values="0 0 0 0 0
+                  0 0 0 0 0
+                  0 0 1 0 0
+                  0 0 0 1 0"
+          result="blue"
+        />
+
+        <feBlend in="red" in2="green" mode="screen" result="rg" />
+        <feBlend in="rg" in2="blue" mode="screen" result="output" />
+        <feGaussianBlur data-blur-node in="output" stdDeviation="0.7" />
+      </filter>
+    </defs>
+  </svg>
+
+  <div class="glass-surface__content">
+    <slot />
+  </div>
+</div>
+
+<style>
+  .glass-surface {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    transition: opacity 0.26s ease-out;
+  }
+
+  .glass-surface__filter {
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    z-index: -1;
+  }
+
+  .glass-surface__content {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: inherit;
+    position: relative;
+    z-index: 1;
+  }
+
+  /* SVG-filter path (Chromium): the real liquid-glass refraction. */
+  .glass-surface--svg {
+    /* Tint base is theme-driven via --glass-frost-rgb (see landing.css). We
+       avoid light-dark() here: this page themes through [data-theme], not the
+       CSS color-scheme property, so light-dark() would wrongly stay on its
+       light value in dark mode (bright/unreadable frost). */
+    background: rgba(var(--glass-frost-rgb, 255 255 255) / var(--glass-frost, 0));
+    backdrop-filter: var(--filter-id, url(#glass-filter)) saturate(var(--glass-saturation, 1))
+      blur(var(--glass-blur, 0px));
+    -webkit-backdrop-filter: var(--filter-id, url(#glass-filter)) saturate(var(--glass-saturation, 1))
+      blur(var(--glass-blur, 0px));
+    box-shadow:
+      0 0 2px 1px light-dark(color-mix(in oklch, black, transparent 85%), color-mix(in oklch, white, transparent 65%))
+        inset,
+      0 0 10px 4px light-dark(color-mix(in oklch, black, transparent 90%), color-mix(in oklch, white, transparent 85%))
+        inset,
+      0px 4px 16px rgba(17, 17, 26, 0.05),
+      0px 8px 24px rgba(17, 17, 26, 0.05),
+      0px 16px 56px rgba(17, 17, 26, 0.05),
+      0px 4px 16px rgba(17, 17, 26, 0.05) inset,
+      0px 8px 24px rgba(17, 17, 26, 0.05) inset,
+      0px 16px 56px rgba(17, 17, 26, 0.05) inset;
+  }
+
+  /* Fallback path (Safari / Firefox / no SVG backdrop filter). */
+  .glass-surface--fallback {
+    background: rgba(255, 255, 255, 0.25);
+    backdrop-filter: blur(12px) saturate(1.8) brightness(1.1);
+    -webkit-backdrop-filter: blur(12px) saturate(1.8) brightness(1.1);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    box-shadow:
+      0 8px 32px 0 rgba(31, 38, 135, 0.2),
+      0 2px 16px 0 rgba(31, 38, 135, 0.1),
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.4),
+      inset 0 -1px 0 0 rgba(255, 255, 255, 0.2);
+  }
+
+  :global([data-theme='dark']) .glass-surface--fallback,
+  :global(:root:not([data-theme='light'])) .glass-surface--fallback {
+    background: rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(12px) saturate(1.8) brightness(1.2);
+    -webkit-backdrop-filter: blur(12px) saturate(1.8) brightness(1.2);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    box-shadow:
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.18),
+      inset 0 -1px 0 0 rgba(255, 255, 255, 0.08);
+  }
+
+  @supports not ((backdrop-filter: blur(10px)) or (-webkit-backdrop-filter: blur(10px))) {
+    .glass-surface--fallback {
+      background: rgba(255, 255, 255, 0.4);
+      box-shadow:
+        inset 0 1px 0 0 rgba(255, 255, 255, 0.5),
+        inset 0 -1px 0 0 rgba(255, 255, 255, 0.3);
+    }
+  }
+
+  .glass-surface:focus-visible {
+    outline: 2px solid light-dark(#007aff, #0a84ff);
+    outline-offset: 2px;
+  }
+</style>
+
+<script>
+  // --- GlassSurface (vanilla port of DavidHDev/react-bits) ----------------
+  // Mirrors the React component's displacement-map generation + feature
+  // detection. One module-level boot pass wires every [data-glass] element.
+
+  type GlassEl = HTMLElement & { _glassCleanup?: () => void };
+
+  function supportsSVGFilters(filterId: string): boolean {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return false;
+    const ua = navigator.userAgent;
+    const isWebkit = /Safari/.test(ua) && !/Chrome/.test(ua);
+    const isFirefox = /Firefox/.test(ua);
+    if (isWebkit || isFirefox) return false;
+    const div = document.createElement('div');
+    div.style.backdropFilter = `url(#${filterId})`;
+    return div.style.backdropFilter !== '';
+  }
+
+  function generateDisplacementMap(el: HTMLElement): string {
+    const d = el.dataset;
+    const rect = el.getBoundingClientRect();
+    const w = rect.width || 400;
+    const h = rect.height || 200;
+    const borderRadius = parseFloat(d.borderRadius || '20');
+    const borderWidth = parseFloat(d.borderWidth || '0.07');
+    const brightness = parseFloat(d.brightness || '50');
+    const opacity = parseFloat(d.opacity || '0.93');
+    const blur = parseFloat(d.blur || '11');
+    const mixBlendMode = d.mixBlendMode || 'difference';
+    const redGradId = d.redGradId || 'red-grad';
+    const blueGradId = d.blueGradId || 'blue-grad';
+    const edge = Math.min(w, h) * (borderWidth * 0.5);
+
+    const svg = `
+      <svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="${redGradId}" x1="100%" y1="0%" x2="0%" y2="0%">
+            <stop offset="0%" stop-color="#0000"/>
+            <stop offset="100%" stop-color="red"/>
+          </linearGradient>
+          <linearGradient id="${blueGradId}" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stop-color="#0000"/>
+            <stop offset="100%" stop-color="blue"/>
+          </linearGradient>
+        </defs>
+        <rect x="0" y="0" width="${w}" height="${h}" fill="black"></rect>
+        <rect x="0" y="0" width="${w}" height="${h}" rx="${borderRadius}" fill="url(#${redGradId})" />
+        <rect x="0" y="0" width="${w}" height="${h}" rx="${borderRadius}" fill="url(#${blueGradId})" style="mix-blend-mode: ${mixBlendMode}" />
+        <rect x="${edge}" y="${edge}" width="${w - edge * 2}" height="${h - edge * 2}" rx="${borderRadius}" fill="hsl(0 0% ${brightness}% / ${opacity})" style="filter:blur(${blur}px)" />
+      </svg>
+    `;
+    return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+  }
+
+  function initGlass(el: GlassEl) {
+    if (el._glassCleanup) return;
+    const d = el.dataset;
+    const filterId = d.filterId || 'glass-filter';
+    const svgOk = supportsSVGFilters(filterId);
+    el.classList.add(svgOk ? 'glass-surface--svg' : 'glass-surface--fallback');
+
+    // The fallback path is pure CSS — no displacement map to maintain.
+    if (!svgOk) {
+      el._glassCleanup = () => {};
+      return;
+    }
+
+    const feImage = el.querySelector<SVGFEImageElement>('[data-feimage]');
+    const displace = parseFloat(d.displace || '0');
+    const distortionScale = parseFloat(d.distortionScale || '-180');
+    const xChannel = d.xChannel || 'R';
+    const yChannel = d.yChannel || 'G';
+    const channels: Array<{ sel: string; offset: number }> = [
+      { sel: 'red', offset: parseFloat(d.redOffset || '0') },
+      { sel: 'green', offset: parseFloat(d.greenOffset || '10') },
+      { sel: 'blue', offset: parseFloat(d.blueOffset || '20') },
+    ];
+
+    const update = () => {
+      feImage?.setAttribute('href', generateDisplacementMap(el));
+      // Some engines only read the namespaced xlink:href.
+      feImage?.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', generateDisplacementMap(el));
+      channels.forEach(({ sel, offset }) => {
+        const node = el.querySelector<SVGFEDisplacementMapElement>(`[data-channel="${sel}"]`);
+        if (!node) return;
+        node.setAttribute('scale', String(distortionScale + offset));
+        node.setAttribute('xChannelSelector', xChannel);
+        node.setAttribute('yChannelSelector', yChannel);
+      });
+      el.querySelector('[data-blur-node]')?.setAttribute('stdDeviation', String(displace));
+    };
+
+    update();
+    const ro = new ResizeObserver(() => setTimeout(update, 0));
+    ro.observe(el);
+    el._glassCleanup = () => ro.disconnect();
+  }
+
+  function boot() {
+    document.querySelectorAll<GlassEl>('[data-glass]').forEach(initGlass);
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot);
+  } else {
+    boot();
+  }
+  // Re-run on Astro view transitions / client navigation.
+  document.addEventListener('astro:page-load', boot);
+</script>

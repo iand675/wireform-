@@ -6,29 +6,21 @@ sidebar:
   label: 1. What is Kafka Streams?
 ---
 
-This is part one of five. By the end, you'll have written a stateful streaming app, queried its state directly, joined two streams, and seen the production checklist.
+Part one of five. This part is conceptual; the code starts in the next one.
 
-This part is conceptual. No code yet. Just the mental model.
+## Why a streaming library
 
-## What problem does Kafka Streams solve?
+Most web services follow request/response: receive a request, do work, send a response. That model breaks down when data arrives continuously (logs, events, sensor readings, user actions) and when processing depends on past data. Streaming systems handle unending sequences of records and deal with the hard parts: failures without data loss, state that survives restarts, coordination across processing steps.
 
-Most web services follow a simple pattern: receive a request, do some work, send a response. But what if you need to process data that arrives continuously? Logs, events, sensor readings, user actions: these streams never end. And the processing itself may take time or depend on past data.
+Kafka Streams is a library, not a cluster. You compile your topology into your application binary, start it, and the framework handles partition assignment, state management, offset tracking, fault tolerance, and scaling. Your service is the runtime.
 
-Streaming systems handle this. Instead of processing one request at a time, they process an unending sequence of records. The challenge is doing this reliably: handling failures without losing data, maintaining state across restarts, and keeping different processing steps coordinated.
-
-Kafka Streams is a library that makes this manageable. It handles the hard parts (fault tolerance, state management, scaling) so you can focus on the processing logic.
-
-## Core concepts explained
+## Core concepts
 
 ### Topics: the log of events
 
-A Kafka **topic** is like a log file that many processes can write to and read from simultaneously. Each entry is a **record** with a key, value, and timestamp. Records are ordered and kept for a configurable time.
+A Kafka **topic** is an append-only log. Each entry is a **record** with a key, value, and timestamp. Records are ordered within a partition and kept for a configurable retention window.
 
-Think of it like a shared journal:
-- Anyone can append a new entry
-- Readers start from a position and read forward
-- Old entries are eventually discarded (by time or size)
-- The log is partitioned (split into independent streams) for parallelism
+The log is partitioned (split into independent streams) for parallelism. Anyone can append; readers track their own position and read forward.
 
 ### Processing pipelines (topologies)
 
@@ -50,25 +42,13 @@ flowchart LR
   Group -.->|maintains| Store[(state: attempts per user)]
 ```
 
-This example:
-1. Reads login events
-2. Filters to suspicious IPs
-3. Groups by user
-4. Counts attempts per user
-5. Outputs counts to another topic
-
-The **state store** (attempts per user) is maintained automatically. You don't write the storage code.
+This example reads login events, filters to suspicious IPs, groups by user, counts attempts per user, and outputs counts to another topic. The **state store** (attempts per user) is maintained automatically.
 
 ### Stateful vs stateless processing
 
 **Stateless** operators see each record in isolation. A `filter` or `map` doesn't need to remember anything between records.
 
-**Stateful** operators need memory. A `count` needs to remember previous counts. A windowed average needs to remember recent values.
-
-The challenge with state: what happens when your process restarts? Kafka Streams solves this by:
-- Writing state changes to a **changelog topic** (a hidden Kafka topic)
-- Replaying the changelog on restart to rebuild state
-- Maintaining **standby replicas** on other instances for fast failover
+**Stateful** operators need memory. A `count` needs to remember previous counts. A windowed average needs to remember recent values. Kafka Streams handles state recovery by writing state changes to a **changelog topic** (a hidden Kafka topic), replaying the changelog on restart to rebuild state, and maintaining **standby replicas** on other instances for fast failover.
 
 ## How Kafka Streams differs from other approaches
 
@@ -83,26 +63,15 @@ forever $ do
   forM_ records process
 ```
 
-This works for simple cases. But you must handle:
-- **Failures**: If `process` throws, what happens to the batch?
-- **State**: Where do you store intermediate results?
-- **Scaling**: How do you coordinate multiple instances?
-- **Exactly-once**: How do you avoid double-processing on restart?
-
-Kafka Streams handles all of this.
+This works for simple cases. But you must handle failures (if `process` throws, what happens to the batch?), state (where do you store intermediate results?), scaling (how do you coordinate multiple instances?), and exactly-once (how do you avoid double-processing on restart?). Kafka Streams handles all of this.
 
 ### Flink
 
-Flink is a full streaming platform. You submit jobs to a cluster that manages them. This is powerful for large-scale analytics but adds operational complexity:
-- Separate cluster to maintain
-- Jobs are isolated from your service code
-- Deployment is "submit a JAR to the cluster"
+Flink is a full streaming platform. You submit jobs to a cluster that manages them. This is suited for large-scale analytics but adds operational complexity: separate cluster to maintain, jobs isolated from your service code, deployment is "submit a JAR to the cluster." Kafka Streams keeps the processing in your service. Same binary, same deployment, same monitoring.
 
-Kafka Streams keeps the processing in your service. Same binary, same deployment, same monitoring.
+## What Kafka provides
 
-## What Kafka gives you
-
-Three guarantees from Kafka that the library leverages:
+The library builds on three guarantees from Kafka itself:
 
 1. **Durability.** Records are replicated across brokers. If your service dies mid-processing, the records are still there when you restart.
 
@@ -135,8 +104,6 @@ Start with the base library; add extensions when you need them.
 
 ## Quick vocabulary
 
-Terms you'll see throughout:
-
 | Term | Plain English meaning |
 | ---- | --------------------- |
 | **Topology** | Your processing pipeline: a graph of operators that data flows through |
@@ -148,17 +115,8 @@ Terms you'll see throughout:
 | **Consumer group** | Multiple instances sharing the work |
 | **Changelog topic** | Hidden Kafka topic that backs a state store |
 
-## What you'll build
+## Next
 
-Next four parts:
-
-1. **A pipe**: Copy records from one topic to another (the "hello world" of streaming)
-2. **A word counter**: Count words and query the running totals
-3. **A page-view enricher**: Join events with reference data
-4. **A production checklist**: What changes between "works on my laptop" and "runs in production"
-
-Each part is self-contained code you run without a Kafka broker.
-
-## Ready?
+The remaining four parts build a pipe topology, a word counter with queryable state, a page-view enricher with joins, and a production checklist. Each is self-contained and runs without a Kafka broker.
 
 [Continue to Tutorial 2: Your first topology →](../your-first-topology/)

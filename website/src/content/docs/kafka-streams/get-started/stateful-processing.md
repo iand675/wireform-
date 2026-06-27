@@ -6,13 +6,11 @@ sidebar:
   label: 3. Stateful processing
 ---
 
-So far we've just moved data around. Now we'll compute *across* records: specifically, counting how many times each word appears in a stream of text.
-
-This introduces **state**: the running totals must be remembered between records. Kafka Streams handles this automatically with **state stores**.
+Counting how many times each word appears in a stream of text requires *state*: the running totals must persist between records. Kafka Streams handles this with **state stores**.
 
 ## The problem
 
-Imagine you're processing a stream of log lines and want to count error occurrences:
+A stream of log lines where you want to count error occurrences:
 
 ```
 Input:  [ERROR] Connection timeout
@@ -21,7 +19,7 @@ Input:  [ERROR] Connection timeout
         [ERROR] Database unavailable
 ```
 
-You need to track: "connection timeout" → 2, "database unavailable" → 1.
+You need to track "connection timeout" → 2, "database unavailable" → 1.
 
 The naive approach in a plain consumer:
 
@@ -36,12 +34,7 @@ process record = do
   writeIORef errorCounts newCounts
 ```
 
-This fails in production because:
-- If your process restarts, the map is empty (data lost)
-- If you scale to multiple instances, each has its own map (counts diverge)
-- If an instance dies mid-batch, some increments are lost
-
-Kafka Streams solves all three problems.
+This fails in production because if your process restarts the map is empty, if you scale to multiple instances each has its own map, and if an instance dies mid-batch some increments are lost. Kafka Streams solves all three.
 
 ## The solution
 
@@ -123,17 +116,17 @@ summit = 1
 kafka = 3
 ```
 
-## What just happened?
+## What just happened
 
-Let's trace through:
+Tracing through the topology:
 
-1. **Input**: Three lines arrive
-2. **Split**: Each line becomes multiple words
-3. **Group**: Same words routed to same processing unit
-4. **Count**: Running totals maintained
-5. **Output**: Every count change emitted
+1. Three lines arrive as input.
+2. Each line splits into multiple words.
+3. Same words are routed to the same processing unit.
+4. Running totals are maintained.
+5. Every count change is emitted.
 
-The output is a **changelog**: "hello" appears as `1` then `2` because the count updated. "kafka" ends at `3` because it appeared three times total.
+The output is a **changelog**. "hello" appears as `1` then `2` because the count updated. "kafka" ends at `3` because it appeared three times total.
 
 ## The operators explained
 
@@ -148,7 +141,7 @@ Most operators produce one output per input. `concatMapValues` produces *multipl
 Input: `"hello world"`
 Output: `["hello", "world"]` (two separate records)
 
-Think of it like `concatMap` on lists: `concatMap words ["a b", "c d"] = ["a", "b", "c", "d"]`
+Same semantics as `concatMap` on lists: `concatMap words ["a b", "c d"] = ["a", "b", "c", "d"]`.
 
 ### `groupBy`: Routing by key
 
@@ -156,20 +149,9 @@ Think of it like `concatMap` on lists: `concatMap words ["a b", "c d"] = ["a", "
 F.groupBy (\r -> recordValue r) (grouped textSerde textSerde)
 ```
 
-This is crucial. Before we can count, all records with the same word must go to the same processing unit. Why?
+Before counting, all records with the same word must go to the same processing unit. If two workers each see "hello" once, both think the count is 1. The real count is 2.
 
-Imagine two workers:
-- Worker A sees "hello" (count: 1)
-- Worker B sees "hello" (count: 1)
-
-Each thinks the count is 1. They're both wrong: the real count is 2.
-
-`groupBy` solves this by re-keying the stream. Behind the scenes:
-1. Records are written to an internal **repartition topic**
-2. They're re-consumed, partitioned by the new key
-3. Now all "hello" records go to the same worker
-
-The cost: network round-trip to Kafka. The benefit: correct counts.
+`groupBy` solves this by re-keying the stream. Behind the scenes records are written to an internal **repartition topic**, re-consumed partitioned by the new key, and now all "hello" records land on the same worker. The cost is a network round-trip to Kafka. The benefit is correct counts.
 
 ### `count`: Stateful aggregation
 
@@ -179,18 +161,13 @@ F.count countMat
 
 This maintains a running count per key. It needs a **state store** to remember counts between records.
 
-The `Materialized` configuration tells it:
-- Store keys as `Text` (the words)
-- Store values as `Int64` (the counts)
-- Name the store "counts-store" (for querying later)
+The `Materialized` configuration specifies store keys as `Text` (the words), store values as `Int64` (the counts), and names the store "counts-store" (for querying later).
 
 ### `toStream`: KTable to KStream
 
 `count` produces a **KTable**: a changelog stream where later values replace earlier ones for the same key. `toStream` converts it back to a regular **KStream** for output.
 
-## KStream vs KTable: the crucial distinction
-
-This is the most important concept in Kafka Streams.
+## KStream vs KTable
 
 |  | KStream | KTable |
 |--|---------|--------|
@@ -211,29 +188,19 @@ KTable view: Latest value per key
   → alice = 150, bob = 50
 ```
 
-Our word count uses both:
-- **KStream** of words going in (each word is an event)
-- **KTable** of counts (latest count per word)
-- **KStream** of count updates going out
+Our word count uses both: a **KStream** of words going in (each word is an event), a **KTable** of counts (latest count per word), and a **KStream** of count updates going out.
 
 ## How state stores work
 
 The state store is a local key-value structure (in-memory or RocksDB). It's **per-task**: each processing unit has its own store for the keys it owns.
 
-But what about durability? Three mechanisms:
+Durability comes from three mechanisms. Every state change is written to a hidden Kafka **changelog topic**. On restart, the changelog is replayed to rebuild state. Other instances keep **standby replicas** for fast failover.
 
-1. **Changelog topic**: Every state change is written to a hidden Kafka topic
-2. **Recovery**: On restart, replay the changelog to rebuild state
-3. **Standby replicas**: Other instances keep copies for fast failover
-
-This means:
-- Your process can restart without losing counts
-- You can scale out and counts stay correct
-- If an instance dies, another takes over quickly
+Your process can restart without losing counts, you can scale out and counts stay correct, and if an instance dies another takes over quickly.
 
 ## Querying state from outside
 
-The state store isn't just for the topology: you can read it directly:
+The state store isn't just for the topology. You can read it directly:
 
 ```haskell
 import qualified Kafka.Streams.InteractiveQueries as IQ
@@ -252,21 +219,13 @@ case ro of
     putStrLn ("kafka count: " <> show kafka)  -- Just 3
 ```
 
-This is **Interactive Queries** (IQ). Use it to:
-- Build HTTP endpoints that return current counts
-- Debug your topology in production
-- Monitor processing health
+This is **Interactive Queries** (IQ). Use it to build HTTP endpoints that return current counts, debug your topology in production, or monitor processing health.
 
-**Important**: IQ reads the local store, which may be slightly ahead of what's committed to Kafka. For strongly consistent reads, query after a commit cycle completes.
+IQ reads the local store, which may be slightly ahead of what's committed to Kafka. For strongly consistent reads, query after a commit cycle completes.
 
-## What you learned
+## Recap
 
-- **Stateful processing** requires remembering data between records
-- **State stores** provide this, backed by changelog topics for durability
-- **`groupBy`** ensures related records go to the same processing unit
-- **KStream** = event log (append-only); **KTable** = table (latest wins)
-- **Interactive Queries** let you read state stores from outside the topology
-- The library handles recovery, replication, and failover automatically
+Stateful processing requires remembering data between records. State stores provide this, backed by changelog topics for durability. `groupBy` ensures related records go to the same processing unit. KStream is an event log (append-only); KTable is a table (latest wins). Interactive Queries let you read state stores from outside the topology. The library handles recovery, replication, and failover automatically.
 
 ## Next up
 

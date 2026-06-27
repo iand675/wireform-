@@ -130,9 +130,9 @@ streaming rewriter) and lexbor (C, the engine behind Servo and Cloudflare).
 
 | Operation | wireform-html | lol-html (Rust) | lexbor (C) |
 |-----------|--------------|-----------------|------------|
-| Tokenize (one-shot) | 1091 MB/s | 886 MiB/s | — |
+| Tokenize (one-shot) | 1091 MB/s | 886 MiB/s | n/a |
 | Tree build (one-shot) | 316 MB/s | 305 MB/s (70% target) | 192 MB/s |
-| Tree build (incremental, 4 KB) | 145 MB/s | — | 195 MB/s |
+| Tree build (incremental, 4 KB) | 145 MB/s | n/a | 195 MB/s |
 
 wireform-html's tokenizer runs faster than lol-html's tag scanner.
 The one-shot tree builder is **1.6x faster than lexbor** (C).

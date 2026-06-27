@@ -7,18 +7,18 @@ sidebar:
 
 Deploying a new version of your Kafka Streams application requires care. Unlike stateless services where you can simply restart with new code, streaming applications have persistent state and internal topics that must be managed across versions.
 
-This guide explains how to deploy safely when your topology changes. You will learn to classify different types of changes, understand their impact, and follow procedures that prevent data loss and service disruption.
-
 :::tip[Unfamiliar terms?]
 Kafka, Streams, and Riffle terminology is defined in the [Glossary](../glossary/).
 :::
 
 :::note[TL;DR]
+
 - Five kinds of topology diff each have a different operational story; the table below classifies them.
 - Name every stateful operator explicitly (`Named` + `materializedAs`): auto-generated names shift when you reshuffle the topology, which renames their changelog topics.
 - Run the [topology-JSON golden-file diff](../observability/#topology-json) in CI and the [orphan-topic detector](../observability/#orphan-internal-topics) on startup.
 - Set `numStandbyReplicas` to at least 1 for any non-trivial state, otherwise rebalance means a full changelog replay.
 - KIP-848 makes the rebalance itself incremental: no double-ownership at any point during a transfer.
+
 :::
 
 ## What a "topology change" actually means

@@ -1,25 +1,174 @@
 @import "tailwindcss";
 
+/* Dark mode: respect both Starlight's data-theme and the system preference
+   on the standalone landing page (which has no theme toggle). */
+@custom-variant dark (&:where([data-theme="dark"] *, [data-theme="dark"]));
+
 @layer base {
   html {
-    font-feature-settings: "ss01", "cv11";
+    font-feature-settings: "cv11", "ss01";
+  }
+
+  body {
+    font-feature-settings: normal;
   }
 }
 
-@theme {
-  --font-display: "Space Grotesk", system-ui, sans-serif;
+/* Semantic tokens mapped to CSS vars so the same utility class works in
+   light + dark. The --wf-* values are swapped per-theme below. */
+@theme inline {
+  --font-display: "Sora", "Inter", system-ui, sans-serif;
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
 
-  --color-paper: #efece4;
-  --color-paper-2: #f6f4ee;
-  --color-card: #ffffff;
-  --color-ink: #1a1d24;
-  --color-muted: #6a6660;
-  --color-line: rgba(0, 0, 0, 0.12);
-  --color-line-2: rgba(0, 0, 0, 0.06);
+  --color-paper: var(--wf-bg);
+  --color-paper-2: var(--wf-surface);
+  --color-card: var(--wf-surface-2);
+  --color-ink: var(--wf-ink);
+  --color-muted: var(--wf-muted);
+  --color-line: var(--wf-line);
+  --color-line-2: var(--wf-line-soft);
+  --color-line-strong: var(--wf-line-strong);
 
-  --color-primary: #0a4a6e;
-  --color-primary-dark: #073952;
-  --color-accent: #c5512d;
-  --color-third: #d4a017;
+  --color-primary: var(--wf-primary);
+  --color-primary-dark: var(--wf-primary-dark);
+  --color-accent: var(--wf-sky);
+}
+
+/* ------------------------------------------------------------------ */
+/* Light                                                              */
+/* ------------------------------------------------------------------ */
+:root,
+:root[data-theme="light"] {
+  --wf-bg: #ffffff;
+  --wf-surface: #f6f7fb;
+  --wf-surface-2: #ffffff;
+  --wf-ink: #0e1320;
+  --wf-muted: #5b6573;
+  --wf-line: rgba(15, 23, 42, 0.10);
+  --wf-line-soft: rgba(15, 23, 42, 0.05);
+  --wf-line-strong: #e2e5eb;
+  --wf-primary: #4f46e5;
+  --wf-primary-dark: #3730a3;
+  --wf-sky: #0ea5e9;
+  --wf-hero-from: #4f46e5;
+  --wf-hero-to: #0ea5e9;
+  --wf-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --wf-shadow-md: 0 8px 28px rgba(15, 23, 42, 0.08);
+  /* GlassSurface frost tint base (paired with --glass-frost opacity). */
+  --glass-frost-rgb: 255 255 255;
+}
+
+/* ------------------------------------------------------------------ */
+/* Dark (explicit Starlight toggle)                                   */
+/* ------------------------------------------------------------------ */
+:root[data-theme="dark"] {
+  --wf-bg: #0b0e14;
+  --wf-surface: #0d1017;
+  --wf-surface-2: #13171f;
+  --wf-ink: #e7e9ef;
+  --wf-muted: #9aa3b2;
+  --wf-line: rgba(255, 255, 255, 0.09);
+  --wf-line-soft: rgba(255, 255, 255, 0.05);
+  --wf-line-strong: #232733;
+  --wf-primary: #a5b4fc;
+  --wf-primary-dark: #c7d2fe;
+  --wf-sky: #38bdf8;
+  --wf-hero-from: #818cf8;
+  --wf-hero-to: #38bdf8;
+  --wf-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --wf-shadow-md: 0 8px 28px rgba(0, 0, 0, 0.4);
+  --glass-frost-rgb: 13 16 23;
+}
+
+/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
+/* Shiki dual-theme code blocks (landing page examples)               */
+/* Shiki emits the light theme as inline defaults and exposes the    */
+/* dark theme as --shiki-dark / --shiki-dark-bg CSS variables; we    */
+/* only need to swap them in when the page goes dark.                */
+/* ------------------------------------------------------------------ */
+/* Floating liquid-glass nav bar (GlassSurface) — a hairline edge so the bar
+   reads against bright hero content in light mode, plus a soft drop shadow to
+   lift it off the page. The SVG-filter refraction supplies the glass body. */
+.wf-nav-glass {
+  border: 1px solid var(--wf-line);
+  box-shadow:
+    0 8px 30px rgba(15, 23, 42, 0.10),
+    0 1px 2px rgba(15, 23, 42, 0.06);
+}
+:root[data-theme='dark'] .wf-nav-glass,
+:root:not([data-theme='light']) .wf-nav-glass {
+  border-color: rgba(255, 255, 255, 0.10);
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.45);
+}
+.wf-nav-glass .glass-surface__content {
+  padding: 0;
+}
+/* Safari / Firefox fallback (no SVG backdrop filter): use a denser frosted
+   tint than the generic glass so the nav links stay readable over scrolling
+   text. */
+.wf-nav-glass.glass-surface--fallback {
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(14px) saturate(1.6);
+  -webkit-backdrop-filter: blur(14px) saturate(1.6);
+}
+:root[data-theme='dark'] .wf-nav-glass.glass-surface--fallback,
+:root:not([data-theme='light']) .wf-nav-glass.glass-surface--fallback {
+  background: rgba(13, 16, 23, 0.66);
+  backdrop-filter: blur(14px) saturate(1.4);
+  -webkit-backdrop-filter: blur(14px) saturate(1.4);
+}
+
+.wf-codeblock {
+  padding: 1.15rem 1.25rem;
+  overflow-x: auto;
+}
+
+.wf-codeblock pre.shiki {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  line-height: 1.7;
+}
+
+/* Explicit Starlight dark toggle */
+:root[data-theme='dark'] .wf-codeblock pre.shiki,
+:root[data-theme='dark'] .wf-codeblock pre.shiki span {
+  color: var(--shiki-dark) !important;
+  background-color: var(--shiki-dark-bg) !important;
+}
+
+/* System-preference dark (landing page has no toggle) */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']):not([data-theme='dark'])
+    .wf-codeblock pre.shiki,
+  :root:not([data-theme='light']):not([data-theme='dark'])
+    .wf-codeblock pre.shiki span {
+    color: var(--shiki-dark) !important;
+    background-color: var(--shiki-dark-bg) !important;
+  }
+}
+
+/* Dark via system preference (landing page only — no toggle there)   */
+/* ------------------------------------------------------------------ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) {
+    --wf-bg: #0b0e14;
+    --wf-surface: #0d1017;
+    --wf-surface-2: #13171f;
+    --wf-ink: #e7e9ef;
+    --wf-muted: #9aa3b2;
+    --wf-line: rgba(255, 255, 255, 0.09);
+    --wf-line-soft: rgba(255, 255, 255, 0.05);
+    --wf-line-strong: #232733;
+    --wf-primary: #a5b4fc;
+    --wf-primary-dark: #c7d2fe;
+    --wf-sky: #38bdf8;
+    --wf-hero-from: #818cf8;
+    --wf-hero-to: #38bdf8;
+    --wf-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --wf-shadow-md: 0 8px 28px rgba(0, 0, 0, 0.4);
+    --glass-frost-rgb: 13 16 23;
+  }
 }

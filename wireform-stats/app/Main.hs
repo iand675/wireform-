@@ -26,6 +26,7 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Options.Applicative
 import System.Directory (
@@ -67,6 +68,12 @@ data RenderOpts = RenderOpts
   -- ^ Where to look for @test-results/@ + @coverage/@.
   , roBadgesDir :: !FilePath
   -- ^ Where to write shields.io endpoint badge JSON.
+  , roDocsDir :: !FilePath
+  -- ^ Astro docs-site package-page directory (relative to the repo
+  --   root). Each @wireform-\<name\>@ package maps to a
+  --   @\<name\>.md@ page in here; the @bench:\<id\>@ AUTOGEN markers in
+  --   those pages are rewritten with an inline, color-scheme-adaptive
+  --   SVG chart so the docs site stays in lock-step with the READMEs.
   , roVerbose :: !Bool
   }
 
@@ -135,13 +142,20 @@ renderOpts = do
           <> value "badges"
           <> help "Where to write shields.io endpoint badge JSON files (default: badges)."
       )
+  docs <-
+    strOption
+      ( long "docs-dir"
+          <> metavar "DIR"
+          <> value "website/src/content/docs/packages"
+          <> help "Astro docs-site package-page directory whose bench markers are rewritten (default: website/src/content/docs/packages)."
+      )
   verbose <-
     switch
       ( long "verbose"
           <> short 'v'
           <> help "Print every marker key seen + its source."
       )
-  pure (RenderOpts root stats badges verbose)
+  pure (RenderOpts root stats badges docs verbose)
 
 
 -- ---------------------------------------------------------------------------
@@ -181,15 +195,29 @@ runRender opts = do
                 "no change ("
                   <> show (Map.size reps)
                   <> " markers)"
+    -- Docs site: rewrite the bench markers on the matching package page.
+    mDocs <- docsPageFor opts pkg
+    forM_ mDocs $ \docsPath -> do
+      dreps <- docsReplacementsFor opts pkg
+      when (not (Map.null dreps)) $ do
+        changed <- Mk.rewriteFile docsPath dreps
+        when (roVerbose opts || changed) $
+          putStrLn $
+            docsPath
+              <> ": "
+              <> if changed
+                then "rewrote"
+                else "no change (" <> show (Map.size dreps) <> " bench markers)"
 
 
 runCheck :: RenderOpts -> IO ()
 runCheck opts = do
   packages <- discoverPackages (roRoot opts)
-  anyChanged <- fmap or $ mapM (checkOne opts) packages
-  if anyChanged
+  readmeChanged <- fmap or $ mapM (checkOne opts) packages
+  docsChanged <- fmap or $ mapM (checkDocs opts) packages
+  if readmeChanged || docsChanged
     then do
-      putStrLn "regen-stats check: README markers are stale. Run `regen-stats render`."
+      putStrLn "regen-stats check: README and/or docs markers are stale. Run `regen-stats render`."
       exitFailure
     else exitSuccess
 
@@ -209,6 +237,25 @@ checkOne opts pkg = do
         putStrLn $
           pkg <> "/README.md: stale (" <> show (Map.size reps) <> " markers)"
       pure changed
+
+
+checkDocs :: RenderOpts -> FilePath -> IO Bool
+checkDocs opts pkg = do
+  mDocs <- docsPageFor opts pkg
+  case mDocs of
+    Nothing -> pure False
+    Just docsPath -> do
+      dreps <- docsReplacementsFor opts pkg
+      if Map.null dreps
+        then pure False
+        else do
+          before <- TIO.readFile docsPath
+          let after = Mk.rewriteMarkers dreps before
+          let changed = before /= after
+          when (changed && roVerbose opts) $
+            putStrLn $
+              docsPath <> ": stale (" <> show (Map.size dreps) <> " bench markers)"
+          pure changed
 
 
 -- ---------------------------------------------------------------------------
@@ -353,6 +400,59 @@ chartPath _pkg theId variant =
   -- README-relative: charts live alongside the README under
   -- bench-results/charts/.
   "bench-results/charts/" <> theId <> "-" <> variant <> ".svg"
+
+
+-- ---------------------------------------------------------------------------
+-- Docs-site bench markers
+-- ---------------------------------------------------------------------------
+
+{- | The Astro docs-site page for a package, if it exists.
+
+Packages live in @wireform-\<name\>/@ and map to a @\<name\>.md@
+page under 'roDocsDir' (e.g. @wireform-cbor@ -> @cbor.md@). Returns
+'Nothing' when there is no matching page so packages without a docs
+stub (or with a non-default page name) are simply skipped.
+-}
+docsPageFor :: RenderOpts -> FilePath -> IO (Maybe FilePath)
+docsPageFor opts pkg =
+  case T.stripPrefix "wireform-" (T.pack pkg) of
+    Nothing -> pure Nothing
+    Just short -> do
+      let path = roRoot opts </> roDocsDir opts </> (T.unpack short <> ".md")
+      ok <- doesFileExist path
+      pure (if ok then Just path else Nothing)
+
+
+{- | Bench replacements for the docs page of a package, keyed by
+@bench:\<id\>@. Unlike 'benchReplacementsFor' (which references the
+two committed README SVG files via a @\<picture\>@), the docs body
+inlines a single color-scheme-adaptive SVG so the chart renders in a
+plain-markdown Starlight page with no asset path or @base@ wiring.
+-}
+docsReplacementsFor :: RenderOpts -> FilePath -> IO (Map Mk.MarkerKey Mk.Replacement)
+docsReplacementsFor opts pkg = do
+  summaries <- listSummaries (roRoot opts) pkg
+  Map.fromList . concat <$> mapM oneDocsBench summaries
+
+
+oneDocsBench :: FilePath -> IO [(Mk.MarkerKey, Mk.Replacement)]
+oneDocsBench summaryPath = do
+  r <- Bench.readSummary summaryPath
+  case r of
+    Left _ -> pure []
+    Right summary ->
+      let theId = Bench.bsId summary
+          theKey = key ("bench:" <> theId)
+          tableT = Tbl.renderTable (Bench.summaryToTable summary)
+          svgT = TE.decodeUtf8 (SVG.renderBarChartAdaptive (Bench.summaryToBarChart summary))
+          captionT =
+            "<sub>Last run "
+              <> T.pack (show (Bench.bsCapturedAt summary))
+              <> ". "
+              <> Bench.bsToolchain summary
+              <> ".</sub>"
+          replacement = svgT <> "\n\n" <> tableT <> "\n" <> captionT
+      in pure [(theKey, replacement)]
 
 
 -- ---------------------------------------------------------------------------

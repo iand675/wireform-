@@ -26,7 +26,7 @@ your own Cabal package is only a few lines more.
 
 No Docker, no `protoc`, and no language-specific runtimes needed.
 
-## Step 1 — Run something
+## Step 1: Run something
 
 ```bash
 cd wireform-
@@ -52,7 +52,7 @@ There are 28 examples in the repo covering every major format. Run
 `cabal list-bin example-` to see them all.
 </Aside>
 
-## Step 2 — Pick a workflow
+## Step 2: Pick a workflow
 
 <Tabs>
 <TabItem label="Schema-less (Generics)">
@@ -151,7 +151,7 @@ wireform includes a full pipeline, not just encode/decode:
 </TabItem>
 </Tabs>
 
-## Step 3 — Use wireform from your own package
+## Step 3: Use wireform from your own package
 
 ### Path dependency (typical while hacking or before Hackage)
 
@@ -225,7 +225,7 @@ main = do
 cd ~/Code/my-app && cabal run my-app
 ```
 
-## Step 4 — Template Haskell for protobufs
+## Step 4: Template Haskell for protobufs
 
 Put `.proto` files under `proto/` and splice them in:
 
@@ -244,7 +244,7 @@ $(loadProtoWith defaultLoadOpts { loIncludeDirs = ["proto", "."] } "proto/api.pr
 
 Reference: `cabal run example-th` in the wireform repo.
 
-## Step 5 — Code generation with `wireform-gen`
+## Step 5: Code generation with `wireform-gen`
 
 No global install needed:
 
@@ -259,7 +259,7 @@ Then add `gen` to `hs-source-dirs` and list modules in your `.cabal`.
 Supported schema languages: `proto`, `avro`, `thrift`, `bond`, `capnp`,
 `fbs`, `asn1`, `xsd`.
 
-## Step 6 — Go deeper
+## Step 6: Go deeper
 
 Once basic encode/decode works, these are the modules you reach for:
 

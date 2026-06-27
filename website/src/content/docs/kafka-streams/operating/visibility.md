@@ -14,11 +14,13 @@ Kafka, Streams, and Riffle terminology is defined in the [Glossary](../glossary/
 :::
 
 :::note[TL;DR]
+
 - Commit boundary is `commitIntervalMs` (default 30 s), not a `COMMIT` statement. Downstream consumers see up to that much staleness.
 - IQ reads see the live in-memory store, not necessarily atomically with the EOS commit cycle.
 - State partitions across instances. Query routing uses `StreamsMetadata` + `KeyQueryMetadata`.
 - Event time and processing time differ. Windowed aggregations use event-time; rate metrics use wall-clock.
 - Side effects in `peek` / `foreach` / `mapValuesM` replay on rewind. Use two-phase commit sinks or idempotency tokens for exactly-once external effects.
+
 :::
 
 ## A vs. ACID
@@ -139,7 +141,7 @@ double-ownership but does mean there's a window where the task is
 owned by no member. IQ during that window returns either
 `StoreNotFound` or a stale read from a standby.
 
-A robust query layer handles this:
+A query layer should handle this:
 
 ```
 on IQ:
@@ -231,7 +233,7 @@ Kafka Streams **may [replay](../glossary/#replay) records on failure**:
   producer commit. **External side effects that aren't inside a
   two-phase-commit sink replay on abort.**
 
-This is the right model for a streaming pipeline. The alternative is dropping records on partial failure, but this approach has consequences
+The alternative is dropping records on partial failure, but replay has consequences
 for code that thinks in database terms:
 
 - **No "commit-then-act" pattern.** You cannot "commit, then call
