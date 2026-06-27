@@ -3,12 +3,27 @@
   "title": "wireform-flatbuffers encode + decode (zero-copy decode)",
   "unit": "Nanos",
   "higherIsBetter": false,
-  "groups": ["Person table", "Person[100] vector"],
+  "groups": [
+    "Person table",
+    "Person[100] vector"
+  ],
   "series": [
-    {"name": "encode", "values": [773.50, 94578.66]},
-    {"name": "decode", "values": [134.40, 70.35]}
+    {
+      "name": "encode",
+      "values": [
+        827.36,
+        95352.16
+      ]
+    },
+    {
+      "name": "decode",
+      "values": [
+        142.36,
+        75.68
+      ]
+    }
   ],
   "baseline": "encode",
-  "capturedAt": "2026-05-13T11:44:00Z",
+  "capturedAt": "2026-06-27T11:35:54Z",
   "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5. Decode is a zero-copy cursor by design: only the outer envelope is resolved at decode time. Per-field reads happen lazily."
 }

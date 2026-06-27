@@ -1,5 +1,5 @@
-<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 360" width="720" height="360" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif" font-size="12">
-  <rect x="0" y="0" width="720" height="360" fill="#0d1117"/>
+<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 400" width="720" height="400" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif" font-size="12">
+  <rect x="0" y="0" width="720" height="400" fill="#0d1117"/>
   <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#e6edf3">wireform-ndjson vs aeson + manual newline splitting</text>
   <text x="360" y="44" text-anchor="middle" font-size="11" fill="#7d8590">lower is better · µs · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5. Today the SIMD newline scanner doesn't yet outperform `BS.split '\n'` on these inputs; both paths are within 10%.</text>
   <g stroke="#30363d" stroke-width="1">
@@ -20,36 +20,36 @@
   </g>
   <g>
     <rect x="95.5" y="318.7" width="60" height="1.3" rx="2" fill="#58a6ff"/>
-    <rect x="157.5" y="318.8" width="60" height="1.2" rx="2" fill="#ff7b72"/>
-    <rect x="250.5" y="178.4" width="60" height="141.6" rx="2" fill="#58a6ff"/>
-    <rect x="312.5" y="189.1" width="60" height="130.9" rx="2" fill="#ff7b72"/>
+    <rect x="157.5" y="318.7" width="60" height="1.3" rx="2" fill="#ff7b72"/>
+    <rect x="250.5" y="185.3" width="60" height="134.7" rx="2" fill="#58a6ff"/>
+    <rect x="312.5" y="187.9" width="60" height="132.1" rx="2" fill="#ff7b72"/>
     <rect x="405.5" y="319.0" width="60" height="1.0" rx="2" fill="#58a6ff"/>
     <rect x="467.5" y="319.0" width="60" height="1.0" rx="2" fill="#ff7b72"/>
-    <rect x="560.5" y="205.0" width="60" height="115.0" rx="2" fill="#58a6ff"/>
-    <rect x="622.5" y="215.4" width="60" height="104.6" rx="2" fill="#ff7b72"/>
+    <rect x="560.5" y="209.2" width="60" height="110.8" rx="2" fill="#58a6ff"/>
+    <rect x="622.5" y="220.6" width="60" height="99.4" rx="2" fill="#ff7b72"/>
   </g>
   <g>
-    <text x="125.5" y="314.7" text-anchor="middle" font-size="10" fill="#e6edf3">5.03</text>
-    <text x="187.5" y="314.8" text-anchor="middle" font-size="10" fill="#e6edf3">4.76</text>
-    <text x="280.5" y="174.4" text-anchor="middle" font-size="10" fill="#e6edf3">545</text>
-    <text x="342.5" y="185.1" text-anchor="middle" font-size="10" fill="#e6edf3">504</text>
-    <text x="435.5" y="315.0" text-anchor="middle" font-size="10" fill="#e6edf3">4.00</text>
-    <text x="497.5" y="315.0" text-anchor="middle" font-size="10" fill="#e6edf3">3.91</text>
-    <text x="590.5" y="201.0" text-anchor="middle" font-size="10" fill="#e6edf3">442</text>
-    <text x="652.5" y="211.4" text-anchor="middle" font-size="10" fill="#e6edf3">402</text>
+    <text x="125.5" y="314.7" text-anchor="middle" font-size="10" fill="#e6edf3">5.18</text>
+    <text x="187.5" y="314.7" text-anchor="middle" font-size="10" fill="#e6edf3">4.95</text>
+    <text x="280.5" y="181.3" text-anchor="middle" font-size="10" fill="#e6edf3">518</text>
+    <text x="342.5" y="183.9" text-anchor="middle" font-size="10" fill="#e6edf3">508</text>
+    <text x="435.5" y="315.0" text-anchor="middle" font-size="10" fill="#e6edf3">3.85</text>
+    <text x="497.5" y="315.0" text-anchor="middle" font-size="10" fill="#e6edf3">3.84</text>
+    <text x="590.5" y="205.2" text-anchor="middle" font-size="10" fill="#e6edf3">426</text>
+    <text x="652.5" y="216.6" text-anchor="middle" font-size="10" fill="#e6edf3">382</text>
   </g>
   <g>
-    <text x="157.5" y="336" text-anchor="middle" font-size="11" fill="#e6edf3">encode 10 rows</text>
-    <text x="312.5" y="336" text-anchor="middle" font-size="11" fill="#e6edf3">encode 1000 rows</text>
-    <text x="467.5" y="336" text-anchor="middle" font-size="11" fill="#e6edf3">decode 10 rows</text>
-    <text x="622.5" y="336" text-anchor="middle" font-size="11" fill="#e6edf3">decode 1000 rows</text>
+    <text x="157.5" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">encode 10 rows</text>
+    <text x="312.5" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">encode 1000 rows</text>
+    <text x="467.5" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">decode 10 rows</text>
+    <text x="622.5" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">decode 1000 rows</text>
   </g>
   <g>
-    <g transform="translate(236, 344)">
+    <g transform="translate(236, 382)">
       <rect x="0" y="-9" width="12" height="12" rx="2" fill="#58a6ff"/>
       <text x="18" y="1" font-size="11" fill="#e6edf3">wireform-ndjson</text>
     </g>
-    <g transform="translate(375, 344)">
+    <g transform="translate(375, 382)">
       <rect x="0" y="-9" width="12" height="12" rx="2" fill="#ff7b72"/>
       <text x="18" y="1" font-size="11" fill="#e6edf3">aeson + lines</text>
     </g>

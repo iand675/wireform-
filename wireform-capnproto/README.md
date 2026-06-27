@@ -173,12 +173,12 @@ cabal bench wireform-capnproto:wireform-capnproto-bench
   <img src="bench-results/charts/capnproto-encode-decode-light.svg" alt="wireform-capnproto encode + decode (zero-copy decode)">
 </picture>
 
-| Operation     |  encode |   decode | ratio |
-| :------------ | ------: | -------: | ----: |
-| Person struct |  108 ns |  27.1 ns | 0.25x |
-| Person[100]   | 8547 ns | 26.10 ns | 0.00x |
+| Operation     |  encode |  decode | ratio |
+| :------------ | ------: | ------: | ----: |
+| Person struct |  114 ns | 28.4 ns | 0.25x |
+| Person[100]   | 8610 ns | 28.0 ns | 0.00x |
 
-<sub>Last run 2026-05-13 11:44:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5. Decode is a zero-copy cursor by design: only the outer envelope is resolved at decode time. Per-field reads happen lazily..</sub>
+<sub>Last run 2026-06-27 11:35:54 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5. Decode is a zero-copy cursor by design: only the outer envelope is resolved at decode time. Per-field reads happen lazily..</sub>
 <!-- END_AUTOGEN bench:capnproto-encode-decode -->
 
 For cross-language comparisons:

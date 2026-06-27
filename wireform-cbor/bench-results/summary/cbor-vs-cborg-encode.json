@@ -3,12 +3,27 @@
   "title": "wireform-cbor vs cborg",
   "unit": "Nanos",
   "higherIsBetter": false,
-  "groups": ["encode", "decode"],
+  "groups": [
+    "encode",
+    "decode"
+  ],
   "series": [
-    {"name": "wireform-cbor", "values": [305.06, 460.08]},
-    {"name": "cborg",         "values": [274.87, 1214.31]}
+    {
+      "name": "wireform-cbor",
+      "values": [
+        302.12,
+        461.54
+      ]
+    },
+    {
+      "name": "cborg",
+      "values": [
+        280.52,
+        1288.89
+      ]
+    }
   ],
   "baseline": "wireform-cbor",
-  "capturedAt": "2026-05-13T10:30:00Z",
+  "capturedAt": "2026-06-27T11:56:42Z",
   "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
 }

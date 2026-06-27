@@ -202,10 +202,10 @@ cabal bench wireform-flatbuffers:wireform-flatbuffers-bench
 
 | Operation          |   encode |  decode | ratio |
 | :----------------- | -------: | ------: | ----: |
-| Person table       |   774 ns |  134 ns | 0.17x |
-| Person[100] vector | 94579 ns | 70.3 ns | 0.00x |
+| Person table       |   827 ns |  142 ns | 0.17x |
+| Person[100] vector | 95352 ns | 75.7 ns | 0.00x |
 
-<sub>Last run 2026-05-13 11:44:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5. Decode is a zero-copy cursor by design: only the outer envelope is resolved at decode time. Per-field reads happen lazily..</sub>
+<sub>Last run 2026-06-27 11:35:54 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5. Decode is a zero-copy cursor by design: only the outer envelope is resolved at decode time. Per-field reads happen lazily..</sub>
 <!-- END_AUTOGEN bench:flatbuffers-encode-decode -->
 
 For cross-language comparisons:

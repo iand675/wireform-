@@ -1,5 +1,5 @@
-<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 360" width="720" height="360" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif" font-size="12">
-  <rect x="0" y="0" width="720" height="360" fill="#ffffff"/>
+<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 400" width="720" height="400" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif" font-size="12">
+  <rect x="0" y="0" width="720" height="400" fill="#ffffff"/>
   <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">wireform-proto vs proto-lens (decode)</text>
   <text x="360" y="44" text-anchor="middle" font-size="11" fill="#656d76">lower is better · ns · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5</text>
   <g stroke="#d0d7de" stroke-width="1">
@@ -19,37 +19,37 @@
     <text x="72" y="64" text-anchor="end" font-size="10" fill="#656d76">2500</text>
   </g>
   <g>
-    <rect x="95.5" y="317.8" width="60" height="2.2" rx="2" fill="#0969da"/>
-    <rect x="157.5" y="312.0" width="60" height="8.0" rx="2" fill="#cf222e"/>
-    <rect x="250.5" y="314.1" width="60" height="5.9" rx="2" fill="#0969da"/>
-    <rect x="312.5" y="299.4" width="60" height="20.6" rx="2" fill="#cf222e"/>
-    <rect x="405.5" y="314.9" width="60" height="5.1" rx="2" fill="#0969da"/>
-    <rect x="467.5" y="305.3" width="60" height="14.7" rx="2" fill="#cf222e"/>
-    <rect x="560.5" y="245.6" width="60" height="74.4" rx="2" fill="#0969da"/>
-    <rect x="622.5" y="100.9" width="60" height="219.1" rx="2" fill="#cf222e"/>
+    <rect x="95.5" y="315.7" width="60" height="4.3" rx="2" fill="#0969da"/>
+    <rect x="157.5" y="311.5" width="60" height="8.5" rx="2" fill="#cf222e"/>
+    <rect x="250.5" y="308.4" width="60" height="11.6" rx="2" fill="#0969da"/>
+    <rect x="312.5" y="298.0" width="60" height="22.0" rx="2" fill="#cf222e"/>
+    <rect x="405.5" y="311.6" width="60" height="8.4" rx="2" fill="#0969da"/>
+    <rect x="467.5" y="304.3" width="60" height="15.7" rx="2" fill="#cf222e"/>
+    <rect x="560.5" y="172.1" width="60" height="147.9" rx="2" fill="#0969da"/>
+    <rect x="622.5" y="81.5" width="60" height="238.5" rx="2" fill="#cf222e"/>
   </g>
   <g>
-    <text x="125.5" y="313.8" text-anchor="middle" font-size="10" fill="#1f2328">20.7</text>
-    <text x="187.5" y="308.0" text-anchor="middle" font-size="10" fill="#1f2328">76.4</text>
-    <text x="280.5" y="310.1" text-anchor="middle" font-size="10" fill="#1f2328">57.0</text>
-    <text x="342.5" y="295.4" text-anchor="middle" font-size="10" fill="#1f2328">198</text>
-    <text x="435.5" y="310.9" text-anchor="middle" font-size="10" fill="#1f2328">48.6</text>
-    <text x="497.5" y="301.3" text-anchor="middle" font-size="10" fill="#1f2328">141</text>
-    <text x="590.5" y="241.6" text-anchor="middle" font-size="10" fill="#1f2328">715</text>
-    <text x="652.5" y="96.9" text-anchor="middle" font-size="10" fill="#1f2328">2107</text>
+    <text x="125.5" y="311.7" text-anchor="middle" font-size="10" fill="#1f2328">41.6</text>
+    <text x="187.5" y="307.5" text-anchor="middle" font-size="10" fill="#1f2328">81.6</text>
+    <text x="280.5" y="304.4" text-anchor="middle" font-size="10" fill="#1f2328">111</text>
+    <text x="342.5" y="294.0" text-anchor="middle" font-size="10" fill="#1f2328">212</text>
+    <text x="435.5" y="307.6" text-anchor="middle" font-size="10" fill="#1f2328">81.0</text>
+    <text x="497.5" y="300.3" text-anchor="middle" font-size="10" fill="#1f2328">151</text>
+    <text x="590.5" y="168.1" text-anchor="middle" font-size="10" fill="#1f2328">1422</text>
+    <text x="652.5" y="77.5" text-anchor="middle" font-size="10" fill="#1f2328">2293</text>
   </g>
   <g>
-    <text x="157.5" y="336" text-anchor="middle" font-size="11" fill="#1f2328">Small</text>
-    <text x="312.5" y="336" text-anchor="middle" font-size="11" fill="#1f2328">Medium</text>
-    <text x="467.5" y="336" text-anchor="middle" font-size="11" fill="#1f2328">Nested</text>
-    <text x="622.5" y="336" text-anchor="middle" font-size="11" fill="#1f2328">Repeated</text>
+    <text x="157.5" y="338" text-anchor="middle" font-size="11" fill="#1f2328">Small</text>
+    <text x="312.5" y="338" text-anchor="middle" font-size="11" fill="#1f2328">Medium</text>
+    <text x="467.5" y="338" text-anchor="middle" font-size="11" fill="#1f2328">Nested</text>
+    <text x="622.5" y="338" text-anchor="middle" font-size="11" fill="#1f2328">Repeated</text>
   </g>
   <g>
-    <g transform="translate(250, 344)">
+    <g transform="translate(250, 382)">
       <rect x="0" y="-9" width="12" height="12" rx="2" fill="#0969da"/>
       <text x="18" y="1" font-size="11" fill="#1f2328">wireform-proto</text>
     </g>
-    <g transform="translate(382, 344)">
+    <g transform="translate(382, 382)">
       <rect x="0" y="-9" width="12" height="12" rx="2" fill="#cf222e"/>
       <text x="18" y="1" font-size="11" fill="#1f2328">proto-lens</text>
     </g>

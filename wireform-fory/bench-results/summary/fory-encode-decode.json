@@ -3,12 +3,36 @@
   "title": "wireform-fory encode + decode across representative shapes",
   "unit": "Nanos",
   "higherIsBetter": false,
-  "groups": ["int", "string", "bytes 1KB", "Person struct", "list[Person]*100"],
+  "groups": [
+    "int",
+    "string",
+    "bytes 1KB",
+    "Person struct",
+    "list[Person]*100"
+  ],
   "series": [
-    {"name": "encode", "values": [76.03, 83.53, 126.86, 262.11, 6712.15]},
-    {"name": "decode", "values": [63.83, 77.53, 62.43, 455.74, 10673.57]}
+    {
+      "name": "encode",
+      "values": [
+        75.65,
+        85.34,
+        126.94,
+        266.32,
+        6629.74
+      ]
+    },
+    {
+      "name": "decode",
+      "values": [
+        62.46,
+        71.77,
+        60.97,
+        439.58,
+        10783.22
+      ]
+    }
   ],
   "baseline": "encode",
-  "capturedAt": "2026-05-13T11:20:00Z",
+  "capturedAt": "2026-06-27T11:35:55Z",
   "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
 }

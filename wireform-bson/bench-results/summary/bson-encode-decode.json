@@ -3,12 +3,27 @@
   "title": "wireform-bson encode + decode (Person record)",
   "unit": "Nanos",
   "higherIsBetter": false,
-  "groups": ["single Person", "[Person] x 100"],
+  "groups": [
+    "single Person",
+    "[Person] x 100"
+  ],
   "series": [
-    {"name": "encode", "values": [317.20, 58181.75]},
-    {"name": "decode", "values": [427.73, 25171.60]}
+    {
+      "name": "encode",
+      "values": [
+        309.37,
+        55342.53
+      ]
+    },
+    {
+      "name": "decode",
+      "values": [
+        398.84,
+        23567.34
+      ]
+    }
   ],
   "baseline": "encode",
-  "capturedAt": "2026-05-13T11:38:00Z",
+  "capturedAt": "2026-06-27T11:35:54Z",
   "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
 }

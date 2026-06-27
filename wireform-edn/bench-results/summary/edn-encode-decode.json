@@ -3,12 +3,27 @@
   "title": "wireform-edn encode + decode (Person record, text format)",
   "unit": "Nanos",
   "higherIsBetter": false,
-  "groups": ["single Person", "[Person] x 100"],
+  "groups": [
+    "single Person",
+    "[Person] x 100"
+  ],
   "series": [
-    {"name": "encode", "values": [812.89, 84602.17]},
-    {"name": "decode", "values": [1992.28, 235878.47]}
+    {
+      "name": "encode",
+      "values": [
+        787.37,
+        84915.52
+      ]
+    },
+    {
+      "name": "decode",
+      "values": [
+        2010.12,
+        244286.99
+      ]
+    }
   ],
   "baseline": "encode",
-  "capturedAt": "2026-05-13T11:38:00Z",
+  "capturedAt": "2026-06-27T11:35:54Z",
   "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
 }

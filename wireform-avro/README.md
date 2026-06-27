@@ -2,7 +2,6 @@
 
 [![BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](https://opensource.org/licenses/BSD-3-Clause)
 
-
 > [!CAUTION]
 > wireform is in heavy development and has not been published to Hackage yet. APIs may change.
 
@@ -264,7 +263,24 @@ JSON bridge.
 
 ## Benchmarks
 
-No per-package criterion harness in tree yet. Planned comparisons:
+Encode + decode of a small record and a 100-element batch, against the
+schema-driven wire codec (`cabal bench wireform-avro:wireform-avro-bench`):
+
+<!-- BEGIN_AUTOGEN bench:avro-encode-decode -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="bench-results/charts/avro-encode-decode-dark.svg">
+  <img src="bench-results/charts/avro-encode-decode-light.svg" alt="wireform-avro encode + decode (Person record, schema-driven)">
+</picture>
+
+| Operation      |   encode |   decode | ratio |
+| :------------- | -------: | -------: | ----: |
+| Person         |   176 ns |   101 ns | 0.57x |
+| [Person] x 100 | 15094 ns | 10524 ns | 0.70x |
+
+<sub>Last run 2026-06-27 12:10:15 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<!-- END_AUTOGEN bench:avro-encode-decode -->
+
+Planned cross-language / cross-library comparisons:
 
 - Haskell: [`avro`](https://hackage.haskell.org/package/avro) (the
   established Haskell Avro library).

@@ -30,6 +30,7 @@ module Wireform.Stats.SVG (
 ) where
 
 import Data.ByteString (ByteString)
+import Data.Maybe (maybeToList)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Vector qualified as V
@@ -344,7 +345,7 @@ title theme chart =
 subtitle :: Theme -> BarChart -> Node
 subtitle theme chart =
   let direction = if chartHigherIsBetter chart then "higher is better" else "lower is better"
-      pieces = [direction, chartUnit chart] ++ maybe [] (: []) (chartSubtitle chart)
+      pieces = [direction, chartUnit chart] ++ maybeToList (chartSubtitle chart)
       txt = T.intercalate " · " pieces
   in el
       "text"
@@ -537,7 +538,7 @@ legend theme chart =
               ]
               [text_ (seriesName s)]
           ]
-  in el "g" [] (map legendItem (zip [0 ..] (zip laidOut series)))
+  in el "g" [] (zipWith (curry legendItem) [0 ..] (zip laidOut series))
 
 
 -- ---------------------------------------------------------------------------

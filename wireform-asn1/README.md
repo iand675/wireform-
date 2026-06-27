@@ -221,10 +221,10 @@ cabal bench wireform-asn1:wireform-asn1-bench
 
 | Operation       |   encode |   decode | ratio |
 | :-------------- | -------: | -------: | ----: |
-| single Subject  |   141 ns |   115 ns | 0.82x |
-| [Subject] x 100 | 16921 ns | 12839 ns | 0.76x |
+| single Subject  |   140 ns |   115 ns | 0.82x |
+| [Subject] x 100 | 17260 ns | 12699 ns | 0.74x |
 
-<sub>Last run 2026-05-13 11:42:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-06-27 11:35:54 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:asn1-encode-decode -->
 
 For cross-language comparisons:

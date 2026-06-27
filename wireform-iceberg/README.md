@@ -286,12 +286,12 @@ cabal bench wireform-iceberg:iceberg-bench
 
 | Operation | C kernel | pure Haskell | ratio |
 | :-------- | -------: | -----------: | ----: |
-| 8 B       |  11.2 ns |      21.2 ns | 1.90x |
-| 64 B      |  24.0 ns |       116 ns | 4.82x |
-| 1 KiB     |   401 ns |      1581 ns | 3.95x |
-| 64 KiB    | 26196 ns |     98723 ns | 3.77x |
+| 8 B       |  11.5 ns |      20.7 ns | 1.80x |
+| 64 B      |  22.9 ns |       110 ns | 4.80x |
+| 1 KiB     |   391 ns |      1551 ns | 3.96x |
+| 64 KiB    | 26010 ns |     97717 ns | 3.76x |
 
-<sub>Last run 2026-05-13 11:30:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-06-27 11:45:59 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:iceberg-murmur3-c-vs-pure -->
 
 <!-- BEGIN_AUTOGEN bench:iceberg-deletion-vector -->
@@ -302,10 +302,10 @@ cabal bench wireform-iceberg:iceberg-bench
 
 | Operation             | C kernel | pure Haskell |  ratio |
 | :-------------------- | -------: | -----------: | -----: |
-| decode 1001 positions | 10262 ns |     29795 ns |  2.90x |
-| contains check        |  12.2 ns |      1049 ns | 85.62x |
+| decode 1001 positions | 10081 ns |     27392 ns |  2.72x |
+| contains check        |  11.9 ns |      1054 ns | 88.30x |
 
-<sub>Last run 2026-05-13 11:30:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-06-27 11:45:59 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:iceberg-deletion-vector -->
 
 For cross-language comparisons (table-format-level):

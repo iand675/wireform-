@@ -3,12 +3,33 @@
   "title": "Parquet XXH64 hash: C kernel vs pure Haskell across input sizes",
   "unit": "Nanos",
   "higherIsBetter": false,
-  "groups": ["8 B", "64 B", "1 KiB", "64 KiB"],
+  "groups": [
+    "8 B",
+    "64 B",
+    "1 KiB",
+    "64 KiB"
+  ],
   "series": [
-    {"name": "C kernel",     "values": [11.98, 18.65, 77.64, 4480.73]},
-    {"name": "pure Haskell", "values": [10.92, 43.08, 452.31, 28118.68]}
+    {
+      "name": "C kernel",
+      "values": [
+        12.08,
+        18.1,
+        79.9,
+        4387.2
+      ]
+    },
+    {
+      "name": "pure Haskell",
+      "values": [
+        10.27,
+        42.97,
+        456.52,
+        28290.97
+      ]
+    }
   ],
   "baseline": "C kernel",
-  "capturedAt": "2026-05-13T11:35:00Z",
+  "capturedAt": "2026-06-27T11:45:59Z",
   "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
 }

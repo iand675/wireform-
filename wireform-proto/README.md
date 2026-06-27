@@ -371,12 +371,12 @@ packages; proto-lens stays NCG. LLVM helps most on repeated fields
 
 | Operation | wireform-proto | proto-lens | ratio |
 | :-------- | -------------: | ---------: | ----: |
-| Small     |        25.5 ns |     146 ns | 5.71x |
-| Medium    |       53.10 ns |     272 ns | 5.04x |
-| Nested    |       44.10 ns |     321 ns | 7.13x |
-| Repeated  |         656 ns |    2701 ns | 4.12x |
+| Small     |        26.6 ns |     151 ns | 5.67x |
+| Medium    |        72.4 ns |     286 ns | 3.95x |
+| Nested    |        55.5 ns |     333 ns | 6.00x |
+| Repeated  |        1038 ns |    2758 ns | 2.66x |
 
-<sub>Last run 2026-05-13 10:45:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-06-27 11:56:42 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:proto-vs-proto-lens-encode -->
 
 <!-- BEGIN_AUTOGEN bench:proto-vs-proto-lens-decode -->
@@ -387,12 +387,12 @@ packages; proto-lens stays NCG. LLVM helps most on repeated fields
 
 | Operation | wireform-proto | proto-lens | ratio |
 | :-------- | -------------: | ---------: | ----: |
-| Small     |        20.7 ns |    76.5 ns | 3.69x |
-| Medium    |        57.0 ns |     198 ns | 3.48x |
-| Nested    |        48.6 ns |     141 ns | 2.91x |
-| Repeated  |         715 ns |    2107 ns | 2.95x |
+| Small     |        41.6 ns |    81.6 ns | 1.96x |
+| Medium    |         111 ns |     212 ns | 1.90x |
+| Nested    |       80.10 ns |     151 ns | 1.87x |
+| Repeated  |        1422 ns |    2293 ns | 1.61x |
 
-<sub>Last run 2026-05-13 10:45:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-06-27 11:56:42 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:proto-vs-proto-lens-decode -->
 
 Encode and decode cost about the same. A 3-field message encodes

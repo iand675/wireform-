@@ -228,10 +228,10 @@ cabal bench format-bench
 
 | Operation | wireform-cbor |   cborg | ratio |
 | :-------- | ------------: | ------: | ----: |
-| encode    |        305 ns |  275 ns | 0.90x |
-| decode    |        460 ns | 1214 ns | 2.64x |
+| encode    |        302 ns |  281 ns | 0.93x |
+| decode    |        462 ns | 1289 ns | 2.79x |
 
-<sub>Last run 2026-05-13 10:30:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-06-27 11:56:42 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:cbor-vs-cborg-encode -->
 
 For cross-language comparisons, the canonical reference implementations

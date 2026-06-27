@@ -210,10 +210,10 @@ cabal bench wireform-thrift:wireform-thrift-bench
 
 | Operation             |   binary |  compact | ratio |
 | :-------------------- | -------: | -------: | ----: |
-| encode Person         |   266 ns |   290 ns | 1.09x |
-| encode [Person] x 100 | 24478 ns | 27893 ns | 1.14x |
+| encode Person         |   248 ns |   259 ns | 1.04x |
+| encode [Person] x 100 | 23948 ns | 25963 ns | 1.08x |
 
-<sub>Last run 2026-05-13 11:38:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-06-27 11:35:55 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:thrift-binary-vs-compact -->
 
 For cross-language comparisons:

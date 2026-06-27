@@ -40,7 +40,7 @@ Subsequent builds reuse `~/.cabal/store` and are much faster.
 | Service | Start | Notes |
 |---------|--------|--------|
 | Kafka (integration tests) | `docker compose -f wireform-kafka/test-integration/docker-compose.yml up -d` | Then `WIREFORM_KAFKA_BROKER=localhost:9092` for relevant `cabal test` targets |
-| Docs site | `cd website && npm install && npm run dev` | http://localhost:4321/wireform-/ |
+| Docs site | `cd website && npm install && npm run dev` | <http://localhost:4321/wireform-/> |
 | Nix dev shell | `nix develop` or `nix develop .#ghc98` | Alternative to ghcup; provides fourmolu, prek, native libs |
 
 ### Gotchas
@@ -72,11 +72,11 @@ between what the codegen produces and what the repo claims it produces; the
 next regen pass clobbers the edit and the change disappears. The pattern that
 broke this rule before:
 
-  * a generated module needed a tweak (an extra import, a missing instance,
+- a generated module needed a tweak (an extra import, a missing instance,
     a fixed comment),
-  * the tweak was applied directly to `<Format>/Generated/Foo.hs`,
-  * the codegen kept generating the old shape,
-  * a later regen wiped the tweak and reintroduced the original bug.
+- the tweak was applied directly to `<Format>/Generated/Foo.hs`,
+- the codegen kept generating the old shape,
+- a later regen wiped the tweak and reintroduced the original bug.
 
 **Always make the change in the codegen** (`<Format>.CodeGen.*` /
 `<Format>/codegen/`) and **regenerate**. The regen output is what gets committed.
@@ -111,6 +111,71 @@ Defined keys: `tests`, `coverage`, `coverage:table`,
 `bench:<id>`. See [`wireform-stats/README.md`](wireform-stats/README.md)
 for the schema and the regen workflow.
 
+`regen-stats render` (and `check`) rewrites the READMEs **and** the
+docs-site package pages in one pass — a `wireform-<name>` package maps
+to the `<name>.md` docs page, and its `bench:<id>` regions are filled
+from the same `wireform-<name>/bench-results/summary/<id>.json` files.
+The only divergence is the chart: READMEs use a `<picture>` pointing
+at two committed SVG files, while the docs pages inline a single
+color-scheme-adaptive SVG (`renderBarChartAdaptive`) because a
+plain-markdown Starlight page can't reference `public/` assets with a
+base-aware URL. Never hand-edit the benchmark tables/charts in either
+place — change the summary JSON (or the renderer) and re-run
+`regen-stats render`. Docs pages whose performance numbers don't come
+from a committed summary (e.g. `html.md`'s custom-harness throughput)
+have no markers and are hand-maintained as usual.
+
+#### Refreshing / adding benchmarks (the summary JSONs are generated)
+
+The numbers inside `wireform-<pkg>/bench-results/summary/<id>.json` are
+**measured output, not source** — treat them like any other generated
+file (see "Never hand-edit a generated file"). They come from real
+criterion runs, distilled by a reproducible, manifest-driven pipeline:
+
+```
+scripts/bench-manifest.json   # declares: bench target -> summary(s) + per-cell map
+      │  (consumed by)
+scripts/run-benchmarks.py     # build + run each target SEQUENTIALLY, then distill
+      │  (calls)
+scripts/distill-bench.py      # criterion --json -> refresh summary values + capturedAt
+      │  (then)
+regen-stats render            # summaries -> charts + READMEs + docs
+```
+
+**Always run benchmarks sequentially** — never via the parallel
+subagent/`-j` paths. criterion is noise-sensitive; concurrent runs
+poison each other's numbers. `run-benchmarks.py` enforces this.
+
+To **refresh** existing numbers:
+
+```bash
+python3 scripts/run-benchmarks.py --render             # everything (slow)
+python3 scripts/run-benchmarks.py --only yaml --render  # one target
+```
+
+To **add a new benchmark** (or repoint/rename an existing one):
+
+1. Add the `BenchSummary` skeleton at
+   `wireform-<pkg>/bench-results/summary/<id>.json` (id / title / unit /
+   `higherIsBetter` / groups / series names / baseline / toolchain) and
+   a `<!-- BEGIN_AUTOGEN bench:<id> -->…<!-- END_AUTOGEN bench:<id> -->`
+   pair in the README and/or `website/src/content/docs/packages/<pkg>.md`.
+2. Add an entry to `scripts/bench-manifest.json` mapping the cabal
+   benchmark target to that summary. Discover the criterion
+   `reportName`s with a dry run: `python3 scripts/run-benchmarks.py
+   --only <target> --dry-run` — any `unmatched cells` error prints the
+   available report names. Add a `"<series>|<group>=<reportName>"` entry
+   to the manifest `map` for every cell that doesn't auto-match
+   `<series>/<group>`.
+3. Re-run `python3 scripts/run-benchmarks.py --only <target> --render`
+   and commit the refreshed summary, charts, README, and docs together.
+
+The manifest is the single source of truth for "which bench feeds which
+summary"; never re-derive that mapping ad-hoc in a shell. The CI
+`collect-bench` job (`.github/workflows/regen-stats.yml`, opt-in via the
+`run_benchmarks` workflow_dispatch input) runs exactly this driver and
+commits the result.
+
 #### Per-format codegen entry points
 
 | Format        | Codegen entry                                              | Regen helper                                  | Generated dir                                       |
@@ -125,9 +190,9 @@ The `kafka-codegen` exe **deletes every existing `.hs` file in the output
 directory** before writing fresh output (`cleanGeneratedFiles` in
 `codegen-exe/Main.hs`). Consequences:
 
-  * Any module in `wireform-kafka/src/Kafka/Protocol/Generated/` whose schema
+- Any module in `wireform-kafka/src/Kafka/Protocol/Generated/` whose schema
     is **not** in the supplied message-dir will be deleted by a regen.
-  * If `wireform-kafka.cabal` lists modules that aren't in the schema dir
+- If `wireform-kafka.cabal` lists modules that aren't in the schema dir
     (e.g. `KIP-932` share-group messages, `StreamsGroup*` from a newer Kafka
     than what you regenerated against), the build will break after a regen
     until the cabal file is updated to match.
@@ -216,12 +281,15 @@ CI builds against GHC `9.6.4` and `9.8.4` (see
 doesn't already have the Haskell toolchain installed:
 
 - **Apt packages** (Ubuntu 24.04, root):
+
   ```
   apt-get install -y build-essential libgmp-dev libffi-dev libffi8 \
     libncurses-dev libtinfo6 zlib1g-dev libnuma-dev xz-utils \
     protobuf-compiler
   ```
+
 - **Haskell toolchain via ghcup**:
+
   ```
   curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | \
     BOOTSTRAP_HASKELL_NONINTERACTIVE=1 sh
@@ -230,6 +298,7 @@ doesn't already have the Haskell toolchain installed:
   ghcup install cabal 3.10.3.0 --set
   cabal update
   ```
+
 - **Cross-language interop tests** (optional): `pip3 install pyarrow`
   for the pyarrow round-trip suites in `wireform-parquet/test/Main.hs`,
   and `pip3 install protobuf` for `python-interop`.
@@ -344,7 +413,7 @@ existing `<Format>.Derive` and adapt the value-mapping calls".
 | `wireform-kafka-protocol` | `Kafka.Protocol.{Primitives,Message,Wire.*}`, `Kafka.Protocol.Generated.*` (one module per API key). | Generated request/response records and wire codec. Sources under `wireform-kafka/src`; separate package so Haddock and linking stay unambiguous. Regen via `scripts/regen-kafka-protocol.sh`; keep `wireform-kafka-protocol.cabal` `exposed-modules` in sync. |
 | `wireform-websocket` | `Network.WebSocket{,.Frame,.Handshake,.Connection,.Message,.Server,.Client}`. | RFC 6455 WebSocket built on `Wireform.Parser` streaming mode + `Wireform.Builder`; SHA-1 + base64 handshake via `Wireform.Base64`. Standalone TCP / TLS listener (`runWebSocketServer`); `acceptWebSocketOn{Socket,Tls}` hand-off for integrating with the `wireform-http` server's accept loop. Client connect over `ws://` and `wss://` via `Wireform.Network.TLS.OpenSSL`. |
 | `wireform-protovalidate` | `Protovalidate`, `Protovalidate.{Format,Library,Rules,Constraint,Eval,Schema,Class,Proto,Violation}` | [protovalidate](https://protovalidate.com/) (CEL-driven Protobuf validation) for the proto stack. Depends on `wireform-cel` + `wireform-proto`. `Protovalidate.Library` registers protovalidate's CEL extension functions (`isEmail`/`isHostname`/`isHostAndPort`/`isIp`/`isIpPrefix`/`isUri`/`isUriRef`/`isNan`/`isInf`/`unique`); `Protovalidate.Format` has the underlying pure RFC predicates; `Protovalidate.Rules` encodes the standard rules as CEL over `this`/`rules`; `Protovalidate.Eval` binds field values + rules and collects `Violation`s (nested-message + repeated paths, custom field/message CEL); `Protovalidate.Schema` reads `(buf.validate.*)` annotations off a parsed `.proto` AST (`parseProtoRules`) into `MessageRules`; `Protovalidate.Class` is the compile-once typed path (`compileValidator`/`runValidator`/`validateValue` + a `ToCel` Generic deriving so generated records validate without a `DynamicMessage` round trip); `Protovalidate.Descriptor` reads `buf.validate` rules out of a compiled `FileDescriptorProto` (extension #1159 on `FieldOptions`/`MessageOptions`, now possible because `Proto.Google.Protobuf.Descriptor` preserves unknown fields); `Protovalidate.TH.compileMessageValidator` reads a `.proto`'s rules at compile time and emits a `Value -> [Violation]` whose every predicate (standard rules inlined over `this`, plus custom `cel`) is compiled to Haskell via `CEL.TH.compileCelFn` — no runtime parse/AST-walk; `Protovalidate.Refined` reifies rules as `refined` refinement types — native predicates for length/count/comparison rules and a type-level-`Symbol` `Cel`/`CelWith` predicate that runs CEL at validation time, so well-known formats and arbitrary/custom `cel` predicates also become refinement types (`refinedFieldType` emits the `Refined (...) T` type expression a code generator would splice); `Protovalidate.Proto` still bridges schemaless `Proto.Dynamic.DynamicMessage` → CEL. Advanced rules: time-relative timestamps (`lt_now`/`gt_now`/`within`) via `validateAt` (binds `now`); `map.keys`/`map.values` sub-rules (`mapKeys`/`mapValues`, reported at `field[key]`, extracted from `.proto` map fields); `enum.defined_only` (`definedOnly`); oneof `required` (`oneofRequired`, also extracted from `(buf.validate.oneof)`); `string.well_known_regex` (`wellKnownRegex`); `(buf.validate.predefined)` reusable constraints via `frPredefined` (CEL + bound `rule`). `.proto` extraction (`parseProtoRules`) resolves these from source: `enum.defined_only` (enum value numbers → `this in [...]`, scalar + `repeated.items`), `string.well_known_regex` (+`strict`), `timestamp`/`duration` `{seconds,nanos}` message-literal bounds (and `timestamp.within`), `map.keys`/`map.values`, and oneof `required`. The `Protovalidate.TH` compiled path inlines the time-literal bounds (`timestamp(..)`/`duration("..s")`) and rides custom constraints (so defined_only/well_known_regex compile too); now-relative/map-key-value/predefined stay interpreted. `Protovalidate.Descriptor` (compiled `FileDescriptorProto`) covers the standard #1159 rules. |
-| `wireform-cel` | `CEL`, `CEL.{Value,Syntax,Parser,Eval,Stdlib,Environment,Error,TH}` | A conformant [Common Expression Language](https://github.com/google/cel-spec/blob/master/doc/langdef.md) parser + evaluator over a dynamic `Value` model: full grammar/lexis (incl. backtick-escaped idents), number-line numeric semantics (`1 == 1u == 1.0` with cel-go's lossy cross-type rule, NaN unordered), error-absorbing `&&`/`||`, the comprehension macros (`has`/`all`/`exists`/`exists_one`/`map`/`filter` plus the two-variable `macros2` forms `all`/`exists`/`existsOne`/`transformList`/`transformMap`), and the standard library of operators, conversions, string/regex functions, and `Timestamp`/`Duration` support (named IANA timezones via `tz`). Passes the upstream cel-spec conformance suite for all non-message core files (`pass=1124 skip=128 fail=0`; skips are protobuf-message cases). Opt-in conformance runner gated by `CEL_SPEC_DIR` (like `TOML_TEST_SUITE`). The evaluator (`CEL.Eval`) is structured as per-node combinators (`compileExpr :: Expr -> Env -> Either CelError Value`); `CEL.TH` reuses them: `[cel\|…\|]`/`compileCel` bake the parsed `Expr` as a `Lift`able constant, and `[celFn\|…\|]`/`compileCelFn` emit the program as Haskell (each node → a combinator call) with no runtime AST walk. Not yet: protobuf message values, the optional type-checker. |
+| `wireform-cel` | `CEL`, `CEL.{Value,Syntax,Parser,Eval,Stdlib,Environment,Error,TH}` | A conformant [Common Expression Language](https://github.com/google/cel-spec/blob/master/doc/langdef.md) parser + evaluator over a dynamic `Value` model: full grammar/lexis (incl. backtick-escaped idents), number-line numeric semantics (`1 == 1u == 1.0` with cel-go's lossy cross-type rule, NaN unordered), error-absorbing `&&`/`||`, the comprehension macros (`has`/`all`/`exists`/`exists_one`/`map`/`filter` plus the two-variable `macros2` forms `all`/`exists`/`existsOne`/`transformList`/`transformMap`), and the standard library of operators, conversions, string/regex functions, and`Timestamp`/`Duration` support (named IANA timezones via `tz`). Passes the upstream cel-spec conformance suite for all non-message core files (`pass=1124 skip=128 fail=0`; skips are protobuf-message cases). Opt-in conformance runner gated by`CEL_SPEC_DIR` (like `TOML_TEST_SUITE`). The evaluator (`CEL.Eval`) is structured as per-node combinators (`compileExpr :: Expr -> Env -> Either CelError Value`);`CEL.TH` reuses them: `[cel\|…\|]`/`compileCel` bake the parsed `Expr` as a `Lift`able constant, and`[celFn\|…\|]`/`compileCelFn` emit the program as Haskell (each node → a combinator call) with no runtime AST walk. Not yet: protobuf message values, the optional type-checker. |
 
 ### `wireform-proto` — bigger surface, historical layout
 
@@ -505,14 +574,14 @@ If you find yourself writing one of the following patterns in
 `wireform-http*` or `wireform-grpc`, stop and check whether the
 hermes module above already covers the same ground:
 
-* Splitting on `0x2C` / `0x3B` to peel apart a header value.
-* A bespoke `parseQuality` / `parseQ` / weight-list parser.
-* A copy of the IMF-fixdate format string.
-* A `case BS.elemIndex 0x3D bs of` dance to extract an `auth-param`.
-* A new `data MyChallenge = MyChallenge { realm :: …, nonce :: … }`
+- Splitting on `0x2C` / `0x3B` to peel apart a header value.
+- A bespoke `parseQuality` / `parseQ` / weight-list parser.
+- A copy of the IMF-fixdate format string.
+- A `case BS.elemIndex 0x3D bs of` dance to extract an `auth-param`.
+- A new `data MyChallenge = MyChallenge { realm :: …, nonce :: … }`
   when `Network.HTTP.Headers.Authorization.Credentials` already
   models the same shape.
-* A handwritten `case rendered of "gzip" -> …; "br" -> …` dispatch
+- A handwritten `case rendered of "gzip" -> …; "br" -> …` dispatch
   on `Content-Encoding` (use `Network.HTTP.ContentCoding` instead).
 
 ### Rule of thumb

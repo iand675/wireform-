@@ -1,5 +1,5 @@
-<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 360" width="720" height="360" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif" font-size="12">
-  <rect x="0" y="0" width="720" height="360" fill="#0d1117"/>
+<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 400" width="720" height="400" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif" font-size="12">
+  <rect x="0" y="0" width="720" height="400" fill="#0d1117"/>
   <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#e6edf3">Parquet XXH64 hash: C kernel vs pure Haskell across input sizes</text>
   <text x="360" y="44" text-anchor="middle" font-size="11" fill="#7d8590">lower is better · ns · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5</text>
   <g stroke="#30363d" stroke-width="1">
@@ -25,31 +25,31 @@
     <rect x="312.5" y="319.8" width="60" height="0.2" rx="2" fill="#ff7b72"/>
     <rect x="405.5" y="319.6" width="60" height="0.4" rx="2" fill="#58a6ff"/>
     <rect x="467.5" y="317.6" width="60" height="2.4" rx="2" fill="#ff7b72"/>
-    <rect x="560.5" y="296.7" width="60" height="23.3" rx="2" fill="#58a6ff"/>
-    <rect x="622.5" y="173.8" width="60" height="146.2" rx="2" fill="#ff7b72"/>
+    <rect x="560.5" y="297.2" width="60" height="22.8" rx="2" fill="#58a6ff"/>
+    <rect x="622.5" y="172.9" width="60" height="147.1" rx="2" fill="#ff7b72"/>
   </g>
   <g>
-    <text x="125.5" y="315.9" text-anchor="middle" font-size="10" fill="#e6edf3">12.0</text>
-    <text x="187.5" y="315.9" text-anchor="middle" font-size="10" fill="#e6edf3">10.9</text>
-    <text x="280.5" y="315.9" text-anchor="middle" font-size="10" fill="#e6edf3">18.6</text>
-    <text x="342.5" y="315.8" text-anchor="middle" font-size="10" fill="#e6edf3">43.1</text>
-    <text x="435.5" y="315.6" text-anchor="middle" font-size="10" fill="#e6edf3">77.6</text>
-    <text x="497.5" y="313.6" text-anchor="middle" font-size="10" fill="#e6edf3">452</text>
-    <text x="590.5" y="292.7" text-anchor="middle" font-size="10" fill="#e6edf3">4481</text>
-    <text x="652.5" y="169.8" text-anchor="middle" font-size="10" fill="#e6edf3">28119</text>
+    <text x="125.5" y="315.9" text-anchor="middle" font-size="10" fill="#e6edf3">12.1</text>
+    <text x="187.5" y="315.9" text-anchor="middle" font-size="10" fill="#e6edf3">10.3</text>
+    <text x="280.5" y="315.9" text-anchor="middle" font-size="10" fill="#e6edf3">18.1</text>
+    <text x="342.5" y="315.8" text-anchor="middle" font-size="10" fill="#e6edf3">43.0</text>
+    <text x="435.5" y="315.6" text-anchor="middle" font-size="10" fill="#e6edf3">79.9</text>
+    <text x="497.5" y="313.6" text-anchor="middle" font-size="10" fill="#e6edf3">457</text>
+    <text x="590.5" y="293.2" text-anchor="middle" font-size="10" fill="#e6edf3">4387</text>
+    <text x="652.5" y="168.9" text-anchor="middle" font-size="10" fill="#e6edf3">28291</text>
   </g>
   <g>
-    <text x="157.5" y="336" text-anchor="middle" font-size="11" fill="#e6edf3">8 B</text>
-    <text x="312.5" y="336" text-anchor="middle" font-size="11" fill="#e6edf3">64 B</text>
-    <text x="467.5" y="336" text-anchor="middle" font-size="11" fill="#e6edf3">1 KiB</text>
-    <text x="622.5" y="336" text-anchor="middle" font-size="11" fill="#e6edf3">64 KiB</text>
+    <text x="157.5" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">8 B</text>
+    <text x="312.5" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">64 B</text>
+    <text x="467.5" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">1 KiB</text>
+    <text x="622.5" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">64 KiB</text>
   </g>
   <g>
-    <g transform="translate(264, 344)">
+    <g transform="translate(264, 382)">
       <rect x="0" y="-9" width="12" height="12" rx="2" fill="#58a6ff"/>
       <text x="18" y="1" font-size="11" fill="#e6edf3">C kernel</text>
     </g>
-    <g transform="translate(354, 344)">
+    <g transform="translate(354, 382)">
       <rect x="0" y="-9" width="12" height="12" rx="2" fill="#ff7b72"/>
       <text x="18" y="1" font-size="11" fill="#e6edf3">pure Haskell</text>
     </g>

@@ -10,20 +10,21 @@ and rewrites the body of each from the data captured under
 Subcommands:
 
 * @regen-stats render@: read what's in tree, regenerate the
-  markdown. Fast (no cabal commands run).
+ markdown. Fast (no cabal commands run).
 * @regen-stats render-bench-charts@: re-render every @bench-results\/charts\/@
-  SVG from its summary JSON. Use after a palette / layout change.
+ SVG from its summary JSON. Use after a palette / layout change.
 * @regen-stats badges@: regenerate every shields.io endpoint
-  badge JSON under @badges/@. Fast.
+ badge JSON under @badges/@. Fast.
 * @regen-stats check@: run @render@ in dry-run mode and exit
-  non-zero if anything would change. The CI gate.
+ non-zero if anything would change. The CI gate.
 -}
 module Main (main) where
 
-import Control.Monad (forM_, when)
+import Control.Monad (forM_, unless, when)
 import Data.ByteString qualified as BS
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (maybeToList)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -199,7 +200,7 @@ runRender opts = do
     mDocs <- docsPageFor opts pkg
     forM_ mDocs $ \docsPath -> do
       dreps <- docsReplacementsFor opts pkg
-      when (not (Map.null dreps)) $ do
+      unless (Map.null dreps) $ do
         changed <- Mk.rewriteFile docsPath dreps
         when (roVerbose opts || changed) $
           putStrLn $
@@ -213,8 +214,8 @@ runRender opts = do
 runCheck :: RenderOpts -> IO ()
 runCheck opts = do
   packages <- discoverPackages (roRoot opts)
-  readmeChanged <- fmap or $ mapM (checkOne opts) packages
-  docsChanged <- fmap or $ mapM (checkDocs opts) packages
+  readmeChanged <- or <$> mapM (checkOne opts) packages
+  docsChanged <- or <$> mapM (checkDocs opts) packages
   if readmeChanged || docsChanged
     then do
       putStrLn "regen-stats check: README and/or docs markers are stale. Run `regen-stats render`."
@@ -331,8 +332,6 @@ buildReplacementsFor opts pkg = do
         , maybeToList covTblRep
         , benchReps
         ]
-  where
-    maybeToList = maybe [] (: [])
 
 
 testsReplacement :: RenderOpts -> FilePath -> IO (Maybe (Mk.MarkerKey, Mk.Replacement))
@@ -362,7 +361,7 @@ coverageTableReplacement opts pkg = do
 benchReplacementsFor :: RenderOpts -> FilePath -> IO [(Mk.MarkerKey, Mk.Replacement)]
 benchReplacementsFor opts pkg = do
   summaries <- listSummaries (roRoot opts) pkg
-  fmap concat $ mapM (oneBench opts pkg) summaries
+  concat <$> mapM (oneBench opts pkg) summaries
 
 
 oneBench :: RenderOpts -> FilePath -> FilePath -> IO [(Mk.MarkerKey, Mk.Replacement)]
@@ -417,8 +416,8 @@ docsPageFor :: RenderOpts -> FilePath -> IO (Maybe FilePath)
 docsPageFor opts pkg =
   case T.stripPrefix "wireform-" (T.pack pkg) of
     Nothing -> pure Nothing
-    Just short -> do
-      let path = roRoot opts </> roDocsDir opts </> (T.unpack short <> ".md")
+    Just shortName -> do
+      let path = roRoot opts </> roDocsDir opts </> (T.unpack shortName <> ".md")
       ok <- doesFileExist path
       pure (if ok then Just path else Nothing)
 
@@ -501,7 +500,7 @@ discoverPackages :: FilePath -> IO [FilePath]
 discoverPackages root = do
   entries <- listDirectory root
   let candidates = filter ("wireform-" `isPrefix`) entries
-  fmap (filter (/= "")) $ mapM checkOne' candidates
+  filter (/= "") <$> mapM checkOne' candidates
   where
     checkOne' name = do
       isDir <- doesDirectoryExist (root </> name)

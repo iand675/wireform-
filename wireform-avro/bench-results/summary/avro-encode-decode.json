@@ -1,0 +1,29 @@
+{
+  "id": "avro-encode-decode",
+  "title": "wireform-avro encode + decode (Person record, schema-driven)",
+  "unit": "Nanos",
+  "higherIsBetter": false,
+  "groups": [
+    "Person",
+    "[Person] x 100"
+  ],
+  "series": [
+    {
+      "name": "encode",
+      "values": [
+        176.36,
+        15093.5
+      ]
+    },
+    {
+      "name": "decode",
+      "values": [
+        101.18,
+        10523.53
+      ]
+    }
+  ],
+  "baseline": "encode",
+  "capturedAt": "2026-06-27T12:10:15Z",
+  "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
+}

@@ -3,14 +3,36 @@
   "title": "wireform-xml DOM parse vs Hackage XML libraries (medium document)",
   "unit": "Micros",
   "higherIsBetter": false,
-  "groups": ["medium document"],
+  "groups": [
+    "medium document"
+  ],
   "series": [
-    {"name": "hexml (C bindings)", "values": [29.02]},
-    {"name": "wireform-xml (FastDOM)", "values": [53.61]},
-    {"name": "wireform-xml (typed DOM)", "values": [194.05]},
-    {"name": "xml-conduit", "values": [1610.18]}
+    {
+      "name": "hexml (C bindings)",
+      "values": [
+        30.67
+      ]
+    },
+    {
+      "name": "wireform-xml (FastDOM)",
+      "values": [
+        52.03
+      ]
+    },
+    {
+      "name": "wireform-xml (typed DOM)",
+      "values": [
+        194.02
+      ]
+    },
+    {
+      "name": "xml-conduit",
+      "values": [
+        1625.64
+      ]
+    }
   ],
   "baseline": "wireform-xml (typed DOM)",
-  "capturedAt": "2026-05-13T10:35:00Z",
+  "capturedAt": "2026-06-27T11:56:42Z",
   "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
 }

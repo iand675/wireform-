@@ -3,12 +3,27 @@
   "title": "wireform-bond encode + decode (Compact Binary, Person record)",
   "unit": "Nanos",
   "higherIsBetter": false,
-  "groups": ["single Person", "[Person] x 100"],
+  "groups": [
+    "single Person",
+    "[Person] x 100"
+  ],
   "series": [
-    {"name": "encode", "values": [162.33, 15720.10]},
-    {"name": "decode", "values": [185.16, 2080.55]}
+    {
+      "name": "encode",
+      "values": [
+        168.31,
+        15742.43
+      ]
+    },
+    {
+      "name": "decode",
+      "values": [
+        191.72,
+        2139.79
+      ]
+    }
   ],
   "baseline": "encode",
-  "capturedAt": "2026-05-13T11:44:00Z",
+  "capturedAt": "2026-06-27T11:35:54Z",
   "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5. Decode is structurally lazy at the Value layer; the [Person] x 100 number reflects only the outer container resolution."
 }

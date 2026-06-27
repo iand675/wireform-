@@ -3,12 +3,33 @@
   "title": "wireform-ndjson vs aeson + manual newline splitting",
   "unit": "Micros",
   "higherIsBetter": false,
-  "groups": ["encode 10 rows", "encode 1000 rows", "decode 10 rows", "decode 1000 rows"],
+  "groups": [
+    "encode 10 rows",
+    "encode 1000 rows",
+    "decode 10 rows",
+    "decode 1000 rows"
+  ],
   "series": [
-    {"name": "wireform-ndjson",  "values": [5.03, 544.67, 4.00, 442.22]},
-    {"name": "aeson + lines",    "values": [4.76, 503.59, 3.91, 402.24]}
+    {
+      "name": "wireform-ndjson",
+      "values": [
+        5.18,
+        518.0,
+        3.85,
+        426.15
+      ]
+    },
+    {
+      "name": "aeson + lines",
+      "values": [
+        4.95,
+        508.21,
+        3.84,
+        382.3
+      ]
+    }
   ],
   "baseline": "wireform-ndjson",
-  "capturedAt": "2026-05-13T11:42:00Z",
+  "capturedAt": "2026-06-27T11:35:55Z",
   "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5. Today the SIMD newline scanner doesn't yet outperform `BS.split '\\n'` on these inputs; both paths are within 10%."
 }

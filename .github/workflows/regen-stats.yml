@@ -39,8 +39,8 @@ jobs:
       - uses: haskell-actions/setup@v2
         id: setup
         with:
-          ghc-version: '9.8.4'
-          cabal-version: 'latest'
+          ghc-version: "9.8.4"
+          cabal-version: "latest"
 
       - name: Cache cabal store
         uses: actions/cache@v4
@@ -96,8 +96,8 @@ jobs:
       - uses: haskell-actions/setup@v2
         id: setup
         with:
-          ghc-version: '9.8.4'
-          cabal-version: 'latest'
+          ghc-version: "9.8.4"
+          cabal-version: "latest"
 
       - name: Cache cabal store
         uses: actions/cache@v4
@@ -144,6 +144,13 @@ jobs:
   # is to run them on a self-hosted dedicated machine; until that
   # exists, the workflow_dispatch path is also useful for ad-hoc runs
   # by maintainers from the GitHub UI.
+  #
+  # This job is the CI face of `scripts/run-benchmarks.py`: it builds +
+  # runs every benchmark declared in `scripts/bench-manifest.json`
+  # SEQUENTIALLY, distills the criterion JSON back into the committed
+  # BenchSummary files, re-renders the charts + READMEs + docs, runs
+  # `regen-stats check`, and commits the refreshed numbers. To add or
+  # repoint a benchmark, edit the manifest -- never this workflow.
   collect-bench:
     name: Collect benchmark stats (manual)
     runs-on: ubuntu-latest
@@ -156,8 +163,8 @@ jobs:
       - uses: haskell-actions/setup@v2
         id: setup
         with:
-          ghc-version: '9.8.4'
-          cabal-version: 'latest'
+          ghc-version: "9.8.4"
+          cabal-version: "latest"
 
       - name: Cache cabal store
         uses: actions/cache@v4
@@ -172,8 +179,12 @@ jobs:
             libgmp-dev libsnappy-dev liblz4-dev libzstd-dev \
             libbrotli-dev librdkafka-dev protobuf-compiler
 
-      - name: Run all benchmarks
-        run: bash scripts/collect-stats.sh bench-all
+      - name: Run benchmarks, distill summaries, re-render, check
+        # Sequential by construction (criterion is noise-sensitive).
+        # --render re-renders charts + READMEs + docs and runs
+        # `regen-stats check` at the end, failing the job if anything
+        # would still be stale.
+        run: python3 scripts/run-benchmarks.py --render
 
       - name: Stash raw criterion JSON as artifact
         uses: actions/upload-artifact@v4
@@ -181,3 +192,16 @@ jobs:
           name: bench-raw-${{ github.sha }}
           path: dist-stats/bench-raw/
           retention-days: 90
+
+      - name: Commit & push refreshed benchmark numbers
+        run: |
+          if ! git diff --quiet; then
+            git config user.name "regen-stats[bot]"
+            git config user.email "regen-stats@users.noreply.github.com"
+            git add 'wireform-*/bench-results' 'wireform-*/README.md' \
+                    website/src/content/docs/packages/
+            git commit -m "ci(regen-stats): refresh benchmark numbers from a full run"
+            git push
+          else
+            echo "No benchmark changes."
+          fi

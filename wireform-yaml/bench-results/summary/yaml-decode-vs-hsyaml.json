@@ -3,12 +3,36 @@
   "title": "wireform-yaml decode vs HsYAML (pure Haskell) across input sizes",
   "unit": "Micros",
   "higherIsBetter": false,
-  "groups": ["tiny", "small", "flow", "literal", "big"],
+  "groups": [
+    "tiny",
+    "small",
+    "flow",
+    "literal",
+    "big"
+  ],
   "series": [
-    {"name": "wireform-yaml", "values": [0.25, 3.80, 4.02, 3.97, 14.87]},
-    {"name": "HsYAML",        "values": [102.06, 1002.32, 1241.80, 1166.90, 3626.79]}
+    {
+      "name": "wireform-yaml",
+      "values": [
+        0.25,
+        3.87,
+        4.11,
+        4.18,
+        15.01
+      ]
+    },
+    {
+      "name": "HsYAML",
+      "values": [
+        108.21,
+        1044.22,
+        1286.11,
+        1175.44,
+        3960.7
+      ]
+    }
   ],
   "baseline": "wireform-yaml",
-  "capturedAt": "2026-05-13T10:40:00Z",
+  "capturedAt": "2026-06-27T11:56:42Z",
   "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
 }

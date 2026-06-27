@@ -3,12 +3,27 @@
   "title": "wireform-asn1 encode + decode (DER, Subject record)",
   "unit": "Nanos",
   "higherIsBetter": false,
-  "groups": ["single Subject", "[Subject] x 100"],
+  "groups": [
+    "single Subject",
+    "[Subject] x 100"
+  ],
   "series": [
-    {"name": "encode", "values": [141.22, 16920.91]},
-    {"name": "decode", "values": [115.10, 12838.98]}
+    {
+      "name": "encode",
+      "values": [
+        139.72,
+        17260.24
+      ]
+    },
+    {
+      "name": "decode",
+      "values": [
+        114.58,
+        12698.53
+      ]
+    }
   ],
   "baseline": "encode",
-  "capturedAt": "2026-05-13T11:42:00Z",
+  "capturedAt": "2026-06-27T11:35:54Z",
   "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
 }

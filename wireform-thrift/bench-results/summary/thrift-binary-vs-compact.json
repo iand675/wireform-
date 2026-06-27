@@ -3,12 +3,27 @@
   "title": "wireform-thrift binary vs compact wire protocols",
   "unit": "Nanos",
   "higherIsBetter": false,
-  "groups": ["encode Person", "encode [Person] x 100"],
+  "groups": [
+    "encode Person",
+    "encode [Person] x 100"
+  ],
   "series": [
-    {"name": "binary",  "values": [266.20, 24478.21]},
-    {"name": "compact", "values": [289.88, 27893.22]}
+    {
+      "name": "binary",
+      "values": [
+        248.31,
+        23948.41
+      ]
+    },
+    {
+      "name": "compact",
+      "values": [
+        258.95,
+        25962.74
+      ]
+    }
   ],
   "baseline": "binary",
-  "capturedAt": "2026-05-13T11:38:00Z",
+  "capturedAt": "2026-06-27T11:35:55Z",
   "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
 }

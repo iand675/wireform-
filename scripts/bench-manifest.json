@@ -1,0 +1,298 @@
+{
+  "_comment": [
+    "Declarative map from each criterion benchmark target to the",
+    "wireform-stats BenchSummary file(s) it feeds, plus the per-cell",
+    "report-name overrides distill-bench.py needs when a summary's display",
+    "label differs from the bench's `bgroup/bench` report name.",
+    "",
+    "Consumed by scripts/run-benchmarks.py (run sequentially -> capture",
+    "criterion JSON -> distill back into the committed summaries). Editing",
+    "this file is how you add/repoint a benchmark; never hand-edit the",
+    "numbers inside a summary JSON. See wireform-stats/README.md.",
+    "",
+    "A `map` entry is `\"<series>|<group>=<criterion reportName>\"`; cells",
+    "not listed are matched automatically by trying `<series>/<group>`,",
+    "`<group>/<series>`, then the bare label."
+  ],
+  "rawDir": "dist-stats/bench-raw",
+  "benches": [
+    {
+      "target": "wireform-avro:bench:wireform-avro-bench",
+      "raw": "avro",
+      "summaries": [
+        { "path": "wireform-avro/bench-results/summary/avro-encode-decode.json", "map": [] }
+      ]
+    },
+    {
+      "target": "wireform-asn1:bench:wireform-asn1-bench",
+      "raw": "asn1",
+      "summaries": [
+        {
+          "path": "wireform-asn1/bench-results/summary/asn1-encode-decode.json",
+          "map": [
+            "encode|single Subject=encode/Subject",
+            "decode|single Subject=decode/Subject"
+          ]
+        }
+      ]
+    },
+    {
+      "target": "wireform-bencode:bench:wireform-bencode-bench",
+      "raw": "bencode",
+      "summaries": [
+        { "path": "wireform-bencode/bench-results/summary/bencode-encode-decode.json", "map": [] }
+      ]
+    },
+    {
+      "target": "wireform-bond:bench:wireform-bond-bench",
+      "raw": "bond",
+      "summaries": [
+        {
+          "path": "wireform-bond/bench-results/summary/bond-encode-decode.json",
+          "map": ["encode|single Person=encode/Person", "decode|single Person=decode/Person"]
+        }
+      ]
+    },
+    {
+      "target": "wireform-bson:bench:wireform-bson-bench",
+      "raw": "bson",
+      "summaries": [
+        {
+          "path": "wireform-bson/bench-results/summary/bson-encode-decode.json",
+          "map": ["encode|single Person=encode/Person", "decode|single Person=decode/Person"]
+        }
+      ]
+    },
+    {
+      "target": "wireform-capnproto:bench:wireform-capnproto-bench",
+      "raw": "capnproto",
+      "summaries": [
+        { "path": "wireform-capnproto/bench-results/summary/capnproto-encode-decode.json", "map": [] }
+      ]
+    },
+    {
+      "target": "wireform-csv:bench:wireform-csv-bench",
+      "raw": "csv",
+      "summaries": [
+        { "path": "wireform-csv/bench-results/summary/csv-encode-decode.json", "map": [] }
+      ]
+    },
+    {
+      "target": "wireform-edn:bench:wireform-edn-bench",
+      "raw": "edn",
+      "summaries": [
+        {
+          "path": "wireform-edn/bench-results/summary/edn-encode-decode.json",
+          "map": ["encode|single Person=encode/Person", "decode|single Person=decode/Person"]
+        }
+      ]
+    },
+    {
+      "target": "wireform-flatbuffers:bench:wireform-flatbuffers-bench",
+      "raw": "flatbuffers",
+      "summaries": [
+        { "path": "wireform-flatbuffers/bench-results/summary/flatbuffers-encode-decode.json", "map": [] }
+      ]
+    },
+    {
+      "target": "wireform-fory:bench:wireform-fory-bench",
+      "raw": "fory",
+      "summaries": [
+        {
+          "path": "wireform-fory/bench-results/summary/fory-encode-decode.json",
+          "map": [
+            "encode|string=encode/small string", "decode|string=decode/small string",
+            "encode|bytes 1KB=encode/bytes 1k", "decode|bytes 1KB=decode/bytes 1k",
+            "encode|Person struct=encode/struct Person", "decode|Person struct=decode/struct Person",
+            "encode|list[Person]*100=encode/list-of-struct 100", "decode|list[Person]*100=decode/list-of-struct 100"
+          ]
+        }
+      ]
+    },
+    {
+      "target": "wireform-ion:bench:wireform-ion-bench",
+      "raw": "ion",
+      "summaries": [
+        {
+          "path": "wireform-ion/bench-results/summary/ion-encode-decode.json",
+          "map": ["encode|single Person=encode/Person", "decode|single Person=decode/Person"]
+        }
+      ]
+    },
+    {
+      "target": "wireform-ndjson:bench:wireform-ndjson-bench",
+      "raw": "ndjson",
+      "summaries": [
+        {
+          "path": "wireform-ndjson/bench-results/summary/ndjson-vs-aeson-lines.json",
+          "map": [
+            "wireform-ndjson|encode 10 rows=encode/10 rows/wireform-ndjson",
+            "wireform-ndjson|encode 1000 rows=encode/1000 rows/wireform-ndjson",
+            "wireform-ndjson|decode 10 rows=decode/10 rows/wireform-ndjson",
+            "wireform-ndjson|decode 1000 rows=decode/1000 rows/wireform-ndjson",
+            "aeson + lines|encode 10 rows=encode/10 rows/aeson + lines",
+            "aeson + lines|encode 1000 rows=encode/1000 rows/aeson + lines",
+            "aeson + lines|decode 10 rows=decode/10 rows/aeson + lines",
+            "aeson + lines|decode 1000 rows=decode/1000 rows/aeson + lines"
+          ]
+        }
+      ]
+    },
+    {
+      "target": "wireform-thrift:bench:wireform-thrift-bench",
+      "raw": "thrift",
+      "summaries": [
+        {
+          "path": "wireform-thrift/bench-results/summary/thrift-binary-vs-compact.json",
+          "map": [
+            "binary|encode Person=binary/encode/Person",
+            "binary|encode [Person] x 100=binary/encode/[Person] x 100",
+            "compact|encode Person=compact/encode/Person",
+            "compact|encode [Person] x 100=compact/encode/[Person] x 100"
+          ]
+        }
+      ]
+    },
+    {
+      "target": "wireform-toml:bench:wireform-toml-bench",
+      "raw": "toml",
+      "summaries": [
+        {
+          "path": "wireform-toml/bench-results/summary/toml-encode-decode.json",
+          "map": ["encode|single Person=encode/Person", "decode|single Person=decode/Person"]
+        }
+      ]
+    },
+    {
+      "target": "wireform-iceberg:bench:iceberg-bench",
+      "raw": "iceberg",
+      "summaries": [
+        {
+          "path": "wireform-iceberg/bench-results/summary/iceberg-deletion-vector.json",
+          "map": [
+            "C kernel|decode 1001 positions=Deletion vector decode (1001 positions)/C",
+            "pure Haskell|decode 1001 positions=Deletion vector decode (1001 positions)/pure",
+            "C kernel|contains check=Deletion vector contains//C",
+            "pure Haskell|contains check=Deletion vector contains//pure"
+          ]
+        },
+        {
+          "path": "wireform-iceberg/bench-results/summary/iceberg-murmur3-c-vs-pure.json",
+          "map": [
+            "C kernel|8 B=Murmur3 32-bit/8 B/C", "pure Haskell|8 B=Murmur3 32-bit/8 B/pure",
+            "C kernel|64 B=Murmur3 32-bit/64 B/C", "pure Haskell|64 B=Murmur3 32-bit/64 B/pure",
+            "C kernel|1 KiB=Murmur3 32-bit/1 KiB/C", "pure Haskell|1 KiB=Murmur3 32-bit/1 KiB/pure",
+            "C kernel|64 KiB=Murmur3 32-bit/64 KiB/C", "pure Haskell|64 KiB=Murmur3 32-bit/64 KiB/pure"
+          ]
+        }
+      ]
+    },
+    {
+      "target": "wireform-parquet:bench:parquet-bench",
+      "raw": "parquet",
+      "summaries": [
+        {
+          "path": "wireform-parquet/bench-results/summary/parquet-xxh64-c-vs-pure.json",
+          "map": [
+            "C kernel|8 B=Parquet XXH64/8 B/C", "pure Haskell|8 B=Parquet XXH64/8 B/pure",
+            "C kernel|64 B=Parquet XXH64/64 B/C", "pure Haskell|64 B=Parquet XXH64/64 B/pure",
+            "C kernel|1 KiB=Parquet XXH64/1 KiB/C", "pure Haskell|1 KiB=Parquet XXH64/1 KiB/pure",
+            "C kernel|64 KiB=Parquet XXH64/64 KiB/C", "pure Haskell|64 KiB=Parquet XXH64/64 KiB/pure"
+          ]
+        }
+      ]
+    },
+    {
+      "target": "wireform-proto:bench:compare-bench",
+      "raw": "proto",
+      "summaries": [
+        {
+          "path": "wireform-proto/bench-results/summary/proto-vs-proto-lens-decode.json",
+          "map": [
+            "wireform-proto|Small=Small/decode/wireform", "proto-lens|Small=Small/decode/proto-lens",
+            "wireform-proto|Medium=Medium/decode/wireform", "proto-lens|Medium=Medium/decode/proto-lens",
+            "wireform-proto|Nested=Nested/decode/wireform", "proto-lens|Nested=Nested/decode/proto-lens",
+            "wireform-proto|Repeated=Repeated/decode/wireform", "proto-lens|Repeated=Repeated/decode/proto-lens"
+          ]
+        },
+        {
+          "path": "wireform-proto/bench-results/summary/proto-vs-proto-lens-encode.json",
+          "map": [
+            "wireform-proto|Small=Small/encode/wireform", "proto-lens|Small=Small/encode/proto-lens",
+            "wireform-proto|Medium=Medium/encode/wireform", "proto-lens|Medium=Medium/encode/proto-lens",
+            "wireform-proto|Nested=Nested/encode/wireform", "proto-lens|Nested=Nested/encode/proto-lens",
+            "wireform-proto|Repeated=Repeated/encode/wireform", "proto-lens|Repeated=Repeated/encode/proto-lens"
+          ]
+        }
+      ]
+    },
+    {
+      "target": "wireform:bench:format-bench",
+      "raw": "format",
+      "summaries": [
+        {
+          "path": "wireform-cbor/bench-results/summary/cbor-vs-cborg-encode.json",
+          "map": [
+            "wireform-cbor|encode=CBOR/encode/wireform", "cborg|encode=CBOR/encode/cborg",
+            "wireform-cbor|decode=CBOR/decode/wireform", "cborg|decode=CBOR/decode/cborg"
+          ]
+        },
+        {
+          "path": "wireform-msgpack/bench-results/summary/msgpack-vs-msgpack-haskell.json",
+          "map": [
+            "wireform-msgpack|encode=MessagePack/encode/wireform", "msgpack|encode=MessagePack/encode/msgpack",
+            "wireform-msgpack|decode=MessagePack/decode/wireform", "msgpack|decode=MessagePack/decode/msgpack"
+          ]
+        }
+      ]
+    },
+    {
+      "target": "wireform:bench:xml-bench",
+      "raw": "xmlb",
+      "summaries": [
+        {
+          "path": "wireform-xml/bench-results/summary/dom-parse-medium.json",
+          "map": [
+            "hexml (C bindings)|medium document=Medium XML/DOM parse/hexml",
+            "wireform-xml (FastDOM)|medium document=Medium XML/DOM parse/wireform-fast",
+            "wireform-xml (typed DOM)|medium document=Medium XML/DOM parse/wireform",
+            "xml-conduit|medium document=Medium XML/DOM parse/xml-conduit"
+          ]
+        },
+        {
+          "path": "wireform-xml/bench-results/summary/sax-parse-medium.json",
+          "map": [
+            "xeno|medium document=Medium XML/SAX parse/xeno",
+            "wireform-xml|medium document=Medium XML/SAX parse/wireform"
+          ]
+        }
+      ]
+    },
+    {
+      "target": "wireform-yaml:bench:wireform-yaml-bench",
+      "raw": "yaml",
+      "summaries": [
+        {
+          "path": "wireform-yaml/bench-results/summary/yaml-decode-vs-libyaml.json",
+          "map": [
+            "wireform-yaml|tiny=decode/tiny", "yaml (libyaml)|tiny=decode-libyaml/tiny",
+            "wireform-yaml|small=decode/small", "yaml (libyaml)|small=decode-libyaml/small",
+            "wireform-yaml|flow=decode/flowMid", "yaml (libyaml)|flow=decode-libyaml/flowMid",
+            "wireform-yaml|literal=decode/literal50", "yaml (libyaml)|literal=decode-libyaml/literal50",
+            "wireform-yaml|big=decode/big", "yaml (libyaml)|big=decode-libyaml/big"
+          ]
+        },
+        {
+          "path": "wireform-yaml/bench-results/summary/yaml-decode-vs-hsyaml.json",
+          "map": [
+            "wireform-yaml|tiny=decode/tiny", "HsYAML|tiny=decode-hsyaml/tiny",
+            "wireform-yaml|small=decode/small", "HsYAML|small=decode-hsyaml/small",
+            "wireform-yaml|flow=decode/flowMid", "HsYAML|flow=decode-hsyaml/flowMid",
+            "wireform-yaml|literal=decode/literal50", "HsYAML|literal=decode-hsyaml/literal50",
+            "wireform-yaml|big=decode/big", "HsYAML|big=decode-hsyaml/big"
+          ]
+        }
+      ]
+    }
+  ]
+}

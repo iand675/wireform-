@@ -3,12 +3,27 @@
   "title": "wireform-ion encode + decode (Person record)",
   "unit": "Nanos",
   "higherIsBetter": false,
-  "groups": ["single Person", "[Person] x 100"],
+  "groups": [
+    "single Person",
+    "[Person] x 100"
+  ],
   "series": [
-    {"name": "encode", "values": [324.42, 38521.35]},
-    {"name": "decode", "values": [410.40, 41672.08]}
+    {
+      "name": "encode",
+      "values": [
+        329.51,
+        38448.98
+      ]
+    },
+    {
+      "name": "decode",
+      "values": [
+        403.13,
+        41835.08
+      ]
+    }
   ],
   "baseline": "encode",
-  "capturedAt": "2026-05-13T11:42:00Z",
+  "capturedAt": "2026-06-27T11:35:54Z",
   "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
 }

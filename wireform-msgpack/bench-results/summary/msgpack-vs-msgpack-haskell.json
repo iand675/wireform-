@@ -3,12 +3,27 @@
   "title": "wireform-msgpack vs Hackage msgpack",
   "unit": "Nanos",
   "higherIsBetter": false,
-  "groups": ["encode", "decode"],
+  "groups": [
+    "encode",
+    "decode"
+  ],
   "series": [
-    {"name": "wireform-msgpack", "values": [291.84, 391.42]},
-    {"name": "msgpack",          "values": [1190.71, 1701.93]}
+    {
+      "name": "wireform-msgpack",
+      "values": [
+        297.32,
+        387.64
+      ]
+    },
+    {
+      "name": "msgpack",
+      "values": [
+        1231.66,
+        1775.48
+      ]
+    }
   ],
   "baseline": "wireform-msgpack",
-  "capturedAt": "2026-05-13T10:30:00Z",
+  "capturedAt": "2026-06-27T11:56:42Z",
   "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
 }

@@ -3,12 +3,33 @@
   "title": "wireform-proto vs proto-lens (decode)",
   "unit": "Nanos",
   "higherIsBetter": false,
-  "groups": ["Small", "Medium", "Nested", "Repeated"],
+  "groups": [
+    "Small",
+    "Medium",
+    "Nested",
+    "Repeated"
+  ],
   "series": [
-    {"name": "wireform-proto", "values": [20.74, 57.04, 48.60, 715.13]},
-    {"name": "proto-lens",     "values": [76.45, 198.42, 141.27, 2107.02]}
+    {
+      "name": "wireform-proto",
+      "values": [
+        41.65,
+        111.48,
+        80.99,
+        1421.86
+      ]
+    },
+    {
+      "name": "proto-lens",
+      "values": [
+        81.64,
+        211.81,
+        151.4,
+        2292.94
+      ]
+    }
   ],
   "baseline": "wireform-proto",
-  "capturedAt": "2026-05-13T10:45:00Z",
+  "capturedAt": "2026-06-27T11:56:42Z",
   "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
 }

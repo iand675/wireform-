@@ -179,10 +179,10 @@ cabal bench wireform-ion:wireform-ion-bench
 
 | Operation      |   encode |   decode | ratio |
 | :------------- | -------: | -------: | ----: |
-| single Person  |   324 ns |   410 ns | 1.27x |
-| [Person] x 100 | 38521 ns | 41672 ns | 1.08x |
+| single Person  |   330 ns |   403 ns | 1.22x |
+| [Person] x 100 | 38449 ns | 41835 ns | 1.09x |
 
-<sub>Last run 2026-05-13 11:42:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-06-27 11:35:54 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:ion-encode-decode -->
 
 For cross-language comparisons:

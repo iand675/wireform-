@@ -204,13 +204,13 @@ cabal bench wireform-fory:wireform-fory-bench
 
 | Operation        |  encode |   decode | ratio |
 | :--------------- | ------: | -------: | ----: |
-| int              | 76.0 ns |  63.8 ns | 0.84x |
-| string           | 83.5 ns |  77.5 ns | 0.93x |
-| bytes 1KB        |  127 ns |  62.4 ns | 0.49x |
-| Person struct    |  262 ns |   456 ns | 1.74x |
-| list[Person]*100 | 6712 ns | 10674 ns | 1.59x |
+| int              | 75.7 ns |  62.5 ns | 0.83x |
+| string           | 85.3 ns |  71.8 ns | 0.84x |
+| bytes 1KB        |  127 ns | 60.10 ns | 0.48x |
+| Person struct    |  266 ns |   440 ns | 1.65x |
+| list[Person]*100 | 6630 ns | 10783 ns | 1.63x |
 
-<sub>Last run 2026-05-13 11:20:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-06-27 11:35:55 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:fory-encode-decode -->
 
 For cross-language comparisons:

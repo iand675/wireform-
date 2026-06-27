@@ -336,9 +336,9 @@ cabal bench xml-bench
 
 | Operation       | hexml (C bindings) | wireform-xml (FastDOM) | wireform-xml (typed DOM) | xml-conduit | ratio |
 | :-------------- | -----------------: | ---------------------: | -----------------------: | ----------: | ----: |
-| medium document |            29.0 µs |                53.6 µs |                   194 µs |     1610 µs | 0.28x |
+| medium document |            30.7 µs |                52.0 µs |                   194 µs |     1626 µs | 0.27x |
 
-<sub>Last run 2026-05-13 10:35:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-06-27 11:56:42 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:dom-parse-medium -->
 
 <!-- BEGIN_AUTOGEN bench:sax-parse-medium -->
@@ -349,9 +349,9 @@ cabal bench xml-bench
 
 | Operation       |    xeno | wireform-xml | ratio |
 | :-------------- | ------: | -----------: | ----: |
-| medium document | 44.6 µs |       149 µs | 1.00x |
+| medium document | 45.8 µs |       149 µs | 1.00x |
 
-<sub>Last run 2026-05-13 10:35:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-06-27 11:56:42 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:sax-parse-medium -->
 
 For cross-language comparisons:

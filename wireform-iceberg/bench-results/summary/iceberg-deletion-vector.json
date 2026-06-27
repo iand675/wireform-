@@ -3,12 +3,27 @@
   "title": "Iceberg deletion vector hot paths: C vs pure Haskell",
   "unit": "Nanos",
   "higherIsBetter": false,
-  "groups": ["decode 1001 positions", "contains check"],
+  "groups": [
+    "decode 1001 positions",
+    "contains check"
+  ],
   "series": [
-    {"name": "C kernel",     "values": [10262.03, 12.25]},
-    {"name": "pure Haskell", "values": [29795.16, 1048.85]}
+    {
+      "name": "C kernel",
+      "values": [
+        10081.45,
+        11.94
+      ]
+    },
+    {
+      "name": "pure Haskell",
+      "values": [
+        27392.3,
+        1054.26
+      ]
+    }
   ],
   "baseline": "C kernel",
-  "capturedAt": "2026-05-13T11:30:00Z",
+  "capturedAt": "2026-06-27T11:45:59Z",
   "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
 }

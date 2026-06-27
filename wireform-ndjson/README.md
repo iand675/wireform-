@@ -177,14 +177,14 @@ cabal bench wireform-ndjson:wireform-ndjson-bench
   <img src="bench-results/charts/ndjson-vs-aeson-lines-light.svg" alt="wireform-ndjson vs aeson + manual newline splitting">
 </picture>
 
-| Operation        | wireform-ndjson | aeson + lines | ratio |
-| :--------------- | --------------: | ------------: | ----: |
-| encode 10 rows   |         5.03 µs |       4.76 µs | 0.95x |
-| encode 1000 rows |          545 µs |        504 µs | 0.92x |
-| decode 10 rows   |         4.00 µs |       3.91 µs | 0.98x |
-| decode 1000 rows |          442 µs |        402 µs | 0.91x |
+| Operation        | wireform-ndjson | aeson + lines |  ratio |
+| :--------------- | --------------: | ------------: | -----: |
+| encode 10 rows   |         5.18 µs |       4.95 µs |  0.96x |
+| encode 1000 rows |          518 µs |        508 µs |  0.98x |
+| decode 10 rows   |         3.85 µs |       3.84 µs | 0.100x |
+| decode 1000 rows |          426 µs |        382 µs |  0.90x |
 
-<sub>Last run 2026-05-13 11:42:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5. Today the SIMD newline scanner doesn't yet outperform `BS.split '\n'` on these inputs; both paths are within 10%..</sub>
+<sub>Last run 2026-06-27 11:35:55 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5. Today the SIMD newline scanner doesn't yet outperform `BS.split '\n'` on these inputs; both paths are within 10%..</sub>
 <!-- END_AUTOGEN bench:ndjson-vs-aeson-lines -->
 
 For cross-language comparisons:

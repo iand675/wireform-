@@ -106,14 +106,118 @@ decodeStream bs = go bs
 
 ### wireform-cbor vs cborg
 
-| Operation | wireform-cbor | cborg | Winner |
-|-----------|--------------|-------|--------|
-| encode | 305 ns | 275 ns | cborg (1.1x) |
-| decode | 460 ns | 1214 ns | wireform (2.6x) |
+<!-- BEGIN_AUTOGEN bench:cbor-vs-cborg-encode -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 400" width="720" height="400" role="img" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif" font-size="12">
+  <title>wireform-cbor vs cborg</title>
+  <style>.wf-dark{display:none}@media (prefers-color-scheme:dark){.wf-light{display:none}.wf-dark{display:inline}}</style>
+  <g class="wf-light">
+    <rect x="0" y="0" width="720" height="400" fill="#ffffff"/>
+    <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">wireform-cbor vs cborg</text>
+    <text x="360" y="44" text-anchor="middle" font-size="11" fill="#656d76">lower is better · ns · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5</text>
+    <g stroke="#d0d7de" stroke-width="1">
+      <line x1="80" y1="320" x2="700" y2="320"/>
+      <line x1="80" y1="60" x2="80" y2="320"/>
+    </g>
+    <g>
+      <g/>
+      <text x="72" y="324" text-anchor="end" font-size="10" fill="#656d76">0</text>
+      <line x1="80" y1="255" x2="700" y2="255" stroke="#d0d7de" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="72" y="259" text-anchor="end" font-size="10" fill="#656d76">500</text>
+      <line x1="80" y1="190" x2="700" y2="190" stroke="#d0d7de" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="72" y="194" text-anchor="end" font-size="10" fill="#656d76">1000</text>
+      <line x1="80" y1="125" x2="700" y2="125" stroke="#d0d7de" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="72" y="129" text-anchor="end" font-size="10" fill="#656d76">1500</text>
+      <line x1="80" y1="60" x2="700" y2="60" stroke="#d0d7de" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="72" y="64" text-anchor="end" font-size="10" fill="#656d76">2000</text>
+    </g>
+    <g>
+      <rect x="171" y="280.7" width="62" height="39.3" rx="2" fill="#0969da"/>
+      <rect x="235" y="283.5" width="62" height="36.5" rx="2" fill="#cf222e"/>
+      <rect x="481" y="260.0" width="62" height="60.0" rx="2" fill="#0969da"/>
+      <rect x="545" y="152.4" width="62" height="167.6" rx="2" fill="#cf222e"/>
+    </g>
+    <g>
+      <text x="202" y="276.7" text-anchor="middle" font-size="10" fill="#1f2328">302</text>
+      <text x="266" y="279.5" text-anchor="middle" font-size="10" fill="#1f2328">281</text>
+      <text x="512" y="256.0" text-anchor="middle" font-size="10" fill="#1f2328">462</text>
+      <text x="576" y="148.4" text-anchor="middle" font-size="10" fill="#1f2328">1289</text>
+    </g>
+    <g>
+      <text x="235" y="338" text-anchor="middle" font-size="11" fill="#1f2328">encode</text>
+      <text x="545" y="338" text-anchor="middle" font-size="11" fill="#1f2328">decode</text>
+    </g>
+    <g>
+      <g transform="translate(271, 382)">
+        <rect x="0" y="-9" width="12" height="12" rx="2" fill="#0969da"/>
+        <text x="18" y="1" font-size="11" fill="#1f2328">wireform-cbor</text>
+      </g>
+      <g transform="translate(396, 382)">
+        <rect x="0" y="-9" width="12" height="12" rx="2" fill="#cf222e"/>
+        <text x="18" y="1" font-size="11" fill="#1f2328">cborg</text>
+      </g>
+    </g>
+  </g>
+  <g class="wf-dark">
+    <rect x="0" y="0" width="720" height="400" fill="#0d1117"/>
+    <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#e6edf3">wireform-cbor vs cborg</text>
+    <text x="360" y="44" text-anchor="middle" font-size="11" fill="#7d8590">lower is better · ns · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5</text>
+    <g stroke="#30363d" stroke-width="1">
+      <line x1="80" y1="320" x2="700" y2="320"/>
+      <line x1="80" y1="60" x2="80" y2="320"/>
+    </g>
+    <g>
+      <g/>
+      <text x="72" y="324" text-anchor="end" font-size="10" fill="#7d8590">0</text>
+      <line x1="80" y1="255" x2="700" y2="255" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="72" y="259" text-anchor="end" font-size="10" fill="#7d8590">500</text>
+      <line x1="80" y1="190" x2="700" y2="190" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="72" y="194" text-anchor="end" font-size="10" fill="#7d8590">1000</text>
+      <line x1="80" y1="125" x2="700" y2="125" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="72" y="129" text-anchor="end" font-size="10" fill="#7d8590">1500</text>
+      <line x1="80" y1="60" x2="700" y2="60" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="72" y="64" text-anchor="end" font-size="10" fill="#7d8590">2000</text>
+    </g>
+    <g>
+      <rect x="171" y="280.7" width="62" height="39.3" rx="2" fill="#58a6ff"/>
+      <rect x="235" y="283.5" width="62" height="36.5" rx="2" fill="#ff7b72"/>
+      <rect x="481" y="260.0" width="62" height="60.0" rx="2" fill="#58a6ff"/>
+      <rect x="545" y="152.4" width="62" height="167.6" rx="2" fill="#ff7b72"/>
+    </g>
+    <g>
+      <text x="202" y="276.7" text-anchor="middle" font-size="10" fill="#e6edf3">302</text>
+      <text x="266" y="279.5" text-anchor="middle" font-size="10" fill="#e6edf3">281</text>
+      <text x="512" y="256.0" text-anchor="middle" font-size="10" fill="#e6edf3">462</text>
+      <text x="576" y="148.4" text-anchor="middle" font-size="10" fill="#e6edf3">1289</text>
+    </g>
+    <g>
+      <text x="235" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">encode</text>
+      <text x="545" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">decode</text>
+    </g>
+    <g>
+      <g transform="translate(271, 382)">
+        <rect x="0" y="-9" width="12" height="12" rx="2" fill="#58a6ff"/>
+        <text x="18" y="1" font-size="11" fill="#e6edf3">wireform-cbor</text>
+      </g>
+      <g transform="translate(396, 382)">
+        <rect x="0" y="-9" width="12" height="12" rx="2" fill="#ff7b72"/>
+        <text x="18" y="1" font-size="11" fill="#e6edf3">cborg</text>
+      </g>
+    </g>
+  </g>
+</svg>
+
+
+| Operation | wireform-cbor |   cborg | ratio |
+| :-------- | ------------: | ------: | ----: |
+| encode    |        302 ns |  281 ns | 0.93x |
+| decode    |        462 ns | 1289 ns | 2.79x |
+
+<sub>Last run 2026-06-27 11:56:42 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<!-- END_AUTOGEN bench:cbor-vs-cborg-encode -->
 
 Encode performance is roughly even with cborg (the established Haskell CBOR library). Decode is 2.6x faster due to wireform's unboxed-sum decoder architecture.
 
-Criterion, GHC 9.8.4, Apple Silicon. See `wireform-cbor/bench-results/` for raw data.
+The chart and table above are regenerated by [`wireform-stats`](../stats/) from `wireform-cbor/bench-results/summary/cbor-vs-cborg-encode.json` — the same source the README chart is built from.
 
 ## Notable modules
 

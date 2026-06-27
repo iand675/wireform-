@@ -3,12 +3,24 @@
   "title": "wireform-xml SAX parse vs xeno (medium document)",
   "unit": "Micros",
   "higherIsBetter": false,
-  "groups": ["medium document"],
+  "groups": [
+    "medium document"
+  ],
   "series": [
-    {"name": "xeno",         "values": [44.56]},
-    {"name": "wireform-xml", "values": [148.80]}
+    {
+      "name": "xeno",
+      "values": [
+        45.77
+      ]
+    },
+    {
+      "name": "wireform-xml",
+      "values": [
+        149.26
+      ]
+    }
   ],
   "baseline": "wireform-xml",
-  "capturedAt": "2026-05-13T10:35:00Z",
+  "capturedAt": "2026-06-27T11:56:42Z",
   "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
 }

@@ -189,10 +189,10 @@ cabal bench wireform-csv:wireform-csv-bench
 
 | Operation |  encode |  decode | ratio |
 | :-------- | ------: | ------: | ----: |
-| 10 rows   | 5.27 µs | 10.7 µs | 2.02x |
-| 1000 rows |  640 µs | 1396 µs | 2.18x |
+| 10 rows   | 5.20 µs | 10.8 µs | 2.08x |
+| 1000 rows |  685 µs | 1432 µs | 2.09x |
 
-<sub>Last run 2026-05-13 11:38:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-06-27 11:35:54 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:csv-encode-decode -->
 
 For cross-language comparisons:

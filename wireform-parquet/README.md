@@ -241,12 +241,12 @@ cabal bench wireform-parquet:parquet-bench
 
 | Operation | C kernel | pure Haskell | ratio |
 | :-------- | -------: | -----------: | ----: |
-| 8 B       | 11.10 ns |      10.9 ns | 0.91x |
-| 64 B      |  18.6 ns |      43.1 ns | 2.31x |
-| 1 KiB     |  77.6 ns |       452 ns | 5.83x |
-| 64 KiB    |  4481 ns |     28119 ns | 6.28x |
+| 8 B       |  12.1 ns |      10.3 ns | 0.85x |
+| 64 B      |  18.1 ns |     42.10 ns | 2.37x |
+| 1 KiB     |  79.9 ns |       457 ns | 5.71x |
+| 64 KiB    |  4387 ns |     28291 ns | 6.45x |
 
-<sub>Last run 2026-05-13 11:35:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-06-27 11:45:59 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:parquet-xxh64-c-vs-pure -->
 
 For cross-language comparisons (file-format-level):

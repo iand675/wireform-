@@ -3,12 +3,27 @@
   "title": "wireform-toml encode + decode (Person record)",
   "unit": "Nanos",
   "higherIsBetter": false,
-  "groups": ["single Person", "[Person] x 100"],
+  "groups": [
+    "single Person",
+    "[Person] x 100"
+  ],
   "series": [
-    {"name": "encode", "values": [731.47, 84497.62]},
-    {"name": "decode", "values": [2336.60, 334545.30]}
+    {
+      "name": "encode",
+      "values": [
+        729.84,
+        86011.94
+      ]
+    },
+    {
+      "name": "decode",
+      "values": [
+        2382.56,
+        343875.8
+      ]
+    }
   ],
   "baseline": "encode",
-  "capturedAt": "2026-05-13T12:10:00Z",
-  "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5. Decode is now linear in input size (was previously O(N\u00b2) due to T.index/T.length on the full source); 100-record decode dropped from 240 ms to 335 \u00b5s."
+  "capturedAt": "2026-06-27T11:35:55Z",
+  "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5. Decode is now linear in input size (was previously O(N²) due to T.index/T.length on the full source); 100-record decode dropped from 240 ms to 335 µs."
 }

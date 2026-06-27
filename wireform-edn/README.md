@@ -168,10 +168,10 @@ cabal bench wireform-edn:wireform-edn-bench
 
 | Operation      |   encode |    decode | ratio |
 | :------------- | -------: | --------: | ----: |
-| single Person  |   813 ns |   1992 ns | 2.45x |
-| [Person] x 100 | 84602 ns | 235878 ns | 2.79x |
+| single Person  |   787 ns |   2010 ns | 2.55x |
+| [Person] x 100 | 84916 ns | 244287 ns | 2.88x |
 
-<sub>Last run 2026-05-13 11:38:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-06-27 11:35:54 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:edn-encode-decode -->
 
 For cross-language comparisons:

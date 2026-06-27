@@ -143,10 +143,10 @@ cabal bench wireform-bencode:wireform-bencode-bench
 
 | Operation            |   encode |   decode | ratio |
 | :------------------- | -------: | -------: | ----: |
-| single-file metainfo |   960 ns |  1929 ns | 2.01x |
-| 100-file metainfo    | 32124 ns | 83068 ns | 2.59x |
+| single-file metainfo |   953 ns |  1946 ns | 2.04x |
+| 100-file metainfo    | 32422 ns | 82927 ns | 2.56x |
 
-<sub>Last run 2026-05-13 11:38:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-06-27 11:24:28 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:bencode-encode-decode -->
 
 For cross-language comparisons:

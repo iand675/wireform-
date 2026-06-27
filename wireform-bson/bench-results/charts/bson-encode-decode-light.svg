@@ -1,5 +1,5 @@
-<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 360" width="720" height="360" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif" font-size="12">
-  <rect x="0" y="0" width="720" height="360" fill="#ffffff"/>
+<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 400" width="720" height="400" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif" font-size="12">
+  <rect x="0" y="0" width="720" height="400" fill="#ffffff"/>
   <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">wireform-bson encode + decode (Person record)</text>
   <text x="360" y="44" text-anchor="middle" font-size="11" fill="#656d76">lower is better · ns · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5</text>
   <g stroke="#d0d7de" stroke-width="1">
@@ -20,26 +20,26 @@
   </g>
   <g>
     <rect x="171" y="319.2" width="62" height="0.8" rx="2" fill="#0969da"/>
-    <rect x="235" y="318.9" width="62" height="1.1" rx="2" fill="#cf222e"/>
-    <rect x="481" y="168.7" width="62" height="151.3" rx="2" fill="#0969da"/>
-    <rect x="545" y="254.6" width="62" height="65.4" rx="2" fill="#cf222e"/>
+    <rect x="235" y="319.0" width="62" height="1.0" rx="2" fill="#cf222e"/>
+    <rect x="481" y="176.1" width="62" height="143.9" rx="2" fill="#0969da"/>
+    <rect x="545" y="258.7" width="62" height="61.3" rx="2" fill="#cf222e"/>
   </g>
   <g>
-    <text x="202" y="315.2" text-anchor="middle" font-size="10" fill="#1f2328">317</text>
-    <text x="266" y="314.9" text-anchor="middle" font-size="10" fill="#1f2328">428</text>
-    <text x="512" y="164.7" text-anchor="middle" font-size="10" fill="#1f2328">58182</text>
-    <text x="576" y="250.6" text-anchor="middle" font-size="10" fill="#1f2328">25172</text>
+    <text x="202" y="315.2" text-anchor="middle" font-size="10" fill="#1f2328">309</text>
+    <text x="266" y="315.0" text-anchor="middle" font-size="10" fill="#1f2328">399</text>
+    <text x="512" y="172.1" text-anchor="middle" font-size="10" fill="#1f2328">55343</text>
+    <text x="576" y="254.7" text-anchor="middle" font-size="10" fill="#1f2328">23567</text>
   </g>
   <g>
-    <text x="235" y="336" text-anchor="middle" font-size="11" fill="#1f2328">single Person</text>
-    <text x="545" y="336" text-anchor="middle" font-size="11" fill="#1f2328">[Person] x 100</text>
+    <text x="235" y="338" text-anchor="middle" font-size="11" fill="#1f2328">single Person</text>
+    <text x="545" y="338" text-anchor="middle" font-size="11" fill="#1f2328">[Person] x 100</text>
   </g>
   <g>
-    <g transform="translate(292, 344)">
+    <g transform="translate(292, 382)">
       <rect x="0" y="-9" width="12" height="12" rx="2" fill="#0969da"/>
       <text x="18" y="1" font-size="11" fill="#1f2328">encode</text>
     </g>
-    <g transform="translate(368, 344)">
+    <g transform="translate(368, 382)">
       <rect x="0" y="-9" width="12" height="12" rx="2" fill="#cf222e"/>
       <text x="18" y="1" font-size="11" fill="#1f2328">decode</text>
     </g>

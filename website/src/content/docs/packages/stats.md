@@ -47,6 +47,30 @@ Adding a new benchmark means dropping a `BenchSummary` JSON into
 `<!-- BEGIN_AUTOGEN bench:<id> --><!-- END_AUTOGEN bench:<id> -->`
 pair somewhere in the README; the regen tool figures out the rest.
 
+## Docs site wiring
+
+The same `bench:<id>` markers also drive **this docs site**, so the
+per-package pages and the READMEs never disagree about benchmark
+numbers. `regen-stats render` (and `check`) walks
+`website/src/content/docs/packages/<name>.md` alongside
+`wireform-<name>/README.md` and rewrites any `bench:<id>` regions it
+finds there from the very same `bench-results/summary/<id>.json`
+files. A package `wireform-<name>` maps to the `<name>.md` docs page
+(e.g. `wireform-cbor` -> `cbor.md`); pages without a matching
+summary (such as `html.md`, whose throughput numbers come from a
+custom harness rather than criterion) are left untouched.
+
+The one difference is the chart. The READMEs use a `<picture>`
+element pointing at two committed SVG files (light + dark), which
+works on github.com. A plain-markdown Starlight page can't reference
+those files without a base-aware URL into `public/`, so the docs
+renderer instead **inlines a single, self-contained SVG** that
+stacks a light and a dark chart and toggles between them with an
+embedded `@media (prefers-color-scheme: …)` rule. The bytes drop
+straight into the page with no asset wiring and adapt to the
+reader's theme at view time. That renderer is
+`Wireform.Stats.SVG.renderBarChartAdaptive`.
+
 ## Notable modules
 
 | Module | Role |
@@ -66,15 +90,21 @@ The package ships a `regen-stats` executable with subcommands `render`,
 the full surface. A typical refresh:
 
 ```bash
-# Re-render the SVG charts from the committed benchmark summaries.
+# Re-render the README SVG charts from the committed benchmark summaries.
 cabal run wireform-stats:exe:regen-stats -- render-bench-charts
 
-# Stitch everything into the per-package READMEs.
+# Stitch everything into the per-package READMEs *and* this docs site.
 cabal run wireform-stats:exe:regen-stats -- render
 
 # Refresh the shields.io endpoint badge JSON files.
 cabal run wireform-stats:exe:regen-stats -- badges
 ```
+
+`render` rewrites both the READMEs and the docs-site package pages in
+one pass; the docs-site charts are inlined at render time, so
+`render-bench-charts` only needs to run for the README's two-file
+SVGs. The `--docs-dir` flag points the docs pass at a different
+directory if the site ever moves.
 
 Distilling each criterion JSON into a `BenchSummary` is intentionally
 manual: criterion's output is wider than the README needs, and you
@@ -85,8 +115,9 @@ re-runnable.
 ## CI gate
 
 A workflow runs `regen-stats check` on every PR and fails the build if
-any README's AUTOGEN regions are stale relative to what the tool would
-produce from the in-tree summary JSON files. A separate job collects
+any README's **or docs page's** AUTOGEN regions are stale relative to
+what the tool would produce from the in-tree summary JSON files. A
+separate job collects
 test and coverage data on every PR and pushes a stats commit back to the
 PR branch when the rendered diff is non-empty. The benchmark step is
 opt-in (criterion is too noisy on shared CI runners).

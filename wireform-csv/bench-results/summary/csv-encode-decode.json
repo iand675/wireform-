@@ -3,12 +3,27 @@
   "title": "wireform-csv encode + decode (Sale record)",
   "unit": "Micros",
   "higherIsBetter": false,
-  "groups": ["10 rows", "1000 rows"],
+  "groups": [
+    "10 rows",
+    "1000 rows"
+  ],
   "series": [
-    {"name": "encode", "values": [5.27, 640.18]},
-    {"name": "decode", "values": [10.66, 1395.74]}
+    {
+      "name": "encode",
+      "values": [
+        5.2,
+        684.73
+      ]
+    },
+    {
+      "name": "decode",
+      "values": [
+        10.84,
+        1431.84
+      ]
+    }
   ],
   "baseline": "encode",
-  "capturedAt": "2026-05-13T11:38:00Z",
+  "capturedAt": "2026-06-27T11:35:54Z",
   "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
 }

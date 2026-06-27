@@ -110,14 +110,116 @@ Each callback receives a `Vector Text` of fields for one row. Combine with
 
 ### Encode/decode
 
-| Rows | encode | decode |
-|------|--------|--------|
-| 10 | 5.3 µs | 10.7 µs |
-| 1000 | 640 µs | 1.40 ms |
+<!-- BEGIN_AUTOGEN bench:csv-encode-decode -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 400" width="720" height="400" role="img" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif" font-size="12">
+  <title>wireform-csv encode + decode (Sale record)</title>
+  <style>.wf-dark{display:none}@media (prefers-color-scheme:dark){.wf-light{display:none}.wf-dark{display:inline}}</style>
+  <g class="wf-light">
+    <rect x="0" y="0" width="720" height="400" fill="#ffffff"/>
+    <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">wireform-csv encode + decode (Sale record)</text>
+    <text x="360" y="44" text-anchor="middle" font-size="11" fill="#656d76">lower is better · µs · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5</text>
+    <g stroke="#d0d7de" stroke-width="1">
+      <line x1="80" y1="320" x2="700" y2="320"/>
+      <line x1="80" y1="60" x2="80" y2="320"/>
+    </g>
+    <g>
+      <g/>
+      <text x="72" y="324" text-anchor="end" font-size="10" fill="#656d76">0</text>
+      <line x1="80" y1="255" x2="700" y2="255" stroke="#d0d7de" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="72" y="259" text-anchor="end" font-size="10" fill="#656d76">500</text>
+      <line x1="80" y1="190" x2="700" y2="190" stroke="#d0d7de" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="72" y="194" text-anchor="end" font-size="10" fill="#656d76">1000</text>
+      <line x1="80" y1="125" x2="700" y2="125" stroke="#d0d7de" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="72" y="129" text-anchor="end" font-size="10" fill="#656d76">1500</text>
+      <line x1="80" y1="60" x2="700" y2="60" stroke="#d0d7de" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="72" y="64" text-anchor="end" font-size="10" fill="#656d76">2000</text>
+    </g>
+    <g>
+      <rect x="171" y="319.3" width="62" height="0.7" rx="2" fill="#0969da"/>
+      <rect x="235" y="318.6" width="62" height="1.4" rx="2" fill="#cf222e"/>
+      <rect x="481" y="231.0" width="62" height="89.0" rx="2" fill="#0969da"/>
+      <rect x="545" y="133.9" width="62" height="186.1" rx="2" fill="#cf222e"/>
+    </g>
+    <g>
+      <text x="202" y="315.3" text-anchor="middle" font-size="10" fill="#1f2328">5.20</text>
+      <text x="266" y="314.6" text-anchor="middle" font-size="10" fill="#1f2328">10.8</text>
+      <text x="512" y="227.0" text-anchor="middle" font-size="10" fill="#1f2328">685</text>
+      <text x="576" y="129.9" text-anchor="middle" font-size="10" fill="#1f2328">1432</text>
+    </g>
+    <g>
+      <text x="235" y="338" text-anchor="middle" font-size="11" fill="#1f2328">10 rows</text>
+      <text x="545" y="338" text-anchor="middle" font-size="11" fill="#1f2328">1000 rows</text>
+    </g>
+    <g>
+      <g transform="translate(292, 382)">
+        <rect x="0" y="-9" width="12" height="12" rx="2" fill="#0969da"/>
+        <text x="18" y="1" font-size="11" fill="#1f2328">encode</text>
+      </g>
+      <g transform="translate(368, 382)">
+        <rect x="0" y="-9" width="12" height="12" rx="2" fill="#cf222e"/>
+        <text x="18" y="1" font-size="11" fill="#1f2328">decode</text>
+      </g>
+    </g>
+  </g>
+  <g class="wf-dark">
+    <rect x="0" y="0" width="720" height="400" fill="#0d1117"/>
+    <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#e6edf3">wireform-csv encode + decode (Sale record)</text>
+    <text x="360" y="44" text-anchor="middle" font-size="11" fill="#7d8590">lower is better · µs · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5</text>
+    <g stroke="#30363d" stroke-width="1">
+      <line x1="80" y1="320" x2="700" y2="320"/>
+      <line x1="80" y1="60" x2="80" y2="320"/>
+    </g>
+    <g>
+      <g/>
+      <text x="72" y="324" text-anchor="end" font-size="10" fill="#7d8590">0</text>
+      <line x1="80" y1="255" x2="700" y2="255" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="72" y="259" text-anchor="end" font-size="10" fill="#7d8590">500</text>
+      <line x1="80" y1="190" x2="700" y2="190" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="72" y="194" text-anchor="end" font-size="10" fill="#7d8590">1000</text>
+      <line x1="80" y1="125" x2="700" y2="125" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="72" y="129" text-anchor="end" font-size="10" fill="#7d8590">1500</text>
+      <line x1="80" y1="60" x2="700" y2="60" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="72" y="64" text-anchor="end" font-size="10" fill="#7d8590">2000</text>
+    </g>
+    <g>
+      <rect x="171" y="319.3" width="62" height="0.7" rx="2" fill="#58a6ff"/>
+      <rect x="235" y="318.6" width="62" height="1.4" rx="2" fill="#ff7b72"/>
+      <rect x="481" y="231.0" width="62" height="89.0" rx="2" fill="#58a6ff"/>
+      <rect x="545" y="133.9" width="62" height="186.1" rx="2" fill="#ff7b72"/>
+    </g>
+    <g>
+      <text x="202" y="315.3" text-anchor="middle" font-size="10" fill="#e6edf3">5.20</text>
+      <text x="266" y="314.6" text-anchor="middle" font-size="10" fill="#e6edf3">10.8</text>
+      <text x="512" y="227.0" text-anchor="middle" font-size="10" fill="#e6edf3">685</text>
+      <text x="576" y="129.9" text-anchor="middle" font-size="10" fill="#e6edf3">1432</text>
+    </g>
+    <g>
+      <text x="235" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">10 rows</text>
+      <text x="545" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">1000 rows</text>
+    </g>
+    <g>
+      <g transform="translate(292, 382)">
+        <rect x="0" y="-9" width="12" height="12" rx="2" fill="#58a6ff"/>
+        <text x="18" y="1" font-size="11" fill="#e6edf3">encode</text>
+      </g>
+      <g transform="translate(368, 382)">
+        <rect x="0" y="-9" width="12" height="12" rx="2" fill="#ff7b72"/>
+        <text x="18" y="1" font-size="11" fill="#e6edf3">decode</text>
+      </g>
+    </g>
+  </g>
+</svg>
 
-Encode runs at roughly 640 ns per row at scale. Decode is about 2x slower due to field-type parsing.
 
-Criterion, GHC 9.8.4, Apple Silicon. See `wireform-csv/bench-results/` for raw data.
+| Operation |  encode |  decode | ratio |
+| :-------- | ------: | ------: | ----: |
+| 10 rows   | 5.20 µs | 10.8 µs | 2.08x |
+| 1000 rows |  685 µs | 1432 µs | 2.09x |
+
+<sub>Last run 2026-06-27 11:35:54 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<!-- END_AUTOGEN bench:csv-encode-decode -->
+
+The chart and table above are regenerated by [`wireform-stats`](../stats/) from `wireform-csv/bench-results/summary/csv-encode-decode.json` — the same source the README chart is built from.
 
 ## Notable modules
 

@@ -77,14 +77,118 @@ and `FromIon` instances that match the schema field names and types.
 
 ### Encode/decode (binary Ion)
 
-| Payload | encode | decode |
-|---------|--------|--------|
-| Person | 324 ns | 410 ns |
-| [Person] x 100 | 38.5 µs | 41.7 µs |
+<!-- BEGIN_AUTOGEN bench:ion-encode-decode -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 400" width="720" height="400" role="img" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif" font-size="12">
+  <title>wireform-ion encode + decode (Person record)</title>
+  <style>.wf-dark{display:none}@media (prefers-color-scheme:dark){.wf-light{display:none}.wf-dark{display:inline}}</style>
+  <g class="wf-light">
+    <rect x="0" y="0" width="720" height="400" fill="#ffffff"/>
+    <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">wireform-ion encode + decode (Person record)</text>
+    <text x="360" y="44" text-anchor="middle" font-size="11" fill="#656d76">lower is better · ns · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5</text>
+    <g stroke="#d0d7de" stroke-width="1">
+      <line x1="80" y1="320" x2="700" y2="320"/>
+      <line x1="80" y1="60" x2="80" y2="320"/>
+    </g>
+    <g>
+      <g/>
+      <text x="72" y="324" text-anchor="end" font-size="10" fill="#656d76">0</text>
+      <line x1="80" y1="255" x2="700" y2="255" stroke="#d0d7de" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="72" y="259" text-anchor="end" font-size="10" fill="#656d76">12500</text>
+      <line x1="80" y1="190" x2="700" y2="190" stroke="#d0d7de" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="72" y="194" text-anchor="end" font-size="10" fill="#656d76">25000</text>
+      <line x1="80" y1="125" x2="700" y2="125" stroke="#d0d7de" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="72" y="129" text-anchor="end" font-size="10" fill="#656d76">37500</text>
+      <line x1="80" y1="60" x2="700" y2="60" stroke="#d0d7de" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="72" y="64" text-anchor="end" font-size="10" fill="#656d76">50000</text>
+    </g>
+    <g>
+      <rect x="171" y="318.3" width="62" height="1.7" rx="2" fill="#0969da"/>
+      <rect x="235" y="317.9" width="62" height="2.1" rx="2" fill="#cf222e"/>
+      <rect x="481" y="120.1" width="62" height="199.9" rx="2" fill="#0969da"/>
+      <rect x="545" y="102.5" width="62" height="217.5" rx="2" fill="#cf222e"/>
+    </g>
+    <g>
+      <text x="202" y="314.3" text-anchor="middle" font-size="10" fill="#1f2328">330</text>
+      <text x="266" y="313.9" text-anchor="middle" font-size="10" fill="#1f2328">403</text>
+      <text x="512" y="116.1" text-anchor="middle" font-size="10" fill="#1f2328">38449</text>
+      <text x="576" y="98.5" text-anchor="middle" font-size="10" fill="#1f2328">41835</text>
+    </g>
+    <g>
+      <text x="235" y="338" text-anchor="middle" font-size="11" fill="#1f2328">single Person</text>
+      <text x="545" y="338" text-anchor="middle" font-size="11" fill="#1f2328">[Person] x 100</text>
+    </g>
+    <g>
+      <g transform="translate(292, 382)">
+        <rect x="0" y="-9" width="12" height="12" rx="2" fill="#0969da"/>
+        <text x="18" y="1" font-size="11" fill="#1f2328">encode</text>
+      </g>
+      <g transform="translate(368, 382)">
+        <rect x="0" y="-9" width="12" height="12" rx="2" fill="#cf222e"/>
+        <text x="18" y="1" font-size="11" fill="#1f2328">decode</text>
+      </g>
+    </g>
+  </g>
+  <g class="wf-dark">
+    <rect x="0" y="0" width="720" height="400" fill="#0d1117"/>
+    <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#e6edf3">wireform-ion encode + decode (Person record)</text>
+    <text x="360" y="44" text-anchor="middle" font-size="11" fill="#7d8590">lower is better · ns · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5</text>
+    <g stroke="#30363d" stroke-width="1">
+      <line x1="80" y1="320" x2="700" y2="320"/>
+      <line x1="80" y1="60" x2="80" y2="320"/>
+    </g>
+    <g>
+      <g/>
+      <text x="72" y="324" text-anchor="end" font-size="10" fill="#7d8590">0</text>
+      <line x1="80" y1="255" x2="700" y2="255" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="72" y="259" text-anchor="end" font-size="10" fill="#7d8590">12500</text>
+      <line x1="80" y1="190" x2="700" y2="190" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="72" y="194" text-anchor="end" font-size="10" fill="#7d8590">25000</text>
+      <line x1="80" y1="125" x2="700" y2="125" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="72" y="129" text-anchor="end" font-size="10" fill="#7d8590">37500</text>
+      <line x1="80" y1="60" x2="700" y2="60" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="72" y="64" text-anchor="end" font-size="10" fill="#7d8590">50000</text>
+    </g>
+    <g>
+      <rect x="171" y="318.3" width="62" height="1.7" rx="2" fill="#58a6ff"/>
+      <rect x="235" y="317.9" width="62" height="2.1" rx="2" fill="#ff7b72"/>
+      <rect x="481" y="120.1" width="62" height="199.9" rx="2" fill="#58a6ff"/>
+      <rect x="545" y="102.5" width="62" height="217.5" rx="2" fill="#ff7b72"/>
+    </g>
+    <g>
+      <text x="202" y="314.3" text-anchor="middle" font-size="10" fill="#e6edf3">330</text>
+      <text x="266" y="313.9" text-anchor="middle" font-size="10" fill="#e6edf3">403</text>
+      <text x="512" y="116.1" text-anchor="middle" font-size="10" fill="#e6edf3">38449</text>
+      <text x="576" y="98.5" text-anchor="middle" font-size="10" fill="#e6edf3">41835</text>
+    </g>
+    <g>
+      <text x="235" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">single Person</text>
+      <text x="545" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">[Person] x 100</text>
+    </g>
+    <g>
+      <g transform="translate(292, 382)">
+        <rect x="0" y="-9" width="12" height="12" rx="2" fill="#58a6ff"/>
+        <text x="18" y="1" font-size="11" fill="#e6edf3">encode</text>
+      </g>
+      <g transform="translate(368, 382)">
+        <rect x="0" y="-9" width="12" height="12" rx="2" fill="#ff7b72"/>
+        <text x="18" y="1" font-size="11" fill="#e6edf3">decode</text>
+      </g>
+    </g>
+  </g>
+</svg>
+
+
+| Operation      |   encode |   decode | ratio |
+| :------------- | -------: | -------: | ----: |
+| single Person  |   330 ns |   403 ns | 1.22x |
+| [Person] x 100 | 38449 ns | 41835 ns | 1.09x |
+
+<sub>Last run 2026-06-27 11:35:54 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<!-- END_AUTOGEN bench:ion-encode-decode -->
 
 Sub-microsecond single-record performance. Batch operations scale linearly.
 
-Criterion, GHC 9.8.4, Apple Silicon. See `wireform-ion/bench-results/` for raw data.
+The chart and table above are regenerated by [`wireform-stats`](../stats/) from `wireform-ion/bench-results/summary/ion-encode-decode.json` — the same source the README chart is built from.
 
 ## Notable modules
 

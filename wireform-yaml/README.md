@@ -229,13 +229,13 @@ cabal bench wireform-yaml:wireform-yaml-bench
 
 | Operation | wireform-yaml | yaml (libyaml) |  ratio |
 | :-------- | ------------: | -------------: | -----: |
-| tiny      |       0.25 µs |        8.01 µs | 32.04x |
-| small     |       3.80 µs |        40.2 µs | 10.57x |
-| flow      |       4.02 µs |        60.5 µs | 15.05x |
-| literal   |       3.97 µs |        13.2 µs |  3.32x |
-| big       |       14.9 µs |         139 µs |  9.36x |
+| tiny      |       0.25 µs |        7.68 µs | 30.72x |
+| small     |       3.87 µs |        39.6 µs | 10.22x |
+| flow      |       4.11 µs |        60.4 µs | 14.70x |
+| literal   |       4.18 µs |        13.8 µs |  3.29x |
+| big       |       15.0 µs |         137 µs |  9.12x |
 
-<sub>Last run 2026-05-13 10:40:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-06-27 11:56:42 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:yaml-decode-vs-libyaml -->
 
 <!-- BEGIN_AUTOGEN bench:yaml-decode-vs-hsyaml -->
@@ -246,13 +246,13 @@ cabal bench wireform-yaml:wireform-yaml-bench
 
 | Operation | wireform-yaml |  HsYAML |   ratio |
 | :-------- | ------------: | ------: | ------: |
-| tiny      |       0.25 µs |  102 µs | 408.24x |
-| small     |       3.80 µs | 1002 µs | 263.77x |
-| flow      |       4.02 µs | 1242 µs | 308.91x |
-| literal   |       3.97 µs | 1167 µs | 293.93x |
-| big       |       14.9 µs | 3627 µs | 243.90x |
+| tiny      |       0.25 µs |  108 µs | 432.84x |
+| small     |       3.87 µs | 1044 µs | 269.82x |
+| flow      |       4.11 µs | 1286 µs | 312.92x |
+| literal   |       4.18 µs | 1175 µs | 281.21x |
+| big       |       15.0 µs | 3961 µs | 263.87x |
 
-<sub>Last run 2026-05-13 10:40:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-06-27 11:56:42 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:yaml-decode-vs-hsyaml -->
 
 For cross-language comparisons:

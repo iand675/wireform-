@@ -3,12 +3,27 @@
   "title": "wireform-bencode encode + decode (TorrentInfo record)",
   "unit": "Nanos",
   "higherIsBetter": false,
-  "groups": ["single-file metainfo", "100-file metainfo"],
+  "groups": [
+    "single-file metainfo",
+    "100-file metainfo"
+  ],
   "series": [
-    {"name": "encode", "values": [959.81, 32123.97]},
-    {"name": "decode", "values": [1928.74, 83068.28]}
+    {
+      "name": "encode",
+      "values": [
+        952.84,
+        32421.91
+      ]
+    },
+    {
+      "name": "decode",
+      "values": [
+        1945.53,
+        82926.84
+      ]
+    }
   ],
   "baseline": "encode",
-  "capturedAt": "2026-05-13T11:38:00Z",
+  "capturedAt": "2026-06-27T11:24:28Z",
   "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
 }

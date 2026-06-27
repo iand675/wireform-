@@ -151,10 +151,10 @@ cabal bench wireform-bson:wireform-bson-bench
 
 | Operation      |   encode |   decode | ratio |
 | :------------- | -------: | -------: | ----: |
-| single Person  |   317 ns |   428 ns | 1.35x |
-| [Person] x 100 | 58182 ns | 25172 ns | 0.43x |
+| single Person  |   309 ns |   399 ns | 1.29x |
+| [Person] x 100 | 55343 ns | 23567 ns | 0.43x |
 
-<sub>Last run 2026-05-13 11:38:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-06-27 11:35:54 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:bson-encode-decode -->
 
 For cross-language comparisons:

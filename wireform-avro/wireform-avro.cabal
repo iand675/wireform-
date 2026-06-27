@@ -70,6 +70,24 @@ library
     zlib >= 0.6 && < 0.8,
     deepseq >= 1.4 && < 1.6
 
+benchmark wireform-avro-bench
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: bench
+  main-is: Bench.hs
+  ghc-options: -O2
+  default-extensions:
+    ScopedTypeVariables
+    TemplateHaskell
+  build-depends:
+    base,
+    wireform-avro,
+    bytestring,
+    deepseq,
+    text,
+    vector,
+    criterion >= 1.5 && < 1.7
+
 test-suite wireform-avro-derive-test
   import: defaults
   type: exitcode-stdio-1.0

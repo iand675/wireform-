@@ -211,10 +211,10 @@ cabal bench format-bench
 
 | Operation | wireform-msgpack | msgpack | ratio |
 | :-------- | ---------------: | ------: | ----: |
-| encode    |           292 ns | 1191 ns | 4.08x |
-| decode    |           391 ns | 1702 ns | 4.35x |
+| encode    |           297 ns | 1232 ns | 4.14x |
+| decode    |           388 ns | 1775 ns | 4.58x |
 
-<sub>Last run 2026-05-13 10:30:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-06-27 11:56:42 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:msgpack-vs-msgpack-haskell -->
 
 For cross-language comparisons, the canonical reference implementations

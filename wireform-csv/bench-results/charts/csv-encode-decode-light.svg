@@ -1,5 +1,5 @@
-<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 360" width="720" height="360" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif" font-size="12">
-  <rect x="0" y="0" width="720" height="360" fill="#ffffff"/>
+<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 400" width="720" height="400" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif" font-size="12">
+  <rect x="0" y="0" width="720" height="400" fill="#ffffff"/>
   <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">wireform-csv encode + decode (Sale record)</text>
   <text x="360" y="44" text-anchor="middle" font-size="11" fill="#656d76">lower is better · µs · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5</text>
   <g stroke="#d0d7de" stroke-width="1">
@@ -21,25 +21,25 @@
   <g>
     <rect x="171" y="319.3" width="62" height="0.7" rx="2" fill="#0969da"/>
     <rect x="235" y="318.6" width="62" height="1.4" rx="2" fill="#cf222e"/>
-    <rect x="481" y="236.8" width="62" height="83.2" rx="2" fill="#0969da"/>
-    <rect x="545" y="138.6" width="62" height="181.4" rx="2" fill="#cf222e"/>
+    <rect x="481" y="231.0" width="62" height="89.0" rx="2" fill="#0969da"/>
+    <rect x="545" y="133.9" width="62" height="186.1" rx="2" fill="#cf222e"/>
   </g>
   <g>
-    <text x="202" y="315.3" text-anchor="middle" font-size="10" fill="#1f2328">5.27</text>
-    <text x="266" y="314.6" text-anchor="middle" font-size="10" fill="#1f2328">10.7</text>
-    <text x="512" y="232.8" text-anchor="middle" font-size="10" fill="#1f2328">640</text>
-    <text x="576" y="134.6" text-anchor="middle" font-size="10" fill="#1f2328">1396</text>
+    <text x="202" y="315.3" text-anchor="middle" font-size="10" fill="#1f2328">5.20</text>
+    <text x="266" y="314.6" text-anchor="middle" font-size="10" fill="#1f2328">10.8</text>
+    <text x="512" y="227.0" text-anchor="middle" font-size="10" fill="#1f2328">685</text>
+    <text x="576" y="129.9" text-anchor="middle" font-size="10" fill="#1f2328">1432</text>
   </g>
   <g>
-    <text x="235" y="336" text-anchor="middle" font-size="11" fill="#1f2328">10 rows</text>
-    <text x="545" y="336" text-anchor="middle" font-size="11" fill="#1f2328">1000 rows</text>
+    <text x="235" y="338" text-anchor="middle" font-size="11" fill="#1f2328">10 rows</text>
+    <text x="545" y="338" text-anchor="middle" font-size="11" fill="#1f2328">1000 rows</text>
   </g>
   <g>
-    <g transform="translate(292, 344)">
+    <g transform="translate(292, 382)">
       <rect x="0" y="-9" width="12" height="12" rx="2" fill="#0969da"/>
       <text x="18" y="1" font-size="11" fill="#1f2328">encode</text>
     </g>
-    <g transform="translate(368, 344)">
+    <g transform="translate(368, 382)">
       <rect x="0" y="-9" width="12" height="12" rx="2" fill="#cf222e"/>
       <text x="18" y="1" font-size="11" fill="#1f2328">decode</text>
     </g>

@@ -174,10 +174,10 @@ cabal bench wireform-bond:wireform-bond-bench
 
 | Operation      |   encode |  decode | ratio |
 | :------------- | -------: | ------: | ----: |
-| single Person  |   162 ns |  185 ns | 1.14x |
-| [Person] x 100 | 15720 ns | 2081 ns | 0.13x |
+| single Person  |   168 ns |  192 ns | 1.14x |
+| [Person] x 100 | 15742 ns | 2140 ns | 0.14x |
 
-<sub>Last run 2026-05-13 11:44:00 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5. Decode is structurally lazy at the Value layer; the [Person] x 100 number reflects only the outer container resolution..</sub>
+<sub>Last run 2026-06-27 11:35:54 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5. Decode is structurally lazy at the Value layer; the [Person] x 100 number reflects only the outer container resolution..</sub>
 <!-- END_AUTOGEN bench:bond-encode-decode -->
 
 For cross-language comparisons:
