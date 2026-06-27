@@ -10,13 +10,13 @@ and rewrites the body of each from the data captured under
 Subcommands:
 
 * @regen-stats render@: read what's in tree, regenerate the
- markdown. Fast (no cabal commands run).
+markdown. Fast (no cabal commands run).
 * @regen-stats render-bench-charts@: re-render every @bench-results\/charts\/@
- SVG from its summary JSON. Use after a palette / layout change.
+SVG from its summary JSON. Use after a palette / layout change.
 * @regen-stats badges@: regenerate every shields.io endpoint
- badge JSON under @badges/@. Fast.
+badge JSON under @badges/@. Fast.
 * @regen-stats check@: run @render@ in dry-run mode and exit
- non-zero if anything would change. The CI gate.
+non-zero if anything would change. The CI gate.
 -}
 module Main (main) where
 
