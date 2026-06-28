@@ -16,15 +16,16 @@ high static-file numbers on benchmarks.
 
 == Portability
 
-This module currently targets Linux. The signature of @sendfile(2)@
-differs on BSD / macOS (extra arguments, different semantics) and on
-Windows @TransmitFile@ is the equivalent. A portability shim is a
-straightforward addition but is reserved for when we actually need it.
+The platform differences in @sendfile(2)@ (Linux vs BSD\/macOS argument
+order, FreeBSD's extra @sbytes@ out-param) and Windows's @TransmitFile@
+are normalised by the C shim @hs_http1_sendfile@ in
+@cbits\/http1_send.c@. Linux, macOS\/Darwin, and FreeBSD\/DragonFly get
+a native zero-copy transfer; every other POSIX platform falls back to a
+correct @pread@+@send@ loop; Windows uses @TransmitFile@.
 
-On non-Linux systems the FFI binding will still compile (the symbol
-is looked up at link time) but calls will fail at runtime. The server
-falls back gracefully: 'sendBodyFile' rethrows the error, which the
-server's outer 'try' catches and turns into a 500 + close.
+(wireform-http1 still depends on @unix@, so the package as a whole is
+Unix-only until that is lifted — but the shim is winsock-clean and
+Windows-ready.)
 -}
 module Network.HTTP1.SendFile (
   sendFile,
@@ -35,27 +36,28 @@ module Network.HTTP1.SendFile (
 import Control.Exception (throwIO)
 import Data.ByteString qualified as BS
 import Data.ByteString.Unsafe qualified as BSU
+import Data.Int (Int64)
 import Data.Word (Word64)
-import Foreign.C.Error (Errno (..), eINTR, errnoToIOError, getErrno)
+import Foreign.C.Error (Errno (..), errnoToIOError)
 import Foreign.C.Types (CInt (..), CSize (..))
-import Foreign.Marshal.Alloc (alloca)
 import Foreign.Ptr (Ptr, castPtr)
 import Foreign.Ptr qualified
-import Foreign.Storable (poke)
 import Network.Socket (Socket, withFdSocket)
-import System.Posix.Types (COff (..), CSsize (..), Fd (..))
+import System.Posix.Types (CSsize (..), Fd (..))
 
 
-{- | Linux @sendfile(2)@.
+{- | Portable single-shot file→socket transfer, implemented by the C
+shim in @cbits\/http1_send.c@ (Linux @sendfile@, macOS \/ *BSD
+@sendfile@, Windows @TransmitFile@, or a @pread@+@send@ fallback).
 
-@ssize_t sendfile(int out_fd, int in_fd, off_t *offset, size_t count);@
+Returns the bytes sent (@>= 0@), @0@ on premature EOF, or @-errno@ on
+failure (EINTR is retried inside the shim).
 
-A @safe@ ccall (not @unsafe@): @sendfile@ may block waiting for
-socket buffer space and we want the GHC RTS to schedule other
-Haskell threads on the same capability while we're parked.
+A @safe@ ccall (not @unsafe@): the transfer may block on socket buffer
+space and we want the RTS to schedule other Haskell threads meanwhile.
 -}
-foreign import ccall safe "sys/sendfile.h sendfile"
-  c_sendfile :: CInt -> CInt -> Ptr COff -> CSize -> IO CSsize
+foreign import ccall safe "hs_http1_sendfile"
+  c_http1_sendfile :: CInt -> CInt -> Int64 -> CSize -> IO CSsize
 
 
 {- | Send @length@ bytes starting at @offset@ from a file descriptor
@@ -87,16 +89,13 @@ sendFileFd sockFd (Fd fileFdInt) = loop
     !chunkCap = 1024 * 1024 :: Word64
 
     loop !_offset 0 = pure ()
-    loop !offset !remaining = alloca $ \offPtr -> do
-      poke offPtr (fromIntegral offset)
+    loop !offset !remaining = do
       let want = min remaining chunkCap
-      n <- c_sendfile sockFd (fromIntegral fileFdInt) offPtr (fromIntegral want)
+      -- The shim retries EINTR internally and returns -errno on
+      -- failure, so we branch only on success / EOF / error.
+      n <- c_http1_sendfile sockFd (fromIntegral fileFdInt) (fromIntegral offset) (fromIntegral want)
       if n < 0
-        then do
-          err <- getErrno
-          if err == eINTR
-            then loop offset remaining
-            else throwSendfileError err
+        then throwSendfileError (Errno (fromIntegral (-n)))
         else
           if n == 0
             -- File ended before we expected (e.g. the user-supplied

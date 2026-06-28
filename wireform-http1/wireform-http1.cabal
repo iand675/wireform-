@@ -88,6 +88,11 @@ library
     cbits/http1_scan.c
     cbits/http1_send.c
   cc-options: -O3
+  -- hs_http1_sendfile uses TransmitFile (mswsock) over winsock on
+  -- Windows. The package is Unix-only today (the `unix` dep below), but
+  -- the C shim is winsock-clean so this is ready when that is lifted.
+  if os(windows)
+    extra-libraries: ws2_32, mswsock
   build-depends:
     base >= 4.16 && < 5,
     bytestring >= 0.11 && < 0.13,
