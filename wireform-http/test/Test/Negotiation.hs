@@ -61,7 +61,8 @@ alpnRoundTrips = it "alpnForVersion / versionForAlpn are inverses" $ do
   alpnForVersion V.HTTP2 `shouldBe` Just "h2"
   alpnForVersion V.HTTP1_1 `shouldBe` Just "http/1.1"
   alpnForVersion V.HTTP1_0 `shouldBe` Just "http/1.0"
-  alpnForVersion V.HTTP3 `shouldBe` Nothing
+  alpnForVersion V.HTTP3 `shouldBe` Just "h3"
   versionForAlpn "h2" `shouldBe` Just V.HTTP2
   versionForAlpn "http/1.1" `shouldBe` Just V.HTTP1_1
+  versionForAlpn "h3" `shouldBe` Just V.HTTP3
   versionForAlpn "h2c" `shouldBe` Nothing
