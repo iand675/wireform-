@@ -48,7 +48,7 @@ import Network.HTTP2.Connection (
   Connection,
   closeConnection,
   connHpackDecoder,
-  connHpackEncoder,
+  sendEncodedHeaders,
   newConnectionFromTransport,
   sendFrame,
  )
@@ -372,18 +372,17 @@ sendOutObj
   -> OutObj
   -> IO ()
 sendOutObj conn cancelRef sid (OutObj hdrs body trailerMaker) = do
-  block <- withMVar (connHpackEncoder conn) $ \encoder ->
-    encodeHeaderBlock defaultEncodeStrategy encoder (ciHeadersToRaw hdrs)
+  let rawHdrs = ciHeadersToRaw hdrs
   case body of
     OutBodyNone -> do
       Trailers tr <- trailerMaker Nothing
       if null tr
-        then sendHeaders conn sid block True
+        then sendEncodedHeaders conn sid True rawHdrs
         else do
-          sendHeaders conn sid block False
+          sendEncodedHeaders conn sid False rawHdrs
           sendTrailerBlock conn sid (ciHeadersToRaw tr)
     OutBodyBuilder b -> do
-      sendHeaders conn sid block False
+      sendEncodedHeaders conn sid False rawHdrs
       let bs = LBS.toStrict (BSB.toLazyByteString b)
       _ <- trailerMaker (Just bs)
       Trailers tr <- trailerMaker Nothing
@@ -393,10 +392,10 @@ sendOutObj conn cancelRef sid (OutObj hdrs body trailerMaker) = do
           sendData conn sid bs False
           sendTrailerBlock conn sid (ciHeadersToRaw tr)
     OutBodyStreaming f -> do
-      sendHeaders conn sid block False
+      sendEncodedHeaders conn sid False rawHdrs
       runStreamingPushFlush conn cancelRef sid trailerMaker f
     OutBodyStreamingIface f -> do
-      sendHeaders conn sid block False
+      sendEncodedHeaders conn sid False rawHdrs
       runStreamingIface conn cancelRef sid trailerMaker f
     OutBodyFile _ ->
       error "Network.HTTP2.Engine.Run.Server: OutBodyFile not supported"
@@ -483,20 +482,8 @@ ciHeadersToRaw = map (\(k, v) -> (CI.original k, v))
 
 
 sendTrailerBlock :: Connection -> H2.StreamId -> [(ByteString, ByteString)] -> IO ()
-sendTrailerBlock conn sid hdrs = do
-  block <- withMVar (connHpackEncoder conn) $ \encoder ->
-    encodeHeaderBlock defaultEncodeStrategy encoder hdrs
-  sendHeaders conn sid block True
-
-
-sendHeaders :: Connection -> H2.StreamId -> ByteString -> Bool -> IO ()
-sendHeaders conn sid block endStream =
-  let flags = flagEndHeaders .|. (if endStream then flagEndStream else 0)
-      frame =
-        Frame
-          (FrameHeader (fromIntegral (BS.length block)) FrameHeaders flags sid)
-          (HeadersFrame Nothing block)
-  in sendFrame conn frame
+sendTrailerBlock conn sid hdrs =
+  sendEncodedHeaders conn sid True hdrs
 
 
 sendData :: Connection -> H2.StreamId -> ByteString -> Bool -> IO ()

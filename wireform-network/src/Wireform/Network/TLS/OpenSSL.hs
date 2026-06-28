@@ -20,12 +20,18 @@ helpers that turn a freshly-handshaked OpenSSL connection into a
 
 == Concurrency
 
-The OpenSSL @SSL*@ object is not thread-safe for concurrent
-'tlsRecvFn' / 'tlsSend' from multiple threads.  Use it from a
-single per-connection thread (which is the shape every
-connection-handler in @wireform-http1@ / @wireform-http2@ /
-@wireform-kafka@ uses today) and you don't need a lock.  If you
-need cross-thread fan-out, serialise through an MVar.
+The OpenSSL @SSL*@ object is not thread-safe for concurrent use
+from multiple threads, yet the HTTP\/2 engine reads on one thread
+while writing on another (and TLS 1.3 post-handshake messages —
+@KeyUpdate@ \/ @NewSessionTicket@ — make a lock-free reader\/writer
+split provably unsafe, not merely racy).  Each 'SslConn' therefore
+carries its own 'MVar' that serialises every @SSL*@ operation
+('tlsReceiveFn' \/ 'tlsSendFn' \/ 'tlsSend' \/ 'tlsShutdown' \/
+'freeConn').  The lock is held only across the FFI call, never
+across the IO-manager park, so a reader blocked in 'threadWaitRead'
+cannot starve a waiting writer.  Single-threaded callers
+(@wireform-http1@ \/ @wireform-kafka@) pay only an uncontended
+take\/put, dwarfed by the per-record crypto + syscall.
 -}
 module Wireform.Network.TLS.OpenSSL (
   -- * One-time init
@@ -77,6 +83,7 @@ module Wireform.Network.TLS.OpenSSL (
 ) where
 
 import Control.Concurrent (threadWaitRead, threadWaitWrite)
+import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Exception (Exception, SomeException, catch, throwIO)
 import Data.ByteString qualified as BS
 import Data.ByteString.Internal qualified as BSI
@@ -448,6 +455,15 @@ data SslConn = SslConn
   {- ^ Kept here so the recv\/send paths can park on the IO manager
   when 'WfSslWantRetry' bubbles up.
   -}
+  , _sslLock :: !(MVar ())
+  {- ^ Serialises every @SSL*@ operation on this connection.  OpenSSL
+  forbids concurrent use of one @SSL*@ from multiple threads, yet the
+  HTTP\/2 engine reads on one thread while writing on another (and
+  TLS 1.3 post-handshake messages make this provably unsafe without
+  it).  Held only across the FFI call, never across the IO-manager
+  park, so a reader blocked in 'threadWaitRead' cannot starve a
+  waiting writer.
+  -}
   }
 
 
@@ -456,7 +472,7 @@ so callers that want to set socket options (KEEPALIVE, NODELAY)
 or pull a raw fd can do so without a separate handle.
 -}
 sslConnSocket :: SslConn -> Socket
-sslConnSocket (SslConn _ sock) = sock
+sslConnSocket (SslConn _ sock _) = sock
 
 
 {- | Build + handshake a TLS client.  Steps: bind the connection to
@@ -486,7 +502,8 @@ newClient (SslCtx ctx) sock mHost = do
             pure ()
         Nothing -> pure ()
       retryHandshake sock c_ssl_connect ssl `catchAndFree` ssl
-      pure (SslConn ssl sock)
+      lock <- newMVar ()
+      pure (SslConn ssl sock lock)
 
 
 {- | Like 'newClient' but additionally pins the server's certificate
@@ -526,7 +543,8 @@ newClientVerified (SslCtx ctx) sock mHost mVerifyHost = do
               else pure ()
         Nothing -> pure ()
       retryHandshake sock c_ssl_connect ssl `catchAndFree` ssl
-      pure (SslConn ssl sock)
+      lock <- newMVar ()
+      pure (SslConn ssl sock lock)
 
 
 {- | Additionally enforce that the server's cert CN \/ SAN matches
@@ -535,7 +553,7 @@ meaningful when the context was constructed with verification
 enabled.
 -}
 setClientHostnameVerify :: SslConn -> BS.ByteString -> IO ()
-setClientHostnameVerify (SslConn ssl _) host =
+setClientHostnameVerify (SslConn ssl _ _) host =
   BSU.unsafeUseAsCString (host `BS.snoc` 0) $ \cstr -> do
     rc <- c_ssl_set_verify_hostname ssl cstr
     if rc /= 0 then throwSsl "setClientHostnameVerify" else pure ()
@@ -552,7 +570,8 @@ newServer (SslCtx ctx) sock = do
     then throwSsl "newServer: SSL_new"
     else do
       retryHandshake sock c_ssl_accept ssl `catchAndFree` ssl
-      pure (SslConn ssl sock)
+      lock <- newMVar ()
+      pure (SslConn ssl sock lock)
 
 
 {- | Retry the handshake on WANT_READ / WANT_WRITE, parking on the
@@ -594,7 +613,7 @@ SSL object.  The underlying socket is NOT closed — caller owns
 its lifetime.
 -}
 freeConn :: SslConn -> IO ()
-freeConn (SslConn ssl _) = do
+freeConn (SslConn ssl _ lock) = withMVar lock $ \() -> do
   c_ssl_shutdown ssl
   c_ssl_free ssl
 
@@ -603,7 +622,7 @@ freeConn (SslConn ssl _) = do
 peer didn't pick one.
 -}
 getAlpn :: SslConn -> IO (Maybe BS.ByteString)
-getAlpn (SslConn ssl _) =
+getAlpn (SslConn ssl _ _) =
   alloca $ \protoPP -> alloca $ \plenP -> do
     rc <- c_ssl_get_alpn ssl protoPP plenP
     if rc /= 0
@@ -629,16 +648,17 @@ Blocks on the IO manager when @SSL_read_ex@ returns WANT_READ
 @0@ on clean EOF (@close_notify@).
 -}
 tlsReceiveFn :: SslConn -> ReceiveFn
-tlsReceiveFn (SslConn ssl sock) = recv
+tlsReceiveFn (SslConn ssl sock lock) = recv
   where
     recv dst want = loop
       where
-        loop = alloca $ \nP -> do
-          rc <- c_ssl_read_into ssl dst (fromIntegral want) nP
+        loop = do
+          (rc, n) <- withMVar lock $ \() -> alloca $ \nP -> do
+            rc <- c_ssl_read_into ssl dst (fromIntegral want) nP
+            n <- peek nP
+            pure (rc, n)
           case rc of
-            WfSslOk -> do
-              n <- peek nP
-              pure (fromIntegral n)
+            WfSslOk -> pure (fromIntegral n)
             WfSslEof -> pure 0
             WfSslWantRetry -> do
               withFdSocket sock $ \fd -> threadWaitRead (Fd (fromIntegral fd))
@@ -653,16 +673,17 @@ number of bytes consumed from the buffer (always > 0 on success).
 Blocks on the IO manager when @SSL_write_ex@ returns WANT_WRITE.
 -}
 tlsSendFn :: SslConn -> SendFn
-tlsSendFn (SslConn ssl sock) = send
+tlsSendFn (SslConn ssl sock lock) = send
   where
     send src want = loop
       where
-        loop = alloca $ \nP -> do
-          rc <- c_ssl_write_from ssl src (fromIntegral want) nP
+        loop = do
+          (rc, n) <- withMVar lock $ \() -> alloca $ \nP -> do
+            rc <- c_ssl_write_from ssl src (fromIntegral want) nP
+            n <- peek nP
+            pure (rc, n)
           case rc of
-            WfSslOk -> do
-              n <- peek nP
-              pure (fromIntegral n)
+            WfSslOk -> pure (fromIntegral n)
             WfSslWantRetry -> do
               withFdSocket sock $ \fd -> threadWaitWrite (Fd (fromIntegral fd))
               loop
@@ -674,17 +695,19 @@ tlsSendFn (SslConn ssl sock) = send
 on the IO manager on WANT_WRITE.
 -}
 tlsSend :: SslConn -> BS.ByteString -> IO ()
-tlsSend (SslConn ssl sock) bs = BSU.unsafeUseAsCStringLen bs go
+tlsSend (SslConn ssl sock lock) bs = BSU.unsafeUseAsCStringLen bs go
   where
     go (src, len) = loop (castPtr src) len
       where
         loop p n
           | n <= 0 = pure ()
-          | otherwise = alloca $ \nP -> do
-              rc <- c_ssl_write_from ssl p (fromIntegral n) nP
+          | otherwise = do
+              (rc, wrote) <- withMVar lock $ \() -> alloca $ \nP -> do
+                rc <- c_ssl_write_from ssl p (fromIntegral n) nP
+                wrote <- peek nP
+                pure (rc, wrote)
               case rc of
                 WfSslOk -> do
-                  wrote <- peek nP
                   let !wroteI = fromIntegral wrote
                   loop (p `plusPtr` wroteI) (n - wroteI)
                 WfSslWantRetry -> do
@@ -698,7 +721,7 @@ tlsSend (SslConn ssl sock) bs = BSU.unsafeUseAsCStringLen bs go
 for that).
 -}
 tlsShutdown :: SslConn -> IO ()
-tlsShutdown (SslConn ssl _) = c_ssl_shutdown ssl
+tlsShutdown (SslConn ssl _ lock) = withMVar lock $ \() -> c_ssl_shutdown ssl
 
 
 ------------------------------------------------------------------------
@@ -741,8 +764,8 @@ withTlsSendTransport
   -> SslConn
   -> (SendTransport -> IO a)
   -> IO a
-withTlsSendTransport cfg conn@(SslConn ssl _) action =
-  withSendBufTransport cfg (tlsSendFn conn) (c_ssl_shutdown ssl) action
+withTlsSendTransport cfg conn action =
+  withSendBufTransport cfg (tlsSendFn conn) (tlsShutdown conn) action
 
 
 -- | IO-style constructor for an OpenSSL-backed 'SendTransport'.
@@ -750,8 +773,8 @@ newTlsSendTransport
   :: TransportConfig
   -> SslConn
   -> IO SendTransport
-newTlsSendTransport cfg conn@(SslConn ssl _) =
-  newSendBufTransport cfg (tlsSendFn conn) (c_ssl_shutdown ssl)
+newTlsSendTransport cfg conn =
+  newSendBufTransport cfg (tlsSendFn conn) (tlsShutdown conn)
 
 
 {- | One TLS context, two magic rings: the natural shape for a
@@ -763,12 +786,12 @@ withTlsDuplexTransport
   -> SslConn
   -> (DuplexTransport -> IO a)
   -> IO a
-withTlsDuplexTransport cfg conn@(SslConn ssl _) =
+withTlsDuplexTransport cfg conn =
   withDuplexBufTransport
     cfg
     (tlsReceiveFn conn)
     (tlsSendFn conn)
-    (c_ssl_shutdown ssl)
+    (tlsShutdown conn)
 
 
 {- | IO-style 'DuplexTransport' for TLS.  Caller is responsible for
@@ -779,9 +802,9 @@ newTlsDuplexTransport
   :: TransportConfig
   -> SslConn
   -> IO DuplexTransport
-newTlsDuplexTransport cfg conn@(SslConn ssl _) =
+newTlsDuplexTransport cfg conn =
   newDuplexBufTransport
     cfg
     (tlsReceiveFn conn)
     (tlsSendFn conn)
-    (c_ssl_shutdown ssl)
+    (tlsShutdown conn)

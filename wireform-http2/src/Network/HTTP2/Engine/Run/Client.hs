@@ -47,9 +47,9 @@ import Network.HTTP2.Connection (
   Connection,
   closeConnection,
   connHpackDecoder,
-  connHpackEncoder,
   newConnectionFromTransport,
   sendFrame,
+  sendNewStreamHeaders,
  )
 import Network.HTTP2.Connection qualified as Conn
 import Network.HTTP2.Connection.Settings (encodeSettings)
@@ -108,7 +108,7 @@ runClient env client = do
                     let err = toException ClientStreamConnectionClosed
                     mapM_
                       ( \mb -> do
-                          _ <- tryPutMVar (smHeadersVar mb) []
+                          _ <- tryPutMVar (smHeadersVar mb) (Left err)
                           atomically $ writeTBQueue (smInputQueue mb) (InputError err)
                       )
                       (Map.elems streams)
@@ -170,7 +170,12 @@ sendClientPrefaceSettings conn s = do
 
 -- | Per-stream worker mailbox for inbound (response side) data.
 data StreamMb = StreamMb
-  { smHeadersVar :: !(MVar [(ByteString, ByteString)])
+  { smHeadersVar :: !(MVar (Either SomeException [(ByteString, ByteString)]))
+    -- ^ The first inbound HEADERS for this stream, or a connection-level
+    -- error if the connection dropped before they arrived.  Carrying the
+    -- error here (rather than putting empty headers) means a mid-flight
+    -- connection close surfaces as a proper 'ClientStreamConnectionClosed'
+    -- instead of a bogus \"response with no @:status@\".
   , smHeadersSent :: !(IORef Bool)
   , smInputQueue :: !(TBQueue InputItem)
   , smTrailerSlot :: !(IORef (Maybe TokenHeaderTable))
@@ -196,13 +201,15 @@ doSendRequest
   -> (InpObj -> IO r)
   -> IO r
 doSendRequest env conn streamsRef nextSidRef (OutObj hdrs body trailerMaker) k = do
-  sid <- atomicModifyIORef' nextSidRef $ \s -> (s + 2, s)
   headersVar <- newEmptyMVar
   headersSentRef <- newIORef False
   inputQ <- atomically (newTBQueue 64)
   trailerRef <- newIORef Nothing
   let mb = StreamMb headersVar headersSentRef inputQ trailerRef
-  atomicModifyIORef' streamsRef (\m -> (Map.insert sid mb m, ()))
+      openStream = do
+        sid <- atomicModifyIORef' nextSidRef $ \s -> (s + 2, s)
+        atomicModifyIORef' streamsRef (\m -> (Map.insert sid mb m, ()))
+        pure sid
 
   -- Inject :scheme and :authority before the user-supplied headers
   -- (these are required pseudo-headers on the request side).
@@ -211,18 +218,22 @@ doSendRequest env conn streamsRef nextSidRef (OutObj hdrs body trailerMaker) k =
           : (":authority", BS.empty) -- placeholder; will be set below
           : ciHeadersToRaw hdrs
       finalHeaders = injectAuthority (envAuthority env) augmented
+      endStreamOnHeaders = case body of
+        OutBodyNone -> True
+        _           -> False
 
-  block <- withMVar (connHpackEncoder conn) $ \encoder ->
-    encodeHeaderBlock defaultEncodeStrategy encoder finalHeaders
+  -- Allocate the stream id, register it, and send the request HEADERS
+  -- atomically (under the connection send lock) so HEADERS reach the wire
+  -- in stream-id order and the HPACK encode stays in sync with them. See
+  -- 'sendNewStreamHeaders' for why both must share one critical section.
+  sid <- sendNewStreamHeaders conn openStream endStreamOnHeaders finalHeaders
+
   case body of
-    OutBodyNone -> do
-      sendHeadersFrame conn sid block True
+    OutBodyNone -> pure ()
     OutBodyBuilder b -> do
-      sendHeadersFrame conn sid block False
       let bs = LBS.toStrict (BSB.toLazyByteString b)
       sendDataFrame conn sid bs True
     OutBodyStreaming f -> do
-      sendHeadersFrame conn sid block False
       _ <-
         forkIO $
           runStreamingBody
@@ -235,7 +246,6 @@ doSendRequest env conn streamsRef nextSidRef (OutObj hdrs body trailerMaker) k =
             `catch` (\(_ :: SomeException) -> pure ())
       pure ()
     OutBodyStreamingIface f -> do
-      sendHeadersFrame conn sid block False
       _ <-
         forkIO $
           runStreamingBody conn sid trailerMaker f
@@ -246,7 +256,7 @@ doSendRequest env conn streamsRef nextSidRef (OutObj hdrs body trailerMaker) k =
 
   -- Wait for the response headers, then construct the inbound object
   -- and hand it to the caller.
-  respHeaders <- takeMVar headersVar
+  respHeaders <- either throwIO pure =<< takeMVar headersVar
   let inpObj =
         InpObj
           { inpObjHeaders = tokeniseHeaders respHeaders
@@ -328,7 +338,7 @@ recvLoop env conn streamsRef = loop
           let err = toException ClientStreamConnectionClosed
           mapM_
             ( \mb -> do
-                _ <- tryPutMVar (smHeadersVar mb) []
+                _ <- tryPutMVar (smHeadersVar mb) (Left err)
                 atomically $ writeTBQueue (smInputQueue mb) (InputError err)
             )
             (Map.elems streams)
@@ -393,7 +403,7 @@ handleClientFrame _env conn streamsRef hdr payload = case fhType hdr of
                   if not alreadySent
                     then do
                       writeIORef (smHeadersSent mb) True
-                      putMVar (smHeadersVar mb) headers
+                      putMVar (smHeadersVar mb) (Right headers)
                       when (testFlag (fhFlags hdr) flagEndStream) $ do
                         writeIORef (smTrailerSlot mb) (Just (tokeniseHeaders headers))
                         atomically $ writeTBQueue (smInputQueue mb) InputEnd
@@ -449,16 +459,6 @@ trySendWindowUpdates conn sid len =
 
 ciHeadersToRaw :: [Header] -> [(ByteString, ByteString)]
 ciHeadersToRaw = map (\(k, v) -> (CI.original k, v))
-
-
-sendHeadersFrame :: Connection -> H2.StreamId -> ByteString -> Bool -> IO ()
-sendHeadersFrame conn sid block endStream =
-  let flags = flagEndHeaders .|. (if endStream then flagEndStream else 0)
-      frame =
-        Frame
-          (FrameHeader (fromIntegral (BS.length block)) FrameHeaders flags sid)
-          (HeadersFrame Nothing block)
-  in sendFrame conn frame
 
 
 sendDataFrame :: Connection -> H2.StreamId -> ByteString -> Bool -> IO ()

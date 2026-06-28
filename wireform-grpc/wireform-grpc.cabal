@@ -220,6 +220,7 @@ test-suite wireform-grpc-interop
       Interop.Client.TestCase.OrcaOob
       Interop.Cmdline
       Interop.SelfTest
+      Interop.Stress
       Interop.Server
       Interop.Server.Common
       Interop.Server.PingService.Ping
@@ -253,6 +254,7 @@ test-suite wireform-grpc-interop
       -- Additional dependencies
     , ansi-terminal        >= 1.1  && < 1.2
     , optparse-applicative >= 0.16 && < 0.20
+    , async
     , reflection
     , data-default
     , vector

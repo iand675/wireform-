@@ -10,6 +10,8 @@ module Network.HTTP2.Connection
   , sendFrames
   , sendFramesUnlocked
   , sendHeaderBlock
+  , sendEncodedHeaders
+  , sendNewStreamHeaders
   , recvFrame
   , recvFrameRaw
   , closeConnection
@@ -195,6 +197,76 @@ sendFrames conn frames = do
   let bss = map encodeFrame frames
   withMVar (connSendLock conn) $ \_ ->
     sendByteStringMany (connSendTransport conn) bss
+
+-- | Encode @headers@ with the connection's HPACK encoder and emit the
+-- resulting block as a single HEADERS frame, holding the send lock
+-- across /both/ the encode and the send.
+--
+-- This atomicity is mandatory. HPACK is stateful: the encoder mutates a
+-- dynamic table as it encodes, and the peer's decoder replays those
+-- mutations in the order the header blocks arrive on the wire. Encoding
+-- under the HPACK lock and then sending under the send lock as two
+-- separate critical sections lets two concurrent streams encode in one
+-- order and reach the wire in the other — desyncing the peer's dynamic
+-- table, after which it mis-decodes every subsequent header block (the
+-- classic symptom is a dropped @:status@ / @PeerMissingPseudoHeaderStatus@).
+-- Holding the send lock for the whole encode+send makes the table
+-- mutation order identical to the wire order.
+sendEncodedHeaders
+  :: Connection
+  -> StreamId
+  -> Bool                          -- ^ set END_STREAM on the HEADERS frame
+  -> [(ByteString, ByteString)]    -- ^ raw header list (incl. pseudo-headers)
+  -> IO ()
+sendEncodedHeaders conn sid endStream headers =
+  withMVar (connSendLock conn) $ \_ -> do
+    block <- withMVar (connHpackEncoder conn) $ \enc ->
+      encodeHeaderBlock defaultEncodeStrategy enc headers
+    let !len   = BS.length block
+        flags  = flagEndHeaders .|. (if endStream then flagEndStream else 0)
+        frame  = Frame
+                   (FrameHeader (fromIntegral len) FrameHeaders flags sid)
+                   (HeadersFrame Nothing block)
+    sendByteString (connSendTransport conn) (encodeFrame frame)
+
+-- | Open a new (client-initiated) stream: atomically run @openStream@ to
+-- allocate the next stream id /and/ register its engine state, then encode
+-- and send the request HEADERS — all under the send lock, returning the id.
+--
+-- Two atomicity requirements collapse into this one critical section:
+--
+--   * HTTP\/2 requires a new stream's id to be numerically greater than
+--     every stream the endpoint has already opened (RFC 9113 §5.1.1). A
+--     peer that receives a HEADERS frame whose id is lower than one it has
+--     already seen MUST treat it as a connection error. Allocating the id
+--     outside the send lock lets two concurrent openers grab ids @n@ and
+--     @n+2@ and then reach the wire in the opposite order — corrupting the
+--     connection for every stream on it.
+--
+--   * the HPACK encode must stay atomic with the send (see
+--     'sendEncodedHeaders').
+--
+-- @openStream@ runs while the lock is held and before the HEADERS reach the
+-- wire, so the recv loop can never see a response for a stream that has not
+-- yet been registered.
+sendNewStreamHeaders
+  :: Connection
+  -> IO StreamId                   -- ^ allocate next id + register state (under lock)
+  -> Bool                          -- ^ set END_STREAM on the HEADERS frame
+  -> [(ByteString, ByteString)]    -- ^ raw header list (incl. pseudo-headers)
+  -> IO StreamId
+sendNewStreamHeaders conn openStream endStream headers =
+  withMVar (connSendLock conn) $ \_ -> do
+    sid   <- openStream
+    block <- withMVar (connHpackEncoder conn) $ \enc ->
+      encodeHeaderBlock defaultEncodeStrategy enc headers
+    let !len  = BS.length block
+        flags = flagEndHeaders .|. (if endStream then flagEndStream else 0)
+        frame = Frame
+                  (FrameHeader (fromIntegral len) FrameHeaders flags sid)
+                  (HeadersFrame Nothing block)
+    sendByteString (connSendTransport conn) (encodeFrame frame)
+    pure sid
 
 -- | Emit an encoded HPACK header block as a HEADERS frame followed
 -- by zero or more CONTINUATION frames, splitting at the peer's

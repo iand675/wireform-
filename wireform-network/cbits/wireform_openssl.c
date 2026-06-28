@@ -30,12 +30,14 @@
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/sslerr.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 #include <openssl/x509_vfy.h>
 
 #include <stddef.h>
 #include <stdint.h>
+#include <errno.h>
 #include <string.h>
 
 /* ---------------------------------------------------------------- *
@@ -284,11 +286,42 @@ int wf_ssl_read_into(SSL *ssl, void *buf, size_t buf_len, size_t *out) {
     if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
         return WF_SSL_WANT_RETRY;
     }
-    /* SSL_ERROR_SYSCALL with no SSL bytes typically means the peer
-     * dropped the connection — treat as EOF so the recv ring sees
-     * the same shape it does on a TCP FIN. */
-    if (err == SSL_ERROR_SYSCALL && ERR_peek_error() == 0) {
+    /* SSL_ERROR_SYSCALL: the underlying recv() failed.  Distinguish a
+     * transient "would block" (EAGAIN/EWOULDBLOCK/EINTR) — which OpenSSL
+     * on some platforms (notably macOS under load) surfaces here instead
+     * of SSL_ERROR_WANT_READ — from a real transport close.  Mapping a
+     * transient EAGAIN to EOF would tear down a perfectly live
+     * connection (every in-flight stream then fails), so retry it; only
+     * errno==0 (peer FIN) / EPIPE / ECONNRESET etc. are genuine EOF. */
+    if (err == SSL_ERROR_SYSCALL) {
+        int e = errno;
+        if (e == EAGAIN || e == EWOULDBLOCK || e == EINTR) {
+            return WF_SSL_WANT_RETRY;
+        }
+        ERR_clear_error();
         return WF_SSL_EOF;
+    }
+    /* SSL_ERROR_SSL: a system-library (errno) error is again EAGAIN-vs-gone;
+     * the OpenSSL-3.x "unexpected eof while reading" (peer closed TCP with
+     * no close_notify) and a "shutdown while in init" teardown race are
+     * both EOF.  Any other reason (e.g. a bad record MAC from corruption)
+     * stays WF_SSL_FATAL so real failures surface. */
+    if (err == SSL_ERROR_SSL) {
+        unsigned long e = ERR_peek_last_error();
+        int reason = ERR_GET_REASON(e);
+        if (ERR_GET_LIB(e) == ERR_LIB_SYS) {
+            if (reason == EAGAIN || reason == EWOULDBLOCK || reason == EINTR) {
+                ERR_clear_error();
+                return WF_SSL_WANT_RETRY;
+            }
+            ERR_clear_error();
+            return WF_SSL_EOF;
+        }
+        if (reason == SSL_R_UNEXPECTED_EOF_WHILE_READING
+            || reason == SSL_R_SHUTDOWN_WHILE_IN_INIT) {
+            ERR_clear_error();
+            return WF_SSL_EOF;
+        }
     }
     return WF_SSL_FATAL;
 }
@@ -308,6 +341,29 @@ int wf_ssl_write_from(SSL *ssl, const void *buf, size_t buf_len, size_t *out) {
     int err = SSL_get_error(ssl, rc);
     if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
         return WF_SSL_WANT_RETRY;
+    }
+    /* As on the read side, a non-blocking send that would block can be
+     * surfaced as SSL_ERROR_SYSCALL with EAGAIN/EWOULDBLOCK/EINTR rather
+     * than SSL_ERROR_WANT_WRITE.  Retry those (park on writability)
+     * instead of treating them as a fatal connection error — otherwise a
+     * burst of concurrent stream writes spuriously tears the connection
+     * down. */
+    if (err == SSL_ERROR_SYSCALL) {
+        int e = errno;
+        if (e == EAGAIN || e == EWOULDBLOCK || e == EINTR) {
+            return WF_SSL_WANT_RETRY;
+        }
+        return WF_SSL_FATAL;
+    }
+    if (err == SSL_ERROR_SSL) {
+        unsigned long e = ERR_peek_last_error();
+        if (ERR_GET_LIB(e) == ERR_LIB_SYS) {
+            int reason = ERR_GET_REASON(e);
+            if (reason == EAGAIN || reason == EWOULDBLOCK || reason == EINTR) {
+                ERR_clear_error();
+                return WF_SSL_WANT_RETRY;
+            }
+        }
     }
     return WF_SSL_FATAL;
 }

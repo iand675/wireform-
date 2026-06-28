@@ -1,12 +1,16 @@
 -- | Run the interop tests against itself
 module Interop.SelfTest (selfTest) where
 
+import Text.Read (readMaybe)
+import System.Environment (lookupEnv)
+
 import Network.GRPC.Server.Run
 
 import Interop.Client (runInteropClient)
 import Interop.Client.Ping
 import Interop.Cmdline
 import Interop.Server (withInteropServer)
+import Interop.Stress (runStress)
 
 selfTest :: Cmdline -> IO ()
 selfTest cmdline = do
@@ -24,5 +28,17 @@ selfTest cmdline = do
       -- should /not/ be done by default), so we prefer to do things this way.
       waitReachable cmdline'
 
-      -- Run the client; when the client terminates, we're done
-      runInteropClient cmdline'
+      -- @WIREFORM_STRESS=conns,streamsPerConn,itersPerStream@ swaps the
+      -- sequential interop client for the concurrent-load driver.
+      mspec <- lookupEnv "WIREFORM_STRESS"
+      case mspec >>= parseStressSpec of
+        Just (c, s, i) -> runStress cmdline' c s i
+        Nothing        -> runInteropClient cmdline'
+
+parseStressSpec :: String -> Maybe (Int, Int, Int)
+parseStressSpec spec =
+    case break (== ',') spec of
+      (a, ',' : rest) -> case break (== ',') rest of
+        (b, ',' : c) -> (,,) <$> readMaybe a <*> readMaybe b <*> readMaybe c
+        _            -> Nothing
+      _ -> Nothing
