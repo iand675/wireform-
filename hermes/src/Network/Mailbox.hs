@@ -72,6 +72,7 @@ import qualified Data.Text.Short as ST
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import qualified Network.HTTP.Headers.Rendering.Util as R
+import Network.HTTP.Grammar (WireGrammar (..))
 
 
 -- ---------------------------------------------------------------------------
@@ -373,6 +374,31 @@ splitOn :: Char -> String -> [String]
 splitOn c s = case break (== c) s of
   (a, []) -> [a]
   (a, _ : rest) -> a : splitOn c rest
+
+
+-- ---------------------------------------------------------------------------
+-- WireGrammar instances
+-- ---------------------------------------------------------------------------
+
+-- | The 'WireGrammar' surface uses the strict 'Network.HTTP.Grammar.parseGrammar'
+-- runner (no trailing-OWS tolerance). The OWS-tolerant 'parseAddrSpec' &
+-- friends below remain the permissive entry points for header-style input.
+instance WireGrammar AddrSpec where
+  type GrammarErr AddrSpec = String
+  grammarParser = addrSpecParser
+  grammarRender = renderAddrSpec
+
+
+instance WireGrammar Mailbox where
+  type GrammarErr Mailbox = String
+  grammarParser = mailboxParser
+  grammarRender = renderMailbox
+
+
+instance WireGrammar Address where
+  type GrammarErr Address = String
+  grammarParser = addressParser
+  grammarRender = renderAddress
 
 
 -- ---------------------------------------------------------------------------

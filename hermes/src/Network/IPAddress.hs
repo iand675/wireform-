@@ -43,6 +43,8 @@ import Data.Word (Word16, Word8)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
 import Numeric (showHex)
+import Data.Bifunctor (first)
+import Network.HTTP.Grammar (WireGrammar (..), grammarParseErrorToString, parseGrammar)
 
 
 -- ---------------------------------------------------------------------------
@@ -288,34 +290,44 @@ bestZeroRun = foldl' better (0, 0) . zeroRuns
 
 
 -- ---------------------------------------------------------------------------
+-- WireGrammar instances
+-- ---------------------------------------------------------------------------
+
+instance WireGrammar IPv4 where
+  type GrammarErr IPv4 = String
+  grammarParser = ipv4Parser
+  grammarRender = renderIPv4
+
+
+instance WireGrammar IPv6 where
+  type GrammarErr IPv6 = String
+  grammarParser = ipv6Parser
+  grammarRender = renderIPv6
+
+
+instance WireGrammar IPAddress where
+  type GrammarErr IPAddress = String
+  grammarParser = ipAddressParser
+  grammarRender = renderIPAddress
+
+
+-- ---------------------------------------------------------------------------
 -- Convenience parsers (full consumption)
 -- ---------------------------------------------------------------------------
 
 -- | Parse a complete IPv4 address from a 'ByteString'.
 parseIPv4 :: ByteString -> Either String IPv4
-parseIPv4 bs = case runParser ipv4Parser bs of
-  OK v "" -> Right v
-  OK _ rest -> Left ("Unconsumed input after parsing IPv4 address: " <> show rest)
-  Fail -> Left "Failed to parse IPv4 address"
-  Err e -> Left e
+parseIPv4 = first (grammarParseErrorToString "IPv4 address") . parseGrammar
 
 
 -- | Parse a complete IPv6 address from a 'ByteString'.
 parseIPv6 :: ByteString -> Either String IPv6
-parseIPv6 bs = case runParser ipv6Parser bs of
-  OK v "" -> Right v
-  OK _ rest -> Left ("Unconsumed input after parsing IPv6 address: " <> show rest)
-  Fail -> Left "Failed to parse IPv6 address"
-  Err e -> Left e
+parseIPv6 = first (grammarParseErrorToString "IPv6 address") . parseGrammar
 
 
 -- | Parse a complete IP-literal of any form from a 'ByteString'.
 parseIPAddress :: ByteString -> Either String IPAddress
-parseIPAddress bs = case runParser ipAddressParser bs of
-  OK v "" -> Right v
-  OK _ rest -> Left ("Unconsumed input after parsing IP address: " <> show rest)
-  Fail -> Left "Failed to parse IP address"
-  Err e -> Left e
+parseIPAddress = first (grammarParseErrorToString "IP address") . parseGrammar
 
 
 -- ---------------------------------------------------------------------------
