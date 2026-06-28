@@ -87,7 +87,7 @@ library
       , data-default
       , deepseq
       , hashable
-      , http-types
+      , hermes
       , iproute
       , network
       , network-byte-order

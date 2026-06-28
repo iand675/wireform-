@@ -32,8 +32,7 @@ import Network.HTTP.Headers
 import Network.HTTP.Headers.HeaderFieldName (hXHttpMethodOverride)
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
-import Network.HTTP.Methods (Method, fromMethod)
-import Symbolize (unintern)
+import Network.HTTP.Methods (Method, methodToBytes)
 
 
 -- | The overridden HTTP request method.
@@ -67,4 +66,4 @@ xHttpMethodOverrideParser =
 
 renderXHttpMethodOverride :: XHttpMethodOverride -> M.Builder
 renderXHttpMethodOverride (XHttpMethodOverride m) =
-  M.string8 (unintern @String (fromMethod m))
+  M.byteString (methodToBytes m)

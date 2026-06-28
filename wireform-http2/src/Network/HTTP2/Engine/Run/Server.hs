@@ -42,7 +42,7 @@ import Data.Map.Strict qualified as Map
 import Data.Word (Word32)
 import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (plusPtr)
-import Network.HTTP.Types qualified as HTTP
+import Network.HTTP.Header (Header)
 import Network.HTTP2.Client (ClientStreamError (..))
 import Network.HTTP2.Connection (
   Connection,
@@ -478,7 +478,7 @@ updateMaker ref mbs = do
     Trailers _ -> pure ()
 
 
-ciHeadersToRaw :: [HTTP.Header] -> [(ByteString, ByteString)]
+ciHeadersToRaw :: [Header] -> [(ByteString, ByteString)]
 ciHeadersToRaw = map (\(k, v) -> (CI.original k, v))
 
 

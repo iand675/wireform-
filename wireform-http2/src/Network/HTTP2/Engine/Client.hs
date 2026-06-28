@@ -61,7 +61,8 @@ import qualified Data.ByteString.Builder as BSB
 import qualified Data.ByteString.Char8 as BS8
 import Data.IORef (readIORef)
 import Data.Word (Word32)
-import qualified Network.HTTP.Types as HTTP
+import Network.HTTP.Header (RequestHeaders)
+import Network.HTTP.Status (StatusCode (..))
 import Network.Socket (Socket)
 import qualified Network.Socket as S
 import qualified Network.Socket.ByteString as NBS
@@ -89,34 +90,34 @@ newtype Request = Request OutObj
 newtype Response = Response InpObj
   deriving stock (Show)
 
-addHeaders :: HTTP.Method -> Path -> HTTP.RequestHeaders -> HTTP.RequestHeaders
+addHeaders :: ByteString -> Path -> RequestHeaders -> RequestHeaders
 addHeaders m p hs = (":method", m) : (":path", p) : hs
 
-requestNoBody :: HTTP.Method -> Path -> HTTP.RequestHeaders -> Request
+requestNoBody :: ByteString -> Path -> RequestHeaders -> Request
 requestNoBody m p hdr =
   Request (OutObj (addHeaders m p hdr) OutBodyNone defaultTrailersMaker)
 
-requestFile :: HTTP.Method -> Path -> HTTP.RequestHeaders -> FileSpec -> Request
+requestFile :: ByteString -> Path -> RequestHeaders -> FileSpec -> Request
 requestFile m p hdr fs =
   Request (OutObj (addHeaders m p hdr) (OutBodyFile fs) defaultTrailersMaker)
 
-requestBuilder :: HTTP.Method -> Path -> HTTP.RequestHeaders -> BSB.Builder -> Request
+requestBuilder :: ByteString -> Path -> RequestHeaders -> BSB.Builder -> Request
 requestBuilder m p hdr b =
   Request (OutObj (addHeaders m p hdr) (OutBodyBuilder b) defaultTrailersMaker)
 
 requestStreaming
-  :: HTTP.Method
+  :: ByteString
   -> Path
-  -> HTTP.RequestHeaders
+  -> RequestHeaders
   -> ((BSB.Builder -> IO ()) -> IO () -> IO ())
   -> Request
 requestStreaming m p hdr body =
   Request (OutObj (addHeaders m p hdr) (OutBodyStreaming body) defaultTrailersMaker)
 
 requestStreamingUnmask
-  :: HTTP.Method
+  :: ByteString
   -> Path
-  -> HTTP.RequestHeaders
+  -> RequestHeaders
   -> ((forall x. IO x -> IO x) -> (BSB.Builder -> IO ()) -> IO () -> IO ())
   -> Request
 requestStreamingUnmask m p hdr body =
@@ -124,9 +125,9 @@ requestStreamingUnmask m p hdr body =
     body (outBodyUnmask iface) (outBodyPush iface) (outBodyFlush iface)
 
 requestStreamingIface
-  :: HTTP.Method
+  :: ByteString
   -> Path
-  -> HTTP.RequestHeaders
+  -> RequestHeaders
   -> (OutBodyIface -> IO ())
   -> Request
 requestStreamingIface m p hdr body =
@@ -135,11 +136,11 @@ requestStreamingIface m p hdr body =
 setRequestTrailersMaker :: Request -> TrailersMaker -> Request
 setRequestTrailersMaker (Request o) tm = Request o { outObjTrailers = tm }
 
-responseStatus :: Response -> Maybe HTTP.Status
+responseStatus :: Response -> Maybe StatusCode
 responseStatus (Response r) = do
   bs <- lookupToken ":status" (inpObjHeaders r)
   case reads (BS8.unpack bs) of
-    [(n, "")] -> Just (HTTP.mkStatus n BS.empty)
+    [(n, "")] -> Just (StatusCode (fromIntegral (n :: Int)))
     _         -> Nothing
 
 responseHeaders :: Response -> TokenHeaderTable

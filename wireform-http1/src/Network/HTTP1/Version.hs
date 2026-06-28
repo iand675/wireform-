@@ -1,42 +1,49 @@
-{- | HTTP protocol version.
+{-# LANGUAGE PatternSynonyms #-}
 
-We only ship the two HTTP\/1.x dialects (RFC 9112). Anything older
-(0.9) is not supported; anything newer (HTTP\/2, HTTP\/3) goes through
-@wireform-http2@ \/ a future @wireform-http3@.
+{- | HTTP protocol version for the HTTP\/1.x layer.
 
-Servers MUST accept either 1.0 or 1.1 and SHOULD respond with
-'HTTP_1_1' regardless of the request's version (RFC 9112 § 2.5). The
-parser preserves what came in so that the application layer can make
-that choice.
+A thin view over the canonical 'Network.HTTP.Versions.HTTPVersion'.
+HTTP\/1.x only ever speaks @1.0@ or @1.1@ on the wire (RFC 9112);
+'versionFromBytes' is therefore strict — anything but @HTTP\/1.0@ or
+@HTTP\/1.1@ is rejected, so a newer-protocol token never sneaks
+through the 1.x request\/status line.
 -}
 module Network.HTTP1.Version (
-  Version (..),
+  Version,
+  pattern HTTP_1_0,
+  pattern HTTP_1_1,
   versionToBytes,
   versionFromBytes,
 ) where
 
-import Control.DeepSeq (NFData)
 import Data.ByteString (ByteString)
-import GHC.Generics (Generic)
+import Network.HTTP.Versions (HTTPVersion, pattern HTTP1_0, pattern HTTP1_1)
+import qualified Network.HTTP.Versions as HV
 
 
-data Version
-  = HTTP_1_0
-  | HTTP_1_1
-  deriving stock (Eq, Ord, Show, Generic)
+-- | The shared HTTP version type (see "Network.HTTP.Versions").
+type Version = HTTPVersion
 
 
-instance NFData Version
+-- | HTTP\/1.0.
+pattern HTTP_1_0 :: Version
+pattern HTTP_1_0 = HTTP1_0
 
 
+-- | HTTP\/1.1.
+pattern HTTP_1_1 :: Version
+pattern HTTP_1_1 = HTTP1_1
+
+
+-- | Render the canonical on-the-wire spelling. For the @1.x@ versions
+-- this layer produces, this is @HTTP\/1.0@ or @HTTP\/1.1@.
 {-# INLINE versionToBytes #-}
 versionToBytes :: Version -> ByteString
-versionToBytes HTTP_1_0 = "HTTP/1.0"
-versionToBytes HTTP_1_1 = "HTTP/1.1"
+versionToBytes = HV.versionToBytes
 
 
 {- | Strict parse: requires exactly @HTTP\/1.0@ or @HTTP\/1.1@. Anything
-else is 'Nothing'.
+else (including HTTP\/2 \/ 3 spellings) is 'Nothing'.
 -}
 {-# INLINE versionFromBytes #-}
 versionFromBytes :: ByteString -> Maybe Version

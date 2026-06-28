@@ -97,7 +97,7 @@ clientHandshakeRoundTrip = it "client handshake -> server verifies" $ do
 mkReq :: H.Headers -> Request
 mkReq hdrs =
   Request
-    { requestMethod = M.Method "GET"
+    { requestMethod = M.mGet
     , requestTarget = "/chat"
     , requestAuthority = lookup H.hHost hdrs
     , requestScheme = SchemeHttp

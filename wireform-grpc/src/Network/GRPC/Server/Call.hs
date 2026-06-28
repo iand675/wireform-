@@ -46,7 +46,7 @@ import Network.GRPC.Util.Imports
 import Control.Concurrent.STM (atomically, throwSTM)
 import Control.Concurrent.STM.TVar (TVar, writeTVar, readTVar, newTVarIO)
 import Control.Concurrent.STM.TMVar (TMVar, putTMVar, tryPutTMVar, tryReadTMVar, newEmptyTMVarIO, readTMVar)
-import Network.HTTP.Types qualified as HTTP
+import Network.HTTP.Status (status200)
 import Network.HTTP2.Engine.Server qualified as Server
 
 import Network.GRPC.Common.Compression qualified as Compr
@@ -284,7 +284,7 @@ startOutbound serverParams metadataVar kickoffVar cOut = do
          Session.FlowStart (ServerOutbound rpc)
       -> Session.ResponseInfo
     buildResponseInfo start = Session.ResponseInfo {
-          responseStatus  = HTTP.ok200
+          responseStatus  = status200
         , responseHeaders =
             case start of
               Session.FlowStartRegular headers ->

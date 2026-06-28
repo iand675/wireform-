@@ -636,7 +636,7 @@ that h2o, nghttp2, and Hyper run.
 -}
 requestFraming :: Method -> Version -> Headers -> Either ParseError Framing
 requestFraming meth _ver hdrs
-  | not (bodyAllowedInRequest meth) = Right NoBody
+  | not (methodBodyAllowedInRequest meth) = Right NoBody
   | otherwise = do
       let mTE = findTransferEncoding hdrs
           cls = hLookupAll "content-length" hdrs

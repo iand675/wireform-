@@ -30,6 +30,11 @@ library
   exposed-modules:
       Network.HTTP.ContentCoding
       Network.HTTP.ContentNegotiation
+      Network.HTTP.Grammar
+      Network.HTTP.Grammar.Parser
+      Network.HTTP.Grammar.Rendering
+      Network.HTTP.Grammar.Types
+      Network.HTTP.Header
       Network.HTTP.Headers
       Network.HTTP.Headers.AIM
       Network.HTTP.Headers.ALPN

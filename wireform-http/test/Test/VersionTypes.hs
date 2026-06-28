@@ -70,7 +70,7 @@ statusCategories = it "Status categorises by 100s digit" $ do
   S.statusCategory S.status301 `shouldBe` S.Redirection
   S.statusCategory S.status404 `shouldBe` S.ClientError
   S.statusCategory S.status500 `shouldBe` S.ServerError
-  S.statusCategory (S.Status 0) `shouldBe` S.UnknownCategory
+  S.statusCategory (S.Status 0) `shouldBe` S.Other
   S.statusReason S.status200 `shouldBe` "OK"
   S.statusReason S.status404 `shouldBe` "Not Found"
   S.statusReason (S.Status 999) `shouldBe` ""

@@ -65,7 +65,8 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString.Builder as BSB
 import qualified Data.ByteString.UTF8 as UTF8
 import Data.IORef (readIORef)
-import qualified Network.HTTP.Types as HTTP
+import Network.HTTP.Header (ResponseHeaders)
+import Network.HTTP.Status (StatusCode, statusCode)
 import Network.Socket (SockAddr)
 import qualified System.TimeManager as TM
 
@@ -92,7 +93,7 @@ newtype Request = Request InpObj
 newtype Response = Response OutObj
   deriving stock (Show)
 
-requestMethod :: Request -> Maybe HTTP.Method
+requestMethod :: Request -> Maybe ByteString
 requestMethod (Request req) = lookupToken ":method" (inpObjHeaders req)
 
 requestPath :: Request -> Maybe Path
@@ -120,29 +121,29 @@ getRequestBodyChunk' (Request req) = inpObjBody req
 getRequestTrailers :: Request -> IO (Maybe TokenHeaderTable)
 getRequestTrailers (Request req) = readIORef (inpObjTrailers req)
 
-responseNoBody :: HTTP.Status -> HTTP.ResponseHeaders -> Response
+responseNoBody :: StatusCode -> ResponseHeaders -> Response
 responseNoBody st hdr =
   Response (OutObj (setStatus st hdr) OutBodyNone defaultTrailersMaker)
 
-responseFile :: HTTP.Status -> HTTP.ResponseHeaders -> FileSpec -> Response
+responseFile :: StatusCode -> ResponseHeaders -> FileSpec -> Response
 responseFile st hdr fs =
   Response (OutObj (setStatus st hdr) (OutBodyFile fs) defaultTrailersMaker)
 
-responseBuilder :: HTTP.Status -> HTTP.ResponseHeaders -> BSB.Builder -> Response
+responseBuilder :: StatusCode -> ResponseHeaders -> BSB.Builder -> Response
 responseBuilder st hdr b =
   Response (OutObj (setStatus st hdr) (OutBodyBuilder b) defaultTrailersMaker)
 
 responseStreaming
-  :: HTTP.Status
-  -> HTTP.ResponseHeaders
+  :: StatusCode
+  -> ResponseHeaders
   -> ((BSB.Builder -> IO ()) -> IO () -> IO ())
   -> Response
 responseStreaming st hdr body =
   Response (OutObj (setStatus st hdr) (OutBodyStreaming body) defaultTrailersMaker)
 
 responseStreamingIface
-  :: HTTP.Status
-  -> HTTP.ResponseHeaders
+  :: StatusCode
+  -> ResponseHeaders
   -> (OutBodyIface -> IO ())
   -> Response
 responseStreamingIface st hdr body =
@@ -156,9 +157,9 @@ responseBodySize _ = Nothing
 setResponseTrailersMaker :: Response -> TrailersMaker -> Response
 setResponseTrailersMaker (Response o) tm = Response o { outObjTrailers = tm }
 
-setStatus :: HTTP.Status -> HTTP.ResponseHeaders -> HTTP.ResponseHeaders
+setStatus :: StatusCode -> ResponseHeaders -> ResponseHeaders
 setStatus st hs = (":status", statusBS) : hs
-  where statusBS = UTF8.fromString (show (HTTP.statusCode st))
+  where statusBS = UTF8.fromString (show (statusCode st))
 
 data PushPromise = PushPromise
   { promiseRequestPath :: !ByteString

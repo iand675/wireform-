@@ -13,6 +13,7 @@ module Network.GRPC.Client.Session (
 import Network.GRPC.Util.Imports
 
 import Network.HTTP.Types qualified as HTTP
+import Network.HTTP.Status (statusCode)
 
 import Network.GRPC.Client.Connection (Connection, ConnParams(..))
 import Network.GRPC.Client.Connection qualified as Connection
@@ -93,7 +94,7 @@ instance SupportsClientRpc rpc => IsSession (ClientSession rpc) where
 
 instance SupportsClientRpc rpc => InitiateSession (ClientSession rpc) where
   parseResponse (ClientSession conn) (ResponseInfo status headers body) =
-      case classifyServerResponse (Proxy @rpc) status headers body of
+      case classifyServerResponse (Proxy @rpc) (HTTP.mkStatus (fromIntegral (statusCode status)) "") headers body of
         Left parsed -> do
           trailersOnly <- throwSynthesized throwIO parsed
           -- We classify the response as Trailers-Only if the grpc-status header

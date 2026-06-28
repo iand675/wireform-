@@ -1,5 +1,13 @@
 module Network.HTTP.Status (
   StatusCode (..),
+  StatusCategory (..),
+  statusCategory,
+  statusReason,
+  statusIsInformational,
+  statusIsSuccessful,
+  statusIsRedirection,
+  statusIsClientError,
+  statusIsServerError,
   status100,
   status101,
   status102,
@@ -64,13 +72,146 @@ module Network.HTTP.Status (
   status511,
 ) where
 
+import Control.DeepSeq (NFData)
 import Data.Hashable (Hashable)
 import Data.Word (Word16)
+import Data.ByteString (ByteString)
 
 
 newtype StatusCode = StatusCode {statusCode :: Word16}
   deriving stock (Eq, Ord)
-  deriving newtype (Hashable)
+  deriving newtype (Hashable, NFData, Show)
+
+
+-- | The broad category of an HTTP status code (RFC 9110 §15).
+data StatusCategory
+  = Informational
+  | Successful
+  | Redirection
+  | ClientError
+  | ServerError
+  | Other
+  deriving stock (Eq, Show)
+
+
+-- | Classify a status code by its hundreds digit. Codes outside
+-- @100–599@ are 'Other'.
+statusCategory :: StatusCode -> StatusCategory
+statusCategory (StatusCode n)
+  | n >= 100 && n < 200 = Informational
+  | n >= 200 && n < 300 = Successful
+  | n >= 300 && n < 400 = Redirection
+  | n >= 400 && n < 500 = ClientError
+  | n >= 500 && n < 600 = ServerError
+  | otherwise = Other
+
+
+-- | True for 1xx informational codes.
+statusIsInformational :: StatusCode -> Bool
+statusIsInformational s = let n = statusCode s in n >= 100 && n < 200
+
+
+-- | True for 2xx successful codes.
+statusIsSuccessful :: StatusCode -> Bool
+statusIsSuccessful s = let n = statusCode s in n >= 200 && n < 300
+
+
+-- | True for 3xx redirection codes.
+statusIsRedirection :: StatusCode -> Bool
+statusIsRedirection s = let n = statusCode s in n >= 300 && n < 400
+
+
+-- | True for 4xx client-error codes.
+statusIsClientError :: StatusCode -> Bool
+statusIsClientError s = let n = statusCode s in n >= 400 && n < 500
+
+
+-- | True for 5xx server-error codes.
+statusIsServerError :: StatusCode -> Bool
+statusIsServerError s = let n = statusCode s in n >= 500 && n < 600
+
+
+{- | The canonical IANA reason phrase for a known status code (RFC 9110
+§15, plus the registered extensions in RFC 2518 \/ 4918 \/ 5842 \/ 3229
+\/ 6585 \/ 7725 \/ 8297 \/ 8470). Falls back to a generic category
+phrase for unregistered codes inside a known range (e.g. 599 →
+@"Server Error"@), and an empty 'ByteString' for codes outside
+@100–599@.
+-}
+statusReason :: StatusCode -> ByteString
+statusReason s =
+  let n = statusCode s
+      fallback = case statusCategory s of
+        Informational -> "Informational"
+        Successful -> "OK"
+        Redirection -> "Redirection"
+        ClientError -> "Client Error"
+        ServerError -> "Server Error"
+        Other -> ""
+  in case n of
+       100 -> "Continue"
+       101 -> "Switching Protocols"
+       102 -> "Processing"
+       103 -> "Early Hints"
+       200 -> "OK"
+       201 -> "Created"
+       202 -> "Accepted"
+       203 -> "Non-Authoritative Information"
+       204 -> "No Content"
+       205 -> "Reset Content"
+       206 -> "Partial Content"
+       207 -> "Multi-Status"
+       208 -> "Already Reported"
+       226 -> "IM Used"
+       300 -> "Multiple Choices"
+       301 -> "Moved Permanently"
+       302 -> "Found"
+       303 -> "See Other"
+       304 -> "Not Modified"
+       305 -> "Use Proxy"
+       307 -> "Temporary Redirect"
+       308 -> "Permanent Redirect"
+       400 -> "Bad Request"
+       401 -> "Unauthorized"
+       402 -> "Payment Required"
+       403 -> "Forbidden"
+       404 -> "Not Found"
+       405 -> "Method Not Allowed"
+       406 -> "Not Acceptable"
+       407 -> "Proxy Authentication Required"
+       408 -> "Request Timeout"
+       409 -> "Conflict"
+       410 -> "Gone"
+       411 -> "Length Required"
+       412 -> "Precondition Failed"
+       413 -> "Content Too Large"
+       414 -> "URI Too Long"
+       415 -> "Unsupported Media Type"
+       416 -> "Range Not Satisfiable"
+       417 -> "Expectation Failed"
+       418 -> "I'm a teapot"
+       421 -> "Misdirected Request"
+       422 -> "Unprocessable Content"
+       423 -> "Locked"
+       424 -> "Failed Dependency"
+       425 -> "Too Early"
+       426 -> "Upgrade Required"
+       428 -> "Precondition Required"
+       429 -> "Too Many Requests"
+       431 -> "Request Header Fields Too Large"
+       451 -> "Unavailable For Legal Reasons"
+       500 -> "Internal Server Error"
+       501 -> "Not Implemented"
+       502 -> "Bad Gateway"
+       503 -> "Service Unavailable"
+       504 -> "Gateway Timeout"
+       505 -> "HTTP Version Not Supported"
+       506 -> "Variant Also Negotiates"
+       507 -> "Insufficient Storage"
+       508 -> "Loop Detected"
+       510 -> "Not Extended"
+       511 -> "Network Authentication Required"
+       _ -> fallback
 
 
 -- 100	Continue	[RFC9110, Section 15.2.1]

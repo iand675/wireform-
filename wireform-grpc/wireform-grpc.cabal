@@ -166,6 +166,7 @@ library
     , wireform-network
     , wireform-proto
     , http-types                >= 0.12    && < 0.13
+    , hermes
     , mtl                       >= 2.2     && < 2.4
     , network                   >= 3.2.4   && < 3.3
     , network-run               >= 0.4.3   && < 0.5
@@ -338,6 +339,7 @@ test-suite wireform-grpc-test-grapesy
     , grpc-spec
     , http-types
     , wireform-http2
+    , hermes
     , mtl
     , network
     , wireform-proto

@@ -16,7 +16,7 @@ import Data.ByteString qualified as BS.Strict
 import Data.ByteString qualified as Strict (ByteString)
 import Data.ByteString.Lazy qualified as BS.Lazy
 import Data.ByteString.Lazy qualified as Lazy (ByteString)
-import Network.HTTP.Types qualified as HTTP
+import Network.HTTP.Status (statusIsSuccessful)
 import Network.HTTP2.Engine.Types (OutBodyIface)
 import Network.HTTP2.Engine.Client qualified as Client
 
@@ -162,7 +162,7 @@ setupRequestChannel sess
                   Nothing -> throwIO PeerMissingPseudoHeaderStatus
 
               responseBody :: Maybe Lazy.ByteString <-
-                if HTTP.statusIsSuccessful responseStatus then
+                if statusIsSuccessful responseStatus then
                   return Nothing
                 else
                   Just <$> readResponseBody resp

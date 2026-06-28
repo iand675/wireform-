@@ -1,329 +1,332 @@
-{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeApplications #-}
 
-module Network.HTTP.Methods where
+{- | HTTP request methods (RFC 9110 § 9).
 
-import Control.DeepSeq (NFData (..))
-import Data.Binary
-import Data.Char (toUpper)
+This is the canonical method type for the whole wireform HTTP stack
+(@wireform-http1@, @wireform-http2@, and the @wireform-http@ wrapper
+all re-export it). The nine RFC 9110 core methods plus the newer
+@QUERY@ method are represented as nullary constructors so the common
+case pattern-matches with no allocation; every other token — WebDAV
+extensions, custom verbs — is carried by 'NonStandard' as an interned
+'Symbol' (O(1) equality and hashing, automatically GC'd).
+
+The @m*@ constants cover the IANA-registered standard methods plus the
+common WebDAV / CalDAV extensions; arbitrary tokens are constructible
+via 'methodFromBytes' or the 'IsString' instance.
+-}
+module Network.HTTP.Methods (
+  Method (..),
+  methodToBytes,
+  methodFromBytes,
+  mkMethod,
+  MethodError (..),
+
+  -- * Semantics (RFC 9110 § 9.2)
+  methodIsSafe,
+  methodIsIdempotent,
+  methodBodyAllowedInRequest,
+
+  -- * Standard methods (RFC 9110 / 5789 / HTTP QUERY)
+  mGet,
+  mHead,
+  mPost,
+  mPut,
+  mDelete,
+  mConnect,
+  mOptions,
+  mTrace,
+  mPatch,
+  mQuery,
+
+  -- * WebDAV (RFC 4918) and other registered extensions
+  mACL,
+  mBaselineControl,
+  mBind,
+  mCheckin,
+  mCheckout,
+  mCopy,
+  mLabel,
+  mLink,
+  mLock,
+  mMerge,
+  mMkActivity,
+  mMkCalendar,
+  mMkCol,
+  mMkRedirectRef,
+  mMkWorkspace,
+  mMove,
+  mOrderPatch,
+  mPropFind,
+  mPropPatch,
+  mRebind,
+  mReport,
+  mSearch,
+  mUnbind,
+  mUnlink,
+  mUnlock,
+  mUncheckout,
+  mUpdate,
+  mUpdateRedirectRef,
+  mVersionControl,
+  mPri,
+) where
+
+import Control.DeepSeq (NFData)
+import Data.Binary (Binary (..))
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS8
 import Data.Hashable (Hashable)
-import Data.String
-import Symbolize
-import Text.Read
+import Data.String (IsString (..))
+import Data.Word (Word8)
+import GHC.Generics (Generic)
+import Symbolize (Symbol, intern, unintern)
 
 
-newtype Method = Method {fromMethod :: Symbol}
-  deriving newtype (Binary, NFData, Eq, Ord, Hashable)
+{- | An HTTP request method. The RFC 9110 core verbs (plus @QUERY@) are
+nullary constructors; everything else is an interned 'NonStandard'
+token holding the exact, case-sensitive bytes that appeared on the
+wire.
+-}
+data Method
+  = GET
+  | HEAD
+  | POST
+  | PUT
+  | DELETE
+  | CONNECT
+  | OPTIONS
+  | TRACE
+  | PATCH
+  | QUERY
+  | NonStandard !Symbol
+  deriving stock (Eq, Ord, Generic)
 
 
-instance IsString Method where
-  fromString = Method . fromString . fmap toUpper
-
-
-instance Read Method where
-  readPrec = do
-    str <- readPrec @String
-    return $ Method $ intern str
+-- 'Symbol' is itself 'NFData' / 'Hashable', so the generic defaults are
+-- correct and cheap (a nullary constructor reduces to @()@; 'NonStandard'
+-- forces / hashes the interned symbol, both O(1)).
+instance NFData Method
+instance Hashable Method
 
 
 instance Show Method where
-  showsPrec _ (Method symbol) =
-    let !str = unintern @String symbol
-    in shows str
+  showsPrec p m = showsPrec p (methodToBytes m)
 
 
-{- | Standard HTTP methods defined in RFC 7231
-https://datatracker.ietf.org/doc/html/rfc7231
+-- | @fromString@ preserves the token case verbatim (RFC 9110 § 9.1
+-- methods are case-sensitive); the standard verbs are recognised, and
+-- anything else is interned as 'NonStandard'.
+instance IsString Method where
+  fromString = methodFromBytes . BS8.pack
+
+
+-- | Wire-stable 'Binary' instance: a method serialises as its on-the-wire
+-- token bytes, independent of the constructor layout.
+instance Binary Method where
+  put = put . methodToBytes
+  get = methodFromBytes <$> get
+
+
+-- | Render a 'Method' as its on-the-wire token bytes.
+{-# INLINE methodToBytes #-}
+methodToBytes :: Method -> ByteString
+methodToBytes = \case
+  GET -> "GET"
+  HEAD -> "HEAD"
+  POST -> "POST"
+  PUT -> "PUT"
+  DELETE -> "DELETE"
+  CONNECT -> "CONNECT"
+  OPTIONS -> "OPTIONS"
+  TRACE -> "TRACE"
+  PATCH -> "PATCH"
+  QUERY -> "QUERY"
+  NonStandard s -> unintern @ByteString s
+
+
+{- | Parse a method token. The standard verbs are recognised by
+length-discriminated 'ByteString' equality (one comparison per
+branch); anything else is interned into 'NonStandard'. Interning
+copies the bytes, so the parse buffer is never retained.
 -}
+{-# INLINE methodFromBytes #-}
+methodFromBytes :: ByteString -> Method
+methodFromBytes bs = case BS.length bs of
+  3
+    | bs == "GET" -> GET
+    | bs == "PUT" -> PUT
+    | otherwise -> NonStandard (intern bs)
+  4
+    | bs == "HEAD" -> HEAD
+    | bs == "POST" -> POST
+    | otherwise -> NonStandard (intern bs)
+  5
+    | bs == "PATCH" -> PATCH
+    | bs == "TRACE" -> TRACE
+    | bs == "QUERY" -> QUERY
+    | otherwise -> NonStandard (intern bs)
+  6
+    | bs == "DELETE" -> DELETE
+    | otherwise -> NonStandard (intern bs)
+  7
+    | bs == "OPTIONS" -> OPTIONS
+    | bs == "CONNECT" -> CONNECT
+    | otherwise -> NonStandard (intern bs)
+  _ -> NonStandard (intern bs)
 
-{- | GET method - Requests a representation of the specified resource.
-Should only retrieve data and not modify it.
-Defined in RFC 7231 Section 4.3.1
+
+-- | Errors raised by 'mkMethod'.
+data MethodError
+  = MethodEmpty
+  | MethodInvalidByte !Word8
+  deriving stock (Eq, Show)
+
+
+{- | Validating constructor: ensures the bytes form a non-empty @token@
+(RFC 9110 § 5.6.2), i.e. only @tchar@ characters. The standard and
+extension constants are already valid by construction.
 -}
-mGet :: Method
-mGet = "GET"
+mkMethod :: ByteString -> Either MethodError Method
+mkMethod bs
+  | BS.null bs = Left MethodEmpty
+  | otherwise = case BS.find (not . isTchar) bs of
+      Nothing -> Right (methodFromBytes bs)
+      Just w -> Left (MethodInvalidByte w)
 
 
-{- | POST method - Submits an entity to the specified resource.
-Often causes a change in state or side effects on the server.
-Defined in RFC 7231 Section 4.3.3
+-- | RFC 9110 § 5.6.2 @tchar@: token characters.
+{-# INLINE isTchar #-}
+isTchar :: Word8 -> Bool
+isTchar w =
+  (w >= 0x30 && w <= 0x39) -- 0-9
+    || (w >= 0x41 && w <= 0x5A) -- A-Z
+    || (w >= 0x61 && w <= 0x7A) -- a-z
+    || w `BS.elem` "!#$%&'*+-.^_`|~"
+
+
+{- | Safe methods (RFC 9110 § 9.2.1): no side effects beyond retrieval —
+@GET@, @HEAD@, @OPTIONS@, @TRACE@.
 -}
-mPost :: Method
-mPost = "POST"
+{-# INLINE methodIsSafe #-}
+methodIsSafe :: Method -> Bool
+methodIsSafe = \case
+  GET -> True
+  HEAD -> True
+  OPTIONS -> True
+  TRACE -> True
+  _ -> False
 
 
-{- | PUT method - Replaces all current representations of the target resource
-with the request payload.
-Defined in RFC 7231 Section 4.3.4
+{- | Idempotent methods (RFC 9110 § 9.2.2): the safe methods plus @PUT@
+and @DELETE@.
 -}
-mPut :: Method
-mPut = "PUT"
+{-# INLINE methodIsIdempotent #-}
+methodIsIdempotent :: Method -> Bool
+methodIsIdempotent = \case
+  PUT -> True
+  DELETE -> True
+  m -> methodIsSafe m
 
 
-{- | DELETE method - Removes the specified resource.
-Defined in RFC 7231 Section 4.3.5
+{- | Whether a request with this method may carry content. @CONNECT@
+(RFC 9110 § 9.3.6 — the body belongs to the tunnel) and @TRACE@
+(§ 9.3.8) have no request body.
 -}
-mDelete :: Method
-mDelete = "DELETE"
-
-
-{- | HEAD method - Similar to GET but returns only the headers, not the body.
-Useful for checking if a resource exists or has been modified.
-Defined in RFC 7231 Section 4.3.2
--}
-mHead :: Method
-mHead = "HEAD"
-
-
-{- | OPTIONS method - Describes the communication options for the target resource.
-Often used for CORS preflight requests.
-Defined in RFC 7231 Section 4.3.7
--}
-mOptions :: Method
-mOptions = "OPTIONS"
-
-
-{- | TRACE method - Performs a message loop-back test along the path to the target resource.
-Useful for debugging.
-Defined in RFC 7231 Section 4.3.8
--}
-mTrace :: Method
-mTrace = "TRACE"
-
-
-{- | PATCH method - Applies partial modifications to a resource.
-Defined in RFC 5789
--}
-mPatch :: Method
-mPatch = "PATCH"
-
-
-{- | CONNECT method - Establishes a tunnel to the server identified by the target resource.
-Used for SSL/TLS tunneling.
-Defined in RFC 7231 Section 4.3.6
--}
-mConnect :: Method
-mConnect = "CONNECT"
-
-
-{- | WebDAV Methods (RFC 4918)
-https://datatracker.ietf.org/doc/html/rfc4918
--}
-
-{- | ACL method - Modifies the access control list of a resource.
-Defined in RFC 3744
--}
-mACL :: Method
-mACL = "ACL"
-
-
-{- | BASELINE-CONTROL method - Used in version control operations.
-Part of WebDAV Versioning Extensions
--}
-mBaselineControl :: Method
-mBaselineControl = "BASELINE-CONTROL"
-
-
-{- | BIND method - Creates a new binding between the specified resource and the request URI.
-Part of WebDAV Bindings
--}
-mBind :: Method
-mBind = "BIND"
-
-
-{- | CHECKIN method - Checks in a version-controlled resource.
-Part of WebDAV Versioning
--}
-mCheckin :: Method
-mCheckin = "CHECKIN"
-
-
-{- | CHECKOUT method - Checks out a version-controlled resource.
-Part of WebDAV Versioning
--}
-mCheckout :: Method
-mCheckout = "CHECKOUT"
-
-
-{- | COPY method - Creates a duplicate of the source resource at the destination.
-Defined in RFC 4918 Section 9.8
--}
-mCopy :: Method
-mCopy = "COPY"
-
-
-{- | LABEL method - Modifies the labels on a version-controlled resource.
-Part of WebDAV Versioning
--}
-mLabel :: Method
-mLabel = "LABEL"
-
-
-{- | LINK method - Establishes one or more relationships between the existing resource
-and the resources identified in the request body.
-Part of WebDAV Bindings
--}
-mLink :: Method
-mLink = "LINK"
-
-
-{- | LOCK method - Creates a lock on the specified resource.
-Defined in RFC 4918 Section 9.10
--}
-mLock :: Method
-mLock = "LOCK"
-
-
-{- | MERGE method - Merges the changes from a checked-out resource into its version history.
-Part of WebDAV Versioning
--}
-mMerge :: Method
-mMerge = "MERGE"
-
-
-{- | MKACTIVITY method - Creates a new activity resource.
-Part of WebDAV Versioning
--}
-mMkActivity :: Method
-mMkActivity = "MKACTIVITY"
-
-
-{- | MKCALENDAR method - Creates a new calendar collection resource.
-Defined in RFC 4791
--}
-mMkCalendar :: Method
-mMkCalendar = "MKCALENDAR"
-
-
-{- | MKCOL method - Creates a new collection resource.
-Defined in RFC 4918 Section 9.3
--}
-mMkCol :: Method
-mMkCol = "MKCOL"
-
-
-{- | MKREDIRECTREF method - Creates a redirect reference resource.
-Part of WebDAV Redirect Reference Resources
--}
-mMkRedirectRef :: Method
-mMkRedirectRef = "MKREDIRECTREF"
-
-
-{- | MKWORKSPACE method - Creates a new workspace resource.
-Part of WebDAV Workspaces
--}
-mMkWorkspace :: Method
-mMkWorkspace = "MKWORKSPACE"
-
-
-{- | MOVE method - Moves a resource from one URI to another.
-Defined in RFC 4918 Section 9.9
--}
-mMove :: Method
-mMove = "MOVE"
-
-
-{- | ORDERPATCH method - Modifies the ordering of members in a collection.
-Part of WebDAV Ordered Collections
--}
-mOrderPatch :: Method
-mOrderPatch = "ORDERPATCH"
-
-
-{- | PROPFIND method - Retrieves properties defined on the resource.
-Defined in RFC 4918 Section 9.1
--}
-mPropFind :: Method
-mPropFind = "PROPFIND"
-
-
-{- | PROPPATCH method - Sets and/or removes properties defined on the resource.
-Defined in RFC 4918 Section 9.2
--}
-mPropPatch :: Method
-mPropPatch = "PROPPATCH"
-
-
-{- | REBIND method - Removes a binding to a resource and adds a new binding.
-Part of WebDAV Bindings
--}
-mRebind :: Method
-mRebind = "REBIND"
-
-
-{- | REPORT method - Performs a report on the resource.
-Defined in RFC 3253
--}
-mReport :: Method
-mReport = "REPORT"
-
-
-{- | SEARCH method - Performs a search on the resource.
-Part of WebDAV Search
--}
-mSearch :: Method
-mSearch = "SEARCH"
-
-
-{- | UNBIND method - Removes a binding to a resource.
-Part of WebDAV Bindings
--}
-mUnbind :: Method
-mUnbind = "UNBIND"
-
-
-{- | UPDATE method - Updates a version-controlled resource.
-Part of WebDAV Versioning
--}
-mUpdate :: Method
-mUpdate = "UPDATE"
-
-
-{- | UPDATEREDIRECTREF method - Updates a redirect reference resource.
-Part of WebDAV Redirect Reference Resources
--}
-mUpdateDirectRef :: Method
-mUpdateDirectRef = "UPDATEDIRECTREF"
-
-
-{- | VERSION-CONTROL method - Creates a version-controlled resource.
-Part of WebDAV Versioning
--}
-mVersionControl :: Method
-mVersionControl = "VERSION-CONTROL"
-
-
-{- | UNCHECKOUT method - Cancels a CHECKOUT, restoring the pre-checkout state.
-Defined in RFC 3253 (WebDAV Versioning)
--}
-mUncheckout :: Method
-mUncheckout = "UNCHECKOUT"
-
-
-{- | UNLINK method - Removes relationships between resources.
-Historic (RFC 2068); paired with LINK.
--}
-mUnlink :: Method
-mUnlink = "UNLINK"
-
-
-{- | UNLOCK method - Removes a lock from the specified resource.
-Defined in RFC 4918 Section 9.11 (WebDAV)
--}
-mUnlock :: Method
-mUnlock = "UNLOCK"
-
-
-{- | PRI method - Reserved by HTTP\/2 for the connection preface; never sent
-as a real request method.
-Defined in RFC 9113 (formerly RFC 7540) Section 3.4
--}
-mPri :: Method
-mPri = "PRI"
-
-
-{- | QUERY method - Safe, idempotent method that carries a request body
-describing a query, returning a representation of the result.
-Defined in RFC 9XXX (HTTP QUERY Method); registered with IANA.
--}
-mQuery :: Method
-mQuery = "QUERY"
+{-# INLINE methodBodyAllowedInRequest #-}
+methodBodyAllowedInRequest :: Method -> Bool
+methodBodyAllowedInRequest = \case
+  CONNECT -> False
+  TRACE -> False
+  _ -> True
+
+
+-- Standard methods --------------------------------------------------------
+
+mGet, mHead, mPost, mPut, mDelete :: Method
+mGet = GET
+mHead = HEAD
+mPost = POST
+mPut = PUT
+mDelete = DELETE
+
+
+mConnect, mOptions, mTrace, mPatch, mQuery :: Method
+mConnect = CONNECT
+mOptions = OPTIONS
+mTrace = TRACE
+mPatch = PATCH
+mQuery = QUERY
+
+
+-- WebDAV and other registered extensions ----------------------------------
+
+-- | Build a 'NonStandard' method from a literal token (interned once).
+nonStandard :: ByteString -> Method
+nonStandard = NonStandard . intern
+
+
+mACL
+  , mBaselineControl
+  , mBind
+  , mCheckin
+  , mCheckout
+  , mCopy
+  , mLabel
+  , mLink
+  , mLock
+  , mMerge
+  , mMkActivity
+  , mMkCalendar
+  , mMkCol
+  , mMkRedirectRef
+  , mMkWorkspace
+  , mMove
+  , mOrderPatch
+  , mPropFind
+  , mPropPatch
+  , mRebind
+  , mReport
+  , mSearch
+  , mUnbind
+  , mUnlink
+  , mUnlock
+  , mUncheckout
+  , mUpdate
+  , mUpdateRedirectRef
+  , mVersionControl
+  , mPri
+    :: Method
+mACL = nonStandard "ACL"
+mBaselineControl = nonStandard "BASELINE-CONTROL"
+mBind = nonStandard "BIND"
+mCheckin = nonStandard "CHECKIN"
+mCheckout = nonStandard "CHECKOUT"
+mCopy = nonStandard "COPY"
+mLabel = nonStandard "LABEL"
+mLink = nonStandard "LINK"
+mLock = nonStandard "LOCK"
+mMerge = nonStandard "MERGE"
+mMkActivity = nonStandard "MKACTIVITY"
+mMkCalendar = nonStandard "MKCALENDAR"
+mMkCol = nonStandard "MKCOL"
+mMkRedirectRef = nonStandard "MKREDIRECTREF"
+mMkWorkspace = nonStandard "MKWORKSPACE"
+mMove = nonStandard "MOVE"
+mOrderPatch = nonStandard "ORDERPATCH"
+mPropFind = nonStandard "PROPFIND"
+mPropPatch = nonStandard "PROPPATCH"
+mRebind = nonStandard "REBIND"
+mReport = nonStandard "REPORT"
+mSearch = nonStandard "SEARCH"
+mUnbind = nonStandard "UNBIND"
+mUnlink = nonStandard "UNLINK"
+mUnlock = nonStandard "UNLOCK"
+mUncheckout = nonStandard "UNCHECKOUT"
+mUpdate = nonStandard "UPDATE"
+mUpdateRedirectRef = nonStandard "UPDATEREDIRECTREF"
+mVersionControl = nonStandard "VERSION-CONTROL"
+mPri = nonStandard "PRI"

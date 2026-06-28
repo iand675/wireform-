@@ -23,6 +23,7 @@ import Network.GRPC.Client qualified as Client
 import Network.GRPC.Common
 import Network.GRPC.Server.Run
 import Network.HTTP.Types qualified as HTTP
+import Network.HTTP.Status (StatusCode (..))
 
 {-------------------------------------------------------------------------------
   Raw test server
@@ -99,7 +100,7 @@ toHTTP2Response :: Response -> HTTP2.Response
 toHTTP2Response response =
     flip HTTP2.setResponseTrailersMaker trailersMaker $
       HTTP2.responseBuilder
-        (responseStatus  response)
+        (StatusCode (fromIntegral (HTTP.statusCode (responseStatus response))))
         (responseHeaders response)
         (BS.Builder.byteString $ responseBody response)
   where

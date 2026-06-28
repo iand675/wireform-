@@ -252,7 +252,7 @@ augmentRequestHeaders meth ver hdrs body =
       then hdrs
       else case body of
         BodyEmpty
-          | bodyAllowedInRequest meth && shouldAddZeroCL meth ->
+          | methodBodyAllowedInRequest meth && shouldAddZeroCL meth ->
               hdrs <> [("Content-Length", "0")]
           | otherwise -> hdrs
         BodyBytes bs ->

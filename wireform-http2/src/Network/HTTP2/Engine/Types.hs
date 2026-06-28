@@ -53,7 +53,7 @@ import Data.CaseInsensitive (CI)
 import qualified Data.CaseInsensitive as CI
 import Data.Int (Int64)
 import Data.IORef (IORef)
-import qualified Network.HTTP.Types as HTTP
+import Network.HTTP.Header (Header)
 
 -- | Tokenised header name. Wraps the raw bytes; we don't maintain the
 -- static-table integer index that @http2@ does.
@@ -106,7 +106,7 @@ type TrailersMaker = Maybe ByteString -> IO NextTrailersMaker
 
 data NextTrailersMaker
   = NextTrailersMaker !TrailersMaker
-  | Trailers ![HTTP.Header]
+  | Trailers ![Header]
 
 defaultTrailersMaker :: TrailersMaker
 defaultTrailersMaker Nothing = pure (Trailers [])
@@ -132,7 +132,7 @@ instance Show InpObj where
 -- | A message we're about to send: headers, body, and a trailers
 -- computer for trailing HEADERS frames.
 data OutObj = OutObj
-  { outObjHeaders :: ![HTTP.Header]
+  { outObjHeaders :: ![Header]
   , outObjBody :: !OutBody
   , outObjTrailers :: !TrailersMaker
   }

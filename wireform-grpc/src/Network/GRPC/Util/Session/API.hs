@@ -18,6 +18,7 @@ import Network.GRPC.Spec.Util.Parser (Parser)
 import Network.GRPC.Util.Imports
 import Network.HTTP2.Engine.Types qualified as HTTP.Semantics (Path)
 import Network.HTTP.Types qualified as HTTP
+import Network.HTTP.Status (StatusCode)
 import Wireform.Builder (Builder)
 
 
@@ -34,7 +35,7 @@ data RequestInfo = RequestInfo
 
 
 data ResponseInfo = ResponseInfo
-  { responseStatus :: HTTP.Status
+  { responseStatus :: StatusCode
   , responseHeaders :: [HTTP.Header]
   , responseBody :: Maybe Lazy.ByteString
   -- ^ Only for errors

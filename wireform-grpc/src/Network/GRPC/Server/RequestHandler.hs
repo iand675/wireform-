@@ -32,6 +32,7 @@ import Network.GRPC.Util.Imports
 import Network.GRPC.Util.Session.Server
 import Network.GRPC.Util.Stream (toBSBuilder)
 import Network.HTTP2.Engine.Server qualified as Server
+import Network.HTTP.Status (StatusCode (..), status200, status400, status405)
 import Network.HTTP.Types qualified as HTTP
 import Wireform.Builder qualified as Builder
 
@@ -150,7 +151,7 @@ mkFailureResponse params = \case
   CallSetupInvalidResourceHeaders (InvalidMethod method) ->
     return $
       Server.responseBuilder
-        HTTP.methodNotAllowed405
+        status405
         [("Allow", "POST")]
         ( toBSBuilder . Builder.byteString . mconcat $
             [ "Unexpected :method " <> method <> ".\n"
@@ -159,15 +160,15 @@ mkFailureResponse params = \case
         )
   CallSetupInvalidResourceHeaders (InvalidPath path) ->
     return $
-      Server.responseBuilder HTTP.badRequest400 [] . toBSBuilder . Builder.byteString $
+      Server.responseBuilder status400 [] . toBSBuilder . Builder.byteString $
         "Invalid path " <> path
   CallSetupInvalidRequestHeaders invalid ->
     return $
-      Server.responseBuilder (statusInvalidHeaders invalid) [] $
+      Server.responseBuilder (StatusCode (fromIntegral (HTTP.statusCode (statusInvalidHeaders invalid)))) [] $
         prettyInvalidHeaders invalid
   CallSetupUnsupportedCompression cid ->
     return $
-      Server.responseBuilder HTTP.badRequest400 [] . toBSBuilder . Builder.byteString $
+      Server.responseBuilder status400 [] . toBSBuilder . Builder.byteString $
         "Unsupported compression: " <> BS.UTF8.fromString (show cid)
   CallSetupUnimplementedMethod path -> do
     let trailersOnly :: TrailersOnly
@@ -177,7 +178,7 @@ mkFailureResponse params = \case
             , serverContentType
             )
     return $
-      Server.responseNoBody HTTP.ok200 $
+      Server.responseNoBody status200 $
         buildTrailersOnly contentTypeForUnknown trailersOnly
   CallSetupHandlerLookupException err -> do
     msg <- serverExceptionToClient err
@@ -194,7 +195,7 @@ mkFailureResponse params = \case
             , serverContentType
             )
     return $
-      Server.responseNoBody HTTP.ok200 $
+      Server.responseNoBody status200 $
         buildTrailersOnly contentTypeForUnknown trailersOnly
   where
     ServerParams

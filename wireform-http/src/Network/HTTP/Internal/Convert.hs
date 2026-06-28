@@ -56,30 +56,27 @@ import Network.HTTP2.Server qualified as H2S
 ------------------------------------------------------------------------
 
 toHttp1Method :: U.Method -> H1.Method
-toHttp1Method = H1.methodFromBytes . U.fromMethod
+toHttp1Method = id
 
 
 fromHttp1Method :: H1.Method -> U.Method
-fromHttp1Method = U.methodFromBytes . H1.methodToBytes
+fromHttp1Method = id
 
 
 toHttp1Status :: U.Status -> H1.Status
-toHttp1Status (U.Status w) = H1.Status w
+toHttp1Status = id
 
 
 fromHttp1Status :: H1.Status -> U.Status
-fromHttp1Status (H1.Status w) = U.Status w
+fromHttp1Status = id
 
 
 toHttp1Version :: U.Version -> H1.Version
-toHttp1Version v
-  | v == U.HTTP1_0 = H1.HTTP_1_0
-  | otherwise = H1.HTTP_1_1
+toHttp1Version = id
 
 
 fromHttp1Version :: H1.Version -> U.Version
-fromHttp1Version H1.HTTP_1_0 = U.HTTP1_0
-fromHttp1Version H1.HTTP_1_1 = U.HTTP1_1
+fromHttp1Version = id
 
 
 toHttp1Headers :: U.Headers -> H1.Headers

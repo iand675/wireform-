@@ -38,7 +38,7 @@ requestLineTests =
             `shouldBe` Right (POST, "/api/v1/things", HTTP_1_1)
       , it "extension method" $
           parseRequestLine "PROPFIND / HTTP/1.1"
-            `shouldBe` Right (MethodOther "PROPFIND", "/", HTTP_1_1)
+            `shouldBe` Right (methodFromBytes "PROPFIND", "/", HTTP_1_1)
       , it "missing target" $
           parseRequestLine "GET  HTTP/1.1"
             `shouldBe` Left ParseBadRequestLine
