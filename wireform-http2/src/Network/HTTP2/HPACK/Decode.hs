@@ -16,8 +16,8 @@ import System.IO.Unsafe (unsafePerformIO)
 import Network.HTTP2.HPACK.Huffman
 import Network.HTTP2.HPACK.Table
 import Network.HTTP2.HPACK.Types
+import Network.HTTP2.Types (Header)
 
-type Header = (ByteString, ByteString)
 
 decodeHeaderBlock :: DynamicTable -> ByteString -> IO (Either DecodeError [Header])
 decodeHeaderBlock dt bs = decodeHeaderBlockWithMaxSize dt 4096 bs

@@ -12,8 +12,8 @@ import Wireform.Builder
 import Network.HTTP2.HPACK.Huffman
 import Network.HTTP2.HPACK.Table
 import Network.HTTP2.HPACK.Types
+import Network.HTTP2.Types (Header)
 
-type Header = (ByteString, ByteString)
 
 encodeHeaderBlock :: EncodeStrategy -> DynamicTable -> [Header] -> IO ByteString
 encodeHeaderBlock strategy dt headers = do
