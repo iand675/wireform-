@@ -42,6 +42,7 @@ packages:
   wireform-http-wai/
   wireform-websocket/
   wireform-grpc/
+  wireform-connect/
   grpc-spec/
   wireform-kafka-protocol/
   wireform-kafka/

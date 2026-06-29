@@ -1082,7 +1082,20 @@ registerAndSend handle req = do
     ReqBodyBytes b
       | BS.null b -> pure ()
       | otherwise -> sendBodyOneShot conn inbox sid b
-    ReqBodyStream producer -> sendBodyStream conn inbox sid producer
+    -- Stream the request body on a separate thread so this function can
+    -- return after the HEADERS frame; the caller then reads response
+    -- headers/body concurrently with the request body still in flight.
+    -- This is what makes full-duplex (bidirectional streaming) possible:
+    -- an inline send would block until the whole request body had been
+    -- written, deadlocking any peer that interleaves request and response.
+    -- A failing producer aborts the stream with RST_STREAM(CANCEL).
+    ReqBodyStream producer ->
+      () <$ forkIO
+        ( sendBodyStream conn inbox sid producer
+            `catch` \(_ :: SomeException) ->
+              sendRstStream handle sid Cancel
+                `catch` \(_ :: SomeException) -> pure ()
+        )
   pure (sid, inbox)
 
 -- | Send a known-length body chunked to the peer's MAX_FRAME_SIZE,

@@ -17,6 +17,7 @@ module Network.GRPC.Spec.RPC.Protobuf (
 ) where
 
 import Control.DeepSeq (NFData (..))
+import Data.Aeson (FromJSON (..), ToJSON (..))
 import Data.ByteString.Lazy qualified as Lazy (ByteString)
 import Data.Kind
 import GHC.Generics (Generic)
@@ -75,6 +76,19 @@ instance MessageEncode msg => MessageEncode (Proto msg) where
 instance MessageDecode msg => MessageDecode (Proto msg) where
   {-# INLINE messageDecoder #-}
   messageDecoder = Proto <$> messageDecoder
+
+
+-- | @Proto msg@ serializes to canonical proto3 JSON via the wrapped
+-- message's @aeson@ instances (which @wireform-proto@'s @loadProto@ /
+-- @Proto.Derive@ generate). This lets the Connect JSON codec treat a
+-- method's @Input@ \/ @Output@ uniformly without unwrapping.
+instance ToJSON msg => ToJSON (Proto msg) where
+  toJSON (Proto msg) = toJSON msg
+  toEncoding (Proto msg) = toEncoding msg
+
+
+instance FromJSON msg => FromJSON (Proto msg) where
+  parseJSON = fmap Proto . parseJSON
 
 
 instance Semigroup msg => Semigroup (Proto msg) where

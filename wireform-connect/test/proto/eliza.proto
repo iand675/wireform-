@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+// connectrpc.eliza.v1.ElizaService — mirrors the upstream Buf schema
+// (buf.build/connectrpc/eliza) so Test.Interop can talk to
+// demo.connectrpc.com, plus a synthetic client-streaming Aggregate method
+// (loopback-only) so all four RPC kinds are exercised.
+package connectrpc.eliza.v1;
+
+service ElizaService {
+  // Unary.
+  rpc Say(SayRequest) returns (SayResponse) {}
+
+  // Bidirectional streaming.
+  rpc Converse(stream ConverseRequest) returns (stream ConverseResponse) {}
+
+  // Server streaming.
+  rpc Introduce(IntroduceRequest) returns (stream IntroduceResponse) {}
+
+  // Client streaming (synthetic; not on the demo server).
+  rpc Aggregate(stream SayRequest) returns (SayResponse) {}
+}
+
+message SayRequest {
+  string sentence = 1;
+}
+
+message SayResponse {
+  string sentence = 1;
+}
+
+message ConverseRequest {
+  string sentence = 1;
+}
+
+message ConverseResponse {
+  string sentence = 1;
+}
+
+message IntroduceRequest {
+  string name = 1;
+}
+
+message IntroduceResponse {
+  string sentence = 1;
+}
