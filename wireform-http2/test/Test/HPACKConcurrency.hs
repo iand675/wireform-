@@ -31,9 +31,19 @@ tests = describe "HPACK concurrency" $ sequence_
           Left err -> expectationFailure ("decode failed at iteration " <> show i <> ": " <> show err)
         ) [1 :: Int .. 100]
 
-  , it "serialized MVar access preserves table consistency" $ do
-      encMVar <- newDynamicTable 4096 >>= newMVar
-      decMVar <- newDynamicTable 4096 >>= newMVar
+  , it "single-lock encode/decode pipeline preserves table consistency under concurrency" $ do
+      -- HPACK's encoder and decoder dynamic tables must observe header
+      -- blocks in the SAME order (RFC 7541 §2.3.2): a block may reference
+      -- entries an earlier block inserted, so out-of-order processing
+      -- desyncs the tables and mis-decodes everything after.  Guarding the
+      -- whole encode->decode pipeline with ONE lock preserves that order
+      -- even when many threads race for it.  (Guarding encode and decode
+      -- with two *separate* locks does NOT — the global encode order and
+      -- decode order can then diverge.  Test.HPACKDejaFu proves both the
+      -- desync and this fix exhaustively with dejafu.)
+      enc <- newDynamicTable 4096
+      dec <- newDynamicTable 4096
+      pipelineLock <- newMVar ()
 
       errRef <- newIORef (Nothing :: Maybe String)
       doneVar <- newEmptyMVar
@@ -48,9 +58,8 @@ tests = describe "HPACK concurrency" $ sequence_
                     , ("x-worker-id", BS8.pack (show i))
                     , ("x-timestamp", BS8.pack (show (i * 1000)))
                     ]
-              encoded <- withMVar encMVar $ \enc ->
-                encodeHeaderBlock defaultEncodeStrategy enc headers
-              decoded <- withMVar decMVar $ \dec ->
+              decoded <- withMVar pipelineLock $ \() -> do
+                encoded <- encodeHeaderBlock defaultEncodeStrategy enc headers
                 decodeHeaderBlock dec encoded
               case decoded of
                 Right hdrs -> do

@@ -7,6 +7,7 @@ import qualified Test.FrameEdgeCases
 import qualified Test.HPACK
 import qualified Test.HPACKEdgeCases
 import qualified Test.HPACKConcurrency
+import qualified Test.HPACKDejaFu
 import qualified Test.Connection
 import qualified Test.Defensive
 
@@ -17,6 +18,7 @@ main = sydTest $ describe "wireform-http2" $ sequence_
   , Test.HPACK.tests
   , Test.HPACKEdgeCases.tests
   , Test.HPACKConcurrency.tests
+  , Test.HPACKDejaFu.tests
   , Test.Connection.tests
   , Test.Defensive.tests
   ]

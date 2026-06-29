@@ -122,6 +122,7 @@ test-suite wireform-http2-test
       Test.HPACK
       Test.HPACKEdgeCases
       Test.HPACKConcurrency
+      Test.HPACKDejaFu
       Test.Connection
       Test.Defensive
     hs-source-dirs:   test
@@ -133,6 +134,8 @@ test-suite wireform-http2-test
     build-depends:
         base
       , bytestring
+      , concurrency
+      , dejafu
       , network
       , stm
       , sydtest

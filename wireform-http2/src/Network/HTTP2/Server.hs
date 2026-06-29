@@ -392,10 +392,15 @@ data ServerRateLimiters = ServerRateLimiters
 -- Per-second caps; see Network.HTTP2.Client for the
 -- corresponding constants on the client side.
 srlPingCap, srlSettingsCap, srlRstCap, srlEmptyCap :: Int
-srlPingCap     = 10
-srlSettingsCap = 5
-srlRstCap      = 100
-srlEmptyCap    = 50
+-- Per-second caps tuned to bound genuine floods (CVE-2019-9512/9515/9518),
+-- which sustain tens of thousands of frames per second, while tolerating
+-- the bursts a legitimate high-throughput peer produces — e.g. a client
+-- driving hundreds of rapid RPCs on one connection, with per-RPC keepalive
+-- PINGs. Caps that are too tight (a handful per second) GOAWAY such peers.
+srlPingCap     = 1000
+srlSettingsCap = 100
+srlRstCap      = 1000
+srlEmptyCap    = 1000
 
 connectionLoop
   :: ServerConfig
@@ -820,9 +825,15 @@ handleFrame' cfg conn streamsRef lastPeerStreamRef contRef
         pure False
     | otherwise -> do
         -- Empty-DATA frames cost the peer nothing flow-control-wise
-        -- but force us through the full per-frame work.  Cap.
-        let isEmpty = BS.null body
-                   || (BS.length body == 1 && testFlag (fhFlags hdr) flagPadded)
+        -- but force us through the full per-frame work.  Cap them —
+        -- but only frames that make no progress: an empty DATA frame
+        -- carrying END_STREAM is the normal stream terminator (one per
+        -- request stream), so it must never count toward the flood limit
+        -- (CVE-2019-9518 is about empty frames that keep a stream open).
+        let isEmpty = ( BS.null body
+                          || (BS.length body == 1 && testFlag (fhFlags hdr) flagPadded)
+                      )
+                   && not (testFlag (fhFlags hdr) flagEndStream)
         overEmpty <-
           if isEmpty
             then do
@@ -840,9 +851,28 @@ handleFrame' cfg conn streamsRef lastPeerStreamRef contRef
               Nothing -> do
                 closeConnection conn Types.StreamClosed "DATA on idle stream"
                 pure False
-              Just sr | srState sr == StClosedSrv -> do
-                closeConnection conn Types.StreamClosed "DATA on closed stream"
-                pure False
+              Just sr | srState sr == StClosedSrv ->
+                -- Half-closed (local): the server has finished sending its
+                -- response, but the peer may still send DATA until it
+                -- half-closes (RFC 9113 §5.1 — a "half-closed (local)" stream
+                -- can receive any frame). The handler is gone, so discard the
+                -- payload — immediately returning its connection-level
+                -- flow-control credit so the peer isn't stalled — and finalize
+                -- on END_STREAM, rather than tearing down the whole connection.
+                case stripPaddingAndPriority FrameData (fhFlags hdr) body of
+                  Nothing -> do
+                    closeConnection conn ProtocolError "malformed DATA frame"
+                    pure False
+                  Just _payload -> do
+                    let frameBytes = BS.length body
+                    when (frameBytes > 0) $
+                      sendFrame conn $ Frame
+                        (FrameHeader 4 FrameWindowUpdate 0 0)
+                        (WindowUpdateFrame (fromIntegral frameBytes))
+                    when (testFlag (fhFlags hdr) flagEndStream) $ do
+                      _ <- tryPutMVar (srTrailers sr) []
+                      atomically $ writeTBQueue (srBodyQueue sr) BodyChunkEnd
+                    pure True
               Just sr | srState sr == StHalfClosedRemote -> do
                 closeConnection conn Types.StreamClosed "DATA on half-closed (remote) stream"
                 pure False
@@ -1274,25 +1304,29 @@ sendResponse conn sid sendWin resp = do
       allHeaders = statusHdr : responseHeaders resp
       trailers = responseTrailers resp
       hasTrailers = not (null trailers)
-  headerBlock <- withMVar (connHpackEncoder conn) $ \encoder ->
-    encodeHeaderBlock defaultEncodeStrategy encoder allHeaders
+  maxFrame <- peerMaxFrameSize conn
+  -- HPACK-encode the response headers and emit the HEADERS block in ONE
+  -- send-lock critical section ('encodeAndSendHeaderBlock'), so the
+  -- encoder's dynamic-table mutation order matches the wire order even when
+  -- many stream handlers send responses concurrently. Encoding under the
+  -- HPACK lock and then sending under the send lock separately would let
+  -- two responses encode in one order and reach the wire in the other,
+  -- desyncing the peer's decoder.
   case responseBody resp of
     ResponseBodyEmpty
       | hasTrailers -> do
-          -- HEADERS (status, !END_STREAM) → HEADERS (trailers, END_STREAM)
-          sendHeadersFrame conn sid headerBlock False
+          encodeAndSendHeaderBlock conn sid False 0 allHeaders maxFrame
           sendTrailers conn sid trailers
       | otherwise ->
-          sendHeadersFrame conn sid headerBlock True
+          encodeAndSendHeaderBlock conn sid True 0 allHeaders maxFrame
     ResponseBodyBS body -> do
-      sendHeadersFrame conn sid headerBlock False
-      maxFrame <- peerMaxFrameSize conn
+      encodeAndSendHeaderBlock conn sid False 0 allHeaders maxFrame
       sendBytes conn sendWin sid (not hasTrailers) body maxFrame
       if hasTrailers
         then sendTrailers conn sid trailers
         else pure ()
     ResponseBodyStream producer -> do
-      sendHeadersFrame conn sid headerBlock False
+      encodeAndSendHeaderBlock conn sid False 0 allHeaders maxFrame
       streamBody conn sendWin sid producer hasTrailers
       if hasTrailers
         then sendTrailers conn sid trailers
@@ -1367,22 +1401,14 @@ sendDataFrame conn sendWin sid endStream bs = do
         (if endStream then flagEndStream else 0) sid)
       (DataFrame bs)
 
--- | Send a HEADERS frame (with optional END_STREAM), splitting the
--- block across CONTINUATION frames when it exceeds the peer's
--- SETTINGS_MAX_FRAME_SIZE.  Used for both the response head and the
--- trailer block.
-sendHeadersFrame :: Connection -> StreamId -> ByteString -> Bool -> IO ()
-sendHeadersFrame conn sid headerBlock endStream = do
-  maxFrame <- peerMaxFrameSize conn
-  sendHeaderBlock conn sid endStream 0 headerBlock maxFrame
-
 -- | Emit the trailer block as a final HEADERS frame with END_STREAM
--- (chunked over CONTINUATION frames if necessary).
+-- (chunked over CONTINUATION frames if necessary). The HPACK encode and
+-- the send are one send-lock critical section ('encodeAndSendHeaderBlock')
+-- so trailer encoding can't desync the peer relative to concurrent streams.
 sendTrailers :: Connection -> StreamId -> [(ByteString, ByteString)] -> IO ()
 sendTrailers conn sid trailers = do
-  block <- withMVar (connHpackEncoder conn) $ \encoder ->
-    encodeHeaderBlock defaultEncodeStrategy encoder trailers
-  sendHeadersFrame conn sid block True
+  maxFrame <- peerMaxFrameSize conn
+  encodeAndSendHeaderBlock conn sid True 0 trailers maxFrame
 
 streamBody
   :: Connection -> FlowControl -> StreamId -> IO (Maybe ByteString) -> Bool -> IO ()
@@ -1390,16 +1416,17 @@ streamBody conn sendWin sid producer hasTrailers = do
   maxFrame <- peerMaxFrameSize conn
   loop maxFrame
   where
+    -- Send each chunk immediately as it is produced — never hold a frame
+    -- waiting for the next one, which would deadlock full-duplex bidi
+    -- streaming (the peer won't send the next request, hence the next
+    -- response chunk, until it receives the one we'd be holding). The end
+    -- of the body is marked with an empty DATA + END_STREAM terminator;
+    -- that terminator is exempt from peers' empty-frame flood defenses
+    -- because it carries END_STREAM (it ends the stream = makes progress).
     loop maxFrame = do
       mChunk <- producer
       case mChunk of
-        Nothing -> do
-          -- End of body. If trailers follow, send an empty DATA
-          -- *without* END_STREAM and let the caller's trailer HEADERS
-          -- carry it; otherwise close the stream with an empty DATA
-          -- + END_STREAM.  An empty terminator doesn't consume the
-          -- flow window.
-          sendDataFrame conn sendWin sid (not hasTrailers) BS.empty
+        Nothing -> sendDataFrame conn sendWin sid (not hasTrailers) BS.empty
         Just chunk
           | BS.null chunk -> loop maxFrame
           | otherwise -> do

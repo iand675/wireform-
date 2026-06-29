@@ -540,9 +540,13 @@ handleClientFrame handle (Frame hdr (FramePayloadRaw body)) = case fhType hdr of
         endStream = testFlag (fhFlags hdr) flagEndStream
     -- Empty-DATA flood guard: each empty DATA frame is a "free"
     -- frame from the peer's POV (no flow-control debit) but still
-    -- forces us through the recv loop's per-frame work.  Cap.
+    -- forces us through the recv loop's per-frame work.  Cap — but
+    -- exempt the END_STREAM terminator (an empty DATA + END_STREAM is
+    -- the normal way to close a response stream; one per stream must
+    -- never count toward the flood limit).
     overFlood <-
-      if BS.null body || (BS.length body == 1 && testFlag (fhFlags hdr) flagPadded)
+      if (BS.null body || (BS.length body == 1 && testFlag (fhFlags hdr) flagPadded))
+        && not endStream
         then do
           n <- tickRate (chEmptyDataRate handle)
           pure (n > defaultEmptyPerSec)
@@ -1021,34 +1025,22 @@ registerAndSend
   :: ClientHandle -> ClientRequest -> IO (StreamId, StreamInbox)
 registerAndSend handle req = do
   let conn = chConnection handle
-  -- Honour the peer's SETTINGS_MAX_CONCURRENT_STREAMS by waiting
-  -- (via STM retry) until the active-stream count drops below the
-  -- limit.  Snapshot the limit out of the IORef first because we
-  -- can't do IO inside STM.
+  -- Phase 1 (NO send lock): honour SETTINGS_MAX_CONCURRENT_STREAMS by
+  -- blocking (STM retry) until a stream slot frees up, then reserve it. The
+  -- stream id is deliberately NOT allocated here: id allocation must be
+  -- atomic with the HEADERS send (phase 2) so the on-wire id order is
+  -- strictly increasing (RFC 9113 §5.1.1) and matches the HPACK encode
+  -- order. We must not hold the send lock across this retry, or a full
+  -- stream table would deadlock every other sender — including the ones
+  -- that would free a slot.
   remoteMax <- settingsMaxConcurrentStreams <$> readIORef (connRemoteSettings conn)
-  outcome <- atomically $ do
-    -- A prior GOAWAY caps the IDs we may use.  We compute the next
-    -- ID inside the same transaction so the cap check is consistent
-    -- with what we'd allocate.
-    nextSid <- readTVar (stNextStreamId (connStreamTable conn))
-    goAway <- readTVar (chGoAway handle)
-    case goAway of
-      Just lastId | nextSid > lastId ->
-        pure (Left (ClientStreamRefusedAfterGoAway lastId))
-      _ -> do
-        case remoteMax of
-          Just m -> do
-            active <- readTVar (chActiveStreams handle)
-            if active >= fromIntegral m
-              then retry
-              else pure ()
-          Nothing -> pure ()
-        modifyTVar' (chActiveStreams handle) (+ 1)
-        writeTVar (stNextStreamId (connStreamTable conn)) (nextSid + 2)
-        pure (Right nextSid)
-  sid <- case outcome of
-    Left err -> throwIO err
-    Right s  -> pure s
+  atomically $ do
+    case remoteMax of
+      Just m -> do
+        active <- readTVar (chActiveStreams handle)
+        if active >= fromIntegral m then retry else pure ()
+      Nothing -> pure ()
+    modifyTVar' (chActiveStreams handle) (+ 1)
   remoteInitial <- settingsInitialWindowSize <$> readIORef (connRemoteSettings conn)
   ourInitial <- settingsInitialWindowSize <$> readIORef (connLocalSettings conn)
   inbox <- do
@@ -1060,7 +1052,6 @@ registerAndSend handle req = do
     rw <- newIORef (fromIntegral ourInitial)
     pp <- atomically (newTVar [])
     pure $ StreamInbox h q t sw ru rw pp
-  atomicModifyIORef' (chStreams handle) (\m -> (Map.insert sid inbox m, ()))
   let pseudoHeaders =
         [ (":method", crMethod req)
         , (":path", crPath req)
@@ -1068,27 +1059,52 @@ registerAndSend handle req = do
         , (":authority", crAuthority req)
         ]
       allHeaders = pseudoHeaders <> crHeaders req
-  headerBlock <- withMVar (connHpackEncoder conn) $ \encoder ->
-    encodeHeaderBlock defaultEncodeStrategy encoder allHeaders
-  let bodyKind = crBody req
+      bodyKind = crBody req
       endStreamOnHeaders = case bodyKind of
         ReqBodyNone -> True
         ReqBodyBytes bs -> BS.null bs
         ReqBodyStream _ -> False
   maxFrame <- peerMaxFrameSize conn
-  sendHeaderBlock conn sid endStreamOnHeaders 0 headerBlock maxFrame
+  -- Phase 2 (send lock HELD): allocate the next stream id (honouring a prior
+  -- GOAWAY cap), register the stream so the recv loop can route its
+  -- response, then HPACK-encode and send the HEADERS — all in one critical
+  -- section, so id order == HPACK encode order == wire order.
+  outcome <- withMVar (connSendLock conn) $ \_ -> do
+    allocated <- atomically $ do
+      nextSid <- readTVar (stNextStreamId (connStreamTable conn))
+      goAway  <- readTVar (chGoAway handle)
+      case goAway of
+        Just lastId | nextSid > lastId -> pure (Left lastId)
+        _ -> do
+          writeTVar (stNextStreamId (connStreamTable conn)) (nextSid + 2)
+          pure (Right nextSid)
+    case allocated of
+      Left lastId -> pure (Left lastId)
+      Right sid -> do
+        atomicModifyIORef' (chStreams handle) (\m -> (Map.insert sid inbox m, ()))
+        block <- withMVar (connHpackEncoder conn) $ \encoder ->
+          encodeHeaderBlock defaultEncodeStrategy encoder allHeaders
+        sendFramesUnlocked conn
+          (headerBlockFrames sid endStreamOnHeaders 0 block maxFrame)
+        pure (Right sid)
+  sid <- case outcome of
+    Left lastId -> do
+      -- Refused after GOAWAY: release the slot reserved in phase 1.
+      atomically $ modifyTVar' (chActiveStreams handle) (subtract 1)
+      throwIO (ClientStreamRefusedAfterGoAway lastId)
+    Right s  -> pure s
+  -- Stream the request body on a separate thread so this function can return
+  -- after the HEADERS frame; the caller then reads response headers/body
+  -- concurrently with the request body still in flight. This is what makes
+  -- full-duplex (bidirectional streaming) possible: an inline send would
+  -- block until the whole request body had been written, deadlocking any
+  -- peer that interleaves request and response. A failing producer aborts
+  -- the stream with RST_STREAM(CANCEL).
   case bodyKind of
     ReqBodyNone -> pure ()
     ReqBodyBytes b
       | BS.null b -> pure ()
       | otherwise -> sendBodyOneShot conn inbox sid b
-    -- Stream the request body on a separate thread so this function can
-    -- return after the HEADERS frame; the caller then reads response
-    -- headers/body concurrently with the request body still in flight.
-    -- This is what makes full-duplex (bidirectional streaming) possible:
-    -- an inline send would block until the whole request body had been
-    -- written, deadlocking any peer that interleaves request and response.
-    -- A failing producer aborts the stream with RST_STREAM(CANCEL).
     ReqBodyStream producer ->
       () <$ forkIO
         ( sendBodyStream conn inbox sid producer
