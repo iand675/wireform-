@@ -108,6 +108,8 @@ import Network.Socket qualified as NS
 import Wireform.Network.TLS.OpenSSL (TlsProtoVersion (..))
 
 
+-- | Configuration for opening an HTTP connection: the host, port,
+-- acceptable on-wire versions, and optional TLS settings.
 data ConnectionConfig = ConnectionConfig
   { connectionHost :: !String
   , connectionPort :: !String
@@ -118,6 +120,9 @@ data ConnectionConfig = ConnectionConfig
   }
 
 
+-- | TLS settings for an HTTP connection: the SNI hostname, a
+-- certificate-validation toggle, an optional mTLS client certificate,
+-- and a minimum protocol version.
 data TlsConnectionConfig = TlsConnectionConfig
   { tlsServerName :: !String
   -- ^ SNI \/ X.509 hostname (defaults to 'connectionHost').
@@ -140,6 +145,8 @@ data TlsConnectionConfig = TlsConnectionConfig
   }
 
 
+-- | A plaintext HTTP\/1.1 default: @127.0.0.1:80@, no TLS. Override
+-- 'connectionHost', 'connectionPort', and 'connectionTls' for real use.
 defaultConnectionConfig :: ConnectionConfig
 defaultConnectionConfig =
   ConnectionConfig
@@ -150,6 +157,8 @@ defaultConnectionConfig =
     }
 
 
+-- | A 'TlsConnectionConfig' seeded with the server hostname (for SNI),
+-- certificate validation on, no mTLS client cert, TLS 1.2 minimum.
 defaultTlsConnectionConfig :: String -> TlsConnectionConfig
 defaultTlsConnectionConfig serverName =
   TlsConnectionConfig
