@@ -23,6 +23,7 @@ module Network.Connect.Error (
   ConnectError (..),
   encodeConnectError,
   decodeConnectError,
+  decodeConnectErrorLenient,
 
   -- * Exceptions
   ConnectException (..),
@@ -40,6 +41,7 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Base64 qualified as B64
 import Data.ByteString.Base64.URL qualified as B64U
 import Data.Foldable (toList)
+import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
@@ -174,9 +176,11 @@ httpStatusToConnectCode (Status w) = case w of
 -- human-readable JSON rendering.
 data ErrorDetail = ErrorDetail
   { edType :: !Text
+    -- ^ Fully-qualified Protobuf message name of the detail.
   , edValue :: !ByteString
-  -- ^ Raw binary Protobuf bytes of the detail message.
+    -- ^ Raw binary Protobuf bytes of the detail message.
   , edDebug :: !(Maybe Aeson.Value)
+    -- ^ Optional human-readable JSON rendering of the detail.
   }
   deriving stock (Eq, Show)
 
@@ -194,8 +198,11 @@ errorDetailFromAny a =
 -- | A Connect error: code, optional message, optional details.
 data ConnectError = ConnectError
   { ceCode :: !ConnectCode
+    -- ^ The gRPC status code ('ConnectCode' is an alias for 'GrpcError').
   , ceMessage :: !(Maybe Text)
+    -- ^ Optional human-readable message.
   , ceDetails :: ![ErrorDetail]
+    -- ^ Optional typed error details (a message name + base64 payload each).
   }
   deriving stock (Eq, Show)
 
@@ -255,6 +262,30 @@ decodeConnectError (Aeson.Object o) = do
     Just _ -> Left "Connect Error: \"details\" must be an array"
   pure (ConnectError code message details)
 decodeConnectError _ = Left "Connect Error: expected a JSON object"
+
+-- | Lenient parse of a Connect @Error@ JSON object, for a /receiving client/.
+--
+-- Unlike 'decodeConnectError' (strict — used for round-trip validation and on
+-- the server), this never rejects a malformed @code@: a missing, @null@, or
+-- unrecognized @code@ falls back to @fallbackCode@ (the HTTP-status-derived
+-- code for unary responses, or 'GrpcUnknown' for a streaming end-stream),
+-- while the @message@ and any well-formed @details@ are still recovered. This
+-- matches the Connect protocol's requirement that clients surface the server's
+-- @message@ even when the @code@ is absent or invalid. Returns 'Nothing' only
+-- when the value is not a JSON object (e.g. a bare @null@ body).
+decodeConnectErrorLenient :: ConnectCode -> Aeson.Value -> Maybe ConnectError
+decodeConnectErrorLenient fallbackCode (Aeson.Object o) =
+  let code = case KeyMap.lookup "code" o of
+        Just (Aeson.String t) -> maybe fallbackCode id (connectCodeFromName t)
+        _ -> fallbackCode
+      message = case KeyMap.lookup "message" o of
+        Just (Aeson.String t) | not (T.null t) -> Just t
+        _ -> Nothing
+      details = case KeyMap.lookup "details" o of
+        Just (Aeson.Array xs) -> mapMaybe (either (const Nothing) Just . decodeDetail) (toList xs)
+        _ -> []
+   in Just (ConnectError code message details)
+decodeConnectErrorLenient _ _ = Nothing
 
 decodeDetail :: Aeson.Value -> Either String ErrorDetail
 decodeDetail (Aeson.Object o) = do

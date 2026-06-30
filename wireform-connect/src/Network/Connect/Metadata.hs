@@ -31,6 +31,7 @@ import Data.ByteString qualified as BS
 import Data.CaseInsensitive (CI)
 import Data.CaseInsensitive qualified as CI
 import Data.Foldable (toList)
+import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -53,9 +54,12 @@ import Network.HTTP.Types.Header (Header, HeaderName, Headers)
 -- Leading metadata
 ------------------------------------------------------------------------
 
+-- | Render leading metadata (custom headers) as HTTP request headers.
 leadingToHeaders :: [Grpc.CustomMetadata] -> Headers
 leadingToHeaders = map cmToHeader
 
+-- | Parse HTTP request headers back into leading metadata, skipping
+-- reserved header names.
 headersToLeading :: Headers -> [Grpc.CustomMetadata]
 headersToLeading = mapMaybe headerToCmUnprefixed
 
@@ -63,9 +67,12 @@ headersToLeading = mapMaybe headerToCmUnprefixed
 -- Unary trailing metadata (trailer- prefix in the same header block)
 ------------------------------------------------------------------------
 
+-- | Render unary trailing metadata as @trailer-@-prefixed headers — the
+-- unary shape, where trailers ride in the same header block.
 trailingToPrefixedHeaders :: [Grpc.CustomMetadata] -> Headers
 trailingToPrefixedHeaders = map cmToTrailerHeader
 
+-- | Parse @trailer-@-prefixed headers back into trailing metadata.
 prefixedHeadersToTrailing :: Headers -> [Grpc.CustomMetadata]
 prefixedHeadersToTrailing = mapMaybe headerToCmTrailer
 
@@ -77,12 +84,14 @@ prefixedHeadersToTrailing = mapMaybe headerToCmTrailer
 -- object: keys are header names (lower-case), values are arrays of the
 -- wire-encoded strings (ASCII verbatim, @-bin@ values base64).
 metadataToJSON :: [Grpc.CustomMetadata] -> Aeson.Value
-metadataToJSON ms = Aeson.object (map one ms)
+metadataToJSON ms = Aeson.object (map toPair (Map.toList grouped))
   where
-    one cm =
-      let nm = CI.foldedCase (ciName (Grpc.customMetadataName cm))
-          val = encodeValue (Grpc.customMetadataName cm) (Grpc.customMetadataValue cm)
-       in AKey.fromText (decodeUtf8 nm) .= [decodeUtf8 val]
+    grouped = Map.fromListWith (flip (<>)) (map kv ms)
+    kv cm =
+      ( decodeUtf8 (CI.foldedCase (ciName (Grpc.customMetadataName cm)))
+      , [decodeUtf8 (encodeValue (Grpc.customMetadataName cm) (Grpc.customMetadataValue cm))]
+      )
+    toPair (n, vs) = AKey.fromText n .= vs
 
 -- | Parse a Connect EndStreamResponse @metadata@ object back into
 -- 'Grpc.CustomMetadata'. A @-bin@ suffix on the key marks a binary header
@@ -92,7 +101,7 @@ metadataFromJSON (Aeson.Object o) =
   concat <$> traverse parseEntry (KeyMap.toList o)
   where
     parseEntry (k, v) = do
-      let nmBs = encodeUtf8 (AKey.toText k)
+      let nmBs = encodeUtf8 (T.toLower (AKey.toText k))
       let isBin = "-bin" `BS.isSuffixOf` nmBs
       vals <- case v of
         Aeson.Array xs -> Right [t | Aeson.String t <- toList xs]
@@ -168,6 +177,7 @@ headerToCm rawName val =
 -- Reserved header classification
 ------------------------------------------------------------------------
 
+-- | Is this header name reserved by Connect (and thus not custom metadata)?
 isReservedHeader :: HeaderName -> Bool
 isReservedHeader = isReservedHeaderCI
 

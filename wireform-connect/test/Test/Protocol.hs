@@ -2,30 +2,19 @@
 
 module Test.Protocol (tests) where
 
-import Hedgehog
 import Network.Connect.Protocol
+import Test.Syd
 
-tests :: Group
+tests :: Spec
 tests =
-  Group
-    "Protocol"
-    [ ("unary content-type round-trips", withTests 1 (property roundtripUnary))
-    , ("streaming content-type round-trips", withTests 1 (property roundtripStream))
-    , ("unknown content-type rejected", withTests 1 (property rejectUnknown))
-    ]
-
-roundtripUnary :: PropertyT IO ()
-roundtripUnary = do
-  parseContentType (unaryContentType CodecProto) === Just (Unary, CodecProto)
-  parseContentType (unaryContentType CodecJSON) === Just (Unary, CodecJSON)
-
-roundtripStream :: PropertyT IO ()
-roundtripStream = do
-  parseContentType (streamContentType CodecProto) === Just (Streaming, CodecProto)
-  parseContentType (streamContentType CodecJSON) === Just (Streaming, CodecJSON)
-
-rejectUnknown :: PropertyT IO ()
-rejectUnknown = do
-  parseContentType "text/plain" === Nothing
-  parseContentType "application/grpc+proto" === Nothing
-  parseContentType "application/octet-stream" === Nothing
+  describe "Protocol" $ do
+    it "unary content-type round-trips" $ do
+      parseContentType (unaryContentType CodecProto) `shouldBe` Just (Unary, CodecProto)
+      parseContentType (unaryContentType CodecJSON) `shouldBe` Just (Unary, CodecJSON)
+    it "streaming content-type round-trips" $ do
+      parseContentType (streamContentType CodecProto) `shouldBe` Just (Streaming, CodecProto)
+      parseContentType (streamContentType CodecJSON) `shouldBe` Just (Streaming, CodecJSON)
+    it "unknown content-type rejected" $ do
+      parseContentType "text/plain" `shouldBe` Nothing
+      parseContentType "application/grpc+proto" `shouldBe` Nothing
+      parseContentType "application/octet-stream" `shouldBe` Nothing

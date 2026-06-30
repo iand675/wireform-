@@ -24,15 +24,18 @@ module Network.Connect.Compression (
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8)
 
-import Control.Exception (IOException, evaluate, try)
+import Control.Exception (SomeException, evaluate, try)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 import Codec.Compression.Brotli qualified as Brotli
 import Codec.Compression.GZip qualified as GZip
 import Codec.Compression.Zstd qualified as Zstd
+import Codec.Compression.Zstd.Lazy qualified as ZstdL
 
--- | A Connect content-coding.
+-- | A Connect content-coding. Connect supports @identity@, @gzip@, @br@
+-- (Brotli), and @zstd@ — a different set from grpc-spec, so this is a local
+-- enum rather than 'Network.GRPC.Spec.Compression'.
 data ContentCoding = Identity | Gzip | Br | Zstd
   deriving stock (Eq, Show, Ord, Enum, Bounded)
 
@@ -66,10 +69,7 @@ decompress :: ContentCoding -> ByteString -> IO (Either String ByteString)
 decompress Identity bs = pure (Right bs)
 decompress Gzip bs = tryLazyDecompress GZip.decompress bs
 decompress Br bs = tryLazyDecompress Brotli.decompress bs
-decompress Zstd bs = case Zstd.decompress bs of
-  Zstd.Decompress out -> pure (Right out)
-  Zstd.Skip -> pure (Right BS.empty)
-  Zstd.Error msg -> pure (Left ("zstd decompress: " <> msg))
+decompress Zstd bs = tryLazyDecompress ZstdL.decompress bs
 
 -- | Run a lazy decompressor, fully forcing the result so any pure
 -- exception surfaces as a caught 'IOException'.
@@ -77,7 +77,7 @@ tryLazyDecompress
   :: (BL.ByteString -> BL.ByteString) -> ByteString -> IO (Either String ByteString)
 tryLazyDecompress dec bs = do
   outcome <-
-    try (evaluate (BL.toStrict (dec (BL.fromStrict bs)))) :: IO (Either IOException ByteString)
+    try (evaluate (BL.toStrict (dec (BL.fromStrict bs)))) :: IO (Either SomeException ByteString)
   pure $ case outcome of
     Right out -> Right out
     Left _ -> Left "decompression failed: corrupt input"

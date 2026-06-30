@@ -94,6 +94,68 @@ library
     wireform-http,
     wireform-proto
 
+-- Internal library: generated Haskell types + RPC tags for the connectrpc
+-- conformance protos. Built with -O0 for fast codegen iteration.
+library conformance-gen
+  import: defaults
+  visibility: private
+  hs-source-dirs: conformance/gen
+  ghc-options: -O0
+  exposed-modules:
+    Connect.Conformance.Proto
+    Connect.Conformance.Service
+    Connect.Conformance.Support
+  build-depends:
+    base,
+    aeson,
+    bytestring,
+    containers,
+    scientific,
+    text,
+    unordered-containers,
+    vector,
+    wireform-proto,
+    grpc-spec,
+    wireform-grpc,
+    wireform-connect
+
+-- Conformance server-under-test: implements ConformanceService over
+-- wireform-connect and speaks the connectconformance stdin/stdout protocol.
+executable conformance-server
+  import: defaults
+  hs-source-dirs: conformance/server
+  main-is: Main.hs
+  ghc-options: -threaded -rtsopts "-with-rtsopts=-N" -O0
+  build-depends:
+    base,
+    bytestring,
+    network,
+    text,
+    vector,
+    grpc-spec,
+    wireform-connect,
+    wireform-connect:conformance-gen,
+    wireform-http,
+    wireform-proto
+
+-- Conformance client-under-test: issues RPCs to the reference server using
+-- wireform-connect's client and reports results over the stdin/stdout protocol.
+executable conformance-client
+  import: defaults
+  hs-source-dirs: conformance/client
+  main-is: Main.hs
+  ghc-options: -threaded -rtsopts "-with-rtsopts=-N" -O0
+  build-depends:
+    base,
+    stm,
+    text,
+    vector,
+    grpc-spec,
+    wireform-connect,
+    wireform-connect:conformance-gen,
+    wireform-http,
+    wireform-proto
+
 test-suite wireform-connect-test
   import: defaults
   type: exitcode-stdio-1.0
@@ -122,6 +184,8 @@ test-suite wireform-connect-test
     containers,
     grpc-spec,
     hedgehog         >= 1.0  && < 1.8,
+    sydtest,
+    sydtest-hedgehog,
     network,
     scientific,
     text,

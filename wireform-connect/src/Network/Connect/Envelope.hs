@@ -29,6 +29,7 @@ module Network.Connect.Envelope (
   encodeEndStream,
   decodeEndStream,
   decodeEndStreamValue,
+  decodeEndStreamLenient,
 ) where
 
 import Control.Exception (throwIO)
@@ -46,6 +47,7 @@ import Network.Connect.Error
   ( ConnectError (..)
   , ConnectException (..)
   , decodeConnectError
+  , decodeConnectErrorLenient
   , encodeConnectError
   )
 import Network.Connect.Metadata (metadataFromJSON, metadataToJSON)
@@ -55,9 +57,11 @@ import Network.GRPC.Spec (CustomMetadata, GrpcError (..))
 -- Frame flags
 ------------------------------------------------------------------------
 
+-- | The flag byte's compressed bit (bit 0, value @0x01@).
 flagCompressedBit :: Word8
 flagCompressedBit = 0x01
 
+-- | The flag byte's end-of-stream bit (bit 1, value @0x02@).
 flagEndStreamBit :: Word8
 flagEndStreamBit = 0x02
 
@@ -68,11 +72,13 @@ data EnvelopeFlags = EnvelopeFlags
   }
   deriving stock (Eq, Show)
 
+-- | Pack an 'EnvelopeFlags' into a single flag byte.
 flagsToByte :: EnvelopeFlags -> Word8
 flagsToByte f =
   (if efCompressed f then flagCompressedBit else 0)
     .|. (if efEndStream f then flagEndStreamBit else 0)
 
+-- | Unpack a flag byte into 'EnvelopeFlags'.
 flagsFromByte :: Word8 -> EnvelopeFlags
 flagsFromByte b =
   EnvelopeFlags
@@ -204,6 +210,7 @@ decodeEndStream bs =
     Nothing -> Left "EndStreamResponse: malformed JSON"
     Just v -> decodeEndStreamValue v
 
+-- | Parse an already-decoded JSON 'Aeson.Value' as an 'EndStreamResponse'.
 decodeEndStreamValue :: Aeson.Value -> Either String EndStreamResponse
 decodeEndStreamValue (Aeson.Object o) = do
   err <- case KeyMap.lookup "error" o of
@@ -216,3 +223,24 @@ decodeEndStreamValue (Aeson.Object o) = do
     Just v -> metadataFromJSON v
   Right (EndStreamResponse err meta)
 decodeEndStreamValue _ = Left "EndStreamResponse: expected a JSON object"
+
+-- | Lenient parse of an end-stream frame's JSON, for a /receiving client/.
+--
+-- Always succeeds (a malformed frame yields a success 'EndStreamResponse'
+-- with no metadata). The @error@ object is parsed leniently via
+-- 'decodeConnectErrorLenient' with a 'GrpcUnknown' fallback, so a malformed
+-- or unrecognized error @code@ still surfaces the error (with its message)
+-- rather than being silently dropped — matching how a conformant Connect
+-- client must report streaming errors.
+decodeEndStreamLenient :: ByteString -> EndStreamResponse
+decodeEndStreamLenient bs =
+  case Aeson.decode (BL.fromStrict bs) :: Maybe Aeson.Value of
+    Just (Aeson.Object o) ->
+      let err = case KeyMap.lookup "error" o of
+            Just v@(Aeson.Object _) -> decodeConnectErrorLenient GrpcUnknown v
+            _ -> Nothing
+          meta = case KeyMap.lookup "metadata" o of
+            Just v -> either (const []) id (metadataFromJSON v)
+            _ -> []
+       in EndStreamResponse err meta
+    _ -> EndStreamResponse Nothing []

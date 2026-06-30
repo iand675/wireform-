@@ -16,6 +16,9 @@ module Network.Connect.Server (
   ConnectServerM,
   ServerContext (..),
   getRequestMetadata,
+  requestIsGet,
+  requestQueryParams,
+  requestTimeoutMs,
   setResponseMetadata,
   addResponseTrailers,
 
@@ -36,6 +39,7 @@ module Network.Connect.Server (
 ) where
 
 import Control.Concurrent (forkIO)
+import Control.Concurrent.MVar (newEmptyMVar, takeMVar, tryPutMVar)
 import Control.Concurrent.STM
   ( TQueue
   , atomically
@@ -118,7 +122,7 @@ import Network.HTTP.Types.Header
   , lookupHeader
   )
 import Network.HTTP.Types.Method qualified as Method
-import Network.HTTP.Types.Status (Status, status200)
+import Network.HTTP.Types.Status (Status, status200, status404, status405, status415)
 import Network.HTTP.Types.Version (pattern HTTP1_1)
 import System.Timeout (timeout)
 
@@ -126,24 +130,53 @@ import System.Timeout (timeout)
 -- Server monad
 ------------------------------------------------------------------------
 
+-- | The monad Connect server handlers run in: a 'ReaderT' over a per-call
+-- 'ServerContext', so a handler can read the request's leading metadata and
+-- stage response metadata. Lift 'IO' for effects.
 type ConnectServerM = ReaderT ServerContext IO
 
 -- | Per-call server context: the parsed request leading metadata plus
 -- mutable cells for response leading and trailing metadata.
 data ServerContext = ServerContext
   { scLeadingMetadata :: ![CustomMetadata]
+    -- ^ The request's leading metadata (parsed from the HTTP request headers).
   , scRespLeading :: !(IORef [CustomMetadata])
+    -- ^ Response leading metadata to send (set by 'setResponseMetadata').
   , scRespTrailing :: !(IORef [CustomMetadata])
+    -- ^ Response trailing metadata to send (accumulated by 'addResponseTrailers').
+  , scIsGet :: !Bool
+    -- ^ Whether the request used HTTP @GET@ (Connect GET). 'False' for POST/streaming.
+  , scQueryParams :: ![(ByteString, ByteString)]
+    -- ^ Decoded query parameters (Connect GET only; empty otherwise).
+  , scTimeoutMs :: !(Maybe Int)
+    -- ^ The observed @connect-timeout-ms@ deadline, if the client set one.
   }
 
+-- | The request's leading metadata (the custom headers the client sent).
 getRequestMetadata :: ConnectServerM [CustomMetadata]
 getRequestMetadata = asks scLeadingMetadata
 
+-- | Whether the request used HTTP @GET@ (Connect GET semantics).
+requestIsGet :: ConnectServerM Bool
+requestIsGet = asks scIsGet
+
+-- | The request's decoded query parameters (Connect GET only; empty otherwise).
+requestQueryParams :: ConnectServerM [(ByteString, ByteString)]
+requestQueryParams = asks scQueryParams
+
+-- | The observed @connect-timeout-ms@ deadline, if the client set one.
+requestTimeoutMs :: ConnectServerM (Maybe Int)
+requestTimeoutMs = asks scTimeoutMs
+
+-- | Replace the response leading metadata (sent as the response headers).
 setResponseMetadata :: [CustomMetadata] -> ConnectServerM ()
 setResponseMetadata ms = do
   ctx <- ask
   liftIO (writeIORef (scRespLeading ctx) ms)
 
+-- | Append response trailing metadata. On a unary call these become
+-- @trailer-@-prefixed headers; on a streaming call they ride the final
+-- 'EndStreamResponse' frame.
 addResponseTrailers :: [CustomMetadata] -> ConnectServerM ()
 addResponseTrailers ms = do
   ctx <- ask
@@ -153,6 +186,10 @@ addResponseTrailers ms = do
 -- Type-erased method handler
 ------------------------------------------------------------------------
 
+-- | A type-erased Connect method handler: the fully-qualified service\/method
+-- names, the streaming kind, and the runner. Construct these with the
+-- 'mkNonStreaming' \/ 'mkClientStreaming' \/ 'mkServerStreaming' \/ 'mkBiDiStreaming'
+-- builders rather than the record directly.
 data MethodHandler = MethodHandler
   { mhService :: !ByteString
   , mhMethod :: !ByteString
@@ -168,6 +205,10 @@ type StreamingFn rpc =
 ------------------------------------------------------------------------
 -- Handler builders
 ------------------------------------------------------------------------
+-- | Register a unary handler of type @Input -> ConnectServerM Output@.
+-- Serves both the unary @POST@ and (for side-effect-free methods) the unary
+-- @GET@ request shapes. Apply the method's service tag with a type
+-- application, e.g. @mkNonStreaming \@Say say@.
 mkNonStreaming
   :: forall (rpc :: Type)
    . ( SupportsServerRpc rpc
@@ -188,6 +229,9 @@ mkNonStreaming h =
   where
     p = Proxy @rpc
 
+-- | Register a client-streaming handler. The argument receives a @recv@
+-- action — 'Nothing' marks end-of-stream — and must produce the single
+-- response output.
 mkClientStreaming
   :: forall (rpc :: Type)
    . ( SupportsServerRpc rpc
@@ -205,6 +249,9 @@ mkClientStreaming h =
       out <- h recv
       send out
 
+-- | Register a server-streaming handler. The argument receives the one
+-- request 'Input' and a @send@ continuation, which it calls once per
+-- response message.
 mkServerStreaming
   :: forall (rpc :: Type)
    . ( SupportsServerRpc rpc
@@ -221,9 +268,30 @@ mkServerStreaming h =
     wrap recv send = do
       mFirst <- recv
       case mFirst of
-        Nothing -> pure ()
-        Just input -> h input send
+        Nothing ->
+          liftIO
+            ( throwConnectIO
+                ( toConnectError
+                    GrpcUnimplemented
+                    (Just "connect: server-streaming RPC requires exactly one request message; received none")
+                )
+            )
+        Just input -> do
+          mNext <- recv
+          case mNext of
+            Just _ ->
+              liftIO
+                ( throwConnectIO
+                    ( toConnectError
+                        GrpcUnimplemented
+                        (Just "connect: server-streaming RPC requires exactly one request message; received more than one")
+                    )
+                )
+            Nothing -> h input send
 
+-- | Register a bidirectional-streaming handler. The argument receives a
+-- @recv@ action ('Nothing' at end-of-stream) and a @send@ continuation;
+-- either may be called any number of times in any order.
 mkBiDiStreaming
   :: forall (rpc :: Type)
    . ( SupportsServerRpc rpc
@@ -258,6 +326,7 @@ streamingHandler p kind fn =
 -- Configuration
 ------------------------------------------------------------------------
 
+-- | Server-wide Connect configuration.
 data ConnectServerConfig = ConnectServerConfig
   { cscSupportedCompression :: ![CC.ContentCoding]
   -- ^ Compression codings the server will accept (default [Identity, Gzip]).
@@ -266,6 +335,8 @@ data ConnectServerConfig = ConnectServerConfig
   -- 'Nothing' (default) keeps the message opaque.
   }
 
+-- | Accept @identity@ and @gzip@ compression; keep uncaught-exception
+-- messages opaque to the client.
 defaultConnectServerConfig :: ConnectServerConfig
 defaultConnectServerConfig =
   ConnectServerConfig
@@ -281,7 +352,7 @@ defaultConnectServerConfig =
 connectApplication :: ConnectServerConfig -> [MethodHandler] -> Handler
 connectApplication cfg hs0 req =
   case Map.lookup path hmap of
-    Nothing -> connectErrorResponse (toConnectError GrpcUnimplemented (Just "connect: no such method"))
+    Nothing -> bareStatusResponse status404
     Just mh -> mhRun mh cfg req
   where
     hmap = methodMap hs0
@@ -315,10 +386,11 @@ runUnary
 runUnary p userHandler cfg req =
   case Method.methodToBytes (requestMethod req) of
     "GET" -> runUnaryGet p userHandler cfg req
-    _ -> case lookupHeader hContentType (requestHeaders req) >>= parseContentType of
-      Nothing -> connectErrorResponse unsupportedMediaType
+    "POST" -> case lookupHeader hContentType (requestHeaders req) >>= parseContentType of
+      Nothing -> bareStatusResponse status415
       Just (Unary, codec) -> runUnaryPost p userHandler cfg req codec
-      Just (Streaming, _) -> connectErrorResponse unsupportedMediaType
+      Just (Streaming, _) -> bareStatusResponse status415
+    _ -> bareStatusResponse status405
 
 runUnaryPost
   :: ( SupportsServerRpc rpc
@@ -333,15 +405,17 @@ runUnaryPost
   -> IO Response
 runUnaryPost p userHandler cfg req codec = do
   bodyBytes <- drainBody (requestBody req)
-  let mReqCoding = lookupHeader hContentEncoding (requestHeaders req) >>= CC.codingFromName
-  edecompressed <- decompressUnary cfg bodyBytes mReqCoding
-  case edecompressed of
+  case resolveReqCoding cfg (lookupHeader hContentEncoding (requestHeaders req)) of
     Left ce -> connectErrorResponse ce
-    Right decompressed -> case decodeInputBody codec p decompressed of
-      Left e ->
-        connectErrorResponse
-          (toConnectError GrpcInvalidArgument (Just (T.pack ("connect: could not decode request: " <> e))))
-      Right input -> runUnaryHandler p userHandler cfg req codec input
+    Right mReqCoding -> do
+      edecompressed <- decompressUnary cfg bodyBytes mReqCoding
+      case edecompressed of
+        Left ce -> connectErrorResponse ce
+        Right decompressed -> case decodeInputBody codec p decompressed of
+          Left e ->
+            connectErrorResponse
+              (toConnectError GrpcInvalidArgument (Just (T.pack ("connect: could not decode request: " <> e))))
+          Right input -> runUnaryHandler p userHandler cfg req codec False [] input
 
 runUnaryGet
   :: ( SupportsServerRpc rpc
@@ -374,7 +448,7 @@ runUnaryGet p userHandler cfg req = do
           Left e ->
             connectErrorResponse
               (toConnectError GrpcInvalidArgument (Just (T.pack ("connect: could not decode message: " <> e))))
-          Right input -> runUnaryHandler p userHandler cfg req codec input
+          Right input -> runUnaryHandler p userHandler cfg req codec True qs input
 
 runUnaryHandler
   :: (SupportsServerRpc rpc, Aeson.ToJSON (Output rpc))
@@ -383,11 +457,14 @@ runUnaryHandler
   -> ConnectServerConfig
   -> Request
   -> Codec
+  -> Bool
+  -> [(ByteString, ByteString)]
   -> Input rpc
   -> IO Response
-runUnaryHandler p userHandler cfg req codec input = do
+runUnaryHandler p userHandler cfg req codec isGet qparams input = do
   let headers = requestHeaders req
       leadingMeta = headersToLeading headers
+      mTimeoutMs = lookupHeader hConnectTimeoutMs headers >>= readInt
   leadRef <- newIORef []
   trailRef <- newIORef []
   let ctx =
@@ -395,8 +472,10 @@ runUnaryHandler p userHandler cfg req codec input = do
           { scLeadingMetadata = leadingMeta
           , scRespLeading = leadRef
           , scRespTrailing = trailRef
+          , scIsGet = isGet
+          , scQueryParams = qparams
+          , scTimeoutMs = mTimeoutMs
           }
-      mTimeoutMs = lookupHeader hConnectTimeoutMs headers >>= readInt
   outcome <-
     try
       ( case mTimeoutMs of
@@ -420,11 +499,35 @@ runUnaryHandler p userHandler cfg req codec input = do
               <> leadingToHeaders outLead
               <> trailingToPrefixedHeaders outTrail
       mkResponse status200 respHeaders (BodyBytes finalBody)
-    Right Nothing ->
-      connectErrorResponse (toConnectError GrpcDeadlineExceeded (Just "connect: deadline exceeded"))
-    Left (e :: SomeException)
-      | Just (ConnectException ce) <- fromException e -> connectErrorResponse ce
-      | otherwise -> connectErrorResponse (toConnectError GrpcInternal (cscExceptionToClient cfg e))
+    Right Nothing -> do
+      outLead <- readIORef leadRef
+      outTrail <- readIORef trailRef
+      connectErrorResponseWith
+        (leadingToHeaders outLead <> trailingToPrefixedHeaders outTrail)
+        (toConnectError GrpcDeadlineExceeded (Just "connect: deadline exceeded"))
+    Left (e :: SomeException) -> do
+      outLead <- readIORef leadRef
+      outTrail <- readIORef trailRef
+      let extraHdrs = leadingToHeaders outLead <> trailingToPrefixedHeaders outTrail
+          ce
+            | Just (ConnectException c) <- fromException e = c
+            | otherwise = toConnectError GrpcInternal (cscExceptionToClient cfg e)
+      connectErrorResponseWith extraHdrs ce
+
+-- | Resolve a request's @content-encoding@ \/ @connect-content-encoding@
+-- header to a content coding. A missing header or an explicit @identity@
+-- means no compression ('Nothing'). Any other value — a coding the server
+-- doesn't support, or an unknown token — is rejected as @unimplemented@
+-- (the Connect protocol requires servers to reject unsupported request
+-- compression rather than silently treat it as identity).
+resolveReqCoding
+  :: ConnectServerConfig -> Maybe ByteString -> Either ConnectError (Maybe CC.ContentCoding)
+resolveReqCoding _ Nothing = Right Nothing
+resolveReqCoding cfg (Just raw)
+  | raw == "identity" = Right Nothing
+  | otherwise = case CC.codingFromName raw of
+      Just c | c `elem` cscSupportedCompression cfg -> Right (Just c)
+      _ -> Left (unsupportedCodingError cfg)
 
 -- | Decompress a unary request body per its (optional) content-coding,
 -- returning @Left@ on an unsupported or undecodable coding.
@@ -458,31 +561,31 @@ runStreaming
   -> Request
   -> IO Response
 runStreaming p userHandler cfg req =
-  case lookupHeader hContentType (requestHeaders req) >>= parseContentType of
-    Just (Streaming, codec) -> go codec
-    _ ->
-      connectErrorResponse
-        ( ConnectError
-            { ceCode = GrpcUnimplemented
-            , ceMessage = Just "connect: streaming requires application/connect+<codec>"
-            , ceDetails = []
-            }
-        )
+  case Method.methodToBytes (requestMethod req) of
+    "POST" -> case lookupHeader hContentType (requestHeaders req) >>= parseContentType of
+      Just (Streaming, codec) -> go codec
+      _ -> bareStatusResponse status415
+    _ -> bareStatusResponse status405
   where
     go codec = do
       let headers = requestHeaders req
-          reqCoding = fromMaybe CC.Identity (lookupHeader hConnectContentEncoding headers >>= CC.codingFromName)
-      if reqCoding /= CC.Identity && reqCoding `notElem` cscSupportedCompression cfg
-        then connectErrorResponse (unsupportedCodingError cfg)
-        else do
+      case resolveReqCoding cfg (lookupHeader hConnectContentEncoding headers) of
+        Left ce -> connectErrorResponse ce
+        Right mReqCoding -> do
+          let reqCoding = fromMaybe CC.Identity mReqCoding
           leadRef <- newIORef []
           trailRef <- newIORef []
+          metaReady <- newEmptyMVar
           let leadingMeta = headersToLeading headers
+              mStreamTimeoutMs = lookupHeader hConnectTimeoutMs headers >>= readInt
               ctx =
                 ServerContext
                   { scLeadingMetadata = leadingMeta
                   , scRespLeading = leadRef
                   , scRespTrailing = trailRef
+                  , scIsGet = False
+                  , scQueryParams = []
+                  , scTimeoutMs = mStreamTimeoutMs
                   }
               clientAccept = maybe [] CC.parseAcceptEncoding (lookupHeader hConnectAcceptEncoding headers)
               rCoding = CC.negotiate (cscSupportedCompression cfg) clientAccept
@@ -493,13 +596,21 @@ runStreaming p userHandler cfg req =
                 mframe <- readFrame fr
                 case mframe of
                   Nothing -> pure Nothing
-                  Just (flags, payload) -> do
-                    pl <- decodePayload p codec reqCoding (efCompressed flags) payload
-                    case pl of
-                      Left e -> throwConnectIO (toConnectError GrpcInvalidArgument e)
-                      Right x -> pure (Just x)
+                  Just (flags, payload)
+                    | efCompressed flags && reqCoding == CC.Identity ->
+                        throwConnectIO
+                          ( toConnectError
+                              GrpcInternal
+                              (Just "connect: received compressed message but no compression was negotiated")
+                          )
+                    | otherwise -> do
+                        pl <- decodePayload p codec reqCoding (efCompressed flags) payload
+                        case pl of
+                          Left e -> throwConnectIO (toConnectError GrpcInvalidArgument e)
+                          Right x -> pure (Just x)
               send :: Output rpc -> ConnectServerM ()
               send out = liftIO $ do
+                _ <- tryPutMVar metaReady ()
                 let outPayload = encodeOutputBody codec p out
                     (framePayload, compressed) =
                       case rCoding of
@@ -509,15 +620,18 @@ runStreaming p userHandler cfg req =
                 atomically (writeTQueue outQ (Just (BL.toStrict (buildFrameLazy sflags framePayload))))
           _ <- forkIO $ do
             result <- try (runReaderT (userHandler recv send) ctx) :: IO (Either SomeException ())
+            _ <- tryPutMVar metaReady ()
             trail <- readIORef trailRef
             let esr = mkEndStream result trail
                 endFrame = encodeEndStream esr
                 eflags = EnvelopeFlags{efCompressed = False, efEndStream = True}
             atomically (writeTQueue outQ (Just (BL.toStrict (buildFrameLazy eflags endFrame))))
             atomically (writeTQueue outQ Nothing)
+          takeMVar metaReady
+          outLead <- readIORef leadRef
           let producer = atomically (readTQueue outQ)
               baseHeaders = (hContentType, streamContentType codec) : streamingEncodingHdr rCoding
-              finalHeaders = baseHeaders <> leadingToHeaders leadingMeta
+              finalHeaders = baseHeaders <> leadingToHeaders outLead
           mkResponse status200 finalHeaders (BodyStream producer)
       where
         mkEndStream :: Either SomeException () -> [CustomMetadata] -> EndStreamResponse
@@ -590,11 +704,25 @@ bodyProducer (BodyBytes bs) = do
 bodyProducer (BodyStream p) = pure p
 
 connectErrorResponse :: ConnectError -> IO Response
-connectErrorResponse ce = do
+connectErrorResponse = connectErrorResponseWith []
+
+-- | Like 'connectErrorResponse' but with extra response headers (e.g. the
+-- handler's staged leading metadata and @trailer-@-prefixed trailing metadata).
+connectErrorResponseWith :: Headers -> ConnectError -> IO Response
+connectErrorResponseWith extra ce = do
   let body = BL.toStrict (Aeson.encode (encodeConnectError ce))
       status = connectCodeToHttpStatus (ceCode ce)
-      hdrs = [(hContentType, "application/json")]
+      hdrs = (hContentType, "application/json") : extra
   mkResponse status hdrs (BodyBytes body)
+
+-- | A bare HTTP status response with no Connect error envelope, for
+-- protocol-level rejections detected before/around the RPC: unsupported
+-- media type (415), unknown route (404), unsupported HTTP method (405).
+-- The peer infers the RPC error code from the HTTP status (per the Connect
+-- protocol's HTTP-to-code mapping), so we deliberately omit a JSON body
+-- whose @code@ would otherwise override that inference.
+bareStatusResponse :: Status -> IO Response
+bareStatusResponse st = mkResponse st [] BodyEmpty
 
 unsupportedCodingError :: ConnectServerConfig -> ConnectError
 unsupportedCodingError cfg =
@@ -609,13 +737,6 @@ streamingEncodingHdr :: CC.ContentCoding -> Headers
 streamingEncodingHdr CC.Identity = []
 streamingEncodingHdr c = [(hConnectContentEncoding, CC.codingName c)]
 
-unsupportedMediaType :: ConnectError
-unsupportedMediaType =
-  ConnectError
-    { ceCode = GrpcUnimplemented
-    , ceMessage = Just "connect: unsupported media type"
-    , ceDetails = []
-    }
 
 lookupParam :: [(ByteString, ByteString)] -> ByteString -> Maybe ByteString
 lookupParam qs name = lookup name qs

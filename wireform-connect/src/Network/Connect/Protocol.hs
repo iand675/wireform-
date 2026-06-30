@@ -44,7 +44,8 @@ import Data.CaseInsensitive (CI)
 import Data.CaseInsensitive qualified as CI
 import Network.HTTP.Types.Header (HeaderName)
 
--- | A Connect message codec.
+-- | A Connect wire codec: 'CodecProto' (binary Protobuf) or 'CodecJSON'
+-- (the proto3 JSON mapping).
 data Codec = CodecProto | CodecJSON
   deriving stock (Eq, Show, Ord, Enum, Bounded)
 

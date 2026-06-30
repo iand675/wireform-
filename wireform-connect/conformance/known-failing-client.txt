@@ -1,0 +1,9 @@
+# Known-failing connectrpc conformance cases — CLIENT mode.
+#
+# Empty: wireform-connect passes all 1603 client-mode permutations
+# (connectconformance v1.0.5, `run.sh client raw`). Add a full test-case
+# name (or wildcard pattern) here, one per line, if a case regresses.
+#
+# Note: the HTTP/2 "empty-DATA flood" cases were historically flaky
+# (connect-go client-side ENHANCE_YOUR_CALM). If that resurfaces under
+# load, prefer `--known-flaky` over re-adding it here.

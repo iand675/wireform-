@@ -8,19 +8,32 @@ import Data.ByteString.Builder qualified as B
 import Data.ByteString.Lazy qualified as BL
 import Data.Either (isLeft)
 import Data.IORef
-import Hedgehog
+import Hedgehog (Gen)
+import Hedgehog qualified as H
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import Network.Connect.Envelope
+import Test.Syd
+import Test.Syd.Hedgehog ()
 
-tests :: Group
+tests :: Spec
 tests =
-  Group
-    "Envelope"
-    [ ("frames round-trip across arbitrary chunk boundaries", property frameRoundtrip)
-    , ("end-stream JSON round-trips (success + error)", withTests 1 (property endStreamRoundtrip))
-    , ("rejects invalid error shapes", withTests 1 (property rejectInvalidEnd))
-    ]
+  describe "Envelope" $ do
+    it "frames round-trip across arbitrary chunk boundaries" $ H.property $ do
+      frames <- H.forAll (Gen.list (Range.linear 0 8) genFrame)
+      let built = BL.toStrict (B.toLazyByteString (mconcat (map (uncurry buildFrame) frames)))
+      chunks <- H.forAll (genChunks built)
+      decoded <- H.evalIO (readAll chunks)
+      decoded H.=== frames
+    it "end-stream JSON round-trips (success + error)" $ do
+      let ok = EndStreamResponse Nothing []
+      decodeEndStream (encodeEndStream ok) `shouldBe` Right ok
+    it "rejects invalid error shapes" $ do
+      decodeEndStream "{\"error\": null}" `shouldSatisfy` isLeft
+      decodeEndStream "{\"error\": {}}" `shouldSatisfy` isLeft
+      decodeEndStream "{\"error\": {\"code\": null}}" `shouldSatisfy` isLeft
+      -- absent error == success
+      decodeEndStream "{}" `shouldBe` Right (EndStreamResponse Nothing [])
 
 genFlags :: Gen EnvelopeFlags
 genFlags = EnvelopeFlags <$> Gen.bool <*> Gen.bool
@@ -36,14 +49,6 @@ genChunks bs
       n <- Gen.int (Range.linear 1 (BS.length bs))
       let (h, t) = BS.splitAt n bs
       (h :) <$> genChunks t
-
-frameRoundtrip :: PropertyT IO ()
-frameRoundtrip = do
-  frames <- forAll (Gen.list (Range.linear 0 8) genFrame)
-  let built = BL.toStrict (B.toLazyByteString (mconcat [buildFrame f p | (f, p) <- frames]))
-  chunks <- forAll (genChunks built)
-  decoded <- evalIO (readAll chunks)
-  decoded === frames
 
 -- Read every frame from a producer over the given chunk list.
 readAll :: [ByteString] -> IO [(EnvelopeFlags, ByteString)]
@@ -61,16 +66,3 @@ readAll chunks0 = do
           Nothing -> pure (reverse acc)
           Just frame -> loop (frame : acc)
   loop []
-
-endStreamRoundtrip :: PropertyT IO ()
-endStreamRoundtrip = do
-  let ok = EndStreamResponse Nothing []
-  decodeEndStream (encodeEndStream ok) === Right ok
-
-rejectInvalidEnd :: PropertyT IO ()
-rejectInvalidEnd = do
-  assert (isLeft (decodeEndStream "{\"error\": null}"))
-  assert (isLeft (decodeEndStream "{\"error\": {}}"))
-  assert (isLeft (decodeEndStream "{\"error\": {\"code\": null}}"))
-  -- absent error == success
-  decodeEndStream "{}" === Right (EndStreamResponse Nothing [])

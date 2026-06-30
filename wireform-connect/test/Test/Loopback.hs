@@ -6,17 +6,20 @@ module Test.Loopback (tests) where
 
 import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (bracket, finally, try)
+import Control.Exception (SomeException, bracket, finally, try)
+import Control.Monad (forM, forM_)
+import Data.Aeson qualified as Aeson
+import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
+import Data.ByteString.Lazy qualified as BL
 import Data.Maybe (mapMaybe)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import Hedgehog
 import Network.Connect.Client
 import Network.Connect.Compression (ContentCoding (..))
-import Control.Monad.IO.Class (liftIO)
-import Network.Connect.Error (ConnectError (..), ConnectException (..), throwConnect)
+import Network.Connect.Error (ConnectError (..), ConnectException (..), decodeConnectError, throwConnect)
 import Network.Connect.Protocol (Codec (..))
 import Network.Connect.Server
 import Network.GRPC.Spec
@@ -25,9 +28,17 @@ import Network.GRPC.Spec
   , HeaderName (..)
   , Proto (..)
   )
+import Network.HTTP.Connection (sendOn)
+import Network.HTTP.Message (Request (..), Response (..))
 import Network.HTTP.Server (ServerConfig (..), defaultServerConfig, runServerOnListener)
+import Network.HTTP.Types.Body (Body (..))
+import Network.HTTP.Types.Header (hContentType)
+import Network.HTTP.Types.Method (mPost)
+import Network.HTTP.Types.Status (status501)
+import Network.HTTP.Types.Version (pattern HTTP1_1)
 import Network.HTTP.VersionRange (VersionRange, http1Only, http2Only)
 import Network.Socket qualified as NS
+import Test.Syd
 
 import Connect.TestProto
 
@@ -108,6 +119,10 @@ convSentence (Proto r) = converseResponseSentence r
 -- Server / client harness
 ------------------------------------------------------------------------
 
+-- The loopback server advertises every coding so request br/zstd is accepted.
+serverCfg :: ConnectServerConfig
+serverCfg = defaultConnectServerConfig{cscSupportedCompression = [Identity, Gzip, Br, Zstd]}
+
 withLoopback :: VersionRange -> ConnectClientConfig -> (ConnectClient -> IO a) -> IO a
 withLoopback range ccfg action =
   withServerSocket $ \sock port -> do
@@ -116,7 +131,7 @@ withLoopback range ccfg action =
             { serverHost = "127.0.0.1"
             , serverPort = show port
             , serverVersionRange = range
-            , serverHandler = connectApplication defaultConnectServerConfig elizaHandlers
+            , serverHandler = connectApplication serverCfg elizaHandlers
             }
     readyVar <- newEmptyMVar
     tid <- forkIO (putMVar readyVar () >> runServerOnListener scfg sock)
@@ -149,82 +164,6 @@ withServerSocket k = do
 clientCfg :: Codec -> ConnectClientConfig
 clientCfg codec = defaultConnectClientConfig{cccCodec = codec}
 
-------------------------------------------------------------------------
--- Tests
-------------------------------------------------------------------------
-
-tests :: Group
-tests =
-  Group
-    "Loopback"
-    [ ("unary Say echo (proto)", withTests 1 (property (sayEcho CodecProto)))
-    , ("unary Say echo (json)", withTests 1 (property (sayEcho CodecJSON)))
-    , ("unary GET Say (proto)", withTests 1 (property (sayGet CodecProto)))
-    , ("unary GET Say (json)", withTests 1 (property (sayGet CodecJSON)))
-    , ("server streaming Introduce", withTests 1 (property (introduceTest CodecProto)))
-    , ("client streaming Aggregate", withTests 1 (property (aggregateTest CodecJSON)))
-    , ("bidi Converse over http2", withTests 1 (property converseTest))
-    , ("error path surfaces ConnectException", withTests 1 (property errorTest))
-    , ("gzip-compressed request round-trips", withTests 1 (property gzipTest))
-    , ("leading metadata reaches the handler", withTests 1 (property metadataTest))
-    ]
-
-sayEcho :: Codec -> PropertyT IO ()
-sayEcho codec = do
-  out <- evalIO $ withLoopback http1Only (clientCfg codec) $ \cl ->
-    nonStreaming cl (Proxy @Say) (mkSay "hi")
-  saidSentence out === "echo:hi"
-
-sayGet :: Codec -> PropertyT IO ()
-sayGet codec = do
-  out <- evalIO $ withLoopback http1Only (clientCfg codec) $ \cl ->
-    nonStreamingGet cl (Proxy @Say) (mkSay "hi")
-  saidSentence out === "echo:hi"
-
-introduceTest :: Codec -> PropertyT IO ()
-introduceTest codec = do
-  rs <- evalIO $ withLoopback http1Only (clientCfg codec) $ \cl ->
-    serverStreaming cl (Proxy @Introduce) (mkIntro "X") (drainAll introSentence)
-  rs === ["X1", "X2", "X3"]
-
-aggregateTest :: Codec -> PropertyT IO ()
-aggregateTest codec = do
-  out <- evalIO $ withLoopback http1Only (clientCfg codec) $ \cl ->
-    clientStreaming cl (Proxy @Aggregate) (\send -> mapM_ (send . mkSay) ["a", "b", "c"])
-  saidSentence out === "a,b,c"
-
-converseTest :: PropertyT IO ()
-converseTest = do
-  rs <- evalIO $ withLoopback http2Only (clientCfg CodecProto) $ \cl ->
-    biDiStreaming cl (Proxy @Converse) $ \send recv -> do
-      send (mkConv "a")
-      r1 <- recv
-      send (mkConv "b")
-      r2 <- recv
-      pure (mapMaybe (fmap convSentence) [r1, r2])
-  rs === ["re:a", "re:b"]
-
-errorTest :: PropertyT IO ()
-errorTest = do
-  res <- evalIO $ withLoopback http1Only (clientCfg CodecProto) $ \cl ->
-    try (nonStreaming cl (Proxy @Say) (mkSay "boom"))
-  case (res :: Either ConnectException (Proto SayResponse)) of
-    Left (ConnectException ce) -> ceCode ce === GrpcUnimplemented
-    Right _ -> failure
-
-gzipTest :: PropertyT IO ()
-gzipTest = do
-  out <- evalIO $ withLoopback http1Only (clientCfg CodecProto){cccRequestCompression = Gzip} $ \cl ->
-    nonStreaming cl (Proxy @Say) (mkSay "zzz")
-  saidSentence out === "echo:zzz"
-
-metadataTest :: PropertyT IO ()
-metadataTest = do
-  let cfg = (clientCfg CodecProto){cccMetadata = [CustomMetadata (AsciiHeader "x-echo") "!"]}
-  out <- evalIO $ withLoopback http1Only cfg $ \cl ->
-    nonStreaming cl (Proxy @Say) (mkSay "hi")
-  saidSentence out === "echo:hi!"
-
 -- Drain a server-stream recv action into a list, projecting each element.
 drainAll :: (a -> b) -> IO (Maybe a) -> IO [b]
 drainAll proj recv = go []
@@ -234,3 +173,161 @@ drainAll proj recv = go []
       case m of
         Nothing -> pure (reverse acc)
         Just x -> go (proj x : acc)
+
+-- Read a full response body into one strict ByteString.
+drainBody :: Body -> IO ByteString
+drainBody BodyEmpty = pure ""
+drainBody (BodyBytes bs) = pure bs
+drainBody (BodyStream p) = go []
+  where
+    go acc = p >>= maybe (pure (BS.concat (reverse acc))) (\c -> go (c : acc))
+
+------------------------------------------------------------------------
+-- Test matrix
+------------------------------------------------------------------------
+
+transports :: [(String, VersionRange)]
+transports = [("http1", http1Only), ("http2", http2Only)]
+
+codecs :: [(String, Codec)]
+codecs = [("proto", CodecProto), ("json", CodecJSON)]
+
+tests :: Spec
+tests =
+  describe "Loopback" $ do
+    describe "unary Say echo" $
+      forM_ transports $ \(tn, range) ->
+        forM_ codecs $ \(cn, codec) ->
+          it (tn <> "/" <> cn) (unaryEchoT range codec)
+    describe "concurrent unary over one http2 connection" $
+      forM_ codecs $ \(cn, codec) ->
+        it cn (concurrentUnaryT codec)
+    describe "unary GET Say" $
+      forM_ transports $ \(tn, range) ->
+        forM_ codecs $ \(cn, codec) ->
+          it (tn <> "/" <> cn) (unaryGetT range codec)
+    describe "server streaming Introduce" $
+      forM_ transports $ \(tn, range) ->
+        forM_ codecs $ \(cn, codec) ->
+          it (tn <> "/" <> cn) (serverStreamT range codec)
+    describe "client streaming Aggregate" $
+      forM_ transports $ \(tn, range) ->
+        forM_ codecs $ \(cn, codec) ->
+          it (tn <> "/" <> cn) (clientStreamT range codec)
+    describe "bidi Converse (http2)" $
+      forM_ codecs $ \(cn, codec) ->
+        it cn (bidiT codec)
+    describe "request compression round-trips (http1)" $
+      forM_ [("gzip", Gzip), ("brotli", Br), ("zstd", Zstd)] $ \(cn, coding) ->
+        it cn (reqCompressionT coding)
+    it "error path surfaces ConnectException" errorT
+    it "error path returns HTTP 501 on the wire" rawErrorStatusT
+    it "leading metadata reaches the handler" metadataT
+
+unaryEchoT :: VersionRange -> Codec -> IO ()
+unaryEchoT range codec = do
+  out <- withLoopback range (clientCfg codec) $ \cl ->
+    nonStreaming cl (Proxy @Say) (mkSay "hi")
+  saidSentence out `shouldBe` "echo:hi"
+
+unaryGetT :: VersionRange -> Codec -> IO ()
+unaryGetT range codec = do
+  out <- withLoopback range (clientCfg codec) $ \cl ->
+    nonStreamingGet cl (Proxy @Say) (mkSay "hi")
+  saidSentence out `shouldBe` "echo:hi"
+
+-- | Many unary RPCs multiplexed concurrently over ONE HTTP/2 connection.
+-- This is the scenario the HPACK send-ordering fix targets: concurrent
+-- streams must keep the encoder's dynamic-table mutation order in lockstep
+-- with the wire order (and allocate monotonically-increasing stream ids),
+-- or the peer's decoder desyncs / the server rejects an out-of-order id.
+-- Each call carries a unique payload; every reply must be that call's own
+-- echo.
+concurrentUnaryT :: Codec -> IO ()
+concurrentUnaryT codec = do
+  let inputs = map (T.pack . show) [1 .. 50 :: Int]
+  results <- withLoopback http2Only (clientCfg codec) $ \cl -> do
+    vars <- forM inputs $ \s -> do
+      v <- newEmptyMVar
+      _ <- forkIO $ do
+        r <-
+          try (nonStreaming cl (Proxy @Say) (mkSay s))
+            :: IO (Either SomeException (Proto SayResponse))
+        putMVar v (s, r)
+      pure v
+    mapM takeMVar vars
+  forM_ results $ \(s, r) -> case r of
+    Right out -> saidSentence out `shouldBe` ("echo:" <> s)
+    Left e ->
+      expectationFailure ("concurrent call " <> T.unpack s <> " failed: " <> show e)
+
+serverStreamT :: VersionRange -> Codec -> IO ()
+serverStreamT range codec = do
+  rs <- withLoopback range (clientCfg codec) $ \cl ->
+    serverStreaming cl (Proxy @Introduce) (mkIntro "X") (drainAll introSentence)
+  rs `shouldBe` ["X1", "X2", "X3"]
+
+clientStreamT :: VersionRange -> Codec -> IO ()
+clientStreamT range codec = do
+  out <- withLoopback range (clientCfg codec) $ \cl ->
+    clientStreaming cl (Proxy @Aggregate) (\send -> mapM_ (send . mkSay) ["a", "b", "c"])
+  saidSentence out `shouldBe` "a,b,c"
+
+bidiT :: Codec -> IO ()
+bidiT codec = do
+  rs <- withLoopback http2Only (clientCfg codec) $ \cl ->
+    biDiStreaming cl (Proxy @Converse) $ \send recv -> do
+      send (mkConv "a")
+      r1 <- recv
+      send (mkConv "b")
+      r2 <- recv
+      pure (mapMaybe (fmap convSentence) [r1, r2])
+  rs `shouldBe` ["re:a", "re:b"]
+
+reqCompressionT :: ContentCoding -> IO ()
+reqCompressionT coding = do
+  out <- withLoopback http1Only (clientCfg CodecProto){cccRequestCompression = coding} $ \cl ->
+    nonStreaming cl (Proxy @Say) (mkSay "zzz")
+  saidSentence out `shouldBe` "echo:zzz"
+
+errorT :: IO ()
+errorT = do
+  res <- withLoopback http1Only (clientCfg CodecProto) $ \cl ->
+    try (nonStreaming cl (Proxy @Say) (mkSay "boom"))
+  case (res :: Either ConnectException (Proto SayResponse)) of
+    Left (ConnectException ce) -> ceCode ce `shouldBe` GrpcUnimplemented
+    Right _ -> expectationFailure "expected ConnectException, got a response"
+
+-- The high-level client derives the code from the JSON error body; this
+-- additionally pins the on-the-wire HTTP status the server emits.
+rawErrorStatusT :: IO ()
+rawErrorStatusT = withLoopback http1Only (clientCfg CodecJSON) $ \cl -> do
+  resp <- rawSayJSON cl "boom"
+  responseStatus resp `shouldBe` status501
+  bs <- drainBody (responseBody resp)
+  case Aeson.eitherDecodeStrict bs >>= decodeConnectError of
+    Right ce -> ceCode ce `shouldBe` GrpcUnimplemented
+    Left e -> expectationFailure ("bad error envelope on the wire: " <> e)
+
+rawSayJSON :: ConnectClient -> Text -> IO Response
+rawSayJSON cl sentence = sendOn (clConn cl) req
+  where
+    body = BL.toStrict (Aeson.encode (Proto defaultSayRequest{sayRequestSentence = sentence}))
+    req =
+      Request
+        { requestMethod = mPost
+        , requestTarget = "/connectrpc.eliza.v1.ElizaService/Say"
+        , requestAuthority = Just (clAuthority cl)
+        , requestScheme = clScheme cl
+        , requestHeaders = [(hContentType, "application/json")]
+        , requestBody = BodyBytes body
+        , requestVersion = HTTP1_1
+        , requestTrailers = pure []
+        }
+
+metadataT :: IO ()
+metadataT = do
+  let cfg = (clientCfg CodecProto){cccMetadata = [CustomMetadata (AsciiHeader "x-echo") "!"]}
+  out <- withLoopback http1Only cfg $ \cl ->
+    nonStreaming cl (Proxy @Say) (mkSay "hi")
+  saidSentence out `shouldBe` "echo:hi!"

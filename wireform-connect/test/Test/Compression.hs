@@ -2,32 +2,29 @@
 
 module Test.Compression (tests) where
 
-import Data.ByteString (ByteString)
-import Hedgehog
+import Hedgehog (Property)
+import Hedgehog qualified as H
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import Network.Connect.Compression
+import Test.Syd
+import Test.Syd.Hedgehog ()
 
-tests :: Group
+tests :: Spec
 tests =
-  Group
-    "Compression"
-    [ ("gzip round-trips", property (roundtrip Gzip))
-    , ("brotli round-trips", property (roundtrip Br))
-    , ("zstd round-trips", property (roundtrip Zstd))
-    , ("identity round-trips", property (roundtrip Identity))
-    , ("negotiate prefers client order intersected with server", withTests 1 (property negotiation))
-    ]
+  describe "Compression" $ do
+    it "gzip round-trips" (roundtrip Gzip)
+    it "brotli round-trips" (roundtrip Br)
+    it "zstd round-trips" (roundtrip Zstd)
+    it "identity round-trips" (roundtrip Identity)
+    it "negotiate prefers client order intersected with server" $ do
+      negotiate [Identity, Gzip] [Br, Gzip, Identity] `shouldBe` Gzip
+      negotiate [Identity, Gzip] [Br] `shouldBe` Identity
+      negotiate [Identity, Gzip, Zstd] [Zstd, Gzip] `shouldBe` Zstd
+      parseAcceptEncoding "gzip, br , zstd" `shouldBe` [Gzip, Br, Zstd]
 
-roundtrip :: ContentCoding -> PropertyT IO ()
-roundtrip coding = do
-  bs <- forAll (Gen.bytes (Range.linear 0 2000))
-  out <- evalIO (decompress coding (compress coding bs))
-  out === Right bs
-
-negotiation :: PropertyT IO ()
-negotiation = do
-  negotiate [Identity, Gzip] [Br, Gzip, Identity] === Gzip
-  negotiate [Identity, Gzip] [Br] === Identity
-  negotiate [Identity, Gzip, Zstd] [Zstd, Gzip] === Zstd
-  parseAcceptEncoding "gzip, br , zstd" === [Gzip, Br, Zstd]
+roundtrip :: ContentCoding -> Property
+roundtrip coding = H.property $ do
+  bs <- H.forAll (Gen.bytes (Range.linear 0 2000))
+  out <- H.evalIO (decompress coding (compress coding bs))
+  out H.=== Right bs
