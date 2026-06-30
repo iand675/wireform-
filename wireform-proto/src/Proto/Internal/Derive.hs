@@ -931,10 +931,7 @@ oneofSizeArm v ov =
           { pfStringAdapter = ovStringAdapter ov
           , pfBytesAdapter = ovBytesAdapter ov
           }
-  in [|
-       PWE.tagSize $(litE (integerL (fromIntegral (ovTag ov))))
-         + $(sizeSingleE pseudo v)
-       |]
+  in sizeSingleE pseudo v
 
 
 pfTagByte :: ProtoField -> Int
