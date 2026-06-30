@@ -59,6 +59,11 @@ module Proto.Registry (
   registerMessage,
   registerCodec,
 
+  -- * Process-global Any registry (for runtime-extensible Any JSON)
+  globalAnyRegistry,
+  registerGlobalAnyCodecs,
+  readGlobalAnyRegistry,
+
   -- * Lookup
   lookupCodec,
   lookupDecoder,
@@ -75,8 +80,10 @@ module Proto.Registry (
 
 import Data.Aeson qualified as Aeson
 import Data.ByteString (ByteString)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import System.IO.Unsafe (unsafePerformIO)
 import Data.Maybe (mapMaybe)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
@@ -183,6 +190,41 @@ representations that don't round-trip through 'Aeson.ToJSON' /
 registerCodec :: Text -> AnyCodec -> TypeRegistry -> TypeRegistry
 registerCodec name codec reg =
   reg {trCodecs = Map.insert name codec (trCodecs reg)}
+
+
+{- | A process-global 'TypeRegistry' for runtime-extensible @Any@ JSON.
+
+Generated code serialises @Any@-typed fields with a registry that
+unions the standard well-known types with whatever has been registered
+here (see 'Proto.Internal.JSON.WellKnown.anyJsonRegistry'). An
+application that handles @Any@ values wrapping its own message types —
+e.g. a Connect/gRPC conformance harness echoing requests packed into
+@google.protobuf.Any@ — registers those types once at startup via
+'registerGlobalAnyCodecs' so the canonical @{"\@type": …, …inlined…}@
+JSON form is produced instead of the degenerate @{"value": <base64>}@
+fallback.
+
+This is a deliberately small piece of process-global state: it is
+written once during initialisation and only read thereafter. Empty by
+default, so libraries that never register anything are unaffected (the
+@Any@ registry is exactly 'standardWktRegistry').
+-}
+{-# NOINLINE globalAnyRegistry #-}
+globalAnyRegistry :: IORef TypeRegistry
+globalAnyRegistry = unsafePerformIO (newIORef emptyRegistry)
+
+
+{- | Merge additional codecs into the process-global 'Any' registry.
+Call once at process startup, before any @Any@ value is (de)serialised.
+-}
+registerGlobalAnyCodecs :: TypeRegistry -> IO ()
+registerGlobalAnyCodecs reg =
+  atomicModifyIORef' globalAnyRegistry (\g -> (g <> reg, ()))
+
+
+-- | Read the current process-global 'Any' registry.
+readGlobalAnyRegistry :: IO TypeRegistry
+readGlobalAnyRegistry = readIORef globalAnyRegistry
 
 
 -- | Look up a JSON codec by proto type name.

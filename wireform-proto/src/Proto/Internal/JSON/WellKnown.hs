@@ -59,6 +59,7 @@ module Proto.Internal.JSON.WellKnown (
   anyToJSON,
   anyFromJSON,
   standardWktRegistry,
+  anyJsonRegistry,
 
   -- * Re-exports from "Proto.Registry"
   AnyCodec (..),
@@ -90,7 +91,9 @@ import Proto.Google.Protobuf.FieldMask
 import Proto.Google.Protobuf.Struct
 import Proto.Google.Protobuf.Timestamp
 import Proto.Google.Protobuf.Wrappers qualified as W
-import Proto.Registry (AnyCodec (..), TypeRegistry, emptyRegistry, lookupCodec, registerCodec)
+import Data.IORef (readIORef)
+import System.IO.Unsafe (unsafePerformIO)
+import Proto.Registry (AnyCodec (..), TypeRegistry, emptyRegistry, globalAnyRegistry, lookupCodec, registerCodec)
 
 
 {- | Encode a 'Timestamp' as canonical RFC 3339. Throws on out-
@@ -878,6 +881,26 @@ anyFromJSON registry (Aeson.Object o) = do
         _ -> Left "Any: non-string value"
       Right Any.defaultAny {Any.anyTypeUrl = url, Any.anyValue = bs}
 anyFromJSON _ _ = Left "Expected JSON Object for Any"
+
+
+{- | The 'TypeRegistry' generated code uses to (de)serialise @Any@-typed
+fields: 'standardWktRegistry' unioned with the process-global registry
+('Proto.Registry.globalAnyRegistry'), so applications can register their
+own message types at runtime (via
+'Proto.Registry.registerGlobalAnyCodecs') and have @Any@ values wrapping
+them produce the canonical inlined @{"\@type": …, …}@ JSON instead of the
+degenerate @{"value": <base64>}@ fallback.
+
+This is a CAF: it is evaluated once, on first @Any@ (de)serialisation,
+capturing the global registry as it stands at that moment. Register all
+application types /before/ any @Any@ value crosses the wire (i.e. during
+process startup). When nothing is registered it is exactly
+'standardWktRegistry', so WKT-only users see no change.
+-}
+{-# NOINLINE anyJsonRegistry #-}
+anyJsonRegistry :: TypeRegistry
+anyJsonRegistry =
+  standardWktRegistry <> unsafePerformIO (readIORef globalAnyRegistry)
 
 
 {- | A pure 'TypeRegistry' containing all 17 standard well-known

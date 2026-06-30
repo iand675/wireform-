@@ -874,7 +874,7 @@ wktEncoderE wkt e = case wkt of
             (PGS.listValueValues $(pure e))
         )
       |]
-  WktAny -> [|WK.anyToJSON WK.standardWktRegistry $(pure e)|]
+  WktAny -> [|WK.anyToJSON WK.anyJsonRegistry $(pure e)|]
   WktEmpty -> [|WK.emptyToJSON $(pure e)|]
   WktNullValue -> [|WK.nullValueToJSON $(pure e)|]
   WktWrapBool -> [|WK.wrapBoolValue $(pure e)|]
@@ -906,7 +906,7 @@ wktEncoderE1 wkt = case wkt of
           . PGS.listValueValues
       )
       |]
-  WktAny -> [|WK.anyToJSON WK.standardWktRegistry|]
+  WktAny -> [|WK.anyToJSON WK.anyJsonRegistry|]
   WktEmpty -> [|WK.emptyToJSON|]
   WktNullValue -> [|WK.nullValueToJSON|]
   WktWrapBool -> [|WK.wrapBoolValue|]
@@ -1758,7 +1758,7 @@ parseAnyMaybe
   :: Aeson.Object
   -> Text
   -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.Any.Any))
-parseAnyMaybe = parseWktMaybe (WK.anyFromJSON WK.standardWktRegistry)
+parseAnyMaybe = parseWktMaybe (WK.anyFromJSON WK.anyJsonRegistry)
 
 
 parseEmptyMaybe
@@ -1886,7 +1886,7 @@ parseListValueVectorMaybe obj key = do
 
 
 parseAnyVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.Any.Any))
-parseAnyVectorMaybe = parseWktVectorMaybe (WK.anyFromJSON WK.standardWktRegistry)
+parseAnyVectorMaybe = parseWktVectorMaybe (WK.anyFromJSON WK.anyJsonRegistry)
 
 
 parseEmptyVectorMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (V.Vector Proto.Google.Protobuf.Empty.Empty))
