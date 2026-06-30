@@ -391,11 +391,19 @@ the same way (default `False`, `manual: True`).
 
 The repo is a monorepo: one umbrella package `wireform` plus 27
 per-format / shared-infrastructure packages listed in `cabal.project`.
-Each format owns a top-level Haskell namespace (`<Format>.*`); the
-umbrella `wireform` package only exposes thin `Wireform.<Format>`
-facades and the `wireform-gen` CLI. Cross-package conventions live
-under the `Wireform.*` namespace (in `wireform-core` and
-`wireform-derive`).
+Each format owns a top-level Haskell namespace (`<Format>.*`) and
+ships a bare `<Format>` entry module re-exporting its codec surface
+(see the entry-module convention in `docs/PLATFORM.md` §4). The
+umbrella `wireform` package ships **no library** — it provides only
+the `wireform-gen` CLI plus conformance / profiling / example
+executables; there is no `Wireform.<Format>` facade. Cross-package
+conventions live under the `Wireform.*` namespace (in `wireform-core`,
+`wireform-derive`, and `wireform-columnar-core`).
+
+The cross-cutting platform contract — the canonical-seam table, the
+namespace rule, the observability (`hs-opentelemetry-api`) and DI
+(`fractal-layer`) mandates, and the sequenced roadmap — lives in
+[`docs/PLATFORM.md`](PLATFORM.md) (the Platform Charter).
 
 If you are adding or moving modules, update this section *and* the
 relevant `*.cabal` `exposed-modules` list in the same change.
@@ -404,7 +412,7 @@ relevant `*.cabal` `exposed-modules` list in the same change.
 
 | Package          | Top-level namespace              | Notes |
 | ---------------- | -------------------------------- | ----- |
-| `wireform`       | `Wireform.<Format>` (facades)    | Re-exports each format under `Wireform.*` (`Wireform.Proto`, `Wireform.Avro`, …, `Wireform.Kafka`) and ships the `wireform-gen` multi-format codegen CLI plus the conformance/profiling/example executables. `Wireform.Columnar` is the cross-format columnar entry point — `decodeIter` / `decodeProjectedIter` / `decodeFilteredIter` / `decodeProjectedFilteredIter` (Parquet + ORC pushdown), `decodeRecordsIter` (Arrow.Record.Table-driven typed records with auto-projection), `decodeDatasetIter` / `decodeDatasetRowSlicedIter` / `decodeHeterogeneousDatasetIter` / `decodePartitionedDataset` (multi-file). |
+| `wireform`       | _(no library)_                  | Ships **no library** — only the `wireform-gen` multi-format codegen CLI plus the conformance / profiling / example executables. There is no `Wireform.<Format>` facade; each format package is depended on directly and exposes its own bare `<Format>` entry module (§4 of `docs/PLATFORM.md`). The cross-format columnar entry point is `Wireform.Columnar` in the separate `wireform-columnar` package. |
 
 ### Shared infrastructure (`Wireform.*` namespace)
 
@@ -412,15 +420,20 @@ relevant `*.cabal` `exposed-modules` list in the same change.
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
 | `wireform-core`     | `Wireform.FFI`, `Wireform.Encode.Direct`, `Wireform.Hash`                                                                                                                                                                | Shared C-FFI primitives (`fast_decode.c`, `fast_scan.c`, `wireform_hash_simd.c`), the direct-write encode buffer, and the SIMD hashing surface. No format code. |
 | `wireform-derive`   | `Wireform.Derive`, `Wireform.Derive.Backend`, `Wireform.Derive.NameStyle`, `Wireform.Derive.Modifier`, `Wireform.Derive.TypeInfo`, `Wireform.Derive.ModifierInfo`, `Wireform.Derive.Extension`, `Wireform.Derive.Aeson`  | Annotation-driven TH deriver core. `Modifier` / `ModifierInfo` are the cross-backend annotation vocabulary; `Backend` / `BackendModifier` (in `Extension`) are how a format opts in. `NameStyle` and `TypeInfo` are the rename + reification helpers used by every per-format `<Format>.Derive`. `Wireform.Derive.Aeson` is the canonical worked example deriver — it lives here (rather than a separate `wireform-derive-aeson` package) so the deriver core has a self-contained reference user. |
-| `wireform-columnar` | `Columnar.IO`, `Columnar.Predicate`, `Columnar.SIMD`, `Columnar.Stream`                                                                                                                                                  | Shared by every columnar package: `Columnar.IO` is the mmap-aware file loader (`loadFile` defaults to mmap above 64 KiB, eager below); `Columnar.Predicate` is the `PValue`/`PColPredicate`/`Predicate` vocabulary all per-format pushdown evaluators feed into; `Columnar.Stream` is the pull-based `Iter` / `IterIO` plus combinators (`iterChunk`, `iterScan`, `iterMergeBy`, `iterIOPrefetch`, `iterParallelMap`); `Columnar.SIMD` is the SIMD-accelerated bit-unpacking / RLE kernel shared with the C side via `cbits/columnar_simd.c` + vendored `simde`. |
+| `wireform-columnar`       | `Wireform.Columnar`                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | The cross-format columnar facade: a single Arrow-shaped encode/decode surface over Arrow IPC, Parquet, and ORC (projection, predicate pushdown, multi-file dataset iteration, record-level helpers). Depends on `wireform-columnar-core`, `wireform-arrow`, `wireform-parquet`, `wireform-orc`. |
+| `wireform-columnar-core`  | `Columnar.IO`, `Columnar.LZ4`, `Columnar.Predicate`, `Columnar.SIMD`, `Columnar.Stream`                                                                                                                                                                                                                                                                                                                                                                                                 | Format-agnostic columnar primitives shared by every columnar package: `Columnar.IO` is the mmap-aware file loader (`loadFile` defaults to mmap above 64 KiB, eager below); `Columnar.Predicate` is the `PValue`/`PColPredicate`/`Predicate` vocabulary all per-format pushdown evaluators feed into; `Columnar.Stream` is the pull-based `Iter` / `IterIO` plus combinators (`iterChunk`, `iterScan`, `iterMergeBy`, `iterIOPrefetch`, `iterParallelMap`); `Columnar.SIMD` is the SIMD-accelerated bit-unpacking / RLE kernel shared with the C side via `cbits/columnar_simd.c` + vendored `simde`. |
 
 ### Per-format packages — Haskell `<Format>.*` namespace
 
 Each per-format package conventionally exposes the same module
-shape:
+shape (the bare `<Format>` umbrella entry module is now mandatory for
+every serde-format package — see the entry-module convention in
+[`docs/PLATFORM.md`](docs/PLATFORM.md) §4; the per-format tables below
+list each package's granular modules, all reachable via that single
+`import <Format>`):
 
 ```
-<Format>                         -- (sometimes) top-level umbrella module
+<Format>                         -- bare umbrella entry module (re-exports the codec surface)
 <Format>.Class                   -- typeclass(es) for value-level codecs
 <Format>.Encode / <Format>.Decode -- low-level encode / decode primitives
 <Format>.Value                   -- dynamic / untyped value ADT

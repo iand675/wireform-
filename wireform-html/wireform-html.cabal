@@ -40,6 +40,7 @@ library
     HTML.Rewriter.Mutations
     HTML.Rewriter.Config
   exposed-modules:
+    HTML
     HTML.Value
     HTML.Parse
     HTML.Encode

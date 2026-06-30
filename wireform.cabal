@@ -5,12 +5,16 @@ synopsis:           High-performance multi-format serialization toolkit for Hask
 description:
   A comprehensive binary serialization library supporting 25+ formats.
   .
-  This is the umbrella package.  It re-exports the public API of each
-  format through @Wireform.*@ convenience modules and provides the
-  @wireform-gen@ multi-format code-generation CLI.
+  This is the umbrella package.  It is NOT a library: it ships the
+  @wireform-gen@ multi-format code-generation CLI plus the
+  conformance, profiling, and example executables.  There is no
+  @Wireform.*@ facade that re-exports every format -- each format
+  package (@wireform-proto@, @wireform-html@, ...) is depended on
+  directly and exposes its own bare @<Format>@ entry module.
   .
-  Individual format packages (e.g. @wireform-proto@, @wireform-html@)
-  can be depended on directly when you only need one format.
+  The cross-cutting platform conventions (canonical seams, namespace
+  rules, the entry-module convention, observability + DI mandates,
+  and the sequenced roadmap) live in @docs/PLATFORM.md@.
 
 license:            BSD-3-Clause
 license-file:       LICENSE

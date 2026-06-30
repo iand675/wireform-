@@ -35,6 +35,7 @@ library
   include-dirs: cbits cbits/simde
   cc-options: -O3 -march=native
   exposed-modules:
+    XML
     XML.Class
     XML.CodeGen
     XML.DSL

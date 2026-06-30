@@ -32,6 +32,7 @@ library
   import: defaults
   hs-source-dirs: src
   exposed-modules:
+    TOML
     TOML.Class
     TOML.Decode
     TOML.Derive
