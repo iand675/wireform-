@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
@@ -112,7 +113,11 @@ import Data.ByteString (ByteString)
 import Data.HashMap.Strict qualified as HashMap
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
+#if MIN_VERSION_hs_opentelemetry_api(1,0,0)
 import Data.Text qualified as T
+#else
+import Data.CaseInsensitive qualified as CI
+#endif
 import Data.Text.Encoding qualified as TE
 import GHC.Stack (HasCallStack)
 import OpenTelemetry.Attributes qualified as OAttr
@@ -345,15 +350,24 @@ injectIntoProducerHeaders tr sp headers = do
   let tp = OTel.getTracerTracerProvider tr
       prop = OTel.getTracerProviderPropagators tp
       ctx = OCtx.insertSpan sp OCtx.empty
-  -- Inject the trace fields into a fresh carrier, then merge them back
-  -- over the original headers. This overwrites any existing trace
-  -- fields and leaves unrelated (possibly binary) headers untouched —
-  -- safer than round-tripping every header through 'Text'.
+#if MIN_VERSION_hs_opentelemetry_api(1,0,0)
+  -- OTel >= 1.0: inject the trace fields into a fresh 'TextMap' carrier,
+  -- then merge them back over the original headers. This overwrites any
+  -- existing trace fields and leaves unrelated (possibly binary) headers
+  -- untouched — safer than round-tripping every header through 'Text'.
   tm <- OProp.inject prop ctx OProp.emptyTextMap
   let injected = fromTextMap tm
       fields = map T.toLower (OProp.propagatorFields prop)
       keep (k, _) = T.toLower k `notElem` fields
   pure (filter keep headers <> injected)
+#else
+  -- OTel 0.2: the propagator's carrier is the header list itself
+  -- ('Propagator Context RequestHeaders ResponseHeaders'). Inject directly
+  -- into the (CI-keyed) header list — the W3C injector overwrites stale
+  -- trace fields in place — then convert back to Kafka's 'Text' keys.
+  injected <- OProp.inject prop ctx (toRequestHeaders headers)
+  pure (fromRequestHeaders injected)
+#endif
 
 
 {- | Extract a parent 'OCtx.Context' from a Kafka consumer record's
@@ -373,7 +387,11 @@ extractFromConsumerHeaders tr headers = do
   let tp = OTel.getTracerTracerProvider tr
       prop = OTel.getTracerProviderPropagators tp
   ctx0 <- OCtxTL.getContext
+#if MIN_VERSION_hs_opentelemetry_api(1,0,0)
   OProp.extract prop (toTextMap headers) ctx0
+#else
+  OProp.extract prop (toRequestHeaders headers) ctx0
+#endif
 
 
 {- | Build a pre-send producer interceptor that opens a
@@ -411,6 +429,7 @@ tracingProducerInterceptor tr topic partition headers =
 -- UTF-8 decode of the (small) header set is safe at this boundary.
 ----------------------------------------------------------------------
 
+#if MIN_VERSION_hs_opentelemetry_api(1,0,0)
 toTextMap :: [(Text, ByteString)] -> OProp.TextMap
 toTextMap =
   OProp.textMapFromList . map (\(k, v) -> (k, TE.decodeUtf8Lenient v))
@@ -419,3 +438,15 @@ toTextMap =
 fromTextMap :: OProp.TextMap -> [(Text, ByteString)]
 fromTextMap =
   map (\(k, v) -> (k, TE.encodeUtf8 v)) . OProp.textMapToList
+#else
+-- OTel 0.2 carrier conversion. The pre-1.0 propagator carries
+-- 'Network.HTTP.Types.RequestHeaders' (@[(CI ByteString, ByteString)]@).
+-- Keys are ASCII trace-context field names; values pass through untouched
+-- so binary Kafka headers survive the round trip.
+toRequestHeaders :: [(Text, ByteString)] -> [(CI.CI ByteString, ByteString)]
+toRequestHeaders = map (\(k, v) -> (CI.mk (TE.encodeUtf8 k), v))
+
+
+fromRequestHeaders :: [(CI.CI ByteString, ByteString)] -> [(Text, ByteString)]
+fromRequestHeaders = map (\(k, v) -> (TE.decodeUtf8Lenient (CI.foldedCase k), v))
+#endif

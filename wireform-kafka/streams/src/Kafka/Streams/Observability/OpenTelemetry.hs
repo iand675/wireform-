@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -38,25 +39,36 @@ Registry metric names use the Java convention
 (@"stream-task-metrics:commit-total"@). OpenTelemetry instrument
 names forbid @:@, so it is rewritten to @.@ and any other
 out-of-grammar character to @_@; see 'sanitizeInstrumentName'.
+
+Metrics are a 1.0-only API — @OpenTelemetry.Metric.Core@ did not exist
+before @hs-opentelemetry-api@ 1.0. Compiled against a pre-1.0 API this
+module omits the metrics bridge ('streamsMeter', 'registerStreamsMetrics',
+'unregisterStreamsMetrics', 'StreamsMetricsRegistration'); only
+'streamsInstrumentationScope' and 'sanitizeInstrumentName' remain.
 -}
 module Kafka.Streams.Observability.OpenTelemetry (
   -- * Instrumentation scope
   streamsInstrumentationScope,
+#if MIN_VERSION_hs_opentelemetry_api(1,0,0)
   streamsMeter,
 
   -- * Registration
   StreamsMetricsRegistration (..),
   registerStreamsMetrics,
   unregisterStreamsMetrics,
+#endif
 
   -- * Helpers (exposed for tests / reuse)
   sanitizeInstrumentName,
 ) where
 
 import Data.Char (isAsciiLower, isAsciiUpper, isDigit)
-import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
+import OpenTelemetry.Attributes (emptyAttributes)
+import OpenTelemetry.Trace.Core (InstrumentationLibrary (..))
+#if MIN_VERSION_hs_opentelemetry_api(1,0,0)
+import Data.Map.Strict qualified as Map
 import Kafka.Streams.Metrics (
   DurationStats (..),
   MetricValue (..),
@@ -66,7 +78,6 @@ import Kafka.Streams.Metrics (
   readDurationStats,
   readGauge,
  )
-import OpenTelemetry.Attributes (emptyAttributes)
 import OpenTelemetry.Metric.Core (
   Meter,
   ObservableCallbackHandle (..),
@@ -80,7 +91,7 @@ import OpenTelemetry.Metric.Core (
   meterCreateObservableGaugeDouble,
   meterCreateObservableGaugeInt64,
  )
-import OpenTelemetry.Trace.Core (InstrumentationLibrary (..))
+#endif
 
 
 ----------------------------------------------------------------------
@@ -100,6 +111,7 @@ streamsInstrumentationScope =
     }
 
 
+#if MIN_VERSION_hs_opentelemetry_api(1,0,0)
 {- | Obtain a 'Meter' for the streams scope from the globally
 installed 'OpenTelemetry.Metric.Core.MeterProvider'. Before the
 application installs an SDK provider this returns a no-op meter.
@@ -249,6 +261,7 @@ last value until its next collection, per OTel semantics).
 unregisterStreamsMetrics :: StreamsMetricsRegistration -> IO ()
 unregisterStreamsMetrics =
   mapM_ unregisterObservableCallback . smrHandles
+#endif
 
 
 ----------------------------------------------------------------------
