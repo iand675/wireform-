@@ -194,6 +194,7 @@ export default defineConfig({
 									items: [
 										{ label: "wireform-grpc", slug: "packages/grpc" },
 										{ label: "grpc-spec", slug: "packages/grpc-spec" },
+										{ label: "wireform-connect", slug: "packages/connect" },
 									],
 								},
 								{
@@ -222,6 +223,16 @@ export default defineConfig({
 								},
 							],
 						},
+					],
+				},
+				{
+					label: "Connect RPC",
+					items: [
+						{ label: "Overview", slug: "connect" },
+						{ label: "Getting started", slug: "connect/getting-started" },
+						{ label: "Serving", slug: "connect/server" },
+						{ label: "Calling", slug: "connect/client" },
+						{ label: "Wire protocol", slug: "connect/protocol" },
 					],
 				},
 				{
