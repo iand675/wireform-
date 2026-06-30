@@ -126,6 +126,8 @@ import Data.Word (Word32, Word64)
 import GHC.Generics (Generic)
 import Language.Haskell.TH
 import Language.Haskell.TH.Syntax (addDependentFile, addModFinalizer)
+import System.Directory (doesFileExist)
+import System.FilePath ((</>))
 import Proto.CodeGen (
   FieldNaming (..),
   escapeReserved,
@@ -332,7 +334,8 @@ loadProtoWith opts path = do
               , fhcFileOptions = protoOptions pf
               , fhcCustomOptions = customOpts
               }
-      decls <- protoFileToDecls' (loFieldNaming opts) (loRepConfig opts) hooks pf
+      importedTLs <- resolveImportedTopLevels (loIncludeDirs opts) pf
+      decls <- protoFileToDeclsScoped (loFieldNaming opts) (loRepConfig opts) hooks importedTLs pf
       hookDecls <- thOnFile hooks fileCtx
       pure (decls <> hookDecls)
 
@@ -345,16 +348,76 @@ protoFileToDecls = protoFileToDecls' PrefixedFields defaultRepConfig defaultTHHo
 
 
 protoFileToDecls' :: FieldNaming -> RepConfig -> THHooks -> ProtoFile -> Q [Dec]
-protoFileToDecls' naming cfg hooks pf = do
+protoFileToDecls' naming cfg hooks = protoFileToDeclsScoped naming cfg hooks []
+
+
+{- | Like 'protoFileToDecls'' but with extra top-level declarations from
+imported files folded into the resolution 'ScopeCtx'. Only the target
+file's own top-levels are generated; the imported ones exist solely so
+cross-file named-type references resolve correctly (enum vs. submessage
+classification via 'isEnumName', and the scoped Haskell type name via
+'resolveScopedHsType'). The target file's own top-levels take precedence
+on name clashes.
+-}
+protoFileToDeclsScoped :: FieldNaming -> RepConfig -> THHooks -> [TopLevel] -> ProtoFile -> Q [Dec]
+protoFileToDeclsScoped naming cfg hooks importedTopLevels pf = do
   let scope =
         ScopeCtx
           { scSyntax = protoSyntax pf
-          , scTopLevels = protoTopLevels pf
+          , scTopLevels = protoTopLevels pf <> importedTopLevels
           , scPackage = Data.Maybe.fromMaybe T.empty (protoPackage pf)
           , scParents = []
           , scFieldNaming = naming
           }
   concat <$> mapM (topLevelToDecls scope cfg hooks) (protoTopLevels pf)
+
+
+{- | Transitively resolve a parsed file's non-WKT @import@s against the
+'loIncludeDirs', returning the imported files' top-level declarations so
+the generator can see cross-file types. @google/protobuf/*@ imports are
+Well-Known Types resolved by 'lookupWkt', so those files are not read.
+Imports that cannot be located in the include dirs (or fail to parse)
+are skipped — the legacy leaf-name fallback still applies — so adding
+this resolution never hard-fails a build that worked before. Every file
+read is registered with 'addDependentFile' for correct recompilation.
+-}
+resolveImportedTopLevels :: [FilePath] -> ProtoFile -> Q [TopLevel]
+resolveImportedTopLevels includeDirs pf0 = do
+  (tls, deps) <- runIO (go [] [] [] (nonWktImports pf0))
+  mapM_ addDependentFile deps
+  pure tls
+  where
+    nonWktImports pf =
+      [importPath i | i <- protoImports pf, not (isWkt (importPath i))]
+    isWkt p = T.pack "google/protobuf/" `T.isPrefixOf` p
+    go _ accTL accDeps [] = pure (accTL, accDeps)
+    go visited accTL accDeps (ip : rest)
+      | ip `elem` visited = go visited accTL accDeps rest
+      | otherwise = do
+          mfp <- findInclude includeDirs (T.unpack ip)
+          case mfp of
+            Nothing -> go (ip : visited) accTL accDeps rest
+            Just fp -> do
+              src <- TIO.readFile fp
+              case parseProtoFile fp src of
+                Left _ -> go (ip : visited) accTL accDeps rest
+                Right ipf ->
+                  go
+                    (ip : visited)
+                    (accTL <> protoTopLevels ipf)
+                    (fp : accDeps)
+                    (nonWktImports ipf <> rest)
+
+
+-- | First existing @dir '</>' rel@ across the include dirs, if any.
+findInclude :: [FilePath] -> FilePath -> IO (Maybe FilePath)
+findInclude dirs rel = go dirs
+  where
+    go [] = pure Nothing
+    go (d : ds) = do
+      let p = d </> rel
+      ok <- doesFileExist p
+      if ok then pure (Just p) else go ds
 
 
 {- | Lookup table built once per file: lets the bridge tell whether
@@ -567,10 +630,10 @@ messageToDecls'' scopeCtx cfg hooks msg = do
   hookDecls <- thOnMessage hooks hookCtx
 
   let defName = mkName ("default" <> nameBase tyName)
-      fqName = case scPackage scopeCtx of
-        p
-          | T.null p -> msgName msg
-          | otherwise -> p <> T.singleton '.' <> msgName msg
+      fqName =
+        T.intercalate
+          (T.singleton '.')
+          (filter (not . T.null) ([scPackage scopeCtx] <> scParents scopeCtx <> [msgName msg]))
       metaFields = fmap (fieldSpecToMetaField scopeCtx tyName) fields
   protoMsgDecs <-
     PTM.mkProtoMessageInstance
