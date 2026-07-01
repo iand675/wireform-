@@ -311,7 +311,7 @@ fresh @data@ declaration alongside the instance group.
 -}
 deriveProtoFromTranslated :: TranslatedMessage -> Q [Dec]
 deriveProtoFromTranslated tm = do
-  let meta = I.MessageMeta {I.mmUnknownFieldsSel = tmUnknownFieldsSel tm}
+  let meta = I.MessageMeta {I.mmUnknownFieldsSel = tmUnknownFieldsSel tm, I.mmRecordDotReads = False}
   deriveProtoFromTranslatedWith meta tm
 
 

@@ -644,6 +644,11 @@ genModuleHeader opts filePath pf =
         UnprefixedFields ->
           [ txt "{-# LANGUAGE DuplicateRecordFields #-}"
           , txt "{-# LANGUAGE NoFieldSelectors #-}"
+          , -- The type-annotated getters/setters/updates that make bare
+            -- field names unambiguous still trip -Wambiguous-fields (a
+            -- deprecation notice for the type-directed resolution they rely
+            -- on); silence it so the generated module builds under -Werror.
+            txt "{-# OPTIONS_GHC -Wno-ambiguous-fields #-}"
           ]
         PrefixedFields -> []
   in vsep $
@@ -1828,6 +1833,23 @@ genFieldDescriptorList ctx scope fields =
 genFieldDescriptorEntry :: GenCtx -> [Text] -> SchemaField -> Doc ann
 genFieldDescriptorEntry ctx scope sf =
   let accN = ctxFieldName ctx scope (sfName sf)
+      -- Under 'UnprefixedFields' the record fields are bare (and
+      -- 'NoFieldSelectors' is on), so a bare selector for 'fdGet' does not
+      -- exist and an un-annotated update for 'fdSet' is ambiguous when the
+      -- same field name recurs across messages in the file. Both are made
+      -- concrete by fixing the message type: a record-dot read and an
+      -- update on a type-annotated binder. Under 'PrefixedFields' the
+      -- selectors are unique, so the plain forms are kept byte-identical.
+      tyN = scopedTypeName scope
+      (getExpr, setExpr) = case genFieldNaming (gcOpts ctx) of
+        UnprefixedFields ->
+          ( "\\(m :: " <> tyN <> ") -> m." <> accN
+          , "\\v (m :: " <> tyN <> ") -> m { " <> accN <> " = v }"
+          )
+        PrefixedFields ->
+          ( accN
+          , "\\v m -> m { " <> accN <> " = v }"
+          )
   in txt "("
        <> pretty (T.pack (show (sfNum sf)))
        <> txt ", SomeField FieldDescriptor"
@@ -1839,8 +1861,8 @@ genFieldDescriptorEntry ctx scope sf =
              , txt ", fdNumber = " <> pretty (T.pack (show (sfNum sf)))
              , txt ", fdTypeDesc = " <> genFieldTypeDesc (sfType sf)
              , txt ", fdLabel = " <> genLabelLit (sfLabel sf)
-             , txt ", fdGet = " <> pretty accN
-             , txt ", fdSet = \\v m -> m { " <> pretty accN <> txt " = v }"
+             , txt ", fdGet = " <> pretty getExpr
+             , txt ", fdSet = " <> pretty setExpr
              , txt "})"
              ]
          )
@@ -1980,7 +2002,14 @@ genFromJSONInstance ctx scope msg =
                         else txt "parseJSON _ = pure default" <> pretty tyN
                   ]
               (f0 : frest) ->
-                vsep
+                -- Under 'UnprefixedFields' a record update whose fields recur
+                -- across messages is ambiguous; pin it with a trailing type
+                -- annotation. 'PrefixedFields' updates are unique, so they are
+                -- left byte-identical.
+                let (pureOpen, closeBrace) = case genFieldNaming (gcOpts ctx) of
+                      UnprefixedFields -> (txt "pure (default" <> pretty tyN, txt "} :: " <> pretty tyN <> txt ")")
+                      PrefixedFields -> (txt "pure default" <> pretty tyN, txt "}")
+                in vsep
                   [ headDoc
                   , indent 2 $
                       vsep
@@ -1989,13 +2018,13 @@ genFromJSONInstance ctx scope msg =
                             vsep
                               ( fmap genFromJSONFieldBind (f0 : frest)
                                   <> extsBind
-                                  <> [ txt "pure default" <> pretty tyN
+                                  <> [ pureOpen
                                      , indent 2 $
                                          vsep
                                            ( txt "{ " <> genFromJSONFieldAssign tyN f0
                                                : fmap (\jfi -> txt ", " <> genFromJSONFieldAssign tyN jfi) frest
                                                  <> [txt ", " <> txt (unknownFieldAccessor scope) <+> txt "=" <+> extsAssign]
-                                                 <> [txt "}"]
+                                                 <> [closeBrace]
                                            )
                                      ]
                               )

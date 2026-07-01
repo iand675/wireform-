@@ -625,8 +625,8 @@ messageToDecls'' scopeCtx cfg hooks msg = do
   -- splice fails with a clear message rather than silently
   -- generating broken code.
   pfs <- traverse (fieldSpecToProtoField scopeCtx tyName) fields
-  codecDecs <- messageCodecsViaBridge tyName pfs
-  hasExtDec <- mkHasExtensionsInstance tyName (msgName msg)
+  codecDecs <- messageCodecsViaBridge (scFieldNaming scopeCtx == UnprefixedFields) tyName pfs
+  hasExtDec <- mkHasExtensionsInstance (scFieldNaming scopeCtx == UnprefixedFields) tyName (msgName msg)
   hookDecls <- thOnMessage hooks hookCtx
 
   let defName = mkName ("default" <> nameBase tyName)
@@ -653,12 +653,14 @@ messageToDecls'' scopeCtx cfg hooks msg = do
           isExt (MEExtensions _ _) = True
           isExt _ = False
       aesonUfSel = if hasExts then Just ufSelName else Nothing
+  let recDot = scFieldNaming scopeCtx == UnprefixedFields
   aesonDecs <-
     PTM.mkAesonInstancesForMessage
       tyName
       fqName
       aesonUfSel
       defName
+      recDot
       metaFields
   hashableDec <- PTM.mkHashableInstanceForMessage tyName metaFields
 
@@ -717,11 +719,12 @@ triple via 'Proto.Internal.Derive.synthesiseProtoInstancesWith'
 with unknown-field preservation enabled. Used for every
 'loadProto'-generated message.
 -}
-messageCodecsViaBridge :: Name -> [PDI.ProtoField] -> Q [Dec]
-messageCodecsViaBridge tyName pfs = do
+messageCodecsViaBridge :: Bool -> Name -> [PDI.ProtoField] -> Q [Dec]
+messageCodecsViaBridge recDot tyName pfs = do
   let meta =
         PDI.MessageMeta
           { PDI.mmUnknownFieldsSel = Just (unknownFieldsName tyName)
+          , PDI.mmRecordDotReads = recDot
           }
   enc <- PDI.mkEncodeInstanceWith meta (ConT tyName) pfs
   siz <- PDI.mkSizeInstanceWith meta (ConT tyName) pfs
@@ -935,45 +938,52 @@ mkHasFieldInstances scope tyName fields =
   fmap concat (mapM mkOne fields)
   where
     parentName = T.pack (nameBase tyName)
+    recDot = scFieldNaming scope == UnprefixedFields
     mkOne :: FieldSpec -> Q [Dec]
     mkOne (FSField name _ lbl ft rep _) = do
       let hsName = scopedHsFieldName (scFieldNaming scope) parentName name
           fname = mkName (T.unpack hsName)
       ty <- fieldTypeToTH scope lbl ft rep
-      mkHasFieldDec tyName (snakeToCamel name) fname ty
+      mkHasFieldDec recDot tyName (snakeToCamel name) fname ty
     mkOne (FSMap name _ kt vt rep) = do
       let hsName = scopedHsFieldName (scFieldNaming scope) parentName name
           fname = mkName (T.unpack hsName)
       kty <- scalarToTH kt
       vty <- fieldTypeInnerScopedQ scope rep vt
       ty <- appT (appT (conT ''Map) (pure kty)) (pure vty)
-      mkHasFieldDec tyName (snakeToCamel name) fname ty
+      mkHasFieldDec recDot tyName (snakeToCamel name) fname ty
     mkOne (FSOneof name _) = do
       let hsName = scopedHsFieldName (scFieldNaming scope) parentName name
           fname = mkName (T.unpack hsName)
           oneofTyName = oneofSumName tyName name
       ty <- appT (conT ''Maybe) (conT oneofTyName)
-      mkHasFieldDec tyName (snakeToCamel name) fname ty
+      mkHasFieldDec recDot tyName (snakeToCamel name) fname ty
 
 
-mkHasFieldDec :: Name -> Text -> Name -> Type -> Q [Dec]
-mkHasFieldDec tyName fnameStr fname ty = do
+mkHasFieldDec :: Bool -> Name -> Text -> Name -> Type -> Q [Dec]
+mkHasFieldDec recDot tyName fnameStr fname ty = do
   msgVar <- newName "msg"
   aVar <- newName "a"
   let nameLit = LitT (StrTyLit (T.unpack fnameStr))
       instTy = foldl AppT (ConT ''PS.HasField) [ConT tyName, nameLit, ty]
-      getFld =
-        FunD
-          'PS.getField
-          [Clause [VarP msgVar] (NormalB (AppE (VarE fname) (VarE msgVar))) []]
-      setFld =
-        FunD
-          'PS.setField
-          [ Clause
-              [VarP aVar, VarP msgVar]
-              (NormalB (RecUpdE (VarE msgVar) [(fname, VarE aVar)]))
-              []
-          ]
+      -- Under 'UnprefixedFields' ('NoFieldSelectors', names shared across
+      -- messages) the bare selector does not exist and an un-annotated
+      -- update is ambiguous: read through the auto-derived record-dot
+      -- (GHC 'HasField', distinct from this 'PS.HasField') on a typed
+      -- binder, and annotate the update's result. Prefixed keeps the
+      -- plain forms.
+      msgBinder
+        | recDot = SigP (VarP msgVar) (ConT tyName)
+        | otherwise = VarP msgVar
+      getBody
+        | recDot = GetFieldE (VarE msgVar) (nameBase fname)
+        | otherwise = AppE (VarE fname) (VarE msgVar)
+      updE = RecUpdE (VarE msgVar) [(fname, VarE aVar)]
+      setBody
+        | recDot = SigE updE (ConT tyName)
+        | otherwise = updE
+      getFld = FunD 'PS.getField [Clause [msgBinder] (NormalB getBody) []]
+      setFld = FunD 'PS.setField [Clause [VarP aVar, msgBinder] (NormalB setBody) []]
       fdesc =
         FunD
           'PS.fieldDescriptor
@@ -1525,27 +1535,32 @@ enumHaddock ed =
 -- ============================================================
 
 {- | Emit the @HasExtensions@ instance for a generated record. The
-instance's two methods read and write the record's
-unknown-fields slot, which is where extension payloads (and any
-other forward-compatible unknown tags) live.
-
-The class and method names are referenced via their bound 'Name's
-('Ext.messageUnknownFields' / 'Ext.setMessageUnknownFields') so
-the generated splice doesn't require the user's module to
-already have @import qualified Proto.Extension@ in scope.
+instance's two methods read and write the record's unknown-fields
+slot, which is where extension payloads (and any unrecognised tags)
+are preserved.
 -}
-mkHasExtensionsInstance :: Name -> Text -> Q [Dec]
-mkHasExtensionsInstance tyName _protoName = do
+mkHasExtensionsInstance :: Bool -> Name -> Text -> Q [Dec]
+mkHasExtensionsInstance recDot tyName _protoName = do
   let ufName = unknownFieldsName tyName
   msgVar <- newName "msg"
   ufsVar <- newName "ufs"
+  -- Under 'UnprefixedFields' ('NoFieldSelectors') the bare unknown-fields
+  -- selector does not exist, so read it through record-dot on a typed
+  -- binder. The selector is unique (always message-prefixed), so the
+  -- 'setMessageUnknownFields' record update needs no annotation.
+  ufReader <-
+    if recDot
+      then do
+        m <- newName "m"
+        pure (LamE [SigP (VarP m) (ConT tyName)] (GetFieldE (VarE m) (nameBase ufName)))
+      else pure (VarE ufName)
   inst <-
     instanceD
       (pure [])
       [t|Ext.HasExtensions $(conT tyName)|]
       [ funD
           'Ext.messageUnknownFields
-          [clause [] (normalB (varE ufName)) []]
+          [clause [] (normalB (pure ufReader)) []]
       , funD
           'Ext.setMessageUnknownFields
           [ clause
@@ -2057,6 +2072,7 @@ fieldSpecToMetaField scope parentTy fs = case fs of
          , PTM.mfJsonKind = jsonKind
          , PTM.mfBytesShape = bytesShape
          , PTM.mfJsonShape = jsonShape
+         , PTM.mfRecordDot = scFieldNaming scope == UnprefixedFields
          }
   FSMap name num kt vt rep ->
     let sel = mkName (T.unpack (scopedHsFieldName (scFieldNaming scope) parentName name))
@@ -2084,6 +2100,7 @@ fieldSpecToMetaField scope parentTy fs = case fs of
          , PTM.mfJsonKind = jsonKind
          , PTM.mfBytesShape = bytesShape
          , PTM.mfJsonShape = jsonShape
+         , PTM.mfRecordDot = scFieldNaming scope == UnprefixedFields
          }
   FSOneof name ofs ->
     let sel = mkName (T.unpack (scopedHsFieldName (scFieldNaming scope) parentName name))
@@ -2100,6 +2117,7 @@ fieldSpecToMetaField scope parentTy fs = case fs of
          , PTM.mfJsonKind = PTM.JKNormal
          , PTM.mfBytesShape = PTM.SBStrict
          , PTM.mfJsonShape = PTM.JSOneof variants
+         , PTM.mfRecordDot = scFieldNaming scope == UnprefixedFields
          }
   where
     parentName = T.pack (nameBase parentTy)

@@ -159,6 +159,15 @@ data MetaField = MetaField
   default-skip, the per-scalar @toJSON@ \/ @parseJSON@ helper,
   and oneof-variant key resolution.
   -}
+  , mfRecordDot :: !Bool
+  {- ^ Read this field with record-dot syntax (@msg.field@) rather
+  than a bare selector application. Set when the record was
+  generated with 'Proto.CodeGen.UnprefixedFields', where bare
+  field names shared across messages are ambiguous and
+  'NoFieldSelectors' removes the selectors; the enclosing module
+  then needs @OverloadedRecordDot@. 'False' for the default
+  prefixed layout, keeping output byte-identical.
+  -}
   }
 
 
@@ -406,6 +415,22 @@ mkProtoMessageInstance tyName fqName pkg defName fields = do
     ]
 
 
+-- | Read a record field expression: record-dot @msg.field@ when the
+-- record uses the unprefixed layout ('NoFieldSelectors' + shared field
+-- names), else the bare selector application @field msg@. The label for
+-- the record-dot form is the selector's base name — the field name in
+-- either layout.
+dotRead :: Bool -> Name -> Name -> Exp
+dotRead recDot sel msgVar
+  | recDot = GetFieldE (VarE msgVar) (nameBase sel)
+  | otherwise = AppE (VarE sel) (VarE msgVar)
+
+
+-- | 'dotRead' driven by a field's own 'mfRecordDot' flag.
+readFieldE :: MetaField -> Name -> Exp
+readFieldE mf = dotRead (mfRecordDot mf) (mfSelector mf)
+
+
 -- | One @(fieldNumber, SomeField FieldDescriptor { ... })@ pair.
 oneFieldDescriptor :: Name -> MetaField -> Q Exp
 oneFieldDescriptor tyName MetaField {..} = do
@@ -413,16 +438,25 @@ oneFieldDescriptor tyName MetaField {..} = do
   vVar <- newName "v"
   tdesc <- mfTypeDesc
   lbl <- mfLabel
-  let getter = LamE [VarP msgVar] (AppE (VarE mfSelector) (VarE msgVar))
-      setter =
-        LamE
-          [VarP vVar, VarP msgVar]
-          (RecUpdE (VarE msgVar) [(mfSelector, VarE vVar)])
-      -- 'tyName' is needed to force the right setter target type
-      -- (RecUpdE doesn't carry it explicitly); GHC infers it from
-      -- the surrounding 'Map.fromList' literal once the FieldDescriptor
-      -- is annotated.
-      _ = tyName
+  -- Under 'UnprefixedFields' the bare selector does not exist
+  -- ('NoFieldSelectors') and an un-annotated record update is
+  -- ambiguous when the field name recurs across messages, so pin the
+  -- message type: read with record-dot on a typed binder, and annotate
+  -- the update's *result* — a typed binder alone does not disambiguate a
+  -- 'RecUpdE' inside the polymorphic 'FieldDescriptor' \/ 'SomeField'
+  -- wrapper. The prefixed layout keeps the plain forms.
+  let msgBinder
+        | mfRecordDot = SigP (VarP msgVar) (ConT tyName)
+        | otherwise = VarP msgVar
+      getBody
+        | mfRecordDot = GetFieldE (VarE msgVar) (nameBase mfSelector)
+        | otherwise = AppE (VarE mfSelector) (VarE msgVar)
+      updateE = RecUpdE (VarE msgVar) [(mfSelector, VarE vVar)]
+      setBody
+        | mfRecordDot = SigE updateE (ConT tyName)
+        | otherwise = updateE
+      getter = LamE [msgBinder] getBody
+      setter = LamE [VarP vVar, msgBinder] setBody
       record =
         RecConE
           'PS.FieldDescriptor
@@ -466,16 +500,18 @@ mkAesonInstancesForMessage
   -}
   -> Name
   -- ^ @default<Tyname>@.
+  -> Bool
+  -- ^ Read fields with record-dot (unprefixed layout).
   -> [MetaField]
   -> Q [Dec]
-mkAesonInstancesForMessage tyName fqName ufSel defName fields = do
-  toJSONDec <- mkToJSONForMessage tyName fqName ufSel fields
-  fromJSONDec <- mkFromJSONForMessage tyName fqName ufSel defName fields
+mkAesonInstancesForMessage tyName fqName ufSel defName recDot fields = do
+  toJSONDec <- mkToJSONForMessage tyName fqName ufSel recDot fields
+  fromJSONDec <- mkFromJSONForMessage tyName fqName ufSel defName recDot fields
   pure [toJSONDec, fromJSONDec]
 
 
-mkToJSONForMessage :: Name -> Text -> Maybe Name -> [MetaField] -> Q Dec
-mkToJSONForMessage tyName fqName mUfSel fields = do
+mkToJSONForMessage :: Name -> Text -> Maybe Name -> Bool -> [MetaField] -> Q Dec
+mkToJSONForMessage tyName fqName mUfSel recDot fields = do
   msgVar <- newName "msg"
   -- Each field contributes a @[(Text, Aeson.Value)]@ — a singleton
   -- when we want to emit the field, an empty list when we want to
@@ -492,7 +528,7 @@ mkToJSONForMessage tyName fqName mUfSel fields = do
         Just ufN ->
           AppE
             (AppE (VarE 'extEntries) (textLit fqName))
-            (AppE (VarE ufN) (VarE msgVar))
+            (dotRead recDot ufN msgVar)
       bodyExp =
         AppE
           (VarE 'PJ.jsonObject)
@@ -532,7 +568,7 @@ extEntries fqn xs = PJExt.extensionEntriesForJson (given :: PJExt.ExtensionRegis
 -}
 toJSONEntry :: Name -> MetaField -> Q Exp
 toJSONEntry msgVar mf =
-  let fieldExpr = AppE (VarE (mfSelector mf)) (VarE msgVar)
+  let fieldExpr = readFieldE mf msgVar
       jsonKey = textLit (mfJsonName mf)
       one valE = ListE [TupE [Just jsonKey, Just valE]]
       shape = mfBytesShape mf
@@ -1005,8 +1041,8 @@ scalarTagE = \case
 
 
 mkFromJSONForMessage
-  :: Name -> Text -> Maybe Name -> Name -> [MetaField] -> Q Dec
-mkFromJSONForMessage tyName fqName mUfSel defName fields = do
+  :: Name -> Text -> Maybe Name -> Name -> Bool -> [MetaField] -> Q Dec
+mkFromJSONForMessage tyName fqName mUfSel defName recDot fields = do
   objVar <- newName "obj"
   fldNames <- mapM (\mf -> (,) mf <$> newName ("fld_" ++ nameBase (mfSelector mf))) fields
   binds <- traverse (uncurry (parseBindStmt objVar)) fldNames
@@ -1014,8 +1050,11 @@ mkFromJSONForMessage tyName fqName mUfSel defName fields = do
       -- Build the record-update target. For empty messages we
       -- can't use 'RecUpdE def []' (GHC rejects it as "Empty
       -- record update"), so fall back to the bare default.
+      -- Under the unprefixed layout a record update whose fields recur
+      -- across messages is ambiguous; pin it with a type annotation.
       baseE
         | null assigns = VarE defName
+        | recDot = SigE (RecUpdE (VarE defName) assigns) (ConT tyName)
         | otherwise = RecUpdE (VarE defName) assigns
       typeNameLit = LitE (StringL (nameBase tyName))
   case mUfSel of
@@ -1052,7 +1091,7 @@ mkFromJSONForMessage tyName fqName mUfSel defName fields = do
                 , AppE
                     ( AppE
                         (VarE '(<>))
-                        (AppE (VarE ufN) (VarE baseVar))
+                        (dotRead recDot ufN baseVar)
                     )
                     ufs
                 )
@@ -1958,7 +1997,7 @@ fromJSONAssign defName mf fldVar = case mfKind mf of
     (mfSelector mf, VarE fldVar)
   _ ->
     -- mfSelector mf = maybe (mfSelector defName) id fld_var
-    let dflt = AppE (VarE (mfSelector mf)) (VarE defName)
+    let dflt = readFieldE mf defName
         e = AppE (AppE (AppE (VarE 'maybe) dflt) (VarE 'id)) (VarE fldVar)
     in (mfSelector mf, e)
 
@@ -1995,7 +2034,7 @@ mkHashableInstanceForMessage tyName fields = do
 -}
 hashStep :: Name -> Exp -> MetaField -> Exp
 hashStep msgVar acc mf =
-  let fieldExpr = AppE (VarE (mfSelector mf)) (VarE msgVar)
+  let fieldExpr = readFieldE mf msgVar
   in case mfKind mf of
        MFKVector ->
          AppE (AppE (AppE (VarE 'V.foldl') (VarE 'hashWithSalt)) acc) fieldExpr
