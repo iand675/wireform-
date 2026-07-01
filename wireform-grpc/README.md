@@ -115,7 +115,7 @@ modules:
 | `Network.GRPC.Common.Compression`            | gzip / deflate / identity compression negotiation         |
 | `Network.GRPC.Common.Protobuf`               | Protobuf message helpers (the bridge to `wireform-proto`) |
 | `Network.GRPC.Common.Protobuf.Any`           | `google.protobuf.Any` envelope handling                   |
-| `Network.GRPC.Server.Otel` / `.Client.Otel`  | OpenTelemetry instrumentation following the messaging semantic conventions |
+| `Network.GRPC.Server.Otel` / `.Client.Otel`  | OpenTelemetry instrumentation (direct `hs-opentelemetry-api`) following the gRPC RPC semantic conventions |
 
 Everything under `Network.GRPC.Util.*` is intentionally
 `other-modules` (private) and not re-exported.

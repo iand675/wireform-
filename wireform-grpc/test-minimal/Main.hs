@@ -3,21 +3,23 @@ module Main (main) where
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS.Char8
 import Network.GRPC.Common.Framing (grpcFrame, grpcFrameMany, grpcUnframe, grpcUnframeMany)
-import Network.GRPC.Server.Otel (noopTracer)
+import Network.GRPC.Server.Otel (grpcTracer)
+import OpenTelemetry.Trace.Core (getGlobalTracerProvider)
 
 main :: IO ()
 main = do
-  testNoopTracer
+  testTracer
   testGrpcFramingSingle
   testGrpcFramingEmpty
   testGrpcFramingMany
   testGrpcFramingLarge
   putStrLn "All wireform-grpc tests passed"
 
-testNoopTracer :: IO ()
-testNoopTracer = do
-  let _tracer = noopTracer
-  putStrLn "noopTracer: OK"
+testTracer :: IO ()
+testTracer = do
+  tp <- getGlobalTracerProvider
+  let _tracer = grpcTracer tp
+  putStrLn "grpcTracer: OK"
 
 testGrpcFramingSingle :: IO ()
 testGrpcFramingSingle = do
