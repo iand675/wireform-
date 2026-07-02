@@ -46,13 +46,18 @@ import Connect.TestProto
 -- Service implementation
 ------------------------------------------------------------------------
 
+elizaService :: Service ElizaService ConnectServerM
+elizaService =
+  service
+    ( method @Say sayH
+        :& method @Aggregate aggregateH
+        :& method @Converse converseH
+        :& method @Introduce introduceH
+        :& Done
+    )
+
 elizaHandlers :: [MethodHandler]
-elizaHandlers =
-  [ mkNonStreaming @Say sayH
-  , mkServerStreaming @Introduce introduceH
-  , mkClientStreaming @Aggregate aggregateH
-  , mkBiDiStreaming @Converse converseH
-  ]
+elizaHandlers = connectHandlers elizaService
 
 sayH :: Proto SayRequest -> ConnectServerM (Proto SayResponse)
 sayH (Proto req) =

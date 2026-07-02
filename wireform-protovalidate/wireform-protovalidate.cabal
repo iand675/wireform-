@@ -49,6 +49,7 @@ library
     Protovalidate.Refined
     Protovalidate.Rules
     Protovalidate.Schema
+    Protovalidate.OpenAPI
     Protovalidate.TH
     Protovalidate.Violation
   build-depends:
@@ -56,6 +57,9 @@ library
     wireform-cel,
     wireform-proto,
     bytestring >= 0.11 && < 0.13,
+    aeson >= 2.1 && < 2.3,
+    base64-bytestring >= 1.2 && < 1.3,
+    scientific >= 0.3 && < 0.4,
     text >= 2.0 && < 2.2,
     vector >= 0.13 && < 0.14,
     containers >= 0.6 && < 0.9,
@@ -72,6 +76,8 @@ test-suite wireform-protovalidate-test
     Test.Protovalidate.Advanced
     Test.Protovalidate.Descriptor
     Test.Protovalidate.Format
+    Test.Protovalidate.OpenAPI
+    Test.Protovalidate.OpenAPICompose
     Test.Protovalidate.Refined
     Test.Protovalidate.Schema
     Test.Protovalidate.TH
@@ -84,6 +90,9 @@ test-suite wireform-protovalidate-test
     wireform-proto,
     refined,
     text,
+    aeson,
     bytestring,
     vector,
-    sydtest
+    sydtest,
+    sydtest-hedgehog,
+    hedgehog

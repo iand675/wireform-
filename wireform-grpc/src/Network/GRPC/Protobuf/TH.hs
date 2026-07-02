@@ -108,9 +108,9 @@ import Proto.IDL.AST
 import Proto.IDL.Parser (parseProtoFile, renderParseError)
 
 import Network.GRPC.Common.Protobuf (Proto (..), Protobuf, getProto)
-import Network.GRPC.Server.Protobuf (ServiceMethods)
 import Network.GRPC.Spec (
   HasStreamingType (..),
+  ServiceMethods,
   Input,
   IsRPC (..),
   NoMetadata,

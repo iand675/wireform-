@@ -8,7 +8,9 @@ import Test.Error qualified
 import Test.Interop qualified
 import Test.Loopback qualified
 import Test.Metadata qualified
+import Test.OpenAPI qualified
 import Test.Protocol qualified
+import Test.SharedService qualified
 
 main :: IO ()
 main =
@@ -20,4 +22,6 @@ main =
       Test.Metadata.tests
       Test.Compression.tests
       Test.Loopback.tests
+      Test.SharedService.tests
       Test.Interop.tests
+      Test.OpenAPI.tests

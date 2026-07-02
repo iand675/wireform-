@@ -52,9 +52,10 @@ both transports.
 
 ## Serve it
 
-A Connect server is one HTTP handler built from a list of method handlers. Each
-handler is constructed with a builder whose name matches the streaming kind; the
-method is fixed by a type application:
+A Connect server is one HTTP handler built from a service implementation:
+one `method` per RPC (the handler shape follows from the method's streaming
+kind), bundled with `service` — order-insensitive and completeness-checked
+at compile time — then adapted with `connectHandlers`:
 
 ```haskell
 import Network.Connect.Server
@@ -64,17 +65,20 @@ import Network.GRPC.Spec (Proto (..))
 import Eliza
 
 main :: IO ()
-main = runConnectServer defaultConnectServerConfig serverCfg handlers
+main = runConnectServer defaultConnectServerConfig serverCfg (connectHandlers eliza)
   where
     serverCfg = defaultServerConfig
       { serverPort = "8080", serverVersionRange = preferHttp20 }
 
-    handlers =
-      [ mkNonStreaming    @Say       say
-      , mkServerStreaming @Introduce introduce
-      , mkBiDiStreaming   @Converse  converse
-      ]
-
+eliza :: Service ElizaService ConnectServerM
+eliza =
+  service
+    (  method @Say       say
+    :& method @Introduce introduce
+    :& method @Converse  converse
+    :& Done
+    )
+  where
     -- Unary: Input -> ConnectServerM Output
     say (Proto req) = pure (Proto defaultSayResponse
       { sayResponseSentence = "Hello, " <> sayRequestSentence req })

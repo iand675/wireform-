@@ -25,7 +25,7 @@ import System.IO (BufferMode (NoBuffering), hSetBinaryMode, hSetBuffering, stder
 import System.IO qualified as IO
 
 import Connect.Conformance.Proto qualified as P
-import Connect.Conformance.Service (BidiStream, ClientStream, IdempotentUnary, ServerStream, Unary, Unimplemented)
+import Connect.Conformance.Service (BidiStream, ClientStream, ConformanceService, IdempotentUnary, ServerStream, Unary, Unimplemented)
 import Connect.Conformance.Support (headersToMetadata, metadataToHeaders, packMsgAny, recvMsg, registerConformanceTypes, sendMsg)
 import Network.Connect ()
 import Network.Connect.Compression (ContentCoding (..))
@@ -33,18 +33,20 @@ import Network.Connect.Error (ConnectError (..), ConnectException (..), ErrorDet
 import Network.Connect.Server
   ( ConnectServerConfig (..)
   , ConnectServerM
+  , Handlers (..)
   , MethodHandler
+  , Service
   , addResponseTrailers
   , connectApplication
+  , connectHandlers
   , defaultConnectServerConfig
   , getRequestMetadata
-  , mkBiDiStreaming
-  , mkClientStreaming
-  , mkNonStreaming
-  , mkServerStreaming
+  , method
+  , methodUnimplemented
   , requestIsGet
   , requestQueryParams
   , requestTimeoutMs
+  , service
   , setResponseMetadata
   )
 import Network.GRPC.Spec (GrpcError (..), Proto (..))
@@ -107,15 +109,20 @@ versionRangeFor _ = preferHttp2
 -- ConformanceService handlers
 ------------------------------------------------------------------------
 
+conformanceService :: Service ConformanceService ConnectServerM
+conformanceService =
+  service
+    ( method @Unary unaryH
+        :& method @IdempotentUnary idempotentH
+        :& methodUnimplemented @Unimplemented
+        :& method @ServerStream serverStreamH
+        :& method @ClientStream clientStreamH
+        :& method @BidiStream bidiStreamH
+        :& Done
+    )
+
 handlers :: [MethodHandler]
-handlers =
-  [ mkNonStreaming @Unary unaryH
-  , mkNonStreaming @IdempotentUnary idempotentH
-  , mkNonStreaming @Unimplemented unimplementedH
-  , mkServerStreaming @ServerStream serverStreamH
-  , mkClientStreaming @ClientStream clientStreamH
-  , mkBiDiStreaming @BidiStream bidiStreamH
-  ]
+handlers = connectHandlers conformanceService
 
 -- Unary / IdempotentUnary share their logic.
 unaryH :: Proto P.UnaryRequest -> ConnectServerM (Proto P.UnaryResponse)
@@ -129,9 +136,6 @@ idempotentH (Proto req) = do
   ri <- buildRequestInfo [packMsgAny req]
   payload <- runUnaryDef (P.idempotentUnaryRequestResponseDefinition req) ri
   pure (Proto (P.defaultIdempotentUnaryResponse {P.idempotentUnaryResponsePayload = Just payload}))
-
-unimplementedH :: Proto P.UnimplementedRequest -> ConnectServerM (Proto P.UnimplementedResponse)
-unimplementedH _ = liftIO (throwIO (ConnectException (ConnectError GrpcUnimplemented (Just "connectrpc.conformance.v1.ConformanceService.Unimplemented is not implemented") [])))
 
 -- | Apply a 'UnaryResponseDefinition' (shared by Unary, IdempotentUnary, and
 -- ClientStream): stage response headers\/trailers, sleep, then either raise the

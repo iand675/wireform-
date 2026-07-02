@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE UndecidableInstances #-}
 -- The streaming-kind equality constraints on the @mk*Streaming@ builders
 -- (e.g. @RpcStreamingType rpc ~ 'NonStreaming@) are load-bearing API shaping —
 -- they reject misuse at call sites — even though their dictionaries are unused
@@ -11,6 +12,31 @@
 -- request path (@\/Service\/Method@) in a dispatch map of type-erased
 -- 'MethodHandler's and runs the matching method. Unary (POST + GET) and all
 -- three streaming kinds are supported, over HTTP\/1.1 and HTTP\/2.
+--
+-- = Registering handlers
+--
+-- Implement the service with the transport-agnostic vocabulary from
+-- "Network.GRPC.Spec.Service" (re-exported here), then adapt it with
+-- 'connectHandlers':
+--
+-- > eliza :: Service ElizaService ConnectServerM
+-- > eliza =
+-- >   service
+-- >     (  method @Say       sayH
+-- >     :& method @Introduce introduceH
+-- >     :& method @Aggregate aggregateH
+-- >     :& method @Converse  converseH
+-- >     :& Done
+-- >     )
+-- >
+-- > main :: IO ()
+-- > main = runConnectServer defaultConnectServerConfig serverCfg (connectHandlers eliza)
+--
+-- Registration is order-insensitive and completeness-checked at compile
+-- time; declare deliberately-unsupported methods with 'methodUnimplemented'.
+-- The same 'Service' value can be served over gRPC with @wireform-grpc@'s
+-- @Network.GRPC.Server.Service.fromService@ (when its handlers are
+-- polymorphic in the monad, e.g. @MonadIO m => Service Eliza m@).
 module Network.Connect.Server (
   -- * Server monad
   ConnectServerM,
@@ -22,12 +48,22 @@ module Network.Connect.Server (
   setResponseMetadata,
   addResponseTrailers,
 
-  -- * Handlers
-  MethodHandler (..),
-  mkNonStreaming,
-  mkClientStreaming,
-  mkServerStreaming,
-  mkBiDiStreaming,
+  -- * Service implementation vocabulary (re-exported from grpc-spec)
+  ServiceMethods,
+  HandlerOf,
+  MethodOf (..),
+  method,
+  methodUnimplemented,
+  Handlers (..),
+  Service (..),
+  service,
+  CompleteService (..),
+  PluckMethod (..),
+
+  -- * Serving over Connect
+  MethodHandler, -- opaque
+  connectHandlers,
+  ConnectMethods, -- opaque class
 
   -- * Configuration
   ConnectServerConfig (..),
@@ -52,6 +88,7 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ReaderT, ask, asks, runReaderT)
 import Data.Aeson qualified as Aeson
 import Data.Kind (Type)
+import GHC.TypeLits (Symbol)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Base64.URL qualified as B64U
@@ -101,14 +138,28 @@ import Network.Connect.Protocol
   , unaryContentType
   )
 import Network.GRPC.Spec
-  ( CustomMetadata
+  ( CompleteService (..)
+  , CustomMetadata
   , GrpcError (..)
+  , HandlerOf
+  , Handlers (..)
   , HasStreamingType (..)
   , Input
   , IsRPC (..)
+  , MethodOf (..)
   , Output
+  , PluckMethod (..)
+  , Protobuf
+  , SStreamingType (..)
+  , Service (..)
+  , ServiceMethods
   , StreamingType (..)
   , SupportsServerRpc
+  , ValidStreamingType (..)
+  , method
+  , methodUnimplemented
+  , service
+  , unimplementedMessage
   )
 import Network.HTTP.Message (Request (..), Response (..))
 import Network.HTTP.PercentEncoding (decodeQueryString)
@@ -187,9 +238,8 @@ addResponseTrailers ms = do
 ------------------------------------------------------------------------
 
 -- | A type-erased Connect method handler: the fully-qualified service\/method
--- names, the streaming kind, and the runner. Construct these with the
--- 'mkNonStreaming' \/ 'mkClientStreaming' \/ 'mkServerStreaming' \/ 'mkBiDiStreaming'
--- builders rather than the record directly.
+-- names, the streaming kind, and the runner. Produced by 'connectHandlers';
+-- opaque outside this module.
 data MethodHandler = MethodHandler
   { mhService :: !ByteString
   , mhMethod :: !ByteString
@@ -203,7 +253,73 @@ type StreamingFn rpc =
   ConnectServerM (Maybe (Input rpc)) -> (Output rpc -> ConnectServerM ()) -> ConnectServerM ()
 
 ------------------------------------------------------------------------
--- Handler builders
+-- Serving a transport-agnostic Service over Connect
+------------------------------------------------------------------------
+
+-- | Adapt a transport-agnostic 'Service' implementation to Connect: the
+-- dispatch list for 'connectApplication' \/ 'runConnectServer'.
+--
+-- Multiple services concatenate:
+--
+-- > connectApplication cfg (connectHandlers eliza <> connectHandlers health)
+connectHandlers
+  :: forall serv
+   . ConnectMethods serv (ServiceMethods serv)
+  => Service serv ConnectServerM
+  -> [MethodHandler]
+connectHandlers (Service hs) = connectMethods hs
+
+-- | Internal: fold a canonical 'Handlers' list into 'MethodHandler's.
+class ConnectMethods (serv :: Type) (meths :: [Symbol]) where
+  connectMethods :: Handlers serv meths ConnectServerM -> [MethodHandler]
+
+instance ConnectMethods serv '[] where
+  connectMethods Done = []
+
+instance
+  ( SupportsServerRpc (Protobuf serv meth)
+  , Aeson.FromJSON (Input (Protobuf serv meth))
+  , Aeson.ToJSON (Output (Protobuf serv meth))
+  , ConnectMethods serv meths
+  )
+  => ConnectMethods serv (meth ': meths)
+  where
+  connectMethods (m :& rest) = toConnect @serv @meth m : connectMethods rest
+
+toConnect
+  :: forall serv meth
+   . ( SupportsServerRpc (Protobuf serv meth)
+     , Aeson.FromJSON (Input (Protobuf serv meth))
+     , Aeson.ToJSON (Output (Protobuf serv meth))
+     )
+  => MethodOf serv meth ConnectServerM
+  -> MethodHandler
+toConnect (MethodImpl styp h) = case styp of
+  SNonStreaming -> mkNonStreaming @(Protobuf serv meth) h
+  SClientStreaming -> mkClientStreaming @(Protobuf serv meth) h
+  SServerStreaming -> mkServerStreaming @(Protobuf serv meth) h
+  SBiDiStreaming -> mkBiDiStreaming @(Protobuf serv meth) h
+toConnect MethodUnimplemented =
+  case validStreamingType (Proxy @(RpcStreamingType (Protobuf serv meth))) of
+    SNonStreaming -> mkNonStreaming @(Protobuf serv meth) (\_ -> throwUnimpl)
+    SClientStreaming -> mkClientStreaming @(Protobuf serv meth) (\_ -> throwUnimpl)
+    SServerStreaming -> mkServerStreaming @(Protobuf serv meth) (\_ _ -> throwUnimpl)
+    SBiDiStreaming -> mkBiDiStreaming @(Protobuf serv meth) (\_ _ -> throwUnimpl)
+  where
+    throwUnimpl :: forall a. ConnectServerM a
+    throwUnimpl =
+      liftIO
+        ( throwConnectIO
+            ( ConnectError
+                { ceCode = GrpcUnimplemented
+                , ceMessage = Just (unimplementedMessage (Proxy @(Protobuf serv meth)))
+                , ceDetails = []
+                }
+            )
+        )
+
+------------------------------------------------------------------------
+-- Handler builders (internal)
 ------------------------------------------------------------------------
 -- | Register a unary handler of type @Input -> ConnectServerM Output@.
 -- Serves both the unary @POST@ and (for side-effect-free methods) the unary

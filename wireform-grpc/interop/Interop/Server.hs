@@ -9,7 +9,6 @@ import Control.Monad.Catch (generalBracket, ExitCase(..))
 
 import Network.GRPC.Common
 import Network.GRPC.Server
-import Network.GRPC.Server.Protobuf
 import Network.GRPC.Server.Run
 import Network.GRPC.Server.StreamType
 import Network.GRPC.Spec (OrcaLoadReport)
@@ -39,32 +38,25 @@ import Proto.API.Ping ()
   * @grpc-repo/src/proto/grpc/testing/empty.proto@ (@Empty@ message)
 -------------------------------------------------------------------------------}
 
-methodsPingService :: Methods IO (ProtobufMethodsOf PingService)
-methodsPingService =
-      Method (mkNonStreaming @Ping Ping.handle)
-    $ NoMoreMethods
+handlersPingService :: [SomeRpcHandler IO]
+handlersPingService =
+    [ fromMethod @Ping $ mkNonStreaming Ping.handle
+    ]
 
-methodsTestService ::
+-- | TestService handlers.
+--
+-- @cacheableUnaryCall@, @halfDuplexCall@, and @unimplementedCall@ are
+-- deliberately not registered; the server responds @UNIMPLEMENTED@ natively.
+handlersTestService ::
      TVar (Maybe OrcaLoadReport)
-  -> Methods IO (ProtobufMethodsOf TestService)
-methodsTestService oobState =
-      UnsupportedMethod -- cacheableUnaryCall
-    $ Method    (mkNonStreaming @EmptyCall EmptyCall.handle)
-    $ RawMethod (mkRpcHandler (FullDuplexCall.handle oobState))
-    $ UnsupportedMethod -- halfDuplexCall
-    $ RawMethod (mkRpcHandler StreamingInputCall.handle)
-    $ RawMethod (mkRpcHandler StreamingOutputCall.handle)
-    $ RawMethod (mkRpcHandler UnaryCall.handle)
-    $ UnsupportedMethod -- unimplementedCall
-    $ NoMoreMethods
-
-mkServices ::
-     TVar (Maybe OrcaLoadReport)
-  -> Services IO (ProtobufServices '[PingService, TestService])
-mkServices oobState =
-      Service methodsPingService
-    $ Service (methodsTestService oobState)
-    $ NoMoreServices
+  -> [SomeRpcHandler IO]
+handlersTestService oobState =
+    [ fromMethod @EmptyCall $ mkNonStreaming EmptyCall.handle
+    , someRpcHandler @FullDuplexCall $ mkRpcHandler (FullDuplexCall.handle oobState)
+    , someRpcHandler @StreamingInputCall $ mkRpcHandler StreamingInputCall.handle
+    , someRpcHandler @StreamingOutputCall $ mkRpcHandler StreamingOutputCall.handle
+    , someRpcHandler @UnaryCall $ mkRpcHandler UnaryCall.handle
+    ]
 
 {-------------------------------------------------------------------------------
   Main server definition
@@ -73,7 +65,8 @@ mkServices oobState =
 withInteropServer :: Cmdline -> (RunningServer -> IO a) -> IO a
 withInteropServer cmdline k = do
     oobState <- newTVarIO Nothing
-    server <- mkGrpcServer serverParams $ fromServices (mkServices oobState)
+    server <- mkGrpcServer serverParams $
+      handlersPingService <> handlersTestService oobState
     forkServer def serverConfig server k
   where
     serverConfig :: ServerConfig

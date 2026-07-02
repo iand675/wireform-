@@ -15,7 +15,7 @@ import Network.GRPC.Client.StreamType.IO qualified as Client
 import Network.GRPC.Common
 import Network.GRPC.Common.Protobuf
 import Network.GRPC.Server qualified as Server
-import Network.GRPC.Server.Protobuf qualified as Server
+import Network.GRPC.Server.Service qualified as Server
 import Network.GRPC.Server.Run qualified as Server
 import Network.GRPC.Server.StreamType qualified as Server
 
@@ -116,7 +116,7 @@ test_lowLevel_nonStreaming2 =
   the declaration of the methods, but differ on how much is defined.
 -------------------------------------------------------------------------------}
 
--- | Completely @undefined@ 'Methods'
+-- | Completely @undefined@ 'Service'
 --
 -- This is different from 'test_routeGuide_nonStreaming2', where the /skeleton/
 -- is defined but the individual handlers are not: here we cannot even construct
@@ -124,9 +124,9 @@ test_lowLevel_nonStreaming2 =
 -- exception handling during lookup.
 test_routeGuide_nonStreaming1 :: IO ()
 test_routeGuide_nonStreaming1 =
-    testWith (Server.fromMethods methods) client
+    testWith (Server.fromService methods) client
   where
-    methods :: Server.Methods IO (Server.ProtobufMethodsOf RouteGuide)
+    methods :: Server.Service RouteGuide IO
     methods = undefined
 
     client :: Client.Connection -> IO (Proto Feature)
@@ -134,30 +134,34 @@ test_routeGuide_nonStreaming1 =
 
 test_routeGuide_nonStreaming2 :: IO ()
 test_routeGuide_nonStreaming2 =
-    testWith (Server.fromMethods methods) client
+    testWith (Server.fromService methods) client
   where
-    methods :: Server.Methods IO (Server.ProtobufMethodsOf RouteGuide)
+    methods :: Server.Service RouteGuide IO
     methods =
-          Server.Method undefined
-        $ Server.Method undefined
-        $ Server.Method undefined
-        $ Server.Method undefined
-        $ Server.NoMoreMethods
+        Server.service
+          (    (undefined :: Server.MethodOf RouteGuide "getFeature" IO)
+          Server.:& (undefined :: Server.MethodOf RouteGuide "listFeatures" IO)
+          Server.:& (undefined :: Server.MethodOf RouteGuide "recordRoute" IO)
+          Server.:& (undefined :: Server.MethodOf RouteGuide "routeChat" IO)
+          Server.:& Server.Done
+          )
 
     client :: Client.Connection -> IO (Proto Feature)
     client conn = Client.nonStreaming conn (rpc @GetFeature) (mempty)
 
 test_routeGuide_nonStreaming3 :: IO ()
 test_routeGuide_nonStreaming3 =
-    testWith (Server.fromMethods methods) client
+    testWith (Server.fromService methods) client
   where
-    methods :: Server.Methods IO (Server.ProtobufMethodsOf RouteGuide)
+    methods :: Server.Service RouteGuide IO
     methods =
-          Server.Method (Server.mkNonStreaming undefined)
-        $ Server.Method undefined
-        $ Server.Method undefined
-        $ Server.Method undefined
-        $ Server.NoMoreMethods
+        Server.service
+          (    Server.method @GetFeature   undefined
+          Server.:& Server.method @ListFeatures undefined
+          Server.:& Server.method @RecordRoute  undefined
+          Server.:& Server.method @RouteChat    undefined
+          Server.:& Server.Done
+          )
 
     client :: Client.Connection -> IO (Proto Feature)
     client conn = Client.nonStreaming conn (rpc @GetFeature) (mempty)
