@@ -70,11 +70,13 @@ module Network.HTTP.Connection (
   -- * Sending requests
   sendOn,
   withResponseOn,
+  withResponseDeferredOn,
 
   -- * Errors
   ConnectionError (..),
 ) where
 
+import Control.Concurrent.MVar (modifyMVar, newMVar)
 import Control.Exception (Exception, bracketOnError, throwIO)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -454,6 +456,37 @@ withResponseOn (Http2Connection handle _) req action = do
   H2.withResponse handle h2req $ \h2resp ->
     action (h2ResponseToUnified h2resp)
 
+
+{- | Like 'withResponseOn', but the action runs immediately after the
+request headers are sent; it receives an @awaitResponse@ action that
+blocks until the response head arrives (idempotent — every call
+returns the same response).
+
+This is the shape full-duplex exchanges need on HTTP\/2: with a
+streaming request body the peer may withhold its response headers
+until it has seen the first request data (e.g. a Connect\/gRPC bidi
+server staging response metadata until the handler's first send), so
+the client must be able to produce request data before blocking on
+the response.
+
+On HTTP\/1.x there is no full duplex: @awaitResponse@ performs the
+entire exchange on first call — it drains the request-body producer
+to completion before the response appears, so a caller that waits on
+the response before finishing its request body will deadlock. Only
+half-duplex usage (send everything, then await) works there.
+-}
+withResponseDeferredOn :: Connection -> Request -> (IO Response -> IO a) -> IO a
+withResponseDeferredOn conn@(Http1Connection _ _) req action = do
+  cell <- newMVar Nothing
+  let awaitResponse = modifyMVar cell $ \case
+        st@(Just resp) -> pure (st, resp)
+        Nothing -> do
+          resp <- sendOn conn req
+          pure (Just resp, resp)
+  action awaitResponse
+withResponseDeferredOn (Http2Connection handle _) req action =
+  H2.withResponseDeferred handle (requestToH2 req) $ \awaitH2 ->
+    action (h2ResponseToUnified <$> awaitH2)
 
 requestToH2 :: Request -> H2.ClientRequest
 requestToH2 req =

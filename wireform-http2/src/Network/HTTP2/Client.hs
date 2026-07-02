@@ -13,6 +13,7 @@ module Network.HTTP2.Client
   , sendRequest
   , sendRequestStreamId
   , withResponse
+  , withResponseDeferred
   , drainResponseBody
     -- * Errors
   , ClientStreamError (..)
@@ -822,7 +823,33 @@ withResponse
   -> ClientRequest
   -> (ClientResponse -> IO a)
   -> IO a
-withResponse handle req action = mask $ \restore -> do
+withResponse handle req action =
+  withResponseDeferred handle req (\awaitResponse -> awaitResponse >>= action)
+
+-- | Like 'withResponse', but the action is started immediately after the
+-- request HEADERS are sent; instead of a 'ClientResponse' it receives an
+-- @awaitResponse@ action that blocks until the response head arrives.
+-- @awaitResponse@ may be called any number of times; every call returns
+-- the same response.
+--
+-- This is the primitive full-duplex protocols need.  With a streaming
+-- request body ('ReqBodyStream') the peer may withhold its response
+-- HEADERS until it has seen the first request DATA frame (e.g. a
+-- Connect\/gRPC bidi server that stages response metadata until the
+-- handler's first send).  A client that blocks on response HEADERS
+-- before its caller can produce any request data deadlocks against such
+-- a peer; with the deferred shape the caller feeds the body producer
+-- first and only awaits the response when it needs it.
+--
+-- Cancellation semantics match 'withResponse': @RST_STREAM(CANCEL)@ is
+-- emitted if the action throws, or if it returns without the stream
+-- having been fully consumed.
+withResponseDeferred
+  :: ClientHandle
+  -> ClientRequest
+  -> (IO ClientResponse -> IO a)
+  -> IO a
+withResponseDeferred handle req action = mask $ \restore -> do
   (sid, inbox) <- registerAndSend handle req
   -- Cancel the stream if (a) the action raises an exception, or
   -- (b) the action returns without fully draining the body.  Both
@@ -837,21 +864,22 @@ withResponse handle req action = mask $ \restore -> do
           _ <- tryPutMVar (siTrailers inbox) []
           atomically $ writeTBQueue (siBody inbox) (BodyError reason)
           closeStream handle sid
-  result <- try @SomeException $ restore $ do
-    -- See note on 'readMVar' in 'sendRequest': 'takeMVar' would
-    -- empty the slot and break trailer-block detection.
-    headersResult <- readMVar (siHeaders inbox)
-    case headersResult of
-      Left err -> throwIO err
-      Right rh -> action ClientResponse
-        { crStreamId = sid
-        , crStatus = rhStatus rh
-        , crResponseHeaders = rhHeaders rh
-        , crResponseBody = nextBodyChunk handle sid inbox
-        , crResponseTrailers = readMVar (siTrailers inbox)
-        , crCancel = cancelIfOpen ClientStreamConnectionClosed
-        , crPushPromises = reverse <$> readTVarIO (siPushPromises inbox)
-        }
+      -- See note on 'readMVar' in 'sendRequest': 'takeMVar' would
+      -- empty the slot and break trailer-block detection.
+      awaitResponse = do
+        headersResult <- readMVar (siHeaders inbox)
+        case headersResult of
+          Left err -> throwIO err
+          Right rh -> pure ClientResponse
+            { crStreamId = sid
+            , crStatus = rhStatus rh
+            , crResponseHeaders = rhHeaders rh
+            , crResponseBody = nextBodyChunk handle sid inbox
+            , crResponseTrailers = readMVar (siTrailers inbox)
+            , crCancel = cancelIfOpen ClientStreamConnectionClosed
+            , crPushPromises = reverse <$> readTVarIO (siPushPromises inbox)
+            }
+  result <- try @SomeException $ restore (action awaitResponse)
   cancelIfOpen ClientStreamConnectionClosed
   case result of
     Left e -> throwIO e

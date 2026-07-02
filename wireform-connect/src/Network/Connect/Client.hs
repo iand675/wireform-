@@ -54,6 +54,7 @@ import Control.Concurrent.STM
   , readTQueue
   , writeTQueue
   )
+import Control.Concurrent.MVar (modifyMVar, newMVar)
 import Control.Exception (throwIO)
 import Data.Aeson qualified as Aeson
 import Data.ByteString (ByteString)
@@ -391,8 +392,15 @@ clientStreaming cl p sendAction = do
 
 -- | Issue a bidirectional-streaming RPC. The continuation is given a @send@
 -- action for requests and a @recv@ action for responses ('Nothing' at
--- end-of-stream); either may be called any number of times. The stream ends
--- when the continuation returns.
+-- end-of-stream); either may be called any number of times, in any order —
+-- full duplex over HTTP\/2. The stream ends when the continuation returns.
+--
+-- The request is dispatched without waiting for the response head: a
+-- Connect server may stage its response headers until its handler sends the
+-- first message, which for a ping-pong conversation only happens after the
+-- client's first request frame — blocking on the response before running
+-- the continuation would deadlock. @recv@ awaits the response head on its
+-- first call instead.
 biDiStreaming
   :: ( SupportsClientRpc rpc
      , Aeson.ToJSON (Input rpc)
@@ -410,11 +418,7 @@ biDiStreaming cl p action = do
       codec = cccCodec cfg
       reqCoding = cccRequestCompression cfg
       send msg = atomically (writeTQueue outQ (Just (inputFrame codec p reqCoding msg)))
-      producer =
-        atomically $
-          readTQueue outQ >>= \case
-            Just fr -> pure (Just fr)
-            Nothing -> pure Nothing
+      producer = atomically (readTQueue outQ)
       req =
         (baseRequest cl)
           { requestMethod = Method.mPost
@@ -422,9 +426,18 @@ biDiStreaming cl p action = do
           , requestHeaders = streamingHeaders cl cfg reqCoding
           , requestBody = BodyStream producer
           }
-  Connection.withResponseOn (clConn cl) req $ \resp -> do
-    fr <- newFrameReader =<< responseBodyProducer (responseBody resp)
-    r <- action send (readDataFrame codec p cfg fr)
+  Connection.withResponseDeferredOn (clConn cl) req $ \awaitResp -> do
+    -- The frame reader is created lazily on the first recv (the response
+    -- head may not have arrived yet); memoized for subsequent calls.
+    frCell <- newMVar Nothing
+    let getFrameReader = modifyMVar frCell $ \case
+          st@(Just fr) -> pure (st, fr)
+          Nothing -> do
+            resp <- awaitResp
+            fr <- newFrameReader =<< responseBodyProducer (responseBody resp)
+            pure (Just fr, fr)
+        recv = getFrameReader >>= readDataFrame codec p cfg
+    r <- action send recv
     atomically (writeTQueue outQ Nothing)
     pure r
 
