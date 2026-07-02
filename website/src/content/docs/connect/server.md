@@ -8,44 +8,64 @@ sidebar:
 
 A Connect server is a single HTTP handler — `connectApplication` — built from a
 list of type-erased `MethodHandler`s. You don't construct `MethodHandler`s
-directly; you use one of four builder functions, each named for the streaming
-kind it accepts. The streaming kind is fixed by the method's service tag, so you
-choose the builder and pin the method with a type application.
+directly; you implement the service with the transport-agnostic `Service`
+vocabulary (shared with `wireform-grpc`, re-exported by
+`Network.Connect.Server`) and adapt it with `connectHandlers`.
 
 Handlers run in `ConnectServerM` — `ReaderT ServerContext IO` — which gives them
 the request's leading metadata and mutable cells to stage response metadata.
 
-## The four handler builders
+## Implementing a service
+
+One `method` per RPC, tied together with `service`:
 
 ```haskell
 import Network.Connect.Server
 import Network.GRPC.Spec (Proto (..))
 import Eliza
 
-handlers =
-  [ mkNonStreaming    @Say       say        -- Input -> ConnectServerM Output
-  , mkClientStreaming @Aggregate aggregate  -- recv -> ConnectServerM Output
-  , mkServerStreaming @Introduce introduce  -- Input -> send -> ConnectServerM ()
-  , mkBiDiStreaming   @Converse  converse   -- recv -> send -> ConnectServerM ()
-  ]
+eliza :: Service ElizaService ConnectServerM
+eliza =
+  service
+    (  method @Say       say        -- Input -> ConnectServerM Output
+    :& method @Aggregate aggregate  -- recv -> ConnectServerM Output
+    :& method @Introduce introduce  -- Input -> send -> ConnectServerM ()
+    :& method @Converse  converse   -- recv -> send -> ConnectServerM ()
+    :& Done
+    )
+
+handlers :: [MethodHandler]
+handlers = connectHandlers eliza
 ```
 
-| Builder | Argument shape | Connect method |
-|---|---|---|
-| `mkNonStreaming` | `Input rpc -> ConnectServerM (Output rpc)` | unary |
-| `mkClientStreaming` | `ConnectServerM (Maybe (Input rpc)) -> ConnectServerM (Output rpc)` | client-streaming |
-| `mkServerStreaming` | `Input rpc -> (Output rpc -> ConnectServerM ()) -> ConnectServerM ()` | server-streaming |
-| `mkBiDiStreaming` | `ConnectServerM (Maybe (Input rpc)) -> (Output rpc -> ConnectServerM ()) -> ConnectServerM ()` | bidirectional |
+There is one registration function, not four: `method @Tag` infers the handler
+shape from the method's streaming kind. The registration is:
 
-For the streaming builders, `recv :: ConnectServerM (Maybe (Input rpc))` yields
+- **Order-insensitive** — list the methods however you like; `service`
+  reorders them to the `.proto` declaration order.
+- **Completeness-checked** — forgetting a method, listing one twice, or
+  listing a method of a different service is a *compile-time* error naming
+  the offending method. Declare deliberately-unsupported methods with
+  `methodUnimplemented @Tag` (the server answers `unimplemented`).
+- **Transport-neutral** — write the handlers polymorphically
+  (`MonadIO m => Service ElizaService m`) and the same value serves over
+  gRPC via `wireform-grpc`'s `fromService` and over Connect via
+  `connectHandlers`.
+
+| Streaming kind | Handler shape (`HandlerOf`) |
+|---|---|
+| unary | `Input rpc -> ConnectServerM (Output rpc)` |
+| client-streaming | `ConnectServerM (Maybe (Input rpc)) -> ConnectServerM (Output rpc)` |
+| server-streaming | `Input rpc -> (Output rpc -> ConnectServerM ()) -> ConnectServerM ()` |
+| bidirectional | `ConnectServerM (Maybe (Input rpc)) -> (Output rpc -> ConnectServerM ()) -> ConnectServerM ()` |
+
+For the streaming shapes, `recv :: ConnectServerM (Maybe (Input rpc))` yields
 the next request message, or `Nothing` at end-of-stream; `send :: Output rpc ->
-ConnectServerM ()` emits a response message. The builders wrap your function
-into a uniform `recv -> send -> ConnectServerM ()` shape so one runner drives
-them all.
+ConnectServerM ()` emits a response message. Returning from the handler ends
+the response stream.
 
 A unary handler serves **both** the unary `POST` and (for side-effect-free
-methods) the unary `GET` request shapes from the same builder — no separate
-handler for GET.
+methods) the unary `GET` request shapes — no separate handler for GET.
 
 ### Unary
 
@@ -173,7 +193,7 @@ import Network.HTTP.Server (defaultServerConfig, ServerConfig (..))
 import Network.HTTP.VersionRange (preferHttp20)
 
 main :: IO ()
-main = runConnectServer defaultConnectServerConfig serverCfg handlers
+main = runConnectServer defaultConnectServerConfig serverCfg (connectHandlers eliza)
   where
     serverCfg = defaultServerConfig
       { serverPort = "8080", serverVersionRange = preferHttp20 }

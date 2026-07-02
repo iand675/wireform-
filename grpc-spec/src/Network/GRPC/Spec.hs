@@ -58,6 +58,21 @@ module Network.GRPC.Spec (
   ClientHandler,
   hoistServerHandler,
 
+  -- * Service implementations
+  -- | Transport-agnostic service implementations; see
+  -- "Network.GRPC.Spec.Service" for the full story.
+  ServiceMethods,
+  HandlerOf,
+  MethodOf (..),
+  method,
+  methodUnimplemented,
+  Handlers (..),
+  Service (..),
+  service,
+  CompleteService (..),
+  PluckMethod (..),
+  unimplementedMessage,
+
   -- * Compression
   CompressionId (..),
   Compression (..),
@@ -224,6 +239,7 @@ import Network.GRPC.Spec.RPC.JSON
 import Network.GRPC.Spec.RPC.Protobuf
 import Network.GRPC.Spec.RPC.Raw
 import Network.GRPC.Spec.RPC.StreamType
+import Network.GRPC.Spec.Service
 import Network.GRPC.Spec.Status
 import Network.GRPC.Spec.Timeout
 import Network.GRPC.Spec.TraceContext

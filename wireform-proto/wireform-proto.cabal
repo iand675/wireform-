@@ -124,6 +124,9 @@ library
     Proto.CodeGen.Types
     Proto.Repr
 
+    -- Schema-derived docs (transport-agnostic JSON Schema)
+    Proto.JSONSchema
+
     -- TH splices
     Proto.TH
     Proto.TH.Metadata

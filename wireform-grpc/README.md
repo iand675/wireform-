@@ -72,30 +72,41 @@ main = do
     print feature
 ```
 
-A minimal server (run-of-the-mill route guide implementation):
+A minimal server. Handlers are registered with the transport-agnostic
+`Service` vocabulary (shared with `wireform-connect`): one `method` per RPC,
+order-insensitive, completeness-checked at compile time:
 
 ```haskell
 import           Network.GRPC.Server.Run
-import           Network.GRPC.Server.Protobuf
-import           Network.GRPC.Server.StreamType
+import           Network.GRPC.Server.Service
 
 import qualified Routeguide.Service.RouteGuide as RG
 
 main :: IO ()
-main = runServerWithHandlers def config handlers
+main = runServerWithHandlers def config (fromService routeGuide)
   where
     config = ServerConfig
       { serverInsecure = Just (InsecureConfig (Just "0.0.0.0") 50051)
       , serverSecure   = Nothing
       }
-    handlers =
-      [ fromMethod (mkNonStreaming handleGetFeature)
-      -- ... and the streaming methods
-      ]
+
+routeGuide :: Service RG.RouteGuide IO
+routeGuide =
+  service
+    (  method @RG.GetFeature   handleGetFeature
+    :& method @RG.ListFeatures handleListFeatures
+    :& method @RG.RecordRoute  handleRecordRoute
+    :& method @RG.RouteChat    handleRouteChat
+    :& Done
+    )
 
 handleGetFeature :: RG.Point -> IO RG.Feature
 handleGetFeature pt = ...
 ```
+
+For raw RPCs (or full control over a single method via the `Call` API), drop
+down to `Network.GRPC.Server.StreamType.fromMethod` /
+`Network.GRPC.Server.someRpcHandler` and concatenate handler lists.
 
 ## What's in here
 
@@ -110,7 +121,8 @@ modules:
 | `Network.GRPC.Client.StreamType.Conduit`     | Conduit-based streaming helpers                           |
 | `Network.GRPC.Server`                        | Server entry point + handler registration                 |
 | `Network.GRPC.Server.Run`                    | `runServerWithHandlers` + the insecure / TLS config |
-| `Network.GRPC.Server.StreamType`             | Streaming-flavor handler builders                         |
+| `Network.GRPC.Server.Service`                | `Service`/`method` registration + `fromService` |
+| `Network.GRPC.Server.StreamType`             | Per-RPC streaming-flavor handler builders (escape hatch) |
 | `Network.GRPC.Common`                        | Shared types: `Address`, `Timeout`, `Status`, metadata, deadlines |
 | `Network.GRPC.Common.Compression`            | gzip / deflate / identity compression negotiation         |
 | `Network.GRPC.Common.Protobuf`               | Protobuf message helpers (the bridge to `wireform-proto`) |
@@ -122,16 +134,26 @@ Everything under `Network.GRPC.Util.*` is intentionally
 
 ## Differences from upstream `grapesy`
 
-The vendored fork is feature-equivalent to upstream
-[`grapesy`](https://github.com/well-typed/grapesy) version 1.1.x at
-the time of vendoring, with one substantive change:
+This package began as a vendor of
+[`grapesy`](https://github.com/well-typed/grapesy) version 1.1.x and is now
+a maintained fork with two substantive changes:
 
 - **Protobuf binding migration**: upstream uses `proto-lens` for
   protobuf message types; this fork uses `wireform-proto`. The
-  `Network.GRPC.Common.Protobuf` and `Network.GRPC.Server.Protobuf` /
+  `Network.GRPC.Common.Protobuf` and
   `Network.GRPC.Client.StreamType.IO.Binary` modules wire through
   the wireform-proto `Proto.Encode` / `Proto.Decode` typeclasses
   instead of `proto-lens`'s `Message`.
+
+- **Handler-registration replacement**: upstream's order-sensitive
+  `Methods`/`Services` GADTs (`fromMethods`, `fromServices`,
+  `simpleMethods`, `Network.GRPC.Server.Protobuf`) are replaced by the
+  transport-agnostic `Service` vocabulary in `grpc-spec`
+  (`Network.GRPC.Spec.Service`) plus the `fromService` adapter in
+  `Network.GRPC.Server.Service`. Registration is order-insensitive,
+  completeness-checked, and the same `Service` value is servable over
+  Connect (`wireform-connect`). `ServiceMethods` moved from
+  `Network.GRPC.Server.Protobuf` to `grpc-spec`.
 
 The minimal test suite (`wireform-grpc-test-minimal`) verifies the
 binding compiles and round-trips. The fuller upstream test suites and

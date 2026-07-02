@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
@@ -198,6 +199,10 @@ withTracing (TracingEnabled opts) inner = Transport $ \req -> do
   -- carries a 'Prop.TextMap', so inject into a fresh carrier and merge
   -- the trace fields back over the request headers (overwriting any
   -- stale trace fields, leaving everything else untouched).
+#if MIN_VERSION_hs_opentelemetry_api(1,0,0)
+  -- OTel >= 1.0: the propagator carries a 'Prop.TextMap'. Inject into a
+  -- fresh carrier, then merge the trace fields over the request headers
+  -- (overwriting stale trace fields, leaving everything else untouched).
   let propagator = Trace.getTracerProviderPropagators tp
   injectedTm <- Prop.inject propagator ctx0 Prop.emptyTextMap
   let injected =
@@ -208,6 +213,15 @@ withTracing (TracingEnabled opts) inner = Transport $ \req -> do
       keepHeader (k, _) =
         TE.decodeUtf8 (CI.foldedCase k) `notElem` traceFields
       req' = req {Req.headers = filter keepHeader (Req.headers req) <> injected}
+#else
+  -- OTel 0.2: the default propagator's outbound carrier is the request
+  -- header list itself (Propagator Context RequestHeaders ResponseHeaders,
+  -- both = [(CI ByteString, ByteString)] just like wireform's own Headers),
+  -- so inject directly into the current headers; the W3C injector
+  -- overwrites any stale trace fields in place.
+  injectedHeaders <- Prop.inject (Trace.getTracerProviderPropagators tp) ctx0 (Req.headers req)
+  let req' = req {Req.headers = injectedHeaders}
+#endif
 
   -- Run the inner transport. If sendRaw itself throws (transport
   -- error, decode error, etc.) record the exception, end the span,

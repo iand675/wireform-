@@ -30,7 +30,7 @@ import Network.GRPC.Util.Stream (ClientDisconnected(..))
   Handlers
 
   This is essentially an untyped interface; for a typed layer, see
-  "Network.GRPC.Server.Protobuf".
+  "Network.GRPC.Server.Service".
 -------------------------------------------------------------------------------}
 
 -- | Handler for an RPC request
@@ -39,12 +39,11 @@ import Network.GRPC.Util.Stream (ClientDisconnected(..))
 --
 -- * Use the \"raw\" API by calling 'mkRpcHandler'; this gives you full control
 --   over the interaction with the client.
--- * Use the API from "Network.GRPC.Server.StreamType" to define handlers that
---   use the Protobuf stream types. This API is more convenient, and can be used
---   to guarantee at compile-time  that you have a handler for every method of
---   the services you support, but provides less flexibility (although it offers
---   an \"escape\" to the full API through
---   'Network.GRPC.Server.StreamType.RawMethod').
+-- * Use the API from "Network.GRPC.Server.Service" ('fromService') to define
+--   complete, completeness-checked Protobuf services, or
+--   "Network.GRPC.Server.StreamType" ('fromMethod') for a single typed
+--   handler. These APIs are more convenient, but provide less flexibility;
+--   mix in 'someRpcHandler' entries when a method needs the raw API.
 --
 -- __Note on cancellation.__ The GRPC spec allows clients to \"cancel\" a
 -- request (<https://grpc.io/docs/guides/cancellation/>). This does not

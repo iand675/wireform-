@@ -27,7 +27,20 @@ import Proto.CodeGen (
   generateModuleText,
   moduleNameForProto,
  )
-import Proto.IDL.AST (ProtoFile (..))
+import Proto.IDL.AST (ProtoFile, protoPackage)
+import Network.Connect.OpenAPI (
+  OpenApiOptions (..),
+  connectOpenApiAnnotated,
+  deprecationAnnotators,
+  noAnnotators,
+  schemaAnnotators,
+  defaultOpenApiOptions,
+  renderOpenApi,
+ )
+import Data.ByteString.Lazy qualified as BL
+import Protovalidate.Schema (fileMessageRules)
+import Protovalidate.Rules (MessageRules)
+import Protovalidate.OpenAPI (protovalidateSchemaOptions)
 import Proto.IDL.Inspect (prettyPrintSummary, summarize)
 import Proto.IDL.Parser.Resolver
 import Proto.IDL.Print (printProtoFile)
@@ -51,6 +64,7 @@ data Command
   | CmdFlatBuffers GenOpts
   | CmdASN1 GenOpts
   | CmdXSD GenOpts
+  | CmdOpenApi OpenApiCmdOpts
 
 
 -- Proto has sub-subcommands to preserve generate/print/summary
@@ -71,6 +85,17 @@ data ProtoOpts = ProtoOpts
 data ProtoPrintOpts = ProtoPrintOpts
   { ppoInput :: !FilePath
   , ppoIncludes :: ![FilePath]
+  }
+
+
+data OpenApiCmdOpts = OpenApiCmdOpts
+  { oaInput :: !FilePath
+  , oaOutput :: !(Maybe FilePath)
+  , oaIncludes :: ![FilePath]
+  , oaTitle :: !(Maybe T.Text)
+  , oaVersion :: !(Maybe T.Text)
+  , oaServers :: ![T.Text]
+  , oaValidate :: !Bool
   }
 
 
@@ -101,6 +126,7 @@ main = do
     CmdFlatBuffers go -> runFlatBuffers go
     CmdASN1 go -> runASN1 go
     CmdXSD go -> runXSD go
+    CmdOpenApi oa -> runOpenApi oa
   where
     opts =
       info
@@ -162,6 +188,12 @@ commandParser =
               (CmdXSD <$> genOptsParser <**> helper)
               (progDesc "Generate Haskell from XSD (XML Schema) files")
           )
+        <> command
+          "openapi"
+          ( info
+              (CmdOpenApi <$> openApiOptsParser <**> helper)
+              (progDesc "Generate an OpenAPI 3.1 doc for a .proto's Connect services")
+          )
     )
 
 
@@ -190,6 +222,58 @@ genOptsParser =
               <> metavar "PREFIX"
               <> help "Module name prefix"
           )
+      )
+
+
+openApiOptsParser :: Parser OpenApiCmdOpts
+openApiOptsParser =
+  OpenApiCmdOpts
+    <$> strOption
+      ( short 'i'
+          <> long "input"
+          <> metavar "FILE"
+          <> help "Input .proto file"
+      )
+    <*> optional
+      ( strOption
+          ( short 'o'
+              <> long "output"
+              <> metavar "FILE"
+              <> help "Output OpenAPI JSON file (default: stdout)"
+          )
+      )
+    <*> many
+      ( strOption
+          ( short 'I'
+              <> long "include"
+              <> metavar "DIR"
+              <> help "Proto include path (can repeat)"
+          )
+      )
+    <*> optional
+      ( strOption
+          ( long "title"
+              <> metavar "TITLE"
+              <> help "OpenAPI info.title (default: package or file name)"
+          )
+      )
+    <*> optional
+      ( strOption
+          ( long "api-version"
+              <> metavar "VERSION"
+              <> help "OpenAPI info.version (default: 0.0.0)"
+          )
+      )
+    <*> many
+      ( strOption
+          ( long "server"
+              <> metavar "URL"
+              <> help "A server base URL (can repeat)"
+          )
+      )
+    <*> switch
+      ( long "validate"
+          <> help "Carry protovalidate (buf.validate) rules through as JSON Schema keywords + x-protovalidate/x-cel extensions"
       )
 
 
@@ -438,6 +522,41 @@ runXSD go = do
   case parseXSD src of
     Left err -> hPutStrLn stderr err >> exitFailure
     Right schema -> writeOutput (goOutput go) (generateXMLTypes schema)
+
+
+runOpenApi :: OpenApiCmdOpts -> IO ()
+runOpenApi oa = do
+  result <- resolveProtoImports (oaIncludes oa) (oaInput oa)
+  case result of
+    Left err -> hPutStrLn stderr (showResolveError err) >> exitFailure
+    Right resolved -> do
+      let target = rpFile resolved
+          imports = fmap (rpFile . snd) (collectTransitiveImports (oaIncludes oa) resolved)
+          schemaFiles = target : imports
+          fallbackTitle = Data.Maybe.fromMaybe (T.pack (oaInput oa)) (protoPackage target)
+          opts =
+            defaultOpenApiOptions
+              { ooTitle = Data.Maybe.fromMaybe fallbackTitle (oaTitle oa)
+              , ooVersion = Data.Maybe.fromMaybe (ooVersion defaultOpenApiOptions) (oaVersion oa)
+              , ooServers = oaServers oa
+              }
+          annotators =
+            deprecationAnnotators schemaFiles
+              <> if oaValidate oa
+                then schemaAnnotators (protovalidateSchemaOptions (concatMap validateRules schemaFiles))
+                else noAnnotators
+          doc = renderOpenApi (connectOpenApiAnnotated annotators opts [target] schemaFiles)
+      case oaOutput oa of
+        Nothing -> BL.putStr doc
+        Just outFile -> do
+          createDirectoryIfMissing True (takeDirectory outFile)
+          BL.writeFile outFile doc
+          hPutStrLn stderr ("Wrote " <> outFile)
+
+
+-- | Extract protovalidate rules from one file; empty on extraction error.
+validateRules :: ProtoFile -> [(T.Text, MessageRules)]
+validateRules pf = either (const []) id (fileMessageRules pf)
 
 
 ------------------------------------------------------------------------

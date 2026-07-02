@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+// A fixture for the deprecation annotator: a mix of deprecated and live
+// messages, enums, fields (regular / map / oneof), methods, and a wholly
+// deprecated service. Declarations are intentionally comment-free so the
+// emitted schemas carry no `description` key.
+package dep.v1;
+
+enum LiveEnum {
+  LIVE_UNSPECIFIED = 0;
+  LIVE_ON = 1;
+}
+
+enum OldEnum {
+  option deprecated = true;
+  OLD_UNSPECIFIED = 0;
+  OLD_ONE = 1;
+}
+
+message OldMsg {
+  option deprecated = true;
+  string label = 1;
+}
+
+message Item {
+  string name = 1;
+  string old_field = 2 [deprecated = true];
+  map<string, int32> live_map = 3;
+  map<string, int32> old_map = 4 [deprecated = true];
+  LiveEnum status = 5;
+
+  oneof pick {
+    string new_alt = 6;
+    string old_alt = 7 [deprecated = true];
+  }
+}
+
+service ItemService {
+  rpc GetItem(Item) returns (Item) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option deprecated = true;
+  }
+  rpc CreateItem(Item) returns (Item) {}
+}
+
+service LegacyService {
+  option deprecated = true;
+  rpc Ping(Item) returns (Item) {}
+  rpc Peek(Item) returns (Item) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}

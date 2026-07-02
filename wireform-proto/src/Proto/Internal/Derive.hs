@@ -317,19 +317,39 @@ footprint). When 'Nothing', the codecs match the original
 'Proto.TH.Derive.deriveProto' output and silently drop unknown
 tags.
 -}
-newtype MessageMeta = MessageMeta
+data MessageMeta = MessageMeta
   { mmUnknownFieldsSel :: Maybe Name
   {- ^ Selector for an @[Decode.UnknownField]@ field on the
   record. When set, the codecs round-trip unknown tags through
   this slot.
   -}
+  , mmRecordDotReads :: !Bool
+  {- ^ When 'True', read record fields with record-dot syntax
+  (@msg.field@) instead of a bare selector application
+  (@field msg@). Required when the record was generated with
+  'Proto.CodeGen.UnprefixedFields' (bare field names shared
+  across messages are ambiguous, and 'NoFieldSelectors' removes
+  the selectors entirely); the enclosing module then needs
+  @OverloadedRecordDot@. Left 'False' for the default prefixed
+  layout so existing output is byte-identical.
+  -}
   }
   deriving stock (Show)
 
 
--- | Default 'MessageMeta' with no unknown-fields slot.
+-- | Default 'MessageMeta': no unknown-fields slot, bare-selector reads.
 defaultMessageMeta :: MessageMeta
-defaultMessageMeta = MessageMeta {mmUnknownFieldsSel = Nothing}
+defaultMessageMeta = MessageMeta {mmUnknownFieldsSel = Nothing, mmRecordDotReads = False}
+
+
+-- | Read a record field: @msg.field@ (record-dot) under
+-- 'mmRecordDotReads', else the bare selector application @field msg@.
+-- The field label for the record-dot form is the selector's base name,
+-- which is exactly the field name in both naming modes.
+readSel :: MessageMeta -> Name -> Name -> Exp
+readSel meta sel msgVar
+  | mmRecordDotReads meta = GetFieldE (VarE msgVar) (nameBase sel)
+  | otherwise = AppE (VarE sel) (VarE msgVar)
 
 
 -- ---------------------------------------------------------------------------
@@ -387,14 +407,14 @@ declared fields.
 buildMessageBodyWith :: MessageMeta -> [ProtoField] -> Q Exp
 buildMessageBodyWith meta fs = do
   msg <- newName "msg"
-  parts <- mapM (encodeOne msg) fs
+  parts <- mapM (encodeOne meta msg) fs
   let ufPart = case mmUnknownFieldsSel meta of
         Nothing -> Nothing
         Just sel ->
           Just
             ( AppE
                 (VarE 'PD.encodeUnknownFields)
-                (AppE (VarE sel) (VarE msg))
+                (readSel meta sel msg)
             )
       allParts = parts <> maybeToList ufPart
   case allParts of
@@ -417,14 +437,14 @@ adds @Decode.unknownFieldsSize (sel msg)@.
 messageSizeBodyWith :: MessageMeta -> [ProtoField] -> Q Exp
 messageSizeBodyWith meta fs = do
   msg <- newName "msg"
-  parts <- mapM (sizeOne msg) fs
+  parts <- mapM (sizeOne meta msg) fs
   let ufPart = case mmUnknownFieldsSel meta of
         Nothing -> Nothing
         Just sel ->
           Just
             ( AppE
                 (VarE 'PD.unknownFieldsSize)
-                (AppE (VarE sel) (VarE msg))
+                (readSel meta sel msg)
             )
       allParts = parts <> maybeToList ufPart
   case allParts of
@@ -575,8 +595,8 @@ mkSemigroupInstanceWith meta ty conName fs = do
   bName <- newName "b"
   let mergeField pf =
         let sel = pfSelector pf
-            getA = AppE (VarE sel) (VarE aName)
-            getB = AppE (VarE sel) (VarE bName)
+            getA = readSel meta sel aName
+            getB = readSel meta sel bName
         in case pfKind pf of
              FKRepeated _ _ -> [|$(pure getA) <> $(pure getB)|]
              FKMap _ -> [|$(pure getA) <> $(pure getB)|]
@@ -603,9 +623,9 @@ mkSemigroupInstanceWith meta ty conName fs = do
             , AppE
                 ( AppE
                     (VarE '(<>))
-                    (AppE (VarE ufSel) (VarE aName))
+                    (readSel meta ufSel aName)
                 )
-                (AppE (VarE ufSel) (VarE bName))
+                (readSel meta ufSel bName)
             )
           ]
         Nothing -> []
@@ -707,9 +727,9 @@ synthesiseProtoInstancesWith meta ty conName _protoName fs = do
 -- Encoder / size internals
 -- ---------------------------------------------------------------------------
 
-encodeOne :: Name -> ProtoField -> Q Exp
-encodeOne msg pf = do
-  let getter = AppE (VarE (pfSelector pf)) (VarE msg)
+encodeOne :: MessageMeta -> Name -> ProtoField -> Q Exp
+encodeOne meta msg pf = do
+  let getter = readSel meta (pfSelector pf) msg
       tagInt = pfTagByte pf
   case pfKind pf of
     FKBare -> do
@@ -786,9 +806,9 @@ encodeOne msg pf = do
       caseE (pure getter) allArms
 
 
-sizeOne :: Name -> ProtoField -> Q Exp
-sizeOne msg pf = do
-  let getter = AppE (VarE (pfSelector pf)) (VarE msg)
+sizeOne :: MessageMeta -> Name -> ProtoField -> Q Exp
+sizeOne meta msg pf = do
+  let getter = readSel meta (pfSelector pf) msg
   case pfKind pf of
     FKBare -> do
       v <- newName "v"

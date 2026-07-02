@@ -77,11 +77,9 @@ import Network.GRPC.Util.Stream (ClientDisconnected(..))
 -- @http2@ package, but "Network.GRPC.Server.Run" provides some convenience
 -- functions.
 --
--- If you are using Protobuf (or if you have another way to compute a list of
--- methods at the type level), you may wish to use the infrastructure from
--- "Network.GRPC.Server.StreamType" (in particular,
--- 'Network.GRPC.Server.StreamType.fromMethods' or
--- 'Network.GRPC.Server.StreamType.fromServices') to construct the set of
+-- If you are using Protobuf, you may wish to use the infrastructure from
+-- "Network.GRPC.Server.Service" (in particular,
+-- 'Network.GRPC.Server.Service.fromService') to construct the set of
 -- handlers.
 mkGrpcServer :: ServerParams -> [SomeRpcHandler IO] -> IO Server.Server
 mkGrpcServer params@ServerParams{serverTopLevel} handlers = do

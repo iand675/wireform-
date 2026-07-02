@@ -45,7 +45,7 @@ from the codec and streaming kind.
 | Module | Role |
 |---|---|
 | `Network.Connect` | Umbrella re-export of the public surface |
-| `Network.Connect.Server` | `runConnectServer`, the `mkNonStreaming` / `mkClientStreaming` / `mkServerStreaming` / `mkBiDiStreaming` handler builders, `ConnectServerM` + metadata accessors |
+| `Network.Connect.Server` | `runConnectServer`, `connectHandlers` + the `service` / `method` registration vocabulary (shared with `wireform-grpc`), `ConnectServerM` + metadata accessors |
 | `Network.Connect.Client` | `withConnectClient` + `nonStreaming` / `nonStreamingGet` / `serverStreaming` / `clientStreaming` / `biDiStreaming` |
 | `Network.Connect.Protocol` | Codecs, the content-type matrix, reserved header names, GET query parameters |
 | `Network.Connect.Error` | `ConnectError` / `ConnectException`, the code↔name and code↔HTTP-status tables, the JSON error envelope |
@@ -53,6 +53,7 @@ from the codec and streaming kind.
 | `Network.Connect.Metadata` | `CustomMetadata` ↔ HTTP headers (ASCII / `-bin` base64 / `trailer-` prefix) |
 | `Network.Connect.Codec` | proto / JSON message-body (de)serialization |
 | `Network.Connect.Compression` | `identity` / `gzip` / `br` / `zstd` + accept-encoding negotiation |
+| `Network.Connect.OpenAPI` | `connectOpenApi` / `renderOpenApi` — an OpenAPI 3.1 document for a `.proto`'s Connect services (also `wireform-gen openapi`) |
 
 Like `wireform-grpc` this is an RPC framework: it owns the `Network.Connect.*`
 namespace (not wireform's per-format `<Format>.*` convention) and is not

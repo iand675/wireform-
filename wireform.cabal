@@ -95,7 +95,10 @@ executable wireform-gen
     , wireform-flatbuffers
     , wireform-asn1
     , wireform-xml
+    , wireform-connect
+    , wireform-protovalidate
     , text
+    , bytestring
     , containers
     , vector
     , directory
