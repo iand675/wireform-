@@ -52,12 +52,14 @@ flag profile
 flag dataframe-bridge
   description: Build the example-dataframe-bridge executable, which
                writes a Parquet file with wireform-parquet and reads
-               it back through the dataframe library
-               (https://hackage.haskell.org/package/dataframe). The
-               dataframe dep tree is large (cassava, attoparsec,
-               regex-tdfa, snappy-hs, zstd, zlib, granite,
-               vector-algorithms, ...), so it is opt-in to keep the
-               default `cabal build all` lean.
+               it back through the dataframe ecosystem
+               (https://hackage.haskell.org/package/dataframe). It
+               depends only on the three subpackages it uses —
+               dataframe-core, dataframe-operations and
+               dataframe-parquet — rather than the umbrella
+               `dataframe` package, but that tree still pulls codecs
+               (snappy-hs, zstd, zlib) and vector-algorithms, so it
+               is opt-in to keep the default `cabal build all` lean.
   manual: True
   default: False
 
@@ -594,9 +596,10 @@ executable example-xml
   build-depends: base, wireform-xml, bytestring, text
 
 -- Cross-library bridge: write a Parquet file with wireform-parquet,
--- read it back with the dataframe library, run aggregations.
--- Behind the +dataframe-bridge flag because the dataframe dep tree
--- is large.
+-- read it back with the dataframe ecosystem, run aggregations.
+-- Depends on just the dataframe subpackages it uses (core, operations,
+-- parquet) rather than the umbrella `dataframe` package. Behind the
+-- +dataframe-bridge flag because that dep tree is still large.
 executable example-dataframe-bridge
   import: defaults
   main-is: DataFrameBridge.hs
@@ -612,7 +615,9 @@ executable example-dataframe-bridge
     , directory
     , filepath
     , temporary           >= 1.3 && < 2
-    , dataframe           >= 1.0 && < 2
+    , dataframe-core       >= 1.1 && < 1.2
+    , dataframe-operations >= 1.1 && < 1.2
+    , dataframe-parquet    >= 1.0.1 && < 1.1
 
 -- Standalone bench executables
 executable wireform-bench

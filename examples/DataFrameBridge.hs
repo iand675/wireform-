@@ -32,15 +32,28 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Vector qualified as V
 import Data.Vector.Primitive qualified as VP
--- The dataframe library's typed surface is in @DataFrame.Typed@,
--- which tracks column names and types in a phantom type. We only
--- touch the untyped @DataFrame@ module for I/O and the initial
--- describe; everything past 'TDF.freezeWithError' is schema-checked
--- at compile time.
-import DataFrame qualified as D
+-- The dataframe ecosystem is split into focused packages; this bridge
+-- depends only on the three it uses and imports their submodules
+-- directly instead of the umbrella @dataframe@ package's curated
+-- @DataFrame@/@DataFrame.Typed@ re-exports:
+--   * dataframe-parquet    — the Parquet reader (DataFrame.IO.Parquet)
+--   * dataframe-operations — untyped describe + the typed DSL
+--                            (groupBy/aggregate/expressions/access)
+--   * dataframe-core       — the (|>) operator and the typed-schema
+--                            'Column' type + 'freezeWithError'
+-- The typed surface tracks column names and types in a phantom type;
+-- everything past 'TDF.freezeWithError' is schema-checked at compile
+-- time.
+import DataFrame.IO.Parquet qualified as D
+import DataFrame.Operations.Core qualified as D
 import DataFrame.Operators ((|>))
-import DataFrame.Typed ((.==.), (.>.))
-import DataFrame.Typed qualified as TDF
+import DataFrame.Typed.Expr ((.*.), (.==.), (.>.))
+import DataFrame.Typed.Access qualified as TDF
+import DataFrame.Typed.Aggregate qualified as TDF
+import DataFrame.Typed.Expr qualified as TDF
+import DataFrame.Typed.Freeze qualified as TDF
+import DataFrame.Typed.Operations qualified as TDF
+import DataFrame.Typed.Types qualified as TDF
 import Parquet.Types qualified as P
 import Parquet.Write qualified as PW
 import System.Directory (
@@ -124,10 +137,9 @@ main = withSystemTempDirectory "wireform-dataframe-bridge" $ \dir -> do
         df
           |> TDF.groupBy @'["region"]
           |> TDF.aggregate
-            ( TDF.agg @"total" (TDF.sum (TDF.col @"amount")) $
-                TDF.agg @"orders" (TDF.count (TDF.col @"order_id")) $
-                  TDF.agg @"avg" (TDF.mean (TDF.col @"amount")) $
-                    TDF.aggNil
+            ( TDF.as @"total" (TDF.sum (TDF.col @"amount"))
+                . TDF.as @"orders" (TDF.count (TDF.col @"order_id"))
+                . TDF.as @"avg" (TDF.mean (TDF.col @"amount"))
             )
           |> TDF.sortBy [TDF.desc (TDF.col @"total")]
   print perRegion
@@ -166,8 +178,8 @@ main = withSystemTempDirectory "wireform-dataframe-bridge" $ \dir -> do
   putStrLn "\n=== filter + derive + take (dataframe pipeline) ==="
   let topDiscounted =
         df
-          |> TDF.filterWhere (TDF.col @"amount" .>. 15.0)
-          |> TDF.derive @"discounted_amount" (TDF.col @"amount" * 0.9)
+          |> TDF.filterWhere (TDF.col @"amount" .>. TDF.lit 15.0)
+          |> TDF.derive @"discounted_amount" (TDF.col @"amount" .*. TDF.lit 0.9)
           |> TDF.sortBy [TDF.desc (TDF.col @"discounted_amount")]
           |> TDF.take 3
   print topDiscounted
