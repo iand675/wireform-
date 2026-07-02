@@ -55,25 +55,31 @@ main = do
       defMessage & RG.latitude .~ lat & RG.longitude .~ lon
 ```
 
-For server-side handlers, use `Network.GRPC.Server.Run` with handlers
-constructed from `Network.GRPC.Server.StreamType`:
+For server-side handlers, implement the service with the transport-agnostic
+`Service` vocabulary (shared with `wireform-connect`) and adapt it with
+`Network.GRPC.Server.Service.fromService`:
 
 ```haskell
 import           Network.GRPC.Server.Run
-import           Network.GRPC.Server.StreamType
+import           Network.GRPC.Server.Service
 
 runGuideServer :: IO ()
 runGuideServer =
-  runServerWithHandlers def config handlers
+  runServerWithHandlers def config (fromService routeGuide)
   where
     config =
       ServerConfig
         { serverInsecure = Just (InsecureConfig (Just "0.0.0.0") 50051)
         , serverSecure   = Nothing
         }
-    handlers =
-      [ fromMethod (mkNonStreaming handleGetFeature)
-      ]
+
+routeGuide :: Service RouteGuide IO
+routeGuide =
+  service
+    (  method @GetFeature handleGetFeature
+    :& ...
+    :& Done
+    )
 ```
 
 Wrap calls with `Network.GRPC.Client.Otel.withTracedRPC` when you need
@@ -85,7 +91,8 @@ distributed tracing spans around RPC latency.
 |--------|---------|
 | `Network.GRPC.Client` | Connection management, `withConnection`, `withRPC` |
 | `Network.GRPC.Client.StreamType.IO` | Unary and streaming client handlers |
-| `Network.GRPC.Server` | Server handler registration and call dispatch |
+| `Network.GRPC.Server` | Server entry point and call dispatch |
+| `Network.GRPC.Server.Service` | `Service` / `method` registration + `fromService` (shared vocabulary with `wireform-connect`) |
 | `Network.GRPC.Server.Run` | Server lifecycle and listener setup |
 | `Network.GRPC.Common.Protobuf` | Protobuf codec integration with `wireform-proto` |
 | `Network.GRPC.Common.Compression` | Compression negotiation |

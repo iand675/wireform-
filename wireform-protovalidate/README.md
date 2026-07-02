@@ -121,6 +121,33 @@ case messageRulesFromDescriptor fileDescriptorProto "acme.user.v1.User" of
 mapped for the common kinds (string / numeric / bool / bytes / repeated / map)
 using the buf.validate v1 field numbers.
 
+## Rules → OpenAPI / JSON Schema
+
+`Protovalidate.OpenAPI` folds extracted rules into the OpenAPI 3.1 generator
+(see [`wireform-connect`](../wireform-connect/)) as JSON Schema validation
+keywords, so a `.proto`'s constraints carry through to the generated API doc:
+
+```haskell
+import Protovalidate.Schema (fileMessageRules)
+import Protovalidate.OpenAPI (protovalidateSchemaOptions)
+import Network.Connect.OpenAPI (connectOpenApiWith, defaultOpenApiOptions)
+
+-- sopts :: SchemaOptions  (the Proto.JSONSchema annotator hook)
+let sopts = protovalidateSchemaOptions (either (const []) id (fileMessageRules pf))
+ in connectOpenApiWith sopts defaultOpenApiOptions [pf] [pf]
+```
+
+Or straight from the CLI: `wireform-gen openapi -i x.proto --validate`.
+
+Rules with a faithful JSON Schema equivalent become standard keywords
+(`string.min_len`→`minLength`, `pattern`→`pattern`, `string.email`→`format`,
+numeric `gte`/`lte`→`minimum`/`maximum`, `repeated.min_items`→`minItems`,
+`repeated.unique`→`uniqueItems`, `map.min_pairs`→`minProperties`,
+`required`→the object's `required` list). Custom CEL becomes an `x-cel` array
+of `{id, message, expression}`; everything else is preserved losslessly under
+an `x-protovalidate` object. `fieldConstraintsFor` exposes the per-field
+mapping directly.
+
 ## Compile-time validators
 
 `Protovalidate.TH.compileMessageValidator` reads a `.proto`'s `buf.validate`

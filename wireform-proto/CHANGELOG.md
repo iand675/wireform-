@@ -30,6 +30,12 @@ Initial release.
 * Proto3 canonical JSON mapping (`Proto.JSON`) with `json_name`
   override, base64 bytes, string-encoded 64-bit integers, and
   NaN/Infinity sentinels.
+* Proto → JSON Schema (draft 2020-12 / OpenAPI 3.1) walk
+  (`Proto.JSONSchema`): the transport-agnostic half of schema-derived
+  API doc generation. Emits `#/components/schemas` objects whose field
+  names, 64-bit-int-as-string, base64 bytes, inlined well-known types,
+  enum-as-string, map, and oneof shapes match the proto3-canonical-JSON
+  codec byte-for-byte. Consumed by `wireform-connect`'s OpenAPI emitter.
 * Well-known types (`Timestamp`, `Duration`, `Any`, `FieldMask`,
   `Struct`, `Value`, `ListValue`, `NullValue`, `Empty`, `Wrappers`,
   `SourceContext`) generated from the bundled `.proto` files by the

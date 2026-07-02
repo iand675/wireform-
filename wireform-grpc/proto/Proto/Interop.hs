@@ -21,8 +21,7 @@ import Proto.Schema (HasField)
 import Proto.Google.Protobuf.Any qualified
 import Network.GRPC.Common
 import Network.GRPC.Common.Protobuf
-import Network.GRPC.Spec (SupportsStreamingType, HasStreamingType(..), SupportsClientRpc(..), SupportsServerRpc(..), IsRPC(..), Input, Output, NoMetadata, RequestMetadata, ResponseInitialMetadata, ResponseTrailingMetadata)
-import Network.GRPC.Server.Protobuf (ServiceMethods)
+import Network.GRPC.Spec (SupportsStreamingType, HasStreamingType(..), SupportsClientRpc(..), SupportsServerRpc(..), IsRPC(..), Input, Output, NoMetadata, RequestMetadata, ResponseInitialMetadata, ResponseTrailingMetadata, ServiceMethods)
 import Control.Monad.Catch (MonadThrow(throwM))
 import Control.Monad.State (StateT, execStateT, modify)
 import Data.Default (Default(def))

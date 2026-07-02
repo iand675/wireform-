@@ -55,8 +55,8 @@ $(loadProto "proto/eliza.proto")
 $(loadProtoServices "proto/eliza.proto")
 ```
 
-A server — one handler per method, the builder chosen with a type application
-because the streaming kind is fixed by the tag:
+A server — one `method` per RPC (the handler shape is inferred from the
+method's streaming kind), bundled into a completeness-checked `Service`:
 
 ```haskell
 import Network.Connect.Server
@@ -66,15 +66,20 @@ import Network.GRPC.Spec (Proto (..))
 import Eliza
 
 main :: IO ()
-main = runConnectServer defaultConnectServerConfig serverCfg handlers
+main = runConnectServer defaultConnectServerConfig serverCfg (connectHandlers eliza)
   where
     serverCfg = defaultServerConfig
       { serverPort = "8080", serverVersionRange = preferHttp20 }
-    handlers =
-      [ mkNonStreaming @Say say
-      , mkServerStreaming @Introduce introduce
-      , mkBiDiStreaming @Converse converse
-      ]
+
+eliza :: Service ElizaService ConnectServerM
+eliza =
+  service
+    (  method @Say say
+    :& method @Introduce introduce
+    :& method @Converse converse
+    :& Done
+    )
+  where
     say (Proto req) = pure (Proto defaultSayResponse
       { sayResponseSentence = "Hello, " <> sayRequestSentence req })
 ```
@@ -111,7 +116,7 @@ compression), see [Wire protocol](./protocol/).
 | Module | Role |
 |---|---|
 | `Network.Connect` | Umbrella re-export of the public surface |
-| `Network.Connect.Server` | `runConnectServer`, the `mkNonStreaming` / `mkClientStreaming` / `mkServerStreaming` / `mkBiDiStreaming` handler builders, `ConnectServerM` + metadata accessors |
+| `Network.Connect.Server` | `runConnectServer`, `connectHandlers` + the `service` / `method` registration vocabulary (shared with `wireform-grpc`), `ConnectServerM` + metadata accessors |
 | `Network.Connect.Client` | `withConnectClient` + `nonStreaming` / `nonStreamingGet` / `serverStreaming` / `clientStreaming` / `biDiStreaming` |
 | `Network.Connect.Protocol` | Codecs, the content-type matrix, reserved header names, GET query parameters |
 | `Network.Connect.Error` | `ConnectError` / `ConnectException`, the code↔name and code↔HTTP-status tables, the JSON error envelope |

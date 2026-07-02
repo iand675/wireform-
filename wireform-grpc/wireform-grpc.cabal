@@ -109,7 +109,7 @@ library
       Network.GRPC.Server
       Network.GRPC.Server.Binary
       Network.GRPC.Server.Otel
-      Network.GRPC.Server.Protobuf
+      Network.GRPC.Server.Service
       Network.GRPC.Server.Run
       Network.GRPC.Server.StreamType
       Network.GRPC.Server.StreamType.Binary

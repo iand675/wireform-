@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+* **Replace the handler-registration API.** The order-sensitive
+  `Methods`/`Services` GADTs and their consumers (`fromMethods`,
+  `fromServices`, `simpleMethods`, `hoistMethods`, `hoistServices`) and the
+  `Network.GRPC.Server.Protobuf` module (`ProtobufMethodsOf` etc.) are
+  removed. Protobuf services are now implemented with the transport-agnostic
+  `Service` vocabulary from `grpc-spec` (`Network.GRPC.Spec.Service`:
+  `service`, `method`, `methodUnimplemented`) and served with
+  `Network.GRPC.Server.Service.fromService`. Registration is
+  order-insensitive and completeness-checked (missing/duplicate/foreign
+  methods are compile-time errors naming the method), and the same `Service`
+  value can be served over Connect (`wireform-connect`). `ServiceMethods`
+  moved to `grpc-spec` (re-exported from `Network.GRPC.Spec`).
+  `Network.GRPC.Server.StreamType` keeps the per-RPC `mk*Streaming` builders
+  and `fromMethod` as the raw/custom-format escape hatch.
+
 * Add `Network.GRPC.Protobuf.TH` (`loadProtoServices` /
   `loadProtoServicesWith`): Template Haskell generation of the gRPC service
   bindings (the `Protobuf`-tagged RPC types plus their `IsRPC` /

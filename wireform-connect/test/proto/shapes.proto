@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+// A synthetic fixture exercising every JSON-Schema shape the OpenAPI
+// generator must render: 64-bit ints (string), 32-bit ints (number), bytes
+// (base64), repeated, map, enum, nested message, oneof, a json_name
+// override, and a google.protobuf.Timestamp reference. The import is
+// deliberately NOT wired into the schema env: WKTs must inline by name.
+//
+// Field/message declarations below are intentionally comment-free so their
+// emitted schemas carry no `description` key (the tests assert exact schema
+// values).
+package shapes.v1;
+
+import "google/protobuf/timestamp.proto";
+
+enum Color {
+  COLOR_UNSPECIFIED = 0;
+  COLOR_RED = 1;
+  COLOR_GREEN = 2;
+  COLOR_BLUE = 3;
+}
+
+message Shape {
+  string name = 1;
+  int64 big_id = 2;
+  uint64 huge = 3;
+  int32 small = 4;
+  bytes blob = 5;
+  bool flag = 6;
+  repeated string tags = 7;
+  map<string, int32> counts = 8;
+  Color color = 9;
+  Nested nested = 10;
+  google.protobuf.Timestamp created_at = 11;
+  string product_id = 12;
+  string legacy_field = 13 [json_name = "legacyName"];
+
+  oneof choice {
+    string alpha = 20;
+    int32 beta = 21;
+  }
+
+  message Nested {
+    string label = 1;
+  }
+}
+
+message GetShapeRequest {
+  string id = 1;
+}
+
+message CreateResult {
+  int32 created = 1;
+}
+
+message ChatMsg {
+  string text = 1;
+}
+
+service ShapeService {
+  rpc GetShape(GetShapeRequest) returns (Shape) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc CreateShape(Shape) returns (Shape) {}
+  rpc StreamShapes(GetShapeRequest) returns (stream Shape) {}
+  rpc UploadShapes(stream Shape) returns (CreateResult) {}
+  rpc Chat(stream ChatMsg) returns (stream ChatMsg) {}
+}

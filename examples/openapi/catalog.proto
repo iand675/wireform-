@@ -1,0 +1,146 @@
+syntax = "proto3";
+
+// A worked end-to-end example for `wireform-gen openapi`: a small catalog API
+// that exercises every feature the generator carries through into OpenAPI 3.1 —
+// all four RPC kinds, a cacheable GET, well-known types, enums / maps / oneofs /
+// nested messages, protovalidate (buf.validate) rules, and `deprecated`.
+//
+// NOTE on the buf.validate options below: wireform's OpenAPI generator reads the
+// `(buf.validate.field)` / `(buf.validate.message)` option *syntax* directly off
+// the .proto AST, so this file generates without importing
+// `buf/validate/validate.proto`. To compile it with `protoc` / `buf` you would
+// add `import "buf/validate/validate.proto";` and the protovalidate dependency.
+package catalog.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// The service. `wireform-gen openapi -i catalog.proto --validate` turns each RPC
+// into an OpenAPI path (`/catalog.v1.CatalogService/<Method>`).
+service CatalogService {
+  // Unary, side-effect-free → gets BOTH a POST and a cacheable GET operation.
+  rpc GetProduct(GetProductRequest) returns (Product) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // Unary write → POST only.
+  rpc CreateProduct(CreateProductRequest) returns (Product) {}
+
+  // Server streaming → `application/connect+json`, tagged `x-connect-streaming: server`.
+  rpc ListProducts(ListProductsRequest) returns (stream Product) {}
+
+  // Client streaming → `x-connect-streaming: client`.
+  rpc ImportProducts(stream CreateProductRequest) returns (ImportSummary) {}
+
+  // Bidirectional streaming → `x-connect-streaming: bidi`.
+  rpc Watch(stream WatchRequest) returns (stream ProductEvent) {}
+
+  // A retired RPC → its operation carries `deprecated: true`.
+  rpc SearchLegacy(GetProductRequest) returns (Product) {
+    option deprecated = true;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+message GetProductRequest {
+  // A UUID → JSON Schema `format: uuid`.
+  string product_id = 1 [(buf.validate.field).string.uuid = true];
+}
+
+message CreateProductRequest {
+  // 1..120 chars → `minLength` / `maxLength`.
+  string name = 1 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.min_len = 1,
+    (buf.validate.field).string.max_len = 120
+  ];
+
+  // Non-negative price in minor units. int64 → JSON string; `gte` → `minimum`.
+  int64 price_cents = 2 [(buf.validate.field).int64.gte = 0];
+
+  // A slug pattern → `pattern`.
+  string slug = 3 [(buf.validate.field).string.pattern = "^[a-z0-9-]+$"];
+
+  Category category = 4;
+
+  // 0..20 unique tags → `minItems` / `maxItems` / `uniqueItems`.
+  repeated string tags = 5 [
+    (buf.validate.field).repeated.max_items = 20,
+    (buf.validate.field).repeated.unique = true
+  ];
+
+  // Free-form attributes → JSON object with `additionalProperties`.
+  map<string, string> attributes = 6;
+}
+
+message Product {
+  string product_id = 1;
+  string name = 2;
+  int64 price_cents = 3;
+  string slug = 4;
+  Category category = 5;
+  repeated string tags = 6;
+  map<string, string> attributes = 7;
+
+  // A well-known type → inlined as `{ "type": "string", "format": "date-time" }`.
+  google.protobuf.Timestamp created_at = 8;
+
+  // A nested message → its own `#/components/schemas/...` entry.
+  Dimensions dimensions = 9;
+
+  // A retired field → `deprecated: true` on the property.
+  string sku = 10 [deprecated = true];
+
+  message Dimensions {
+    double width_cm = 1;
+    double height_cm = 2;
+    double depth_cm = 3;
+  }
+}
+
+message ListProductsRequest {
+  Category category = 1;
+  int32 page_size = 2 [
+    (buf.validate.field).int32.gte = 1,
+    (buf.validate.field).int32.lte = 100
+  ];
+}
+
+message ImportSummary {
+  int32 imported = 1;
+  int32 skipped = 2;
+}
+
+message WatchRequest {
+  // Exactly one of the two selectors → oneof members flatten as optional properties.
+  oneof selector {
+    string product_id = 1;
+    Category category = 2;
+  }
+}
+
+message ProductEvent {
+  EventKind kind = 1;
+  Product product = 2;
+
+  enum EventKind {
+    EVENT_KIND_UNSPECIFIED = 0;
+    EVENT_KIND_CREATED = 1;
+    EVENT_KIND_UPDATED = 2;
+    EVENT_KIND_DELETED = 3;
+  }
+}
+
+// An enum → `{ "type": "string", "enum": [...] }` in declared order.
+enum Category {
+  CATEGORY_UNSPECIFIED = 0;
+  CATEGORY_BOOKS = 1;
+  CATEGORY_ELECTRONICS = 2;
+  CATEGORY_HOME = 3;
+}
+
+// A retired enum → `deprecated: true` on the enum component.
+enum LegacyTier {
+  option deprecated = true;
+  LEGACY_TIER_UNSPECIFIED = 0;
+  LEGACY_TIER_GOLD = 1;
+}
