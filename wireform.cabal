@@ -595,6 +595,25 @@ executable example-xml
   hs-source-dirs: examples
   build-depends: base, wireform-xml, bytestring, text
 
+-- A runnable Connect implementation of examples/openapi/catalog.proto:
+-- serves the CatalogService over the Connect protocol and drives it with an
+-- in-process Connect client (all four RPC kinds + a cacheable GET).
+executable example-connect-catalog
+  import: defaults
+  main-is: CatalogDemo.hs
+  hs-source-dirs: examples/openapi
+  build-depends:
+      base
+    , wireform-proto
+    , wireform-grpc
+    , wireform-connect
+    , grpc-spec
+    , wireform-http
+    , text
+    , containers
+    , vector
+    , network
+
 -- Cross-library bridge: write a Parquet file with wireform-parquet,
 -- read it back with the dataframe ecosystem, run aggregations.
 -- Depends on just the dataframe subpackages it uses (core, operations,
