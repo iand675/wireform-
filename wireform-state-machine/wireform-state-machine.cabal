@@ -1,0 +1,116 @@
+cabal-version: 3.0
+name: wireform-state-machine
+version: 0.1.0.0
+synopsis: Dependently typed statecharts (XState for Haskell)
+description:
+  Hierarchical state machines (statecharts) with the full XState feature
+  set — compound and parallel states, history, guards, entry/exit/transition
+  actions, eventless and delayed transitions, invoked services and actors,
+  done events with typed output — where the machine specification lives at
+  the type level. Ill-formed charts (dangling transition targets, duplicate
+  state names, missing initial states), unknown events, and incomplete
+  guard/action/service registrations are compile-time errors naming the
+  offender. Machine state serializes to JSON and restores with rich error
+  handling and recovery strategies when the persisted state no longer fits
+  the current chart. Ships renderers (XState/Stately-importable JSON,
+  Mermaid, Graphviz DOT, self-contained HTML) and a deterministic
+  simulation + tracing toolkit for debugging.
+license: BSD-3-Clause
+license-file: LICENSE
+author: Ian Duncan
+maintainer: ian@iankduncan.com
+copyright: 2026 Ian Duncan
+build-type: Simple
+
+common defaults
+  ghc-options:
+    -Wall
+    -Wcompat
+    -Widentities
+    -Wincomplete-record-updates
+    -Wincomplete-uni-patterns
+    -Wpartial-fields
+    -Wredundant-constraints
+    -O2
+  default-language: GHC2021
+  default-extensions:
+    DataKinds
+    TypeFamilies
+    GADTs
+    UndecidableInstances
+    DerivingStrategies
+    OverloadedStrings
+    LambdaCase
+
+library
+  import: defaults
+  hs-source-dirs: src
+  exposed-modules:
+    StateMachine
+    StateMachine.Runtime
+    StateMachine.Spec
+    StateMachine.Validate
+    StateMachine.Reify
+    StateMachine.Event
+    StateMachine.Registry
+    StateMachine.Machine
+    StateMachine.Step
+    StateMachine.Persist
+    StateMachine.Interpret
+    StateMachine.Debug
+    StateMachine.Render.XState
+    StateMachine.Render.Mermaid
+    StateMachine.Render.Dot
+    StateMachine.Render.Html
+  build-depends:
+    base >= 4.16 && < 5,
+    aeson >= 2.1 && < 2.3,
+    aeson-pretty >= 0.8 && < 0.9,
+    async >= 2.2 && < 2.3,
+    bytestring >= 0.11 && < 0.13,
+    containers >= 0.6 && < 0.9,
+    stm >= 2.5 && < 2.6,
+    text >= 2.0 && < 2.2,
+    time >= 1.11 && < 1.16
+
+test-suite wireform-state-machine-test
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is: Main.hs
+  other-modules:
+    Test.StateMachine.ChildBridge
+    Test.StateMachine.Completion
+    Test.StateMachine.Effects
+    Test.StateMachine.Eventless
+    Test.StateMachine.History
+    Test.StateMachine.Ordering
+    Test.StateMachine.Parallel
+    Test.StateMachine.Persistence
+    Test.StateMachine.Properties
+    Test.StateMachine.Selection
+    Test.StateMachine.Support
+    Test.StateMachine.Surface
+  ghc-options: -threaded
+  build-depends:
+    base,
+    wireform-state-machine,
+    aeson,
+    containers,
+    text,
+    transformers,
+    stm,
+    sydtest,
+    sydtest-hedgehog,
+    hedgehog
+
+executable example-traffic
+  import: defaults
+  hs-source-dirs: examples
+  main-is: Traffic.hs
+  build-depends:
+    base,
+    wireform-state-machine,
+    aeson,
+    bytestring,
+    text

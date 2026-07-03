@@ -177,6 +177,15 @@ export default defineConfig({
 							],
 						},
 						{
+							label: "State machines",
+							items: [
+								{
+									label: "wireform-state-machine",
+									slug: "packages/state-machine",
+								},
+							],
+						},
+						{
 							label: "Messaging & networking",
 							items: [
 								{
@@ -223,6 +232,18 @@ export default defineConfig({
 								},
 							],
 						},
+					],
+				},
+				{
+					label: "State machines",
+					items: [
+						{ label: "Overview", slug: "state-machine" },
+						{ label: "The chart type", slug: "state-machine/spec" },
+						{ label: "Implementing a chart", slug: "state-machine/implementing" },
+						{ label: "Running a machine", slug: "state-machine/running" },
+						{ label: "Testing", slug: "state-machine/testing" },
+						{ label: "Persistence & recovery", slug: "state-machine/persistence" },
+						{ label: "Visualization", slug: "state-machine/visualization" },
 					],
 				},
 				{

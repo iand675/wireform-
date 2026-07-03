@@ -187,6 +187,7 @@ let
     wireform-stats         = { path = "wireform-stats";         emoji = ":bar_chart:";        tier = "tool"; };
     wireform-cel           = { path = "wireform-cel";           emoji = ":scroll:";           tier = "tool"; };
     wireform-protovalidate = { path = "wireform-protovalidate"; emoji = ":shield:";           tier = "tool"; };
+    wireform-state-machine = { path = "wireform-state-machine"; emoji = ":traffic_light:";    tier = "tool"; };
   };
 
   # Merge hand-maintained metadata with auto-extracted cabal info,

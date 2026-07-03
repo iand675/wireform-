@@ -588,7 +588,23 @@ function rewriteAnchorHtml(html) {
     const target = mod.toLowerCase();
     return `href="../${target}/${anchor || ''}"`;
   });
-  return escapeMdxBraces(rewritten);
+  // Collapse remaining physical newlines to spaces (HTML-neutral outside
+  // <pre>, whose newlines are already entities via flattenPre): a line
+  // beginning with "+ ", "- ", "1. ", "#", … inside embedded HTML would
+  // otherwise start a markdown list/heading, end the paragraph, and orphan
+  // the enclosing tag.
+  return escapeMdxBraces(flattenPre(rewritten)).replace(/\n[ \t]*/g, ' ');
+}
+
+// MDX terminates an HTML flow block at a blank line, so a Haddock code
+// block (`<pre>` with blank lines inside — common in wire-format grammars)
+// orphans its `</pre>` and fails the build with "Expected a closing tag
+// for `<pre>`".  Collapse each <pre>…</pre> onto one physical line by
+// encoding its newlines; `white-space: pre` renders `&#10;` identically.
+function flattenPre(html) {
+  return String(html).replace(/<pre\b[^>]*>[\s\S]*?<\/pre>/g, (block) =>
+    block.replace(/\n/g, '&#10;'),
+  );
 }
 
 function writePackageIndex(pkg, modules) {
@@ -722,17 +738,43 @@ function escapeHtml(s = '') {
     // MDX parses '{' as the start of a JS expression even inside HTML
     // elements, so escape both braces.
     .replace(/\{/g, '&#123;')
-    .replace(/\}/g, '&#125;');
+    .replace(/\}/g, '&#125;')
+    // MDX still runs the *markdown* inline parser inside raw HTML, so a
+    // type signature like `f_a * f_b` becomes emphasis and orphans the
+    // enclosing tag. Entity-encode the emphasis triggers.
+    .replace(/_/g, '&#95;')
+    .replace(/\*/g, '&#42;')
+    .replace(/~/g, '&#126;')
+    .replace(/`/g, '&#96;');
 }
 
 function escapeAttr(s = '') {
   return escapeHtml(s);
 }
 
+// For strings that are already HTML (Haddock output): neutralize only the
+// MDX-active characters, leaving tags intact. Applied AFTER 'flattenPre';
+// '_' and '*' become entities so markdown emphasis can't fire inside doc
+// prose or inline code.
 function escapeMdxBraces(s = '') {
   return String(s)
     .replace(/\{/g, '&#123;')
-    .replace(/\}/g, '&#125;');
+    .replace(/\}/g, '&#125;')
+    .replace(/_/g, '&#95;')
+    .replace(/\*/g, '&#42;')
+    .replace(/~/g, '&#126;')
+    .replace(/`/g, '&#96;')
+    // A backslash escapes the next character in MDX ("\<" hides the '<'
+    // of the very tag that follows), so it must be an entity.
+    .replace(/\\/g, '&#92;')
+    // Literal markdown-link syntax in prose ("[RFC 1945](https://…)")
+    // otherwise interleaves with Haddock's <em>/<code> spans and breaks
+    // MDX's inline parser; real links are already <a> tags.
+    .replace(/\[/g, '&#91;')
+    // A '<' that cannot start a tag (e.g. the literal <"> in an RFC
+    // grammar) is a hard MDX error; real tags start with a letter, '/',
+    // or '!'.
+    .replace(/<(?![A-Za-z/!])/g, '&lt;');
 }
 
 function oneLine(s = '') {
@@ -780,8 +822,14 @@ function joinUrl(base, href) {
 }
 
 function markdownDescription(s) {
-  // Haddock module descriptions are already partially HTML; we strip the
-  // outermost <p> wrappers but otherwise keep them as-is so MDX renders them
-  // verbatim.  This is good enough for the typical "module summary" blurb.
-  return `<div class="doc">${escapeMdxBraces(s).replace(/\n{2,}/g, '<br/><br/>')}</div>`;
+  // The module description was extracted with cheerio's .text(): it is
+  // PLAIN TEXT with entities decoded and tags stripped, so it must be
+  // fully HTML-escaped before re-embedding (an RFC grammar like <addr-spec>
+  // would otherwise read as an unclosed JSX tag and fail the MDX build).
+  // Paragraph breaks are preserved as <br/><br/>; every other newline
+  // collapses to a space so no line can start a markdown list/heading or
+  // read as an MDX blank line (whitespace-only lines included).
+  return `<div class="doc">${escapeHtml(s)
+    .replace(/\n(?:[ \t]*\n)+/g, '<br/><br/>')
+    .replace(/\n[ \t]*/g, ' ')}</div>`;
 }

@@ -96,6 +96,7 @@ jobs:
           cabal test wireform-delta:delta-test           --test-show-details=streaming
           cabal test wireform-hudi:hudi-test             --test-show-details=streaming
           cabal test wireform-lance:lance-test           --test-show-details=streaming
+          cabal test wireform-state-machine:wireform-state-machine-test --test-show-details=streaming
 
   hlint:
     name: HLint

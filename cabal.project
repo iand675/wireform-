@@ -50,6 +50,7 @@ packages:
   wireform-stats/
   wireform-cel/
   wireform-protovalidate/
+  wireform-state-machine/
   examples/payments-pipeline/
 
 package *
