@@ -3,6 +3,7 @@ module Network.GRPC.Util.HTTP2 (
     -- * Configuration
   withConfigForInsecure,
   withConfigForSecure,
+  withConfigForTransport,
     -- * Settings
   mkServerConfig,
   mkTlsSettings,
@@ -102,6 +103,32 @@ withConfig mgr sendFn recv mysa peersa k = do
       , confMySockAddr        = mysa
       , confPeerSockAddr      = peersa
       }
+
+-- | Create a server config over a caller-supplied byte transport (a
+-- pointer-based send and an exactly-N read), rather than a 'Socket'. Used to
+-- run the gRPC server over any transport — e.g. one end of a
+-- @wireform-dst-net@ fault link. The socket addresses are placeholders (there
+-- is no real socket); nothing in the request path depends on them for gRPC.
+-- The @readN@ callback MUST return exactly the requested number of bytes,
+-- fewer only at end-of-input (the engine's frame reader relies on this).
+withConfigForTransport ::
+     TimeManager
+  -> SendFn
+  -> (Int -> IO Strict.ByteString)
+  -> (Server.Config -> IO a)
+  -> IO a
+withConfigForTransport mgr sendFn readN k =
+    k Server.Config {
+        confSendFn            = sendFn
+      , confReadN             = readN
+      , confPositionReadMaker = Server.defaultPositionReadMaker
+      , confTimeoutManager    = mgr
+      , confMySockAddr        = placeholder
+      , confPeerSockAddr      = placeholder
+      }
+  where
+    placeholder :: SockAddr
+    placeholder = Socket.SockAddrUnix "wireform-dst-net"
 
 {-------------------------------------------------------------------------------
   Settings

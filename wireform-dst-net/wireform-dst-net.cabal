@@ -1,0 +1,225 @@
+cabal-version: 3.0
+name: wireform-dst-net
+version: 0.1.0.0
+synopsis: Fault-injecting in-memory transport bridging wireform-dst and wireform-network
+description:
+  A bridge package that plugs the @wireform-dst@ deterministic
+  simulation-testing fault vocabulary ('Sim.World.LinkPolicy' /
+  'Sim.Entropy.LatencyDist' / 'Sim.Types.Seed') into the
+  @wireform-network@ transport seam. 'Sim.Net.Link' builds a pair of
+  in-memory 'Wireform.Network.DuplexTransport's (and the raw
+  'ReceiveFn' / 'SendFn' the HTTP\/2 engine consumes) whose byte flow is
+  governed by a runtime-controllable fault policy — partition\/stall\/cut,
+  probabilistic drop, latency, bit-corruption, and close.
+  .
+  Because every wireform networking layer (HTTP\/1, HTTP\/2, gRPC,
+  Connect, Kafka, WebSocket) already funnels its bytes through
+  @ReceiveFn@\/@SendFn@, the /entire real IO stack/ can run over this
+  fault link in "simulator mode" with no change to — and no runtime cost
+  in — the production socket\/TLS path.
+homepage: https://github.com/iand675/wireform-
+bug-reports: https://github.com/iand675/wireform-/issues
+license: BSD-3-Clause
+license-file: LICENSE
+author: Ian Duncan
+maintainer: ian@iankduncan.com
+copyright: 2026 Ian Duncan
+category: Testing, Simulation, Network
+build-type: Simple
+tested-with: GHC == 9.6.4, GHC == 9.8.4
+
+source-repository head
+  type:     git
+  location: https://github.com/iand675/wireform-
+
+common defaults
+  default-language: GHC2021
+  ghc-options:
+    -Wall
+    -Wcompat
+    -Widentities
+    -Wincomplete-record-updates
+    -Wincomplete-uni-patterns
+    -Wpartial-fields
+    -Wredundant-constraints
+    -O2
+  default-extensions:
+    StrictData
+    DerivingStrategies
+    OverloadedStrings
+    LambdaCase
+    BangPatterns
+
+library
+  import: defaults
+  hs-source-dirs: src
+  exposed-modules:
+    Sim.Net.Link
+    Sim.Net.Explore
+  build-depends:
+    base >= 4.16 && < 5,
+    bytestring >= 0.11 && < 0.13,
+    stm >= 2.5 && < 2.6,
+    wireform-dst,
+    wireform-network,
+    wireform-core
+
+test-suite wireform-dst-net-test
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is: Main.hs
+  ghc-options: -threaded -rtsopts "-with-rtsopts=-N"
+  build-depends:
+    base >= 4.16 && < 5,
+    bytestring >= 0.11 && < 0.13,
+    async >= 2.2 && < 2.3,
+    wireform-dst,
+    wireform-dst-net,
+    wireform-network,
+    wireform-core,
+    sydtest,
+    sydtest-hedgehog
+
+-- Drives the REAL vendored HTTP/2 engine (client + server) over the
+-- fault-injecting in-memory link: proves the production stack runs
+-- unchanged in simulator mode and that injected faults actually bite it.
+test-suite http2-fault-test
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test-http2
+  main-is: Main.hs
+  ghc-options: -threaded -rtsopts "-with-rtsopts=-N"
+  build-depends:
+    base >= 4.16 && < 5,
+    bytestring >= 0.11 && < 0.13,
+    wireform-dst-net,
+    wireform-http2,
+    sydtest
+
+-- Randomized fault-injection campaign: generates fault schedules from seeds
+-- and folds outcomes through an invariant oracle (safety / liveness / no
+-- crash) against the real HTTP/2 engine. The CI bug hunt.
+test-suite http2-explore
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test-http2-explore
+  main-is: Main.hs
+  ghc-options: -threaded -rtsopts "-with-rtsopts=-N"
+  build-depends:
+    base >= 4.16 && < 5,
+    bytestring >= 0.11 && < 0.13,
+    wireform-dst-net,
+    wireform-http2,
+    sydtest
+
+-- Randomized fault-exploration campaign against the REAL HTTP/1.1 stack
+-- (wireform-http1 client + server) over the link's 'leDuplex' (client
+-- 'newConnectionFromDuplex' + 'sendRequestOn', server 'runServerOnConnection').
+test-suite http1-explore
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test-http1-explore
+  main-is: Main.hs
+  ghc-options: -threaded -rtsopts "-with-rtsopts=-N"
+  build-depends:
+    base >= 4.16 && < 5,
+    bytestring >= 0.11 && < 0.13,
+    wireform-dst-net,
+    wireform-http1,
+    sydtest
+
+-- Randomized fault-exploration campaign against the REAL WebSocket frame layer
+-- (wireform-websocket) over the link's 'leDuplex' (both ends built via
+-- 'newConnection'); the HTTP/1 Upgrade handshake is covered by http1-explore.
+test-suite websocket-explore
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test-websocket-explore
+  main-is: Main.hs
+  ghc-options: -threaded -rtsopts "-with-rtsopts=-N"
+  build-depends:
+    base >= 4.16 && < 5,
+    text >= 2.0 && < 2.2,
+    wireform-dst-net,
+    wireform-websocket,
+    sydtest
+
+-- Same randomized fault-exploration campaign against the REAL gRPC stack
+-- (grapesy-fork client + server) running over the fault link at the engine
+-- 'Config' seam (client 'withConnectionVia' + server 'runServerOverConfig',
+-- both built from the link's 'leSendFn' / 'leReadExactN'). A codegen-free
+-- 'RawRpc' echo is the workload; proves gRPC generalizes over the transport
+-- and hunts for gRPC-layer crashes / hangs under faults.
+test-suite grpc-explore
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test-grpc-explore
+  main-is: Main.hs
+  ghc-options: -threaded -rtsopts "-with-rtsopts=-N"
+  build-depends:
+    base >= 4.16 && < 5,
+    bytestring >= 0.11 && < 0.13,
+    data-default >= 0.7 && < 0.9,
+    wireform-dst-net,
+    wireform-grpc,
+    grpc-spec,
+    wireform-http2,
+    sydtest
+
+-- Same randomized fault-exploration campaign against the REAL Connect stack
+-- (wireform-connect client + server) running over the fault link at the
+-- wireform-http transport seam (server 'runConnectServerOnTransport' + client
+-- 'withConnectClientOnTransport', both over the link's HTTP/2 h2c transport,
+-- avoiding the HTTP/1 duplex path). A minimal proto echo service is the
+-- workload; proves Connect generalizes over the transport and hunts for
+-- Connect-layer crashes / hangs under faults.
+test-suite connect-explore
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test-connect-explore
+  main-is: Main.hs
+  default-extensions:
+    DataKinds
+    TemplateHaskell
+    DeriveGeneric
+    DeriveAnyClass
+  other-modules:
+    Connect.EchoProto
+  build-depends:
+    base >= 4.16 && < 5,
+    bytestring >= 0.11 && < 0.13,
+    text >= 2.0 && < 2.2,
+    data-default >= 0.7 && < 0.9,
+    wireform-dst-net,
+    wireform-connect,
+    wireform-http,
+    wireform-http2,
+    wireform-proto,
+    wireform-grpc,
+    grpc-spec,
+    sydtest
+
+-- Same randomized fault-exploration campaign against the REAL Kafka client
+-- (wireform-kafka). Kafka is client-only and rides a magic-ring DuplexTransport,
+-- so the client runs over the link's 'leDuplex' (real 'negotiateVersions'
+-- handshake) against a minimal raw-fn mock broker. Proves the SimLink duplex
+-- carries a real request/response protocol under faults and hunts for
+-- Kafka-client crashes / hangs.
+test-suite kafka-explore
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test-kafka-explore
+  main-is: Main.hs
+  ghc-options: -threaded -rtsopts "-with-rtsopts=-N"
+  build-depends:
+    base >= 4.16 && < 5,
+    bytestring >= 0.11 && < 0.13,
+    containers >= 0.6 && < 0.9,
+    vector >= 0.13 && < 0.14,
+    async >= 2.2 && < 2.3,
+    network >= 3.1 && < 3.3,
+    wireform-dst-net,
+    wireform-kafka,
+    wireform-kafka-protocol,
+    sydtest

@@ -62,6 +62,7 @@ module Network.HTTP.Connection (
   negotiatedVersion,
   withConnection,
   withConnectionVia,
+  withConnectionOnTransport,
   openConnection,
   openConnectionVia,
   closeConnection,
@@ -106,6 +107,7 @@ import Network.HTTP1.Client qualified as H1
 import Network.HTTP1.Parser qualified as H1
 import Network.HTTP1.Types qualified as H1
 import Network.HTTP2.Client qualified as H2
+import Network.HTTP2.Transport qualified as H2T
 import Network.Socket qualified as NS
 import Wireform.Network.TLS.OpenSSL (TlsProtoVersion (..))
 
@@ -404,6 +406,26 @@ withPlaintextHttp2 cfg action = do
           , H2.clientPort = connectionPort cfg
           }
   H2.withConnection h2cfg $ \handle ->
+    action (Http2Connection handle U.HTTP2)
+
+{- | Open a __single__ 'Connection' over a caller-supplied
+'H2T.Transport' (e.g. one end of an in-memory @wireform-dst-net@ fault
+link) instead of dialing a socket, speaking HTTP\/2 prior-knowledge (h2c).
+The counterpart of the server's
+'Network.HTTP.Server.runServerOnTransport'. @connectionHost@ /
+@connectionPort@ are still used for the @:authority@; TLS and the version
+range are ignored (a raw transport is plaintext h2c). The connection is
+torn down by the underlying HTTP\/2 client bracket on exit.
+-}
+withConnectionOnTransport ::
+  ConnectionConfig -> H2T.Transport -> (Connection -> IO a) -> IO a
+withConnectionOnTransport cfg transport action = do
+  let h2cfg =
+        H2.defaultClientConfig
+          { H2.clientHost = connectionHost cfg
+          , H2.clientPort = connectionPort cfg
+          }
+  H2.withConnectionOnTransport h2cfg transport Nothing $ \handle ->
     action (Http2Connection handle U.HTTP2)
 
 

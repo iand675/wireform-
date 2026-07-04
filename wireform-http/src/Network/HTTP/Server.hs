@@ -37,6 +37,7 @@ module Network.HTTP.Server (
   -- * Running
   runServer,
   runServerOnListener,
+  runServerOnTransport,
   handleAcceptedSocket,
 
   -- * Handler
@@ -285,6 +286,21 @@ runServer cfg = case serverTls cfg of
     in if preferred == U.HTTP2
          then runHttp2 cfg
          else runHttp1 cfg
+
+{- | Serve a __single connection__ over a caller-supplied 'H2T.Transport'
+(e.g. one end of an in-memory @wireform-dst-net@ fault link) instead of
+binding a socket, speaking HTTP\/2 prior-knowledge (h2c). Returns when the
+connection closes. The counterpart of the HTTP\/2 client's
+'Network.HTTP.Connection.withConnectionOnTransport'; the two let the whole
+@wireform-http@ / @wireform-connect@ stack run over a transport with no
+socket. (Plaintext h2c only — there is no version sniff on a raw transport,
+so both ends must agree to speak HTTP\/2.)
+-}
+runServerOnTransport :: ServerConfig -> H2T.Transport -> IO ()
+runServerOnTransport cfg transport =
+  H2.runServerOnTransport
+    (mkH2Config cfg) {H2.serverHandler = wrapHttp2Handler cfg (serverHandler cfg)}
+    transport
 
 
 runTlsServer :: ServerConfig -> TlsServerConfig -> IO ()

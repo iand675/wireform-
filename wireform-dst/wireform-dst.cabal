@@ -1,0 +1,108 @@
+cabal-version: 3.0
+name: wireform-dst
+version: 0.1.0.0
+synopsis: Deterministic simulation testing engine (Antithesis-style)
+description:
+  A deterministic, fault-injecting simulation-testing engine in the
+  spirit of Antithesis: branching multiverse search over a purely
+  functional simulated distributed system, guided novelty search,
+  assertion "lightposts", and perfect byte-for-byte reproduction from
+  @(seed, decisions)@. The simulated world is an immutable 'Sim.World.World'
+  value stepped by a deterministic scheduler ('Sim.Interp.step'), so
+  snapshotting and branching many futures is a pointer copy and every
+  failure replays exactly. FIND ('Sim.Search') discovers bugs via guided
+  search; NAIL ('Sim.Localize') minimizes and localizes them. The
+  cluster-scale complement to the narrow dejafu systematic-concurrency
+  tests elsewhere in the tree.
+homepage: https://github.com/iand675/wireform-
+bug-reports: https://github.com/iand675/wireform-/issues
+license: BSD-3-Clause
+license-file: LICENSE
+author: Ian Duncan
+maintainer: ian@iankduncan.com
+copyright: 2026 Ian Duncan
+category: Testing, Simulation
+build-type: Simple
+tested-with: GHC == 9.6.4, GHC == 9.8.4
+
+source-repository head
+  type:     git
+  location: https://github.com/iand675/wireform-
+
+common defaults
+  default-language: GHC2021
+  ghc-options:
+    -Wall
+    -Wcompat
+    -Widentities
+    -Wincomplete-record-updates
+    -Wincomplete-uni-patterns
+    -Wpartial-fields
+    -Wredundant-constraints
+    -O2
+  default-extensions:
+    StrictData
+    DerivingStrategies
+    DeriveGeneric
+    DeriveAnyClass
+    OverloadedStrings
+    LambdaCase
+    GADTs
+    ExistentialQuantification
+    RankNTypes
+    BangPatterns
+
+library
+  import: defaults
+  hs-source-dirs: src
+  exposed-modules:
+    Sim.Types
+    Sim.Entropy
+    Sim.Prog
+    Sim.World
+    Sim.Fault
+    Sim.Interp
+    Sim.Coverage
+    Sim.Assert
+    Sim.Search
+    Sim.Localize
+    Sim.Workload
+    Sim
+  build-depends:
+    base >= 4.16 && < 5,
+    containers >= 0.6 && < 0.9,
+    splitmix >= 0.1 && < 0.2,
+    bytestring >= 0.11 && < 0.13,
+    text >= 2.0 && < 2.2,
+    deepseq >= 1.4 && < 1.6,
+    aeson >= 2.1 && < 2.3,
+    async >= 2.2 && < 2.3,
+    stm >= 2.5 && < 2.6
+
+test-suite wireform-dst-test
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is: Main.hs
+  ghc-options: -threaded -rtsopts "-with-rtsopts=-N"
+  build-depends:
+    base >= 4.16 && < 5,
+    wireform-dst,
+    containers >= 0.6 && < 0.9,
+    bytestring >= 0.11 && < 0.13,
+    text >= 2.0 && < 2.2,
+    hedgehog >= 1.4 && < 1.8,
+    sydtest,
+    sydtest-hedgehog
+
+executable example-register-partition
+  import: defaults
+  hs-source-dirs: examples
+  main-is: RegisterPartition.hs
+  ghc-options: -threaded -rtsopts "-with-rtsopts=-N"
+  build-depends:
+    base >= 4.16 && < 5,
+    wireform-dst,
+    containers >= 0.6 && < 0.9,
+    bytestring >= 0.11 && < 0.13,
+    text >= 2.0 && < 2.2

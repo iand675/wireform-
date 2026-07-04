@@ -9,6 +9,8 @@ module Network.GRPC.Client.Run (
   , withConnection
   , openConnection
   , closeConnection
+  , openConnectionVia
+  , withConnectionVia
     -- * Configuration
   , Server(..)
   , ServerValidation(..)
@@ -122,6 +124,45 @@ openConnection connParams server = do
 -- | Close a connection to the server.
 closeConnection :: Connection -> IO ()
 closeConnection conn = putMVar (connOutOfScope conn) ()
+
+-- | Like 'openConnection', but drives the client over a caller-supplied engine
+-- 'HTTP2.Client.Config' (any byte transport) instead of dialing a 'Server'.
+-- Used to run gRPC over the @wireform-dst-net@ fault link, e.g.
+--
+-- > openConnectionVia def "sim"
+-- >   (allocConfigForTransport (leSendFn end) (leReadExactN end))
+--
+-- There is no reconnection: the attempt runs once, and the config is freed
+-- when the connection is closed (or on a fatal error, which is recorded as
+-- 'ConnectionAbandoned' so outstanding RPCs fail rather than hang).
+openConnectionVia ::
+     ConnParams
+  -> String                  -- ^ the @:authority@ pseudo-header value
+  -> IO HTTP2.Client.Config  -- ^ allocate the engine config (freed on close)
+  -> IO Connection
+openConnectionVia connParams authorityStr mkConf = do
+    connMetaVar    <- newMVar $ Meta.init (connInitCompression connParams)
+    connStateVar   <- newTVarIO ConnectionNotReady
+    connOutOfScope <- newEmptyMVar
+    attempt <- newConnectionAttempt connParams
+                                    (connOnConnection connParams)
+                                    connStateVar
+                                    connOutOfScope
+    void $ forkLabelled "grapesy:connectVia" $
+      connectVia connParams attempt authorityStr mkConf
+        `catch` \(e :: SomeException) ->
+          atomically $ writeTVar connStateVar (ConnectionAbandoned e)
+    pure Connection {connParams, connMetaVar, connStateVar, connOutOfScope}
+
+-- | 'bracket'ed form of 'openConnectionVia'.
+withConnectionVia ::
+     ConnParams
+  -> String
+  -> IO HTTP2.Client.Config
+  -> (Connection -> IO a)
+  -> IO a
+withConnectionVia connParams authorityStr mkConf =
+    bracket (openConnectionVia connParams authorityStr mkConf) closeConnection
 
 {-------------------------------------------------------------------------------
   Fatal exceptions (no point reconnecting)
@@ -275,9 +316,26 @@ connectInsecure connParams attempt addr = do
 
 -- | Insecure connection over the given socket
 connectSocket :: ConnParams -> Attempt -> String -> Socket -> IO ()
-connectSocket connParams attempt connAuthority sock = do
+connectSocket connParams attempt connAuthority sock =
     bracket (HTTP2.Client.allocSimpleConfig sock writeBufferSize)
-            HTTP2.Client.freeSimpleConfig $ \conf ->
+            HTTP2.Client.freeSimpleConfig
+            (runOverConfig connParams attempt connAuthority)
+
+-- | Insecure connection over a caller-supplied engine 'Config'.  Lets the
+-- client run over any byte transport (e.g. the @wireform-dst-net@ fault link
+-- via @allocConfigForTransport@) rather than a real socket.  No reconnection:
+-- the attempt runs once and the config is freed when the connection closes.
+connectVia :: ConnParams -> Attempt -> String -> IO HTTP2.Client.Config -> IO ()
+connectVia connParams attempt connAuthority mkConf =
+    bracket mkConf
+            HTTP2.Client.freeSimpleConfig
+            (runOverConfig connParams attempt connAuthority)
+
+-- | Drive the HTTP/2 engine over an allocated 'Config' and publish the
+-- resulting send function into the connection state.  Shared by
+-- 'connectSocket' and 'connectVia'.
+runOverConfig :: ConnParams -> Attempt -> String -> HTTP2.Client.Config -> IO ()
+runOverConfig connParams attempt connAuthority conf =
       HTTP2.Client.run clientConfig conf $ \sendRequest _aux -> do
         let conn = Session.ConnectionToServer sendRequest
         atomically $

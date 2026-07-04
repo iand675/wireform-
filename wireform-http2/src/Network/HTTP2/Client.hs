@@ -51,7 +51,6 @@ import Network.HTTP2.HPACK
 import Network.HTTP2.RateLimit (RateCounter, newRateCounter, tickRate)
 import Network.HTTP2.Types
 import qualified Network.HTTP2.Types as H2Types
-import qualified Debug.Trace
 
 data ClientConfig = ClientConfig
   { clientSettings :: !Settings
@@ -253,6 +252,15 @@ data ClientHandle = ClientHandle
     -- replenished when we emit a connection-level @WINDOW_UPDATE@.
     -- Goes negative ⇒ peer overflowed our advertised window ⇒
     -- connection-level @FLOW_CONTROL_ERROR@.
+  , chRecvDone :: !(IORef Bool)
+    -- ^ Set 'True' the instant the recv loop terminates, before
+    -- 'failOutstanding' snapshots 'chStreams'.  Closes a
+    -- register-vs-teardown race: a stream registered by
+    -- 'registerAndSend' after the recv loop has already died would
+    -- otherwise never have its response-headers MVar filled, hanging
+    -- 'sendRequest' forever.  'registerAndSend' re-reads this after
+    -- inserting its inbox and fails the stream itself if the loop is
+    -- already gone.
   }
 
 -- | Per-second caps for the control-plane rate counters.  These
@@ -331,11 +339,18 @@ withConnectionOnTransport cfg transport mSock action = do
   rstRate <- newRateCounter
   emptyDataRate <- newRateCounter
   recvWindowRef <- newIORef (65535 :: Int)
+  recvDoneRef <- newIORef False
   let handle = ClientHandle conn streamsRef pendingRef recvUnackedRef activeStreamsTv goAwayTv
                             pingRate settingsRate rstRate emptyDataRate
                             (settingsMaxHeaderListSize (clientSettings cfg))
                             recvWindowRef
-  recvTid <- forkIO $ clientRecvLoop handle `finally` failOutstanding handle
+                            recvDoneRef
+  -- Mark the recv loop done *before* failing outstanding streams, so a
+  -- concurrent 'registerAndSend' that inserts its inbox after this point
+  -- observes the flag and fails its own stream (see 'chRecvDone').
+  recvTid <- forkIO $
+    clientRecvLoop handle
+      `finally` (atomicModifyIORef' (chRecvDone handle) (const (True, ())) >> failOutstanding handle)
   -- Tear-down order matters: stop the recv loop *before* the
   -- outer bracket closes the socket, otherwise the recv loop's
   -- in-flight @threadWaitRead@ sees the fd disappear and prints
@@ -565,40 +580,52 @@ handleClientFrame handle (Frame hdr (FramePayloadRaw body)) = case fhType hdr of
           case Map.lookup sid inboxes of
             Nothing -> pure True
             Just inbox -> do
-              -- Recv-window accounting (RFC 9113 §6.9.1): the
-              -- whole frame payload (including padding) is
-              -- charged, not the post-padding bytes.
-              let frameBytes = BS.length body
-              streamWin <- atomicModifyIORef' (siRecvWindow inbox) $ \w ->
-                let w' = w - frameBytes in (w', w')
-              connWin <- atomicModifyIORef' (chRecvWindow handle) $ \w ->
-                let w' = w - frameBytes in (w', w')
-              if streamWin < 0
-                then do
-                  sendRstStream handle sid FlowControlError
-                  failStream handle sid (ClientStreamReset FlowControlError)
+              -- RFC 9113 §8.1: a response begins with a HEADERS frame.
+              -- DATA before the response HEADERS have been delivered is a
+              -- protocol error. Fail the stream (which fills 'siHeaders')
+              -- so a caller blocked in 'sendRequest' wakes with a clean
+              -- error instead of hanging forever on a headers MVar that
+              -- will never be filled — the stream would otherwise be
+              -- removed from 'chStreams' on END_STREAM below, so even the
+              -- connection-close 'failOutstanding' sweep could not rescue it.
+              hdrsSeen <- tryReadMVar (siHeaders inbox)
+              case hdrsSeen of
+                Nothing -> do
+                  sendRstStream handle sid ProtocolError
+                  failStream handle sid
+                    (ClientStreamProtocolError "DATA received before response HEADERS")
                   pure True
-                else if connWin < 0
-                  then do
-                    closeConnection (chConnection handle) FlowControlError
-                      "connection recv window underflow"
-                    pure False
-                  else do
-                    -- The recv loop just enqueues here; WINDOW_UPDATE
-                    -- frames are emitted lazily by 'nextBodyChunk' once
-                    -- the user has actually consumed the bytes -- so a
-                    -- slow reader throttles the peer naturally.
-                    -- 'forceCopyBS' (not 'BS.copy'): the payload is a
-                    -- zero-copy slice of the recv ring buffer, and
-                    -- 'BS.copy' is too lazy under inlining to make the
-                    -- memcpy happen before the buffer is overwritten.
-                    copied <- forceCopyBS payload
-                    atomically $ writeTBQueue (siBody inbox) (BodyChunk copied)
-                    when endStream $ do
-                      _ <- tryPutMVar (siTrailers inbox) []
-                      atomically $ writeTBQueue (siBody inbox) BodyEnd
-                      closeStream handle sid
-                    pure True
+                Just _ -> do
+                  -- Recv-window accounting (RFC 9113 §6.9.1): the
+                  -- whole frame payload (including padding) is
+                  -- charged, not the post-padding bytes.
+                  let frameBytes = BS.length body
+                  streamWin <- atomicModifyIORef' (siRecvWindow inbox) $ \w ->
+                    let w' = w - frameBytes in (w', w')
+                  connWin <- atomicModifyIORef' (chRecvWindow handle) $ \w ->
+                    let w' = w - frameBytes in (w', w')
+                  if streamWin < 0
+                    then do
+                      sendRstStream handle sid FlowControlError
+                      failStream handle sid (ClientStreamReset FlowControlError)
+                      pure True
+                    else if connWin < 0
+                      then do
+                        closeConnection (chConnection handle) FlowControlError
+                          "connection recv window underflow"
+                        pure False
+                      else do
+                        -- 'forceCopyBS' (not 'BS.copy'): the payload is a
+                        -- zero-copy slice of the recv ring buffer, and
+                        -- 'BS.copy' is too lazy under inlining to make the
+                        -- memcpy happen before the buffer is overwritten.
+                        copied <- forceCopyBS payload
+                        atomically $ writeTBQueue (siBody inbox) (BodyChunk copied)
+                        when endStream $ do
+                          _ <- tryPutMVar (siTrailers inbox) []
+                          atomically $ writeTBQueue (siBody inbox) BodyEnd
+                          closeStream handle sid
+                        pure True
 
   FramePushPromise -> do
     -- RFC 9113 §6.6: PUSH_PROMISE carries the promised stream ID
@@ -1110,11 +1137,25 @@ registerAndSend handle req = do
       Left lastId -> pure (Left lastId)
       Right sid -> do
         atomicModifyIORef' (chStreams handle) (\m -> (Map.insert sid inbox m, ()))
-        block <- withMVar (connHpackEncoder conn) $ \encoder ->
-          encodeHeaderBlock defaultEncodeStrategy encoder allHeaders
-        sendFramesUnlocked conn
-          (headerBlockFrames sid endStreamOnHeaders 0 block maxFrame)
-        pure (Right sid)
+        -- Race guard: if the recv loop finished between our slot
+        -- reservation and this insert, 'failOutstanding' has already
+        -- snapshotted 'chStreams' and will never see this inbox. Detect
+        -- that and fail the stream ourselves so 'sendRequest' wakes with
+        -- 'ClientStreamConnectionClosed' instead of hanging forever.
+        recvDone <- readIORef (chRecvDone handle)
+        if recvDone
+          then do
+            _ <- tryPutMVar (siHeaders inbox) (Left ClientStreamConnectionClosed)
+            _ <- tryPutMVar (siTrailers inbox) []
+            atomically $ writeTBQueue (siBody inbox) (BodyError ClientStreamConnectionClosed)
+            closeStream handle sid
+            pure (Right sid)
+          else do
+            block <- withMVar (connHpackEncoder conn) $ \encoder ->
+              encodeHeaderBlock defaultEncodeStrategy encoder allHeaders
+            sendFramesUnlocked conn
+              (headerBlockFrames sid endStreamOnHeaders 0 block maxFrame)
+            pure (Right sid)
   sid <- case outcome of
     Left lastId -> do
       -- Refused after GOAWAY: release the slot reserved in phase 1.

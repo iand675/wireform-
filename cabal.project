@@ -51,6 +51,8 @@ packages:
   wireform-cel/
   wireform-protovalidate/
   wireform-state-machine/
+  wireform-dst/
+  wireform-dst-net/
   examples/payments-pipeline/
 
 package *

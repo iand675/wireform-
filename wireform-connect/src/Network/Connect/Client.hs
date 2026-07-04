@@ -9,6 +9,7 @@ module Network.Connect.Client
     -- * Client
     ConnectClient (..),
     withConnectClient,
+    withConnectClientOnTransport,
 
     -- * Calls
     nonStreaming,
@@ -111,6 +112,7 @@ import Network.GRPC.Spec
   , SupportsClientRpc
   )
 import Network.HTTP.Connection qualified as Connection
+import Network.HTTP2.Transport (Transport)
 import Network.HTTP.Message (Request (..), Response (..), Scheme (..))
 import Network.HTTP.PercentEncoding (renderQueryString)
 import Network.HTTP.Types.Body (Body (..))
@@ -195,6 +197,22 @@ withConnectClient cfg connCfg action =
           Just _ -> SchemeHttps
           Nothing -> SchemeHttp
     action (ConnectClient conn cfg host scheme)
+
+-- | Bracket a Connect client over a caller-supplied 'Transport' (e.g. one end
+-- of an in-memory @wireform-dst-net@ fault link) instead of dialing a socket,
+-- speaking HTTP\/2 prior-knowledge (h2c). The transport counterpart of
+-- 'withConnectClient'; @connectionHost@ supplies the @:authority@. The link is
+-- plaintext, so the scheme is always @http@.
+withConnectClientOnTransport
+  :: ConnectClientConfig
+  -> Connection.ConnectionConfig
+  -> Transport
+  -> (ConnectClient -> IO a)
+  -> IO a
+withConnectClientOnTransport cfg connCfg transport action =
+  Connection.withConnectionOnTransport connCfg transport $ \conn -> do
+    let host = bsPack (Connection.connectionHost connCfg)
+    action (ConnectClient conn cfg host SchemeHttp)
 
 ------------------------------------------------------------------------
 -- Unary

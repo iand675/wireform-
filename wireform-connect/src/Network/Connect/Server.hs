@@ -72,6 +72,7 @@ module Network.Connect.Server (
   -- * Running
   connectApplication,
   runConnectServer,
+  runConnectServerOnTransport,
 ) where
 
 import Control.Concurrent (forkIO)
@@ -164,7 +165,8 @@ import Network.GRPC.Spec
 import Network.HTTP.Message (Request (..), Response (..))
 import Network.HTTP.PercentEncoding (decodeQueryString)
 import Network.HTTP.Types.Body (Body (..))
-import Network.HTTP.Server (Handler, ServerConfig (..), runServer)
+import Network.HTTP.Server (Handler, ServerConfig (..), runServer, runServerOnTransport)
+import Network.HTTP2.Transport (Transport)
 import Network.HTTP.Types.Header
   ( Headers
   , hAcceptEncoding
@@ -479,6 +481,15 @@ connectApplication cfg hs0 req =
 runConnectServer :: ConnectServerConfig -> ServerConfig -> [MethodHandler] -> IO ()
 runConnectServer cfg serverCfg hs =
   runServer serverCfg{serverHandler = connectApplication cfg hs}
+
+-- | Run a Connect server over a caller-supplied 'Transport' (e.g. one end of
+-- an in-memory @wireform-dst-net@ fault link) instead of a listening socket,
+-- speaking HTTP\/2 prior-knowledge (h2c). Serves a single connection and
+-- returns when it closes. The transport counterpart of 'runConnectServer'.
+runConnectServerOnTransport ::
+  ConnectServerConfig -> ServerConfig -> [MethodHandler] -> Transport -> IO ()
+runConnectServerOnTransport cfg serverCfg hs transport =
+  runServerOnTransport serverCfg{serverHandler = connectApplication cfg hs} transport
 
 methodMap :: [MethodHandler] -> Map ByteString MethodHandler
 methodMap hs = Map.fromList [(key h, h) | h <- hs]

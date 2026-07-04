@@ -50,6 +50,7 @@ module Network.HTTP2.Engine.Client
   , BufferSize
     -- * Simple config helpers
   , allocSimpleConfig
+  , allocConfigForTransport
   , freeSimpleConfig
     -- * Engine entry point
   , run
@@ -217,6 +218,22 @@ allocSimpleConfig sock _bufSize = do
   pure Config
     { confSendFn = S.sendBuf sock
     , confReadN = recvExactN sock
+    , confPositionReadMaker = defaultPositionReadMaker
+    , confTimeoutManager = mgr
+    }
+
+-- | Allocate a 'Config' from raw transport callbacks rather than a 'Socket'.
+-- The @readN@ callback MUST return exactly the requested number of bytes
+-- (blocking until they arrive), returning fewer only at end-of-input — the
+-- same contract as 'recvExactN'. Used to run the engine (and thus gRPC /
+-- Connect) over any byte transport, e.g. the @wireform-dst-net@ fault link.
+-- 'freeSimpleConfig' releases the internally-created time manager.
+allocConfigForTransport :: SendFn -> (Int -> IO ByteString) -> IO Config
+allocConfigForTransport sendFn readN = do
+  mgr <- TM.initialize (30 * 1000 * 1000)
+  pure Config
+    { confSendFn = sendFn
+    , confReadN = readN
     , confPositionReadMaker = defaultPositionReadMaker
     , confTimeoutManager = mgr
     }

@@ -187,6 +187,8 @@ let
     wireform-stats         = { path = "wireform-stats";         emoji = ":bar_chart:";        tier = "tool"; };
     wireform-cel           = { path = "wireform-cel";           emoji = ":scroll:";           tier = "tool"; };
     wireform-protovalidate = { path = "wireform-protovalidate"; emoji = ":shield:";           tier = "tool"; };
+    wireform-dst           = { path = "wireform-dst";           emoji = ":game_die:";         tier = "tool"; };
+    wireform-dst-net       = { path = "wireform-dst-net";       emoji = ":game_die:";         tier = "tool"; };
     wireform-state-machine = { path = "wireform-state-machine"; emoji = ":traffic_light:";    tier = "tool"; };
   };
 

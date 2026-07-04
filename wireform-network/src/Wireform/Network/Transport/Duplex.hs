@@ -25,6 +25,8 @@ module Wireform.Network.Transport.Duplex (
 ) where
 
 import Control.Exception (SomeException, try)
+import Control.Monad (join)
+import Data.IORef (atomicModifyIORef', newIORef)
 import Network.Socket (Socket)
 import Network.Socket qualified as S
 import Wireform.Network.Transport.Receive (
@@ -126,8 +128,15 @@ newDuplexBufTransport cfg recvFn sendFn shut = do
   txRing <- newMagicRing (ringSizeHint cfg)
   rx0 <- buildReceiveTransport rxRing recvFn
   tx0 <- buildSendTransport txRing sendFn shut
-  let rx = rx0 {receiveClose = receiveClose rx0 *> destroyMagicRing rxRing}
-      tx = tx0 {sendClose = sendClose tx0 *> destroyMagicRing txRing}
+  -- Guard the ring teardown so it fires at most once even under
+  -- re-entrant / concurrent close: 'destroyMagicRing' munmaps its base
+  -- pointer unconditionally, so a second close would munmap an address
+  -- that a fresh ring may already have been mapped at -> heap corruption
+  -- / SIGSEGV. (Delivers the idempotency this module's haddock promises.)
+  destroyRx <- mkDestroyOnce (destroyMagicRing rxRing)
+  destroyTx <- mkDestroyOnce (destroyMagicRing txRing)
+  let rx = rx0 {receiveClose = receiveClose rx0 *> destroyRx}
+      tx = tx0 {sendClose = sendClose tx0 *> destroyTx}
   pure
     DuplexTransport
       { duplexReceive = rx
@@ -152,8 +161,12 @@ newDuplexBufTransportPooled pool cfg recvFn sendFn shut = do
   txRing <- acquireRing pool (ringSizeHint cfg)
   rx0 <- buildReceiveTransport rxRing recvFn
   tx0 <- buildSendTransport txRing sendFn shut
-  let rx = rx0 {receiveClose = receiveClose rx0 *> releaseRing pool rxRing}
-      tx = tx0 {sendClose = sendClose tx0 *> releaseRing pool txRing}
+  -- Release each ring back to the pool at most once (see 'newDuplexBufTransport');
+  -- a double release would hand the same ring out twice.
+  releaseRx <- mkDestroyOnce (releaseRing pool rxRing)
+  releaseTx <- mkDestroyOnce (releaseRing pool txRing)
+  let rx = rx0 {receiveClose = receiveClose rx0 *> releaseRx}
+      tx = tx0 {sendClose = sendClose tx0 *> releaseTx}
   pure
     DuplexTransport
       { duplexReceive = rx
@@ -176,6 +189,16 @@ closeBoth tx rx = do
   _ <- try @SomeException (sendShutdownWrite tx)
   _ <- try @SomeException (receiveClose rx)
   pure ()
+
+{- | Wrap a teardown action so it runs at most once, atomically, no matter
+how many times (or from how many threads) the resulting action is invoked.
+Used to make ring destroy / pool-release idempotent under re-entrant and
+concurrent 'closeBoth'.
+-}
+mkDestroyOnce :: IO () -> IO (IO ())
+mkDestroyOnce act = do
+  ref <- newIORef False
+  pure (join (atomicModifyIORef' ref (\done -> (True, if done then pure () else act))))
 
 
 {- | Synonym for 'duplexClose' (record-field accesses can be awkward

@@ -94,6 +94,7 @@ library
     zstd                 >= 0.1  && < 0.2,
     grpc-spec            >= 1.0  && < 1.1,
     wireform-http,
+    wireform-http2,
     wireform-proto
 
 -- Internal library: generated Haskell types + RPC tags for the connectrpc

@@ -12,6 +12,7 @@ module Network.GRPC.Server.Run (
     -- * Simple interface
   , runServer
   , runServerWithHandlers
+  , runServerOverConfig
     -- * Full interface
   , RunningServer -- opaque
   , forkServer
@@ -32,6 +33,8 @@ import Control.Concurrent.STM (STM, atomically, catchSTM, throwSTM, orElse)
 import Control.Concurrent.STM.TMVar (TMVar, newEmptyTMVarIO, putTMVar, readTMVar)
 import Network.HTTP2.Engine.Server qualified as Server
 import Network.HTTP2.Engine.Server qualified as HTTP2 (ServerConfig, run)
+import Network.HTTP2.Transport (SendFn)
+import Data.ByteString (ByteString)
 import Network.HTTP2.Engine.TLS.Server qualified as HTTP2.TLS
 import Network.Run.TCP qualified as Run
 import Network.Socket (Socket, AddrInfo, HostName, PortNumber)
@@ -155,6 +158,22 @@ runServerWithHandlers params config handlers = do
   where
     http2 :: HTTP2Settings
     http2 = def
+
+-- | Run a gRPC server over a caller-supplied byte transport — a pointer-based
+-- send and an exactly-N read (e.g. one end of a @wireform-dst-net@ fault link)
+-- — instead of a listening socket. Serves a single connection and returns when
+-- it closes; there is no accept loop. Build the 'Server.Server' with
+-- 'mkGrpcServer'. The counterpart to the client's @openConnectionVia@.
+runServerOverConfig ::
+     HTTP2Settings
+  -> Server.Server
+  -> SendFn
+  -> (Int -> IO ByteString)
+  -> IO ()
+runServerOverConfig http2 server sendFn readN =
+    withTimeManager $ \mgr ->
+      withConfigForTransport mgr sendFn readN $ \config ->
+        HTTP2.run (mkServerConfig http2) config server
 
 {-------------------------------------------------------------------------------
   Full interface

@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+// A one-method unary service for the connect-explore fault campaign: the
+// server echoes the request message straight back. Minimal on purpose — the
+// campaign fuzzes the transport, not the schema.
+package sim.echo.v1;
+
+service EchoService {
+  // Unary echo.
+  rpc Echo(EchoMessage) returns (EchoMessage) {}
+}
+
+message EchoMessage {
+  string text = 1;
+}

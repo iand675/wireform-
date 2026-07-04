@@ -96,6 +96,15 @@ jobs:
           cabal test wireform-delta:delta-test           --test-show-details=streaming
           cabal test wireform-hudi:hudi-test             --test-show-details=streaming
           cabal test wireform-lance:lance-test           --test-show-details=streaming
+          cabal test wireform-dst:wireform-dst-test       --test-show-details=streaming
+          cabal test wireform-dst-net:wireform-dst-net-test --test-show-details=streaming
+          cabal test wireform-dst-net:http2-fault-test --test-show-details=streaming
+          cabal test wireform-dst-net:http2-explore --test-show-details=streaming
+          cabal test wireform-dst-net:grpc-explore --test-show-details=streaming
+          cabal test wireform-dst-net:connect-explore --test-show-details=streaming
+          cabal test wireform-dst-net:kafka-explore --test-show-details=streaming
+          cabal test wireform-dst-net:http1-explore --test-show-details=streaming
+          cabal test wireform-dst-net:websocket-explore --test-show-details=streaming
           cabal test wireform-state-machine:wireform-state-machine-test --test-show-details=streaming
 
   hlint:
