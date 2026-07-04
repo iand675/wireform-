@@ -56,11 +56,12 @@ Surely someone has already solved this, you think. Rust has `serde`, for example
 
 Enter `wireform`.
 
-Wireform provides an ecosystem of roughly thirty format packages where
-every one shares the extremely performant core utilities (`wireform-core`),
-the same annotation-driven Template Haskell deriver (`wireform-derive`),
-aggressively complete test suites, and, where an upstream conformance
-suite exists, an opt-in test runner that wires it up. 
+Wireform provides an ecosystem of roughly thirty format, networking, and
+infrastructure packages where every one shares the extremely performant core
+utilities (`wireform-core`), the same annotation-driven Template Haskell deriver
+(`wireform-derive`) where relevant, aggressively complete test suites, and,
+where an upstream conformance suite exists, an opt-in test runner that wires it
+up.
 
 For example: 
 
@@ -82,9 +83,9 @@ is held to the standard that it is has to be as fast as, or faster than, hand-wr
 parse, render, encode, decode, frame, or otherwise shuffles bytes
 between two systems, we want to support it. 
 
-The current thirty packages are a starting
-point for the project, but new format packages are welcome and actively
-wanted, provided they clear the same bar the existing ones aspire to:
+The current package set is a starting point for the project, but new format
+packages are welcome and actively wanted, provided they clear the same bar the
+existing ones aspire to:
 
 - fast enough to rival C/Rust/Zig, minimal garbage collection overhead, 
 tested hard enough to prove it fully conforms with the format's official conformance suite (or, where no such
@@ -159,6 +160,14 @@ only need CBOR, you only build CBOR.
 |---------|------|
 | [`wireform-grpc`](wireform-grpc/README.md) | gRPC client and server |
 | [`wireform-kafka`](wireform-kafka/README.md) | Native Kafka client with Streams, transactions, and OpenTelemetry |
+
+### Workflow, testing, and simulation
+
+| Package | What it does |
+|---------|------|
+| [`wireform-state-machine`](wireform-state-machine/README.md) | Dependently typed statecharts: XState/SCXML semantics with chart shape, events, guards, actions, services, and final output checked at compile time |
+| [`wireform-dst`](wireform-dst/) | Deterministic simulation-testing engine: pure `World` snapshots, byte-for-byte replay from seeds and decisions, guided FIND search, and NAIL minimization |
+| [`wireform-dst-net`](wireform-dst-net/) | Fault-injecting in-memory transport bridge from `wireform-dst` to the real `wireform-network` stacks (HTTP/2, gRPC, Connect, Kafka, HTTP/1, WebSocket) |
 
 ### Internal tooling
 
