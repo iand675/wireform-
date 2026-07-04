@@ -53,6 +53,9 @@ This catalogue page maps the package. The **[State machines guide](../../state-m
 contains the tutorial and API guide:
 
 - [Overview & hello world](../../state-machine/) — the shape of a program.
+- [State machine concepts](../../state-machine/concepts/) — states,
+  configurations, events, transitions, guards, actions, hierarchy, parallel
+  regions, history, macrosteps, and effect requests.
 - [The chart type](../../state-machine/spec/) — the type-level DSL and the
   `TypeError`s that reject bad charts.
 - [Implementing a chart](../../state-machine/implementing/) — `chartImpl`, the

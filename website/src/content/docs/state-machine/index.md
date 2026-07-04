@@ -115,26 +115,30 @@ flowchart LR
   spec --> viz["render<br/>(Stately/Mermaid/DOT/HTML)"]
 ```
 
-1. **[Specify](./spec/)** the chart as a type: states, typed events,
+1. **Understand the model**: states, events, transitions, guards, actions,
+   hierarchy, history, parallel regions, macrosteps, and effect requests.
+   Start with [State machine concepts](./concepts/) if the vocabulary is new.
+2. **[Specify](./spec/)** the chart as a type: states, typed events,
    transitions, guards, actions, invoked services. Ill-formed charts do not
    typecheck.
-2. **[Implement](./implementing/)** the names the chart mentions with
+3. **[Implement](./implementing/)** the names the chart mentions with
    `chartImpl`. Registration is order-insensitive and *complete* — a missing,
    duplicated, or foreign name is a compile error.
-3. **[Run](./running/)** it: purely with `initialize` / `step` (timers and
+4. **[Run](./running/)** it: purely with `initialize` / `step` (timers and
    services surface as effect requests), interactively with the
    [IO interpreter](./running/#the-io-interpreter), or deterministically in
    tests with the [simulator](./testing/).
-4. **[Persist](./persistence/)** it: `snapshot` / `restore` with precise errors
+5. **[Persist](./persistence/)** it: `snapshot` / `restore` with precise errors
    and per-failure recovery when a stored snapshot no longer matches the
    current chart.
-5. **[Visualize](./visualization/)** it: Stately config, Mermaid, Graphviz DOT,
+6. **[Visualize](./visualization/)** it: Stately config, Mermaid, Graphviz DOT,
    or a self-contained HTML page.
 
 ## Guides
 
 | Page | What it covers |
 | --- | --- |
+| [State machine concepts](./concepts/) | The runtime model: states, configurations, events, transitions, guards, actions, context, hierarchy, parallel regions, history, macrosteps, effect requests, and how each concept maps to the API. |
 | [The chart type](./spec/) | The type-level DSL: per-role key kinds, states, typed events, transitions, guards, actions, `Invoke`, history, parallel regions, root handlers, and the errors that reject bad charts. |
 | [Implementing a chart](./implementing/) | `chartImpl` and the four registries; `mkGuard` / `assign` / `effect` / `raiseEvent`; the three service kinds; typed context and events inside handlers. |
 | [Running a machine](./running/) | The pure `step` and its trace + effect requests; the IO interpreter (timers, subscriptions, `waitFinished`, actors); the effect-request model. |

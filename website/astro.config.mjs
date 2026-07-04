@@ -238,6 +238,7 @@ export default defineConfig({
 					label: "State machines",
 					items: [
 						{ label: "Overview", slug: "state-machine" },
+						{ label: "Concepts", slug: "state-machine/concepts" },
 						{ label: "The chart type", slug: "state-machine/spec" },
 						{ label: "Implementing a chart", slug: "state-machine/implementing" },
 						{ label: "Running a machine", slug: "state-machine/running" },

@@ -6,9 +6,10 @@ sidebar:
   label: The chart type
 ---
 
-A chart is a type of kind `ChartSpec`. Writing it as a type lets the compiler reject errors that a string-keyed
-state machine would otherwise discover at runtime. This page is the reference for the DSL exported by
-`StateMachine.Spec` (all re-exported from `StateMachine`).
+A chart is a type of kind `ChartSpec`. Writing it as a type lets the compiler
+reject errors that a string-keyed state machine would otherwise discover at
+runtime. This page is the DSL reference; for the model behind the DSL, start
+with [State machine concepts](../concepts/).
 
 ## Names are enums, used as kinds
 
