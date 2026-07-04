@@ -29,11 +29,8 @@ module Test.StateMachine.Support (
 
 import Control.Monad.Trans.State.Strict (State, modify', runState)
 import Data.List (foldl')
-import Data.Proxy (Proxy (..))
 import Data.Text (Text)
-import Data.Text qualified as T
 import GHC.Stack (HasCallStack)
-import GHC.TypeLits (KnownSymbol, symbolVal)
 
 import StateMachine hiding (State)
 
@@ -47,9 +44,9 @@ runLog :: LogM a -> (a, [Text])
 runLog act = runState act []
 
 -- | A registry action that logs its own name and does nothing else:
--- @logAct \@\"enterA\"@.
-logAct :: forall n spec. (KnownSymbol n) => ActionE LogM spec n
-logAct = effect @n (\_ _ -> modify' (<> [T.pack (symbolVal (Proxy @n))]))
+-- @logAct \@\'EnterA@.
+logAct :: forall n spec. (KnownKey n) => ActionE LogM spec n
+logAct = effect @n (\_ _ -> modify' (<> [keyNameOf @n]))
 
 -- | Tests never expect step faults; make one fail loudly.
 orFault :: (HasCallStack) => Either StepFault a -> a

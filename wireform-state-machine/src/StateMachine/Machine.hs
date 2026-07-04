@@ -34,8 +34,11 @@ module StateMachine.Machine (
 
   -- * Compile-checked state queries
   matches,
+  matchesKey,
   activeStates,
+  activeKeys,
   availableEvents,
+  availableEventKeys,
 
   -- * Assembly
   chartImpl,
@@ -48,7 +51,8 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
-import GHC.TypeLits (KnownSymbol, symbolVal)
+
+import StateMachine.Key (KeyKind, KnownKey, demoteKey, keyName, keyNameOf, parseKey, withSomeKey)
 
 import StateMachine.Reify (KnownChart, reifyChart)
 import StateMachine.Registry (
@@ -88,7 +92,7 @@ import StateMachine.Validate (ValidChart)
 
 -- | The live state of a statechart. Fields are internal; see the module
 -- header for the construction discipline.
-data Machine (spec :: ChartSpec) = Machine
+data Machine (spec :: ChartSpec st ev g act svc inv out) = Machine
   { mConfig :: !Config
   -- ^ Active states, ancestors included.
   , mCtx :: Ctx spec
@@ -98,7 +102,7 @@ data Machine (spec :: ChartSpec) = Machine
   }
 
 -- | Whether the machine is still running.
-data Status (spec :: ChartSpec)
+data Status (spec :: ChartSpec st ev g act svc inv out)
   = Running
   | -- | A top-level final state was reached; carries the machine's typed
     -- output.
@@ -125,19 +129,43 @@ isFinished m = case mStatus m of
 -------------------------------------------------------------------------------}
 
 -- | Is the named state active? The name is compile-checked:
--- @matches \@\"loading\" m@ fails to compile if the chart has no
--- @\"loading\"@ state.
+-- @matches \@\'Loading m@ fails to compile if the chart has no
+-- @\'Loading@ state.
 matches ::
   forall s spec.
-  (KnownSymbol s, HasState spec s) =>
+  (KnownKey s, HasState spec s) =>
   Machine spec ->
   Bool
-matches m = T.pack (symbolVal (Proxy @s)) `Set.member` mConfig m
+matches m = keyNameOf @s `Set.member` mConfig m
+
+-- | 'matches' with the state passed as an ordinary value —
+-- @matchesKey Loading m@. Any key of the chart's state kind names a
+-- known state, so nothing is left to check at compile time.
+matchesKey ::
+  forall st ev g act svc inv out (spec :: ChartSpec st ev g act svc inv out).
+  (KeyKind st) =>
+  st ->
+  Machine spec ->
+  Bool
+matchesKey s m = keyName s `Set.member` mConfig m
 
 -- | The names of all active states (ancestors included), useful for
 -- display; prefer 'matches' for logic.
 activeStates :: Machine spec -> [NodeName]
 activeStates = Set.toList . mConfig
+
+-- | The active states as /values/ of the chart's state kind — reified
+-- from the configuration, so the result pattern-matches exhaustively:
+-- @case activeKeys m of …@. (The synthetic root, which is not a key, is
+-- not included.)
+activeKeys ::
+  forall st ev g act svc inv out (spec :: ChartSpec st ev g act svc inv out).
+  (KeyKind st) =>
+  Machine spec ->
+  [st]
+activeKeys = mapMaybe (fmap toVal . parseKey) . activeStates
+ where
+  toVal sk = withSomeKey sk demoteKey
 
 {- | The named events that could cause a transition right now: for every
 active state (and the root), the 'TOn' triggers of its transitions.
@@ -153,6 +181,17 @@ availableEvents impl m =
     TOn e -> Just e
     _ -> Nothing
   dedup = Set.toList . Set.fromList
+
+-- | 'availableEvents' as values of the chart's event kind.
+availableEventKeys ::
+  forall st ev g act svc inv out (spec :: ChartSpec st ev g act svc inv out) m.
+  (KeyKind ev) =>
+  ChartImpl m spec ->
+  Machine spec ->
+  [ev]
+availableEventKeys impl m = mapMaybe (fmap toVal . parseKey) (availableEvents impl m)
+ where
+  toVal sk = withSomeKey sk demoteKey
 
 {-------------------------------------------------------------------------------
   Assembly

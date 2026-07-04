@@ -7,6 +7,7 @@ import Test.StateMachine.Completion qualified
 import Test.StateMachine.Effects qualified
 import Test.StateMachine.Eventless qualified
 import Test.StateMachine.History qualified
+import Test.StateMachine.Keys qualified
 import Test.StateMachine.Ordering qualified
 import Test.StateMachine.Parallel qualified
 import Test.StateMachine.Persistence qualified
@@ -30,4 +31,5 @@ main =
         , Test.StateMachine.Persistence.tests
         , Test.StateMachine.Properties.tests
         , Test.StateMachine.ChildBridge.tests
+        , Test.StateMachine.Keys.tests
         ]

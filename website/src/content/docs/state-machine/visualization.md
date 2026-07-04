@@ -1,21 +1,21 @@
 ---
 title: Visualization
-description: "Render any chart to XState/Stately-importable JSON, Mermaid stateDiagram-v2, Graphviz DOT, or a self-contained HTML page with an SVG diagram and trace timeline — with the live configuration highlightable."
+description: "Render any chart to Stately config, Mermaid stateDiagram-v2, Graphviz DOT, or a self-contained HTML page with an SVG diagram and trace timeline — with the live configuration highlightable."
 sidebar:
   order: 7
   label: Visualization
 ---
 
-Every chart renders from its runtime demotion (`ciChart impl :: RChart`), so
-the same machine you run is the machine you draw. Four renderers cover editor
-import, docs, graphs, and a standalone page — and each can highlight the *live*
+Every renderer consumes the runtime chart (`ciChart impl :: RChart`). Labels are
+key wire names: constructor spellings, or the names supplied to
+`deriveKeyKindWith`. The renderers target editor import, documentation,
+graphing, and standalone inspection, and each can highlight a live
 configuration.
 
-## XState / Stately JSON
+## Stately config
 
-`StateMachine.Render.XState` emits an XState v5 machine config you can paste
-into the [Stately editor](https://stately.ai) to view and simulate your Haskell
-chart:
+`StateMachine.Render.XState` emits a machine config for the
+[Stately editor](https://stately.ai):
 
 ```haskell
 import StateMachine.Render.XState (xstateConfig, xstateConfigText)
@@ -29,14 +29,14 @@ putStrLn (T.unpack (xstateConfigText (ciChart impl)))
 Compound states become `{ initial, states }`, parallel states `type:
 "parallel"`, finals `type: "final"`, history `type: "history"`; transitions
 group by trigger under `on` / `always` / `after` / `invoke`. Targets are
-emitted as absolute `#id` references so cross-level edges (root handlers,
-history rebinds) import into a real `createMachine` without error — the output
-is verified against the actual xstate v5 runtime.
+emitted as absolute `#id` references; cross-level edges (root handlers,
+history rebinds) import into a real `createMachine` without error. The output
+is verified against the editor runtime.
 
 ## Mermaid
 
 `StateMachine.Render.Mermaid` produces a `stateDiagram-v2` for READMEs and docs
-sites (this one renders it):
+sites:
 
 ```haskell
 mermaid          :: RChart -> Text
@@ -47,30 +47,30 @@ The traffic-light demo chart, rendered by the library:
 
 ```mermaid
 stateDiagram-v2
-  [*] --> operational
-  state "operational" as operational
-  state operational {
-    [*] --> green
-    state "green" as green
-    state "yellow" as yellow
-    state "red" as red
-    state "walk" as walk
-    state "H" as opHist
+  [*] --> Operational
+  state "Operational" as Operational
+  state Operational {
+    [*] --> Green
+    state "Green" as Green
+    state "Yellow" as Yellow
+    state "Red" as Red
+    state "Walk" as Walk
+    state "H" as OpHist
   }
-  state "flashing" as flashing
-  state "off" as off
-  off --> [*]
-  opHist : opHist
-  operational --> flashing : POWER_OUT
-  green --> yellow : TIMER
-  green --> green : PUSH / notePedestrian
-  yellow --> red : TIMER / countCycle
-  red --> green : TIMER [noPedestrian]
-  red --> walk : TIMER
-  walk --> green : TIMER / clearPedestrian
-  flashing --> opHist : FIXED
+  state "Flashing" as Flashing
+  state "Off" as Off
+  Off --> [*]
+  OpHist : OpHist
+  Operational --> Flashing : POWER_OUT
+  Green --> Yellow : TIMER
+  Green --> Green : PUSH / NotePedestrian
+  Yellow --> Red : TIMER / CountCycle
+  Red --> Green : TIMER [NoPedestrian]
+  Red --> Walk : TIMER
+  Walk --> Green : TIMER / ClearPedestrian
+  Flashing --> OpHist : FIXED
   state "any state" as __any
-  __any --> off : DECOMMISSION
+  __any --> Off : DECOMMISSION
 ```
 
 History appears as an `H` node, finals get an edge to `[*]`, parallel regions
@@ -113,18 +113,18 @@ only adds row-to-edge hover highlighting.
 
 ## Wiring it into a workflow
 
-Because everything renders from `ciChart impl`, a handy pattern is a tiny exe or
+Because everything renders from `ciChart impl`, a practical pattern is a tiny exe or
 test that regenerates the diagrams from the source of truth:
 
 ```haskell
 main :: IO ()
 main = do
   T.writeFile "docs/chart.mmd"  (mermaid (ciChart impl))
-  BL.writeFile "docs/chart.json" (encode (xstateConfig (ciChart impl)))
+  BL.writeFile "docs/chart.xstate" (encode (xstateConfig (ciChart impl)))
 ```
 
-The `example-traffic` demo prints the Mermaid and XState JSON and writes an
-HTML page highlighting the machine's live configuration after a step — run
+The `example-traffic` demo prints Mermaid and Stately config output and writes
+an HTML page highlighting the machine's live configuration after a step — run
 `cabal run example-traffic` to see all four in action.
 
 Back to the [overview](../), or the

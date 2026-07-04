@@ -231,7 +231,7 @@ hex64 w = T.pack (pad (showHex w ""))
 -------------------------------------------------------------------------------}
 
 -- | A successfully restored machine.
-data Restored (spec :: ChartSpec) = Restored
+data Restored (spec :: ChartSpec st ev g act svc inv out) = Restored
   { restoredMachine :: Machine spec
   , restoredWarnings :: [RestoreWarning]
   , restoredEffects :: [EffectReq]
@@ -426,7 +426,7 @@ sanitizeHistory chart = Map.foldrWithKey go (Map.empty, [])
 -------------------------------------------------------------------------------}
 
 -- | What to do instead of failing.
-data RecoveryAction (spec :: ChartSpec)
+data RecoveryAction (spec :: ChartSpec st ev g act svc inv out)
   = -- | Discard the snapshot and initialize the machine fresh with this
     -- context (root and initial entry actions run; invocations start).
     Restart (Ctx spec)
@@ -439,7 +439,7 @@ data RecoveryAction (spec :: ChartSpec)
 and the raw snapshot; 'Nothing' means \"do not recover — fail with the
 original error\".
 -}
-data Recovery (spec :: ChartSpec) = Recovery
+data Recovery (spec :: ChartSpec st ev g act svc inv out) = Recovery
   { onWrongChart :: Text -> Snapshot -> Maybe (RecoveryAction spec)
   , onUnknownStates :: [NodeName] -> Snapshot -> Maybe (RecoveryAction spec)
   , onIllegalConfiguration :: Text -> Snapshot -> Maybe (RecoveryAction spec)
@@ -471,7 +471,7 @@ restartRecovery ctx =
     }
 
 -- | How a 'restoreWith' concluded.
-data RestoreOutcome m (spec :: ChartSpec)
+data RestoreOutcome m (spec :: ChartSpec st ev g act svc inv out)
   = -- | The snapshot restored cleanly.
     Intact (Restored spec)
   | -- | Restore failed with the given error, and a 'Restart' recovery

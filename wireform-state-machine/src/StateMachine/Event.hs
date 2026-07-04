@@ -3,10 +3,12 @@
 {- | Typed events.
 
 An 'EventVal' is a named event carrying its /typed/ payload — @mkEvent
-\@\"FETCH\" url@ only compiles if the chart declares a @\"FETCH\"@ event
+\@\'FETCH url@ only compiles if the chart declares a @\'FETCH@ event
 and the payload has the declared type, and it recovers that exact type by
-name ('matchEvent' \/ 'onEvent'). No serialization is involved: the value
-is the real Haskell value, start to finish.
+name ('matchEvent' \/ 'onEvent'): event keys are singletons, so matching
+two names ('Data.Type.Equality.testEquality' on their 'SKey's) /proves/
+payload-type equality. No serialization is involved: the value is the
+real Haskell value, start to finish.
 
 The step algorithm additionally processes lifecycle events — done, timers,
 invoke results. Those carry values born at a service or output producer
@@ -25,6 +27,7 @@ module StateMachine.Event (
   -- * Typed events
   EventVal (..),
   mkEvent,
+  mkEventS,
   mkEvent_,
   eventName,
   matchEvent,
@@ -45,16 +48,17 @@ module StateMachine.Event (
 ) where
 
 import Data.Aeson (FromJSON, Value)
+import Data.Kind (Constraint, Type)
 import Data.Aeson.Types qualified as Aeson
 import Data.Dynamic (Dynamic, fromDynamic)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Type.Equality ((:~:) (..))
+import Data.Type.Equality (testEquality, (:~:) (..))
 import Data.Typeable (Typeable)
-import GHC.TypeLits (KnownSymbol, sameSymbol, symbolVal)
+
+import StateMachine.Key (KnownKey, SKey, demoteKey, keyName, keyNameOf, skey)
 
 import StateMachine.Runtime (EventKey (..), NodeName, TimerKey (..))
 import StateMachine.Spec (
@@ -72,53 +76,66 @@ import StateMachine.Spec (
 -- | A declared event of chart @spec@, carrying its typed payload. The
 -- 'Show' constraint is for tracing/debugging only — the payload itself is
 -- never serialized on the typed path.
-data EventVal (spec :: ChartSpec) where
+type EventVal :: forall {st} {ev} {g} {act} {svc} {inv} {out}. ChartSpec st ev g act svc inv out -> Type
+data EventVal (spec :: ChartSpec st ev g act svc inv out) where
   EventVal ::
-    ( KnownSymbol e
+    ( KnownKey e
     , HasEvent spec e
     , Show (EventPayload spec e)
     ) =>
-    Proxy e ->
+    SKey e ->
     EventPayload spec e ->
     EventVal spec
 
 instance Show (EventVal spec) where
-  showsPrec d (EventVal p payload) =
+  showsPrec d (EventVal s payload) =
     showParen (d > 10) $
       showString "EventVal "
-        . shows (T.pack (symbolVal p))
+        . shows (keyName (demoteKey s))
         . showString " "
         . showsPrec 11 payload
 
--- | Construct an event: @mkEvent \@\"FETCH\" url@. Compiles only if the
+-- | Construct an event: @mkEvent \@\'FETCH url@. Compiles only if the
 -- chart declares the event with that payload type.
 mkEvent ::
   forall e spec.
-  (KnownSymbol e, HasEvent spec e, Show (EventPayload spec e)) =>
+  (KnownKey e, HasEvent spec e, Show (EventPayload spec e)) =>
   EventPayload spec e ->
   EventVal spec
-mkEvent = EventVal (Proxy @e)
+mkEvent = EventVal (skey @e)
 
--- | Construct a payload-less event: @mkEvent_ \@\"CANCEL\"@.
+-- | 'mkEvent' with the event name passed as a singleton value instead of
+-- a type application — the shape to use inside a
+-- 'StateMachine.Key.withKey' continuation, where matching on the 'SKey'
+-- constructor refines the payload type branch by branch.
+mkEventS ::
+  forall e spec.
+  (KnownKey e, HasEvent spec e, Show (EventPayload spec e)) =>
+  SKey e ->
+  EventPayload spec e ->
+  EventVal spec
+mkEventS = EventVal
+
+-- | Construct a payload-less event: @mkEvent_ \@\'CANCEL@.
 mkEvent_ ::
   forall e spec.
-  (KnownSymbol e, HasEvent spec e, Show (EventPayload spec e), EventPayload spec e ~ ()) =>
+  (KnownKey e, HasEvent spec e, Show (EventPayload spec e), EventPayload spec e ~ ()) =>
   EventVal spec
 mkEvent_ = mkEvent @e ()
 
 eventName :: EventVal spec -> Text
-eventName (EventVal p _) = T.pack (symbolVal p)
+eventName (EventVal s _) = keyName (demoteKey s)
 
--- | Typed projection: @matchEvent \@\"FETCH\" ev@ returns the payload when
--- the event is a @\"FETCH\"@. State names are unique, so name equality
--- proves payload-type equality.
+-- | Typed projection: @matchEvent \@\'FETCH ev@ returns the payload when
+-- the event is a @\'FETCH@. Singleton equality on the event keys proves
+-- payload-type equality.
 matchEvent ::
   forall e spec.
-  (KnownSymbol e) =>
+  (KnownKey e) =>
   EventVal spec ->
   Maybe (EventPayload spec e)
-matchEvent (EventVal (p :: Proxy e') payload) =
-  case sameSymbol (Proxy @e) p of
+matchEvent (EventVal s payload) =
+  case testEquality (skey @e) s of
     Just Refl -> Just payload
     Nothing -> Nothing
 
@@ -130,7 +147,8 @@ matchEvent (EventVal (p :: Proxy e') payload) =
 and output producers receive the full 'StepEvent', so an @onDone@
 transition's action can read the invocation's output, etc.
 -}
-data StepEvent (spec :: ChartSpec)
+type StepEvent :: forall {st} {ev} {g} {act} {svc} {inv} {out}. ChartSpec st ev g act svc inv out -> Type
+data StepEvent (spec :: ChartSpec st ev g act svc inv out)
   = -- | A declared event, external or raised.
     EvExternal (EventVal spec)
   | -- | @done.state.{node}@ with the final state's done-data (typed,
@@ -173,10 +191,10 @@ stepEventLabel = \case
   EvInit -> "#init"
 
 -- | Typed projection for guards\/actions: the payload of a named event,
--- at its declared type — @onEvent \@\"FETCH\" ev :: Maybe Url@.
+-- at its declared type — @onEvent \@\'FETCH ev :: Maybe Url@.
 onEvent ::
   forall e spec.
-  (KnownSymbol e) =>
+  (KnownKey e) =>
   StepEvent spec ->
   Maybe (EventPayload spec e)
 onEvent = \case
@@ -215,14 +233,17 @@ message, an untyped host). This is the one place the library parses JSON
 into a typed event; the internal path never does. Satisfied for any chart
 whose event payloads are 'FromJSON' (and 'Show', for the typed value).
 -}
-class DecodeEvents (spec :: ChartSpec) (evs :: [EventSpec]) where
+type DecodeEvents ::
+  forall {st} {ev} {g} {act} {svc} {inv} {out}.
+  ChartSpec st ev g act svc inv out -> [EventSpec ev] -> Constraint
+class DecodeEvents (spec :: ChartSpec st ev g act svc inv out) (evs :: [EventSpec ev]) where
   eventDecoders :: Map Text (Value -> Either String (EventVal spec))
 
 instance DecodeEvents spec '[] where
   eventDecoders = Map.empty
 
 instance
-  ( KnownSymbol e
+  ( KnownKey e
   , HasEvent spec e
   , EventPayload spec e ~ p
   , FromJSON p
@@ -233,8 +254,8 @@ instance
   where
   eventDecoders =
     Map.insert
-      (T.pack (symbolVal (Proxy @e)))
-      (fmap (EventVal (Proxy @e)) . Aeson.parseEither Aeson.parseJSON)
+      (keyNameOf @e)
+      (fmap (EventVal (skey @e)) . Aeson.parseEither Aeson.parseJSON)
       (eventDecoders @spec @rest)
 
 -- | The constraint a chart needs to decode events arriving from outside.

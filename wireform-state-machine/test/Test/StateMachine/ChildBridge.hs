@@ -1,3 +1,5 @@
+{-# LANGUAGE TemplateHaskell #-}
+
 -- | The typed child-chart bridge ('mkServiceChart' \/ 'ChildBridge') under
 -- the real IO interpreter. Three contracts, all with typed payloads and no
 -- JSON:
@@ -36,22 +38,36 @@ newtype ChildOut = ChildOut Int
   (a) child completes on its own; parent recovers its typed Output
 -------------------------------------------------------------------------------}
 
+data ACState = ACStart | ACFin
+deriveKeyKind ''ACState
+
+data PAState = PAWait | PADone
+data PAAction = GrabA
+data PAService = RunChild
+data PAInvoke = KidA
+deriveKeyKind ''PAState
+deriveKeyKind ''PAAction
+deriveKeyKind ''PAService
+deriveKeyKind ''PAInvoke
+
 -- | Runs to its top-level final on the initial macrostep (the eventless
 -- transition fires on entry), producing @ChildOut 9@.
+type AutoChild :: ChartSpec ACState NoKey NoKey NoKey NoKey NoKey NoKey
 type AutoChild =
   Chart
     "autochild"
     ()
     ChildOut
     '[]
-    '[ State "cstart" '[Always ==> To "cfin"]
-     , Final "cfin"
+    '[ State 'ACStart '[Always ==> To 'ACFin]
+     , Final 'ACFin
      ]
-    "cstart"
+    'ACStart
 
 autoChildImpl :: ChartImpl IO AutoChild
 autoChildImpl = chartImpl RNil RNil RNil RNil (const (ChildOut 9))
 
+type ParentA :: ChartSpec PAState NoKey NoKey PAAction PAService PAInvoke NoKey
 type ParentA =
   Chart
     "parenta"
@@ -59,18 +75,18 @@ type ParentA =
     Int
     '[]
     '[ State
-        "pwait"
-        '[Invoke "kid" "runChild" '[OnDone ==> To "pdone" ! '["grab"]] '[]]
-     , Final "pdone"
+        'PAWait
+        '[Invoke 'KidA 'RunChild '[OnDone ==> To 'PADone ! '[ 'GrabA]] '[]]
+     , Final 'PADone
      ]
-    "pwait"
+    'PAWait
 
 parentAImpl :: ChartImpl IO ParentA
 parentAImpl =
   chartImpl
     RNil
-    (assign @"grab" (\_ ev -> fmap (\(ChildOut n) -> n) (invokeOutput @ChildOut ev)) :& RNil)
-    (mkServiceChart @"runChild" autoChildImpl autoBridge :& RNil)
+    (assign @'GrabA (\_ ev -> fmap (\(ChildOut n) -> n) (invokeOutput @ChildOut ev)) :& RNil)
+    (mkServiceChart @'RunChild autoChildImpl autoBridge :& RNil)
     RNil
     (fromMaybe 0)
 
@@ -88,45 +104,63 @@ autoBridge =
   (b) parent sendChild -> bridgeToChild -> child advances
 -------------------------------------------------------------------------------}
 
+data WCState = WCIdle | WCFin
+data WCEvent = GO
+deriveKeyKind ''WCState
+deriveKeyKind ''WCEvent
+
+data PBState = PBWait | PBDone
+data PBEvent = PING
+data PBAction = GrabB | PokeChild
+data PBService = RunWait
+data PBInvoke = KidB
+deriveKeyKind ''PBState
+deriveKeyKind ''PBEvent
+deriveKeyKind ''PBAction
+deriveKeyKind ''PBService
+deriveKeyKind ''PBInvoke
+
 -- | Sits idle until it receives @GO@, then completes with @ChildOut 42@.
+type WaitChild :: ChartSpec WCState WCEvent NoKey NoKey NoKey NoKey NoKey
 type WaitChild =
   Chart
     "waitchild"
     ()
     ChildOut
-    '["GO" ::: ()]
-    '[ State "cidle" '[On "GO" ==> To "cfin"]
-     , Final "cfin"
+    '[ 'GO ::: ()]
+    '[ State 'WCIdle '[On 'GO ==> To 'WCFin]
+     , Final 'WCFin
      ]
-    "cidle"
+    'WCIdle
 
 waitChildImpl :: ChartImpl IO WaitChild
 waitChildImpl = chartImpl RNil RNil RNil RNil (const (ChildOut 42))
 
+type ParentB :: ChartSpec PBState PBEvent NoKey PBAction PBService PBInvoke NoKey
 type ParentB =
   Chart
     "parentb"
     (Maybe Int)
     Int
-    '["PING" ::: ()]
+    '[ 'PING ::: ()]
     '[ State
-        "pwait"
-        '[ Invoke "kid" "runWait" '[OnDone ==> To "pdone" ! '["grab"]] '[]
-         , On "PING" ==> Stay ! '["pokeChild"]
+        'PBWait
+        '[ Invoke 'KidB 'RunWait '[OnDone ==> To 'PBDone ! '[ 'GrabB]] '[]
+         , On 'PING ==> Stay ! '[ 'PokeChild]
          ]
-     , Final "pdone"
+     , Final 'PBDone
      ]
-    "pwait"
+    'PBWait
 
 parentBImpl :: ChartImpl IO ParentB
 parentBImpl =
   chartImpl
     RNil
-    ( assign @"grab" (\_ ev -> fmap (\(ChildOut n) -> n) (invokeOutput @ChildOut ev))
-        :& mkAction @"pokeChild" (\ctx _ -> pure (outcome ctx){aoSends = [sendChild "kid" (mkEvent_ @"PING")]})
+    ( assign @'GrabB (\_ ev -> fmap (\(ChildOut n) -> n) (invokeOutput @ChildOut ev))
+        :& mkAction @'PokeChild (\ctx _ -> pure (outcome ctx){aoSends = [sendChild "KidB" (mkEvent_ @'PING)]})
         :& RNil
     )
-    (mkServiceChart @"runWait" waitChildImpl waitBridge :& RNil)
+    (mkServiceChart @'RunWait waitChildImpl waitBridge :& RNil)
     RNil
     (fromMaybe 0)
 
@@ -135,9 +169,7 @@ waitBridge :: ChildBridge ParentB WaitChild
 waitBridge =
   ChildBridge
     { bridgeCtx = \_ _ -> ()
-    , bridgeToChild = \pev -> case eventName pev of
-        "PING" -> Just (mkEvent_ @"GO")
-        _ -> Nothing
+    , bridgeToChild = \pev -> mkEvent_ @'GO <$ matchEvent @'PING pev
     , bridgeToParent = const Nothing
     }
 
@@ -145,47 +177,67 @@ waitBridge =
   (c) child sendParent -> bridgeToParent -> parent advances
 -------------------------------------------------------------------------------}
 
+data RCState = RCStart
+data RCEvent = REPORT
+data RCAction = TellParent
+deriveKeyKind ''RCState
+deriveKeyKind ''RCEvent
+deriveKeyKind ''RCAction
+
+data PCState = PCWait | PCDone
+data PCEvent = GOTREPORT
+data PCAction = Mark
+data PCService = RunReport
+data PCInvoke = KidC
+deriveKeyKind ''PCState
+deriveKeyKind ''PCEvent
+deriveKeyKind ''PCAction
+deriveKeyKind ''PCService
+deriveKeyKind ''PCInvoke
+
 -- | On entry it reports to its parent (a @REPORT@ child event) and then
 -- rests; it never finishes on its own — the parent finishing cancels it.
+type ReportChild :: ChartSpec RCState RCEvent NoKey RCAction NoKey NoKey NoKey
 type ReportChild =
   Chart
     "reportchild"
     ()
     ChildOut
-    '["REPORT" ::: ()]
-    '[State "cstart" '[Entry '["tellParent"]]]
-    "cstart"
+    '[ 'REPORT ::: ()]
+    '[State 'RCStart '[Entry '[ 'TellParent]]]
+    'RCStart
 
 reportChildImpl :: ChartImpl IO ReportChild
 reportChildImpl =
   chartImpl
     RNil
-    (mkAction @"tellParent" (\ctx _ -> pure (outcome ctx){aoSends = [sendParent (mkEvent_ @"REPORT")]}) :& RNil)
+    (mkAction @'TellParent (\ctx _ -> pure (outcome ctx){aoSends = [sendParent (mkEvent_ @'REPORT)]}) :& RNil)
     RNil
     RNil
     (const (ChildOut 0))
 
+type ParentC :: ChartSpec PCState PCEvent NoKey PCAction PCService PCInvoke NoKey
 type ParentC =
   Chart
     "parentc"
     Int
     Int
-    '["GOTREPORT" ::: ()]
+    '[ 'GOTREPORT ::: ()]
     '[ State
-        "pwait"
-        '[ Invoke "kid" "runReport" '[] '[]
-         , On "GOTREPORT" ==> To "pdone" ! '["mark"]
+        'PCWait
+        '[ Invoke 'KidC 'RunReport '[] '[]
+         , On 'GOTREPORT ==> To 'PCDone ! '[ 'Mark]
          ]
-     , Final "pdone"
+     , Final 'PCDone
      ]
-    "pwait"
+    'PCWait
 
 parentCImpl :: ChartImpl IO ParentC
 parentCImpl =
   chartImpl
     RNil
-    (assign @"mark" (\_ _ -> 7) :& RNil)
-    (mkServiceChart @"runReport" reportChildImpl reportBridge :& RNil)
+    (assign @'Mark (\_ _ -> 7) :& RNil)
+    (mkServiceChart @'RunReport reportChildImpl reportBridge :& RNil)
     RNil
     id
 
@@ -195,9 +247,7 @@ reportBridge =
   ChildBridge
     { bridgeCtx = \_ _ -> ()
     , bridgeToChild = const Nothing
-    , bridgeToParent = \cev -> case eventName cev of
-        "REPORT" -> Just (mkEvent_ @"GOTREPORT")
-        _ -> Nothing
+    , bridgeToParent = \cev -> mkEvent_ @'GOTREPORT <$ matchEvent @'REPORT cev
     }
 
 {-------------------------------------------------------------------------------
@@ -235,7 +285,7 @@ tests = describe "typed child-chart bridge" $ do
 
   it "translates a parent sendChild through bridgeToChild, advancing the child to completion" $ do
     itp <- startParent parentBImpl Nothing
-    accepted <- send itp (mkEvent_ @"PING")
+    accepted <- send itp (mkEvent_ @'PING)
     accepted `shouldBe` True
     out <- awaitOutput itp
     out `shouldBe` Right 42

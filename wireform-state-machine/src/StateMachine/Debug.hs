@@ -59,8 +59,8 @@ import StateMachine.Step (MicroTrace (..), StepFault, Stepped (..), completionOf
 -------------------------------------------------------------------------------}
 
 -- | One step of a simulation script.
-data SimCommand (spec :: ChartSpec)
-  = -- | Deliver a typed external event (@'StateMachine.Event.mkEvent' \@\"NAME\" payload@).
+data SimCommand (spec :: ChartSpec st ev g act svc inv out)
+  = -- | Deliver a typed external event (@'StateMachine.Event.mkEvent' \@\'NAME payload@).
     SimSend (EventVal spec)
   | -- | Deliver an event by name with a JSON payload — the dynamic
     -- boundary, exactly as an actor send or a wire message would arrive.
@@ -97,7 +97,7 @@ simReject i = SimReject i . toDyn
 {- | Where a simulation ended up: the machine, everything that happened
 (traces and effect requests, in order), and what is still armed.
 -}
-data SimResult (spec :: ChartSpec) = SimResult
+data SimResult (spec :: ChartSpec st ev g act svc inv out) = SimResult
   { simMachine :: Machine spec
   , simTrace :: [MicroTrace]
   -- ^ Every microstep of the whole run (initialization included), in

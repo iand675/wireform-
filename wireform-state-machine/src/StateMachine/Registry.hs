@@ -62,14 +62,16 @@ module StateMachine.Registry (
 ) where
 
 import Data.Dynamic (Dynamic, Typeable, toDyn)
-import Data.Kind (Type)
+import Data.Kind (Constraint, Type)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.TypeError (ErrorMessage (..), TypeError)
-import GHC.TypeLits (KnownSymbol, Symbol, symbolVal)
+import GHC.TypeLits (Symbol)
+
+import StateMachine.Key (KnownKey, keyNameOf)
 
 import StateMachine.Event (EventVal, StepEvent)
 import StateMachine.Runtime (RChart)
@@ -88,8 +90,10 @@ import StateMachine.Spec (
 -------------------------------------------------------------------------------}
 
 -- | A heterogeneous list of named entries, in any order. @f@ is the entry
--- shape (e.g. @'GuardE' spec@), indexed by the entry's name.
-data Reg (f :: Symbol -> Type) (names :: [Symbol]) where
+-- shape (e.g. @'GuardE' spec@), indexed by the entry's name — a key of
+-- the role's kind, so registering (say) an action under a guard's name is
+-- a kind error.
+data Reg (f :: k -> Type) (names :: [k]) where
   RNil :: Reg f '[]
   (:&) :: f n -> Reg f names -> Reg f (n ': names)
 
@@ -99,7 +103,8 @@ infixr 5 :&
 @what@ is the registry's human name (\"guard\", \"action\", …), used in
 error messages. You never write instances of this class.
 -}
-class CompleteReg (what :: Symbol) (want :: [Symbol]) (have :: [Symbol]) where
+type CompleteReg :: forall {k}. Symbol -> [k] -> [k] -> Constraint
+class CompleteReg (what :: Symbol) (want :: [k]) (have :: [k]) where
   canonReg :: Reg f have -> Reg f want
 
 instance CompleteReg what '[] '[] where
@@ -129,8 +134,9 @@ instance
 {- | Extract the entry named @n@ from a registry, returning the remainder.
 Drives 'CompleteReg'; a missing entry is a 'TypeError'.
 -}
+type Pluck :: forall {k}. Symbol -> k -> [k] -> [k] -> Constraint
 class
-  Pluck (what :: Symbol) (n :: Symbol) (have :: [Symbol]) (rest :: [Symbol])
+  Pluck (what :: Symbol) (n :: k) (have :: [k]) (rest :: [k])
     | n have -> rest
   where
   pluckReg :: Reg f have -> (f n, Reg f rest)
@@ -145,14 +151,15 @@ instance
   pluckReg = error "unreachable"
 
 instance
-  (Pluck' (EqSymbol h n) what n (h ': t) rest) =>
+  (Pluck' (EqKey h n) what n (h ': t) rest) =>
   Pluck what n (h ': t) rest
   where
-  pluckReg = pluckReg' @(EqSymbol h n) @what @n
+  pluckReg = pluckReg' @(EqKey h n) @what @n
 
 -- | Dispatch on whether the head entry is the one we want.
+type Pluck' :: forall {k}. Bool -> Symbol -> k -> [k] -> [k] -> Constraint
 class
-  Pluck' (match :: Bool) (what :: Symbol) (n :: Symbol) (have :: [Symbol]) (rest :: [Symbol])
+  Pluck' (match :: Bool) (what :: Symbol) (n :: k) (have :: [k]) (rest :: [k])
     | match n have -> rest
   where
   pluckReg' :: Reg f have -> (f n, Reg f rest)
@@ -168,22 +175,23 @@ instance
     let (y, r') = pluckReg @what @n r
      in (y, x :& r')
 
-type family EqSymbol (a :: Symbol) (b :: Symbol) :: Bool where
-  EqSymbol a a = 'True
-  EqSymbol a b = 'False
+type family EqKey (a :: k) (b :: k) :: Bool where
+  EqKey a a = 'True
+  EqKey a b = 'False
 
 -- | Demote a registry's names alongside its entries.
-class RegNames (names :: [Symbol]) where
-  regFold :: (forall n. (KnownSymbol n) => Proxy n -> f n -> a) -> Reg f names -> [(Text, a)]
+type RegNames :: forall {k}. [k] -> Constraint
+class RegNames (names :: [k]) where
+  regFold :: (forall (n :: k). (KnownKey n) => Proxy n -> f n -> a) -> Reg f names -> [(Text, a)]
 
 instance RegNames '[] where
   regFold _ RNil = []
 
-instance (KnownSymbol n, RegNames ns) => RegNames (n ': ns) where
-  regFold k (x :& r) = (T.pack (symbolVal (Proxy @n)), k (Proxy @n) x) : regFold k r
+instance (KnownKey n, RegNames ns) => RegNames (n ': ns) where
+  regFold k (x :& r) = (keyNameOf @n, k (Proxy @n) x) : regFold k r
 
 -- | Erase a registry to a name-keyed map.
-regMap :: (RegNames names) => (forall n. (KnownSymbol n) => f n -> a) -> Reg f names -> Map Text a
+regMap :: (RegNames names) => (forall n. (KnownKey n) => f n -> a) -> Reg f names -> Map Text a
 regMap k = Map.fromList . regFold (\_ x -> k x)
 
 {-------------------------------------------------------------------------------
@@ -192,10 +200,10 @@ regMap k = Map.fromList . regFold (\_ x -> k x)
 
 -- | The implementation of the guard named @n@: a /pure/ predicate over
 -- context and the triggering event.
-newtype GuardE (spec :: ChartSpec) (n :: Symbol)
+newtype GuardE (spec :: ChartSpec st ev g act svc inv out) (n :: g)
   = GuardE (Ctx spec -> StepEvent spec -> Bool)
 
--- | Register a guard: @mkGuard \@\"outOfRetries\" (\\ctx _ -> retries ctx >= 3)@.
+-- | Register a guard: @mkGuard \@\'OutOfRetries (\\ctx _ -> retries ctx >= 3)@.
 mkGuard :: forall n spec. (Ctx spec -> StepEvent spec -> Bool) -> GuardE spec n
 mkGuard = GuardE
 
@@ -208,7 +216,7 @@ the /current/ macrostep's internal queue, and sends across actor
 boundaries (parent, invoked children, or the machine's own external
 queue).
 -}
-data ActionOutcome (spec :: ChartSpec) = ActionOutcome
+data ActionOutcome (spec :: ChartSpec st ev g act svc inv out) = ActionOutcome
   { aoCtx :: Ctx spec
   , aoRaised :: [EventVal spec]
   , aoSends :: [SendReq spec]
@@ -223,7 +231,7 @@ event is a /typed/ 'EventVal' of the sender's chart — no serialization.
 A cross-chart target ('ToChild' \/ 'ToParent') is translated to the peer's
 event type by that invocation's 'ChildBridge'.
 -}
-data SendReq (spec :: ChartSpec) = SendReq
+data SendReq (spec :: ChartSpec st ev g act svc inv out) = SendReq
   { srTarget :: SendTarget
   , srEvent :: EventVal spec
   }
@@ -261,7 +269,7 @@ sendParent :: EventVal spec -> SendReq spec
 sendParent = SendReq ToParent
 
 -- | The implementation of the action named @n@, in monad @m@.
-newtype ActionE m (spec :: ChartSpec) (n :: Symbol)
+newtype ActionE m (spec :: ChartSpec st ev g act svc inv out) (n :: act)
   = ActionE (Ctx spec -> StepEvent spec -> m (ActionOutcome spec))
 
 -- | Register an action with full control over the outcome.
@@ -306,7 +314,7 @@ typed Haskell values; they reach the @onDone@ \/ @onError@ handlers as
 'Data.Dynamic.Dynamic' and are recovered there with
 'StateMachine.Event.invokeOutput' \/ 'StateMachine.Event.invokeError'.
 -}
-data ServiceE m (spec :: ChartSpec) (n :: Symbol) where
+data ServiceE m (spec :: ChartSpec st ev g act svc inv out) (n :: svc) where
   -- | Promise semantics: run to completion; 'Right' resolves the
   -- invocation (onDone), 'Left' fails it (onError). The output and error
   -- are arbitrary typed values.
@@ -336,7 +344,7 @@ chart. Both directions are total, typed translations — nothing is
 serialized. A translation returning 'Nothing' drops that cross-boundary
 event (e.g. a child event the parent does not care about).
 -}
-data ChildBridge (parent :: ChartSpec) (child :: ChartSpec) = ChildBridge
+data ChildBridge (parent :: ChartSpec st ev g act svc inv out) (child :: ChartSpec st' ev' g' act' svc' inv' out') = ChildBridge
   { bridgeCtx :: Ctx parent -> StepEvent parent -> Ctx child
   -- ^ Derive the child's initial context when the invocation starts.
   , bridgeToChild :: EventVal parent -> Maybe (EventVal child)
@@ -346,7 +354,7 @@ data ChildBridge (parent :: ChartSpec) (child :: ChartSpec) = ChildBridge
   }
 
 -- | Register a promise service with its name pinned:
--- @mkService \@\"httpGet\" (\\ctx ev -> …)@. (The bare 'ServiceFn'
+-- @mkService \@\'HttpGet (\\ctx ev -> …)@. (The bare 'ServiceFn'
 -- constructor leaves the name index ambiguous at registration sites.)
 mkService ::
   forall n out err m spec.
@@ -375,7 +383,7 @@ mkServiceChart = ServiceChart
 -- | 'ServiceE' with its name index erased (what 'ChartImpl' stores).
 -- Typed results are boxed to 'Dynamic' here, where each service's static
 -- output\/error types are still in scope.
-data SomeService m (spec :: ChartSpec)
+data SomeService m (spec :: ChartSpec st ev g act svc inv out)
   = SomePromise (Ctx spec -> StepEvent spec -> m (Either Dynamic Dynamic))
   | SomeCallback (Ctx spec -> StepEvent spec -> (EventVal spec -> m ()) -> m (Either Dynamic Dynamic))
   | forall child.
@@ -399,7 +407,7 @@ eraseService = \case
 -- done event when the final state is entered. The payload is an ordinary
 -- typed value, recovered by the @'StateMachine.Spec.OnDoneOf'@ handler
 -- with 'StateMachine.Event.doneData'.
-newtype OutputE (spec :: ChartSpec) (n :: Symbol)
+newtype OutputE (spec :: ChartSpec st ev g act svc inv out) (n :: out)
   = OutputE (Ctx spec -> StepEvent spec -> Dynamic)
 
 mkOutput ::
@@ -420,7 +428,7 @@ the chart names, erased to total name-keyed maps (totality is what
 
 Build with 'StateMachine.Machine.chartImpl'.
 -}
-data ChartImpl m (spec :: ChartSpec) = ChartImpl
+data ChartImpl m (spec :: ChartSpec st ev g act svc inv out) = ChartImpl
   { ciChart :: RChart
   , ciGuards :: Map Text (Ctx spec -> StepEvent spec -> Bool)
   , ciActions :: Map Text (Ctx spec -> StepEvent spec -> m (ActionOutcome spec))

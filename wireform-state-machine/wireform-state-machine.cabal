@@ -47,6 +47,7 @@ library
   hs-source-dirs: src
   exposed-modules:
     StateMachine
+    StateMachine.Key
     StateMachine.Runtime
     StateMachine.Spec
     StateMachine.Validate
@@ -70,6 +71,7 @@ library
     bytestring >= 0.11 && < 0.13,
     containers >= 0.6 && < 0.9,
     stm >= 2.5 && < 2.6,
+    template-haskell >= 2.19 && < 2.24,
     text >= 2.0 && < 2.2,
     time >= 1.11 && < 1.16
 
@@ -84,6 +86,7 @@ test-suite wireform-state-machine-test
     Test.StateMachine.Effects
     Test.StateMachine.Eventless
     Test.StateMachine.History
+    Test.StateMachine.Keys
     Test.StateMachine.Ordering
     Test.StateMachine.Parallel
     Test.StateMachine.Persistence

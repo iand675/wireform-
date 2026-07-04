@@ -26,11 +26,15 @@ module StateMachine.Reify (
 ) where
 
 import Data.Map.Strict qualified as Map
+import Data.Maybe (mapMaybe)
+import Data.Kind (Constraint)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Typeable (Typeable, typeRep)
-import GHC.TypeLits (KnownNat, KnownSymbol, Symbol, natVal, symbolVal)
+import GHC.TypeLits (KnownNat, KnownSymbol, natVal, symbolVal)
+
+import StateMachine.Key (KnownKey, keyNameOf)
 
 import StateMachine.Runtime (
   HistoryKind (..),
@@ -68,7 +72,8 @@ There is a single catch-all instance, so a user-facing signature never
 needs more than @'KnownChart' spec@ — the per-component demotion
 constraints are solved structurally from the spec type.
 -}
-class KnownChart (spec :: ChartSpec) where
+type KnownChart :: forall {st} {ev} {g} {act} {svc} {inv} {out}. ChartSpec st ev g act svc inv out -> Constraint
+class KnownChart (spec :: ChartSpec st ev g act svc inv out) where
   {- | The value-level chart: @'reifyChart' \@MyChart@.
 
   Each use re-assembles the whole structure, so evaluate it once and share
@@ -80,7 +85,7 @@ class KnownChart (spec :: ChartSpec) where
 
 instance
   ( KnownSymbol (ChartName spec)
-  , KnownSymbol (ChartInitial spec)
+  , KnownKey (ChartInitial spec)
   , KnownEvents (ChartEvents spec)
   , KnownNodes (ChartStates spec)
   , KnownFeatures (ChartRoot spec)
@@ -90,7 +95,7 @@ instance
   reifyChart =
     assemble
       (symText @(ChartName spec))
-      (symText @(ChartInitial spec))
+      (keyNameOf @(ChartInitial spec))
       (eventsVal @(ChartEvents spec))
       (nodesVal @(ChartStates spec))
       (featuresVal @(ChartRoot spec))
@@ -143,29 +148,32 @@ data PTrigger
   Demotion classes
 -------------------------------------------------------------------------------}
 
--- | A 'Symbol' as 'Text'.
-symText :: forall s. KnownSymbol s => Text
+-- | A 'Symbol' as 'Text' (the chart name; every other name is a key,
+-- rendered by 'keyNameOf').
+symText :: forall s. (KnownSymbol s) => Text
 symText = Text.pack (symbolVal (Proxy @s))
 
--- | Demote a promoted 'Symbol' list.
-class KnownSymbols (ss :: [Symbol]) where
-  symbolsVal :: [Text]
+-- | Demote a promoted key list to its wire names.
+type KnownKeys :: forall {k}. [k] -> Constraint
+class KnownKeys (ks :: [k]) where
+  keysVal :: [Text]
 
-instance KnownSymbols '[] where
-  symbolsVal = []
+instance KnownKeys '[] where
+  keysVal = []
 
-instance (KnownSymbol s, KnownSymbols ss) => KnownSymbols (s ': ss) where
-  symbolsVal = symText @s : symbolsVal @ss
+instance (KnownKey x, KnownKeys xs) => KnownKeys (x ': xs) where
+  keysVal = keyNameOf @x : keysVal @xs
 
--- | Demote a promoted @Maybe Symbol@.
-class KnownMaybeSymbol (ms :: Maybe Symbol) where
-  maybeSymbolVal :: Maybe Text
+-- | Demote a promoted @Maybe key@.
+type KnownMaybeKey :: forall {k}. Maybe k -> Constraint
+class KnownMaybeKey (mk :: Maybe k) where
+  maybeKeyVal :: Maybe Text
 
-instance KnownMaybeSymbol 'Nothing where
-  maybeSymbolVal = Nothing
+instance KnownMaybeKey 'Nothing where
+  maybeKeyVal = Nothing
 
-instance KnownSymbol s => KnownMaybeSymbol ('Just s) where
-  maybeSymbolVal = Just (symText @s)
+instance (KnownKey x) => KnownMaybeKey ('Just x) where
+  maybeKeyVal = Just (keyNameOf @x)
 
 -- | Demote a promoted 'HistoryKind' back to its value.
 class KnownHistoryKind (k :: HistoryKind) where
@@ -189,11 +197,12 @@ instance KnownTransKind 'Internal where
 
 -- | Demote a trigger. Invoke lifecycle triggers demote to placeholders;
 -- the enclosing 'FInvoke' supplies the invocation id during flattening.
-class KnownTrigger (t :: TriggerSpec) where
+type KnownTrigger :: forall {st} {ev}. TriggerSpec st ev -> Constraint
+class KnownTrigger (t :: TriggerSpec st ev) where
   triggerVal :: PTrigger
 
-instance KnownSymbol e => KnownTrigger ('TrOn e) where
-  triggerVal = PResolved (TOn (symText @e))
+instance (KnownKey e) => KnownTrigger ('TrOn e) where
+  triggerVal = PResolved (TOn (keyNameOf @e))
 
 instance KnownTrigger 'TrWildcard where
   triggerVal = PResolved TWildcard
@@ -204,8 +213,8 @@ instance KnownTrigger 'TrAlways where
 instance KnownNat ms => KnownTrigger ('TrAfter ms) where
   triggerVal = PResolved (TAfter (fromIntegral (natVal (Proxy @ms))))
 
-instance KnownSymbol s => KnownTrigger ('TrDone s) where
-  triggerVal = PResolved (TDone (symText @s))
+instance (KnownKey s) => KnownTrigger ('TrDone s) where
+  triggerVal = PResolved (TDone (keyNameOf @s))
 
 instance KnownTrigger 'TrInvokeDone where
   triggerVal = PInvokeDone
@@ -214,14 +223,15 @@ instance KnownTrigger 'TrInvokeError where
   triggerVal = PInvokeError
 
 -- | Demote one transition.
-class KnownTrans (t :: TransSpec) where
+type KnownTrans :: forall {st} {ev} {g} {act}. TransSpec st ev g act -> Constraint
+class KnownTrans (t :: TransSpec st ev g act) where
   transVal :: PTrans
 
 instance
   ( KnownTrigger tr
-  , KnownMaybeSymbol g
-  , KnownSymbols targets
-  , KnownSymbols actions
+  , KnownMaybeKey g
+  , KnownKeys targets
+  , KnownKeys actions
   , KnownTransKind kind
   ) =>
   KnownTrans ('MkTrans tr g targets actions kind)
@@ -229,33 +239,34 @@ instance
   transVal =
     PTrans
       { ptTrigger = triggerVal @tr
-      , ptGuard = maybeSymbolVal @g
-      , ptTargets = symbolsVal @targets
-      , ptActions = symbolsVal @actions
+      , ptGuard = maybeKeyVal @g
+      , ptTargets = keysVal @targets
+      , ptActions = keysVal @actions
       , ptInternal = isInternalVal @kind
       }
 
 -- | Demote one feature.
-class KnownFeature (f :: Feature) where
+type KnownFeature :: forall {st} {ev} {g} {act} {svc} {inv}. Feature st ev g act svc inv -> Constraint
+class KnownFeature (f :: Feature st ev g act svc inv) where
   featureVal :: PFeature
 
 instance KnownTrans t => KnownFeature ('FTrans t) where
   featureVal = PFTrans (transVal @t)
 
-instance KnownSymbols as => KnownFeature ('FEntry as) where
-  featureVal = PFEntry (symbolsVal @as)
+instance (KnownKeys as) => KnownFeature ('FEntry as) where
+  featureVal = PFEntry (keysVal @as)
 
-instance KnownSymbols as => KnownFeature ('FExit as) where
-  featureVal = PFExit (symbolsVal @as)
+instance (KnownKeys as) => KnownFeature ('FExit as) where
+  featureVal = PFExit (keysVal @as)
 
 instance
-  (KnownSymbol i, KnownSymbol src, KnownFeatures onDone, KnownFeatures onError) =>
+  (KnownKey i, KnownKey src, KnownFeatures onDone, KnownFeatures onError) =>
   KnownFeature ('FInvoke i src onDone onError)
   where
   featureVal =
     PFInvoke
-      (symText @i)
-      (symText @src)
+      (keyNameOf @i)
+      (keyNameOf @src)
       (transitionsOnly (featuresVal @onDone))
       (transitionsOnly (featuresVal @onError))
 
@@ -263,10 +274,13 @@ instance
 -- transition lists by construction ('StateMachine.Spec.Invoke'); anything
 -- else in one is left to "StateMachine.Validate" to reject.
 transitionsOnly :: [PFeature] -> [PTrans]
-transitionsOnly fs = [t | PFTrans t <- fs]
+transitionsOnly = mapMaybe $ \case
+  PFTrans t -> Just t
+  _ -> Nothing
 
 -- | Demote a feature list, preserving order.
-class KnownFeatures (fs :: [Feature]) where
+type KnownFeatures :: forall {st} {ev} {g} {act} {svc} {inv}. [Feature st ev g act svc inv] -> Constraint
+class KnownFeatures (fs :: [Feature st ev g act svc inv]) where
   featuresVal :: [PFeature]
 
 instance KnownFeatures '[] where
@@ -276,13 +290,14 @@ instance (KnownFeature f, KnownFeatures fs) => KnownFeatures (f ': fs) where
   featuresVal = featureVal @f : featuresVal @fs
 
 -- | Demote one node declaration, children included.
-class KnownNode (n :: NodeSpec) where
+type KnownNode :: forall {st} {ev} {g} {act} {svc} {inv} {out}. NodeSpec st ev g act svc inv out -> Constraint
+class KnownNode (n :: NodeSpec st ev g act svc inv out) where
   nodeVal :: PNode
 
-instance (KnownSymbol n, KnownFeatures fs) => KnownNode ('MkAtomic n fs) where
+instance (KnownKey n, KnownFeatures fs) => KnownNode ('MkAtomic n fs) where
   nodeVal =
     PNode
-      { pnName = symText @n
+      { pnName = keyNameOf @n
       , pnKind = RAtomic
       , pnFeatures = featuresVal @fs
       , pnChildren = []
@@ -290,56 +305,57 @@ instance (KnownSymbol n, KnownFeatures fs) => KnownNode ('MkAtomic n fs) where
       }
 
 instance
-  (KnownSymbol n, KnownSymbol ini, KnownNodes children, KnownFeatures fs) =>
+  (KnownKey n, KnownKey ini, KnownNodes children, KnownFeatures fs) =>
   KnownNode ('MkCompound n ini children fs)
   where
   nodeVal =
     PNode
-      { pnName = symText @n
-      , pnKind = RCompound (symText @ini)
+      { pnName = keyNameOf @n
+      , pnKind = RCompound (keyNameOf @ini)
       , pnFeatures = featuresVal @fs
       , pnChildren = nodesVal @children
       , pnDoneData = Nothing
       }
 
 instance
-  (KnownSymbol n, KnownNodes regions, KnownFeatures fs) =>
+  (KnownKey n, KnownNodes regions, KnownFeatures fs) =>
   KnownNode ('MkParallel n regions fs)
   where
   nodeVal =
     PNode
-      { pnName = symText @n
+      { pnName = keyNameOf @n
       , pnKind = RParallel
       , pnFeatures = featuresVal @fs
       , pnChildren = nodesVal @regions
       , pnDoneData = Nothing
       }
 
-instance (KnownSymbol n, KnownMaybeSymbol out) => KnownNode ('MkFinal n out) where
+instance (KnownKey n, KnownMaybeKey out) => KnownNode ('MkFinal n out) where
   nodeVal =
     PNode
-      { pnName = symText @n
+      { pnName = keyNameOf @n
       , pnKind = RFinal
       , pnFeatures = []
       , pnChildren = []
-      , pnDoneData = maybeSymbolVal @out
+      , pnDoneData = maybeKeyVal @out
       }
 
 instance
-  (KnownSymbol n, KnownHistoryKind k, KnownMaybeSymbol def) =>
+  (KnownKey n, KnownHistoryKind k, KnownMaybeKey def) =>
   KnownNode ('MkHistory n k def)
   where
   nodeVal =
     PNode
-      { pnName = symText @n
-      , pnKind = RHistory (historyKindVal @k) (maybeSymbolVal @def)
+      { pnName = keyNameOf @n
+      , pnKind = RHistory (historyKindVal @k) (maybeKeyVal @def)
       , pnFeatures = []
       , pnChildren = []
       , pnDoneData = Nothing
       }
 
 -- | Demote a node list, preserving declaration order.
-class KnownNodes (ns :: [NodeSpec]) where
+type KnownNodes :: forall {st} {ev} {g} {act} {svc} {inv} {out}. [NodeSpec st ev g act svc inv out] -> Constraint
+class KnownNodes (ns :: [NodeSpec st ev g act svc inv out]) where
   nodesVal :: [PNode]
 
 instance KnownNodes '[] where
@@ -350,14 +366,15 @@ instance (KnownNode n, KnownNodes ns) => KnownNodes (n ': ns) where
 
 -- | Demote the event declarations: names paired with rendered payload
 -- type names ('Typeable'-based, for visualization and fingerprinting).
-class KnownEvents (es :: [EventSpec]) where
+type KnownEvents :: forall {ev}. [EventSpec ev] -> Constraint
+class KnownEvents (es :: [EventSpec ev]) where
   eventsVal :: [(Text, Text)]
 
 instance KnownEvents '[] where
   eventsVal = []
 
-instance (KnownSymbol n, Typeable p, KnownEvents es) => KnownEvents ('MkEvent n p ': es) where
-  eventsVal = (symText @n, Text.pack (show (typeRep (Proxy @p)))) : eventsVal @es
+instance (KnownKey n, Typeable p, KnownEvents es) => KnownEvents ('MkEvent n p ': es) where
+  eventsVal = (keyNameOf @n, Text.pack (show (typeRep (Proxy @p)))) : eventsVal @es
 
 {-------------------------------------------------------------------------------
   Assembly

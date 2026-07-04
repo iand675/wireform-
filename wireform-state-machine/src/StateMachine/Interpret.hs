@@ -126,7 +126,7 @@ import StateMachine.Step (StepFault (..), Stepped (..), initialize, step)
 -------------------------------------------------------------------------------}
 
 -- | Environment knobs for 'interpretWith'.
-data InterpretOptions (spec :: ChartSpec) = InterpretOptions
+data InterpretOptions (spec :: ChartSpec st ev g act svc inv out) = InterpretOptions
   { optDelay :: Int -> IO ()
   -- ^ How to wait out a delayed ('StateMachine.Spec.After') transition,
   -- given milliseconds. The default is 'threadDelay'; tests inject a
@@ -154,7 +154,7 @@ defaultInterpretOptions =
 'interpretWith'; interact through 'send', 'machineView', 'waitFinished',
 'subscribe', and 'halt'.
 -}
-data Interpreter (spec :: ChartSpec) = Interpreter
+data Interpreter (spec :: ChartSpec st ev g act svc inv out) = Interpreter
   { iQueue :: TQueue (IEvent spec)
   , iMachine :: TVar (Machine spec)
   -- ^ Last committed machine state; written only by the driver.
@@ -178,7 +178,7 @@ they must be cheap and non-blocking (in particular they must never call
 'halt' or 'waitFinished' on this interpreter — that would deadlock the
 driver against itself). A subscriber that throws is ignored.
 -}
-data Notification (spec :: ChartSpec)
+data Notification (spec :: ChartSpec st ev g act svc inv out)
   = -- | A macrostep was committed (including the initial one and the
     -- final one, whose machine is 'Finished').
     NotifyStepped (Stepped spec)
@@ -320,7 +320,7 @@ subscribe itp callback = atomically $ do
 
 -- | What the driver consumes. Timer and invocation results carry the
 -- generation they were armed under; stale generations are dropped.
-data IEvent (spec :: ChartSpec)
+data IEvent (spec :: ChartSpec st ev g act svc inv out)
   = IExternal (StepEvent spec)
   | ITimer TimerKey Int
   | IInvokeDone Text Int Dynamic
@@ -328,7 +328,7 @@ data IEvent (spec :: ChartSpec)
   | IStop
 
 -- | A live invocation: a plain worker 'Async', or a child interpreter.
-data Run (spec :: ChartSpec)
+data Run (spec :: ChartSpec st ev g act svc inv out)
   = RunAsync (Async ())
   | RunChild (ChildHandle spec)
 
@@ -336,7 +336,7 @@ data Run (spec :: ChartSpec)
 -- 'chDeliver' takes a /parent/ event and translates it to the child via
 -- the invocation's 'ChildBridge' before sending; 'chHalt' stops it; the
 -- waiter awaits the child's output.
-data ChildHandle (spec :: ChartSpec) = ChildHandle
+data ChildHandle (spec :: ChartSpec st ev g act svc inv out) = ChildHandle
   { chDeliver :: EventVal spec -> IO ()
   , chHalt :: IO ()
   , chWaiter :: Async ()
@@ -344,7 +344,7 @@ data ChildHandle (spec :: ChartSpec) = ChildHandle
 
 -- | Driver-local bookkeeping. Generation maps are monotonic (never
 -- shrunk); the async\/run maps hold only live entries.
-data Armed (spec :: ChartSpec) = Armed
+data Armed (spec :: ChartSpec st ev g act svc inv out) = Armed
   { armedTimerGens :: !(Map TimerKey Int)
   , armedTimers :: !(Map TimerKey (Async ()))
   , armedInvokeGens :: !(Map Text Int)

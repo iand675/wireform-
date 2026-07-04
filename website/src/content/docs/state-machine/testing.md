@@ -7,11 +7,10 @@ sidebar:
 ---
 
 Because the [pure step](../running/#the-pure-step) turns timers and services
-into effect *requests*, you can execute them on a **virtual clock** instead of
-the wall clock. `StateMachine.Debug.simulate` drives a machine from a script
-where time only advances when you say so and invoked services never run until
-you settle them — so a timer-versus-timeout race is a deterministic, repeatable
-assertion, not a flaky `threadDelay`.
+into effect *requests*, execute them on a **virtual clock** instead of the wall clock.
+`StateMachine.Debug.simulate` drives a machine from a script: time advances only
+through `SimAdvance`, and services resolve only through explicit settlement
+commands. Timer/service races become deterministic assertions, not sleeps.
 
 ## `simulate`
 
@@ -21,20 +20,24 @@ simulate :: (Monad m, EventCodec spec)
          -> m (Either SimFailure (SimResult spec))
 
 data SimCommand spec
-  = SimSend      (EventVal spec)   -- deliver a typed external event
-  | SimSendNamed Text Value        -- deliver by name + JSON (the dynamic boundary)
+  = SimSend      (EventVal spec)   -- deliver a typed external event (mkEvent @'NAME)
+  | SimSendNamed Text Value        -- deliver by name + payload at the dynamic boundary
   | SimAdvance   Int               -- move the virtual clock forward N ms
-  | SimResolve   Text Value        -- resolve the invocation with this id (onDone)
-  | SimReject    Text Value        -- fail the invocation with this id (onError)
+  | SimResolve   Text Dynamic      -- resolve the invocation with this id (onDone)
+  | SimReject    Text Dynamic      -- fail the invocation with this id (onError)
+
+-- typed settlement helpers — build the Dynamic for you:
+simResolve :: Typeable a => Text -> a -> SimCommand spec
+simReject  :: Typeable a => Text -> a -> SimCommand spec
 ```
 
-The result carries everything that happened plus what is still armed:
+The result contains the committed trace and the remaining armed effects:
 
 ```haskell
 data SimResult spec = SimResult
   { simMachine       :: Machine spec
   , simTrace         :: [MicroTrace]      -- every microstep, init included
-  , simEffectLog     :: [EffectReq]       -- full timer/invocation lifecycle
+  , simEffectLog     :: [EffectReq]       -- timer/invocation lifecycle
   , simPendingTimers :: [(TimerKey, Int)] -- still armed, with ms remaining
   , simActiveInvokes :: [(Text, Text)]    -- (invoke id, service) awaiting settlement
   }
@@ -49,40 +52,41 @@ armed *mid-advance* can fire in the same window if it fits. Survivors keep their
 reduced remaining time, so two `SimAdvance 50` equal one `SimAdvance 100`.
 
 ```haskell
--- A state with `After 100 ==> To "warn"` and `After 250 ==> To "fail"`:
+-- A state with `After 100 ==> To 'Warn` and `After 250 ==> To 'Fail`:
 Right r <- simulate impl ctx0
   [ SimAdvance 99 ]      -- nothing fires; simPendingTimers == [(…,1),(…,151)]
-matches @"working" (simMachine r)  -- still working
+matches @'Working (simMachine r)  -- still working
 
 Right r2 <- simulate impl ctx0
   [ SimAdvance 100 ]     -- the 100ms timer fires
-matches @"warn" (simMachine r2)    -- True; the 250ms timer was cancelled on exit
+matches @'Warn (simMachine r2)     -- True; the 250ms timer was cancelled on exit
 ```
 
 ## Service outcomes
 
-Invocations never run on their own in a simulation — starting one merely
-**arms** it, which is what makes a service/timeout race scriptable. Settle it
-explicitly:
+Invocations do not run on their own in a simulation. Starting one **arms** it;
+settlement remains explicit, which makes service/timeout races scriptable. Settle it
+explicitly, addressed by the invoke key's wire spelling and carrying a *typed*
+value recovered by `onDone` consumers with `invokeOutput`:
 
 ```haskell
 Right r <- simulate impl ctx0
-  [ SimSend (mkEvent @"FETCH" url)   -- enters "loading", arms invoke "getUser"
-  , SimResolve "getUser" (toJSON response)  -- onDone fires
+  [ SimSend (mkEvent @'FETCH url)   -- enters 'Loading, arms invoke "GetUser"
+  , simResolve "GetUser" response   -- onDone fires
   ]
-matches @"success" (simMachine r)
+matches @'Success (simMachine r)
 
 -- Race the service against its timeout by advancing the clock first:
 Right r2 <- simulate impl ctx0
-  [ SimSend (mkEvent @"FETCH" url)
-  , SimAdvance 30000                 -- After 30000 ==> To "failure" wins
-  , SimResolve "getUser" v           -- SimInvokeNotActive: it was cancelled
+  [ SimSend (mkEvent @'FETCH url)
+  , SimAdvance 30000                 -- After 30000 ==> To 'Failure wins
+  , simResolve "GetUser" v           -- SimInvokeNotActive: it was cancelled
   ]
 ```
 
 `SimResolve` / `SimReject` on an invocation that is not armed is a
 `SimInvokeNotActive` failure — deliberate strictness that catches a script
-resolving something the machine already cancelled, or a typo'd id.
+resolving something the machine already cancelled, or a misspelled id.
 
 ## Failure modes
 
@@ -106,26 +110,26 @@ prettyStepped :: Stepped spec -> Text         -- active states + trace + effects
 ```
 
 `putStrLn (T.unpack (prettyTrace (simTrace r)))` gives an aligned,
-multi-line transcript — the fastest way to see why a chart did (or didn't) do
-what you expected:
+multi-line transcript — a compact way to inspect transition selection and action order. Every name is a key's constructor spelling; event payloads
+print via `Show`, lifecycle values by their `TypeRep`:
 
 ```
-1. FETCH
-   -> idle #0
-   -  idle
-   +  loading
-   !  logStart
-2. done.invoke.getUser output="ok"
-   -> loading #0
-   -  loading
-   +  success
-   !  save
+1. EventVal "FETCH" "https://api.example.com/users/1"
+   -> Idle #0
+   -  Idle
+   +  Loading
+   !  LogStart
+2. done.invoke.GetUser <<User>>
+   -> Loading #0
+   -  Loading
+   +  Success
+   !  Save
 ```
 
 ## Static lints
 
 Two advisory checks over the chart structure — run them in a test to catch
-dead corners:
+dead states:
 
 ```haskell
 unreachableStates :: RChart -> [NodeName]  -- states no path can reach
@@ -146,7 +150,7 @@ The simulator is the recommended way to test *semantics* — it is pure,
 deterministic, and needs no threads. Use the
 [IO interpreter](../running/#the-io-interpreter) in tests only when you are
 testing the *runtime* itself (real concurrency, subscriptions), and inject
-`optDelay` with a gate rather than sleeping. The repo's own suite (79 tests)
-drives the pure `step` directly and never uses `threadDelay`.
+`optDelay` with a gate rather than sleeping. The repo's own suite drives the
+pure `step` directly and never uses `threadDelay`.
 
 Next: [persist and restore machine state](../persistence/).

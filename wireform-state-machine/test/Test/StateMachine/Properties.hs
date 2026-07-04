@@ -1,3 +1,5 @@
+{-# LANGUAGE TemplateHaskell #-}
+
 -- | Hedgehog properties: configuration invariants hold after every step
 -- of a random event sequence, and snapshot/restore through JSON is the
 -- identity on machine state after any event prefix.
@@ -21,79 +23,88 @@ import StateMachine.Machine (Machine (..))
 
 import Test.StateMachine.Support
 
+data PropState = M | U | V | W | MH | W1 | W2 | Par | RA | RB | A0 | A1 | B0 | B1
+data PropEvent = A | B | C | D | E
+  deriving stock (Show, Enum, Bounded)
+data PropAction = Bump
+
+deriveKeyKind ''PropState
+deriveKeyKind ''PropEvent
+deriveKeyKind ''PropAction
+
 {- | Compound nesting, a parallel state, and history, with every event
 handled somewhere (and sometimes nowhere — drops are part of the walk).
 -}
+type PropChart :: ChartSpec PropState PropEvent NoKey PropAction NoKey NoKey NoKey
 type PropChart =
   Chart
     "prop"
     Int
     ()
-    '[ "A" ::: ()
-     , "B" ::: ()
-     , "C" ::: ()
-     , "D" ::: ()
-     , "E" ::: ()
+    '[ 'A ::: ()
+     , 'B ::: ()
+     , 'C ::: ()
+     , 'D ::: ()
+     , 'E ::: ()
      ]
     '[ Compound
-        "m"
-        "u"
-        '[ State "u" '[On "A" ==> To "v" ! '["bump"], On "B" ==> To "w"]
-         , State "v" '[On "A" ==> To "u" ! '["bump"]]
+        'M
+        'U
+        '[ State 'U '[On 'A ==> To 'V ! '[ 'Bump ], On 'B ==> To 'W]
+         , State 'V '[On 'A ==> To 'U ! '[ 'Bump ]]
          , Compound
-            "w"
-            "w1"
-            '[ State "w1" '[On "A" ==> To "w2" ! '["bump"]]
-             , State "w2" '[]
+            'W
+            'W1
+            '[ State 'W1 '[On 'A ==> To 'W2 ! '[ 'Bump ]]
+             , State 'W2 '[]
              ]
-            '[On "C" ==> To "u"]
-         , Hist "mh"
+            '[On 'C ==> To 'U]
+         , Hist 'MH
          ]
-        '[On "D" ==> To "par"]
+        '[On 'D ==> To 'Par]
      , Parallel
-        "par"
+        'Par
         '[ Compound
-            "ra"
-            "a0"
-            '[ State "a0" '[On "A" ==> To "a1" ! '["bump"]]
-             , State "a1" '[On "B" ==> To "a0"]
+            'RA
+            'A0
+            '[ State 'A0 '[On 'A ==> To 'A1 ! '[ 'Bump ]]
+             , State 'A1 '[On 'B ==> To 'A0]
              ]
             '[]
          , Compound
-            "rb"
-            "b0"
-            '[ State "b0" '[On "C" ==> To "b1"]
-             , State "b1" '[]
+            'RB
+            'B0
+            '[ State 'B0 '[On 'C ==> To 'B1]
+             , State 'B1 '[]
              ]
             '[]
          ]
-        '[On "E" ==> To "mh", On "D" ==> To "m"]
+        '[On 'E ==> To 'MH, On 'D ==> To 'M]
      ]
-    "m"
+    'M
 
 propImpl :: ChartImpl LogM PropChart
 propImpl =
   chartImpl
     RNil
-    (assign @"bump" (\c _ -> c + 1) :& RNil)
+    (assign @'Bump (\c _ -> c + 1) :& RNil)
     RNil
     RNil
     (const ())
 
-eventNames :: [Text]
-eventNames = ["A", "B", "C", "D", "E"]
+eventKeys :: [PropEvent]
+eventKeys = [minBound .. maxBound]
 
-evOf :: Text -> StepEvent PropChart
-evOf name = case name of
-  "A" -> EvExternal (mkEvent_ @"A")
-  "B" -> EvExternal (mkEvent_ @"B")
-  "C" -> EvExternal (mkEvent_ @"C")
-  "D" -> EvExternal (mkEvent_ @"D")
-  "E" -> EvExternal (mkEvent_ @"E")
-  other -> error ("unknown test event " <> show other)
+evOf :: PropEvent -> StepEvent PropChart
+evOf e = case e of
+  A -> EvExternal (mkEvent_ @'A)
+  B -> EvExternal (mkEvent_ @'B)
+  C -> EvExternal (mkEvent_ @'C)
+  D -> EvExternal (mkEvent_ @'D)
+  E -> EvExternal (mkEvent_ @'E)
 
 -- | The machine after initialization and after each event, in order.
-machinesAfter :: [Text] -> Either StepFault [Machine PropChart]
+machinesAfter :: [PropEvent] -> Either StepFault [Machine PropChart]
 machinesAfter names = fst $ runLog $ do
   r0 <- initialize propImpl 0
   case r0 of
@@ -115,29 +126,29 @@ machinesAfter names = fst $ runLog $ do
 parentOfName :: Map Text Text
 parentOfName =
   Map.fromList
-    [ ("u", "m")
-    , ("v", "m")
-    , ("w", "m")
-    , ("mh", "m")
-    , ("w1", "w")
-    , ("w2", "w")
-    , ("ra", "par")
-    , ("rb", "par")
-    , ("a0", "ra")
-    , ("a1", "ra")
-    , ("b0", "rb")
-    , ("b1", "rb")
+    [ ("U", "M")
+    , ("V", "M")
+    , ("W", "M")
+    , ("MH", "M")
+    , ("W1", "W")
+    , ("W2", "W")
+    , ("RA", "Par")
+    , ("RB", "Par")
+    , ("A0", "RA")
+    , ("A1", "RA")
+    , ("B0", "RB")
+    , ("B1", "RB")
     ]
 
 topLevel :: [Text]
-topLevel = ["m", "par"]
+topLevel = ["M", "Par"]
 
 compoundKids :: [(Text, [Text])]
 compoundKids =
-  [ ("m", ["u", "v", "w"])
-  , ("w", ["w1", "w2"])
-  , ("ra", ["a0", "a1"])
-  , ("rb", ["b0", "b1"])
+  [ ("M", ["U", "V", "W"])
+  , ("W", ["W1", "W2"])
+  , ("RA", ["A0", "A1"])
+  , ("RB", ["B0", "B1"])
   ]
 
 -- | Everything wrong with a configuration; empty means legal.
@@ -158,13 +169,13 @@ violations cfg = topCheck <> closure <> compounds <> parallels <> histories
         [_] -> []
         act -> ["compound " <> c <> " has active children " <> tshow act]
   parallels
-    | Set.member "par" cfg =
+    | Set.member "Par" cfg =
         concatMap
           (\r -> if Set.member r cfg then [] else ["parallel region " <> r <> " is not active"])
-          ["ra", "rb"]
+          ["RA", "RB"]
     | otherwise = []
   histories
-    | Set.member "mh" cfg = ["history pseudo-state mh is active"]
+    | Set.member "MH" cfg = ["history pseudo-state MH is active"]
     | otherwise = []
   tshow :: (Show a) => a -> Text
   tshow = T.pack . show
@@ -175,7 +186,7 @@ violations cfg = topCheck <> closure <> compounds <> parallels <> histories
 
 prop_configInvariants :: Property
 prop_configInvariants = property $ do
-  names <- forAll (Gen.list (Range.linear 0 40) (Gen.element eventNames))
+  names <- forAll (Gen.list (Range.linear 0 40) (Gen.element eventKeys))
   case machinesAfter names of
     Left f -> annotateShow f >> failure
     Right ms -> mapM_ checkOne ms
@@ -186,7 +197,7 @@ prop_configInvariants = property $ do
 
 prop_snapshotRoundtrip :: Property
 prop_snapshotRoundtrip = property $ do
-  names <- forAll (Gen.list (Range.linear 0 30) (Gen.element eventNames))
+  names <- forAll (Gen.list (Range.linear 0 30) (Gen.element eventKeys))
   m <- case machinesAfter names of
     Left f -> annotateShow f >> failure
     Right ms -> pure (last ms)

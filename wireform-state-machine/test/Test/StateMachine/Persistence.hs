@@ -1,3 +1,5 @@
+{-# LANGUAGE TemplateHaskell #-}
+
 -- | Snapshots and restore: JSON roundtrips, re-arm effects, every
 -- rejection mode, sanitization warnings, recovery strategies, and the
 -- structural fingerprint.
@@ -18,56 +20,68 @@ import StateMachine.Runtime (EffectReq (..), TimerKey (..), rootName)
 
 import Test.StateMachine.Support
 
+data PersState = P | A | B | Ph | W | R1 | R1a | R2 | R2a | Fin
+data PersEvent = GO | TOW | END
+data PersAction = Bump
+data PersService = Fetch
+data PersInvoke = IvA | IvRoot
+deriveKeyKind ''PersState
+deriveKeyKind ''PersEvent
+deriveKeyKind ''PersAction
+deriveKeyKind ''PersService
+deriveKeyKind ''PersInvoke
+
 {- | A chart exercising everything a snapshot stores: a compound with a
 timer, an invocation, and shallow history; a parallel state; a top-level
 final reachable through a root handler; and a root-level invocation.
 -}
+type PersChart :: ChartSpec PersState PersEvent NoKey PersAction PersService PersInvoke NoKey
 type PersChart =
   ChartWith
     "pers"
     Int
     Int
-    '[ "GO" ::: ()
-     , "TOW" ::: ()
-     , "END" ::: ()
+    '[ 'GO ::: ()
+     , 'TOW ::: ()
+     , 'END ::: ()
      ]
     '[ Compound
-        "p"
-        "a"
+        'P
+        'A
         '[ State
-            "a"
-            '[ After 100 ==> To "b"
-             , Invoke "ivA" "fetch" '[OnDone ==> To "b"] '[]
-             , On "GO" ==> To "b" ! '["bump"]
+            'A
+            '[ After 100 ==> To 'B
+             , Invoke 'IvA 'Fetch '[OnDone ==> To 'B] '[]
+             , On 'GO ==> To 'B ! '[ 'Bump]
              ]
-         , State "b" '[]
-         , Hist "ph"
+         , State 'B '[]
+         , Hist 'Ph
          ]
-        '[On "TOW" ==> To "w"]
+        '[On 'TOW ==> To 'W]
      , Parallel
-        "w"
-        '[ Compound "r1" "r1a" '[State "r1a" '[]] '[]
-         , Compound "r2" "r2a" '[State "r2a" '[]] '[]
+        'W
+        '[ Compound 'R1 'R1a '[State 'R1a '[]] '[]
+         , Compound 'R2 'R2a '[State 'R2a '[]] '[]
          ]
         '[]
-     , Final "fin"
+     , Final 'Fin
      ]
-    "p"
-    '[On "END" ==> To "fin", Invoke "ivRoot" "fetch" '[] '[]]
+    'P
+    '[On 'END ==> To 'Fin, Invoke 'IvRoot 'Fetch '[] '[]]
 
-fetchSvc :: ServiceE LogM PersChart "fetch"
-fetchSvc = mkService @"fetch" (\_ _ -> pure (Right () :: Either () ()))
+fetchSvc :: ServiceE LogM PersChart 'Fetch
+fetchSvc = mkService @'Fetch (\_ _ -> pure (Right () :: Either () ()))
 
 persImpl :: ChartImpl LogM PersChart
 persImpl =
   chartImpl
     RNil
-    (assign @"bump" (\c _ -> c + 1) :& RNil)
+    (assign @'Bump (\c _ -> c + 1) :& RNil)
     (fetchSvc :& RNil)
     RNil
     id
 
--- | A pristine snapshot of the freshly initialized machine (@p/a@).
+-- | A pristine snapshot of the freshly initialized machine (@P/A@).
 baseSnap :: Snapshot
 baseSnap = snapshot persImpl (boot persImpl 0)
 
@@ -91,27 +105,34 @@ shouldRejectConfig cfg fragment =
   Fingerprint charts: identical structure vs one extra transition
 -------------------------------------------------------------------------------}
 
+data FpState = FpS | FpT
+data FpEvent = FpE
+deriveKeyKind ''FpState
+deriveKeyKind ''FpEvent
+
+type FpA :: ChartSpec FpState FpEvent NoKey NoKey NoKey NoKey NoKey
 type FpA =
   Chart
     "fp"
     ()
     ()
-    '["E" ::: ()]
-    '[ State "s" '[On "E" ==> To "t"]
-     , State "t" '[]
+    '[ 'FpE ::: ()]
+    '[ State 'FpS '[On 'FpE ==> To 'FpT]
+     , State 'FpT '[]
      ]
-    "s"
+    'FpS
 
+type FpB :: ChartSpec FpState FpEvent NoKey NoKey NoKey NoKey NoKey
 type FpB =
   Chart
     "fp"
     ()
     ()
-    '["E" ::: ()]
-    '[ State "s" '[On "E" ==> To "t", On "E" ==> To "s"]
-     , State "t" '[]
+    '[ 'FpE ::: ()]
+    '[ State 'FpS '[On 'FpE ==> To 'FpT, On 'FpE ==> To 'FpS]
+     , State 'FpT '[]
      ]
-    "s"
+    'FpS
 
 {-------------------------------------------------------------------------------
   Tests
@@ -124,17 +145,17 @@ tests = describe "persistence" $ do
           feed
             persImpl
             (boot persImpl 0)
-            [EvExternal (mkEvent_ @"GO"), EvExternal (mkEvent_ @"TOW")]
+            [EvExternal (mkEvent_ @'GO), EvExternal (mkEvent_ @'TOW)]
         snap = snapshot persImpl m1
         snap' = expectRight (Aeson.eitherDecode (Aeson.encode snap))
     snap' `shouldBe` snap
     let r = expectRight (restore persImpl snap')
         m2 = restoredMachine r
     restoredWarnings r `shouldBe` []
-    config m1 `shouldBe` Set.fromList ["w", "r1", "r1a", "r2", "r2a"]
+    config m1 `shouldBe` Set.fromList ["W", "R1", "R1a", "R2", "R2a"]
     config m2 `shouldBe` config m1
     ctxOf m2 `shouldBe` 1
-    mHistory m1 `shouldBe` Map.fromList [("ph", Set.fromList ["b"])]
+    mHistory m1 `shouldBe` Map.fromList [("Ph", Set.fromList ["B"])]
     mHistory m2 `shouldBe` mHistory m1
     isFinished m2 `shouldBe` False
 
@@ -143,13 +164,13 @@ tests = describe "persistence" $ do
     sortOn show (restoredEffects r)
       `shouldBe` sortOn
         show
-        [ ReqStartTimer (TimerKey "a" 100 0)
-        , ReqStartInvoke "ivA" "fetch" "a"
-        , ReqStartInvoke "ivRoot" "fetch" rootName
+        [ ReqStartTimer (TimerKey "A" 100 0)
+        , ReqStartInvoke "IvA" "Fetch" "A"
+        , ReqStartInvoke "IvRoot" "Fetch" rootName
         ]
 
   it "restoring a finished machine re-arms nothing" $ do
-    let m1 = advance persImpl (boot persImpl 0) (EvExternal (mkEvent_ @"END"))
+    let m1 = advance persImpl (boot persImpl 0) (EvExternal (mkEvent_ @'END))
         r = expectRight (restore persImpl (snapshot persImpl m1))
     restoredEffects r `shouldBe` []
     case status (restoredMachine r) of
@@ -158,14 +179,14 @@ tests = describe "persistence" $ do
 
   describe "rejections" $ do
     it "unknown configuration members are rejected, fingerprint matched" $ do
-      case expectLeft (restore persImpl baseSnap{snapConfig = ["p", "a", "zzz"]}) of
+      case expectLeft (restore persImpl baseSnap{snapConfig = ["P", "A", "zzz"]}) of
         UnknownStates unknown _ fpm -> do
           unknown `shouldBe` ["zzz"]
           fpm `shouldBe` True
         other -> expectationFailure ("expected UnknownStates, got " <> show other)
 
     it "unknown configuration members report a fingerprint mismatch after a tamper" $ do
-      let tampered = baseSnap{snapConfig = ["p", "a", "zzz"], snapFingerprint = "0000000000000000"}
+      let tampered = baseSnap{snapConfig = ["P", "A", "zzz"], snapFingerprint = "0000000000000000"}
       case expectLeft (restore persImpl tampered) of
         UnknownStates unknown _ fpm -> do
           unknown `shouldBe` ["zzz"]
@@ -173,16 +194,16 @@ tests = describe "persistence" $ do
         other -> expectationFailure ("expected UnknownStates, got " <> show other)
 
     it "two active children of one compound are an illegal configuration" $
-      shouldRejectConfig ["p", "a", "b"] "exactly one active child"
+      shouldRejectConfig ["P", "A", "B"] "exactly one active child"
 
     it "a parallel member with a missing region is an illegal configuration" $
-      shouldRejectConfig ["w", "r1", "r1a"] "missing active regions"
+      shouldRejectConfig ["W", "R1", "R1a"] "missing active regions"
 
     it "a history pseudo-state in the configuration is illegal" $
-      shouldRejectConfig ["p", "a", "ph"] "history pseudo-state"
+      shouldRejectConfig ["P", "A", "Ph"] "history pseudo-state"
 
     it "a member with missing ancestors is an illegal configuration" $
-      shouldRejectConfig ["p", "a", "r1a"] "missing from configuration"
+      shouldRejectConfig ["P", "A", "R1a"] "missing from configuration"
 
     it "a context that no longer parses is BadContext" $ do
       case expectLeft (restore persImpl baseSnap{snapContext = String "nope"}) of
@@ -199,29 +220,29 @@ tests = describe "persistence" $ do
 
   describe "warnings" $ do
     it "stored history naming a removed state is dropped with a warning" $ do
-      let r = expectRight (restore persImpl baseSnap{snapHistory = Map.fromList [("ph", ["ghost"])]})
-      restoredWarnings r `shouldBe` [DroppedHistory "ph" ["ghost"]]
+      let r = expectRight (restore persImpl baseSnap{snapHistory = Map.fromList [("Ph", ["ghost"])]})
+      restoredWarnings r `shouldBe` [DroppedHistory "Ph" ["ghost"]]
       mHistory (restoredMachine r) `shouldBe` Map.empty
 
     it "a history key that is not a history node is dropped with a warning" $ do
-      let r = expectRight (restore persImpl baseSnap{snapHistory = Map.fromList [("b", ["a"])]})
-      restoredWarnings r `shouldBe` [DroppedHistory "b" ["a"]]
+      let r = expectRight (restore persImpl baseSnap{snapHistory = Map.fromList [("B", ["A"])]})
+      restoredWarnings r `shouldBe` [DroppedHistory "B" ["A"]]
       mHistory (restoredMachine r) `shouldBe` Map.empty
 
     it "a changed fingerprint that still validates restores with a warning" $ do
       let r = expectRight (restore persImpl baseSnap{snapFingerprint = "0000000000000000"})
       restoredWarnings r
         `shouldBe` [FingerprintChanged "0000000000000000" (chartFingerprint (reifyChart @PersChart))]
-      config (restoredMachine r) `shouldBe` Set.fromList ["p", "a"]
+      config (restoredMachine r) `shouldBe` Set.fromList ["P", "A"]
 
   describe "recovery" $ do
-    let broken = baseSnap{snapConfig = ["p", "zzz"]}
+    let broken = baseSnap{snapConfig = ["P", "zzz"]}
 
     it "restartRecovery restores a broken snapshot as a freshly initialized machine" $ do
       let (r, _) = runLog (restoreWith persImpl (restartRecovery 0) broken)
       case expectRight r of
         RecoveredByRestart stepped err -> do
-          config (sMachine stepped) `shouldBe` Set.fromList ["p", "a"]
+          config (sMachine stepped) `shouldBe` Set.fromList ["P", "A"]
           case err of
             UnknownStates{} -> pure ()
             other -> expectationFailure ("expected UnknownStates as the cause, got " <> show other)
@@ -229,22 +250,22 @@ tests = describe "persistence" $ do
         RecoveredByResume _ _ -> expectationFailure "expected a restart, not a resume"
 
     it "ResumeAt normalizes to a complete legal configuration (parallel regions filled)" $ do
-      let rec = noRecovery{onUnknownStates = \_ _ -> Just (ResumeAt ["w"] 5)}
+      let rec = noRecovery{onUnknownStates = \_ _ -> Just (ResumeAt ["W"] 5)}
           (r, _) = runLog (restoreWith persImpl rec broken)
       case expectRight r of
         RecoveredByResume restored _ -> do
-          config (restoredMachine restored) `shouldBe` Set.fromList ["w", "r1", "r1a", "r2", "r2a"]
+          config (restoredMachine restored) `shouldBe` Set.fromList ["W", "R1", "R1a", "R2", "R2a"]
           ctxOf (restoredMachine restored) `shouldBe` 5
-          restoredEffects restored `shouldBe` [ReqStartInvoke "ivRoot" "fetch" rootName]
+          restoredEffects restored `shouldBe` [ReqStartInvoke "IvRoot" "Fetch" rootName]
         Intact _ -> expectationFailure "expected recovery, not an intact restore"
         RecoveredByRestart _ _ -> expectationFailure "expected a resume, not a restart"
 
     it "ResumeAt normalizes to a complete legal configuration (ancestors filled)" $ do
-      let rec = noRecovery{onUnknownStates = \_ _ -> Just (ResumeAt ["b"] 5)}
+      let rec = noRecovery{onUnknownStates = \_ _ -> Just (ResumeAt ["B"] 5)}
           (r, _) = runLog (restoreWith persImpl rec broken)
       case expectRight r of
         RecoveredByResume restored _ ->
-          config (restoredMachine restored) `shouldBe` Set.fromList ["p", "b"]
+          config (restoredMachine restored) `shouldBe` Set.fromList ["P", "B"]
         Intact _ -> expectationFailure "expected recovery, not an intact restore"
         RecoveredByRestart _ _ -> expectationFailure "expected a resume, not a restart"
 

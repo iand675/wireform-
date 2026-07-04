@@ -1,6 +1,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 {- | A traffic light with a pedestrian button, a power-outage mode, and a
 history-based recovery — exercising the full vertical slice: type-level
@@ -29,50 +30,70 @@ data TrafficCtx = TrafficCtx
   deriving stock (Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
--- | The chart. Illegal edits do not compile: misspell @\"yellow\"@ in a
+-- | The chart's name vocabulary: one ordinary sum type per role. The
+-- 'deriveKeyKind' splices equip each type so its promoted constructors
+-- serve as type-level chart keys (singletons like @SGreen :: SKey \'Green@,
+-- 'KeyKind', …); 'keyName' — the runtime\/wire spelling — is the
+-- constructor name verbatim.
+data TrafficState = Operational | Green | Yellow | Red | Walk | OpHist | Flashing | Off
+data TrafficEvent = TIMER | PUSH | POWER_OUT | FIXED | DECOMMISSION
+data TrafficGuard = NoPedestrian
+data TrafficAction = CountCycle | NotePedestrian | ClearPedestrian
+
+deriveKeyKind ''TrafficState
+deriveKeyKind ''TrafficEvent
+deriveKeyKind ''TrafficGuard
+deriveKeyKind ''TrafficAction
+
+-- | The chart. Illegal edits do not compile: misspell @\'Yellow@ in a
 -- target, drop a state, reference an undeclared event — all TypeErrors.
+--
+-- The standalone kind signature pins every name role; the chart invokes
+-- no services and produces no done-data, so those roles are 'NoKey'.
+type Traffic ::
+  ChartSpec TrafficState TrafficEvent TrafficGuard TrafficAction NoKey NoKey NoKey
 type Traffic =
   ChartWith
     "traffic"
     TrafficCtx
     Int -- output: total cycles once decommissioned
-    '[ "TIMER" ::: ()
-     , "PUSH" ::: ()
-     , "POWER_OUT" ::: ()
-     , "FIXED" ::: ()
-     , "DECOMMISSION" ::: ()
+    '[ 'TIMER ::: ()
+     , 'PUSH ::: ()
+     , 'POWER_OUT ::: ()
+     , 'FIXED ::: ()
+     , 'DECOMMISSION ::: ()
      ]
     '[ Compound
-        "operational"
-        "green"
+        'Operational
+        'Green
         '[ State
-            "green"
-            '[ On "TIMER" ==> To "yellow"
-             , On "PUSH" ==> Stay ! '["notePedestrian"]
+            'Green
+            '[ On 'TIMER ==> To 'Yellow
+             , On 'PUSH ==> Stay ! '[ 'NotePedestrian ]
              ]
-         , State "yellow" '[On "TIMER" ==> To "red" ! '["countCycle"]]
+         , State 'Yellow '[On 'TIMER ==> To 'Red ! '[ 'CountCycle ]]
          , State
-            "red"
-            '[ On "TIMER" ?: "noPedestrian" ==> To "green"
-             , On "TIMER" ==> To "walk"
+            'Red
+            '[ On 'TIMER ?: 'NoPedestrian ==> To 'Green
+             , On 'TIMER ==> To 'Walk
              ]
-         , State "walk" '[On "TIMER" ==> To "green" ! '["clearPedestrian"]]
-         , Hist "opHist"
+         , State 'Walk '[On 'TIMER ==> To 'Green ! '[ 'ClearPedestrian ]]
+         , Hist 'OpHist
          ]
-        '[On "POWER_OUT" ==> To "flashing"]
-     , State "flashing" '[On "FIXED" ==> To "opHist"]
-     , Final "off"
+        '[On 'POWER_OUT ==> To 'Flashing]
+     , State 'Flashing '[On 'FIXED ==> To 'OpHist]
+     , Final 'Off
      ]
-    "operational"
-    '[On "DECOMMISSION" ==> To "off"]
+    'Operational
+    '[On 'DECOMMISSION ==> To 'Off]
 
 impl :: ChartImpl IO Traffic
 impl =
   chartImpl
-    (mkGuard @"noPedestrian" (\ctx _ -> not (pedestrianWaiting ctx)) :& RNil)
-    ( assign @"countCycle" (\ctx _ -> ctx{cycles = cycles ctx + 1})
-        :& assign @"notePedestrian" (\ctx _ -> ctx{pedestrianWaiting = True})
-        :& assign @"clearPedestrian" (\ctx _ -> ctx{pedestrianWaiting = False})
+    (mkGuard @'NoPedestrian (\ctx _ -> not (pedestrianWaiting ctx)) :& RNil)
+    ( assign @'CountCycle (\ctx _ -> ctx{cycles = cycles ctx + 1})
+        :& assign @'NotePedestrian (\ctx _ -> ctx{pedestrianWaiting = True})
+        :& assign @'ClearPedestrian (\ctx _ -> ctx{pedestrianWaiting = False})
         :& RNil
     )
     RNil
@@ -103,7 +124,7 @@ main = do
     Right restored -> describe (restoredMachine restored)
 
   banner "restoring a snapshot from a stale chart"
-  let stale = snap{snapConfig = ["operational", "amber"], snapFingerprint = "0000000000000000"}
+  let stale = snap{snapConfig = ["Operational", "Amber"], snapFingerprint = "0000000000000000"}
   case restore impl stale of
     Left err -> putStrLn ("refused, as it should: " <> show err)
     Right _ -> error "should not restore"
@@ -136,11 +157,11 @@ main = do
  where
   external :: Text -> StepEvent Traffic
   external = \case
-    "TIMER" -> EvExternal (mkEvent_ @"TIMER")
-    "PUSH" -> EvExternal (mkEvent_ @"PUSH")
-    "POWER_OUT" -> EvExternal (mkEvent_ @"POWER_OUT")
-    "FIXED" -> EvExternal (mkEvent_ @"FIXED")
-    "DECOMMISSION" -> EvExternal (mkEvent_ @"DECOMMISSION")
+    "TIMER" -> EvExternal (mkEvent_ @'TIMER)
+    "PUSH" -> EvExternal (mkEvent_ @'PUSH)
+    "POWER_OUT" -> EvExternal (mkEvent_ @'POWER_OUT)
+    "FIXED" -> EvExternal (mkEvent_ @'FIXED)
+    "DECOMMISSION" -> EvExternal (mkEvent_ @'DECOMMISSION)
     other -> error ("unknown event in demo: " <> T.unpack other)
 
   feed m [] = pure m
@@ -157,7 +178,7 @@ main = do
           <> "  ctx: "
           <> show (context m)
           <> "  walk? "
-          <> show (matches @"walk" m)
+          <> show (matches @'Walk m)
       )
 
   summarize = \case

@@ -6,11 +6,10 @@ sidebar:
   label: Persistence & recovery
 ---
 
-A long-lived machine outlives the process — and eventually the *chart* — that
-created it. `StateMachine.Persist` serializes a machine to plain JSON and
-restores it against the **current** chart, failing precisely enough that a
-caller can tell "this snapshot is from last week's deploy" apart from "this
-data is corrupt", and recover per case.
+A long-lived machine may outlive both its process and the chart version that
+created it. `StateMachine.Persist` serializes a machine to JSON and restores it
+against the current chart. Restore errors distinguish stale snapshots from
+corrupt data, and recovery hooks can handle each case separately.
 
 ## Snapshotting
 
@@ -29,14 +28,33 @@ let snap = snapshot impl machine
 BL.writeFile "state.json" (encode snap)
 ```
 
+For the traffic-light demo mid-cycle, that file reads:
+
+```json
+{
+  "version": 1,
+  "chart": "traffic",
+  "fingerprint": "8c50f1f56e3a9d42",
+  "configuration": ["Operational", "Red"],
+  "context": { "cycles": 1, "pedestrianWaiting": false },
+  "history": {},
+  "status": "running"
+}
+```
+
+The names in `configuration` (and `history`) are the state keys' wire names —
+their `keyName` spellings, i.e. the constructor names verbatim
+(`keyNameOf @'Red == "Red"`); `parseKey` is the inverse. `"traffic"` is the
+chart's display name, the one `Symbol` a chart still carries.
+
 The fingerprint is a stable hash (FNV-1a over a canonical rendering of the
 chart's states, hierarchy, transitions, and events). It changes exactly when
 the chart's shape changes, and it is what lets `restore` classify failures.
 
-Two deliberate semantics: a snapshot stores **no closures and no in-flight
+Two restore rules are deliberate: a snapshot stores **no closures and no in-flight
 work** — timers and invocations re-arm from zero on restore (see
 `restoredEffects` below); and history is treated as an *optimization*, not
-truth (stale history is dropped with a warning, never an error).
+truth (stale history is dropped with a warning rather than promoted to an error).
 
 ## Restoring
 
@@ -61,7 +79,7 @@ case restore impl snap of
 configuration; feed them to the interpreter exactly as you would a step's
 `sEffects` (they are empty for a `Finished` machine).
 
-### The error taxonomy
+### Restore errors
 
 Every `RestoreError` carries `reFingerprintMatched` — the difference between a
 stale snapshot and a broken one:
@@ -106,14 +124,16 @@ data RecoveryAction spec
 
 `ResumeAt` completes the configuration for you — name a compound and its
 initial child is entered; name a parallel state and every region is entered.
+States are named by their wire spelling; `keyNameOf @'Red` produces one with
+the spelling compile-checked.
 
-### The common policies
+### Common policies
 
 ```haskell
 -- Recover nothing (equivalent to plain `restore`):
 noRecovery :: Recovery spec
 
--- "Yesterday's state is worthless — just boot" for every failure mode:
+-- Restart from fresh context for every failure mode:
 restartRecovery :: Ctx spec -> Recovery spec
 ```
 
@@ -133,10 +153,10 @@ corruption.
 
 ## Worked example
 
-The `example-traffic` demo (`cabal run example-traffic`) does the full
+The `example-traffic` demo (`cabal run example-traffic`) performs the
 round-trip: snapshot the running light, restore it, then feed it a snapshot
-built for a chart that no longer has one of its states — watch `restore` refuse
-it with `UnknownStates { reFingerprintMatched = False }`, and
-`restoreWith (restartRecovery …)` recover by rebooting.
+built for a chart that no longer has one of its states. `restore` returns
+`UnknownStates { reFingerprintMatched = False }`, and
+`restoreWith (restartRecovery …)` recovers by rebooting.
 
 Next: [visualize the chart](../visualization/).

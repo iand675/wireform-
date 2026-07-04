@@ -57,7 +57,7 @@ import StateMachine.Spec (ChartSpec, Ctx)
 -------------------------------------------------------------------------------}
 
 -- | The result of one macrostep.
-data Stepped (spec :: ChartSpec) = Stepped
+data Stepped (spec :: ChartSpec st ev g act svc inv out) = Stepped
   { sMachine :: Machine spec
   , sEffects :: [EffectReq]
   -- ^ Timer\/invocation lifecycle requests, in emission order.
@@ -102,7 +102,7 @@ maxMicrosteps = 10000
   Loop state
 -------------------------------------------------------------------------------}
 
-data Loop (spec :: ChartSpec) = Loop
+data Loop (spec :: ChartSpec st ev g act svc inv out) = Loop
   { lConfig :: !Config
   , lCtx :: Ctx spec
   , lHistory :: !(Map NodeName (Set NodeName))
