@@ -2,7 +2,9 @@
   "fileTypes": [
     "cabal"
   ],
-  "name": "Cabal",
+  "name": "cabal",
+  "displayName": "Cabal",
+  "aliases": [],
   "patterns": [
     {
       "name": "keyword.other.cabal",
@@ -14,7 +16,7 @@
     },
     {
       "name": "keyword.operator.cabal",
-      "match": "(==|>=|<=|<|>|^>=|\\|\\||&&|!)"
+      "match": "(\\^>=|==|>=|<=|<|>|\\|\\||&&|!)"
     },
     {
       "name": "constant.numeric.cabal",
@@ -42,6 +44,14 @@
     {
       "name": "keyword.control.cabal",
       "match": "^[ \\t]*(if|elif|else)"
+    },
+    {
+      "name": "support.function.cabal",
+      "match": "(?i)\\b(os|arch|impl|flag)\\b(?=\\s*\\()"
+    },
+    {
+      "name": "constant.language.boolean.cabal",
+      "match": "(?i)\\b(true|false)\\b"
     },
     {
       "name": "comment.line.double-dash",
