@@ -17,11 +17,11 @@ bidirectional `Converse`, and a client-streaming `Aggregate`.
 `wireform-connect` sits on top of three in-tree packages, all of which must be
 on the build path (they ship together in this monorepo):
 
-- [`wireform-proto`](../packages/proto/) — message types + the `loadProto` splice
-- [`wireform-grpc`](../packages/grpc/) / [`grpc-spec`](../packages/grpc-spec/) —
+- [`wireform-proto`](../../packages/proto/) — message types + the `loadProto` splice
+- [`wireform-grpc`](../../packages/grpc/) / [`grpc-spec`](../../packages/grpc-spec/) —
   the protocol-agnostic service tags (`loadProtoServices`) and the `Proto`
   newtype with its JSON instances
-- [`wireform-http`](../packages/http/) — the HTTP/1.1 + HTTP/2 transport
+- [`wireform-http`](../../packages/http/) — the HTTP/1.1 + HTTP/2 transport
 
 Add `wireform-connect` (plus `wireform-grpc` and `wireform-proto`) to your
 cabal `build-depends`. It targets GHC 9.6 / 9.8.
