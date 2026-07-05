@@ -1,0 +1,103 @@
+---
+title: Lattice
+description: "A cache-native graph query protocol: content-addressed queries, GETs in the steady state, normalized entity streams, a compile-time authorization partition, declared invalidation, and N+1 made inexpressible."
+sidebar:
+  order: 1
+  label: Overview
+---
+
+Lattice is a schema-first query and mutation protocol for graph-structured
+APIs. It occupies the same problem space as GraphQL and JSON:API but is
+designed so that every network-relevant property of a request — cache key,
+freshness, authorization variance, dependency set, batch structure — is a
+static artifact derived from the schema and the query text, rather than an
+emergent runtime behavior.
+
+The central design commitments (spec §1):
+
+1. **Queries are content-addressed.** A query's identity is a canonical form
+   of its text. Servers require no prior knowledge of a query to serve it; a
+   compiled-plan memo table is a cache, never a source of truth.
+2. **Reads are GETs in the steady state.** Every read has a stable URL. The
+   QUERY method is the introduction path for large query documents; servers
+   hand back a compact GET URL via `Location`.
+3. **Responses are normalized entity streams,** not composite trees.
+   Streaming, deferred delivery, partial loading, and cheap revalidation all
+   fall out of this representation.
+4. **Authorization is a compile-time partition over paths.** Field policies
+   join along traversal paths to split every query into slices (`pub`, `ctx`,
+   `priv`) with distinct cache behavior, so shared caches serve authorized
+   data using ordinary cache keys.
+5. **Cache dependency tracking is a protocol obligation.** Every response
+   enumerates its surrogate keys; every mutation declares its write set and
+   invalidation footprint; both derive from the same schema-declared grouping
+   keys, so they agree by construction.
+6. **N+1 resolution is inexpressible.** Relationship loaders are set-in,
+   map-out by type. Plans execute in batched rounds with statically checked
+   budgets.
+
+The protocol targets stock HTTP infrastructure: a conforming deployment runs
+behind unmodified Varnish or Fastly with no edge compute.
+
+## In this section
+
+- [Specification](./spec/) — the normative protocol document (living Draft 26).
+- [Lattice for GraphQL developers](./corpus/) — a worked comparison corpus,
+  entry by entry against the GraphQL constructs you already know.
+- [Haskell guide](./haskell/) — `wireform-lattice`: parsing an IDL, compiling
+  a query, standing up an origin, running the demo.
+- [TypeScript client](./typescript/) — `lattice-ts`: the `gql` tag, the
+  client, merged multi-root queries, React bindings.
+
+## What ships in this repo
+
+| Component | What it is |
+|---|---|
+| `wireform-lattice` | The Haskell implementation: IDL parser and semantic model, query-language parser and canonicalizer, the authorization path-join planner, the NDJSON wire format, an HTTP origin built on [`wireform-http`](../packages/http/), and an HTTP client with a normalized entity store. |
+| `lattice-ts` | A tiny Apollo-style TypeScript client (npm: `@wireform/lattice`): `gql` tag, transport ladder, normalized entity store, merged multi-root queries, and React bindings. |
+| `example-lattice` | A demo origin serving the Star Wars corpus schema over the in-memory backend — the target of the [curl walkthrough](./haskell/#running-the-demo-origin). |
+
+## Implementation status
+
+The implementation tracks the living spec; section numbers refer to the
+[specification](./spec/). Where Haskell and TypeScript coverage differ, the
+row says so — the TS client is deliberately small (transport ladder:
+introduce, hash GET, inline GET; wire decode into a normalized store; merged
+multi-root queries; React bindings).
+
+### Implemented
+
+| Area | Spec | Coverage |
+|---|---|---|
+| IDL parser + the type-system subset | §3.4, §3.5 | Haskell |
+| Query language + normative grammar | §4, §4.8 | Haskell (full); TS parses enough to canonicalize and merge |
+| Canonicalization + query hash | §5.1 | Haskell; TS canonicalizes but never hashes — it learns hash-form URLs from the origin's `Location` grant |
+| Compression (shared dictionary optional) | §5.2 | Haskell; TS via `CompressionStream` where available |
+| Transport ladder | §6.1–6.5 | Haskell (all rungs); TS: introduce + hash GET + inline GET |
+| Point fetches, field masks, `ver`-pinned immutable fetches | §6.7 | Haskell + TS (store gap-filling) |
+| Discovery document | §7.1 | Haskell + TS |
+| `source` / `explain` inspection endpoints | §7.2, §20.2 | Haskell |
+| Plan identity (`planId` over pertinent declarations) | §7.3 | Haskell |
+| Slices + the authorization path join | §8 | Haskell |
+| `vc` payload/proof, bundled HMAC verifier | §8.2 | Haskell |
+| Wire format, incl. scoped errors + `207 Multi-Status` | §9 | Haskell + TS (decode + normalized store, tolerant unknowns) |
+| Caching headers, surrogate keys, weak manifest ETags | §10 | Haskell |
+| Mutations: `Named` binding, `Transactional` + `NaturallyIdempotent` effect classes, idempotency keys, write-set enforcement, `invalidated` records, best-effort batch | §11 | Haskell; TS: invocation + invalidation-driven refetch |
+
+### Deferred
+
+Documented deferrals — designed in the spec, deliberately not built yet, and
+never silently missing:
+
+| Area | Spec | Note |
+|---|---|---|
+| Federation and schema modules | §18 | |
+| Live queries | §12 | |
+| Derived fields | §3.7 | |
+| Cache digests | §10.4 | the `X-Have` header name is enumerated, nothing consumes it |
+| Signed admission | §14.3 | admission is `open` |
+| Verb bindings | §11.7 | every mutation invokes as `POST /m/{name}` |
+| Resource-mode coalescing | §6.9 | single-flight per `(type, key)` only; no accumulation windows |
+| Observability conventions | §19 | |
+| Compatibility registry | §17 | |
+| NFC normalization of string literals | §5.1 | the canonicalizer assumes NFC input |

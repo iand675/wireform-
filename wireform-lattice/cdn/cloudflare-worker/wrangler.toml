@@ -1,0 +1,14 @@
+name = "lattice-cdn"
+main = "src/worker.ts"
+compatibility_date = "2025-05-01"
+
+kv_namespaces = [
+  { binding = "TAGS", id = "tags-dev" }
+]
+
+# Dev defaults. For a real deployment override PURGE_SECRET with
+# `wrangler secret put PURGE_SECRET` (secrets shadow [vars]) and point
+# ORIGIN_URL at your Lattice origin — see README.md.
+[vars]
+ORIGIN_URL = "http://127.0.0.1:8917"
+PURGE_SECRET = "dev-secret"

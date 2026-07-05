@@ -179,6 +179,7 @@ let
     wireform-grpc          = { path = "wireform-grpc";          emoji = ":satellite_antenna:";             tier = "network"; };
     wireform-kafka         = { path = "wireform-kafka";         emoji = ":kafka:";            tier = "network"; };
     wireform-hw-kafka-client = { path = "wireform-hw-kafka-client"; emoji = ":kafka:";        tier = "network"; };
+    wireform-lattice       = { path = "wireform-lattice";       emoji = ":spider_web:";       tier = "network"; };
 
     # -- tool --------------------------------------------------------
     wireform-attoparsec    = { path = "wireform-attoparsec";    emoji = ":bridge_at_night:";  tier = "tool"; };

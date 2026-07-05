@@ -1,0 +1,70 @@
+schema starwars.example.com
+
+newtype DroidId = Text
+
+enum Episode closed = NewHope | Empire | Jedi
+
+newtype HumanId = Text
+
+newtype ReviewId = Text
+
+newtype StarshipId = Text
+
+interface Character {
+  appearsIn: [Episode]
+  name: Text
+  has many friends: Character by ownerId ordered by name asc page 10 max 50
+}
+
+entity Droid by id implements Character {
+  visible to all by default
+  appearsIn: [Episode]
+  id: DroidId
+  name: Text
+  primaryFunction: Text?
+  has many friends: Character by ownerId ordered by name asc page 10 max 50
+  fetch by id: public
+}
+
+entity Human by id implements Character {
+  visible to all by default
+  appearsIn: [Episode]
+  homePlanet: Text?
+  id: HumanId
+  name: Text
+  has many friends: Character by ownerId ordered by name asc page 10 max 50
+  fetch by id: public
+}
+
+entity Review by id {
+  visible to all by default
+  commentary: Text?
+  createdAt: Timestamp
+  episode: Episode
+  id: ReviewId
+  stars: W8
+  fetch by id: public
+}
+
+entity Starship by id {
+  visible to all by default
+  id: StarshipId
+  length: F64?
+  name: Text
+  fetch by id: public
+}
+
+fragment CharacterName on Character {name}
+
+get hero(episode: Episode?) of (Human | Droid) public
+
+list reviews of Review by episode ordered by createdAt desc page 10 max 50 public
+
+list search(text: Text) of (Human | Droid | Starship) ordered by name asc page 10 max 50 public
+
+mutation createReview(episode: Episode, stars: W8, commentary: Text?) returns Review {
+  allow public
+  writes Review(new), reviews(episode)
+  invalidates writes
+  effect transactional
+}

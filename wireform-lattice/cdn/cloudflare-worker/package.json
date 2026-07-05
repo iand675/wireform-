@@ -1,0 +1,17 @@
+{
+  "name": "lattice-cdn-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Worker CDN tier for the Lattice protocol: full-URL shared caching + KV surrogate-key purge index",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "dev": "wrangler dev --local --port 8787",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250705.0",
+    "typescript": "^5.6.3",
+    "wrangler": "^4.22.0"
+  }
+}

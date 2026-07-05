@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+* **`wireform-lattice`** — an implementation of Lattice, a cache-native
+  graph query protocol (GraphQL/JSON:API problem space; spec Draft 27 +
+  GraphQL comparison corpus in the docs site under `/lattice/`): schema
+  IDL parser + canonical content-addressed IDL, the normative query
+  grammar + canonicalization + BLAKE3 query hashes, the authorization
+  path-join planner (`pub`/`ctx`/`priv` slices, plan ids over pertinent
+  declarations, budgets, `explain`), the NDJSON entity-stream wire
+  format with scoped errors, a full HTTP origin on `wireform-http`
+  (transport ladder incl. the RFC 10008 `QUERY` introduction, point
+  fetches with masks + version pinning, mutations with at-most-once
+  idempotency keys and write-set-derived invalidation, per-slice cache
+  headers + `Surrogate-Key` tags), an HTTP client with a normalized
+  entity store, an STM in-memory backend, and the Star Wars corpus demo
+  origin (`example-lattice`). Proven behind real CDN tiers from the dev
+  shell: a Varnish (vmod_xkey) VCL harness and a plug-and-play
+  Cloudflare Worker (KV surrogate-key index), both driven by one
+  conformance checker (request coalescing, tag purging, slice
+  isolation, idempotent replay through the cache). Companion
+  TypeScript client `lattice-ts/` (zero runtime deps, React bindings,
+  merged multi-root query batching).
+
 ## 0.1.0.0 -- 2026
 
 Initial release of the `wireform` umbrella package and its per-format

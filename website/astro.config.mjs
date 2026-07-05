@@ -106,6 +106,16 @@ export default defineConfig({
 					autogenerate: { directory: "concepts" },
 				},
 				{
+					label: "Lattice",
+					items: [
+						{ label: "Overview", slug: "lattice" },
+						{ label: "Specification", slug: "lattice/spec" },
+						{ label: "GraphQL comparison corpus", slug: "lattice/corpus" },
+						{ label: "Haskell guide", slug: "lattice/haskell" },
+						{ label: "TypeScript client", slug: "lattice/typescript" },
+					],
+				},
+				{
 					label: "Packages",
 					items: [
 						{

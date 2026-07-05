@@ -128,6 +128,7 @@
           wireform-cel               = ./wireform-cel;
           wireform-protovalidate     = ./wireform-protovalidate;
           wireform-hw-kafka-client   = ./wireform-hw-kafka-client;
+          wireform-lattice           = ./wireform-lattice;
         };
 
         # Cabal flags to enable on specific packages.
@@ -287,6 +288,24 @@
               libzstd  = pkgs.zstd;
               lz4      = pkgs.lz4;
               openssl  = pkgs.openssl;
+              # blake3's SIMD cabal flags default on and compile x86
+              # intrinsics C on every arch (broken on aarch64); force the
+              # portable path, mirroring the cabal.project flags block.
+              # nixpkgs also marks the package x86-only (same false
+              # restriction as crc32c above); with the portable path forced
+              # it builds fine on aarch64-darwin, so lift meta.platforms.
+              # Its test suite prints every case OK yet exits FAIL there,
+              # so skip it (same treatment as symbolize above).
+              blake3 = lib.pipe super.blake3 [
+                hlib.dontCheck
+                (hlib.disableCabalFlag "avx512")
+                (hlib.disableCabalFlag "avx2")
+                (hlib.disableCabalFlag "sse41")
+                (hlib.disableCabalFlag "sse2")
+                (drv: drv.overrideAttrs (old: {
+                  meta = old.meta // { platforms = lib.platforms.all; };
+                }))
+              ];
             };
 
         mkDevShell = ghcAttr:
@@ -337,7 +356,7 @@
 
             nativeBuildInputs = [
               hp.haskell-language-server
-            ] ++ sharedTools;
+            ] ++ sharedTools ++ cdnTools;
 
             buildInputs = systemDeps;
 
@@ -349,6 +368,22 @@
           };
 
         devShells = builtins.mapAttrs (_: mkDevShell) ghcMatrix;
+
+        # CDN harness tools (wireform-lattice/cdn), part of the dev shell:
+        # node for the conformance checker + the Cloudflare Worker harness
+        # (wrangler runs via npx), curl for the run scripts. Varnish itself
+        # runs as a container (official varnish:8.0 image, which bundles
+        # varnish-modules incl. vmod_xkey) via podman — see
+        # wireform-lattice/cdn/README.md. The native nixpkgs varnish is
+        # deliberately not used: 8.0.2 needs several Darwin build patches
+        # (false ac_cv pre-seeds, pre-2.4.7 libtool), and its successor —
+        # Varnish rebranded to Vinyl Cache at v9; nixpkgs ships it as
+        # `vinyl-cache` 9.0.1 — is marked broken on Darwin and has no
+        # vinyl-compatible modules set for xkey.
+        cdnTools = [
+          pkgs.nodejs
+          pkgs.curl
+        ];
 
         packagesForGhc = ghcAttr:
           let

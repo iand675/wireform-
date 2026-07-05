@@ -1,0 +1,2 @@
+query($text:Text){search(text:$text){... on Droid{name primaryFunction} ... on Human{homePlanet name} ... on Starship{length name}}}
+io5QJ1HcVUygTysINcUD_A

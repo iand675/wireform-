@@ -1,0 +1,103 @@
+schema api.example.com
+
+-- The spec §3.4 worked example, made self-contained (the published spec
+-- example referenced Url/Markdown/PostId/UserId/OrgId/Role without
+-- declaring them, and ordered `feed` by an undeclared `rank` field).
+
+newtype PostId = Uuid
+newtype UserId = Uuid
+newtype OrgId  = Uuid
+newtype Url    = Text
+newtype Markdown = Text
+newtype Email  = Text
+
+enum Role closed = Member | Editor | Admin
+
+claims {
+  org:  OrgId
+  role: Role
+}
+
+entity Post by id {
+  visible to all by default
+
+  id:         PostId
+  orgId:      OrgId
+  authorId:   UserId
+  title:      Text
+  body:       Markdown
+  rank:       F64
+  createdAt:  Timestamp
+  publishedAt: Timestamp
+  draftNotes: Text?              private
+  ctr:        F64                visible when caller.role = Admin
+
+  has one  author: User by authorId
+
+  has many tags: Tag by postId max 50
+
+  has many comments: Comment by postId
+                     ordered by createdAt desc
+                     page 20 max 100
+
+  fetch by id: public
+}
+
+entity User by id {
+  visible to all by default
+
+  id:        UserId
+  orgId:     OrgId
+  name:      Text
+  email:     Email               visible when caller.org = orgId
+  avatarUrl(size: I32 = 96): Url
+
+  fetch by id: visible when caller.org = orgId
+}
+
+entity Tag by id {
+  visible to all by default
+
+  id:     Text
+  postId: PostId
+  name:   Text
+
+  fetch by id: public
+}
+
+entity Comment by id {
+  visible to all by default
+
+  id:        Text
+  postId:    PostId
+  authorId:  UserId
+  body:      Text
+  createdAt: Timestamp
+
+  has one author: User by authorId
+
+  fetch by id: public
+}
+
+fragment UserByline on User { name avatarUrl(size: 48) }
+fragment UserAvatar($size: I32 = 96) on User { avatarUrl(size: $size) }
+fragment UserProfile on User { ...UserByline email }
+
+list feed of Post by orgId
+     ordered by rank desc
+     page 20 max 100
+     visible when caller.org = orgId
+
+list bookmarks of Post by authorId
+     ordered by createdAt desc
+     page 20 max 100
+     visible when caller.org = orgId
+
+get me of User private
+
+mutation publishPost(post: PostId) returns Post {
+  allow when  caller.role in [Editor, Admin]
+  writes      Post(post), feed(Post.orgId), bookmarks(Post.authorId)
+  invalidates writes
+  effect      natural
+}

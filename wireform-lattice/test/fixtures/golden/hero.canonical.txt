@@ -1,0 +1,2 @@
+query{hero{friends{name} name}}
+s4V38HBMuqZxudioMVI57Q

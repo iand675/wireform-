@@ -53,6 +53,7 @@ packages:
   wireform-state-machine/
   wireform-dst/
   wireform-dst-net/
+  wireform-lattice/
   examples/payments-pipeline/
 
 package *
@@ -97,3 +98,9 @@ package wireform-kafka
   optimization: 2
 package wireform-kafka-protocol
   optimization: 2
+
+-- blake3's SIMD flags default on and unconditionally compile x86
+-- intrinsics C files on non-x86_64 (broken on aarch64). The portable
+-- path is plenty: wireform-lattice only hashes short query/IDL texts.
+package blake3
+  flags: -avx512 -avx2 -sse41 -sse2

@@ -1,0 +1,40 @@
+{
+  "name": "@wireform/lattice",
+  "version": "0.1.0",
+  "description": "Zero-dependency TypeScript client for the Lattice cache-native graph query protocol, with Apollo-style React bindings",
+  "license": "BSD-3-Clause",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./react": "./src/react.ts"
+  },
+  "files": [
+    "src",
+    "!src/*.test.ts",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "workspaces": [
+    "example"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "example:dev": "npm run dev --workspace example",
+    "example:build": "npm run build --workspace example"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "@types/react": "^18.3.12",
+    "typescript": "^5.6.3",
+    "vitest": "^4.1.9"
+  }
+}

@@ -1,0 +1,86 @@
+schema api.example.com
+
+claims {
+  org: OrgId
+  role: Role
+}
+
+newtype Email = Text
+
+newtype Markdown = Text
+
+newtype OrgId = Uuid
+
+newtype PostId = Uuid
+
+enum Role closed = Member | Editor | Admin
+
+newtype Url = Text
+
+newtype UserId = Uuid
+
+entity Comment by id {
+  visible to all by default
+  authorId: UserId
+  body: Text
+  createdAt: Timestamp
+  id: Text
+  postId: PostId
+  has one author: User by authorId
+  fetch by id: public
+}
+
+entity Post by id {
+  visible to all by default
+  authorId: UserId
+  body: Markdown
+  createdAt: Timestamp
+  ctr: F64 visible when caller.role = Admin
+  draftNotes: Text? private
+  id: PostId
+  orgId: OrgId
+  publishedAt: Timestamp
+  rank: F64
+  title: Text
+  has one author: User by authorId
+  has many comments: Comment by postId ordered by createdAt desc page 20 max 100
+  has many tags: Tag by postId max 50
+  fetch by id: public
+}
+
+entity Tag by id {
+  visible to all by default
+  id: Text
+  name: Text
+  postId: PostId
+  fetch by id: public
+}
+
+entity User by id {
+  visible to all by default
+  avatarUrl(size: I32 = 96): Url
+  email: Email visible when caller.org = orgId
+  id: UserId
+  name: Text
+  orgId: OrgId
+  fetch by id: visible when caller.org = orgId
+}
+
+fragment UserAvatar($size:I32=96) on User {avatarUrl(size:$size)}
+
+fragment UserByline on User {name avatarUrl(size:48)}
+
+fragment UserProfile on User {...UserByline email}
+
+list bookmarks of Post by authorId ordered by createdAt desc page 20 max 100 visible when caller.org = orgId
+
+list feed of Post by orgId ordered by rank desc page 20 max 100 visible when caller.org = orgId
+
+get me of User private
+
+mutation publishPost(post: PostId) returns Post {
+  allow when caller.role in [Editor, Admin]
+  writes Post(post), feed(Post.orgId), bookmarks(Post.authorId)
+  invalidates writes
+  effect natural
+}
