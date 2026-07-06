@@ -199,7 +199,7 @@ which silently breaks shared caching.
 
 Lattice declares field visibility in the schema:
 
-```
+```lattice
 email: Email  visible when caller.org = orgId
 ```
 
@@ -217,7 +217,7 @@ received. (Spec: [§8 Authorization](./spec/#_8-authorization).)
 A Lattice mutation declares its **write set** in the schema: exactly which
 entities and collection ranges it may modify.
 
-```
+```lattice
 mutation publishPost(post: PostId) returns Post {
   writes      Post(post), feed(Post.orgId), bookmarks(Post.authorId)
   invalidates writes

@@ -188,7 +188,7 @@ Guidance: grouping keys at tenant or container granularity (org, thread, folder)
 
 The published schema is a text document. It is meant to read as a domain model first and as a set of access-and-cache declarations second. So relationships say `has one` or `has many`, roots say `get` or `list`, and visibility rules read as sentences (`visible when caller.org = orgId`). A `has many` or `list` defines its collection inline (Section 3.3); there are no separate index declarations to cross-reference.
 
-```
+```lattice
 schema api.example.com
 
 -- Named types used below (Section 3.5.2). The IDL also accepts
@@ -299,7 +299,7 @@ Algebraic data types are **structural values**: they have no identity, no `ver`,
 
 #### 3.5.2 Declarations
 
-```
+```lattice
 newtype PostId = Uuid
 newtype Iban   = Text(match "^[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}$")
 
@@ -371,7 +371,7 @@ Not every `has many` needs pagination. A post's tags, a user's roles, and an ord
 
 **Bounded collections** return the entire set in one shot, capped at a declared (or defaulted) `max`. They take no pagination arguments:
 
-```
+```lattice
 has many tags: Tag by postId max 50        -- whole set, at most 50
 ```
 
@@ -391,7 +391,7 @@ Bounded collections may also declare a **floor**: `has many lineItems: LineItem 
 
 **Paginated collections** declare `page <default> max <cap>` and a keyset order; they grow without a domain bound, so the client walks them. Keyset pagination is the only kind; offsets drift under insertion and make page URLs cache-hostile. Arguments:
 
-```
+```lattice
 comments(first: 20)                    -- forward from the start
 comments(first: 20, after: $cur)       -- forward from a cursor
 comments(last: 20, before: $cur)       -- backward
@@ -437,7 +437,7 @@ data Dep
 data Materialization = OnRead | Maintained
 ```
 
-```
+```lattice
 entity Post by id {
   commentCount: W32 derived
     reads   comments count                   -- an aggregate over the Post.comments collection
@@ -462,7 +462,7 @@ entity Post by id {
 
 Production storage reuses ids across entity types in two ways that mean opposite things. The schema declares which is meant, because the difference is network-relevant: it decides whose caches a write invalidates.
 
-```
+```lattice
 entity User by id { ... }
 
 -- A 1:1 companion behind the same id: its OWN record of truth.
@@ -515,7 +515,7 @@ Everything else GraphQL developers expect, nested fields, arguments, fragments, 
 
 ### 4.2 Syntax
 
-```
+```lattice
 query FeedPage($after: Cursor, $limit: Int = 20) {
   feed(after: $after, limit: $limit) {
     title
@@ -550,7 +550,7 @@ A query document carries a name (documentation only; identity is the canonical t
 
 A query may select several root fields, exactly as GraphQL does; each is an independent entry point with its own pagination.
 
-```
+```lattice
 query Dashboard($nAfter: Cursor, $eAfter: Cursor) {
   notifications(after: $nAfter, first: 20) { body createdAt }
   events(after: $eAfter, first: 10)        { title startsAt }
@@ -565,7 +565,7 @@ When to use one multi-root query versus several queries is unchanged from earlie
 
 An edge targeting an interface dispatches per concrete type with GraphQL inline fragments, `... on Type { ... }`. Concrete types not listed are emitted as bare typed refs (identity only):
 
-```
+```lattice
 query Search($text: Text) {
   search(text: $text, first: 10) {
     ... on Human    { name homePlanet }
@@ -583,7 +583,7 @@ A fragment is a named selection on a type, written `fragment Name on Type { ... 
 
 - **Local fragments** are defined in a query document, or in a shared `.lq` file that is `import`ed. They are **expanded into the canonical text at build time**. The server never sees a fragment as a distinct concept; two builds that expand to the same selection share one identity. This is the ordinary fragment, and the default answer to "share this selection."
 
-```
+```lattice
 -- fragments/user.lq
 fragment UserByline on User { name avatarUrl(size: 48) }
 fragment UserProfile on User { ...UserByline email }
@@ -838,7 +838,7 @@ This is the point-fetch counterpart of the hash-form query URL, and it is what m
 
 A mask is canonicalized like any selection: fields sorted, deduplicated, arguments in canonical form, defaults erased. A masked fetch is *defined as* the degenerate query:
 
-```
+```lattice
 query { root node($ref) -> T@_ ; T@_ { <mask fields> } }
 ```
 
@@ -1107,7 +1107,7 @@ Two vocabularies fill `code`, and a record carries exactly one:
 - **Protocol codes**, `code`, drawn from the same `lattice:` namespace as whole-request problem types (Section 15): `lattice:loader-timeout`, `lattice:upstream-unavailable`, `lattice:internal`. These describe infrastructure failing to answer, not a domain decision, and apply uniformly to query-side and mutation-side scoped errors alike. One registry, not two.
 - **Domain errors**, `error`, an ordinary schema-declared sum, used only by mutations that opt in:
 
-```
+```lattice
 mutation cancelOrder(order: OrderId) -> Order {
   ...
   errors CancelError open = AlreadyFilled | AlreadyCancelled | NotFound
@@ -1444,7 +1444,7 @@ The mutation's snapshot token turns "wait until the cache catches up" from a tim
 
 A mutation may bind to an entity-space URL and verb. The binding chooses the wire spelling only. The guard, `writes`, `invalidates`, and effect class apply identically, so no business invariant can be reached around by choosing a verb. What the binding adds is HTTP's own semantics, compiler-checked against the effect class:
 
-```
+```lattice
 mutation replacePost(post: PostId, body: PostInput) returns Post
   as PUT /e/Post/{post}
 mutation editPost(post: PostId, patch: PostPatch) returns Post
@@ -1481,7 +1481,7 @@ A mutation MAY declare a `batch` policy. The policy admits an array invocation t
 
 For a `Bound` (verb) mutation, batch uses a distinct collection-level URL, declared alongside the singular binding:
 
-```
+```lattice
 mutation markRead(notification: NotificationId, read: Bool) -> Notification
   as PATCH /e/Notification/{notification}
   batch best-effort max 500 as PATCH /e/Notification
@@ -1615,7 +1615,7 @@ data QueryAdmission
 
 Every origin serves the protocol-level batched entity root used by federation and by clients filling store gaps:
 
-```
+```lattice
 root nodes(refs: [EntityRef]) -> mixed
 ```
 
@@ -1757,7 +1757,7 @@ The design goal for the network case is that federation is invisible in the prot
 
 Each entity type has exactly one **owning** upstream, authoritative for its key, its fields, and its versions. Other upstreams may **extend** a foreign type with fields and edges they own:
 
-```
+```lattice
 -- in the social upstream's IDL
 extend entity Post {
   has many reactions: Reaction by postId
@@ -1769,7 +1769,7 @@ Extension fields are versioned by the extending module. An entity record for `Po
 
 Worked example, adding a commerce module's orders to an identity module's `User`:
 
-```
+```lattice
 -- commerce module (or upstream; the declarations are identical)
 entity Order by id {
   private by default

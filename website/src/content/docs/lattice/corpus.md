@@ -85,7 +85,7 @@ type Subscription {
 
 ### Lattice IDL
 
-```
+```lattice
 newtype HumanId    = Text
 newtype DroidId    = Text
 newtype StarshipId = Text
@@ -197,7 +197,7 @@ The `friends` collection spans both concrete types: a friend list mixes species 
 
 **Lattice**
 
-```
+```lattice
 query Hero {
   hero {
     name
@@ -227,7 +227,7 @@ query HeroNameAndFriends($episode: Episode) {
 
 **Lattice**
 
-```
+```lattice
 query HeroNameAndFriends($episode: Episode) {
   hero(episode: $episode) {
     name
@@ -257,7 +257,7 @@ There is no alias mechanism (Section 4.1). GraphQL aliasing exists to disambigua
 
 **As two requests:**
 
-```
+```lattice
 query EmpireHero { hero(episode: EMPIRE) { name } }
 query JediHero   { hero(episode: JEDI)   { name } }
 ```
@@ -266,14 +266,14 @@ Two canonical texts, two hashes, two independently cacheable and independently t
 
 **As two schema-declared roots**, if the pairing itself is a stable product concept worth naming:
 
-```
+```lattice
 get empireHero of Human  where episode = Empire  public
 get jediHero   of Human  where episode = Jedi    public
 ```
 
 These can be combined into one multi-root query (Section 4.3) if a single fetch is wanted:
 
-```
+```lattice
 query Heroes {
   empireHero { name }
   jediHero   { name }
@@ -303,7 +303,7 @@ fragment comparisonFields on Character {
 
 **Lattice**
 
-```
+```lattice
 -- fragments/character.lq
 fragment Comparison on Character {
   name
@@ -312,13 +312,13 @@ fragment Comparison on Character {
 }
 ```
 
-```
+```lattice
 -- queries/empire_hero.lq
 import "fragments/character.lq"
 query EmpireHero { hero(episode: EMPIRE) { ...Comparison } }
 ```
 
-```
+```lattice
 -- queries/jedi_hero.lq
 import "fragments/character.lq"
 query JediHero { hero(episode: JEDI) { ...Comparison } }
@@ -347,7 +347,7 @@ Conditional field inclusion is absent (Section 4.7). A client-toggleable selecti
 
 **Split into two queries**, the usual answer:
 
-```
+```lattice
 query HeroName($episode: Episode) {
   hero(episode: $episode) { name }
 }
@@ -382,7 +382,7 @@ A client fetches the first when the friends panel is collapsed and the second wh
 
 **Lattice**
 
-```
+```lattice
 query Search($text: Text) {
   search(text: $text, first: 10) {
     ... on Human    { name homePlanet }
@@ -456,7 +456,7 @@ The general pattern: GraphQL's scalar set covers what a typical CRUD API needs a
 
 **Lattice**
 
-```
+```lattice
 query HeroFriends {
   hero {
     friends(first: 2, after: "cur_8f2") { name }
@@ -498,7 +498,7 @@ This is the textbook example DataLoader exists to fix. A naive resolver-per-fiel
 
 **Lattice**
 
-```
+```lattice
 query PostsWithAuthors {
   posts(first: 20) {
     title
@@ -616,7 +616,7 @@ One is a mutation field that accepts a list argument (`createReviews(reviews: [R
 
 **Lattice**
 
-```
+```lattice
 mutation cancelOrder(order: OrderId) returns Order {
   allow when   caller.org = orgId
   writes       Order(order), open_orders(Order.userId)
@@ -674,7 +674,7 @@ Accept: text/event-stream
 
 using an ordinary previously-registered query,
 
-```
+```lattice
 query CommentsOnPost($postId: PostId) {
   comments(post: $postId, first: 20) {
     content
@@ -708,7 +708,7 @@ __type(name: "Human") {
 GET /schema/current
 ```
 
-```
+```lattice
 schema api.example.com
 
 entity Human by id {
@@ -743,7 +743,7 @@ GraphQL's spec does not address either case. Both types mint unrelated identitie
 
 **Lattice**
 
-```
+```lattice
 entity User by id {
   visible to all by default
   id:   UserId
@@ -795,7 +795,7 @@ GraphQL's `!` works against its own default (everything is nullable unless annot
 
 **Lattice**
 
-```
+```lattice
 entity Order by id {
   visible to all by default
   id:    OrderId

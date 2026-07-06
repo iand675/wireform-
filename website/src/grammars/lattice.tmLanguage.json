@@ -1,0 +1,70 @@
+{
+  "name": "lattice",
+  "displayName": "Lattice",
+  "scopeName": "source.lattice",
+  "fileTypes": ["lattice", "lq"],
+  "aliases": ["lattice-idl", "lattice-query", "lq"],
+  "patterns": [
+    {
+      "name": "string.quoted.double.lattice",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        { "name": "constant.character.escape.lattice", "match": "\\\\." }
+      ]
+    },
+    {
+      "name": "comment.line.double-dash.lattice",
+      "match": "--.*$"
+    },
+    {
+      "name": "comment.line.number-sign.lattice",
+      "match": "#.*$"
+    },
+    {
+      "name": "entity.name.function.directive.lattice",
+      "match": "@[A-Za-z_][A-Za-z0-9_]*"
+    },
+    {
+      "name": "variable.parameter.lattice",
+      "match": "\\$[A-Za-z_][A-Za-z0-9_]*"
+    },
+    {
+      "name": "keyword.operator.spread.lattice",
+      "match": "\\.\\.\\."
+    },
+    {
+      "name": "constant.numeric.lattice",
+      "match": "\\b\\d+(\\.\\d+)?([eE][+-]?\\d+)?\\b"
+    },
+    {
+      "name": "variable.language.caller.lattice",
+      "match": "\\bcaller\\b"
+    },
+    {
+      "name": "storage.type.lattice",
+      "match": "\\b(schema|newtype|enum|interface|entity|fragment|claims|query|mutation|get|list)\\b"
+    },
+    {
+      "name": "keyword.control.lattice",
+      "match": "\\b(implements|visible|when|where|to|all|default|has|one|many|by|fetch|ordered|asc|desc|page|max|min|on|of|returns|allow|writes|invalidates|effect|reads|read|derived|refines|joins|batch|errors|import|in|root|count)\\b"
+    },
+    {
+      "name": "constant.language.lattice",
+      "match": "\\b(public|private|true|false|natural|transactional|best-effort|closed|new)\\b"
+    },
+    {
+      "name": "entity.name.type.lattice",
+      "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+    },
+    {
+      "name": "variable.other.member.lattice",
+      "match": "\\b[a-z][A-Za-z0-9_]*(?=\\s*[:(])"
+    },
+    {
+      "name": "keyword.operator.lattice",
+      "match": "(=|\\||<|>|\\?|\u2294|!)"
+    }
+  ],
+  "uuid": "d4b7e9a2-1c3f-4a5b-8e6d-2f9c1a0b3e4d"
+}

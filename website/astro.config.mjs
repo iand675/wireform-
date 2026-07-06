@@ -387,6 +387,12 @@ export default defineConfig({
 								"utf8",
 							),
 						),
+						JSON.parse(
+							readFileSync(
+								resolve(__dirname, "src/grammars/lattice.tmLanguage.json"),
+								"utf8",
+							),
+						),
 					],
 				},
 				styleOverrides: {

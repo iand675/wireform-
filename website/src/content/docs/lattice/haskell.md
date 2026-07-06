@@ -67,7 +67,7 @@ loadSchema path = do
 
 A minimal schema, in the shape of the Star Wars corpus the demo serves:
 
-```
+```lattice
 entity Review by id {
   visible to all by default
 
