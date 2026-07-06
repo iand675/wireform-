@@ -100,6 +100,19 @@ batcher falls back to issuing those queries as separate (still individually
 cacheable) requests. Because responses are normalized entity streams rather
 than trees, splitting merged results is a store read, not tree surgery.
 
+```mermaid
+flowchart TD
+  H1["useLatticeQuery(HeroName)"] --> Tick["Same microtask tick"]
+  H2["useLatticeQuery(JediReviews)"] --> Tick
+  Tick --> Merge["mergeQueries"]
+  Merge --> OK{"Roots mergeable?"}
+  OK -->|"yes: disjoint roots"| One["One merged document,<br/>itself a content-addressed request"]
+  OK -->|"no: same root, different args<br/>(UnmergeableError)"| Sep["Separate, still-cacheable requests"]
+  One --> Store["Normalize into the store"]
+  Sep --> Store
+  Store --> Split["Split results per caller<br/>(a store read, not tree surgery)"]
+```
+
 ## React bindings
 
 ```tsx

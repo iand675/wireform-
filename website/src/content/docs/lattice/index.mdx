@@ -136,6 +136,21 @@ The query language will look familiar if you know GraphQL: brace-nested
 selections, fragments, field arguments. What is different is everything
 underneath. Here is how that works, one design decision at a time.
 
+```mermaid
+sequenceDiagram
+  participant App as Client app
+  participant CDN as Shared cache (CDN)
+  participant Origin
+  Note over App,Origin: First time: introduce the query
+  App->>Origin: QUERY /q (canonical query text)
+  Origin-->>App: 200 + Location /q/{hash} + entity stream
+  App->>App: learn the hash URL, normalize entities into the store
+  Note over App,Origin: Steady state: a content-addressed GET
+  App->>CDN: GET /q/{hash} (stable, cacheable URL)
+  CDN-->>App: cached entity stream (origin untouched)
+  App->>App: patch the store, subscribed components re-render
+```
+
 ## Why queries are content-addressed
 
 Every query has a canonical form, and the hash of that form is its identity. A
@@ -284,35 +299,42 @@ merged multi-root queries, and React bindings.
 
 | Area | Spec | Coverage |
 |---|---|---|
-| IDL parser + the type-system subset | §3.4, §3.5 | Haskell |
+| IDL parser + the type system (incl. cardinality, co-keyed entities) | §3.4-3.8 | Haskell |
+| Derived fields: `on read` planning, `maintained` relay, witness validators, information flow | §3.7 | Haskell |
 | Query language + normative grammar | §4, §4.8 | Haskell (full); TS parses enough to canonicalize and merge |
-| Canonicalization + query hash | §5.1 | Haskell; TS canonicalizes but never hashes. It learns hash-form URLs from the origin's `Location` grant. |
+| Canonicalization + query hash (NFC-normalized) | §5.1 | Haskell; TS canonicalizes but never hashes; both NFC-normalize |
 | Compression (shared dictionary optional) | §5.2 | Haskell; TS via `CompressionStream` where available |
 | Transport ladder | §6.1-6.5 | Haskell (all rungs); TS: introduce + hash GET + inline GET |
 | Point fetches, field masks, `ver`-pinned immutable fetches | §6.7 | Haskell + TS (store gap-filling) |
+| Origin coalescing: accumulation windows + single-flight | §6.9 | Haskell (`coalesceWindowMs` in discovery; deterministic flush hooks for tests) |
 | Discovery document | §7.1 | Haskell + TS |
-| `source` / `explain` inspection endpoints | §7.2, §20.2 | Haskell |
+| `source` / `explain` inspection endpoints (explain carries the §19.2 span skeleton) | §7.2, §20.2 | Haskell |
 | Plan identity (`planId` over pertinent declarations) | §7.3 | Haskell |
 | Slices + the authorization path join | §8 | Haskell |
 | `vc` payload/proof, bundled HMAC verifier | §8.2 | Haskell |
 | Wire format, incl. scoped errors + `207 Multi-Status` | §9 | Haskell + TS (decode + normalized store, tolerant unknowns) |
 | Caching headers, surrogate keys, weak manifest ETags | §10 | Haskell |
-| Mutations: `Named` binding, `Transactional` + `NaturallyIdempotent` effect classes, idempotency keys, write-set enforcement, `invalidated` records, best-effort batch | §11 | Haskell; TS: invocation + invalidation-driven refetch |
+| Cache digests: `X-Have`, the pinned Golomb-coded set, `unchanged` markers | §10.4 | Haskell client + origin (priv/oneshot only); TS store applies `unchanged` |
+| Mutations: `Named` binding, effect classes, idempotency keys, write-set enforcement, `invalidated` records, batch | §11 | Haskell; TS: invocation + invalidation-driven refetch |
+| Verb bindings: `as PUT/PATCH/DELETE/POST`, merge-patch, conditional requests, bound batches | §11.7-11.8 | Haskell |
+| Live queries: SSE subscriptions, single-flight deltas, reauth | §12 | Haskell origin + client |
+| Signed admission (Ed25519 over canonical text) | §14.3 | Haskell |
+| The `nodes` root (per-type gating, emit-nothing denials) | §14.4 | Haskell |
+| Compatibility: change taxonomy, check modes + transitive windows, `@break`/`@deprecated`, corpus-weighted reports, `POST /schema/check` | §17 | Haskell |
+| Schema modules: `extend entity`, order-insensitive fusion, fused backends | §18.1-18.2 | Haskell |
+| Federation gateway: per-upstream subplans over `nodes`, `src`-tagged streams, namespaced snapshots/keys, feed-driven purges | §18.3-18.8 | Haskell |
+| Invalidation feed | §18.6 | Haskell (`GET /invalidations?since=&live=sse`) |
+| Observability: §19.2 span topology + the ten §19.3 instruments | §19 | Haskell (OpenTelemetry; no-op unless configured) |
 
-### Deferred
+### Simplifications and remaining edges
 
-Documented deferrals, designed in the spec, deliberately not built yet, and
-never silently missing:
+Documented divergences, each deliberate and noted in the relevant module's
+haddock rather than silently missing:
 
-| Area | Spec | Note |
-|---|---|---|
-| Federation and schema modules | §18 | |
-| Live queries | §12 | |
-| Derived fields | §3.7 | |
-| Cache digests | §10.4 | the `X-Have` header name is enumerated, nothing consumes it |
-| Signed admission | §14.3 | admission is `open` |
-| Verb bindings | §11.7 | every mutation invokes as `POST /m/{name}` |
-| Resource-mode coalescing | §6.9 | single-flight per `(type, key)` only; no accumulation windows |
-| Observability conventions | §19 | |
-| Compatibility registry | §17 | |
-| NFC normalization of string literals | §5.1 | the canonicalizer assumes NFC input |
+| What | Note |
+|---|---|
+| In-process fused emission | one merged record per entity, `ver` = owner's; the gateway emits the true per-module records with `src` |
+| TS client and federation | the TS store merges src-less records only; federated responses are Haskell-client territory for now |
+| §17.5 traffic-threshold gate | the checker gates on sunset + corpus weights; a traffic threshold is deployment configuration |
+| `SERVER_FORWARD` | implemented as the reversed structural diff (documented approximation) |
+| Resource-mode `103 Early Hints` | not emitted |

@@ -738,6 +738,26 @@ A query has several request encodings, ordered here from most to least cacheable
 
 The one-shot form (Section 6.5) is not a rung in this fall-through. It is an explicit opt-in a client selects when it knows a query is unique, and it never caches.
 
+```mermaid
+flowchart TD
+  Start["Client has a query"] --> Known{"Knows the query hash<br/>and plan id?"}
+  Known -->|yes| Hash["Rung 1: hash form<br/>GET /q/{hash}?p={plan}"]
+  Known -->|no| Intro["Introduce the query"]
+  Hash --> Resp{"response"}
+  Resp -->|200| Done["Steady state:<br/>cacheable entity stream"]
+  Resp -->|"404 unknown-query<br/>or 409 plan-superseded"| Intro
+  Intro --> Fits{"Compressed text fits<br/>the URL budget?"}
+  Fits -->|yes| Inline["Rung 2: inline form<br/>GET /q?d={deflate(text)}"]
+  Fits -->|no| Query["Rung 3: QUERY form<br/>QUERY /q with body"]
+  Inline -->|"404, 405, 414 or 501"| Query
+  Query -->|"405 method rejected"| Post["Rung 4: POST introduction<br/>the compatibility floor"]
+  Inline --> Grant["200 + Location /q/{hash}<br/>+ Lattice-Plan"]
+  Query --> Grant
+  Post --> Grant
+  Grant --> Learn["Client learns the hash URL"]
+  Learn --> Hash
+```
+
 ### 6.1 Hash form (steady state)
 
 ```
@@ -961,6 +981,17 @@ Slices are then: **`pub`** = everything at level `Public`; **`ctx`** = everythin
 Worked example: in `FeedPage`, the `feed` root is declared `visible when caller.org = orgId`. Every Post reached through it, every public field of those Posts, and everything downstream is at least `Claims({org})`. The pub slice is therefore **empty**, and the whole result is ctx-variant on `{org}`, which is correct: the feed's membership is org data. Cache sharing still operates at org granularity, which was always the achievable maximum for this query. A query entering through a `visible to all` root has a nonempty pub slice for its public-path, public-policy fields.
 
 Drafts before 6 partitioned by field policy alone; that version leaks gated membership into publicly cached responses and is unsound. Path-level assignment is less guessable by inspection (the same field lands in different slices depending on how it is reached), which is why `explain` reports the join derivation per plan element (Section 20.2).
+
+```mermaid
+flowchart TD
+  Q["Query traversal DAG"] --> Join["Join visibility levels along each path<br/>level(child) = level(parent) ⊔ policy(edge)<br/>emission = level(node) ⊔ policy(field)"]
+  Join --> Pub["pub slice<br/>level Public"]
+  Join --> Ctx["ctx slice<br/>level Claims(S)"]
+  Join --> Priv["priv slice<br/>level Private"]
+  Pub --> PubU["GET /q/{hash}?slice=pub<br/>Cache-Control: public, shared"]
+  Ctx --> CtxU["GET /q/{hash}?slice=ctx, vc={claims} in URL<br/>X-Vc-Auth proof in header<br/>shared per audience"]
+  Priv --> PrivU["GET /q/{hash}?slice=priv<br/>Authorization header<br/>Cache-Control: private"]
+```
 
 ### 8.2 Visibility context: payload and proof
 
@@ -1213,6 +1244,17 @@ To bound cache pollution from adversarially minted novel queries (any content-ad
 
 The tenure counter is a monotone per-hash serving count keyed by query hash; it is not windowed or decayed. A hash earns full tenure on its Nth lifetime serving and keeps it until the counter is lost. The counter is advisory and losable; losing it merely re-imposes the `s-maxage=15` introductory rate until the hash re-crosses the threshold.
 
+```mermaid
+stateDiagram-v2
+  state "First sight (s-maxage=15)" as FirstSight
+  state "Promoted (full policy TTL)" as Promoted
+  [*] --> FirstSight : first serving
+  FirstSight --> FirstSight : served, below threshold
+  FirstSight --> Promoted : Nth serving (reference default N=3)
+  Promoted --> Promoted : served
+  Promoted --> FirstSight : counter lost
+```
+
 The organic query working set is highly repetitive (the empirical fact that motivated persisted queries) and quickly earns full tenure; one-off adversarial queries occupy shared cache slots for seconds. Tenure state is advisory and losable.
 
 ### 10.8 Error response caching
@@ -1354,6 +1396,23 @@ The write-set keys, instantiated against the actual written rows, are recorded i
 4. the subscribable invalidation feed (Section 18.6), consumed by federating gateways and any other change-notification consumer.
 
 **The pipeline is asynchronous.** Nothing above requires a purge to land before the mutation response is sent. Section 11.6 exists so that nothing has to: read-your-writes is carried by the snapshot token, so relay latency degrades only the freshness of *other* principals' shared-cache hits, never correctness.
+
+```mermaid
+sequenceDiagram
+  participant Client
+  participant Origin
+  participant Relay as Outbox relay
+  participant CDN as Shared cache
+  Client->>Origin: POST /m/{name} (Idempotency-Key, input)
+  Origin->>Origin: run effect, commit (write-set keys<br/>to the outbox in the same commit)
+  Origin-->>Client: 200 entity stream + Lattice-Snapshot<br/>+ invalidated record + Surrogate-Key
+  Note over Origin,Relay: the response returns before any purge lands
+  Relay->>CDN: drain outbox, soft-purge each key
+  Relay->>Relay: live-query fanout, audit, invalidation feed
+  Client->>Client: mark intersecting queries stale (invalidated record)
+  Client->>CDN: refetch with no-cache
+  CDN-->>Client: revalidated once Lattice-Snapshot is at or past the mutation's
+```
 
 The relay may be an in-process worker, a CDC follower, or a consumer group on a message broker. The outbox rows are already an ordered, resumable log, and Section 18.6's feed cursor has that shape on the wire.
 
@@ -1560,11 +1619,13 @@ Every origin serves the protocol-level batched entity root used by federation an
 root nodes(refs: [EntityRef]) -> mixed
 ```
 
+The query-side spelling is pinned: the grammar deliberately has no list type constructor in variable position, so a nodes query declares `$refs: EntityRef` (a protocol-level name) and binds it as a JSON array of ref strings (`["Post:17","User:9"]`); literal refs inline as strings. Literal refs give the compiler an exact fan-out to check against budgets at compile time; variable refs are capped at bind time. Because dispatch is per concrete type, a nodes root's membership can span slices: each slice's manifest carries its types' subsequence of the request order, and the client merges order-preservingly (the one root whose membership legitimately lives in several slices; Section 9.2's one-slice-per-root rule reads per subsequence here).
+
 Batched fetch-by-ref is also an enumeration and existence-probing primitive, so it is governed explicitly:
 
 - Access is gated **per entity type** by the type's `nodes(...)` policy (Section 3.1), which participates in the path join like any root policy: entities fetched via `nodes` are sliced at `nodesPolicy ⊔ field policy`. The recommended posture for sensitive types is a claims or service-principal gate; a gateway is then granted via `Signed`-mode or a service claim.
 - `nodes` traffic SHOULD occupy its own rate class per principal, separate from both cold-compile and warm limits, because its cost model (pure point reads, trivially parallel) and its abuse model (bulk walking) differ from both.
-- Existence probing against a denied type is indistinguishable from nonexistence: policy failures on `nodes` refs emit nothing, not `elided`, regardless of the type's elision setting.
+- Existence probing against a denied type is indistinguishable from nonexistence: policy failures on `nodes` refs emit nothing, not `elided`, regardless of the type's elision setting. A row-comparing fetch-by gate (`visible when caller.org = orgId`) is evaluated per row, and a tombstoned row has no row to compare, so under row gates tombstones also emit nothing; under claims-only gates, which decide before loading, an admitted ref's tombstone emits normally (deletion is a stable fact the caller was entitled to learn).
 - Sequential or otherwise guessable keys make enumeration cheap for permitted types; this is schema hygiene rather than protocol, but the specification notes it because `nodes` is what converts guessable keys into a bulk export tool.
 
 ---
@@ -1730,7 +1791,9 @@ extend entity User {
 
 A query selecting `User { name, orders(first: 10) -> Order }` places the `orders` subtree in the priv slice via the ordinary path join, since order history is owner-visible. The `name` field stays wherever the identity module's policies put it. The commerce module owns `Order`, its `orders` collection and grouping, and the edge policy; identity's ownership of `User` is untouched. In-process, the edge resolves through commerce's loader directly. Behind a gateway, it resolves through the `nodes` root and subplan machinery of Section 18.3, with no schema difference between the two.
 
-Composition conflicts (two owners for one type, one field declared by two upstreams, claim registry disagreements) fail fusion at deploy time. Claim registries union; a claim name declared with different types in two upstreams is a conflict, because visibility payloads must mean one thing.
+Extensions target entities: an interface is a shape contract, not a record of truth, so there is nothing for an extension field to be versioned against; extend the implementing entities instead. An extension's own references (edge targets, value types) must resolve within the extending module's document, since modules parse independently; identical value-type redeclarations dedupe at fusion. The fused schema's `schema` name is derived deterministically from the constituents (the reference rule: sorted, deduplicated module schema names joined with `.`; same-named modules fuse under that name).
+
+Composition conflicts (two owners for one type, one field declared by two upstreams, claim registry disagreements) fail fusion at deploy time. Claim registries union; a claim name declared with different types in two upstreams is a conflict, because visibility payloads must mean one thing. Interface declarations may legitimately appear in several modules when they agree exactly; identical surfaces dedupe with member-set union, anything else is a conflict.
 
 ### 18.2 Fused schema and plan identity
 
@@ -1745,6 +1808,22 @@ The gateway compiles a fused query into per-upstream subplans. Each subplan **is
 Cross-upstream joins use the `nodes` root (Section 14.4). Gateways authenticate to upstreams as service principals that satisfy the relevant `nodes` policies. Gateway execution is the same round structure as local planning, lifted one level: each round collects, across the whole fused plan, the full key set needed from each upstream, and issues one `nodes` query per upstream per round. Set-in map-out loaders at the upstream then batch internally as usual. N+1 across service boundaries is inexpressible for the same reason it is locally: there is no per-entity call in the plan algebra.
 
 The path join composes: a subplan's roots inherit the fused path level at their cut point, so an upstream serving a sub-query gated upstream of the cut sees it arrive on its ctx slice with the appropriate claims payload, re-minted per Section 18.8. Subplans inherit the fused query's tenure: the gateway's introduction of a subplan re-teaches an upstream that evicted it, exactly as any client would.
+
+```mermaid
+flowchart TD
+  Client["Client"] -->|"fused query, hash GET"| GW["Federation gateway"]
+  GW --> Compile["Compile into per-upstream subplans<br/>(each subplan is itself a Lattice query)"]
+  Compile --> SubA["Subplan A: hash-form GET"]
+  Compile --> SubB["Subplan B: hash-form GET"]
+  Compile --> Nodes["Cross-upstream joins:<br/>one nodes query per upstream per round"]
+  SubA --> UpA["Upstream A<br/>(CDN-cacheable hop)"]
+  SubB --> UpB["Upstream B<br/>(CDN-cacheable hop)"]
+  Nodes --> UpA
+  Nodes --> UpB
+  UpA --> Merge["Gateway merges normalized streams,<br/>records tagged with src,<br/>into one fused manifest"]
+  UpB --> Merge
+  Merge --> Client
+```
 
 ### 18.4 Wire composition
 
@@ -1768,7 +1847,7 @@ Surrogate keys are namespaced by upstream at the gateway (`posts/Post:17`, `soci
 GET /invalidations?since={outboxCursor}&live=sse
 ```
 
-Feed events are pinned: the same SSE framing as Section 12, each event one JSON object `{"cursor": n, "keys": ["Post:17", "feed:9"]}` with `id: {cursor}`. `since` replays every retained event with a cursor greater than the parameter, over a bounded, deployment-configured window of most-recent events (the reference implementation retains the last 4096 drained batches); a `since` older than the window is loss, detectable because the first replayed event's cursor then exceeds `since + 1`, and a consumer that observes this MUST resync from scratch rather than trust the gap. Because per-process cursors are not durable across origin restarts (Section 11.5), a consumer that cannot match its `since` MUST also resync. The gateway subscribes to each upstream's feed and translates keys, with namespace prefixes, into purges against its own cache tier. Invalidation therefore composes through the same declared footprints that produced it, and the feed's outbox cursor makes gateway-side purge processing resumable and exactly-once. The feed is also the natural attachment point for anything else that wants change notifications (search indexers, materialized views), which keeps those consumers off the mutation path.
+Feed events are pinned: the same SSE framing as Section 12, each event one JSON object `{"cursor": n, "keys": ["Post:17", "feed:9"]}` with `id: {cursor}`. `since` replays every retained event with a cursor greater than the parameter, over a bounded, deployment-configured window of most-recent events (the reference implementation retains the last 4096 drained batches); a `since` older than the window is loss, detectable because the first replayed event's cursor then exceeds `since + 1`, and a consumer that observes this MUST resync from scratch rather than trust the gap. Because per-process cursors are not durable across origin restarts (Section 11.5), a consumer that cannot match its `since` MUST also resync. The gateway subscribes to each upstream's feed and translates keys, with namespace prefixes, into purges against its own cache tier. Invalidation therefore composes through the same declared footprints that produced it, and the feed's outbox cursor makes gateway-side purge processing resumable and exactly-once. The feed is also the natural attachment point for anything else that wants change notifications (search indexers, materialized views), which keeps those consumers off the mutation path. Surrogate keys reveal write patterns, so the feed is not for anonymous consumption: the recommended posture is a service-principal gate at the proxy or service tier, the same class of protection as a sensitive type's `nodes` policy.
 
 ### 18.7 Mutations
 

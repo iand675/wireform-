@@ -13,14 +13,6 @@ the NDJSON entity-stream wire format, an HTTP origin built on
 [`wireform-http`](../../packages/http/), and an HTTP client with a normalized
 entity store.
 
-:::note
-The compiler pipeline (`parseSchema`, `compileText`, `planQuery`) and the
-wire/auth vocabulary documented here are the package's stable surface. The
-HTTP server, HTTP client, and demo executable are landing alongside this page;
-their sections below are shaped by the `Lattice.Backend` contract and will
-firm up as those modules land.
-:::
-
 ## Module map
 
 | Module | Role |
@@ -41,7 +33,16 @@ firm up as those modules land.
 | `Lattice.Backend.Memory` | In-memory backend for demos and tests |
 | `Lattice.Server` | The origin HTTP handler on wireform-http (§6, §9-§11) |
 | `Lattice.Server.Auth` | `vc` claims payload + pluggable proof verification, bundled HMAC (§8.2) |
-| `Lattice.Client`, `Lattice.Client.Store` | HTTP client: transport ladder + normalized entity store |
+| `Lattice.Server.Execute` | Round-batched plan execution, derived-field witnesses, write-set enforcement |
+| `Lattice.Server.Coalesce` | §6.9 origin coalescing: per-type accumulation windows, single-flight per (type, key) |
+| `Lattice.Server.Live` | §12 live queries: subscription table, single-flight re-execution, SSE deltas, reauth |
+| `Lattice.Digest` | §10.4 cache digests: `X-Have` and the pinned Golomb-coded set |
+| `Lattice.Telemetry` | §19 OpenTelemetry spans and the ten named instruments (no-op by default) |
+| `Lattice.Compat` | §17.2 change taxonomy: `diffSchemas`, check modes, transitive windows, `@break`/`@deprecated` gating |
+| `Lattice.Registry` | §17.1 deployment log + corpus export behind `POST /schema/check` and `GET /schema/corpus` |
+| `Lattice.Module` | §18.1 schema modules: `extend entity`, `fuseModules`, `fuseBackends` |
+| `Lattice.Gateway` | §18.3 federation gateway: fused origin over upstream `nodes` subqueries, feed-driven purges |
+| `Lattice.Client`, `Lattice.Client.Store` | HTTP client: transport ladder, live subscriptions, digest advertisement, per-src store merge |
 
 ## Parsing an IDL
 
@@ -108,6 +109,15 @@ Query compilation is two stages with one intermediate:
    every field and edge, runs the authorization path join (§8.1), derives the
    slices and the plan id (§7.3), and checks the static budgets (roots, depth,
    fan-out; §14.1).
+
+```mermaid
+flowchart LR
+  QT["Query text"] -->|compileText| C["Compiled:<br/>canonical text + queryHash"]
+  C -->|"planQuery (schema)"| P["Plan:<br/>path joins, slices,<br/>planId, budgets"]
+  P --> Exec["Server execution"]
+  P --> Explain["explainJson (§20.2)"]
+  P --> Slice["planSliceRecord (§6.6)"]
+```
 
 ```haskell
 -- Runnable (imports elided).
