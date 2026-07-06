@@ -464,7 +464,7 @@ query HeroFriends {
 }
 ```
 
-```json
+```ndjson
 {"kind":"entity","id":"Human:1000","ver":"e41",
  "fields":{"friends(first:2,after:\"cur_8f2\")":
    {"$page":{"items":[{"$ref":"Human:1002"},{"$ref":"Human:1003"}],
@@ -547,7 +547,7 @@ Idempotency-Key: 7e2c1a90-...
 {"episode":"Jedi","stars":5,"commentary":"This is a great movie!"}
 ```
 
-```
+```ndjson
 {"kind":"manifest","mutation":"createReview","root":{"result":["Review:501"]},"etag":"m:c210"}
 {"kind":"entity","id":"Review:501","ver":"a01",
  "fields":{"episode":"Jedi","stars":5,"commentary":"This is a great movie!"}}
@@ -590,9 +590,7 @@ This is GraphQL's canonical partial-failure form, and it is an awkward one to co
 
 **Lattice**
 
-```
-HTTP/1.1 207 Multi-Status
-
+```ndjson
 {"kind":"manifest","query":"...","plan":"...","slice":"pub","root":{"hero":["Droid:2001"]},"etag":"m:..."}
 {"kind":"entity","id":"Droid:2001","ver":"f10","fields":{"name":"R2-D2",
    "friends(first:3)":{"$page":{"items":[{"$ref":"Human:1000"},{"$ref":"Human:1002"},{"$ref":"Human:1003"}]}}}}
@@ -602,7 +600,7 @@ HTTP/1.1 207 Multi-Status
 {"kind":"end","complete":true}
 ```
 
-The failure is scoped to `Human:1002` directly, by entity id, rather than by a path a client has to interpret relative to a tree that mixes it into `data`. The status line carries the coarse signal, `207` rather than `200` (Section 9.4.6), for any infrastructure that only inspects headers. The in-body `error` record remains what a client actually acts on: it names what failed (`Scope`, Section 9.4.1), how (`code`, drawn from the same `lattice:` namespace as whole-request errors, Section 9.4.2), and whether retrying is worth it (`retryable`).
+The failure is scoped to `Human:1002` directly, by entity id, rather than by a path a client has to interpret relative to a tree that mixes it into `data`. At the HTTP layer the response is `207` rather than `200` (Section 9.4.6), the coarse signal for any infrastructure that only inspects headers. The in-body `error` record remains what a client actually acts on: it names what failed (`Scope`, Section 9.4.1), how (`code`, drawn from the same `lattice:` namespace as whole-request errors, Section 9.4.2), and whether retrying is worth it (`retryable`).
 
 GraphQL's design has no equivalent of `retryable` at all. Every error is presented identically whether it is a transient timeout or a permanent validation failure, leaving the client to guess. And GraphQL's response stays cacheable-by-convention at `200` even when it is visibly degraded. A `207` here is specifically excluded from RFC 9111's default-cacheable status list, so a shared cache defaults to caution on exactly the response that most needs it (Section 9.4.6). The origin additionally self-purges its own surrogate keys immediately so the degraded copy does not linger even under an explicit override.
 
@@ -634,9 +632,9 @@ Idempotency-Key: batch_20260704_09
 [{"key":"ord_a","order":"501"}, {"key":"ord_b","order":"502"}, {"key":"ord_c","order":"503"}]
 ```
 
-```
-HTTP/1.1 207 Multi-Status
+The response is `207 Multi-Status`:
 
+```ndjson
 {"kind":"manifest","mutation":"cancelOrder","batch":{"atomicity":"best-effort","count":3},
  "root":{"items":["ord_a","ord_b","ord_c"]},"etag":"m:c9f1"}
 {"kind":"entity","id":"Order:501","ver":"g10","fields":{"status":"cancelled"},"item":"ord_a"}
@@ -815,6 +813,40 @@ The defaults flip and the gaps fill in. Fields are required unless marked `?`, s
 
 ---
 
+## 17. Federation
+
+**GraphQL (Apollo Federation)**
+
+```graphql
+# posts subgraph
+type Post @key(fields: "id") {
+  id: ID!
+  title: String
+}
+
+# social subgraph
+extend type Post @key(fields: "id") {
+  id: ID! @external
+  reactionCount: Int!
+}
+```
+
+Composition runs through a dedicated toolchain (rover, a composition spec, a supergraph SDL), and the gateway executes query plans against subgraphs over bespoke `_entities` POSTs that no HTTP cache can do anything with.
+
+**Lattice**
+
+```lattice
+-- social upstream's IDL
+extend entity Post {
+  has many reactions: Reaction by postId
+  reactionCount: W32 derived reads reactions count on read
+}
+```
+
+The gateway fuses the upstream IDLs with the same algebra in-process modules use (Section 18.1), publishes the fused document content-addressed like any schema, and compiles fused queries into per-upstream subplans that are themselves ordinary Lattice queries: canonicalized, content-addressed, issued as hash-form GETs. Cross-upstream joins ride the `nodes` root (Section 14.4).
+
+**What changed.** Three structural differences, all downstream of content addressing and normalized streams. First, the gateway-to-upstream hop is ordinary cacheable HTTP, so a CDN can sit between gateway and upstream and behave correctly; Apollo's `_entities` POSTs forfeit that hop. Second, there is no tree stitching: upstream records forward as they arrive, tagged `src`, and the client store keys versions per (entity, contributing upstream), so one upstream's partial failure degrades exactly its own fields (Section 18.4). Third, moving a module in or out of process changes deployment topology and nothing in any client's query, because in-process fusion and network federation share one composition model; there is no supergraph artifact to regenerate and ship. Invalidation composes through the same declared footprints: each upstream's outbox relay publishes a subscribable feed (Section 18.6) the gateway translates into its own cache tier's purges.
+
 ## Index
 
 | # | GraphQL feature | Lattice equivalent | Spec section |
@@ -835,3 +867,4 @@ The defaults flip and the gaps fill in. Fields are required unless marked `?`, s
 | 14 | Introspection | Content-addressed schema documents | 7.1 |
 | 15 | Shared ids: subclassing / 1:1 joins | Co-keyed entities: `refines` / `joins` | 3.8 |
 | 16 | Non-null (`!`), list cardinality | Required-by-default + `?`, `has one?`, `min N`, `[t]+` | 3.4-3.6 |
+| 17 | Apollo Federation | `extend entity` + one fusion algebra, subplans as ordinary queries | 18 |

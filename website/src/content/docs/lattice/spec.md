@@ -1034,7 +1034,7 @@ The degeneration remains stated rather than hidden: content whose audience is on
 
 Responses are newline-delimited JSON records over chunked transfer (or the identical records over SSE for live queries). A response is a set of facts about entities, not a tree.
 
-```
+```ndjson
 {"kind":"manifest", ...}
 {"kind":"entity","id":"Post:17","ver":"e41","fields":{"title":"...","author":{"$ref":"User:9"},"tags":["Tag:4","Tag:9"],"comments(first:3)":{"$page":{"items":[{"$ref":"Comment:301"}],"next":"cur_ab3"}}}}
 {"kind":"entity","id":"User:9","ver":"b02","fields":{"name":"...","avatarUrl(size:48)":"https://..."}}
@@ -1362,7 +1362,7 @@ A `Workflow` mutation's Operation is an ordinary entity (`Operation:{id}`, with 
 
 A mutation response uses the same wire format as queries:
 
-```
+```ndjson
 {"kind":"manifest","mutation":"publishPost","root":{"result":["Post:17"]},"etag":"m:c210"}
 {"kind":"entity","id":"Post:17","ver":"f52","fields":{"status":"published","publishedAt":"..."}}
 {"kind":"invalidated","keys":["Post:17","feed:123","bookmarks:9"]}
@@ -1496,12 +1496,9 @@ mutation markRead(notification: NotificationId, read: Bool) -> Notification
 
 **Idempotency: envelope and item.** The `Idempotency-Key` header addresses the whole batch envelope, as before, and protects "did my submission arrive." Each item's own `"key"` field addresses that item, scoped as `(mutation, principal, item key)`, independent of the envelope key. This is the same double-keying that production batch order-entry APIs already use: a batch identifier for the submission, and a client order id per leg, so that resubmitting an adjusted batch does not reprocess legs that already landed. Items without a key rely solely on envelope-level dedupe, which is adequate for `AllOrNothing` (the whole envelope is one outcome). For `BestEffort`, a retried batch re-executes any keyless item, so clients SHOULD supply a per-item `key` on every `BestEffort` item whose effect class is not `NaturallyIdempotent`; an origin MAY reject a keyless `Transactional` or `Workflow` item in a `BestEffort` batch with `400` before execution rather than risk silent reprocessing.
 
-**Response.** Batch responses use the ordinary entity-stream format with results correlated by item key (or a positional label when a key was not supplied), using the `Item` scope of Section 9.4.1 and, where the mutation declares one, its domain `errors` vocabulary:
+**Response.** Batch responses use the ordinary entity-stream format with results correlated by item key (or a positional label when a key was not supplied), using the `Item` scope of Section 9.4.1 and, where the mutation declares one, its domain `errors` vocabulary. A mixed batch responds `207 Multi-Status` with `Lattice-Outcome: degraded`:
 
-```
-HTTP/1.1 207 Multi-Status
-Lattice-Outcome: degraded
-
+```ndjson
 {"kind":"manifest","mutation":"cancelOrder","batch":{"atomicity":"best-effort","count":3},
  "root":{"items":["ord_a","ord_b","ord_c"]},"etag":"m:c9f1"}
 {"kind":"entity","id":"Order:501","ver":"g10","fields":{"status":"cancelled"},"item":"ord_a"}
@@ -1805,7 +1802,9 @@ A gateway's grace period for a superseded fused plan is bounded by its ability t
 
 The gateway compiles a fused query into per-upstream subplans. Each subplan **is itself a Lattice query** in the upstream's schema, canonicalized, content-addressed, and issued as a hash-form GET with the standard ladder for introduction. This is the central payoff of content addressing at this layer: the gateway-to-upstream hop is ordinary cacheable HTTP, so shared caches may sit between gateway and upstream and behave correctly. A GraphQL federation gateway's bespoke subgraph POSTs forfeit that hop entirely. A fused deployment can run CDN, gateway, CDN, upstream, and every layer keeps RFC 9111 semantics.
 
-Cross-upstream joins use the `nodes` root (Section 14.4). Gateways authenticate to upstreams as service principals that satisfy the relevant `nodes` policies. Gateway execution is the same round structure as local planning, lifted one level: each round collects, across the whole fused plan, the full key set needed from each upstream, and issues one `nodes` query per upstream per round. Set-in map-out loaders at the upstream then batch internally as usual. N+1 across service boundaries is inexpressible for the same reason it is locally: there is no per-entity call in the plan algebra.
+Cross-upstream joins use the `nodes` root (Section 14.4). Gateways authenticate to upstreams as service principals that satisfy the relevant `nodes` policies. An upstream that only *extends* a foreign type still has to serve `nodes` fetches for it, and an extension cannot declare `fetch by` (that is the owner's authority), so a standalone extension upstream serves a schema containing a fetchable *stub skeleton* of the foreign type (key fields plus its own extension members) alongside publishing its extend-form module IDL for fusion; the two documents describe the same truth at two granularities, one for serving, one for composition. Gateway execution is the same round structure as local planning, lifted one level: each round collects, across the whole fused plan, the full key set needed from each upstream, and issues one `nodes` query per upstream per round. Set-in map-out loaders at the upstream then batch internally as usual. N+1 across service boundaries is inexpressible for the same reason it is locally: there is no per-entity call in the plan algebra.
+
+Root pagination composes through cursor derivability rather than forwarding: the manifest's root arrays are plain refs (Section 9.2), so a gateway cannot relay an upstream's cursor envelope and does not need to; it MUST select the keyset columns of any paginated root or edge in its subqueries, so both it and its clients can mint resumption cursors from boundary items exactly as Section 3.2 prescribes.
 
 The path join composes: a subplan's roots inherit the fused path level at their cut point, so an upstream serving a sub-query gated upstream of the cut sees it arrive on its ctx slice with the appropriate claims payload, re-minted per Section 18.8. Subplans inherit the fused query's tenure: the gateway's introduction of a subplan re-teaches an upstream that evicted it, exactly as any client would.
 
@@ -1855,7 +1854,7 @@ A mutation belongs to exactly one upstream and the gateway routes it whole, forw
 
 ### 18.8 Authorization across upstreams
 
-The fused claim registry is the union of upstream registries (Section 18.1 conflicts aside). The gateway verifies the inbound proof once, then re-mints per-upstream payload/proof pairs containing only the claims each upstream's registry declares. Each re-minted proof MUST use the same proof construction as a directly issued visibility proof (Section 8.3) and MUST be signed with a key whose trust the upstream established out of band (the gateway registers as a service principal, Section 18.3); an upstream MUST reject a re-minted proof signed by an unregistered key with `401 lattice:proof-expired`. Key distribution and rotation are a deployment concern outside protocol scope. Narrowing a payload preserves its coarseness, so upstream-side cache sharing on the `vc` parameter is at least as effective as at the gateway. Upstreams keep sole authority over their field, edge, root, and `nodes` policies; the gateway computes the fused partition compositionally from them via the path join, which is well-defined because every policy has exactly one owner.
+The fused claim registry is the union of upstream registries (Section 18.1 conflicts aside). The gateway verifies the inbound proof once, then re-mints per-upstream payload/proof pairs containing only the claims each upstream's registry declares. Each re-minted proof MUST use the same proof construction as a directly issued visibility proof (Section 8.3) and MUST be signed with a key whose trust the upstream established out of band (the gateway registers as a service principal, Section 18.3); an upstream MUST reject a re-minted proof signed by an unregistered key with `401 lattice:proof-expired`. Key distribution and rotation are a deployment concern outside protocol scope. Narrowing a payload preserves its coarseness, so upstream-side cache sharing on the `vc` parameter is at least as effective as at the gateway. A caller whose verified claims cannot cover an upstream subplan's required claims gets that subtree skipped, exactly as if the gate had evaluated false; the gateway never manufactures authority it was not presented, and a missing claim is a policy outcome, not a `401`. Upstreams keep sole authority over their field, edge, root, and `nodes` policies; the gateway computes the fused partition compositionally from them via the path join, which is well-defined because every policy has exactly one owner.
 
 ---
 

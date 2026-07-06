@@ -1,0 +1,42 @@
+{
+  "name": "ndjson",
+  "displayName": "NDJSON",
+  "scopeName": "source.ndjson",
+  "fileTypes": ["ndjson", "jsonl"],
+  "aliases": ["jsonl"],
+  "patterns": [
+    {
+      "name": "support.type.property-name.json",
+      "match": "\"(?:[^\"\\\\]|\\\\.)*\"(?=\\s*:)"
+    },
+    {
+      "name": "string.quoted.double.json",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        { "name": "constant.character.escape.json", "match": "\\\\." }
+      ]
+    },
+    {
+      "name": "constant.numeric.json",
+      "match": "-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?"
+    },
+    {
+      "name": "constant.language.json",
+      "match": "\\b(?:true|false|null)\\b"
+    },
+    {
+      "name": "punctuation.definition.dictionary.json",
+      "match": "[{}]"
+    },
+    {
+      "name": "punctuation.definition.array.json",
+      "match": "[\\[\\]]"
+    },
+    {
+      "name": "punctuation.separator.json",
+      "match": "[,:]"
+    }
+  ],
+  "uuid": "e7c1a9d3-4b2f-4c6a-9d8e-1f3a5b7c9e0d"
+}

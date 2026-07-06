@@ -210,12 +210,14 @@ curl -si 'http://localhost:8080/q?intent=introduce' \
   --data 'query Hero { hero { name friends(first: 10) { name } } }'
 ```
 
-```
+```http
 HTTP/1.1 200 OK
 Location: /q/8f2c41a9…?p=pl_9dK2…
 Lattice-Plan: pl_9dK2…
 Surrogate-Key: Human:1000 …
+```
 
+```ndjson
 {"kind":"manifest","query":"8f2c41a9…","plan":"pl_9dK2…","slice":"pub","root":{"hero":["Human:1000"]},"etag":"m:…"}
 {"kind":"entity","id":"Human:1000","ver":"…","fields":{"name":"Luke Skywalker","friends":{"$page":{"items":[{"$ref":"Human:1002"},…]}}}}
 {"kind":"entity","id":"Human:1002","ver":"…","fields":{"name":"Han Solo"}}
@@ -256,7 +258,7 @@ curl -s http://localhost:8080/m/createReview \
   -d '{"episode":"Jedi","stars":5,"commentary":"Great!"}'
 ```
 
-```json
+```ndjson
 {"kind":"manifest","mutation":"createReview","root":{"result":["Review:41"]},"etag":"m:…"}
 {"kind":"entity","id":"Review:41","ver":"…","fields":{"episode":"Jedi","stars":5,"commentary":"Great!"}}
 {"kind":"invalidated","keys":["Review:41","reviews:Jedi"]}

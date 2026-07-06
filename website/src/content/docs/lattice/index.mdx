@@ -181,7 +181,7 @@ author appears under ten posts, you get ten copies of their data. A Lattice
 response is a **normalized stream of entity records**: each entity appears once,
 keyed by identity, with relationships expressed as references.
 
-```
+```ndjson
 {"kind":"entity","id":"Post:17","ver":"e41","fields":{"title":"...","author":{"$ref":"User:9"}}}
 {"kind":"entity","id":"User:9","ver":"b02","fields":{"name":"Ada Lovelace"}}
 ```
