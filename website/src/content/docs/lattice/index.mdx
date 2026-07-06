@@ -237,11 +237,21 @@ three thousand. (Spec: [§3.1 Semantic model](./spec/#_3-schema-definition).)
 
 ## Runs on stock HTTP infrastructure
 
-None of this requires edge compute or custom CDN logic. A conforming deployment
-runs behind unmodified Varnish (with the xkey vmod) or Fastly VCL. Surrogate-key
-purging uses the standard `Surrogate-Key` header that both support natively. If
-you are already serving HTTP traffic through a CDN, Lattice fits the shape you
-already have.
+A conforming deployment runs behind unmodified Varnish (with the xkey vmod) or
+Fastly VCL. Both consume the standard `Surrogate-Key` header natively, so
+tag-based purging needs no edge compute at all.
+
+Lattice is not tied to those two. Because every representation-affecting input
+(the slice, the `vc` claims, `ver` pins, field masks, and variables) is part of
+the URL, any cache that keys on the full URL and honors `Cache-Control` serves
+Lattice correctly, with no protocol-specific parsing. The repo ships a
+plug-and-play Cloudflare Worker cache tier that shows this in practice: point it
+at any conforming origin and it shared-caches GETs by full URL, maintains a
+surrogate-key-to-URL index in Workers KV, and purges by key over a
+`POST /_lattice/purge` endpoint. That is how a CDN without native tag support
+still gets tag-based invalidation, from one small generic Worker rather than a
+per-application one. If you are already serving HTTP traffic through a CDN,
+Lattice fits the shape you already have.
 
 ## In this section
 
@@ -260,6 +270,7 @@ already have.
 | `wireform-lattice` | The Haskell implementation: IDL parser and semantic model, query parser and canonicalizer, authorization path-join planner, NDJSON wire format, an HTTP origin on [`wireform-http`](../packages/http/), and an HTTP client with a normalized entity store. |
 | `lattice-ts` | A small Apollo-style TypeScript client (npm: `@wireform/lattice`): `gql` tag, transport ladder, normalized entity store, merged multi-root queries, and React bindings. |
 | `example-lattice` | A demo origin serving the Star Wars corpus schema over the in-memory backend. It is the target of the [curl walkthrough](./haskell/#running-the-demo-origin). |
+| `wireform-lattice/cdn/` | Two CDN cache tiers, proven by a shared conformance harness: a Varnish VCL (xkey vmod) and a plug-and-play Cloudflare Worker (Workers KV surrogate-key index plus a `POST /_lattice/purge` endpoint). Both run against any conforming origin, demonstrating that Lattice caches correctly on more than one CDN. |
 
 ## Implementation status
 

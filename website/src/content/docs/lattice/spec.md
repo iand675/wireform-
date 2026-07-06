@@ -28,7 +28,7 @@ The central design commitments:
 5. **Cache dependency tracking is a protocol obligation.** Every response enumerates its surrogate keys; every mutation declares its write set and invalidation footprint. Both sides derive their keys from the same schema-declared collection grouping keys, so they agree.
 6. **N+1 resolution is inexpressible.** Relationship loaders are set-in, map-out by type. Plans execute in batched rounds with statically checked budgets.
 
-The protocol targets stock HTTP infrastructure. A conforming deployment runs behind unmodified Varnish (with the xkey vmod) or Fastly VCL with no edge compute.
+The protocol targets stock HTTP infrastructure. On a cache with native surrogate-key support (Varnish with the xkey vmod, or Fastly VCL), a conforming deployment needs no edge compute at all. On a CDN without native tag support, a small protocol-agnostic worker that maintains a surrogate-key index restores tag-based purging; the repository ships one for Cloudflare Workers. Full-URL keying is the entire cache-correctness story, because every representation-affecting input rides in the URL (Section 6, Section 8.2).
 
 ### 1.1 Non-goals
 
@@ -41,7 +41,7 @@ The protocol targets stock HTTP infrastructure. A conforming deployment runs beh
 ## 2. Terminology
 
 - **Entity**: a schema-defined object with a canonical identity (`TypeName` + key fields), e.g. `Post:17`.
-- **Entity version (`ver`)**: an opaque token that changes whenever any field of the entity changes. Comparable only for equality.
+- **Entity version (`ver`)**: an opaque token that changes whenever any *stored* field of the entity changes. Comparable only for equality. Derived fields (Section 3.7) whose dependencies live in other entities or collections are not witnessed by `ver`; responses carry a separate witness for them (Section 3.7, Validators).
 - **Fragment**: a named per-type selection, `fragment name on Type { ... }`, spread with `...name` (Section 4.5). Local fragments are inlined at build time; schema fragments are declared in the IDL and late-bound.
 - **Visibility level**: an element of the lattice `Public < Claims(S) < Private` (Section 8.1).
 - **Path level**: the join of policies along a traversal path from a root to a plan element (Section 8.1).
@@ -168,7 +168,7 @@ specHash = base64url( first 4 bytes of BLAKE3( keysetRendering ) )
 keysetRendering = "field dir" *( "," "field dir" )      dir = "asc" | "desc"
 ```
 
-Here `v1...vN` are the item's keyset column values in canonical wire form (Section 3.5.3), and `canonicalJson` is the canonical JSON defined in Section 5.1. A presented cursor whose embedded `specHash` does not match the collection's current `CursorSpec` is the `410 lattice:cursor-retired` case. A cursor that fails to decode at all is a `400`.
+Here `v1...vN` are the item's keyset column values in canonical wire form (Section 3.5.3), and `canonicalJson` is the canonical JSON defined in Section 5.1. A presented cursor whose embedded `specHash` does not match the hash of the collection's current keyset ordering (the `(field, direction)` list, which is the only part of the `CursorSpec` the `specHash` covers, per the layout below) is the `410 lattice:cursor-retired` case. Changes to page bounds (`defaultPage`, `maxPage`) or count policy do not alter the `specHash` and so do not retire outstanding cursors, though a `defaultPage` change is identity-affecting for canonical text (Section 5.1). A cursor that fails to decode at all (bad `cur_` prefix, invalid base64url, or a non-array or absent-spec-hash payload) is rejected `400 lattice:compile-rejected` with the diagnostic `malformed cursor`.
 
 ### 3.3 Collections and cache grouping
 
@@ -385,7 +385,7 @@ On the wire, a bounded collection is a plain ref array on the owning entity's fi
 "tags": ["Tag:4", "Tag:9", "Tag:12"]
 ```
 
-If a post's actual tag count exceeds the cap, the collection is reported with an Edge-scoped error (`lattice:collection-overflow`, Section 9.4) rather than being silently truncated. That error tells the schema author the collection was misdeclared as bounded and should be paginated. An author who wants truncation instead declares `max 50 truncate`, accepting that clients see a partial set. `max` defaults to the origin's `maxPage` (Section 14.1) when omitted, so a plain `has many tags: Tag by postId` is bounded at the origin default.
+If a post's actual tag count exceeds the cap, the collection is reported with an Edge-scoped error (`lattice:collection-overflow`, Section 9.4) rather than being silently truncated. That error tells the schema author the collection was misdeclared as bounded and should be paginated. An author who wants truncation instead declares `max 50 truncate`, accepting that clients see a partial set. `max` defaults to the origin budget `maxPageDefault` (Section 14.1; reference default 100) when omitted, so a plain `has many tags: Tag by postId` is bounded at that budget. This is distinct from a paginated collection's own `maxPage` cap.
 
 Bounded collections may also declare a **floor**: `has many lineItems: LineItem by orderId min 1 max 200` requires at least one item. This states the domain rule "an order has line items" where the collection is declared. A scan producing fewer than `min` items emits what exists plus an Edge-scoped `lattice:collection-underflow` error (the mirror of overflow: report the integrity violation, keep the rest of the response, and degrade to `207` per Section 9.4.6), and codegen maps a `min 1` collection to the target's nonempty-list type. `min` composes with either overflow policy, defaults to `0`, must not exceed `max`, and is rejected on paginated collections. The reason is that an empty page is indistinguishable from end-of-pagination, and emptiness checking on an unbounded collection would require the count query that the protocol declines to force. Roots take no cardinality declarations at all: a `get` can miss and a `list` can be empty by the nature of lookups. Cardinality is a *relationship* contract, where the schema author owns the integrity of the link.
 
@@ -395,7 +395,7 @@ Bounded collections may also declare a **floor**: `has many lineItems: LineItem 
 comments(first: 20)                    -- forward from the start
 comments(first: 20, after: $cur)       -- forward from a cursor
 comments(last: 20, before: $cur)       -- backward
-comments(around: $cur, first: 21)      -- window centered on an item (permalinks)
+comments(around: $cur)                 -- window centered on an item (permalinks)
 ```
 
 The wire form is a page value, not a plain array:
@@ -411,8 +411,9 @@ The wire form is a page value, not a plain array:
 
 These apply to paginated collections:
 - `next`/`prev` are the boundary items' cursors and are null-terminated. `hasNextPage` is simply `next != null` (origins evaluate it with the standard fetch-n-plus-one).
-- **Per-item cursors are not transmitted; they are derived** (Section 3.2). A client whose selection includes the keyset columns can resume from, or anchor a window on, any item it holds. The compiler warns when a query paginates an edge without selecting its keyset columns, since that query cannot mint resumption cursors.
+- **Per-item cursors are not transmitted; they are derived** (Section 3.2). A client whose selection includes the keyset columns can resume from, or anchor a window on, any item it holds. A query that paginates an edge without selecting that edge's keyset columns is still valid and compiles normally, but it cannot mint per-item resumption cursors (Section 3.2). Implementations MAY surface this as a non-fatal code-generation diagnostic; it is not a `400` rejection and has no wire effect.
 - `total` appears only when the edge's `CountPolicy` is `Exact` or `Estimate`. Exact counts are declared, not defaulted, because a count is a membership query whose invalidation profile is every write in the collection's range; it invalidates correctly via the collection's cache tag, and the declaration is the schema author accepting that cost. `Estimate` permits planner statistics or probabilistic counts and MUST be labeled as such in codegen types.
+- An `around` query returns a window whose size is the collection's `defaultPage` (falling back to `maxPage` when the collection declares no default). `around` takes no size argument, because it is exclusive of `first`/`last` (Section 4.8 rule 6). The window is centered on the anchor item: `floor(size/2)` items precede the anchor and the remainder follow, clamped at the ends of the collection.
 - Keyset pages are stable under concurrent insertion: an item inserted before the cursor never causes skips or duplicates in subsequent pages, which offset pagination cannot promise.
 - There is no Relay-style connection/edge envelope. This is the concrete improvement over GraphQL for lists: a small list is a plain ref array (not a `{edges: [{node, cursor}], pageInfo}` wrapper you write and unwrap by hand), and a large list is a keyset page whose cursors are *derivable* from the items you already hold (Section 3.2), so no per-item cursor rides the wire. Edge wrappers in Relay exist to carry per-edge attributes inside a response tree; a normalized wire has no tree, and relationship attributes (a member's role, a follow's timestamp) are modeled by **reifying the join as an entity** (`Membership` with edges to both sides), which makes them selectable, versioned, and invalidatable like anything else.
 - Enum keyset columns compare in declaration order, which is why open enums are append-only (Section 17.2): inserting a constructor mid-list reorders every index sorted on that column and retires every outstanding cursor over it.
@@ -681,7 +682,7 @@ Documents are UTF-8; canonicalization additionally requires NFC (Section 5.1). `
 1. A document contains **exactly one** `QueryDef`, any number of `FragmentDef`s, and any number of `Import`s.
 2. The names `query`, `fragment`, `import`, `on`, `true`, and `false` are reserved. They are not usable as fragment names, variable names, or enum values. This is what disambiguates `... on T {}` from `...fragName`, and `EnumValue` from `BooleanValue`.
 3. **Aliases cannot exist.** There is no production for them, and rule 1 of Section 4.1 is enforced by the grammar rather than by a validator.
-4. `@depth` is the entire directive grammar. A `Field` carrying `Depth` MUST NOT carry a `SelectionSet`, MUST be an edge whose target type is the type of the enclosing selection, and means: repeat the enclosing selection set at this edge, unrolled `n` levels, with the innermost level omitting the recursive edge (Section 4.2). Any other `@` token is a parse error, not a validation error.
+4. `@depth` is the entire directive grammar. A `Field` carrying `Depth` MUST NOT carry a `SelectionSet`, MUST be an edge whose target type is the type of the enclosing selection, and means: repeat the enclosing selection set at this edge, unrolled `n` levels, with the innermost level omitting the recursive edge (Section 4.2). Any other `@` token is a parse error, not a validation error. `n` MUST be an integer `>= 1`; `@depth(0)` and negative depths are rejected `400 lattice:compile-rejected`. The unrolled depth counts fully against `maxDepth` (Section 14.1).
 5. A scalar field takes no `SelectionSet`; an edge field requires one (or `Depth`). An interface edge's selection set contains only interface-declared fields and `InlineFragment`s, and each inline fragment's type must implement the interface (Section 4.4).
 6. Every argument must be declared. Field arguments are declared by the field's IDL declaration. The arguments `first`/`after`/`last`/`before`/`around` appear only on paginated collections, with `first`/`last` mutually exclusive, `after` only with `first`, `before` only with `last`, and `around` exclusive of both. Grouping-key arguments appear on the roots and edges whose collections declare them. Bounded collections take no arguments (Section 3.6). Explicit `null` does not exist as a `Value`; omission is the only spelling of absence.
 7. Every declared variable is used and every used variable is declared, with compatible types. An unused declaration is rejected rather than ignored, because it would otherwise vary the canonical text without varying meaning. Variable names must additionally not collide with the reserved URL parameter names (`p`, `slice`, `vc`, `project`, `live`, `d`, `dv`, `intent`), since variables bind as URL query parameters in the hash form (Section 6.1).
@@ -712,7 +713,7 @@ Because canonicalization erases explicit defaults, changing a default in the sch
 
 ### 5.2 Compression
 
-For URL embedding, canonical text is compressed with raw DEFLATE at a fixed, specified parameterization. It uses a **schema-derived shared dictionary**: a deterministic function of the schema (field names, type names, common syntax). Dictionaries are content-addressed and immutable:
+For URL embedding, canonical text is compressed with raw DEFLATE (RFC 1951), using a **schema-derived shared dictionary**. Correctness requires only that the stream decode: decoders MUST accept any conforming raw-DEFLATE stream (32 KiB maximum window). The encoder's compression level and window are a cache-hit-rate choice, not a correctness requirement, because the origin re-canonicalizes before hashing (encoder nondeterminism fragments the cache but cannot produce a wrong response). The reference encoder uses level 9 with the 32 KiB window. The dictionary is:
 
 ```
 GET /schema/dict/{dictHash}     Cache-Control: public, max-age=31536000, immutable
@@ -728,7 +729,14 @@ Consumption note: with raw DEFLATE there is no `Z_NEED_DICT` signal, so inflater
 
 ## 6. Transport Bindings
 
-A query has a ladder of request encodings. Clients SHOULD attempt them in this order and fall down on failure.
+A query has several request encodings, ordered here from most to least cacheable. A client SHOULD use the most cacheable rung available to it and drop to a lower rung only on the specific, named condition below, not speculatively:
+
+1. **Hash form** (Section 6.1) is the steady state, used once the client knows the query hash and its plan id. A `404 lattice:unknown-query` response (the origin's memo lacks the hash) drops the client to an introduction rung.
+2. **Inline form** (Section 6.2) introduces a query whose DEFLATE-compressed canonical text fits the URL budget of Section 6.2. A client whose compressed text exceeds that budget uses the QUERY form instead.
+3. **QUERY form** (Section 6.3) introduces a query too large for a URL. A `405 Method Not Allowed` (an intermediary predating RFC 10008 rejects the method) drops the client to the POST form.
+4. **POST introduction** (Section 6.4) always reaches the origin and is the compatibility floor.
+
+The one-shot form (Section 6.5) is not a rung in this fall-through. It is an explicit opt-in a client selects when it knows a query is unique, and it never caches.
 
 ### 6.1 Hash form (steady state)
 
@@ -736,7 +744,7 @@ A query has a ladder of request encodings. Clients SHOULD attempt them in this o
 GET /q/{queryHash}?p={planId}&slice=ctx&vc={claims}&after=cur_8f2&limit=20
 ```
 
-Variables are canonicalized into query parameters: sorted by name, typed, with defaults omitted. The URL is a stable cache key on any RFC 9111 cache. `p` names the plan the client is assembling against (Section 7.3; obtained from plan discovery or computed locally). `vc` carries the visibility claims payload on `ctx` requests (Section 8.2). A `p` the instance cannot derive is answered `409 lattice:plan-superseded` (Section 13.3).
+Variables are canonicalized into query parameters: sorted by name, typed, with defaults omitted. The URL is a stable cache key on any RFC 9111 cache. `p` names the plan the client is assembling against (Section 7.3; obtained from plan discovery or computed locally). `vc` carries the visibility claims payload on `ctx` requests (Section 8.2). A `p` the instance cannot derive is answered `409 lattice:plan-superseded` (Section 13.3). A client receiving this on a hash-form request MUST discard the stale plan pin and the learned hash-form URL for that query and re-enter the ladder at an introduction rung, which re-teaches it the current `planId` via `Lattice-Plan` and the `Location` handoff, the same recovery as `404 lattice:unknown-query`.
 
 If the origin's plan memo does not contain `queryHash`, it MUST respond `404` with problem type `lattice:unknown-query` **and `Cache-Control: no-store`**. A 404 is heuristically cacheable under RFC 9110, and a cached unknown-query response would pin the hash as unknown at a shared cache after the client has introduced it upstream, livelocking the ladder. The client falls to a lower rung, which re-teaches the origin as a side effect. The memo table is therefore evictable, wipeable, and rebuildable from traffic; it MUST NOT be treated as authoritative state.
 
@@ -746,7 +754,7 @@ If the origin's plan memo does not contain `queryHash`, it MUST respond `404` wi
 GET /q?d={base64url(deflate(canonicalText))}&dv={dictHash}&slice=pub&after=cur_8f2
 ```
 
-This form suits canonical texts that compress under roughly 6 KB of URL budget (RFC 9110 recommends intermediaries accept at least 8000 octets of request line). It requires no origin state and no extra round trip. Responses to inline-form requests SHOULD include `Location` with the hash-form URL so clients can upgrade.
+This form suits canonical texts whose base64url `d=` value fits the client's inline URL budget (client-configured, default 6144 bytes, sized to leave headroom under the RFC 9110 8000-octet request-line floor for the rest of the URL). It requires no origin state and no extra round trip. A client MUST skip the inline rung when raw-DEFLATE encoding is unavailable or the encoded `d=` value would exceed that budget, and MUST fall from the inline rung to an introduction rung (Sections 6.3, 6.4) on any of `404` (unknown query), `405` (method rejected), `414` (URI too long), or `501` (encoding unsupported); any other status is treated as the response. Responses to inline-form requests SHOULD include `Location` with the hash-form URL so clients can upgrade.
 
 ### 6.3 QUERY form (introduction path for large documents)
 
@@ -786,7 +794,7 @@ This has semantics identical to Section 6.3 (it executes, memoizes, and grants `
 
 The `slice` parameter selects the authorization slice (Section 8). Values: `pub`, `ctx`, `priv`, and the pseudo-slice `plan`.
 
-`slice=plan` returns the current plan document for the query: its plan id, the slice structure, per-slice claim dependencies, and root-to-slice assignment, all derivable from (canonical text, pertinent schema declarations) alone. It contains no entity data and no membership, so it is publicly cacheable regardless of the query's policies, with a short TTL. It is the one per-query "current" pointer, playing the role that `/schema/current` plays for the whole schema. The immutable form `GET /q/{hash}/plan/{planId}` serves any plan document the instance can still derive, cacheable forever. A request with **no** `slice` parameter is equivalent to `slice=plan`; data slices always name their plan explicitly via `p`.
+`slice=plan` returns the current plan document for the query: its plan id, the slice structure, per-slice claim dependencies, and root-to-slice assignment, all derivable from (canonical text, pertinent schema declarations) alone. It contains no entity data and no membership, so it is publicly cacheable regardless of the query's policies, with a short TTL (`public, s-maxage=60`, per the plan-slice row of Section 10.1). It is the one per-query "current" pointer, playing the role that `/schema/current` plays for the whole schema. The immutable form `GET /q/{hash}/plan/{planId}` serves any plan document the instance can still derive, cacheable forever. A hash-form or inline GET with **no** `slice` parameter is equivalent to `slice=plan`. An introduction (`QUERY` or `POST ?intent=introduce`, Sections 6.3 and 6.4) with no `slice` executes the `pub` slice instead, since an introduction exists to execute and grant a `Location`, not to return the plan document. Data slices always name their plan explicitly via `p`.
 
 Each data slice is a distinct URL and therefore a distinct cache entry, with its own `Cache-Control` and cache key structure.
 
@@ -841,7 +849,7 @@ Properties, stated so neither profile is chosen on folklore:
 - **Cache granularity.** Stream responses cache per (query, plan, variables, claims); entity responses cache per entity. Resource mode therefore shares hot entities at the shared cache **across different queries, clients, and applications**, which stream mode cannot do at any layer above the client store. Workloads with hot entities under diverse queries get structurally better shared-cache hit rates in resource mode; long-tail workloads pay its overheads for nothing.
 - **Consistency.** Resource mode has **no cross-entity snapshot guarantee**: each point fetch is its own snapshot, and Section 13.2's per-response isolation applies per entity. The refs projection is itself snapshot-consistent, so membership is coherent even when attributes are not. Applications needing more use stream mode; the profiles may be mixed per query.
 - **Overhead.** With HPACK/QPACK, marginal request cost is tens of bytes. The operative limits are CDN request pricing and `SETTINGS_MAX_CONCURRENT_STREAMS` (commonly around 100), which bound sensible page sizes. On HTTP/3, per-entity streams recover independently from packet loss; on HTTP/2 over TCP, transport head-of-line blocking erases that advantage.
-- **Latency staging.** Refs-then-entities is two stages. Origins SHOULD emit `103 Early Hints` on refs responses with preload links for the highest-priority entity URLs, letting clients open entity streams before the refs body completes.
+- **Latency staging.** Refs-then-entities is two stages. Origins SHOULD emit `103 Early Hints` on refs responses with `Link: rel=preload` entries for the entities the plan marks critical-path (the same planner priority that orders the stream, Section 9.1), bounded by the connection's `SETTINGS_MAX_CONCURRENT_STREAMS` so the hint never advertises more parallel fetches than the client can open; how many within that bound is deployment-configured. This lets clients open entity streams before the refs body completes.
 
 **Origin coalescing is mandatory for conformance** (Section 6.9). Without it, resource mode reintroduces N+1 at the transport layer and bypasses the plan algebra; with it, the origin's execution is identical regardless of how requests arrived.
 
@@ -853,7 +861,7 @@ Resource mode is also the adoption ladder. An origin that publishes only `/e` wi
 
 Resource mode moves result assembly to the client, which means the origin sees the same work arrive as a spray of independent point fetches instead of one plan. Coalescing is the mechanism that makes those two arrival patterns execute identically. It is a conformance requirement, not an optimization, because the alternative is N+1 against storage, reintroduced at the transport layer by clients doing exactly what Section 6.8 tells them to do.
 
-**Mechanics.** The origin maintains, per entity type, an accumulation window. A point fetch that misses origin-locally joins the current window for its type. The window flushes into one set-in map-out loader call (the same loaders queries use, Section 3.1) when either the loader's batch cap is reached or a deadline expires. The deadline is measured from the window's **first** entrant, not its most recent, so steady arrival cannot extend the window indefinitely. The deadline is single-digit milliseconds by default and is published in discovery as `coalesceWindowMs` (inside the budgets block; the advertised value reflects the origin's live configuration, for which the schema's budget entry is only the default). Implementations MAY flush early when the connection is otherwise idle. Concurrent fetches for the same `(type, key)` are additionally single-flighted: they join one loader slot, and each response is rendered from the one loaded row. Single-flight spans one loader round, never a row's identity across rounds: a fetch arriving after its key's window has dispatched joins the *next* window and gets a fresh load.
+**Mechanics.** The origin maintains, per entity type, an accumulation window. A point fetch that misses origin-locally joins the current window for its type. The window flushes into one set-in map-out loader call (the same loaders queries use, Section 3.1) when either the loader's batch cap is reached or a deadline expires. The deadline is measured from the window's **first** entrant, not its most recent, so steady arrival cannot extend the window indefinitely. The deadline is deployment-configured and published in discovery as `coalesceWindowMs` (reference default 5 ms; the advertised value reflects the origin's live configuration, for which the schema budget entry is only the default); implementations MAY flush early when the connection is otherwise idle. Concurrent fetches for the same `(type, key)` are additionally single-flighted: they join one loader slot, and each response is rendered from the one loaded row. Single-flight spans one loader round, never a row's identity across rounds: a fetch arriving after its key's window has dispatched joins the *next* window and gets a fresh load.
 
 **Loads are policy-free; rendering is policy-full.** Coalescing batches fetches from different callers with different claims into one loader call. This is safe by construction, not by care. Loaders fetch rows by key and know nothing about callers, while visibility is applied at emission, per response, against that response's own slice and claims (Section 8.1). Nothing about the *load* depends on who asked, so no caller can widen another's read by sharing a batch. Everything caller-dependent happens after the batch, independently per response. This is the same read-then-render separation the path join already imposes on query execution, applied at the transport seam. Field masks are likewise a per-response projection: the loader returns the row (or the union of requested columns, where loaders support column sets), and each response emits only its own mask.
 
@@ -894,7 +902,7 @@ GET /.well-known/lattice
 }
 ```
 
-The document is small and cacheable with a short TTL. Publishing budgets is deliberate: it lets CI lint a client's query set offline, with rejection thresholds identical to the origin's.
+The document is small and cacheable with a short TTL (`public, max-age=60`). Publishing budgets is deliberate: it lets CI lint a client's query set offline, with rejection thresholds identical to the origin's.
 
 Schema documents are immutable and content-complete:
 
@@ -915,7 +923,7 @@ GET /q/{hash}/source     -> the canonical query text (query structure is not sec
 GET /q/{hash}/explain    -> the compiled plan as data (Section 20.2)
 ```
 
-Both are publicly cacheable. `explain` output is per (hash, planId) and carries its plan id. Clients MAY additionally send an advisory `Lattice-Query-Name` request header, excluded from all cache keys, purely so human-assigned names appear in access logs and traces alongside hashes.
+Both are publicly cacheable; `explain` output is per (hash, planId) and carries its plan id. For a hash the origin's memo does not contain (never introduced, or evicted), `/q/{hash}/source`, `/q/{hash}/explain`, and `/q/{hash}/plan/{planId}` respond `404 lattice:unknown-query` with `Cache-Control: no-store`, exactly as the hash-form data endpoint does (Section 6.1), so a stale negative is never pinned at a shared cache. Clients MAY additionally send an advisory `Lattice-Query-Name` request header, excluded from all cache keys, purely so human-assigned names appear in access logs and traces alongside hashes.
 
 ### 7.3 Plan identity
 
@@ -927,7 +935,7 @@ Consequences, each of which was previously a global-epoch mechanism:
 - Deployment requires no total order. During a rolling deploy, instances serving old and new schemas answer for the plan ids they can derive. The URL spaces are disjoint (Section 13.3), so caches hold both without confusion and no instance needs to know what the others serve.
 - The compatibility question "which queries does this change affect" (Section 17.2) becomes directly computable per query with traffic weights, rather than a global boolean.
 
-Every response carries `Lattice-Plan: {planId}` and, informationally, `Lattice-Schema: {schemaHash}`. Clients detect deployments passively by header drift and refetch plan documents lazily. Linear deployment history, needed for transitive compatibility checks, lives in the compatibility registry's deployment log (Section 17.1). That is where a timeline belongs: it is an analysis artifact, not a coordination mechanism.
+Every response carries `Lattice-Plan: {planId}` and, informationally, `Lattice-Schema: {schemaHash}`; clients detect deployments passively by `Lattice-Plan` / `Lattice-Schema` header drift. A client MAY refresh a query's plan document (`slice=plan`) the next time it uses that query after observing drift, but it is not required to, since re-entering the ladder on `409 lattice:plan-superseded` (Section 6.1) re-teaches the current plan id through the `Location` handoff. There is no eager, deployment-triggered refetch. Linear deployment history, needed for transitive compatibility checks, lives in the compatibility registry's deployment log (Section 17.1). That is where a timeline belongs: it is an analysis artifact, not a coordination mechanism.
 
 ---
 
@@ -961,7 +969,7 @@ The `ctx` slice's variance is carried by two pieces:
 - **Claims payload**, in the URL: `vc={base64url(canonicalJson(claims))}`, containing only the claims from the schema's registry that this query's ctx slice depends on (the plan says which). It is canonically serialized so that equal claim sets are equal bytes. The payload is part of the cache key because it is part of the URL: no `Vary` support is needed, no custom-header preflight for browsers is needed, and caches too limited for `Vary` still behave correctly.
 - **Proof**, in a header: `X-Vc-Auth: {exp}.{sig}`, a signature by the auth service over (payload, exp). Headers outside the cache key do not fragment it, so token rotation and expiry renewal never disturb cached entries; only a change in the claims themselves produces a new cache key.
 
-Origins MUST verify the proof on every request they serve and MUST reject expired proofs; caches never verify anything. A cache hit is therefore a response that some principal with an identical claims payload legitimately received while holding a valid proof.
+Origins MUST verify the proof on every request they serve; caches never verify anything. An origin MUST reject a `ctx` request with `401 lattice:proof-expired` when the `vc` parameter is absent, its payload does not decode to a canonical claims object, the `X-Vc-Auth` proof is missing, malformed, or fails signature verification, the proof is expired, or the presented claims do not cover every claim the slice depends on. A `priv` request lacking the deployment's `Authorization` credential is rejected the same way. None of these open an entity stream. A cache hit is therefore a response that some principal with an identical claims payload legitimately received while holding a valid proof.
 
 Requirements carried over from earlier drafts, restated against the split:
 
@@ -1002,7 +1010,7 @@ Responses are newline-delimited JSON records over chunked transfer (or the ident
 {"kind":"end","complete":true,"etag":"m:9ac2"}
 ```
 
-Record kinds: `manifest`, `entity`, `tombstone`, `elided`, `unchanged`, `error`, `progress`, `end`. Parameterized fields are keyed by their canonical argument form. Records emitted by a federating gateway additionally carry `src` (Section 18.4).
+Record kinds carried in an entity stream: `manifest`, `entity`, `tombstone`, `elided`, `unchanged`, `error`, `invalidated`, `end`. (`plan` is the sole record of a `slice=plan` response, Section 9.2; `reauth` appears only on live subscriptions, Section 12.) The set is open: clients MUST tolerate an unrecognized `kind` by keeping it verbatim and ignoring it (Section 9.4.1). Parameterized fields are keyed by their canonical argument form. Records emitted by a federating gateway additionally carry `src` (Section 18.4).
 
 Consequences of normalization:
 
@@ -1115,7 +1123,7 @@ Whether a given response can actually *use* `207` depends on whether the origin 
 - **Envelope-level rejections** (a batch rejected outright for size, an idempotency key conflict, a failed guard before any effect was attempted) are unaffected by any of this and remain ordinary whole-request `4xx`/`5xx` responses, since nothing was processed to report per-item on.
 - **Resource-mode point fetches** (Section 6.8) need none of this. Each is already a single-resource request with its own ordinary status code, since multi-status exists specifically for "one response describing several outcomes," a problem resource-mode's transport-level granularity doesn't have.
 
-For infrastructure that inspects headers but not bodies, a `Lattice-Outcome: ok | degraded` trailer SHOULD accompany any response containing an `error` record. It mirrors the in-body signal for consumers that can read trailers but won't parse NDJSON. Trailer support is inconsistent enough across HTTP/1.1 intermediaries that this is a convenience, never the mechanism a client is permitted to depend on in place of the body.
+For infrastructure that inspects headers but not bodies, a `Lattice-Outcome: degraded` signal SHOULD accompany any response that contains an `error` record; a response with no `error` record either omits the field or carries `Lattice-Outcome: ok`, and consumers MUST treat absence as `ok`. An origin that buffers the response (and so knows the outcome before the status line) MAY emit it as a response header; a streaming origin emits it as a trailer. Trailer support is inconsistent enough across HTTP/1.1 intermediaries that this is a convenience, never the mechanism a client is permitted to depend on in place of the body.
 
 ---
 
@@ -1130,7 +1138,7 @@ For infrastructure that inspects headers but not bodies, a `Lattice-Outcome: ok 
 | `ctx` | `public, s-maxage=120, stale-while-revalidate=30` | `vc` URL parameter |
 | `priv` | `private, max-age=30` | `Authorization` (Vary) |
 
-TTLs are per-query-per-slice policy, set by the schema author or defaulted; the values above are illustrative. `stale-while-revalidate` is RECOMMENDED on shared slices because soft purges (Section 10.6) rely on it to avoid thundering herds. `stale-if-error` (RFC 5861) SHOULD accompany it on shared slices, so that when the origin is unreachable or returns 5xx, a cache may serve a slightly stale but correct body rather than propagating the error. Because every response also carries surrogate keys, a served-stale body is still subject to purge the moment the origin recovers and invalidates, bounding how long an error can extend staleness.
+TTLs are per-query-per-slice policy, set by the schema author or defaulted; the values above are illustrative. `stale-while-revalidate` is RECOMMENDED on shared slices because soft purges (Section 10.6) rely on it to avoid thundering herds. `stale-if-error` (RFC 5861) SHOULD accompany it on shared slices with a deployment-configured window (reference default `stale-if-error=600`), so that when the origin is unreachable or returns 5xx, a cache may serve a stale but correct body rather than propagating the error; because every response also carries surrogate keys, a served-stale body is still subject to purge the moment the origin recovers and invalidates, bounding how long an error can extend staleness.
 
 ### 10.2 Validators and snapshot refresh
 
@@ -1188,7 +1196,7 @@ Three families:
 
 **Key budget.** Responses have a maximum key count (published in `/.well-known/lattice`; Fastly's header limit makes roughly 256 a practical ceiling). When a plan would exceed it, the planner MUST coarsen rather than drop. Entity keys for entities reached through a collection scan may be subsumed by that scan's collection key (any mutation of such an entity that matters to this response also touches the collection's type, so the collection key over-approximates safely). Coarsening trades purge precision for correctness, never the reverse.
 
-Fastly consumes this header natively; Varnish via the xkey vmod. Deployments without tag-capable caches degrade to TTL-only freshness, losing promptness but not correctness.
+Fastly consumes this header natively, and Varnish via the xkey vmod. A CDN without native surrogate-key support can still purge by tag with a small edge worker that maintains a surrogate-key-to-URL index and exposes a purge endpoint; the reference Cloudflare Worker (a Workers KV index plus `POST /_lattice/purge`) is one such tier. Only a deployment with neither native tag support nor such a worker degrades to TTL-only freshness, which loses promptness but not correctness.
 
 Co-keyed entities (Section 3.8) shape the entity-key family. A `refines` family shares one truth, so a write to any member mints the entity keys of every member (`User:7` and `AdminUser:7` together), while a `joins` companion mints independently. The fan-out is static from the schema, so readers tag only the types they actually touched.
 
@@ -1200,8 +1208,10 @@ Invalidation is event-driven from the transactional outbox (Section 11.5), cover
 
 To bound cache pollution from adversarially minted novel queries (any content-addressed scheme admits unlimited distinct valid requests), origins SHOULD scale `s-maxage` with observed query popularity:
 
-- first sight of a query hash: `s-maxage=15`
-- promoted after N distinct servings within a window: full policy TTL
+- first sight of a query hash (its tenure counter below the promotion threshold): `s-maxage=15`, carrying the slice's usual `stale-while-revalidate` / `stale-if-error`;
+- promoted once the query hash has been served a threshold number of times (deployment-configured; reference default 3): the slice's full policy TTL (for example `s-maxage=300` for `pub`, `s-maxage=120` for `ctx`).
+
+The tenure counter is a monotone per-hash serving count keyed by query hash; it is not windowed or decayed. A hash earns full tenure on its Nth lifetime serving and keeps it until the counter is lost. The counter is advisory and losable; losing it merely re-imposes the `s-maxage=15` introductory rate until the hash re-crosses the threshold.
 
 The organic query working set is highly repetitive (the empirical fact that motivated persisted queries) and quickly earns full tenure; one-off adversarial queries occupy shared cache slots for seconds. Tenure state is advisory and losable.
 
@@ -1290,7 +1300,7 @@ A mutation MAY additionally declare `errors`: an ordinary sum type that names it
 
 Earlier drafts implied a uniform exactly-once story. That claim is only implementable when the entire effect lives inside one ACID transaction, and most consequential mutations do not. They charge cards, send email, call other services, and enqueue work. The protocol therefore promises exactly one thing uniformly, and promises more only where the effect class can support it:
 
-**Uniform guarantee: at-most-once acceptance.** For any keyed mutation, the origin accepts `(mutation, principal, key)` at most once within the retention window. The acceptance record is written in the same transaction as whatever the initiation does transactionally. A concurrent duplicate of an in-flight key receives `409 lattice:key-in-flight` with `Retry-After`. A replay after completion receives the stored response with `Idempotency-Replayed: true`. A replay with a mismatched request digest is rejected with `422 lattice:key-reuse`. Retention is per-mutation policy (24h default, published in discovery). Beyond the window a replay re-executes, and clients MUST NOT rely on detection past it.
+**Uniform guarantee: at-most-once acceptance.** For any keyed mutation, the origin accepts `(mutation, principal, key)` at most once within the retention window. The acceptance record is written in the same transaction as whatever the initiation does transactionally. Concurrent duplicates of an in-flight key receive `409 lattice:key-in-flight` carrying `Retry-After` with a deployment-configured backoff (reference default 1 second), after which the client SHOULD retry the same `(mutation, principal, key)`; replays after completion receive the stored response with `Idempotency-Replayed: true`; a replayed key with a mismatched request digest is rejected `422 lattice:key-reuse`. The retention window is measured from the instant of first acceptance; the acceptance record and the stored replay response are retained for that window. Retention has a global default published in discovery as `idempotency.defaultRetention` (default `PT24H`); an origin MAY set shorter or longer per-mutation windows, which it likewise publishes. Beyond the window a replay re-executes, and clients MUST NOT rely on detection past it.
 
 **Per class:**
 
@@ -1408,7 +1418,7 @@ Bound mutation responses are the same entity streams as Section 11.3, so read-yo
 
 A mutation MAY declare a `batch` policy. The policy admits an array invocation that applies the same declared mutation (the same `guard`, `writes`, `effectClass`, and `invalidates`) to many inputs in one request. Nothing about per-item semantics changes. Only the invocation and response structure generalize from one item to many.
 
-**Invocation.** For a `Named` binding, the request body's top-level JSON type selects cardinality. An object is the singular call (unchanged). An array is a batch call, each element `{"key": <opaque>?, "input": <Input>}`. This is unambiguous, since every `InputType` is a schema-declared record and a record always serializes as an object (Section 3.5.2). A bare array can therefore never be a valid singular body.
+**Invocation.** For a `Named` binding, the request body's top-level JSON type selects cardinality. An object is the singular call (unchanged). An array is a batch call, each element `{"key": <opaque>?, "input": <Input>}`. This is unambiguous, since every `InputType` is a schema-declared record and a record always serializes as an object (Section 3.5.2). A bare array can therefore never be a valid singular body. An empty array is a well-formed zero-item batch: it commits nothing, emits a manifest with an empty item set, and responds `200` with `end.complete: true`. Item `key`s, where supplied, MUST be unique within a single batch invocation; a request with duplicate item keys is rejected `400 lattice:batch-duplicate-key` before any item executes, because per-item response correlation and per-item dedupe both key on it.
 
 For a `Bound` (verb) mutation, batch uses a distinct collection-level URL, declared alongside the singular binding:
 
@@ -1425,7 +1435,7 @@ mutation markRead(notification: NotificationId, read: Bool) -> Notification
 
 **Atomicity and effect class.** `AllOrNothing` brackets one transaction against the union of every item's declared write set. The compiler admits it only when every batch-eligible mutation's effect class is `Transactional` or `NaturallyIdempotent`. The reason is that a `Workflow` mutation's own guarantee is that only initiation is transactional, and that cannot be strengthened by wrapping N initiations in an outer transaction that promises more than any one of them does. `BestEffort` runs each item in its own bracketed transaction, so it is the only mode available to `Workflow`-classed mutations, and it is available to any class. Downgrading a `Workflow` mutation's batch from an invalid `AllOrNothing` is rejected at schema compile time, not at request time.
 
-**Idempotency: envelope and item.** The `Idempotency-Key` header addresses the whole batch envelope, as before, and protects "did my submission arrive." Each item's own `"key"` field addresses that item, scoped as `(mutation, principal, item key)`, independent of the envelope key. This is the same double-keying that production batch order-entry APIs already use: a batch identifier for the submission, and a client order id per leg, so that resubmitting an adjusted batch does not reprocess legs that already landed. Items without a key rely solely on envelope-level dedupe. That is adequate for `AllOrNothing` (the whole envelope is one outcome), but it means a retried `BestEffort` batch may reprocess previously succeeded items unless their effect class is independently `NaturallyIdempotent`.
+**Idempotency: envelope and item.** The `Idempotency-Key` header addresses the whole batch envelope, as before, and protects "did my submission arrive." Each item's own `"key"` field addresses that item, scoped as `(mutation, principal, item key)`, independent of the envelope key. This is the same double-keying that production batch order-entry APIs already use: a batch identifier for the submission, and a client order id per leg, so that resubmitting an adjusted batch does not reprocess legs that already landed. Items without a key rely solely on envelope-level dedupe, which is adequate for `AllOrNothing` (the whole envelope is one outcome). For `BestEffort`, a retried batch re-executes any keyless item, so clients SHOULD supply a per-item `key` on every `BestEffort` item whose effect class is not `NaturallyIdempotent`; an origin MAY reject a keyless `Transactional` or `Workflow` item in a `BestEffort` batch with `400` before execution rather than risk silent reprocessing.
 
 **Response.** Batch responses use the ordinary entity-stream format with results correlated by item key (or a positional label when a key was not supplied), using the `Item` scope of Section 9.4.1 and, where the mutation declares one, its domain `errors` vocabulary:
 
@@ -1466,11 +1476,13 @@ GET /q/8f2c41a9?p=pl_9dK2&vc={claims}&live=sse
 Accept: text/event-stream
 ```
 
-The origin registers the manifest's surrogate key set against the connection. When the invalidation relay (Section 11.5) publishes an intersecting key, the origin re-executes the plan (single-flighted per query hash, variables, and claims payload: concurrent triggers coalesce into one execution whose output fans out to every matching subscriber) and pushes a delta stream: a fresh manifest first when membership changed, then changed `entity` records and `tombstone`s, then the `end` record with the new etag. The registered key set is replaced by the new manifest's. Records are identical to the pull wire format, so the client store does not distinguish push from pull.
+The origin registers the manifest's surrogate key set against the connection. When the invalidation relay (Section 11.5) publishes an intersecting key, the origin re-executes the plan (single-flighted per (query hash, slice, variables, claims payload): concurrent triggers coalesce into one execution whose output fans out to every matching subscriber) and pushes a delta stream: a fresh manifest first when the root map changed (an edge occurrence's page growing rides in its re-emitted owner record; only root membership re-emits the manifest), then changed `entity` records and `tombstone`s, then the `end` record with the new etag. Changed means the record's rendered canonical bytes differ from the previous emission, a strict superset of `(id, ver)` movement, since a page or derived value can change inside an owner whose own `ver` held still. The registered key set is replaced by the new manifest's. Records are identical to the pull wire format, so the client store does not distinguish push from pull.
 
-The SSE framing is pinned. Each NDJSON record rides one event as a single `data:` line (records are single-line JSON by construction); no `event:` field is used. Delta events carry `id: {outbox cursor}` of the triggering invalidation batch; initial-snapshot events carry no id. A reconnecting client sends `Last-Event-ID` per the SSE processing model; an origin MAY use it to skip work, but the conforming baseline answer to any reconnect is a fresh initial snapshot. The id exists so smarter deltas remain possible, not so correctness depends on them. Comment lines (`: ping`) keep intermediaries from idling the connection out and are semantically empty.
+The SSE framing is pinned. Each NDJSON record rides one event as a single `data:` line (records are single-line JSON by construction); no `event:` field is used. Delta events carry `id: {outbox cursor}` of the triggering invalidation batch; initial-snapshot events carry no id. A reconnecting client sends `Last-Event-ID` per the SSE processing model; an origin MAY use it to skip work, but the conforming baseline answer to any reconnect is a fresh initial snapshot. The id exists so smarter deltas remain possible, not so correctness depends on them. Comment lines (`: ping`) are sent after each idle period with no dispatched traffic, to keep intermediaries from idling the connection out; they are semantically empty. The idle period is deployment-configured (reference default 15 seconds); a period of zero disables the ping loop, and an interval in which real traffic was dispatched skips its ping.
 
-A subscription's authorization is its proof (Section 8.2), and a long-lived connection MUST NOT outlive it. At proof expiry the origin sends `{"kind":"reauth"}` and terminates the stream after a short grace period, unless the client supplies a fresh proof (via the SSE reconnect carrying updated credentials). Without this rule, a subscription minted under since-revoked claims would keep receiving gated data indefinitely.
+A subscription's authorization is its proof (Section 8.2), and a long-lived connection MUST NOT outlive it. At proof expiry the origin sends `{"kind":"reauth"}` and terminates the stream after a deployment-configured grace period (reference default 10 seconds), unless the client supplies a fresh proof by reconnecting with updated credentials. A grace period of zero terminates the stream immediately after the `reauth` record is queued. In-connection credential upgrade is out of scope; a fresh proof is always presented on a new connection. Without this rule, a subscription minted under since-revoked claims would keep receiving gated data indefinitely.
+
+Boundary rules that pull-path machinery does not carry over: the SSE response itself bears no `ETag`, `Surrogate-Key`, or `Lattice-Snapshot` headers (they would describe one instant of a long-lived stream; snapshot movement is visible in the records); cache digests are ignored on subscriptions; a degraded re-execution pushes its scoped errors in-stream but does not self-purge (the purge would re-trigger the subscription it came from); the `plan` pseudo-slice is not subscribable, and an absent `slice` parameter subscribes `pub`. Reauth applies to any presented proof that carries an expiry, whatever the slice: expiry is a property of the credential, not of the data it gates. An origin over its subscriber capacity answers `503 lattice:live-over-capacity`, `no-store`.
 
 Live queries bypass shared caches by nature. Deployments SHOULD terminate them on a separate tier so subscription fanout cannot degrade the cacheable read path.
 
@@ -1496,7 +1508,7 @@ Tokens are opaque and totally ordered **within a domain** (an LSN, a Spanner tim
 1. **Per-slice, per-domain snapshot isolation.** Within one response, all records from a given domain were computed against that domain's single token in `Lattice-Snapshot`; across domains, no relationship holds, whether within one origin or across upstreams.
 2. **Cross-slice divergence is permitted and detectable.** The slices of one logical page may be served from different snapshots (independent cache entries age independently). Snapshot distance alone is **not** actionable: a revalidated response is current regardless of its body's age, and its refreshed token says so (Section 10.2).
 3. **Convergence triggers on conflict, not distance.** The client acts when two responses assert different `ver` for one entity: it SHOULD refetch the slice(s) with the older snapshot using `Cache-Control: no-cache`, at most K times (default 2), then render with newest-snapshot-wins per entity and surface residual staleness to the application. Absent a `ver` conflict, divergence is unobservable and MUST NOT generate traffic.
-4. **Mutation ordering.** A mutation response's token for its domain is >= any token of that domain that includes its effects. Read-your-writes for membership compares the mutation's domain component against the same component of subsequent responses (Section 11.6).
+4. **Mutation ordering.** A mutation response's `Lattice-Snapshot` token for a domain is the commit token at which that mutation's effects became visible in that domain. Consequently any subsequent response whose token for the same domain is >= the mutation's token reflects those effects. Read-your-writes for membership (Section 11.6) is exactly this comparison.
 5. **No cross-query guarantees.** Two different queries observe independently aged caches; applications requiring a consistent multi-query view issue them as one query.
 6. **Resource mode weakens 1 to per-entity.** Under the resource profile (Section 6.8) only the refs projection is snapshot-consistent; entity attributes are each their own snapshot. The convergence protocol still applies via `ver` conflicts against the refs projection's versions.
 
@@ -1528,7 +1540,7 @@ Rejections for structural reasons are deterministic per canonical text, so a rej
 
 ### 14.2 Cold-path rate limiting
 
-Because the miss path is protocol-distinguishable (it only occurs when the memo lacks the hash), origins SHOULD rate-limit cold compiles per client identity independently of warm traffic. Warm-path limits remain whatever the deployment already does.
+Because the miss path is protocol-distinguishable (it only occurs when the memo lacks the hash), origins SHOULD rate-limit cold compiles per client identity independently of warm traffic. The cold-compile budget is deployment-configured; the protocol fixes no default. A cold compile refused for rate is reported `429 lattice:rate-limited` and MUST carry `Retry-After` (Section 9.4); this response is `no-store`. Warm-path limits remain whatever the deployment already does.
 
 ### 14.3 Admission modes
 
@@ -1565,7 +1577,7 @@ The two mechanisms share the `lattice:` code namespace but apply at different gr
 
 | Type | Status | Meaning |
 |---|---|---|
-| `lattice:unknown-query` | 404 | hash form miss; retry with a lower ladder rung |
+| `lattice:unknown-query` | 404 | hash-form memo miss; the client drops to an introduction rung (Section 6): inline (6.2) when the compressed canonical text fits the inline URL budget, otherwise QUERY (6.3) or POST (6.4). `no-store`. |
 | `lattice:compile-rejected` | 400 | canonical text fails validation or budgets; body carries compiler diagnostics |
 | `lattice:compile-budget` | 503 | compile timed out; MUST carry `Retry-After` |
 | `lattice:unknown-dictionary` | 400 | `dv` names a dictionary this origin never published |
@@ -1579,6 +1591,7 @@ The two mechanisms share the `lattice:` code namespace but apply at different gr
 | `lattice:write-scope` | 500 | effect attempted a write outside its declared write set; rolled back |
 | `lattice:batch-not-supported` | 400 | array/collection invocation of a mutation with no declared `batch` policy |
 | `lattice:batch-too-large` | 400 | batch item count exceeds the mutation's `maxItems` |
+| `lattice:batch-duplicate-key` | 400 | a batch invocation carries two items with the same `key`; rejected before any item executes |
 | `lattice:plan-superseded` | 409 | request named a plan id this instance no longer serves; body carries the current plan document |
 | `lattice:rate-limited` | 429 | request-rate budget exceeded; MUST carry `Retry-After` |
 | `lattice:version-unavailable` | 404 | version-pinned fetch for a `ver` the origin no longer holds; `no-store`, `Content-Location` names the unpinned URL (Section 6.9) |
@@ -1592,7 +1605,7 @@ Mid-stream failures use the `error` record (Section 9.4), since the status line 
 
 **Native-HTTP conformance.** The protocol reuses standard mechanisms rather than inventing parallel ones, and states where it deliberately does not:
 - Custom response headers (`Surrogate-Key`, `Lattice-Plan`, `Lattice-Snapshot`, `Lattice-Outcome`) are RFC 8941 Structured Field Values, so generic intermediaries parse them without bespoke grammars: `Surrogate-Key` is an sf-list of tokens, `Lattice-Outcome` an sf-token, the rest sf-strings.
-- `429` and `503` MUST carry `Retry-After`; problem-details bodies MAY additionally carry a machine-readable budget hint, but `Retry-After` is the authoritative signal a generic client honors.
+- `429`, `503`, and `409 lattice:key-in-flight` MUST carry `Retry-After`; any `5xx` the origin classifies as retryable SHOULD carry it. Problem-details bodies MAY additionally carry a machine-readable budget hint, but `Retry-After` is the authoritative signal a generic client honors.
 - The refs-only projection is a URL parameter (`project=refs`, Section 6.8), not a `Prefer: return=minimal` header. This is deliberate: `Prefer` would force `Vary: Prefer` and split the shared cache entry, defeating the point. Lattice uses native semantics up to the exact line where they would fragment cache identity, and puts the distinction in the URL past that line. Claims are carried in the URL rather than a `Vary`-ed header for the same reason (Section 8.2).
 - After a `QUERY` or `POST` introduction (Section 6.3, 6.4), the response carries `Content-Location: /q/{hash}?p={planId}&slice=...`, the canonical cacheable GET the client should use thereafter, so the introduction round trip teaches the client its steady-state URL through a standard header.
 
@@ -1607,7 +1620,7 @@ Mid-stream failures use the `error` record (Section 9.4), since the status line 
 - **Query text in URLs:** inline-form URLs expose query structure to every log on the path. Query structure is not secret in this design (it is content-addressed and servable via `/source`); variable *values* are the sensitive part and appear in URLs in all forms, so URL-logging hygiene requirements are identical to any REST API.
 - **`nodes` as enumeration oracle:** Section 14.4.
 - **Idempotency store as oracle:** replay responses are returned only for matching `(mutation, principal, key, digest)`; a key is not a capability that lets another principal read a stored response.
-- **Snapshot tokens as side channel:** tokens reveal coarse write-rate information about the origin. Deployments for which this matters MAY coarsen token granularity; comparison semantics are all the protocol requires.
+- **Snapshot tokens as side channel:** tokens reveal coarse write-rate information about the origin. Deployments that treat write-rate as sensitive (for example where token deltas would reveal customer transaction volume) MAY coarsen token granularity, for instance by quantizing the LSN or advancing tokens on a fixed interval rather than per commit. The protocol requires only that comparison semantics (ordering and membership, Section 11.6) be preserved under any such coarsening.
 - **Tenure state:** advisory only; its loss or corruption affects TTLs, never correctness or authorization.
 
 ---
@@ -1669,7 +1682,7 @@ Deployments choose their gate per change class: structural gates for policy and 
 
 ### 17.5 Deprecation lifecycle
 
-`@deprecated(sunset: <date>, note: "...")` on any field, root, or mutation: the element keeps serving, appears with its deprecation metadata in the IDL document (so codegen warns), and the registry tracks its corpus traffic over time. Removal passes the checker only when past sunset (inclusive: a removal on the sunset date passes) or below the traffic threshold, whichever the deployment configures. Deprecation is thereby a measured drain, not a hope. Both annotations are part of the published canonical IDL, so adding one moves the schema hash; neither is a pertinent declaration (Section 7.3), so deprecating or overriding moves no plan ids and disturbs no cached responses.
+`@deprecated(sunset: <date>, note: "...")` on any field, root, or mutation: the element keeps serving, appears with its deprecation metadata in the IDL document (so codegen warns), and the registry tracks its corpus traffic over time. A removal of a `@deprecated` element passes the checker when the check date is on or after the element's `sunset` date (inclusive). Independently, and for removals of non-deprecated elements, the ordinary corpus gate applies: the removal passes only if its attributed corpus traffic is below the deployment-configured traffic threshold. The `sunset` date is set per element by the `@deprecated` annotation; the traffic threshold is a single deployment-wide checker parameter. Deprecation is thereby a measured drain, not a hope. Both annotations are part of the published canonical IDL, so adding one moves the schema hash; neither is a pertinent declaration (Section 7.3), so deprecating or overriding moves no plan ids and disturbs no cached responses.
 
 ---
 
@@ -1755,7 +1768,7 @@ Surrogate keys are namespaced by upstream at the gateway (`posts/Post:17`, `soci
 GET /invalidations?since={outboxCursor}&live=sse
 ```
 
-Feed events are pinned: the same SSE framing as Section 12, each event one JSON object `{"cursor": n, "keys": ["Post:17", "feed:9"]}` with `id: {cursor}`. `since` replays every retained event with a cursor greater than the parameter; a consumer that observes the first replayed cursor exceeding `since + 1` knows the window was outrun and resyncs from scratch rather than trusting the gap. The gateway subscribes to each upstream's feed and translates keys, with namespace prefixes, into purges against its own cache tier. Invalidation therefore composes through the same declared footprints that produced it, and the feed's outbox cursor makes gateway-side purge processing resumable and exactly-once. The feed is also the natural attachment point for anything else that wants change notifications (search indexers, materialized views), which keeps those consumers off the mutation path.
+Feed events are pinned: the same SSE framing as Section 12, each event one JSON object `{"cursor": n, "keys": ["Post:17", "feed:9"]}` with `id: {cursor}`. `since` replays every retained event with a cursor greater than the parameter, over a bounded, deployment-configured window of most-recent events (the reference implementation retains the last 4096 drained batches); a `since` older than the window is loss, detectable because the first replayed event's cursor then exceeds `since + 1`, and a consumer that observes this MUST resync from scratch rather than trust the gap. Because per-process cursors are not durable across origin restarts (Section 11.5), a consumer that cannot match its `since` MUST also resync. The gateway subscribes to each upstream's feed and translates keys, with namespace prefixes, into purges against its own cache tier. Invalidation therefore composes through the same declared footprints that produced it, and the feed's outbox cursor makes gateway-side purge processing resumable and exactly-once. The feed is also the natural attachment point for anything else that wants change notifications (search indexers, materialized views), which keeps those consumers off the mutation path.
 
 ### 18.7 Mutations
 
@@ -1763,7 +1776,7 @@ A mutation belongs to exactly one upstream and the gateway routes it whole, forw
 
 ### 18.8 Authorization across upstreams
 
-The fused claim registry is the union of upstream registries (Section 18.1 conflicts aside). The gateway verifies the inbound proof once, then re-mints per-upstream payload/proof pairs containing only the claims each upstream's registry declares, signed with a key the upstream trusts. Narrowing a payload preserves its coarseness, so upstream-side cache sharing on the `vc` parameter is at least as effective as at the gateway. Upstreams keep sole authority over their field, edge, root, and `nodes` policies; the gateway computes the fused partition compositionally from them via the path join, which is well-defined because every policy has exactly one owner.
+The fused claim registry is the union of upstream registries (Section 18.1 conflicts aside). The gateway verifies the inbound proof once, then re-mints per-upstream payload/proof pairs containing only the claims each upstream's registry declares. Each re-minted proof MUST use the same proof construction as a directly issued visibility proof (Section 8.3) and MUST be signed with a key whose trust the upstream established out of band (the gateway registers as a service principal, Section 18.3); an upstream MUST reject a re-minted proof signed by an unregistered key with `401 lattice:proof-expired`. Key distribution and rotation are a deployment concern outside protocol scope. Narrowing a payload preserves its coarseness, so upstream-side cache sharing on the `vc` parameter is at least as effective as at the gateway. Upstreams keep sole authority over their field, edge, root, and `nodes` policies; the gateway computes the fused partition compositionally from them via the path join, which is well-defined because every policy has exactly one owner.
 
 ---
 
@@ -1810,9 +1823,9 @@ Attributes (registry prefix `lattice.`):
 | `lattice.loader.name`, `lattice.loader.batch_size` | load spans | |
 | `lattice.mutation.name`, `lattice.effect_class` | mutation spans | |
 | `lattice.idempotency.replayed` | mutation spans | |
-| `lattice.error.scope`, `lattice.error.code` | error events | `scope`'s `$tag` (`Entity` for the bare-ref shorthand) and the protocol or domain code; never the entity/item identifier itself at default verbosity |
+| `lattice.error.scope`, `lattice.error.code` | error events | `scope`'s `$tag` (`Entity` for the bare-ref shorthand) and the protocol or domain code; never the entity or item identifier itself, which is high-cardinality and MUST NOT appear on shared-cacheable-request spans (an origin MAY attach it only on spans of uncacheable requests, or in development mode, Section 20.4) |
 | `lattice.operation.id` | workflow spans | |
-| `lattice.purge.key_count`, `lattice.outbox.cursor` | relay spans | keys themselves are high-cardinality; count only by default |
+| `lattice.purge.key_count`, `lattice.outbox.cursor` | relay spans | the keys themselves are high-cardinality and MUST NOT be attached to production-verbosity spans; count only |
 | `lattice.derivation.name` | recompute spans | |
 | `lattice.snapshot.domains` | server spans | domain names only, never tokens |
 
@@ -1851,7 +1864,7 @@ This chapter is non-normative, but the protocol was designed assuming these tool
 
 ### 20.1 The reference CLI
 
-Canonicalization, hashing, partition, planning, and compatibility diffing are all deterministic functions. They MUST agree bit-for-bit across every SDK, editor plugin, and origin, or content addressing quietly fragments. The intended mechanism is a single reference implementation shipped as a CLI, plus a test-vector corpus in the specification repository that every independent implementation runs in CI:
+Canonicalization, hashing, partition, planning, and compatibility diffing are deterministic functions and MUST agree bit-for-bit across every SDK, editor plugin, and origin (a normative requirement of Sections 5 and 6); otherwise content addressing quietly fragments. This chapter, otherwise non-normative, describes the tooling that makes that agreement inspectable and testable. The intended mechanism is a single reference implementation shipped as a CLI, plus a test-vector corpus in the specification repository that every independent implementation runs in CI:
 
 ```
 lattice canon  <query.lq>                      -- canonical text
