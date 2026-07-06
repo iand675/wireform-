@@ -17,10 +17,12 @@ their selection sets recursively, identical spreads deduplicate, inline
 fragments on one type merge their selections.
 
 NFC note: names are ASCII by the grammar (§4.8), so the only place NFC
-normalization could act is inside string literals. Normalizing those needs
-a Unicode tables dependency (@unicode-transforms@) this package does not
-carry yet; string-literal NFC is deferred and documents containing
-non-NFC string literals canonicalize byte-identically to their input form.
+normalization acts is inside string literals. 'compileText' NFC-normalizes
+the input before parsing and 'renderCanonical' NFC-normalizes the rendered
+text as the final serialization step (§5.1 step 4), so hashing always sees
+NFC bytes and the closure property holds exactly: the canonical text
+re-parses to the canonical document, byte-identical string literals
+included.
 -}
 module Lattice.Canonical (
   Compiled (..),
@@ -39,6 +41,7 @@ module Lattice.Canonical (
 import Data.Aeson qualified as A
 import Data.ByteString qualified as BS
 import Data.List (find, sortOn)
+import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
@@ -46,14 +49,18 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import Data.Text.Normalize (NormalizationMode (NFC), normalize)
 import Lattice.Hash (queryHash)
 import Lattice.Query.AST
 import Lattice.Query.Parser (ParseError (..), parseDocument, parseImportFile)
 import Lattice.Query.Validate (
   CompileError,
   ResolvedField (..),
+  SelCtx (CtxUnion),
   compileRejected,
   fieldInContext,
+  nodesListedTypes,
+  nodesRootName,
   normalizeLimitArg,
   normalizeTypeAlias,
   targetContext,
@@ -83,7 +90,7 @@ file map first).
 -}
 compileText :: Schema -> Budgets -> Text -> Either CompileError Compiled
 compileText schema budgets text = do
-  doc <- case parseDocument text of
+  doc <- case parseDocument (normalize NFC text) of
     Left e ->
       Left
         ( compileRejected
@@ -268,6 +275,15 @@ canonicalize schema Document {..} =
                     { fArgs = eraseArgs (rootParams rd) mcol (fArgs f)
                     , fSelection = fmap (eraseSet ctx) (fSelection f)
                     }
+        -- The implicit @nodes@ root (§14.4): no declared arguments to
+        -- erase (@refs@ has no default), but the selection's field
+        -- defaults erase per concrete type through the dispatch union,
+        -- exactly as a declared union-target root would.
+        | RootName (unFieldName (fName f)) == nodesRootName ->
+            let ctx = do
+                  sub <- fSelection f
+                  CtxUnion <$> NE.nonEmpty (nodesListedTypes sub)
+             in SField f {fSelection = fmap (eraseSet ctx) (fSelection f)}
       s -> s
 
     eraseSet mctx = case mctx of
@@ -366,10 +382,12 @@ Order-preserving: selections, arguments, and variables render exactly as
 stored (the sorting of §5.1 step 2 is an AST transformation performed by
 'compileDocument' before rendering). Only the query definition renders;
 a restricted document has no imports and no local fragment definitions.
+The result is NFC-normalized (module header) — the final serialization
+step, so every hash of canonical text is over NFC bytes.
 -}
 renderCanonical :: Document -> Text
 renderCanonical Document {docQuery = QueryDef {..}} =
-  "query" <> vars <> renderSelectionSet qSelection
+  normalize NFC ("query" <> vars <> renderSelectionSet qSelection)
   where
     vars = case qVars of
       [] -> ""

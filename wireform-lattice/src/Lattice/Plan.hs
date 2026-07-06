@@ -65,7 +65,7 @@ import Data.List.NonEmpty qualified as NE
 import Data.Map.Lazy qualified as MapL
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, mapMaybe)
 import Data.Scientific qualified as Sci
 import Data.Set (Set)
 import Data.Set qualified as Set
@@ -75,7 +75,14 @@ import Lattice.Canonical (Compiled (..), canonicalFieldKey)
 import Lattice.Hash (planIdHash)
 import Lattice.IDL.Print qualified as Print
 import Lattice.Query.AST
-import Lattice.Query.Validate (CompileError, compileRejected)
+import Lattice.Query.Validate (
+  CompileError,
+  compileRejected,
+  isNodesRootDef,
+  nodesListedTypes,
+  nodesRootDef,
+  nodesRootName,
+ )
 import Lattice.Schema
 import Lattice.Types
 import Lattice.Value (canonicalJsonText, qvalueToJson)
@@ -130,6 +137,10 @@ data PlanField = PlanField
   -- at execution time; keys containing variables are completed then).
   , pfLevel :: Level
   -- ^ Emission level: node level ⊔ field policy.
+  , pfDerivation :: Maybe Derivation
+  -- ^ The field's declared derivation (§3.7); the executor resolves
+  -- @on read@ read sets as hidden traversals, @maintained@ values read
+  -- from the row like any stored field.
   }
   deriving stock (Show)
 
@@ -214,7 +225,7 @@ planQuery schema budgets compiled = do
       , planCanonicalText = compiledText compiled
       , planVars = qVars queryDef
       , planRoots = rootsMap
-      , planSlices = deriveSlices budgets rootsMap
+      , planSlices = deriveSlices budgets (nodesMembership schema rootsMap) rootsMap
       , planPertinent = pertinent
       }
 
@@ -342,9 +353,15 @@ uniqueRoots = foldM step Map.empty
 resolveRoot :: Schema -> Field -> PlanM (RootName, PlanRoot)
 resolveRoot schema f = do
   let rname = RootName (unFieldName (fName f))
-  rd <- case Map.lookup rname (schemaRoots schema) of
-    Just rd -> pure rd
-    Nothing -> rejectM ["unknown root: " <> unRootName rname]
+  case Map.lookup rname (schemaRoots schema) of
+    Just rd -> resolveDeclaredRoot schema f rname rd
+    Nothing
+      | rname == nodesRootName -> resolveNodesRoot schema f
+      | otherwise -> rejectM ["unknown root: " <> unRootName rname]
+
+
+resolveDeclaredRoot :: Schema -> Field -> RootName -> RootDef -> PlanM (RootName, PlanRoot)
+resolveDeclaredRoot schema f rname rd = do
   touchRoot rname
   touchPolicy (rootPolicy rd)
   args <- bindArgs (fArgs f)
@@ -355,6 +372,75 @@ resolveRoot schema f = do
   let lvl = policyLevel (rootPolicy rd)
   sel <- resolveTyped schema lvl (rootTarget rd) sels
   pure (rname, PlanRoot {prDef = rd, prArgs = args, prLevel = lvl, prSelection = sel})
+
+
+{- | The implicit @nodes@ root (§14.4): dispatch union drawn from the
+selection's inline fragments, each type resolved at its own membership
+level — the level of its @fetch by@ policy ('entityFetchBy'), which is how
+@fetchBy ⊔ field policy@ falls out of the ordinary path join. A type whose
+@fetch by@ is absent (by-ref fetching forbidden) is validated and touched
+(its declaration is pertinent: a fetch-by change must move the plan id) but
+excluded from the per-type selection, so its refs never load and never
+emit — indistinguishable from nonexistence.
+
+'prLevel' is 'LPublic' (the root itself is reachable; membership is
+per-type); 'planQuery' feeds the per-type membership levels into the slice
+partition via 'nodesMembership'. The implicit root is never a schema
+declaration, so it is not touched as a pertinent root — the canonical text
+names it, and the per-type fetch-by policies travel with the touched
+entity declarations.
+-}
+resolveNodesRoot :: Schema -> Field -> PlanM (RootName, PlanRoot)
+resolveNodesRoot schema f = do
+  args <- bindArgs (fArgs f)
+  sels <- case (fSelection f, fDepth f) of
+    (Just s, Nothing) -> pure s
+    (_, Just _) -> rejectM ["@depth is not valid on a root field: nodes"]
+    (Nothing, Nothing) -> rejectM ["root field requires a selection set: nodes"]
+  ts <- case NE.nonEmpty (nodesListedTypes sels) of
+    Just ts -> pure ts
+    Nothing ->
+      rejectM ["the nodes root dispatches per concrete type; select with inline fragments (§14.4)"]
+  ents <- traverse (entityOf schema) (NE.toList ts)
+  let typed = zip (NE.toList ts) ents
+  checkFieldCoverage typed sels
+  nodes <- traverse (resolveFetchable sels) typed
+  pure
+    ( nodesRootName
+    , PlanRoot
+        { prDef = nodesRootDef ts
+        , prArgs = args
+        , prLevel = LPublic
+        , prSelection = TypedSelection (Map.fromList (catMaybes nodes))
+        }
+    )
+  where
+    resolveFetchable sels (t, ent) = do
+      touchEntity t
+      case entityFetchBy ent of
+        Nothing -> pure Nothing
+        Just pol -> do
+          touchPolicy pol
+          node <- resolveNode schema t ent (policyLevel pol) [] sels
+          pure (Just (t, node))
+
+
+{- | Per-root membership-level overrides for the slice partition: the
+implicit @nodes@ root's membership is per type — each fetchable listed
+type contributes its @fetch by@ policy's level. Declared roots are absent
+from the map (their membership is 'prLevel').
+-}
+nodesMembership :: Schema -> Map RootName PlanRoot -> Map RootName [Level]
+nodesMembership schema roots =
+  Map.fromList
+    [ (rn, lvls)
+    | (rn, pr) <- Map.toList roots
+    , isNodesRootDef (prDef pr)
+    , let lvls =
+            mapMaybe
+              (\t -> policyLevel <$> (entityFetchBy =<< lookupEntity schema t))
+              (Map.keys (tsPerType (prSelection pr)))
+    ]
 
 
 -- ---------------------------------------------------------------------------
@@ -564,7 +650,7 @@ resolveItem schema t ent lvl ties enclosing f =
   case lookupEntityRel ent (fName f) of
     Just rel -> Right <$> resolveEdge schema t ent lvl ties enclosing f rel
     Nothing -> case lookupEntityField ent (fName f) of
-      Just fd -> Left <$> resolveScalar ent lvl f fd
+      Just fd -> Left <$> resolveScalar schema ent lvl f fd
       Nothing ->
         rejectM
           [ "field "
@@ -574,8 +660,8 @@ resolveItem schema t ent lvl ties enclosing f =
           ]
 
 
-resolveScalar :: EntityDef -> Level -> Field -> FieldDef -> PlanM PlanField
-resolveScalar ent lvl f fd = do
+resolveScalar :: Schema -> EntityDef -> Level -> Field -> FieldDef -> PlanM PlanField
+resolveScalar schema ent lvl f fd = do
   when (isJust (fSelection f)) $
     rejectM ["scalar field takes no selection set: " <> unFieldName (fName f)]
   when (isJust (fDepth f)) $
@@ -583,13 +669,33 @@ resolveScalar ent lvl f fd = do
   args <- bindArgs (fArgs f)
   let pol = entityFieldPolicy ent fd
   touchPolicy pol
+  -- §3.7 + §7.3: an @on read@ derivation's hidden traversals make the dep
+  -- fragment and target declarations pertinent — a change to either must
+  -- move the plan id. Maintained fields read only the row.
+  case fieldDerivation fd of
+    Just d | OnRead <- derivMaterialize d -> traverse_ touchDep (derivReads d)
+    _ -> pure ()
   pure
     PlanField
       { pfName = fName f
       , pfArgs = args
       , pfKey = fieldKey (fName f) (fArgs f)
       , pfLevel = joinLevel lvl (policyLevel pol)
+      , pfDerivation = fieldDerivation fd
       }
+  where
+    touchDep = \case
+      OwnFields _ -> pure ()
+      ViaEdge e frag -> do
+        touchFragment frag
+        touchDepRel e
+      ViaCollection r _ -> touchDepRel r
+    touchDepRel e = case lookupEntityRel ent e of
+      Nothing -> pure ()
+      Just rel -> do
+        touchTarget (relTarget rel)
+        traverse_ touchEntity (targetTypes schema (relTarget rel))
+        touchPolicy (fromMaybe Public (relPolicy rel))
 
 
 resolveEdge ::
@@ -731,29 +837,36 @@ renderKeyVal = \case
 plan (root membership, edge membership, or field emission) lands in it;
 the ctx slice's claim dependency is the union of every @Claims(S)@ level
 in the plan; a slice's roots are those whose membership level lands in it.
+
+@memberships@ overrides a root's membership levels (default
+@[prLevel]@): the implicit @nodes@ root's membership is per type
+('nodesMembership'), so it may land in several slices at once, and its
+fetch-by claim gates join the ctx slice's claim dependency like any root
+policy would.
 -}
-deriveSlices :: Budgets -> Map RootName PlanRoot -> Map SliceName SliceInfo
-deriveSlices budgets roots =
+deriveSlices :: Budgets -> Map RootName [Level] -> Map RootName PlanRoot -> Map SliceName SliceInfo
+deriveSlices budgets memberships roots =
   Map.fromList (map (\s -> (s, info s)) (Set.toList present))
   where
     fuel = fromIntegral (maxDepth budgets) + 2 :: Int
-    allLevels = concatMap (rootLevels fuel) (Map.elems roots)
+    membershipOf rn pr = Map.findWithDefault [prLevel pr] rn memberships
+    allLevels =
+      concatMap
+        (\(rn, pr) -> membershipOf rn pr <> typedLevels fuel (prSelection pr))
+        (Map.toList roots)
     present = Set.fromList (map sliceOfLevel allLevels)
     ctxClaims = Set.toAscList (Set.fromList (concatMap claimsOf allLevels))
     claimsOf = \case
       LClaims cs -> cs
       LPublic -> []
       LPrivate -> []
-    rootsIn s = map fst (filter (\(_, pr) -> sliceOfLevel (prLevel pr) == s) (Map.toList roots))
+    rootsIn s =
+      map fst (filter (\(rn, pr) -> s `elem` map sliceOfLevel (membershipOf rn pr)) (Map.toList roots))
     info s =
       SliceInfo
         { siClaims = if s == SliceCtx then ctxClaims else []
         , siRoots = rootsIn s
         }
-
-
-rootLevels :: Int -> PlanRoot -> [Level]
-rootLevels fuel pr = prLevel pr : typedLevels fuel (prSelection pr)
 
 
 -- Fuel bounds the traversal through @depth knots; levels are join fixed
@@ -787,12 +900,24 @@ typedDepth :: TypedSelection -> Natural
 typedDepth (TypedSelection m) = maximum0 (map nodeDepth (Map.elems m))
 
 
+{- | A node's depth: its own level plus its deepest child. A field with an
+@on read@ derivation whose read set leaves the row (§3.7 Planning) is a
+hidden one-level traversal and counts like a leaf child.
+-}
 nodeDepth :: NodeSelection -> Natural
-nodeDepth (NodeSelection _ es) =
+nodeDepth (NodeSelection fs es) =
   let (depthEdges, normalEdges) = partition (isJust . peDepth) es
-      dBase = 1 + maximum0 (map (typedDepth . peSelection) normalEdges)
+      dHidden = if any hiddenDerivedField fs then 1 else 0
+      dBase = 1 + maximum0 (dHidden : map (typedDepth . peSelection) normalEdges)
       dRec = maximum0 (mapMaybe (fmap fromIntegral . peDepth) depthEdges)
   in dBase + dRec
+
+
+-- | Does this plan field resolve through hidden traversals (§3.7)?
+hiddenDerivedField :: PlanField -> Bool
+hiddenDerivedField pf = case pfDerivation pf of
+  Just d -> derivMaterialize d == OnRead && derivationHidden d
+  Nothing -> False
 
 
 maximum0 :: [Natural] -> Natural
@@ -814,7 +939,11 @@ Interface alternatives count fully (conservative sum across concrete
 types). A @\@depth(n)@ edge contributes a geometric series over its @n@
 levels, each level also repeating the enclosing set's non-recursive edges;
 recursive occurrences inside the expansion are counted by that series and
-never traversed structurally.
+never traversed structurally. An @on read@ derived field's hidden
+traversals (§3.7 Planning) count fully: each 'ViaEdge' dep is one loader
+at the parents' fan-out, each 'ViaCollection' dep one aggregate loader at
+the same fan-out (set-in map-out, one value per parent), both in the same
+round as the node's edge loads.
 -}
 planLoaderRounds :: Map RootName PlanRoot -> [[LoaderInfo]]
 planLoaderRounds roots = mergeRounds (map rootRounds (Map.toList roots))
@@ -833,10 +962,39 @@ planLoaderRounds roots = mergeRounds (map rootRounds (Map.toList roots))
     typedRounds cnt (TypedSelection m) =
       mergeRounds (map (\(t, node) -> nodeRounds cnt t node) (Map.toList m))
 
-    nodeRounds cnt t node = mergeRounds (map (edgeRounds cnt t) (nsEdges node))
+    nodeRounds cnt t node =
+      mergeRounds (derivedRounds cnt t node : map (edgeRounds cnt t) (nsEdges node))
 
     baseNodeRounds cnt t node =
-      mergeRounds (map (edgeRounds cnt t) (filter (isNothing . peDepth) (nsEdges node)))
+      mergeRounds
+        ( derivedRounds cnt t node
+            : map (edgeRounds cnt t) (filter (isNothing . peDepth) (nsEdges node))
+        )
+
+    derivedRounds cnt t node =
+      case concatMap (derivedLoaders cnt t) (nsFields node) of
+        [] -> []
+        ls -> [ls]
+
+    derivedLoaders cnt t pf = case pfDerivation pf of
+      Just d
+        | OnRead <- derivMaterialize d ->
+            mapMaybe (depLoader cnt t pf) (NE.toList (derivReads d))
+      _ -> []
+
+    depLoader cnt t pf dep =
+      let label via =
+            unTypeName t
+              <> "."
+              <> unFieldName (pfName pf)
+              <> " derived via "
+              <> unFieldName via
+      in case dep of
+          OwnFields _ -> Nothing
+          ViaEdge e _ ->
+            Just LoaderInfo {liLoader = label e, liCollection = Nothing, liFanout = cnt}
+          ViaCollection r _ ->
+            Just LoaderInfo {liLoader = label r, liCollection = Nothing, liFanout = cnt}
 
     edgeRounds cnt t e =
       let b = edgeBound e
@@ -887,11 +1045,23 @@ edgeCollection e = case peRel e of
   ToMany {relCollection = col} -> Just col
 
 
+{- | A root's static round-0 fan-out. The implicit @nodes@ root's is the
+literal @refs@ list's length when inline — over 'maxRoundFanout' this
+rejects at compile time through 'checkFanout', the ordinary budget
+rejection — and @1@ when variable-bound (the executor rejects an
+over-budget list at binding time; deeper-round static bounds under this
+approximation are a documented concession, the runtime fan-out guard being
+authoritative).
+-}
 rootFanout :: RootDef -> [(ArgName, BoundArg)] -> Natural
-rootFanout rd args = case (rootKind rd, rootCollection rd) of
-  (RootGet, _) -> 1
-  (RootList, Just col) -> windowBound (colWindow col) args
-  (RootList, Nothing) -> 1
+rootFanout rd args
+  | isNodesRootDef rd = case lookup "refs" args of
+      Just (ArgLit (A.Array xs)) -> fromIntegral (length xs)
+      _ -> 1
+  | otherwise = case (rootKind rd, rootCollection rd) of
+      (RootGet, _) -> 1
+      (RootList, Just col) -> windowBound (colWindow col) args
+      (RootList, Nothing) -> 1
 
 
 {- | A collection's static cardinality bound: a bounded collection's @max@; a
@@ -1064,6 +1234,13 @@ for roots), join derivation, and joined level.
 data Element = Element Text (Maybe TypeName) Text Level
 
 
+{- | One static traversal job for skeleton derivation, mirroring the
+executor's per-entity work unit: concrete type, fan-out bound, node
+selection, and remaining @\@depth@ fuel.
+-}
+data SkelJob = SkelJob TypeName Natural NodeSelection (Map FieldName Int)
+
+
 -- | The @explain@ document (§20.2): path joins, slices, rounds, keys, budgets.
 explainJson :: Schema -> Budgets -> Plan -> A.Value
 explainJson schema budgets plan =
@@ -1075,7 +1252,7 @@ explainJson schema budgets plan =
     , "surrogateKeys" .= map keyJson surrogates
     , "budgets" .= budgetsJson
     , "slices" .= slicesJson
-    , "spanSkeleton" .= skeleton
+    , "spans" .= skeleton
     ]
   where
     rounds = planLoaderRounds (planRoots plan)
@@ -1174,11 +1351,75 @@ explainJson schema budgets plan =
     sliceInfoJson (SliceInfo cs rs) =
       A.object ["claims" .= map unClaimName cs, "roots" .= map unRootName rs]
 
-    -- The expected span skeleton (§19.2).
-    skeleton = "lattice.execute" : concatMap roundSpans indexedRounds
-    roundSpans (i, ls) =
-      ("lattice.round[" <> tshow i <> "]")
-        : map (\l -> "lattice.load{" <> liLoader l <> "}") ls
+    -- The expected span skeleton (§19.2): the @lattice.execute@ tree a
+    -- live trace of this plan must match, derived by replaying the
+    -- executor's round structure statically. Round k opens one entity
+    -- load per concrete type its jobs reach (bare type name, ascending —
+    -- 'loadRound' order) followed by one children fetch per @has many@
+    -- edge occurrence (@Type.field@, ascending task key — 'runEdgeTask'
+    -- order); fetched children and to-one targets (required ones probed
+    -- even without a node selection) become round k+1's jobs. Root
+    -- resolution and hidden derived-field loads open no spans. Loader
+    -- names are attributes, never span names; @batch@ carries the static
+    -- fan-out bound (runtime batch sizes are data facts, at most the
+    -- bound).
+    skeleton =
+      [ A.object
+          [ "name" .= ("lattice.execute" :: Text)
+          , "children" .= zipWith spanRound [0 :: Int ..] (spanRounds initialJobs)
+          ]
+      ]
+    initialJobs =
+      [ SkelJob t (rootFanout (prDef pr) (prArgs pr)) node Map.empty
+      | pr <- Map.elems (planRoots plan)
+      , (t, node) <- Map.toAscList (tsPerType (prSelection pr))
+      ]
+    spanRounds [] = []
+    spanRounds jobs =
+      let loads = Map.fromListWith (+) [(t, c) | SkelJob t c _ _ <- jobs]
+          steps = concatMap jobSteps jobs
+          fetches = Map.fromListWith (+) (concatMap fst steps)
+          kids = concatMap snd steps
+      in (loads, fetches) : spanRounds kids
+    jobSteps (SkelJob t cnt node fuel) = mapMaybe (skelEdge t cnt fuel) (nsEdges node)
+    skelEdge t cnt fuel pe
+      | Just n <- peDepth pe
+      , Map.findWithDefault n (peField pe) fuel <= 0 =
+          Nothing
+      | otherwise =
+          let fuel' = case peDepth pe of
+                Nothing -> Map.empty
+                Just n -> Map.insert (peField pe) (Map.findWithDefault n (peField pe) fuel - 1) fuel
+              selTypes = tsPerType (peSelection pe)
+              selJobs c = [SkelJob t' c node' fuel' | (t', node') <- Map.toAscList selTypes]
+          in Just $ case peRel pe of
+              ToOne {relTarget = tgt, relOptional = opt} ->
+                ( []
+                , selJobs cnt
+                    <> [ SkelJob t' cnt (NodeSelection [] []) fuel'
+                       | not opt
+                       , t' <- targetTypes schema tgt
+                       , not (Map.member t' selTypes)
+                       ]
+                )
+              ToMany {} ->
+                ([((t, peField pe, peKey pe), cnt)], selJobs (cnt * edgeBound pe))
+    spanRound i (loads, fetches) =
+      A.object
+        [ "name" .= ("lattice.round[" <> tshow i <> "]")
+        , "children"
+            .= ( map (\(t, c) -> loadSpan (unTypeName t) c) (Map.toAscList loads)
+                  <> map
+                    (\((t, f, _), c) -> loadSpan (unTypeName t <> "." <> unFieldName f) c)
+                    (Map.toAscList fetches)
+               )
+        ]
+    loadSpan loader c =
+      A.object
+        [ "name" .= ("lattice.load" :: Text)
+        , "loader" .= (loader :: Text)
+        , "batch" .= (c :: Natural)
+        ]
 
 
 renderLevel :: Level -> Text

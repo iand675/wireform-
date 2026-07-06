@@ -21,7 +21,13 @@ corpus live in the docs site: [`/lattice/`](https://iand675.github.io/wireform-/
 | Wire format | `Lattice.Wire` | §9 NDJSON entity-stream records, scoped errors, surrogate keys, protocol headers |
 | Origin | `Lattice.Server` (+ `.Execute`, `.Auth`) | The full HTTP origin on `wireform-http`: discovery, transport ladder (hash GET / inline GET / QUERY / POST), point fetches with masks + ver pinning, mutations with idempotency keys and write-set enforcement, per-slice caching headers + tenure |
 | Backend contract | `Lattice.Backend` (+ `.Memory`) | Set-in map-out loaders (N+1 is inexpressible); an STM in-memory backend deriving pagination/cursors from the schema |
-| Client | `Lattice.Client` (+ `.Store`) | Transport ladder, normalized entity store, schema-directed denormalization |
+| Client | `Lattice.Client` (+ `.Store`) | Transport ladder, normalized entity store, schema-directed denormalization, live subscriptions, digest advertisement |
+| Governance | `Lattice.Server.Coalesce`, `Lattice.Server.Auth` | §6.9 origin coalescing (accumulation windows, single-flight); §14.3 signed admission (Ed25519 over canonical text) |
+| Live queries | `Lattice.Server.Live` | §12: SSE subscriptions over hash-form URLs, single-flight delta re-execution, reauth |
+| Digests | `Lattice.Digest` | §10.4 `X-Have` + the pinned Golomb-coded set; `unchanged` markers on priv/oneshot |
+| Compatibility | `Lattice.Compat`, `Lattice.Registry` | §17: change taxonomy, transitive check windows, `@break`/`@deprecated`, corpus-weighted `POST /schema/check` |
+| Federation | `Lattice.Module`, `Lattice.Gateway` | §18: `extend entity` + order-insensitive fusion (in-process), and the network gateway (per-upstream `nodes` subplans, `src` tags, feed-driven purges) |
+| Observability | `Lattice.Telemetry` | §19 span topology + the ten named instruments (OpenTelemetry, no-op by default) |
 | Demo origin | `example/` (`cabal run example-lattice`) | The corpus Star Wars schema on port 8917, with CDN-harness hooks |
 | CDN tiers | `cdn/` | Varnish (vmod_xkey) VCL + harness and a plug-and-play Cloudflare Worker, both proven by `cdn/conformance.mjs` |
 | TLA+ model | `tla/` (`./check.sh`) | Model-checked §11.5 invalidation-pipeline claims: quiescent coherence under at-least-once reordered purge delivery, read-your-writes independent of purge timing, and the intent-time-purge stale-refill race as a TLC counterexample. `tlc` ships in the dev shell |
@@ -65,8 +71,10 @@ draft changelog.
 
 ## Implementation status
 
-The docs landing page (`/lattice/`) carries the authoritative
-implemented/deferred matrix. Deferred, by design and documented: federation
-(§18), live queries (§12), derived fields (§3.7), cache digests (§10.4),
-signed admission (§14.3), verb bindings (§11.7), OTel conventions (§19),
-the compatibility registry (§17).
+The docs landing page (`/lattice/`) carries the authoritative coverage
+matrix. Every formerly deferred area now ships: derived fields (§3.7),
+cache digests (§10.4), verb bindings (§11.7), live queries (§12), signed
+admission (§14.3), the `nodes` root (§14.4), the compatibility registry
+(§17), modules + federation (§18), and the OTel conventions (§19). The
+matrix's "simplifications" table lists the deliberate, haddock-documented
+edges that remain.

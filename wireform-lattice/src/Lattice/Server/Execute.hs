@@ -59,6 +59,36 @@ Execution follows the pinned origin design:
   through a collection scan are recorded in 'xrCovered' for the caller's
   key-budget coarsening.
 
+* __Derived fields (§3.7).__ A field with an @on read@ 'Derivation' never
+  reads the row: after a round's jobs emit, every requested (type, field)
+  resolves as one batch — @ViaEdge@ deps load through 'beLoad' (one call
+  per target type, rows shared with the visible traversal), @ViaCollection@
+  deps through 'beAggregate' (one call per (collection, aggregate)), and
+  the assembled 'DepValues' feed one 'beDerive' call. Hidden loads count
+  against the round fan-out budget; exhaustion degrades the response
+  (unscoped @lattice:internal@, all derived fields elided). A failed dep
+  load\/aggregate is a Field-scoped error on the owning entity's derived
+  field; a key absent from 'beDerive''s result elides the field silently
+  (parity with 'beComputed'). @maintained@ fields read from the row like
+  any stored field.
+
+  __Read-set keys:__ every attempted @ViaEdge@ dep contributes its entity
+  key and every @ViaCollection@ dep its instantiated collection tag to the
+  response's surrogate keys ('xrEntityKeys'\/'xrCollectionKeys').
+
+  __Witness (§3.7 Validators), exact bytes:__ each @ViaEdge@ dep yields
+  @[\"e\", \"Type:key\", ver]@ (tombstone version as-is, @\"\"@ for an
+  absent row); each aggregate result yields
+  @[\"a\", \"{collection}:{grouping}\", valueHash]@ where
+  @valueHash = base64url(BLAKE3(canonicalJson(value))[0..11])@ unpadded.
+  'witnessValue' is the canonical-JSON array of those triples sorted
+  ascending as (tag, id\/key, ver\/hash) string triples. A point fetch
+  touching derived fields uses
+  @ETag: \"w:\" <> base64url(BLAKE3(utf8(ver) || 0x00 ||
+  canonicalJson(witnessValue))[0..11])@ ('witnessEtag') instead of the
+  bare @ver@; query manifests fold 'witnessValue' into the etag input
+  (see 'Lattice.Server.manifestEtag').
+
 Cursor problems abort the whole request ('AbortCursorRetired' → 410,
 'AbortCursorMalformed' → 400) per spec §10.8.
 -}
@@ -74,6 +104,12 @@ module Lattice.Server.Execute (
   ExecResult (..),
   executeRoots,
   executeSeeds,
+
+  -- * Derived-field witness (§3.7)
+  WitnessEntry (..),
+  witnessValue,
+  witnessEtag,
+  deriveGroupKey,
 
   -- * Selection builders and runtime binding helpers
   outputSelection,
@@ -95,23 +131,41 @@ import Control.Exception (
   try,
  )
 import Data.Aeson qualified as A
-import Data.Foldable (for_, traverse_)
+import Data.ByteString qualified as BS
+import Data.Either (isRight)
+import Data.Foldable (for_, toList, traverse_)
 import Data.IORef
 import Data.List (sort)
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, mapMaybe, maybeToList)
+import Data.Maybe (catMaybes, fromMaybe, mapMaybe, maybeToList)
 import Data.Scientific qualified as Sci
+import Control.Monad (when)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Lattice.Backend
 import Lattice.Canonical (canonicalFieldKey)
+import Lattice.Hash (b64url, blake3)
 import Lattice.Cursor (CursorError (..), decodeCursor)
 import Lattice.Plan
+import Lattice.Query.AST (fName, selectionFields)
+import Lattice.Query.Validate (isNodesRootDef)
 import Lattice.Schema
 import Lattice.Types
+import Lattice.Telemetry (
+  LatticeTelemetry,
+  errorEvent,
+  intA,
+  recordLoaderBatch,
+  telemetryEnabled,
+  txtA,
+  withLatticeSpan,
+ )
+import Lattice.Telemetry qualified as Tel
 import Lattice.Value (canonicalJson, qvalueToJson, renderScalarKey)
 import Lattice.Wire
 import Numeric.Natural (Natural)
@@ -130,6 +184,8 @@ data ExecEnv = ExecEnv
   , xVars :: Map VarName A.Value
   -- ^ Bound query variables (absent optional variables are simply missing).
   , xMode :: EmitMode
+  , xTelemetry :: LatticeTelemetry
+  -- ^ §19 instrumentation; 'Lattice.Telemetry.noTelemetry' when off.
   }
 
 
@@ -181,6 +237,10 @@ data ExecAbort
     AbortCursorRetired
   | -- | A presented cursor failed to decode: @400@.
     AbortCursorMalformed
+  | -- | A request-time budget violation — a variable-bound @nodes@ @refs@
+    -- list over 'maxRoundFanout' (§14.4): @400@, the ordinary budget
+    -- rejection (the literal-list form rejects at compile time instead).
+    AbortBudget Text
   deriving stock (Eq, Show)
 
 
@@ -202,16 +262,61 @@ data ExecResult = ExecResult
   -- ^ Sorted @(id, ver)@ pairs of every emitted record, tombstone versions
   -- included, elisions with an empty version — the manifest-etag fact set.
   , xrEntityKeys :: Set SurrogateKey
-  -- ^ @Type:key@ for every reached entity.
+  -- ^ @Type:key@ for every reached entity, hidden derived-field deps
+  -- included (§3.7 Invalidation).
   , xrCollectionKeys :: [SurrogateKey]
-  -- ^ Scanned collections, instantiated, in scan order (deduplicated).
+  -- ^ Scanned collections, instantiated, in scan order (deduplicated) —
+  -- including derived aggregates' collection tags.
   , xrCovered :: Set SurrogateKey
   -- ^ Entity keys reached through a collection scan (coarsening candidates).
+  , xrWitness :: Set WitnessEntry
+  -- ^ The derived-value witness (§3.7 Validators); empty when the
+  -- response touched no @on read@ derived field.
   , xrDegraded :: Bool
   -- ^ Any error record present.
   , xrComplete :: Bool
   -- ^ 'False' only when an exception truncated execution.
   }
+
+
+{- | One witness entry (§3.7 Validators): an edge dep's identity or an
+aggregate result's value hash. See the module haddock for the exact
+rendered bytes.
+-}
+data WitnessEntry
+  = -- | @ViaEdge@ dep: the dep entity and its version (tombstone version
+    -- as stored; @\"\"@ for an absent row).
+    WitnessEdge Ref Text
+  | -- | @ViaCollection@ dep: the instantiated collection tag and the
+    -- 12-byte-truncated BLAKE3 of the aggregate value's canonical JSON.
+    WitnessAgg SurrogateKey Text
+  deriving stock (Eq, Ord, Show)
+
+
+-- | The canonical JSON rendering of a witness: sorted string triples.
+witnessValue :: Set WitnessEntry -> A.Value
+witnessValue w = A.toJSON (sort (map triple (Set.toList w)))
+  where
+    triple :: WitnessEntry -> [Text]
+    triple = \case
+      WitnessEdge ref ver -> ["e", renderRef ref, ver]
+      WitnessAgg key h -> ["a", key, h]
+
+
+{- | The point-fetch validator over a row version and a nonempty witness:
+@\"w:\" <> base64url(BLAKE3(utf8(ver) || 0x00 ||
+canonicalJson(witnessValue))[0..11])@.
+-}
+witnessEtag :: Text -> Set WitnessEntry -> Text
+witnessEtag ver w =
+  "w:"
+    <> b64url
+      (BS.take 12 (blake3 (TE.encodeUtf8 ver <> BS.singleton 0 <> canonicalJson (witnessValue w))))
+
+
+-- | @valueHash@ of one aggregate result (module haddock).
+aggValueHash :: A.Value -> Text
+aggValueHash v = b64url (BS.take 12 (blake3 (canonicalJson v)))
 
 
 -- ---------------------------------------------------------------------------
@@ -240,7 +345,19 @@ data St = St
   , stPendingOne :: [(Ref, FieldName, Ref)]
   -- ^ Required to-one obligations, reversed: (parent, edge field, target).
   , stRootMap :: Map Text [Ref]
+  , stWitness :: Set WitnessEntry
   , stIncomplete :: Bool
+  , stPendingNodes :: [(Text, Bool, [(Ref, Level, Bool)])]
+  -- ^ Implicit @nodes@ roots awaiting their post-round manifest fixup
+  -- (§14.4): root name, whether the root-map key itself emits at this
+  -- slice, and the admitted refs in request order with their per-type
+  -- membership levels and whether their gate is row-comparing. The entry
+  -- filters to refs that actually resolved and passed their row gate
+  -- ('fixupNodesRoots') — absent entries are simply missing.
+  , stNodesDenied :: Set Ref
+  -- ^ @nodes@ refs whose loaded row failed the type's row-comparing
+  -- @fetch by@ gate (§14.4): dropped from the manifest entry, and their
+  -- tombstones scrubbed — indistinguishable from nonexistence.
   }
 
 
@@ -257,7 +374,10 @@ emptySt =
     , stCovered = Set.empty
     , stPendingOne = []
     , stRootMap = Map.empty
+    , stWitness = Set.empty
     , stIncomplete = False
+    , stPendingNodes = []
+    , stNodesDenied = Set.empty
     }
 
 
@@ -267,6 +387,12 @@ data Job = Job
   , jNode :: NodeSelection
   , jFuel :: Map FieldName Int
   -- ^ Remaining @\@depth@ fuel along this path, keyed by edge field.
+  , jGate :: Maybe Policy
+  -- ^ A row-aware admission gate evaluated against the loaded row before
+  -- anything of this job emits or traverses — the @nodes@ root's
+  -- row-comparing @fetch by@ predicates (§14.4). Per job, not per ref: the
+  -- same entity reached through an ordinary edge in the same response is
+  -- governed by that path's own policies. 'Nothing' everywhere else.
   }
 
 
@@ -339,21 +465,44 @@ fetches, mutation output rendering). Seeds whose selections carry empty
 -}
 executeSeeds :: ExecEnv -> [(Ref, NodeSelection)] -> IO (Either ExecAbort ExecResult)
 executeSeeds env seeds = runEngine env $ \_ _ ->
-  pure (map (\(r, n) -> Job r n Map.empty) seeds)
+  pure (map (\(r, n) -> Job r n Map.empty Nothing) seeds)
 
 
+{- | Run the engine inside a @lattice.execute@ span (§19.2: one per slice
+execution) attributed with @lattice.slice@; each scoped error record also
+becomes a @lattice.error@ span EVENT (scope @$tag@ + code, never the id).
+-}
 runEngine :: ExecEnv -> (IORef St -> IORef Int -> IO [Job]) -> IO (Either ExecAbort ExecResult)
-runEngine env seed = do
-  stRef <- newIORef emptySt
-  outcome <- try $ handle (onCrash stRef) $ do
-    counter <- newIORef (0 :: Int)
-    jobs0 <- seed stRef counter
-    rounds env stRef (fromIntegral (maxDepth (xBudgets env)) + 2) jobs0
-    checkCardinality stRef
-  case outcome of
-    Left (ExecAbortEx a) -> pure (Left a)
-    Right () -> Right . finalize <$> readIORef stRef
+runEngine env seed =
+  withLatticeSpan (xTelemetry env) "lattice.execute" Tel.Internal [] execAttrs $ \msp -> do
+    stRef <- newIORef emptySt
+    outcome <- try $ handle (onCrash stRef) $ do
+      counter <- newIORef (0 :: Int)
+      jobs0 <- seed stRef counter
+      rounds env stRef 0 (fromIntegral (maxDepth (xBudgets env)) + 2) jobs0
+      checkCardinality stRef
+      fixupNodesRoots env stRef
+    case outcome of
+      Left (ExecAbortEx a) -> pure (Left a)
+      Right () -> do
+        st <- readIORef stRef
+        when (telemetryEnabled (xTelemetry env)) $
+          for_ (stErrs st) $ \er ->
+            errorEvent msp (scopeTag <$> errScope er) (errCode er)
+        pure (Right (finalize st))
   where
+    execAttrs =
+      [("lattice.slice", txtA (renderSlice modeSlice))]
+    modeSlice = case xMode env of
+      EmitEq s -> s
+      EmitAtMost s -> s
+    scopeTag = \case
+      ScopeEntity {} -> "Entity"
+      ScopeField {} -> "Field"
+      ScopeEdge {} -> "Edge"
+      ScopeRoot {} -> "Root"
+      ScopeItem {} -> "Item"
+      ScopeUnknown t _ -> t
     onCrash :: IORef St -> SomeException -> IO ()
     onCrash stRef e
       | Just ExecAbortEx {} <- fromException e = throwIO e
@@ -379,6 +528,7 @@ finalize st =
     , xrEntityKeys = stEntityKeys st
     , xrCollectionKeys = dedupOrd (reverse (stCollKeys st))
     , xrCovered = stCovered st
+    , xrWitness = stWitness st
     , xrDegraded = not (null (stErrs st))
     , xrComplete = not (stIncomplete st)
     }
@@ -414,6 +564,7 @@ dedupOrd = go Set.empty
 
 rootJobs :: ExecEnv -> IORef St -> IORef Int -> (RootName, PlanRoot) -> IO [Job]
 rootJobs env stRef counter (name, pr)
+  | unRootName name == "nodes" && isNodesRootDef (prDef pr) = nodesRootJobs env stRef counter name pr
   | not (traversesAt (xMode env) (prLevel pr)) = pure []
   | not (claimOnlyPredicates (xClaims env) (rootPolicy (prDef pr))) = pure []
   | otherwise = do
@@ -443,9 +594,132 @@ rootJobs env stRef counter (name, pr)
       when' (emitsAt (xMode env) (prLevel pr)) $
         modifyIORef' stRef (\s -> s {stRootMap = Map.insert (unRootName name) refs (stRootMap s)})
       enqueue env stRef counter (ScopeRoot name) $
-        mapMaybe (\r -> (\n -> Job r n Map.empty) <$> nodeFor (prSelection pr) (refType r)) refs
+        mapMaybe (\r -> (\n -> Job r n Map.empty Nothing) <$> nodeFor (prSelection pr) (refType r)) refs
   where
     when' b act = if b then act else pure ()
+
+
+{- | The implicit @nodes@ root (§14.4): refs come from the bound @refs@
+argument rather than a backend loader, gated per type by @fetch by@.
+
+* A variable-bound list longer than 'maxRoundFanout' aborts the request
+  ('AbortBudget'); the literal form was already rejected at compile time.
+* Malformed refs, unknown types, forbidden types ('entityFetchBy' absent),
+  and claim-value gate failures all EMIT NOTHING for that ref — no record,
+  no error, no root-map entry: indistinguishable from nonexistence.
+* A @fetch by@ whose predicates compare against row fields ('RhsField')
+  cannot be decided before the load; the policy rides the job as 'jGate'
+  and 'processJob' evaluates it against the loaded row — a failing row
+  emits nothing (recorded in 'stNodesDenied' so the manifest entry drops
+  too), and a tombstoned row, having no fields to compare, is treated as
+  denied ('fixupNodesRoots' suppresses the tombstone record). This is
+  stricter than declared roots' claims-only membership check, and
+  deliberately so: for @nodes@ the row IS the membership fact.
+* Admitted refs become ordinary jobs — 'loadRound' batches them one
+  'beLoad' per type per round — with the per-type node selection of the
+  interface-dispatch machinery; an admitted type the selection does not
+  list still loads (existence is verified before the ref may enter the
+  manifest) under an empty selection.
+* The manifest root entry is deferred to 'fixupNodesRoots': request
+  order, filtered to refs that resolved (found, tombstoned, or a scoped
+  load failure — never 'RowAbsent'), each at its type's membership slice.
+-}
+nodesRootJobs :: ExecEnv -> IORef St -> IORef Int -> RootName -> PlanRoot -> IO [Job]
+nodesRootJobs env stRef counter name pr = do
+  let schema = xSchema env
+      bound = bindRuntimeArgs (xVars env) (prArgs pr)
+      raw = case lookup "refs" bound of
+        Just (A.Array xs) -> [s | A.String s <- toList xs]
+        _ -> []
+      cap = fromIntegral (maxRoundFanout (xBudgets env)) :: Int
+      gateOf r = do
+        ent <- lookupEntity schema (refType r)
+        pol <- entityFetchBy ent
+        pure (pol, policyLevel pol)
+      admitted =
+        [ (r, lvl, pol)
+        | r <- dedupOrd (mapMaybe parseRef raw)
+        , Just (pol, lvl) <- [gateOf r]
+        , claimOnlyPredicates (xClaims env) pol
+        , traversesAt (xMode env) lvl
+        ]
+      listedLevels =
+        mapMaybe
+          (\t -> policyLevel <$> (entityFetchBy =<< lookupEntity schema t))
+          (Map.keys (tsPerType (prSelection pr)))
+      keyEmits = any (emitsAt (xMode env)) listedLevels
+  when (length raw > cap) . throwIO . ExecAbortEx . AbortBudget $
+    "nodes refs list length "
+      <> T.pack (show (length raw))
+      <> " exceeds the origin's maxRoundFanout budget "
+      <> T.pack (show cap)
+  modifyIORef' stRef $ \s ->
+    s
+      { stPendingNodes =
+          (unRootName name, keyEmits, [(r, lvl, policyRowDependent pol) | (r, lvl, pol) <- admitted])
+            : stPendingNodes s
+      }
+  enqueue env stRef counter (ScopeRoot name) $
+    map
+      ( \(r, _, pol) ->
+          Job
+            { jRef = r
+            , jNode = fromMaybe (NodeSelection [] []) (nodeFor (prSelection pr) (refType r))
+            , jFuel = Map.empty
+            , jGate = if policyRowDependent pol then Just pol else Nothing
+            }
+      )
+      admitted
+
+
+-- | Does a policy carry row-comparing ('RhsField') predicates?
+policyRowDependent :: Policy -> Bool
+policyRowDependent = \case
+  RequiresClaims preds -> any rowDep preds
+  Public -> False
+  Private -> False
+  where
+    rowDep p = case cpRhs p of
+      RhsField _ -> True
+      _ -> False
+
+
+{- | Resolve the deferred @nodes@ manifest entries (§14.4): request order,
+refs whose membership level emits at this slice and whose row resolved —
+found (and not row-gate denied), tombstoned (row-independent gates only:
+a row-comparing gate has no row to pass), or a load failure (the scoped
+error explains it; dropping it would make an outage look like
+nonexistence). 'RowAbsent' and denied entries are simply missing. A
+row-gate-denied tombstone is also scrubbed from the record stream. The
+root-map key appears whenever any listed type's membership lands in this
+slice (an all-absent request keeps its empty entry), or when a ref
+emitted.
+-}
+fixupNodesRoots :: ExecEnv -> IORef St -> IO ()
+fixupNodesRoots env stRef = do
+  st0 <- readIORef stRef
+  for_ (stPendingNodes st0) $ \(_, _, refs) ->
+    for_ refs $ \(r, _, rowGated) ->
+      case Map.lookup r (stRows st0) of
+        Just (Right (RowTombstone _))
+          | rowGated ->
+              modifyIORef' stRef $ \s ->
+                s
+                  { stTombs = Map.delete r (stTombs s)
+                  , stNodesDenied = Set.insert r (stNodesDenied s)
+                  }
+        _ -> pure ()
+  st <- readIORef stRef
+  for_ (stPendingNodes st) $ \(name, keyEmits, refs) -> do
+    let present r = case Map.lookup r (stRows st) of
+          _ | Set.member r (stNodesDenied st) -> False
+          Just (Right (RowFound _)) -> True
+          Just (Right (RowTombstone _)) -> True
+          Just (Left _) -> True
+          _ -> False
+        emitRefs = [r | (r, lvl, _) <- refs, emitsAt (xMode env) lvl, present r]
+    when (keyEmits || not (null emitRefs)) $
+      modifyIORef' stRef (\s -> s {stRootMap = Map.insert name emitRefs (stRootMap s)})
 
 
 rootCollectionKey :: CollectionDef -> [(ArgName, A.Value)] -> SurrogateKey
@@ -463,19 +737,50 @@ markCovered refs s =
 -- Rounds
 -- ---------------------------------------------------------------------------
 
-rounds :: ExecEnv -> IORef St -> Int -> [Job] -> IO ()
-rounds _ _ _ [] = pure ()
-rounds env stRef fuel jobs
+rounds :: ExecEnv -> IORef St -> Int -> Int -> [Job] -> IO ()
+rounds _ _ _ _ [] = pure ()
+rounds env stRef ix fuel jobs
   | fuel <= 0 = do
       modifyIORef' stRef (\s -> s {stIncomplete = True})
       addError stRef $
         ErrorRecord Nothing (Just "lattice:internal") Nothing False (Just "round budget exhausted")
   | otherwise = do
-      loadRound env stRef jobs
-      counter <- newIORef (0 :: Int)
-      (toOneKids, tasks) <- processJobs env stRef counter jobs
-      edgeKids <- concat <$> traverse (runEdgeTask env stRef counter) (Map.toAscList tasks)
-      rounds env stRef (fuel - 1) (toOneKids <> edgeKids)
+      -- §19.2: one @lattice.round[i]@ span per traversal round; the next
+      -- round's span is a sibling, so the recursion sits outside the span.
+      kids <-
+        withLatticeSpan
+          (xTelemetry env)
+          ("lattice.round[" <> T.pack (show ix) <> "]")
+          Tel.Internal
+          []
+          [("lattice.round.index", intA ix)]
+          $ \_ -> do
+            loadRound env stRef jobs
+            counter <- newIORef (0 :: Int)
+            deriveRef <- newIORef Map.empty
+            (toOneKids, tasks) <- processJobs env stRef counter deriveRef jobs
+            edgeKids <- concat <$> traverse (runEdgeTask env stRef counter) (Map.toAscList tasks)
+            runDeriveTasks env stRef counter =<< readIORef deriveRef
+            pure (toOneKids <> edgeKids)
+      rounds env stRef (ix + 1) (fuel - 1) kids
+
+
+{- | One @lattice.load@ span per loader invocation (§19.2) — loader name
+and batch size as attributes, never in the span name — with the
+@lattice.loader.batch_size@ histogram recorded alongside.
+-}
+loaderSpan :: ExecEnv -> Text -> Int -> IO a -> IO a
+loaderSpan env loader batch act = do
+  recordLoaderBatch (xTelemetry env) loader batch
+  withLatticeSpan
+    (xTelemetry env)
+    "lattice.load"
+    Tel.Internal
+    []
+    [ ("lattice.loader.name", txtA loader)
+    , ("lattice.loader.batch_size", intA batch)
+    ]
+    (const act)
 
 
 -- | Load every not-yet-loaded key, one 'beLoad' per type.
@@ -494,7 +799,8 @@ loadRound env stRef jobs = do
             )
             jobs
   for_ (Map.toAscList needed) $ \(ty, keys) -> do
-    loaded <- beLoad (xBackend env) ty (Set.toAscList keys)
+    loaded <- loaderSpan env (unTypeName ty) (Set.size keys) $
+      beLoad (xBackend env) ty (Set.toAscList keys)
     for_ (Set.toAscList keys) $ \k -> do
       let ref = Ref ty k
           res = fromMaybe (Right RowAbsent) (Map.lookup k loaded)
@@ -512,13 +818,14 @@ processJobs ::
   ExecEnv ->
   IORef St ->
   IORef Int ->
+  IORef (Map DKey DeriveTask) ->
   [Job] ->
   IO ([Job], Map TaskKey EdgeTask)
-processJobs env stRef counter jobs = go [] Map.empty jobs
+processJobs env stRef counter deriveRef jobs = go [] Map.empty jobs
   where
     go kids tasks [] = pure (reverse kids, tasks)
     go kids tasks (j : rest) = do
-      (kids', tasks') <- processJob env stRef counter tasks j
+      (kids', tasks') <- processJob env stRef counter deriveRef tasks j
       go (reverse kids' <> kids) tasks' rest
 
 
@@ -526,15 +833,23 @@ processJob ::
   ExecEnv ->
   IORef St ->
   IORef Int ->
+  IORef (Map DKey DeriveTask) ->
   Map TaskKey EdgeTask ->
   Job ->
   IO ([Job], Map TaskKey EdgeTask)
-processJob env stRef counter tasks j = do
+processJob env stRef counter deriveRef tasks j = do
   st <- readIORef stRef
   case (Map.lookup (jRef j) (stRows st), lookupEntity (xSchema env) (refType (jRef j))) of
-    (Just (Right (RowFound row)), Just ent) -> do
-      traverse_ (emitField env stRef ent (jRef j) row) (nsFields (jNode j))
-      goEdges [] tasks (nsEdges (jNode j)) row
+    (Just (Right (RowFound row)), Just ent)
+      -- §14.4: a nodes job whose row fails its fetch-by gate emits and
+      -- traverses nothing; the denial also drops its manifest entry.
+      | Just pol <- jGate j
+      , not (rowPredicates (xClaims env) row pol) -> do
+          modifyIORef' stRef (\s -> s {stNodesDenied = Set.insert (jRef j) (stNodesDenied s)})
+          pure ([], tasks)
+      | otherwise -> do
+          traverse_ (emitField env stRef deriveRef ent (jRef j) row) (nsFields (jNode j))
+          goEdges [] tasks (nsEdges (jNode j)) row
     _ -> pure ([], tasks)
   where
     goEdges kids ts [] _ = pure (reverse kids, ts)
@@ -543,14 +858,27 @@ processJob env stRef counter tasks j = do
       goEdges (reverse kids' <> kids) ts' pes row
 
 
-emitField :: ExecEnv -> IORef St -> EntityDef -> Ref -> EntityRow -> PlanField -> IO ()
-emitField env stRef ent ref row pf
+emitField ::
+  ExecEnv ->
+  IORef St ->
+  IORef (Map DKey DeriveTask) ->
+  EntityDef ->
+  Ref ->
+  EntityRow ->
+  PlanField ->
+  IO ()
+emitField env stRef deriveRef ent ref row pf
   | not (emitsAt (xMode env) (pfLevel pf)) = pure ()
   | otherwise = case lookupEntityField ent (pfName pf) of
       Nothing -> pure ()
       Just fd
         | not (rowPredicates (xClaims env) row (entityFieldPolicy ent fd)) ->
             modifyIORef' stRef (suppressSt ref (rowVer row))
+        | Just d <- fieldDerivation fd
+        , OnRead <- derivMaterialize d ->
+            -- §3.7: on-read derived values never live on the row; defer to
+            -- the round's batched derive pass ('runDeriveTasks').
+            modifyIORef' deriveRef (addDeriveParent ent fd d (pfName pf) key ref row)
         | otherwise -> do
             mval <-
               if null (fieldArgs fd)
@@ -590,6 +918,302 @@ computedArgs fd bound = Map.fromList (mapMaybe one (fieldArgs fd))
       Nothing -> (,) (adName ad) <$> (qvalueToJson =<< adDefault ad)
 
 
+-- ---------------------------------------------------------------------------
+-- Derived fields (§3.7)
+-- ---------------------------------------------------------------------------
+
+type DKey = (TypeName, FieldName)
+
+
+-- | One round's accumulated requests for one @on read@ derived field.
+data DeriveTask = DeriveTask
+  { dtEnt :: EntityDef
+  , dtFieldDef :: FieldDef
+  , dtDeriv :: Derivation
+  , dtKey :: Text
+  -- ^ The wire field key (derived fields take no arguments, so the plan's
+  -- static key is final).
+  , dtParents :: Map Ref EntityRow
+  }
+
+
+addDeriveParent ::
+  EntityDef ->
+  FieldDef ->
+  Derivation ->
+  FieldName ->
+  Text ->
+  Ref ->
+  EntityRow ->
+  Map DKey DeriveTask ->
+  Map DKey DeriveTask
+addDeriveParent ent fd d fname key ref row = Map.alter step (refType ref, fname)
+  where
+    step = \case
+      Nothing ->
+        Just
+          DeriveTask
+            { dtEnt = ent
+            , dtFieldDef = fd
+            , dtDeriv = d
+            , dtKey = key
+            , dtParents = Map.singleton ref row
+            }
+      Just t -> Just t {dtParents = Map.insertWith (\_new old -> old) ref row (dtParents t)}
+
+
+{- | Resolve a round's derived fields (module haddock, /Derived fields/):
+hidden 'beLoad'\/'beAggregate' batches, 'DepValues' assembly, one
+'beDerive' per (type, field), witness + read-set key recording.
+-}
+runDeriveTasks :: ExecEnv -> IORef St -> IORef Int -> Map DKey DeriveTask -> IO ()
+runDeriveTasks env stRef counter tasks
+  | Map.null tasks = pure ()
+  | otherwise = do
+      st0 <- readIORef stRef
+      let schema = xSchema env
+          taskList = Map.toAscList tasks
+
+          -- Per (task, parent): resolved ViaEdge deps.
+          edgeWants =
+            concatMap
+              ( \(k, t) ->
+                  concatMap
+                    ( \case
+                        ViaEdge e frag
+                          | Just rel@ToOne {} <- lookupEntityRel (dtEnt t) e ->
+                              map
+                                ( \(pref, prow) ->
+                                    ((k, pref), (e, frag, linkTargetOf schema rel prow))
+                                )
+                                (Map.toAscList (dtParents t))
+                        _ -> []
+                    )
+                    (NE.toList (derivReads (dtDeriv t)))
+              )
+              taskList
+
+          -- Per (task, parent): ViaCollection deps with their group keys.
+          aggWants =
+            concatMap
+              ( \(k, t) ->
+                  concatMap
+                    ( \case
+                        ViaCollection r agg
+                          | Just ToMany {relCollection = col} <- lookupEntityRel (dtEnt t) r ->
+                              map
+                                ( \(pref, prow) ->
+                                    ((k, pref), (r, colName col, agg, deriveGroupKey col pref prow))
+                                )
+                                (Map.toAscList (dtParents t))
+                        _ -> []
+                    )
+                    (NE.toList (derivReads (dtDeriv t)))
+              )
+              taskList
+
+          allDepRefs = dedupOrd (mapMaybe (\(_, (_, _, mref)) -> mref) edgeWants)
+          toLoad = filter (\r -> not (Map.member r (stRows st0))) allDepRefs
+          aggCalls =
+            Map.fromListWith
+              Set.union
+              (map (\(_, (_, cn, agg, gk)) -> ((cn, agg), Set.singleton gk)) aggWants)
+          hiddenCount = length toLoad + sum (map Set.size (Map.elems aggCalls))
+      ok <- reserveHidden env stRef counter hiddenCount
+      when' ok $ do
+        -- One 'beLoad' per dep target type across every task.
+        let byType =
+              Map.fromListWith
+                Set.union
+                (map (\r -> (refType r, Set.singleton (refKey r))) toLoad)
+        loadedPairs <-
+          traverse
+            ( \(ty, keys) ->
+                -- Hidden derived-field batch: batch_size only, no span
+                -- (module haddock of "Lattice.Telemetry").
+                recordLoaderBatch (xTelemetry env) (unTypeName ty) (Set.size keys)
+                  *> ((,) ty <$> beLoad (xBackend env) ty (Set.toAscList keys))
+            )
+            (Map.toAscList byType)
+        let loaded =
+              Map.fromList
+                ( concatMap
+                    (\(ty, m) -> map (\(k, res) -> (Ref ty k, res)) (Map.toList m))
+                    loadedPairs
+                )
+            depRow r = case Map.lookup r (stRows st0) of
+              Just res -> res
+              Nothing -> fromMaybe (Right RowAbsent) (Map.lookup r loaded)
+        -- Cache successful hidden loads for later rounds (failures stay
+        -- uncached so a visible reach re-loads and reports); record every
+        -- attempted dep entity key (§3.7 Invalidation).
+        modifyIORef' stRef $ \s ->
+          s
+            { stRows = Map.union (stRows s) (Map.filter isRight loaded)
+            , stEntityKeys = foldr (Set.insert . entityKeyOf) (stEntityKeys s) allDepRefs
+            }
+        -- Witness the dep entities (§3.7 Validators).
+        for_ allDepRefs $ \r -> case depRow r of
+          Right (RowFound row) -> addWitness stRef (WitnessEdge r (rowVer row))
+          Right (RowTombstone v) -> addWitness stRef (WitnessEdge r v)
+          Right RowAbsent -> addWitness stRef (WitnessEdge r "")
+          Left _ -> pure ()
+        -- One 'beAggregate' per (collection, aggregate) across every task.
+        aggPairs <-
+          traverse
+            ( \((cn, agg), gks) ->
+                (,) (cn, agg) <$> beAggregate (xBackend env) cn agg (Set.toAscList gks)
+            )
+            (Map.toAscList aggCalls)
+        let aggResults = Map.fromList aggPairs
+        -- Collection tags + aggregate witness per instantiated group.
+        for_ (dedupOrd (map (\(_, (_, cn, agg, gk)) -> (cn, agg, gk)) aggWants)) $
+          \(cn, agg, gk) -> do
+            modifyIORef' stRef (\s -> s {stCollKeys = collectionKey cn gk : stCollKeys s})
+            case Map.lookup (cn, agg) aggResults of
+              Just (Right vals)
+                | Just v <- Map.lookup gk vals ->
+                    addWitness stRef (WitnessAgg (collectionKey cn gk) (aggValueHash v))
+              _ -> pure ()
+        -- Assemble DepValues, derive, emit — one 'beDerive' per (type, field).
+        let edgeByParent = Map.fromListWith (<>) (map (\(kp, w) -> (kp, [w])) edgeWants)
+            aggByParent = Map.fromListWith (<>) (map (\(kp, w) -> (kp, [w])) aggWants)
+        for_ taskList $ \(k@(ty, fname), t) -> do
+          let ownNames =
+                concatMap
+                  ( \case
+                      OwnFields fs -> NE.toList fs
+                      _ -> []
+                  )
+                  (NE.toList (derivReads (dtDeriv t)))
+              buildOne (pref, prow) = do
+                let edges = Map.findWithDefault [] (k, pref) edgeByParent
+                    aggs = Map.findWithDefault [] (k, pref) aggByParent
+                    failures =
+                      mapMaybe
+                        ( \(_, _, mref) ->
+                            mref >>= \r -> case depRow r of
+                              Left bf -> Just bf
+                              Right _ -> Nothing
+                        )
+                        edges
+                        <> mapMaybe
+                          ( \(_, cn, agg, _) -> case Map.lookup (cn, agg) aggResults of
+                              Just (Left bf) -> Just bf
+                              _ -> Nothing
+                          )
+                          aggs
+                case failures of
+                  bf : _ -> do
+                    addError stRef (scopedError (Just (ScopeField pref fname)) bf)
+                    pure Nothing
+                  [] -> do
+                    let dvE =
+                          Map.fromList
+                            ( mapMaybe
+                                ( \(e, frag, mref) ->
+                                    mref >>= \r -> case depRow r of
+                                      Right (RowFound row) ->
+                                        Just (e, (r, fragmentFieldsOf schema frag row))
+                                      _ -> Nothing
+                                )
+                                edges
+                            )
+                        dvA =
+                          Map.fromList
+                            ( mapMaybe
+                                ( \(rf, cn, agg, gk) -> case Map.lookup (cn, agg) aggResults of
+                                    Just (Right vals) -> (,) rf <$> Map.lookup gk vals
+                                    _ -> Nothing
+                                )
+                                aggs
+                            )
+                        dv =
+                          DepValues
+                            { dvOwn = Map.restrictKeys (rowFields prow) (Set.fromList ownNames)
+                            , dvEdges = dvE
+                            , dvAggregates = dvA
+                            }
+                    pure (Just (refKey pref, (pref, prow, dv)))
+          inputs <- catMaybes <$> traverse buildOne (Map.toAscList (dtParents t))
+          when' (not (null inputs)) $ do
+            vals <-
+              beDerive
+                (xBackend env)
+                ty
+                fname
+                (Map.fromList (map (\(kk, (_, _, dv)) -> (kk, dv)) inputs))
+            for_ inputs $ \(kk, (pref, prow, _)) ->
+              for_ (Map.lookup kk vals) $ \v -> do
+                when' (violatesList1 schema (fieldType (dtFieldDef t)) v) $
+                  addError stRef $
+                    ErrorRecord
+                      { errScope = Just (ScopeField pref fname)
+                      , errCode = Just "lattice:integrity"
+                      , errDomain = Nothing
+                      , errRetryable = False
+                      , errMessage = Just "derived value violates its nonempty list type"
+                      }
+                modifyIORef' stRef (addFieldSt pref (rowVer prow) (dtKey t) v)
+  where
+    when' b act = if b then act else pure ()
+
+
+linkTargetOf :: Schema -> RelationshipDef -> EntityRow -> Maybe Ref
+linkTargetOf schema rel prow =
+  Map.lookup (relByField rel) (rowFields prow) >>= refFromValue schema (relTarget rel)
+
+
+{- | A derived aggregate's grouping values at one owner (mirrors
+'edgeCollectionKey' minus bound arguments): the link field holds the
+owner's key component, other grouping fields read the owner row.
+-}
+deriveGroupKey :: CollectionDef -> Ref -> EntityRow -> GroupKey
+deriveGroupKey col pref prow = map gv (NE.toList (colGrouping col))
+  where
+    gv g
+      | g == colLink col = refKey pref
+      | Just v <- Map.lookup g (rowFields prow) = renderScalarKey v
+      | otherwise = ""
+
+
+-- | The fragment's top-level plain fields read off a dep target row.
+fragmentFieldsOf :: Schema -> FragmentName -> EntityRow -> Map FieldName A.Value
+fragmentFieldsOf schema frag row = case Map.lookup frag (schemaFragments schema) of
+  Nothing -> Map.empty
+  Just fdef ->
+    Map.restrictKeys
+      (rowFields row)
+      (Set.fromList (map fName (selectionFields (fragSelection fdef))))
+
+
+addWitness :: IORef St -> WitnessEntry -> IO ()
+addWitness stRef w = modifyIORef' stRef (\s -> s {stWitness = Set.insert w (stWitness s)})
+
+
+{- | Reserve hidden derived-field loads against the round fan-out budget;
+exhaustion degrades the response and skips the round's derived fields.
+-}
+reserveHidden :: ExecEnv -> IORef St -> IORef Int -> Int -> IO Bool
+reserveHidden env stRef counter n = do
+  used <- readIORef counter
+  let cap = fromIntegral (maxRoundFanout (xBudgets env))
+  if used + n <= cap
+    then do
+      writeIORef counter (used + n)
+      pure True
+    else do
+      modifyIORef' stRef (\s -> s {stIncomplete = True})
+      addError stRef $
+        ErrorRecord
+          Nothing
+          (Just "lattice:internal")
+          Nothing
+          False
+          (Just "round fan-out exhausted resolving derived fields")
+      pure False
+
+
 edgeStep ::
   ExecEnv ->
   IORef St ->
@@ -623,7 +1247,7 @@ edgeStep env stRef counter tasks j row pe = case depthGate of
               kids <- case nodeFor (peSelection pe) (refType childRef) of
                 Just childNode ->
                   enqueue env stRef counter (ScopeEdge (jRef j) (peField pe)) $
-                    [Job childRef childNode (childFuelOf pe (jFuel j))]
+                    [Job childRef childNode (childFuelOf pe (jFuel j)) Nothing]
                 Nothing
                   | opt -> pure []
                   | otherwise ->
@@ -632,7 +1256,7 @@ edgeStep env stRef counter tasks j row pe = case depthGate of
                       -- (point-fetch masks, mutation output); the empty
                       -- selection loads the row and traverses nothing.
                       enqueue env stRef counter (ScopeEdge (jRef j) (peField pe)) $
-                        [Job childRef (NodeSelection [] []) (childFuelOf pe (jFuel j))]
+                        [Job childRef (NodeSelection [] []) (childFuelOf pe (jFuel j)) Nothing]
               pure (kids, tasks)
         ToMany {relCollection = col} -> do
           win <- abortEither (windowFor col (bindRuntimeArgs (xVars env) (peArgs pe)))
@@ -690,7 +1314,8 @@ runEdgeTask env stRef counter ((pty, field, key), task) = do
   let parents = reverse (etParents task)
       pe = etEdge task
   results <-
-    beChildren (xBackend env) pty field (map (\(r, row, _) -> (r, row)) parents) (etWindow task)
+    loaderSpan env (unTypeName pty <> "." <> unFieldName field) (length parents) $
+      beChildren (xBackend env) pty field (map (\(r, row, _) -> (r, row)) parents) (etWindow task)
   fmap concat (traverse (perParent pe results) parents)
   where
     perParent pe results (pref, prow, fuelMap) =
@@ -710,7 +1335,7 @@ runEdgeTask env stRef counter ((pty, field, key), task) = do
               s {stCollKeys = edgeCollectionKey env (etCol task) pref prow pe : stCollKeys s}
           enqueue env stRef counter (ScopeEdge pref field) $
             mapMaybe
-              (\r -> (\n -> Job r n (childFuelOf pe fuelMap)) <$> nodeFor (peSelection pe) (refType r))
+              (\r -> (\n -> Job r n (childFuelOf pe fuelMap) Nothing) <$> nodeFor (peSelection pe) (refType r))
               (pageRefs page)
       where
         missing = Left (internalError (Just "backend returned no page for parent"))
@@ -1000,6 +1625,7 @@ outputSelection schema cap base t = do
                     , pfArgs = []
                     , pfKey = unFieldName n
                     , pfLevel = lvl
+                    , pfDerivation = fieldDerivation fd
                     }
               else Nothing
       edgeOf (n, rel) = case rel of

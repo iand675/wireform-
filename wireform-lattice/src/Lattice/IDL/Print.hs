@@ -18,11 +18,13 @@ parsed schemas.
 module Lattice.IDL.Print (
   canonicalIdl,
   printEntity,
+  printExtension,
   printRoot,
   printMutation,
   printFragment,
   printTypeDecl,
   printInterface,
+  renderType,
 ) where
 
 import Data.Aeson qualified as A
@@ -45,15 +47,17 @@ canonicalIdl :: Schema -> Text
 canonicalIdl s =
   T.intercalate "\n\n" (schemaLine : blocks) <> "\n"
   where
-    schemaLine = "schema " <> schemaName s
+    ann = annPrefix s
+    schemaLine = ann OnSchema "\n" <> "schema " <> schemaName s
     blocks =
       claimsBlocks
-        <> map (uncurry printTypeDecl) (Map.toAscList (schemaTypes s))
-        <> map (uncurry printInterface) (Map.toAscList (schemaInterfaces s))
-        <> map (uncurry printEntity) (Map.toAscList (schemaEntities s))
-        <> map (uncurry printFragment) (Map.toAscList (schemaFragments s))
-        <> map (uncurry printRoot) (Map.toAscList (schemaRoots s))
-        <> map (uncurry printMutation) (Map.toAscList (schemaMutations s))
+        <> map (\(n, d) -> ann (OnType n) "\n" <> printTypeDecl n d) (Map.toAscList (schemaTypes s))
+        <> map (\(n, d) -> ann (OnInterface n) "\n" <> printInterfaceIn s n d) (Map.toAscList (schemaInterfaces s))
+        <> map (\(n, d) -> ann (OnEntity n) "\n" <> printEntityIn s n d) (Map.toAscList (schemaEntities s))
+        <> map (\(n, d) -> ann (OnEntity n) "\n" <> printExtensionIn s n d) (Map.toAscList (schemaExtensions s))
+        <> map (\(n, d) -> ann (OnFragment n) "\n" <> printFragment n d) (Map.toAscList (schemaFragments s))
+        <> map (\(n, d) -> ann (OnRoot n) "\n" <> printRoot n d) (Map.toAscList (schemaRoots s))
+        <> map (\(n, d) -> ann (OnMutation n) "\n" <> printMutation n d) (Map.toAscList (schemaMutations s))
     claimsBlocks
       | Map.null (schemaClaims s) = []
       | otherwise = [printClaims (schemaClaims s)]
@@ -62,6 +66,50 @@ canonicalIdl s =
       block "claims {" (map claimLine (Map.toAscList cm))
     claimLine (ClaimName c, t) = c <> ": " <> renderType t
 
+
+{- | The canonical rendering of a site's annotations (§17.3 @\@break@,
+§17.5 @\@deprecated@), each followed by @sep@: a newline before a
+top-level declaration, a space before an entity\/interface item. Empty
+when the site carries none. Annotations participate in the canonical IDL
+text (they are part of the published document) but never in plan
+pertinence ("Lattice.Plan" prints declarations without them).
+-}
+annPrefix :: Schema -> DeclPath -> Text -> Text
+annPrefix s p sep =
+  maybe "" (\t -> "@break(approved: " <> jsonString t <> ")" <> sep) (Map.lookup p (schemaBreaks s))
+    <> maybe "" (\d -> renderDeprecation d <> sep) (Map.lookup p (schemaDeprecations s))
+
+
+renderDeprecation :: Deprecation -> Text
+renderDeprecation d =
+  "@deprecated(sunset: \""
+    <> T.pack (show (depSunset d))
+    <> "\", note: "
+    <> jsonString (depNote d)
+    <> ")"
+
+
+
+{- | A schema carrying no annotations: the un-annotated printers
+('printEntity', 'printInterface') delegate through it, so plan pertinence
+(§7.3) never includes annotation text and plan ids are stable under
+@\@break@\/@\@deprecated@ churn.
+-}
+bare :: Schema
+bare =
+  Schema
+    { schemaName = ""
+    , schemaClaims = Map.empty
+    , schemaTypes = Map.empty
+    , schemaInterfaces = Map.empty
+    , schemaEntities = Map.empty
+    , schemaExtensions = Map.empty
+    , schemaFragments = Map.empty
+    , schemaRoots = Map.empty
+    , schemaMutations = Map.empty
+    , schemaBreaks = Map.empty
+    , schemaDeprecations = Map.empty
+    }
 
 printTypeDecl :: TypeName -> TypeDecl -> Text
 printTypeDecl (TypeName n) = \case
@@ -90,18 +138,29 @@ printTypeDecl (TypeName n) = \case
 
 
 printInterface :: InterfaceName -> InterfaceDef -> Text
-printInterface (InterfaceName n) i =
+printInterface = printInterfaceIn bare
+
+
+-- | 'printInterface' with the schema's annotations rendered on items.
+printInterfaceIn :: Schema -> InterfaceName -> InterfaceDef -> Text
+printInterfaceIn s iname@(InterfaceName n) i =
   block
     ("interface " <> n <> " {")
-    ( map fieldLine (Map.toAscList (ifaceFields i))
+    ( map (\(f, fd) -> itemAnn f <> fieldLine (f, fd)) (Map.toAscList (ifaceFields i))
         <> map relLine (Map.toAscList (ifaceRels i))
     )
   where
-    relLine (f, r) = renderRel (defaultCollName n f) f r
+    itemAnn f = annPrefix s (OnIfaceItem iname f) " "
+    relLine (f, r) = itemAnn f <> renderRel (defaultCollName n f) f r
 
 
 printEntity :: TypeName -> EntityDef -> Text
-printEntity (TypeName n) e =
+printEntity = printEntityIn bare
+
+
+-- | 'printEntity' with the schema's annotations rendered on items.
+printEntityIn :: Schema -> TypeName -> EntityDef -> Text
+printEntityIn s tname@(TypeName n) e =
   block
     ("entity " <> n <> keyClause <> impls <> " {")
     (defaultLine : fieldLines <> relLines <> fetchLines)
@@ -131,15 +190,56 @@ printEntity (TypeName n) e =
         Map.withoutKeys
           (entityFields e)
           (Set.fromList (NE.toList (entityKey e)))
-    fieldLines = map fieldLine (Map.toAscList bodyFields)
+    fieldLines = map (\(f, fd) -> itemAnn f <> fieldLine (f, fd)) (Map.toAscList bodyFields)
     relLines =
-      map (\(f, r) -> renderRel (defaultCollName n f) f r) (Map.toAscList (entityRels e))
+      map (\(f, r) -> itemAnn f <> renderRel (defaultCollName n f) f r) (Map.toAscList (entityRels e))
+    itemAnn f = annPrefix s (OnEntityItem tname f) " "
     fetchLines = case entityFetchBy e of
       Nothing -> []
       Just p -> ["fetch by " <> renderKey (entityKey e) <> ": " <> renderPolicy p]
 
     renderKey (FieldName k :| []) = k
     renderKey ks = "(" <> T.intercalate ", " (map unFieldName (NE.toList ks)) <> ")"
+
+
+printExtension :: TypeName -> ExtensionDef -> Text
+printExtension = printExtensionIn bare
+
+
+{- | Canonical @extend entity@ block (§18.1). Body layout mirrors an entity:
+the (illegal, fusion-rejected) default-visibility line if present, fields
+sorted by name, relationships sorted by name, then the (illegal) @fetch by@.
+Extension edges auto-name their collections off the EXTENDED type
+(@Post.reactions@), matching where fusion folds them.
+-}
+printExtensionIn :: Schema -> TypeName -> ExtensionDef -> Text
+printExtensionIn s tname@(TypeName n) x =
+  block
+    ("extend entity " <> n <> coClause <> " {")
+    (defaultLines <> fieldLines <> relLines <> fetchLines)
+  where
+    coClause = case extCoKey x of
+      Nothing -> ""
+      Just (CoKey (TypeName b) JoinsBase) -> " joins " <> b
+      Just (CoKey (TypeName b) RefinesBase) -> " refines " <> b
+
+    defaultLines = case extDefaultPolicy x of
+      Nothing -> []
+      Just Public -> ["visible to all by default"]
+      Just Private -> ["private by default"]
+      Just (RequiresClaims ps) -> ["visible when " <> renderPreds ps <> " by default"]
+
+    fieldLines = map (\(f, fd) -> itemAnn f <> fieldLine (f, fd)) (Map.toAscList (extFields x))
+    relLines =
+      map (\(f, r) -> itemAnn f <> renderRel (defaultCollName n f) f r) (Map.toAscList (extRels x))
+    itemAnn f = annPrefix s (OnEntityItem tname f) " "
+
+    fetchLines = case extFetchBy x of
+      Nothing -> []
+      Just (ks, p) -> ["fetch by " <> renderKeySpec ks <> ": " <> renderPolicy p]
+
+    renderKeySpec (FieldName k :| []) = k
+    renderKeySpec ks = "(" <> T.intercalate ", " (map unFieldName (NE.toList ks)) <> ")"
 
 
 printRoot :: RootName -> RootDef -> Text
@@ -184,7 +284,7 @@ printMutation :: MutationName -> MutationDef -> Text
 printMutation (MutationName n) m =
   block
     ("mutation " <> n <> renderArgDefs (mutParams m) <> " returns " <> unTypeName (mutReturns m) <> " {")
-    (allowLine : writesLine : invalidatesLine : effectLine : errorsLines <> batchLines)
+    (allowLine : writesLine : invalidatesLine : effectLine : (asLines <> errorsLines <> batchLines))
   where
     allowLine = case mutGuard m of
       Public -> "allow public"
@@ -204,13 +304,28 @@ printMutation (MutationName n) m =
       Nothing -> []
       Just (TypeName en, o, cs) ->
         ["errors " <> en <> " " <> renderOpenness o <> " = " <> T.intercalate " | " (NE.toList cs)]
+    -- Canonical clause order (parse order is free): the singular binding
+    -- prints after @effect@, the batch binding as a suffix of @batch@.
+    asLines = case mutBinding m of
+      Nothing -> []
+      Just b ->
+        [ "as "
+            <> bindVerbName (vbVerb b)
+            <> " /e/"
+            <> unTypeName (vbTarget b)
+            <> maybe "" (\(ArgName a) -> "/{" <> a <> "}") (vbKeyArg b)
+            <> (if vbLww b then " last-writer-wins" else "")
+        ]
     batchLines = case mutBatch m of
       Nothing -> []
       Just bp ->
         let at = case bpAtomicity bp of
               BestEffort -> "best-effort"
               AllOrNothing -> "all-or-nothing"
-         in ["batch " <> at <> " max " <> tshow (bpMaxItems bp)]
+            bound = case bpBound bp of
+              Nothing -> ""
+              Just (v, ty) -> " as " <> bindVerbName v <> " /e/" <> unTypeName ty
+         in ["batch " <> at <> " max " <> tshow (bpMaxItems bp) <> bound]
 
     renderScopes = T.intercalate ", " . map renderScope
     renderScope = \case
@@ -245,10 +360,42 @@ defaultCollName :: Text -> FieldName -> CollectionName
 defaultCollName owner (FieldName f) = CollectionName (owner <> "." <> f)
 
 
+{- | Canonical field line. The derived clause (§3.7) prints in the pinned
+clause order — @derived reads \<dep\>{, \<dep\>}
+[\@declassify(approved: \"…\")] (on read | maintained)@ — between the type
+and the policy, matching the parser's only accepted order; fields without
+a derivation print byte-identically to before the clause existed.
+-}
 fieldLine :: (FieldName, FieldDef) -> Text
 fieldLine (FieldName f, fd) =
   f <> renderArgDefs (fieldArgs fd) <> ": " <> renderType (fieldType fd)
+    <> maybe "" renderDerivation (fieldDerivation fd)
     <> maybe "" (\p -> " " <> renderPolicy p) (fieldPolicy fd)
+
+
+renderDerivation :: Derivation -> Text
+renderDerivation d =
+  " derived reads "
+    <> T.intercalate ", " (map renderDep (NE.toList (derivReads d)))
+    <> maybe "" (\j -> " @declassify(approved: " <> jsonString j <> ")") (derivDeclassify d)
+    <> case derivMaterialize d of
+      OnRead -> " on read"
+      Maintained -> " maintained"
+
+
+renderDep :: Dep -> Text
+renderDep = \case
+  OwnFields fs -> "own(" <> T.intercalate ", " (map unFieldName (NE.toList fs)) <> ")"
+  ViaEdge e frag -> unFieldName e <> " ..." <> unFragmentName frag
+  ViaCollection r agg -> unFieldName r <> " " <> renderAggregate agg
+
+
+renderAggregate :: Aggregate -> Text
+renderAggregate = \case
+  AggCount -> "count"
+  AggSum f -> "sum(" <> unFieldName f <> ")"
+  AggMin f -> "min(" <> unFieldName f <> ")"
+  AggMax f -> "max(" <> unFieldName f <> ")"
 
 
 renderArgDefs :: [ArgDef] -> Text

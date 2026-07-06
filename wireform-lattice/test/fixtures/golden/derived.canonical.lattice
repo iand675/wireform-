@@ -1,0 +1,47 @@
+schema derived.example.com
+
+newtype AuthorId = Text
+
+newtype CommentId = Text
+
+newtype PostId = Text
+
+entity Author by id {
+  visible to all by default
+  id: AuthorId
+  name: Text
+  fetch by id: public
+}
+
+entity Comment by id {
+  visible to all by default
+  body: Text
+  createdAt: Timestamp
+  id: CommentId
+  postId: PostId
+  fetch by id: public
+}
+
+entity Post by id {
+  visible to all by default
+  authorId: AuthorId
+  authorLine: Text derived reads author ...AuthorByline on read
+  commentCount: W32 derived reads comments count on read
+  commentTotal: W32 derived reads comments count maintained
+  id: PostId
+  title: Text
+  has one author: Author by authorId
+  has many comments: Comment by postId ordered by createdAt asc page 10 max 100
+  fetch by id: public
+}
+
+fragment AuthorByline on Author {name}
+
+get post(id: PostId) of Post public
+
+mutation addComment(comment: CommentId, post: PostId, body: Text) returns Comment {
+  allow public
+  writes Comment(new), Post.comments(Comment.postId)
+  invalidates writes
+  effect transactional
+}

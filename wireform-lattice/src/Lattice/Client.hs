@@ -27,12 +27,41 @@ Requests attach credentials per slice: @vc@ (the encoded claims payload,
 ctx fetches, and the @Authorization@ header on priv fetches. Mutations
 and point fetches attach whatever credentials the config carries.
 
+== Cache digests (§10.4)
+
+Priv-slice fetches advertise the store: at ≤ 32 entries an enumerated
+@X-Have: Post:17\@e41,…@ header, above that a Golomb-coded
+@X-Have-Digest@ at @fp=10@ over the whole store ("Lattice.Digest").
+The origin may then elide entities we hold, emitting @unchanged@
+markers. The store applies a marker for a held @(id, ver)@ as
+keep-and-mark-fresh; a marker for an entity the store lacks (the
+digest's false positive) is recorded as a gap and repaired here with a
+follow-up 'pointFetch' before the query result assembles — the §10.4
+tolerance trade.
+
+== Live queries (§12)
+
+'subscribeQuery' opens the SSE live mode: a hash-form
+@GET \/q\/{hash}?slice=…&live=sse@ whose frames ("Network.HTTP.Client.SSE"
+parses the wire grammar) carry the ordinary NDJSON records one per
+event. Bursts — snapshot at (re)connect, deltas on change — apply to
+the store through the same 'applyRecords' path as pull responses (the
+store does not distinguish push from pull; §12's invariant), then
+surface to the caller as 'LiveEvent's. A dropped stream reconnects with
+@Last-Event-ID@ set to the last seen event id; the origin's baseline
+answer is a fresh snapshot, so reconnection is always safe. A
+@{\"kind\":\"reauth\"}@ record surfaces as 'LiveReauthEvent' and the
+following reconnect re-presents the configured credentials —
+re-provisioning a fresh proof is the application's job ('ccClaims' is
+read per connect). On a @404 lattice:unknown-query@ the client
+introduces the text once and retries the subscribe.
+
 == Out of scope for v1 (deliberate)
 
 * @\/.well-known\/lattice@ discovery is not fetched; base paths are the
   fixed @\/q@, @\/m@, @\/e@, @\/schema@.
-* Conditional requests (@If-None-Match@ \/ 304 revalidation), the
-  @X-Have@ cache digest, and live mode (SSE) are not implemented.
+* Conditional requests (@If-None-Match@ \/ 304 revalidation) are not
+  implemented.
 * The compressed inline form (@\/q?d=…@) is not used.
 
 A whole-request failure surfaces as 'LatticeError'; RFC 9457 problem
@@ -44,6 +73,7 @@ module Lattice.Client (
   defaultClientConfig,
   LatticeClient,
   withLatticeClient,
+  latticeClientOver,
   clientStore,
 
   -- * Operations
@@ -51,14 +81,23 @@ module Lattice.Client (
   mutate,
   pointFetch,
 
+  -- * Live queries (spec §12)
+  subscribeQuery,
+  SubscribeOptions (..),
+  defaultSubscribeOptions,
+  LiveEvent (..),
+  Subscription (..),
+
   -- * Results
   QueryResult (..),
   MutationResult (..),
   LatticeError (..),
 ) where
 
-import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVarIO)
-import Control.Exception (Handler (..), IOException, catches)
+import Control.Concurrent (forkIO, killThread)
+import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO, registerDelay, retry, writeTVar)
+import Control.Exception (Handler (..), IOException, catches, finally)
+import Control.Monad (void, when)
 import Data.Aeson qualified as A
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString (ByteString)
@@ -69,13 +108,14 @@ import Data.Either (partitionEithers)
 import Data.List (sortOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8Lenient, encodeUtf8)
 import Data.Vector qualified as V
 import Lattice.Canonical (Compiled (..), compileText)
 import Lattice.Client.Store
+import Lattice.Digest (encodeGcs, renderHave, renderHaveDigest)
 import Lattice.Plan (Plan (..), planQuery)
 import Lattice.Query.AST (Document)
 import Lattice.Query.Parser (ParseError (..), parseDocument)
@@ -85,8 +125,13 @@ import Lattice.Server.Auth (encodeClaims)
 import Lattice.Types
 import Lattice.Value (valueToUrlParam)
 import Lattice.Wire
+import Network.HTTP.Client.SSE (
+  ServerSentEvent (..),
+  SseFrame (..),
+  parseEventStream,
+  sseFramePopper,
+ )
 import Network.HTTP.Connection (
-  Connection,
   ConnectionConfig (..),
   ConnectionError,
   defaultConnectionConfig,
@@ -96,7 +141,7 @@ import Network.HTTP.Connection (
 import Network.HTTP.Message (Request (..), Response (..), Scheme (..))
 import Network.HTTP.PercentEncoding (encodePathSegment, renderQueryString)
 import Network.HTTP.Types.Body (Body (..))
-import Network.HTTP.Types.Header (Headers, lookupHeader)
+import Network.HTTP.Types.Header (Headers, hAccept, lookupHeader)
 import Network.HTTP.Types.Method (Method (..))
 import Network.HTTP.Types.Status (statusCode)
 import Network.HTTP.Types.Version qualified as V
@@ -143,7 +188,10 @@ data KnownQuery = KnownQuery
 
 data LatticeClient = LatticeClient
   { lcConfig :: ClientConfig
-  , lcConn :: Connection
+  , lcSend :: Request -> IO Response
+  -- ^ The transport seam: 'sendOn' a dialed connection under
+  -- 'withLatticeClient', or any request function under
+  -- 'latticeClientOver' (loopback against a handler included).
   , lcStore :: Store
   , lcKnown :: TVar (Map Text KnownQuery)
   }
@@ -173,10 +221,31 @@ withLatticeClient cfg action = do
     action
       LatticeClient
         { lcConfig = cfg
-        , lcConn = conn
+        , lcSend = sendOn conn
         , lcStore = store
         , lcKnown = known
         }
+
+
+{- | A client over an arbitrary request function — the loopback seam:
+drive 'Lattice.Server.latticeHandler' directly (in-process composition,
+deterministic tests) with no socket. 'ccHost'\/'ccPort' only shape the
+@:authority@ header. Exceptions the function throws surface as
+'TransportError'; for live queries ('subscribeQuery') the function must
+return streaming ('BodyStream') bodies unconsumed, exactly as
+'latticeHandler' builds them.
+-}
+latticeClientOver :: ClientConfig -> (Request -> IO Response) -> IO LatticeClient
+latticeClientOver cfg send = do
+  store <- newStore
+  known <- newTVarIO Map.empty
+  pure
+    LatticeClient
+      { lcConfig = cfg
+      , lcSend = send
+      , lcStore = store
+      , lcKnown = known
+      }
 
 
 -- ---------------------------------------------------------------------------
@@ -302,6 +371,7 @@ fetchSlice ::
   Map VarName A.Value ->
   IO (Either LatticeError SliceStream)
 fetchSlice lc memoKey bodyText hash mPlanId memoSlices slice vars = do
+  haveHdrs <- advertiseHeaders lc slice
   let (credParams, credHeaders) = credsFor (lcConfig lc) slice
       planParam = maybe [] (\p -> [("p", encodeUtf8 p)]) mPlanId
       params =
@@ -310,7 +380,7 @@ fetchSlice lc memoKey bodyText hash mPlanId memoSlices slice vars = do
           <> credParams
           <> varParams vars
       target = targetFor ("/q/" <> encodePathSegment (encodeUtf8 hash)) params
-  r <- sendRaw lc (mkReq lc GET target credHeaders BodyEmpty)
+  r <- sendRaw lc (mkReq lc GET target (credHeaders <> haveHdrs) BodyEmpty)
   case r of
     Left e -> pure (Left e)
     Right rr
@@ -334,12 +404,13 @@ introduce ::
   Map VarName A.Value ->
   IO (Either LatticeError SliceStream)
 introduce lc memoKey bodyText memoSlices slice vars = do
+  haveHdrs <- advertiseHeaders lc slice
   let (credParams, credHeaders) = credsFor (lcConfig lc) slice
       params =
         [("intent", "introduce"), ("slice", encodeUtf8 (renderSlice slice))]
           <> credParams
           <> varParams vars
-      headers = ("Content-Type", queryMediaType) : credHeaders
+      headers = ("Content-Type", queryMediaType) : credHeaders <> haveHdrs
       body = BodyBytes (encodeUtf8 bodyText)
   r <- sendRaw lc (mkReq lc POST (targetFor "/q" params) headers body)
   case r of
@@ -353,6 +424,25 @@ introduce lc memoKey bodyText memoSlices slice vars = do
       | otherwise -> do
           absorbFailureRecords lc rr
           pure (Left (problemOf rr))
+
+
+{- | The §10.4 store advertisement, on priv-slice requests only (pub\/ctx
+responses never vary on digests and the origin ignores them there):
+enumerated @X-Have@ at ≤ 32 store entries, else a GCS @X-Have-Digest@ at
+@fp=10@ over the whole store. An empty store advertises nothing.
+-}
+advertiseHeaders :: LatticeClient -> SliceName -> IO Headers
+advertiseHeaders lc slice
+  | slice /= SlicePriv = pure []
+  | otherwise = do
+      ents <- atomically (snapshotEntities (lcStore lc))
+      let pairs = map (\(r, (v, _)) -> (renderRef r, v)) (Map.toList ents)
+      pure $ case pairs of
+        [] -> []
+        _
+          | length pairs <= 32 -> [(hXHave, encodeUtf8 (renderHave pairs))]
+          | otherwise ->
+              [(hXHaveDigest, encodeUtf8 (renderHaveDigest (encodeGcs 10 pairs)))]
 
 
 -- | Schema-less first contact: introduce under the credential-implied
@@ -410,10 +500,17 @@ finishQuery lc doc vars streams0 = do
   case reverse manifests of
     [] -> pure (Left (DecodeError "response carried no manifest record"))
     (lastManifest : _) -> do
-      snapshot <- atomically $ do
+      gaps <- atomically $ do
         applyRecords (lcStore lc) allRecords
-        snapshotEntities (lcStore lc)
-      let merged = lastManifest {mRoot = Map.unions (map mRoot manifests)}
+        takeGaps (lcStore lc)
+      -- §10.4 false-positive repair: the origin elided an entity this
+      -- store lacks (or holds at another ver); each gap point-fetches
+      -- (which applies to the store) before the snapshot is taken. A
+      -- failed repair degrades to a placeholder in the tree, never a
+      -- failed query.
+      mapM_ (\r -> void (pointFetch lc r [])) gaps
+      snapshot <- atomically (snapshotEntities (lcStore lc))
+      let merged = lastManifest {mRoot = Map.unionsWith mergeRootRefs (map mRoot manifests)}
           errs = concatMap ssErrors streams
       pure
         ( Right
@@ -425,6 +522,25 @@ finishQuery lc doc vars streams0 = do
               , qrDegraded = not (null errs) || any (\s -> ssStatus s == 207) streams
               }
         )
+
+
+{- | Merge one root's ref lists across slices, losing nothing. Ordinary
+roots live in exactly one slice, so this never fires for them; the @nodes@
+root's membership is per type (§14.4), so each slice's manifest carries a
+subsequence of the request order. Shared refs align, a ref the other list
+still contains later yields to it, otherwise heads emit in slice order —
+so each slice's internal (request) order is preserved, and the
+interleaving of refs exclusive to different slices follows slice rank.
+Per-manifest request ordering is the §14.4 pin; the merged view is a
+client convenience, not a wire fact.
+-}
+mergeRootRefs :: [Ref] -> [Ref] -> [Ref]
+mergeRootRefs xs [] = xs
+mergeRootRefs [] ys = ys
+mergeRootRefs (x : xs) (y : ys)
+  | x == y = x : mergeRootRefs xs ys
+  | x `elem` ys = y : mergeRootRefs (x : xs) ys
+  | otherwise = x : mergeRootRefs xs (y : ys)
 
 
 -- ---------------------------------------------------------------------------
@@ -533,6 +649,268 @@ pointFetch lc ref mask = do
       | otherwise -> do
           absorbFailureRecords lc rr
           pure (Left (problemOf rr))
+
+
+-- ---------------------------------------------------------------------------
+-- Live queries (spec §12)
+-- ---------------------------------------------------------------------------
+
+-- | Knobs for one 'subscribeQuery'.
+data SubscribeOptions = SubscribeOptions
+  { soSlice :: SliceName
+  -- ^ The data slice to subscribe. One subscription is one slice — the
+  -- multi-slice merge of 'query' has no live analogue in v1.
+  , soReconnectMicros :: Int
+  -- ^ Pause before each reconnect attempt (@0@ = immediate). Tests use
+  -- @0@; production keeps a small backoff so a dead origin is not
+  -- hammered.
+  }
+  deriving stock (Eq, Show)
+
+
+defaultSubscribeOptions :: SubscribeOptions
+defaultSubscribeOptions =
+  SubscribeOptions
+    { soSlice = SlicePub
+    , soReconnectMicros = 1_000_000
+    }
+
+
+{- | One delivered burst (or control record) of a live stream. Records
+are already applied to 'clientStore' when the callback runs — the event
+is notification and provenance, not the only copy of the data.
+-}
+data LiveEvent
+  = LiveSnapshotEvent [Record]
+  -- ^ A full snapshot burst: initial subscribe or any reconnect.
+  | LiveDeltaEvent [Record]
+  -- ^ A §12 delta push (its events carried @id:@ cursors).
+  | LiveReauthEvent
+  -- ^ The origin demanded a fresh proof; the stream will close after
+  -- the origin's grace and the reconnect re-presents 'ccClaims'.
+  deriving stock (Eq, Show)
+
+
+-- | A live subscription handle.
+newtype Subscription = Subscription
+  { subscriptionCancel :: IO ()
+  -- ^ Stop the stream and the reconnect loop. Idempotent.
+  }
+
+
+{- | Subscribe to a query (spec §12): resolve its hash exactly as
+'query' does, open @GET \/q\/{hash}?slice=…&live=sse@, and feed every
+burst through the store into the callback. The initial connect happens
+synchronously — a refusal (compile error, admission, over-capacity 503)
+is the 'Left'; after that a background thread owns the stream and
+reconnects (fresh snapshot, @Last-Event-ID@ attached) until cancelled.
+
+The callback runs on the subscription thread: keep it brief, and an
+exception from it kills the subscription (after aborting the stream).
+-}
+subscribeQuery ::
+  LatticeClient ->
+  -- | Query text (canonicalized locally when 'ccSchema' is set).
+  Text ->
+  Map VarName A.Value ->
+  SubscribeOptions ->
+  (LiveEvent -> IO ()) ->
+  IO (Either LatticeError Subscription)
+subscribeQuery lc text vars opts onEvent =
+  resolveLiveTarget lc text slice vars >>= \case
+    Left e -> pure (Left e)
+    Right (memoKey, hash, mPlanId) -> do
+      stopV <- newTVarIO False
+      lastIdV <- newTVarIO Nothing
+      first <-
+        openLive lc hash mPlanId slice vars lastIdV >>= \case
+          Left e | isUnknownQuery e ->
+            -- First contact through this origin: introduce the text
+            -- (remembering its Location), absorb the pull records it
+            -- returns, and retry the subscribe once.
+            introduce lc memoKey text [slice] slice vars >>= \case
+              Left e2 -> pure (Left e2)
+              Right ss -> do
+                atomically (applyRecords (lcStore lc) (ssRecords ss))
+                openLive lc hash mPlanId slice vars lastIdV
+          other -> pure other
+      case first of
+        Left e -> pure (Left e)
+        Right stream -> do
+          tid <- forkIO (liveLoop lc hash mPlanId slice opts vars stopV lastIdV onEvent stream)
+          pure . Right $
+            Subscription
+              { subscriptionCancel = do
+                  atomically (writeTVar stopV True)
+                  killThread tid
+              }
+  where
+    slice = soSlice opts
+
+
+{- | The subscribe spelling of 'query''s hash resolution: local
+compilation under a schema; the introduction memo (introducing on first
+contact, store applied) without one. Returns (memo key, hash, plan id).
+-}
+resolveLiveTarget ::
+  LatticeClient ->
+  Text ->
+  SliceName ->
+  Map VarName A.Value ->
+  IO (Either LatticeError (Text, Text, Maybe Text))
+resolveLiveTarget lc text slice vars = case ccSchema (lcConfig lc) of
+  Just schema -> case compileText schema defaultBudgets text of
+    Left ce -> pure (Left (ClientCompileError ce))
+    Right compiled -> case planQuery schema defaultBudgets compiled of
+      Left ce -> pure (Left (ClientCompileError ce))
+      Right plan ->
+        pure (Right (compiledText compiled, compiledHash compiled, Just (planId plan)))
+  Nothing -> do
+    known <- readTVarIO (lcKnown lc)
+    case Map.lookup text known of
+      Just kq -> pure (Right (text, kqHash kq, kqPlanId kq))
+      Nothing ->
+        introduce lc text text [slice] slice vars >>= \case
+          Left e -> pure (Left e)
+          Right ss -> do
+            atomically (applyRecords (lcStore lc) (ssRecords ss))
+            known' <- readTVarIO (lcKnown lc)
+            case Map.lookup text known' of
+              Just kq -> pure (Right (text, kqHash kq, kqPlanId kq))
+              Nothing -> pure (Left (DecodeError "introduction returned no Location hash"))
+
+
+-- | An open SSE stream: a frame source and its abort hook.
+data LiveStream = LiveStream
+  { lstPop :: IO (Maybe SseFrame)
+  , lstAbort :: IO ()
+  }
+
+
+{- | Open one live connection: the hash-form GET with @live=sse@ plus
+slice credentials, @Accept: text\/event-stream@, and — on reconnects —
+@Last-Event-ID@. Streaming bodies feed the incremental SSE parser;
+a buffered body (a transport that drained the stream) is parsed whole.
+-}
+openLive ::
+  LatticeClient ->
+  Text ->
+  Maybe Text ->
+  SliceName ->
+  Map VarName A.Value ->
+  TVar (Maybe ByteString) ->
+  IO (Either LatticeError LiveStream)
+openLive lc hash mPlanId slice vars lastIdV = do
+  lastId <- readTVarIO lastIdV
+  let (credParams, credHeaders) = credsFor (lcConfig lc) slice
+      params =
+        maybe [] (\p -> [("p", encodeUtf8 p)]) mPlanId
+          <> [("slice", encodeUtf8 (renderSlice slice)), ("live", "sse")]
+          <> credParams
+          <> varParams vars
+      target = targetFor ("/q/" <> encodePathSegment (encodeUtf8 hash)) params
+      headers =
+        [(hAccept, "text/event-stream")]
+          <> credHeaders
+          <> maybe [] (\i -> [("Last-Event-ID", i)]) lastId
+      attempt = do
+        resp <- lcSend lc (mkReq lc GET target headers BodyEmpty)
+        let status = fromIntegral (statusCode (responseStatus resp))
+        if status /= 200
+          then do
+            body <- drainBody (responseBody resp)
+            let rr = RawResult {rrStatus = status, rrHeaders = responseHeaders resp, rrBody = body}
+            absorbFailureRecords lc rr
+            pure (Left (problemOf rr))
+          else do
+            pop <- case responseBody resp of
+              BodyEmpty -> pure (pure Nothing)
+              BodyBytes bs -> do
+                framesV <- newTVarIO (parseEventStream bs)
+                pure . atomically $ do
+                  fs <- readTVar framesV
+                  case fs of
+                    [] -> pure Nothing
+                    f : rest -> do
+                      writeTVar framesV rest
+                      pure (Just f)
+              BodyStream p -> sseFramePopper (fromMaybe BS.empty <$> p)
+            pure (Right (LiveStream {lstPop = pop, lstAbort = responseCancel resp}))
+  attempt
+    `catches` [ Handler (\(e :: ConnectionError) -> pure (Left (TransportError (tshow e))))
+              , Handler (\(e :: IOException) -> pure (Left (TransportError (tshow e))))
+              ]
+
+
+{- | The subscription thread: drain frames into bursts, apply and
+deliver each burst at its end record, reconnect on EOF. A burst whose
+events carried @id:@ cursors is a delta; id-less bursts are snapshots
+(initial and every reconnect). The stream is aborted whenever the drain
+exits — cancellation included — so a loopback origin unregisters
+deterministically.
+-}
+liveLoop ::
+  LatticeClient ->
+  Text ->
+  Maybe Text ->
+  SliceName ->
+  SubscribeOptions ->
+  Map VarName A.Value ->
+  TVar Bool ->
+  TVar (Maybe ByteString) ->
+  (LiveEvent -> IO ()) ->
+  LiveStream ->
+  IO ()
+liveLoop lc hash mPlanId slice opts vars stopV lastIdV onEvent = loop
+  where
+    loop stream = do
+      survived <- drain stream [] False `finally` lstAbort stream
+      when survived reconnect
+
+    reconnect = do
+      go <- pauseFor (soReconnectMicros opts)
+      when go $
+        openLive lc hash mPlanId slice vars lastIdV >>= \case
+          Left _ -> reconnect
+          Right stream -> loop stream
+
+    -- False = cancelled while pausing.
+    pauseFor n
+      | n <= 0 = not <$> readTVarIO stopV
+      | otherwise = do
+          tv <- registerDelay n
+          atomically $ do
+            stopped <- readTVar stopV
+            if stopped
+              then pure False
+              else do
+                done <- readTVar tv
+                if done then pure True else retry
+
+    -- False = cancelled; True = stream ended (reconnect).
+    drain stream acc sawId = do
+      stopped <- readTVarIO stopV
+      if stopped
+        then pure False
+        else
+          lstPop stream >>= \case
+            Nothing -> pure True
+            Just (SseComment _) -> drain stream acc sawId
+            Just (SseRetry _) -> drain stream acc sawId
+            Just (SseDispatch ev) -> do
+              mapM_ (\i -> atomically (writeTVar lastIdV (Just i))) (sseEventId ev)
+              let sawId' = sawId || isJust (sseEventId ev)
+              case A.decodeStrict (sseData ev) of
+                Nothing -> drain stream acc sawId'
+                Just RReauth -> do
+                  onEvent LiveReauthEvent
+                  drain stream acc sawId'
+                Just r@(REnd _) -> do
+                  let recs = reverse (r : acc)
+                  atomically (applyRecords (lcStore lc) recs)
+                  onEvent (if sawId' then LiveDeltaEvent recs else LiveSnapshotEvent recs)
+                  drain stream [] False
+                Just r -> drain stream (r : acc) sawId'
 
 
 -- ---------------------------------------------------------------------------
@@ -705,7 +1083,7 @@ sendRaw lc req =
               ]
   where
     attempt = do
-      resp <- sendOn (lcConn lc) req
+      resp <- lcSend lc req
       body <- drainBody (responseBody resp)
       pure
         ( Right

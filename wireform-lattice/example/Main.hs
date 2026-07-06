@@ -37,11 +37,15 @@ import Data.ByteString.Lazy qualified as BL
 import Data.Maybe (fromMaybe)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import Data.Time.Clock.POSIX (getPOSIXTime)
+import Data.Time.Clock.POSIX (getPOSIXTime, posixSecondsToUTCTime)
 import Lattice.Backend.Memory (memoryBackend)
+import Lattice.IDL.Print (canonicalIdl)
+import Lattice.Registry (newRegistry, recordDeploy)
 import Lattice.Schema (defaultBudgets)
-import Lattice.Server (OriginConfig (..), latticeHandler, newOrigin)
-import Lattice.Server.Auth (hmacVerifier)
+import Lattice.Server (OriginConfig (..), defaultLiveConfig, latticeHandler, newOrigin, startMaintainedRelay)
+import Lattice.Telemetry (noTelemetry)
+import Lattice.Server.Auth (QueryAdmission (..), hmacVerifier)
+import Lattice.Server.Coalesce (CoalesceConfig (..))
 import Lattice.Wire (SurrogateKey)
 import Network.HTTP.Client.URI (URI, parseURI, uriHost, uriPathAndQuery, uriPort)
 import Network.HTTP.Connection (ConnectionConfig (..), defaultConnectionConfig, sendOn, withConnection)
@@ -68,6 +72,19 @@ main = do
   db <- newStarWarsDb schema
   purge <- mkPurger
   counter <- newTVarIO (0 :: Int)
+  -- §17.1: the compatibility registry — in-memory deployment log seeded
+  -- with the schema this origin is serving, enabling /schema/check and
+  -- /schema/corpus plus Lattice-Client corpus attribution.
+  -- LATTICE_REGISTRY=0 runs unregistered (the endpoints 404).
+  registryOff <- lookupEnv "LATTICE_REGISTRY"
+  registry <-
+    if registryOff == Just "0"
+      then pure Nothing
+      else do
+        reg <- newRegistry
+        now0 <- posixSecondsToUTCTime <$> getPOSIXTime
+        recordDeploy reg now0 (canonicalIdl schema)
+        pure (Just reg)
   let config =
         OriginConfig
           { ocSchema = schema
@@ -81,14 +98,28 @@ main = do
           , ocPurge = purge
           , ocCors = True
           , ocNow = getPOSIXTime
+          , ocAdmission = AdmitOpen
+          , ocCoalesce = Just CoalesceConfig {ccWindowMicros = 5000, ccMaxBatch = 500}
+          , ocRegistry = registry
+          , ocLive = defaultLiveConfig
+          , ocTelemetry = noTelemetry
           }
   origin <- newOrigin config
+  -- §3.7 Materialization: recompute `maintained` derived fields (e.g.
+  -- Saga.starTotal) off the invalidation bus. LATTICE_MAINTAINED=0 leaves
+  -- them stale for demoing witness-only etag movement.
+  maintained <- lookupEnv "LATTICE_MAINTAINED"
+  _stopRelay <-
+    if maintained == Just "0"
+      then pure (pure ())
+      else startMaintainedRelay origin
   let handler = debugMiddleware counter delayMs (latticeHandler origin)
       base = "http://127.0.0.1:" <> port
   putStrLn ("example-lattice: Star Wars origin listening on " <> base)
   putStrLn ("  curl " <> base <> "/.well-known/lattice")
   putStrLn ("  curl -X QUERY -H 'Content-Type: application/x-lattice-query' --data 'query Hero { hero { name } }' " <> base <> "/q")
   putStrLn ("  curl -X POST -H 'Content-Type: application/json' --data '{\"episode\":\"Jedi\",\"stars\":5}' " <> base <> "/m/createReview")
+  putStrLn ("  curl -X POST -H 'Content-Type: application/x-lattice-idl' --data-binary @candidate.idl '" <> base <> "/schema/check?mode=client-backward'")
   runServer
     defaultServerConfig
       { serverHost = "0.0.0.0"

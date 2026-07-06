@@ -16,6 +16,11 @@ Hook choices mirror the corpus:
   them ordered by target name through the shared pagination machinery.
 * @createReview@ — inserts a Review under the next sequential id and
   reports the entity + @reviews:\<episode\>@ collection write facts.
+* @Saga@ (appended demo entity, §3.7) — one row per episode with an
+  @on read@ aggregate (@reviewCount@) and a @maintained@ aggregate
+  (@starTotal@, seeded stale at 0 so relay convergence is observable).
+  @addSagaReview@ is @createReview@ plus the @Saga.sagaReviews@ collection
+  write fact that triggers the maintained relay.
 -}
 module StarWars (
   loadStarWarsSchema,
@@ -26,8 +31,10 @@ module StarWars (
 import Control.Concurrent.STM (STM, atomically)
 import Control.Exception (IOException, try)
 import Data.Aeson qualified as A
+import Data.Aeson.Key qualified as AK
+import Data.Aeson.KeyMap qualified as KM
 import Data.Foldable (toList)
-import Data.List (sortOn)
+import Data.List (foldl', sortOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, mapMaybe)
@@ -41,6 +48,7 @@ import Lattice.Backend.Memory
 import Lattice.IDL.Parser (parseSchema)
 import Lattice.Schema
 import Lattice.Types
+import Lattice.Value (renderScalarKey)
 import Text.Read (readMaybe)
 
 
@@ -49,12 +57,14 @@ import Text.Read (readMaybe)
 -- ---------------------------------------------------------------------------
 
 {- | Parse the corpus schema, preferring the checked-in fixture, falling
-back to 'starWarsSource'.
+back to 'starWarsSource'. Demo-only declarations ('starWarsExtensions')
+are appended to whichever text loads, so the fixture (and its canonical
+golden) stays byte-identical.
 -}
 loadStarWarsSchema :: IO Schema
 loadStarWarsSchema = do
   src <- readFirst fixturePaths
-  case parseSchema (fromMaybe starWarsSource src) of
+  case parseSchema (fromMaybe starWarsSource src <> starWarsExtensions <> starWarsDerivedExtensions) of
     Right schema -> pure schema
     Left errs -> fail ("starwars.lattice failed to parse: " <> show errs)
   where
@@ -172,6 +182,93 @@ starWarsSource =
     ]
 
 
+{- | Demo-only declarations appended to the parsed schema: the verb-binding
+surface (spec §11.7\/§11.8). Kept out of @starwars.lattice@ so the
+fixture's canonical golden stays byte-identical; appending is limited to
+top-level declarations by construction.
+-}
+starWarsExtensions :: Text
+starWarsExtensions =
+  T.unlines
+    [ ""
+    , "-- Verb-binding demo surface (spec §11.7/§11.8), appended by the example"
+    , "-- server so the checked-in fixture stays untouched."
+    , ""
+    , "data ReviewInput { episode: Episode, stars: W8, commentary: Text? }"
+    , "data ReviewPatch { stars: W8?, commentary: Text? }"
+    , ""
+    , "mutation replaceReview(review: ReviewId, content: ReviewInput) returns Review {"
+    , "  allow       public"
+    , "  writes      Review(review), reviews(Review.episode)"
+    , "  invalidates writes"
+    , "  effect      natural \"PUT is set-to-state: replaying a replacement is a no-op\""
+    , "  as          PUT /e/Review/{review}"
+    , "}"
+    , ""
+    , "mutation editReview(review: ReviewId, patch: ReviewPatch) returns Review {"
+    , "  allow       public"
+    , "  writes      Review(review)"
+    , "  invalidates writes"
+    , "  effect      natural \"merge-patch: reapplying the same patch is a no-op\""
+    , "  as          PATCH /e/Review/{review}"
+    , "  batch       best-effort max 100 as PATCH /e/Review"
+    , "}"
+    , ""
+    , "mutation deleteReview(review: ReviewId) returns Review {"
+    , "  allow       public"
+    , "  writes      Review(review), reviews(Review.episode)"
+    , "  invalidates writes"
+    , "  effect      natural \"deleting a named entity twice deletes it once\""
+    , "  as          DELETE /e/Review/{review}"
+    , "  batch       best-effort max 100 as DELETE /e/Review"
+    , "}"
+    , ""
+    , "mutation submitReview(episode: Episode, stars: W8, commentary: Text?) returns Review {"
+    , "  allow       public"
+    , "  writes      Review(new), reviews(episode)"
+    , "  invalidates writes"
+    , "  effect      transactional"
+    , "  batch       best-effort max 100"
+    , "}"
+    ]
+
+
+{- | Demo-only derived-field surface (spec §3.7), appended like
+'starWarsExtensions' so the fixture golden stays byte-identical. @Saga@ is
+keyed by the episode name; its collection groups Reviews by @episode@, so
+the collection tag @Saga.sagaReviews:\<episode\>@ names the owning row —
+which is what lets the maintained relay recover the owner from a purge
+key, and lets @addSagaReview@'s write set purge both aggregates.
+-}
+starWarsDerivedExtensions :: Text
+starWarsDerivedExtensions =
+  T.unlines
+    [ ""
+    , "-- Derived-field demo surface (spec §3.7), appended by the example server."
+    , ""
+    , "entity Saga by id {"
+    , "  visible to all by default"
+    , ""
+    , "  id:    Text"
+    , "  title: Text"
+    , ""
+    , "  has many sagaReviews: Review by episode"
+    , ""
+    , "  reviewCount: W32 derived reads sagaReviews count on read"
+    , "  starTotal:   I32 derived reads sagaReviews sum(stars) maintained"
+    , ""
+    , "  fetch by id: public"
+    , "}"
+    , ""
+    , "mutation addSagaReview(episode: Episode, stars: W8, commentary: Text?) returns Review {"
+    , "  allow       public"
+    , "  writes      Review(new), reviews(episode), Saga.sagaReviews(episode)"
+    , "  invalidates writes"
+    , "  effect      transactional"
+    , "}"
+    ]
+
+
 -- ---------------------------------------------------------------------------
 -- Seed data
 -- ---------------------------------------------------------------------------
@@ -192,7 +289,7 @@ seedEntity schema db (ty, fields) =
 
 
 seedRows :: [(TypeName, Map FieldName A.Value)]
-seedRows = humans <> droids <> starships <> reviews
+seedRows = humans <> droids <> starships <> reviews <> sagas
   where
     allEpisodes = A.toJSON (["NewHope", "Empire", "Jedi"] :: [Text])
     friendIds fs = A.toJSON (fs :: [Text])
@@ -264,6 +361,23 @@ seedRows = humans <> droids <> starships <> reviews
             <> maybe [] (\c -> [("commentary", A.String c)]) commentary
       )
 
+    -- One Saga row per episode. @starTotal@ (maintained, §3.7) is seeded
+    -- deliberately stale at 0: the first triggering write converges it to
+    -- the full recomputed aggregate, which the demo observes.
+    sagas =
+      [ saga "NewHope" "A New Hope"
+      , saga "Empire" "The Empire Strikes Back"
+      , saga "Jedi" "Return of the Jedi"
+      ]
+    saga key title =
+      ( "Saga"
+      , Map.fromList
+          [ ("id", A.String key)
+          , ("title", A.String title)
+          , ("starTotal", A.Number 0)
+          ]
+      )
+
 
 -- ---------------------------------------------------------------------------
 -- Hooks
@@ -279,7 +393,15 @@ starWarsHooks schema =
           [ (("Human", "friends"), friendsChildren schema)
           , (("Droid", "friends"), friendsChildren schema)
           ]
-    , mhMutations = Map.singleton "createReview" createReview
+    , mhMutations =
+        Map.fromList
+          [ ("createReview", createReview)
+          , ("submitReview", createReview)
+          , ("replaceReview", replaceReview)
+          , ("editReview", editReview)
+          , ("deleteReview", deleteReview)
+          , ("addSagaReview", addSagaReview)
+          ]
     }
 
 
@@ -394,3 +516,148 @@ createReview db _claims args =
             , crSnapshot = tok
             }
     _ -> pure (MutationFailed (internalError (Just "createReview: episode and stars arguments required")))
+
+
+{- | @addSagaReview(episode, stars, commentary?)@: 'createReview' plus the
+@Saga.sagaReviews@ collection write fact, so the invalidation event
+carries the tag the maintained @Saga.starTotal@ derivation (§3.7) is
+keyed on — the relay recovers the owning Saga row from it.
+-}
+addSagaReview :: MemoryDb -> Claims -> Map ArgName A.Value -> IO MutationOutcome
+addSagaReview db claims args = do
+  out <- createReview db claims args
+  pure $ case out of
+    MutationCommitted cr ->
+      MutationCommitted cr {crWrites = crWrites cr <> concatMap sagaFact (crWrites cr)}
+    other -> other
+  where
+    sagaFact = \case
+      WroteCollection "reviews" gs -> [WroteCollection "Saga.sagaReviews" gs]
+      _ -> []
+
+
+-- ---------------------------------------------------------------------------
+-- Verb-bound demo mutations (§11.7)
+-- ---------------------------------------------------------------------------
+
+-- | The @review@ key argument (URL segment or inline batch key) as
+-- canonical key text.
+reviewKeyArg :: Map ArgName A.Value -> Maybe Text
+reviewKeyArg args = renderScalarKey <$> Map.lookup "review" args
+
+
+episodeOf :: Maybe A.Value -> Maybe Text
+episodeOf = \case
+  Just (A.String t) -> Just t
+  _ -> Nothing
+
+
+nowText :: IO Text
+nowText = do
+  now <- getCurrentTime
+  pure (T.pack (formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" now))
+
+
+{- | @replaceReview(review, content)@ — @as PUT \/e\/Review\/{review}@: full
+replacement (set-to-state). @createdAt@ is not part of the representation:
+it survives from the prior row, or is minted on a create-if-absent PUT.
+Membership facts cover both the prior and the new episode.
+-}
+replaceReview :: MemoryDb -> Claims -> Map ArgName A.Value -> IO MutationOutcome
+replaceReview db _claims args =
+  case (reviewKeyArg args, Map.lookup "content" args) of
+    (Just key, Just (A.Object content))
+      | Just episode <- KM.lookup "episode" content
+      , Just stars <- KM.lookup "stars" content -> do
+          now <- nowText
+          atomically $ do
+            prior <- readRow db "Review" key
+            let priorFields = case prior of
+                  RowFound r -> rowFields r
+                  _ -> Map.empty
+                createdAt = fromMaybe (A.String now) (Map.lookup "createdAt" priorFields)
+                fields =
+                  Map.fromList $
+                    [ ("id", A.String key)
+                    , ("episode", episode)
+                    , ("stars", stars)
+                    , ("createdAt", createdAt)
+                    ]
+                      <> (case KM.lookup "commentary" content of
+                            Just c@(A.String _) -> [("commentary", c)]
+                            _ -> [])
+                ref = Ref "Review" key
+                episodes =
+                  dedup (mapMaybe episodeOf [Map.lookup "episode" priorFields, Just episode])
+            putRow db "Review" key fields
+            tok <- snapshotToken db
+            pure . MutationCommitted $
+              CommitResult
+                { crResult = [ref]
+                , crWrites = WroteEntity ref : map (\ep -> WroteCollection "reviews" [ep]) episodes
+                , crSnapshot = tok
+                }
+    _ -> pure (MutationFailed (internalError (Just "replaceReview: review and content (episode, stars) required")))
+  where
+    dedup = foldr (\x acc -> if elem x acc then acc else x : acc) []
+
+
+{- | @editReview(review, patch)@ — @as PATCH \/e\/Review\/{review}@:
+merge-patch semantics — present fields replace, @null@ clears optional
+fields, absent fields are untouched.
+-}
+editReview :: MemoryDb -> Claims -> Map ArgName A.Value -> IO MutationOutcome
+editReview db _claims args =
+  case (reviewKeyArg args, Map.lookup "patch" args) of
+    (Just key, Just (A.Object patch)) ->
+      atomically $ do
+        prior <- readRow db "Review" key
+        case prior of
+          RowFound r -> do
+            let apply fields (k, v) = case v of
+                  A.Null -> Map.delete (FieldName (AK.toText k)) fields
+                  _ -> Map.insert (FieldName (AK.toText k)) v fields
+                merged = foldl' apply (rowFields r) (KM.toList patch)
+                ref = Ref "Review" key
+            putRow db "Review" key merged
+            tok <- snapshotToken db
+            pure . MutationCommitted $
+              CommitResult
+                { crResult = [ref]
+                , crWrites = [WroteEntity ref]
+                , crSnapshot = tok
+                }
+          _ -> pure (MutationFailed (internalError (Just "editReview: no such review")))
+    _ -> pure (MutationFailed (internalError (Just "editReview: review and patch arguments required")))
+
+
+{- | @deleteReview(review)@ — @as DELETE \/e\/Review\/{review}@: tombstone
+the row (idempotent; deleting an absent review still records the
+tombstone). The response carries the tombstone via the @DeletedEntity@
+fact.
+-}
+deleteReview :: MemoryDb -> Claims -> Map ArgName A.Value -> IO MutationOutcome
+deleteReview db _claims args =
+  case reviewKeyArg args of
+    Just key ->
+      atomically $ do
+        prior <- readRow db "Review" key
+        let oldEp = case prior of
+              RowFound r -> episodeOf (Map.lookup "episode" (rowFields r))
+              _ -> Nothing
+            ref = Ref "Review" key
+        deleteRow db "Review" key
+        after <- readRow db "Review" key
+        let tv = case after of
+              RowTombstone v -> v
+              _ -> "t:1"
+        tok <- snapshotToken db
+        pure . MutationCommitted $
+          CommitResult
+            { crResult = [ref]
+            , crWrites =
+                DeletedEntity ref tv
+                  : maybe [] (\ep -> [WroteCollection "reviews" [ep]]) oldEp
+            , crSnapshot = tok
+            }
+    Nothing -> pure (MutationFailed (internalError (Just "deleteReview: review argument required")))

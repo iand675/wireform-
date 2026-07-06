@@ -55,6 +55,23 @@ deferred.
   so sibling items' verdicts still reach the client. Replays of a
   completed @Idempotency-Key@ return the stored response with
   @Idempotency-Replayed: true@.
+* __Verb bindings (§11.7\/§11.8).__ A bound PUT decodes its body into the
+  mutation's single non-key argument (the full replacement value); PATCH
+  decodes an @application\/x-lattice-merge-patch@ object into the input
+  record argument (unknown fields 400, wrong content type 415); DELETE
+  takes no body. Conditional headers are supported exactly as pinned:
+  @If-Match: \"ver\"@ (single, strong) and @If-None-Match: *@ on PUT;
+  anything else is 400. Per §15 the 412\/428 responses carry no
+  @lattice:@ code: 428 is an @about:blank@ problem, 412 an ordinary
+  entity stream with current state. Preconditions reach the backend via
+  'MutatePrecondition' and are evaluated in the effect bracket; the named
+  @POST \/m\/{name}@ form of a bound mutation ignores conditional headers
+  (the binding chooses the wire spelling only), and collection (batch)
+  forms reject them (items carry their own keys). A 412 is never stored
+  as an idempotency replay (a refused precondition is not an acceptance).
+  Creation POST answers 201 + @Location@ only when the effect reports a
+  result ref of the bound type; batch creation answers the ordinary
+  batch stream.
 * __Point fetches.__ With neither @fragment@ nor @f@, the mask is every
   field at or below the caller's presented level (anonymous → @pub@).
   Fragment masks take top-level fields and matching inline fragments;
@@ -67,21 +84,84 @@ deferred.
 * __Root membership keys.__ A @get@ root contributes no collection
   surrogate key (the spec's key families have no root-reassignment key);
   its entity key covers field changes.
-* __@X-Have@ \/ digest elision and live queries are not implemented__;
-  @project=refs@ covers the partial-loading path.
+* __Cache digests (§10.4)__: @X-Have@ \/ @X-Have-Digest@ are honored on
+  priv slices and oneshot POSTs only — matching @(id, ver)@ entity
+  records emit as @unchanged@ markers ("Lattice.Digest"). On pub\/ctx
+  slices both headers are ignored entirely (responses never vary on
+  them). @project=refs@ covers the refs-only partial-loading path.
+* __Live queries (§12)__ are served: @live=sse@ (or an
+  @Accept: text\/event-stream@ hint) on a memoized hash-form GET opens
+  an SSE stream — snapshot burst, bus-driven delta pushes, reauth on
+  proof expiry. Pins and deviations are on 'serveLiveQuery'; the
+  @503 lattice:live-over-capacity@ problem joins the minor-code table
+  above. The subscription machinery lives in "Lattice.Server.Live".
+* __The @nodes@ root (§14.4)__ is implicit: 'Lattice.Query.Validate' and
+  'Lattice.Plan' inject it, so it needs no routing here — a nodes query
+  memoizes, hash-GETs, subscribes live, and slices like any query. The
+  executor-side pins live on 'Lattice.Server.Execute.nodesRootJobs'.
+* __The invalidation feed (§18.6)__: @GET \/invalidations?since=&live=sse@
+  streams the §11.5 bus over SSE — replay via 'invalidationsSince', then
+  the live tail. UNGATED in the reference implementation (deployments
+  gate it at the proxy\/service tier); pins on 'serveInvalidations'.
 * 'ocNow' is carried for deployment wiring (e.g. building a
   'ProofVerifier'); the handler itself never reads the clock.
+* __Admission & coalescing.__ Signed admission (§14.3) is enforced only on
+  the compile paths (QUERY\/POST introduction, inline @d=@, oneshot) —
+  the memo means a hash-form GET was already admitted. Discovery's
+  @coalesceWindowMs@ reports the origin's live 'ocCoalesce' window
+  (0 when coalescing is off), shadowing the static
+  'Lattice.Schema.coalesceWindowMs' budget field.
 -}
 module Lattice.Server (
   OriginConfig (..),
   Origin,
   newOrigin,
   latticeHandler,
+  originCoalescer,
+
+  -- * The invalidation bus (spec §11.5)
+
+  -- | Every purge the origin emits — mutation write sets and degraded
+  -- responses' self-purges — is published as an 'InvalEvent' with a
+  -- monotone outbox cursor before the CDN hook ('ocPurge') runs. Live
+  -- queries (§12), the federation invalidation feed (§18.6), and
+  -- 'Lattice.Schema.Maintained' derivation recomputation (§3.7) are all
+  -- consumers of this one pipe.
+  InvalEvent (..),
+  publishPurge,
+  subscribeInvalidations,
+  invalidationsSince,
+
+  -- * Maintained derivations (§3.7)
+  startMaintainedRelay,
+  maintainedRecompute,
+
+  -- * Live queries (spec §12)
+
+  -- | The SSE subscription surface: a hash-form GET with @live=sse@
+  -- (or an @Accept: text\/event-stream@ hint) upgrades to an event
+  -- stream served from the "Lattice.Server.Live" table. Config rides
+  -- in 'ocLive'; the machinery's knobs are re-exported here so
+  -- deployments configure the origin from one import.
+  LiveConfig (..),
+  defaultLiveConfig,
+  originLiveSubscribers,
+
+  -- * Compatibility registry glue (spec §17)
+
+  -- | The Origin-facing half of the registry: the deployment log and
+  -- pure checker live in "Lattice.Registry" \/ "Lattice.Compat";
+  -- 'exportCorpus' lives here because it snapshots 'Origin' internals
+  -- (memo, tenure, @Lattice-Client@ attribution). Served over HTTP as
+  -- @GET \/schema\/corpus@ and consumed by @POST \/schema\/check@, both
+  -- routed only when 'ocRegistry' is configured.
+  exportCorpus,
 ) where
 
+import Control.Concurrent (forkIO)
 import Control.Concurrent.STM
-import Control.Exception (SomeAsyncException (..), SomeException, catch, fromException, onException, throwIO)
-import Control.Monad (unless, when)
+import Control.Exception (SomeAsyncException (..), SomeException, catch, fromException, onException, throwIO, try)
+import Control.Monad (unless, void, when)
 import Data.Aeson.Types qualified as A
 import Data.Aeson ((.=))
 import Data.Aeson qualified as A
@@ -93,11 +173,14 @@ import Data.ByteString.Base64.URL qualified as B64U
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BL
 import Data.Char (isAlphaNum)
-import Data.Foldable (traverse_)
-import Data.List (find, sort, sortOn)
+import Data.Foldable (for_, traverse_)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
+import Data.List (elemIndex, find, sort, sortOn)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
+import Data.Sequence (Seq)
+import Data.Sequence qualified as Seq
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe, isJust, listToMaybe, mapMaybe, maybeToList)
 import Data.Set qualified as Set
@@ -105,28 +188,63 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.Encoding.Error qualified as TEE
-import Data.Time.Clock.POSIX (POSIXTime)
+import Data.Time.Clock.POSIX (POSIXTime, posixSecondsToUTCTime)
 import Data.Vector qualified as V
+import Data.Word (Word64)
 import Lattice.Backend
 import Lattice.Canonical (Compiled (..), canonicalFieldKey, compileText)
+import Lattice.Compat (CheckConfig (..), CheckMode (..), LoggedSchema (..), checkSchemas, parseCheckMode, parseWindow)
+import Lattice.Compat qualified as Compat
 import Lattice.Compress (Dictionary, decompressQuery, schemaDictionary)
+import Lattice.Digest (elideKnown, requestDigest)
 import Lattice.Hash (b64url, blake3, dictHash, manifestEtagHash, schemaHash)
+import Lattice.IDL.Parser (SchemaError (..), parseSchema)
 import Lattice.IDL.Print (canonicalIdl)
 import Lattice.Plan
 import Lattice.Query.AST (Argument (..), Field (..), QValue (..), Selection (..), TypeRefQ (..), VarDef (..))
 import Lattice.Query.Validate (CompileError (..), normalizeTypeAlias)
+import Lattice.Registry (CorpusEntry (..), DeployEntry (..), Registry, registryLog)
 import Lattice.Schema
 import Lattice.Server.Auth
+import Lattice.Server.Coalesce
 import Lattice.Server.Execute
+import Lattice.Telemetry (
+  LatticeTelemetry,
+  SpanContext,
+  activeSpanContext,
+  addActiveSpanAttrs,
+  addSpanAttrs,
+  boolA,
+  countMutationReplay,
+  countPlanSupersession,
+  countTenurePromotion,
+  elapsedMs,
+  intA,
+  recordCompileDuration,
+  recordDerivationLag,
+  recordInvalidationLag,
+  recordPurgeFanout,
+  traceresponseValue,
+  txtA,
+  withLatticeSpan,
+  withServerSpan,
+ )
+import Lattice.Telemetry qualified as Tel
+import Lattice.Server.Live
 import Lattice.Types
 import Lattice.Value
 import Lattice.Wire
+import Network.HTTP.Client.SSE (
+  ServerSentEvent (..),
+  SseFrame (SseComment, SseDispatch),
+  sseResponseBodyFrames,
+ )
 import Network.HTTP.Message (Request (..), Response (..))
 import Network.HTTP.PercentEncoding (decodeQueryString, encodePathSegment, encodeQueryComponent, percentDecode)
 import Network.HTTP.Server (Handler)
 import Network.HTTP.Types.Body (Body (..))
 import Network.HTTP.Types.Header
-import Network.HTTP.Types.Method (Method (..))
+import Network.HTTP.Types.Method (Method (..), fromMethod)
 import Network.HTTP.Types.Status (pattern Status)
 
 
@@ -147,6 +265,25 @@ data OriginConfig = OriginConfig
   , ocCors :: Bool
   -- ^ Permissive CORS for demo\/browser use.
   , ocNow :: IO POSIXTime
+  , ocAdmission :: QueryAdmission
+  -- ^ Cold-path query admission (spec §14.3); 'AdmitOpen' = today's behavior.
+  , ocCoalesce :: Maybe CoalesceConfig
+  -- ^ Point-fetch load coalescing (spec §6.9); 'Nothing' = direct loads.
+  , ocRegistry :: Maybe Registry
+  -- ^ The compatibility registry (spec §17.1): routes @POST \/schema\/check@
+  -- and @GET \/schema\/corpus@ and enables @Lattice-Client@ corpus
+  -- attribution. 'Nothing' (the norm — the registry is analysis
+  -- infrastructure, never a serving dependency) leaves the endpoints
+  -- unrouted (404) and recording disabled at zero cost.
+  , ocLive :: LiveConfig
+  -- ^ Live-query subscriptions (spec §12): keep-alive period, reauth
+  -- grace, subscriber cap. 'defaultLiveConfig' for production defaults;
+  -- live serving is always routed (a subscription costs nothing until
+  -- someone opens one).
+  , ocTelemetry :: LatticeTelemetry
+  -- ^ §19 OpenTelemetry instrumentation. 'Lattice.Telemetry.noTelemetry'
+  -- (the default) is a guaranteed no-op; build a live handle with
+  -- 'Lattice.Telemetry.newLatticeTelemetry'.
   }
 
 
@@ -167,10 +304,342 @@ data Origin = Origin
   , oIdlHash :: Text
   , oDict :: Dictionary
   , oDictHash :: Text
+  , oCoalescer :: Maybe Coalescer
+  -- ^ Live per-type accumulation windows when 'ocCoalesce' is set (§6.9).
   , oMemo :: TVar (Map Text (Compiled, Plan))
   , oIdem :: TVar (Map (MutationName, Text, Text) IdemEntry)
   , oTenure :: TVar (Map Text Int)
+  , oInvalCursor :: TVar Word64
+  , oInvalLog :: TVar (Seq InvalEvent)
+  -- ^ Bounded replay window for @/invalidations?since=@ resumption.
+  , oInvalBus :: TChan InvalEvent
+  -- ^ Broadcast channel; subscribe via 'subscribeInvalidations'.
+  , oClients :: TVar (Map Text (Set.Set Text))
+  -- ^ Advisory @Lattice-Client@ builds seen per query hash (§17.1),
+  -- recorded only when 'ocRegistry' is configured; corpus attribution.
+  , oLive :: LiveState
+  -- ^ The §12 subscription table ("Lattice.Server.Live").
   }
+
+
+{- | The origin's live coalescer, when 'ocCoalesce' configured one — the
+handle for the deterministic test hooks ('Lattice.Server.Coalesce.flushNow',
+'Lattice.Server.Coalesce.awaitPending', 'Lattice.Server.Coalesce.coalesceStats').
+-}
+originCoalescer :: Origin -> Maybe Coalescer
+originCoalescer = oCoalescer
+
+
+{- | One drained batch of the invalidation pipeline (§11.5): the surrogate
+keys of a committed effect (or of a degraded response's self-purge, §9.4.5),
+tagged with a monotone outbox cursor. Cursors are per-process and 1-based;
+they make feed consumption resumable ('invalidationsSince'), not durable.
+-}
+data InvalEvent = InvalEvent
+  { ieCursor :: !Word64
+  , ieKeys :: [SurrogateKey]
+  , ieContext :: Maybe SpanContext
+  -- ^ §19.1 \"the outbox carries context\": the span context active when
+  -- the purge was published (the committing mutation, a degraded
+  -- response's self-purge, or a recompute). Relay work — CDN purges,
+  -- live-query re-execution, maintained-derivation recomputation —
+  -- LINKS its spans here rather than parenting under them. 'Nothing'
+  -- when telemetry is off or the publish happened outside any span.
+  }
+  deriving stock (Eq, Show)
+
+
+-- | How many drained batches 'oInvalLog' retains for @since=@ replay.
+invalLogBound :: Int
+invalLogBound = 4096
+
+
+{- | Publish a purge batch: assign the next outbox cursor, append to the
+replay log, wake every bus subscriber, then invoke the CDN hook. This is
+the only path by which keys leave the origin; anything wanting change
+notifications taps the bus rather than wrapping 'ocPurge' (§18.6's
+"keeps those consumers off the mutation path").
+-}
+publishPurge :: Origin -> [SurrogateKey] -> IO ()
+publishPurge o keys = void (publishPurgeAt o keys)
+
+
+{- | 'publishPurge' returning the assigned outbox cursor. Internal: the
+maintained-derivation relay records the cursors of its own purges so it
+can skip them on the bus instead of re-triggering itself.
+-}
+publishPurgeAt :: Origin -> [SurrogateKey] -> IO Word64
+publishPurgeAt o keys = do
+  let tel = ocTelemetry (oConfig o)
+  -- §19.1: the outbox row carries the publishing span's context so relay
+  -- consumers (live queries, derivation recompute, the feed) can LINK.
+  mctx <- activeSpanContext tel
+  n <- atomically $ do
+    n <- stateTVar (oInvalCursor o) (\c -> let c' = c + 1 in (c', c'))
+    let ev = InvalEvent n keys mctx
+    modifyTVar' (oInvalLog o) $ \l ->
+      Seq.drop (Seq.length l + 1 - invalLogBound) (l Seq.|> ev)
+    writeTChan (oInvalBus o) ev
+    pure n
+  -- §19.2 relay span around the CDN hook: purge.key_count + outbox.cursor
+  -- attributes, linked (not parented) to the publishing context. The
+  -- hook's wall time is the origin-observable @lattice.invalidation.lag@.
+  recordPurgeFanout tel (length keys)
+  ((), lagMs) <-
+    withLatticeSpan
+      tel
+      "lattice.purge"
+      Tel.Internal
+      (maybeToList mctx)
+      [ ("lattice.purge.key_count", intA (length keys))
+      , ("lattice.outbox.cursor", intA (fromIntegral n))
+      ]
+      (\_ -> elapsedMs (ocPurge (oConfig o) keys))
+  recordInvalidationLag tel lagMs
+  pure n
+
+
+{- | Subscribe to the live invalidation bus. Returns a blocking STM read
+of the subscriber's private queue; events published after the subscription
+are seen exactly once, in cursor order.
+-}
+subscribeInvalidations :: Origin -> IO (STM InvalEvent)
+subscribeInvalidations o = do
+  ch <- atomically (dupTChan (oInvalBus o))
+  pure (readTChan ch)
+
+
+{- | Replay every retained event with cursor greater than @since@, plus a
+live tail subscribed atomically with the replay cut (no gap, no overlap).
+A @since@ older than the replay window means loss: the first replayed
+event's cursor will exceed @since + 1@, which consumers detect and treat
+as "resync from scratch".
+-}
+invalidationsSince :: Origin -> Word64 -> IO ([InvalEvent], STM InvalEvent)
+invalidationsSince o since = atomically $ do
+  ch <- dupTChan (oInvalBus o)
+  logd <- readTVar (oInvalLog o)
+  let missed = filter ((> since) . ieCursor) (foldr (:) [] logd)
+  pure (missed, readTChan ch)
+
+
+-- ---------------------------------------------------------------------------
+-- Maintained derivations (§3.7 Materialization)
+-- ---------------------------------------------------------------------------
+
+-- | One @maintained@ derived field, indexed for relay matching.
+data MaintainedDeriv = MaintainedDeriv
+  { mdType :: TypeName
+  , mdField :: FieldName
+  , mdEnt :: EntityDef
+  , mdDeriv :: Derivation
+  }
+
+
+maintainedDerivs :: Schema -> [MaintainedDeriv]
+maintainedDerivs schema = concatMap entOne (Map.toList (schemaEntities schema))
+  where
+    entOne (ty, ent) = mapMaybe (fieldOne ty ent) (Map.toList (entityFields ent))
+    fieldOne ty ent (f, fd) = case fieldDerivation fd of
+      Just d | Maintained <- derivMaterialize d -> Just (MaintainedDeriv ty f ent d)
+      _ -> Nothing
+
+
+{- | The owners a purged key affects for one derivation, recovered
+mechanically from the read set (§3.7 Invalidation): an entity key of the
+owning type matches @own(…)@ deps; a collection tag matches a
+@ViaCollection@ dep, with the owner key read out of the tag's grouping
+values at the link field's position (elaboration guarantees the link is
+in the grouping for @maintained@). Edge deps are rejected at elaboration
+(no reverse index in v1).
+-}
+affectedOwners :: MaintainedDeriv -> SurrogateKey -> [Text]
+affectedOwners md k = concatMap dep (NE.toList (derivReads (mdDeriv md)))
+  where
+    dep = \case
+      OwnFields _
+        | Just r <- parseRef k
+        , refType r == mdType md ->
+            [refKey r]
+      ViaCollection rf _
+        | Just ToMany {relCollection = col} <- lookupEntityRel (mdEnt md) rf
+        , Just rest <- T.stripPrefix (unCollectionName (colName col) <> ":") k
+        , Just ix <- elemIndex (colLink col) (NE.toList (colGrouping col))
+        , ownerKey : _ <- drop ix (T.splitOn "," rest) ->
+            [ownerKey]
+      _ -> []
+
+
+{- | Recompute every @maintained@ derivation whose read-set keys intersect
+the given purged keys (§3.7 Materialization): load the affected owners,
+assemble 'DepValues' (own fields + aggregates), 'beDerive', and write
+back through 'beStoreDerived' (write scope: the owning entity), producing
+ordinary @ver@ bumps published as one 'InvalEvent'. Owners whose stored
+value already equals the recomputed one are skipped — the convergence
+guard: a recompute triggered by its own purge writes nothing and the loop
+ends. Returns the entity keys it purged (@[]@ when converged).
+
+Deterministic tests drive this directly with the keys of interest — no
+relay thread, no sleeping.
+-}
+maintainedRecompute :: Origin -> [SurrogateKey] -> IO [SurrogateKey]
+maintainedRecompute o keys = fst <$> maintainedRecomputeAt o keys
+
+
+maintainedRecomputeAt :: Origin -> [SurrogateKey] -> IO ([SurrogateKey], Maybe Word64)
+maintainedRecomputeAt o = maintainedRecomputeFrom o Nothing
+
+
+{- | 'maintainedRecomputeAt' with the triggering outbox event's span
+context: each derivation recomputed runs in a @lattice.recompute@ span
+(§19.2: @lattice.derivation.name@ attribute) that LINKS to the
+originating mutation (§19.1), and a committing recompute records its
+trigger-to-commit wall time as @lattice.derivation.lag@.
+-}
+maintainedRecomputeFrom :: Origin -> Maybe SpanContext -> [SurrogateKey] -> IO ([SurrogateKey], Maybe Word64)
+maintainedRecomputeFrom o mctx keys = do
+  let schema = ocSchema (oConfig o)
+      be = ocBackend (oConfig o)
+      work =
+        mapMaybe
+          ( \md -> case dedupOrd (concatMap (affectedOwners md) keys) of
+              [] -> Nothing
+              owners -> Just (md, owners)
+          )
+          (maintainedDerivs schema)
+  written <- concat <$> traverse (recomputeOne be) work
+  case dedupOrd written of
+    [] -> pure ([], Nothing)
+    ks -> do
+      cur <- publishPurgeAt o ks
+      pure (ks, Just cur)
+  where
+    tel = ocTelemetry (oConfig o)
+    derivName md = unTypeName (mdType md) <> "." <> unFieldName (mdField md)
+    recomputeOne be (md, owners) =
+      withLatticeSpan
+        tel
+        "lattice.recompute"
+        Tel.Internal
+        (maybeToList mctx)
+        [("lattice.derivation.name", txtA (derivName md))]
+        $ \_ -> do
+          (written, ms) <- elapsedMs (recomputeBody be md owners)
+          unless (null written) (recordDerivationLag tel (derivName md) ms)
+          pure written
+    recomputeBody be md owners = do
+      loaded <- beLoad be (mdType md) owners
+      let rows =
+            mapMaybe
+              ( \k -> case Map.lookup k loaded of
+                  Just (Right (RowFound row)) -> Just (k, row)
+                  _ -> Nothing
+              )
+              owners
+          reads' = NE.toList (derivReads (mdDeriv md))
+          ownNames =
+            concatMap
+              ( \case
+                  OwnFields fs -> NE.toList fs
+                  _ -> []
+              )
+              reads'
+          aggDeps =
+            mapMaybe
+              ( \case
+                  ViaCollection rf agg
+                    | Just ToMany {relCollection = col} <- lookupEntityRel (mdEnt md) rf ->
+                        Just (rf, col, agg)
+                  _ -> Nothing
+              )
+              reads'
+      if null rows
+        then pure []
+        else do
+          aggVals <-
+            traverse
+              ( \(rf, col, agg) -> do
+                  let gks = map (\(k, row) -> (k, deriveGroupKey col (Ref (mdType md) k) row)) rows
+                  res <- beAggregate be (colName col) agg (dedupOrd (map snd gks))
+                  pure (rf, Map.fromList gks, res)
+              )
+              aggDeps
+          let depOf (k, row) =
+                let aggsFor =
+                      Map.fromList
+                        ( mapMaybe
+                            ( \(rf, gkMap, res) -> case res of
+                                Right vals ->
+                                  Map.lookup k gkMap >>= \gk -> (,) rf <$> Map.lookup gk vals
+                                Left _ -> Nothing
+                            )
+                            aggVals
+                        )
+                in ( k
+                   , DepValues
+                      { dvOwn = Map.restrictKeys (rowFields row) (Set.fromList ownNames)
+                      , dvEdges = Map.empty
+                      , dvAggregates = aggsFor
+                      }
+                   )
+          vals <- beDerive be (mdType md) (mdField md) (Map.fromList (map depOf rows))
+          let rowsMap = Map.fromList rows
+              changed =
+                Map.filterWithKey
+                  ( \k v -> case Map.lookup k rowsMap of
+                      Nothing -> False
+                      Just row ->
+                        fmap canonicalJson (Map.lookup (mdField md) (rowFields row))
+                          /= Just (canonicalJson v)
+                  )
+                  vals
+          if Map.null changed
+            then pure []
+            else do
+              stored <- beStoreDerived be (mdType md) (mdField md) changed
+              pure (map (\k -> renderRef (Ref (mdType md) k)) (Map.keys stored))
+
+
+{- | Start the @maintained@-derivation relay (§3.7 Materialization): a bus
+consumer that recomputes affected maintained values and writes them back,
+producing ordinary @ver@ bumps and purges. Returns the (idempotent)
+shutdown action. Loop guards, both live: the relay skips events it
+published itself (matched by outbox cursor via 'publishPurgeAt'), and
+'maintainedRecompute' skips value-identical writes — so recomputation
+converges even for derivations reading their own entity's fields. A
+crashing recompute pass degrades to a skipped event; the relay survives.
+
+Deterministic testing: call 'maintainedRecompute' directly (no thread),
+or subscribe via 'subscribeInvalidations' and block in STM on the
+recompute's own purge event — never sleep.
+-}
+startMaintainedRelay :: Origin -> IO (IO ())
+startMaintainedRelay o = do
+  next <- subscribeInvalidations o
+  stopV <- newTVarIO False
+  skipRef <- newIORef Set.empty
+  let loop = do
+        step <-
+          atomically $
+            orElse
+              (Left <$> (readTVar stopV >>= check))
+              (Right <$> next)
+        case step of
+          Left () -> pure ()
+          Right ev -> do
+            skips <- readIORef skipRef
+            if Set.member (ieCursor ev) skips
+              then writeIORef skipRef (Set.delete (ieCursor ev) skips)
+              else do
+                outcome <- try (maintainedRecomputeFrom o (ieContext ev) (ieKeys ev))
+                case outcome of
+                  Right (_, mcur) -> for_ mcur (\c -> modifyIORef' skipRef (Set.insert c))
+                  Left e
+                    | Just SomeAsyncException {} <- fromException e -> throwIO e
+                    | otherwise -> pure ()
+            loop
+  _ <- forkIO loop
+  pure (atomically (writeTVar stopV True))
 
 
 -- | Allocate the origin's shared state and precompute the schema documents.
@@ -178,27 +647,98 @@ newOrigin :: OriginConfig -> IO Origin
 newOrigin cfg = do
   let idl = canonicalIdl (ocSchema cfg)
       dict = schemaDictionary (ocSchema cfg)
-  Origin cfg idl (schemaHash idl) dict (dictHash dict)
+  coalescer <- traverse (newCoalescerWith (ocTelemetry cfg)) (ocCoalesce cfg)
+  Origin cfg idl (schemaHash idl) dict (dictHash dict) coalescer
     <$> newTVarIO Map.empty
     <*> newTVarIO Map.empty
     <*> newTVarIO Map.empty
+    <*> newTVarIO 0
+    <*> newTVarIO Seq.empty
+    <*> newBroadcastTChanIO
+    <*> newTVarIO Map.empty
+    <*> newLiveState
 
 
 -- ---------------------------------------------------------------------------
 -- Handler and routing
 -- ---------------------------------------------------------------------------
 
+{- | The request handler. Telemetry (§19): every routed request runs in a
+server span named by route template ('routeTemplate'), parented on an
+inbound @traceparent@; a @traceresponse@ header is attached ONLY to
+uncacheable responses (§19.4 — shared-cacheable responses MUST NOT carry
+per-request telemetry identifiers, so anything with a @public@
+@Cache-Control@ never gets one).
+-}
 latticeHandler :: Origin -> Handler
 latticeHandler origin req = do
-  resp <- route origin req `catch` onCrash
+  let tel = ocTelemetry (oConfig origin)
+      (segs, _) = pathAndParams req
+      serve = route origin req `catch` onCrash
+  resp <- case routeTemplate (requestMethod req) segs of
+    Nothing -> serve
+    Just template ->
+      withServerSpan
+        tel
+        (lookupHeader "traceparent" (requestHeaders req))
+        template
+        [("lattice.snapshot.domains", txtA (ocSnapshotDomain (oConfig origin)))]
+        $ \msp -> do
+          r <- serve
+          case msp of
+            Just sp | uncacheable r -> do
+              tr <- traceresponseValue sp
+              pure r {responseHeaders = insertHeader "traceresponse" tr (responseHeaders r)}
+            _ -> pure r
   pure (addCorsHeaders (ocCors (oConfig origin)) resp)
   where
+    -- Shared-cacheable = an explicit public Cache-Control (§19.4). No
+    -- Cache-Control at all (schema docs, 405s, …) is treated as
+    -- uncacheable-by-default and MAY carry traceresponse.
+    uncacheable r = case lookupHeader hCacheControl (responseHeaders r) of
+      Just cc -> not ("public" `BS.isInfixOf` cc)
+      Nothing -> True
     onCrash :: SomeException -> IO Response
     onCrash e
       | Just SomeAsyncException {} <- fromException e = throwIO e
       | otherwise =
           pure . problemResponse req $
             (mkProblem 500 "lattice:internal") {pDetail = Just "unhandled exception"}
+
+
+{- | The §19.2 server-span name: the route template, never a concrete
+hash\/key\/name. Mirrors 'route' case-for-case; unrouted paths get no
+span ('Nothing') — they are 404\/405 noise, not protocol surface.
+-}
+routeTemplate :: Method -> [Text] -> Maybe Text
+routeTemplate method segs = (prefix <>) <$> tpl
+  where
+    prefix = lenientText (fromMethod method) <> " "
+    tpl = case (method, segs) of
+      (OPTIONS, _) -> Just "*"
+      (GET, [".well-known", "lattice"]) -> Just "/.well-known/lattice"
+      (GET, ["schema", "current"]) -> Just "/schema/current"
+      (GET, ["schema", "dict", _]) -> Just "/schema/dict/{hash}"
+      (GET, ["schema", "corpus"]) -> Just "/schema/corpus"
+      (GET, ["schema", _]) -> Just "/schema/{hash}"
+      (GET, ["q"]) -> Just "/q"
+      (GET, ["q", _]) -> Just "/q/{hash}"
+      (GET, ["q", _, "source"]) -> Just "/q/{hash}/source"
+      (GET, ["q", _, "explain"]) -> Just "/q/{hash}/explain"
+      (GET, ["q", _, "plan", _]) -> Just "/q/{hash}/plan/{planId}"
+      (GET, ["e", _, _]) -> Just "/e/{Type}/{key}"
+      (GET, ["invalidations"]) -> Just "/invalidations"
+      (QUERY, ["q"]) -> Just "/q"
+      (POST, ["q"]) -> Just "/q"
+      (POST, ["m", _]) -> Just "/m/{name}"
+      (POST, ["schema", "check"]) -> Just "/schema/check"
+      (POST, ["e", _]) -> Just "/e/{Type}"
+      (PUT, ["e", _, _]) -> Just "/e/{Type}/{key}"
+      (PATCH, ["e", _, _]) -> Just "/e/{Type}/{key}"
+      (PATCH, ["e", _]) -> Just "/e/{Type}"
+      (DELETE, ["e", _, _]) -> Just "/e/{Type}/{key}"
+      (DELETE, ["e", _]) -> Just "/e/{Type}"
+      _ -> Nothing
 
 
 route :: Origin -> Request -> IO Response
@@ -209,19 +749,24 @@ route o req = case requestMethod req of
     [".well-known", "lattice"] -> pure (discovery o req)
     ["schema", "current"] -> pure (schemaCurrent o req)
     ["schema", "dict", h] -> pure (schemaDict o req h)
+    ["schema", "corpus"] -> serveCorpus o req
     ["schema", h] -> pure (schemaDoc o req h)
     ["q"] -> case lookup "d" params of
       Just d -> serveQuery o req params (QInline d (lookup "dv" params)) NotIntro
       Nothing -> pure (problemResponse req (badRequest ["the inline query form requires the d parameter"]))
-    ["q", h] -> serveQuery o req params (QHash h) NotIntro
+    ["q", h] -> case liveRequested req params of
+      Left p -> pure (problemResponse req p)
+      Right True -> serveLiveQuery o req params h
+      Right False -> serveQuery o req params (QHash h) NotIntro
     ["q", h, "source"] -> serveSource o req h
     ["q", h, "explain"] -> serveExplain o req h
     ["q", h, "plan", pid] -> servePlanDoc o req h pid
     ["e", ty, key] -> serveEntity o req params ty key
-    _ -> pure (fallback req segs)
+    ["invalidations"] -> serveInvalidations o req params
+    _ -> pure (fallback o req segs)
   QUERY -> case segs of
     ["q"] -> withQueryBody req $ \txt -> serveQuery o req params (QText txt) Introduce
-    _ -> pure (fallback req segs)
+    _ -> pure (fallback o req segs)
   POST -> case segs of
     ["q"] -> case lookup "intent" params of
       Just "oneshot" -> withQueryBody req $ \txt -> serveQuery o req params (QText txt) Oneshot
@@ -229,8 +774,21 @@ route o req = case requestMethod req of
       Nothing -> asIntro
       Just other -> pure (problemResponse req (badRequest ["unknown intent: " <> other]))
     ["m", name] -> serveMutation o req params (MutationName name)
-    _ -> pure (fallback req segs)
-  _ -> pure (fallback req segs)
+    ["e", ty] -> serveBound o req params BindCreate ty Nothing
+    ["schema", "check"] -> serveSchemaCheck o req params
+    _ -> pure (fallback o req segs)
+  PUT -> case segs of
+    ["e", ty, key] -> serveBound o req params BindPut ty (Just key)
+    _ -> pure (fallback o req segs)
+  PATCH -> case segs of
+    ["e", ty, key] -> serveBound o req params BindPatch ty (Just key)
+    ["e", ty] -> serveBound o req params BindPatch ty Nothing
+    _ -> pure (fallback o req segs)
+  DELETE -> case segs of
+    ["e", ty, key] -> serveBound o req params BindDelete ty (Just key)
+    ["e", ty] -> serveBound o req params BindDelete ty Nothing
+    _ -> pure (fallback o req segs)
+  _ -> pure (fallback o req segs)
   where
     (segs, params) = pathAndParams req
     asIntro = withQueryBody req $ \txt -> serveQuery o req params (QText txt) Introduce
@@ -257,9 +815,13 @@ lenientText :: ByteString -> Text
 lenientText = TE.decodeUtf8With TEE.lenientDecode
 
 
--- | 405 with @Allow@ for known paths under the wrong method, else 404.
-fallback :: Request -> [Text] -> Response
-fallback req segs = case allowedFor segs of
+{- | 405 with @Allow@ for known paths under the wrong method, else 404.
+Entity URLs advertise the schema's verb bindings (§11.7): the keyed form
+allows GET plus every keyed binding of the type; the collection form
+exists only where a binding declares it.
+-}
+fallback :: Origin -> Request -> [Text] -> Response
+fallback o req segs = case allowedFor segs of
   [] -> problemResponse req (mkProblem 404 "lattice:not-found")
   methods ->
     mkResponse
@@ -274,9 +836,18 @@ fallback req segs = case allowedFor segs of
       ("schema" : _) -> ["GET"]
       ["q"] -> ["GET", "QUERY", "POST"]
       ("q" : _) -> ["GET"]
-      ["e", _, _] -> ["GET"]
+      ["e", ty, _] -> "GET" : boundVerbs ty ShapeKeyed
+      ["e", ty] -> boundVerbs ty ShapeCollection
       ["m", _] -> ["POST"]
       _ -> []
+    boundVerbs ty shape =
+      mapMaybe
+        ( \v ->
+            if Map.member (v, TypeName ty, shape) (bindingIndex (ocSchema (oConfig o)))
+              then Just (TE.encodeUtf8 (bindVerbName v))
+              else Nothing
+        )
+        [BindCreate, BindPut, BindPatch, BindDelete]
 
 
 -- ---------------------------------------------------------------------------
@@ -351,8 +922,8 @@ preflight req =
     req
     204
     [ ("Access-Control-Allow-Origin", "*")
-    , ("Access-Control-Allow-Methods", "GET, POST, QUERY, OPTIONS")
-    , ("Access-Control-Allow-Headers", "Content-Type, Idempotency-Key, X-Vc-Auth, X-Have, Lattice-Query-Name")
+    , ("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, QUERY, OPTIONS")
+    , ("Access-Control-Allow-Headers", "Content-Type, Idempotency-Key, If-Match, If-None-Match, X-Vc-Auth, X-Have, X-Have-Digest, Lattice-Query-Name")
     , ("Access-Control-Max-Age", "600")
     ]
     ""
@@ -442,7 +1013,7 @@ discovery o req =
             , "schema" .= ("/schema" :: Text)
             ]
       , "schema" .= A.object ["current" .= ("/schema/" <> oIdlHash o)]
-      , "admission" .= ("open" :: Text)
+      , "admission" .= admissionMode (ocAdmission (oConfig o))
       , "queryMediaType" .= TE.decodeUtf8 queryMediaType
       , "methods" .= A.object ["introduce" .= (["QUERY", "POST"] :: [Text])]
       , "dictionary"
@@ -450,13 +1021,31 @@ discovery o req =
             [ "current" .= ("/schema/dict/" <> oDictHash o)
             , "algorithm" .= ("deflate-raw/9" :: Text)
             ]
-      , "budgets" .= budgetsJson (ocBudgets (oConfig o))
+      , "budgets" .= budgetsJson (effectiveCoalesceMs (oConfig o)) (ocBudgets (oConfig o))
       , "idempotency" .= A.object ["defaultRetention" .= ("PT24H" :: Text)]
       ]
 
 
-budgetsJson :: Budgets -> A.Value
-budgetsJson b =
+-- | Discovery's @admission@ field (§7.1 / §14.3).
+admissionMode :: QueryAdmission -> Text
+admissionMode = \case
+  AdmitOpen -> "open"
+  AdmitSigned _ -> "signed"
+
+
+{- | Discovery's @coalesceWindowMs@: what this origin actually does —
+the live 'ocCoalesce' window in whole milliseconds, 0 when coalescing is
+disabled. The static 'Lattice.Schema.coalesceWindowMs' budget field is
+shadowed here so the published document never promises batching the
+origin does not perform.
+-}
+effectiveCoalesceMs :: OriginConfig -> Int
+effectiveCoalesceMs cfg =
+  maybe 0 (\cc -> max 0 (ccWindowMicros cc) `div` 1000) (ocCoalesce cfg)
+
+
+budgetsJson :: Int -> Budgets -> A.Value
+budgetsJson windowMs b =
   A.object
     [ "maxCanonicalBytes" .= maxCanonicalBytes b
     , "maxDepth" .= maxDepth b
@@ -466,7 +1055,7 @@ budgetsJson b =
     , "maxSurrogateKeys" .= maxSurrogateKeys b
     , "maxBatchItems" .= maxBatchItems b
     , "maxPageDefault" .= maxPageDefault b
-    , "coalesceWindowMs" .= coalesceWindowMs b
+    , "coalesceWindowMs" .= windowMs
     ]
 
 
@@ -606,8 +1195,8 @@ drainBody = \case
 
 
 -- | Resolve a request to its compiled query and plan.
-resolveQuery :: Origin -> QueryInput -> Intro -> IO (Either Problem (Compiled, Plan))
-resolveQuery o input intro = case input of
+resolveQuery :: Origin -> Maybe ByteString -> QueryInput -> Intro -> IO (Either Problem (Compiled, Plan))
+resolveQuery o sig input intro = case input of
   QHash h -> do
     memo <- readTVarIO (oMemo o)
     case Map.lookup h memo of
@@ -622,8 +1211,8 @@ resolveQuery o input intro = case input of
       Left _ -> pure (Left (badRequest ["the d parameter is not valid base64url"]))
       Right bytes -> case decompressQuery dict bytes of
         Left e -> pure (Left (badRequest ["inline query failed to inflate: " <> e]))
-        Right txt -> compileMemo o True txt
-  QText txt -> compileMemo o (intro /= Oneshot) txt
+        Right txt -> compileMemo o sig True txt
+  QText txt -> compileMemo o sig (intro /= Oneshot) txt
   where
     dictFor = \case
       Nothing -> Right Nothing
@@ -642,15 +1231,47 @@ b64urlDecode bs = case B64U.decodeUnpadded bs of
   Left _ -> B64U.decode bs
 
 
-compileMemo :: Origin -> Bool -> Text -> IO (Either Problem (Compiled, Plan))
-compileMemo o memoize txt =
-  case compiled of
-    Left ce -> pure (Left (compileProblem ce))
-    Right (c, p) -> do
-      when memoize . atomically . modifyTVar' (oMemo o) $
-        Map.insert (compiledHash c) (c, p)
-      pure (Right (c, p))
+{- | Compile (and optionally memoize) canonical text — the cold path.
+'ocAdmission' (§14.3) is enforced here and only here: every compile
+spends admission-governed resources, while a hash-form GET's memo hit
+means the text was already admitted. The signature is verified against
+the origin's own canonical text ('compiledText'), after
+re-canonicalization; in signed mode a missing header fast-fails before
+any compile work, and a query failing admission is never memoized.
+-}
+compileMemo :: Origin -> Maybe ByteString -> Bool -> Text -> IO (Either Problem (Compiled, Plan))
+compileMemo o sig memoize txt
+  | AdmitSigned _ <- admission
+  , Nothing <- sig =
+      pure (Left (admissionDenied "signed admission: the X-Lattice-Query-Sig header is required"))
+  | otherwise =
+      -- §19.2: @lattice.compile@ exists only here — the cold path (a
+      -- hash-form memo hit never compiles), so @compile.cold@ is
+      -- constitutively true; a rejection carries @compile.rejected@ +
+      -- @error.type@ and feeds the same duration histogram.
+      withLatticeSpan tel "lattice.compile" Tel.Internal [] [("lattice.compile.cold", boolA True)] $ \msp -> do
+        (outcome, ms) <- elapsedMs $ case compiled of
+          Left ce -> pure (Left (compileProblem ce))
+          Right (c, p) -> case admitQuery admission sig (compiledText c) of
+            Left detail -> pure (Left (admissionDenied detail))
+            Right () -> do
+              when memoize . atomically . modifyTVar' (oMemo o) $
+                Map.insert (compiledHash c) (c, p)
+              pure (Right (c, p))
+        case outcome of
+          Left p ->
+            addSpanAttrs
+              msp
+              [ ("lattice.compile.rejected", boolA True)
+              , ("error.type", txtA (pCode p))
+              ]
+          Right _ -> pure ()
+        recordCompileDuration tel ms (either (const True) (const False) outcome)
+        pure outcome
   where
+    tel = ocTelemetry (oConfig o)
+    admission = ocAdmission (oConfig o)
+    admissionDenied d = (mkProblem 403 "lattice:admission-denied") {pDetail = Just d}
     schema = ocSchema (oConfig o)
     budgets = ocBudgets (oConfig o)
     compiled = do
@@ -661,11 +1282,13 @@ compileMemo o memoize txt =
 
 serveQuery :: Origin -> Request -> [(Text, Text)] -> QueryInput -> Intro -> IO Response
 serveQuery o req params input intro =
-  resolveQuery o input intro >>= \case
+  resolveQuery o (lookupHeader hLatticeQuerySig (requestHeaders req)) input intro >>= \case
     Left p -> pure (problemResponse req p)
-    Right (c, plan) -> case lookup "p" params of
+    Right (c, plan) -> recordClient o req (compiledHash c) *> case lookup "p" params of
       Just pid
-        | pid /= planId plan ->
+        | pid /= planId plan -> do
+            -- §19.3 @lattice.plan.supersessions@: the deploy-boundary signal.
+            countPlanSupersession (ocTelemetry (oConfig o))
             pure . problemResponse req $
               (mkProblem 409 "lattice:plan-superseded")
                 {pExtra = ["plan" .= RPlan (planSliceRecord plan)]}
@@ -730,6 +1353,18 @@ serveDataSlice o req params c plan slice input intro = do
       admitSlice o req params (requiredClaims plan) slice >>= \case
         Left p -> pure (problemResponse req p)
         Right (claims, vcRaw) -> do
+          -- §19.2 query-span attributes (on the enclosing server span):
+          -- hash/name/plan/slice — attributes, never span names. The
+          -- advisory name comes from the Lattice-Query-Name header.
+          addActiveSpanAttrs (ocTelemetry cfg) $
+            [ ("lattice.query.hash", txtA (compiledHash c))
+            , ("lattice.plan.id", txtA (planId plan))
+            , ("lattice.slice", txtA (renderSlice slice))
+            ]
+              <> maybe
+                []
+                (\n -> [("lattice.query.name", txtA (lenientText n))])
+                (lookupHeader "lattice-query-name" (requestHeaders req))
           let env =
                 ExecEnv
                   { xSchema = schema
@@ -738,16 +1373,24 @@ serveDataSlice o req params c plan slice input intro = do
                   , xClaims = claims
                   , xVars = vars
                   , xMode = EmitEq slice
+                  , xTelemetry = ocTelemetry cfg
                   }
           executeRoots env (planRoots plan) >>= \case
             Left AbortCursorRetired -> pure (problemResponse req (mkProblem 410 "lattice:cursor-retired"))
             Left AbortCursorMalformed -> pure (problemResponse req (badRequest ["malformed cursor"]))
+            Left (AbortBudget d) -> pure (problemResponse req (badRequest [d]))
             Right xr -> do
               snap <- beSnapshot (ocBackend cfg)
               promoted <- case intro of
                 Oneshot -> pure True
                 _ -> bumpTenure o (compiledHash c)
-              let etag = manifestEtag plan vars vcRaw (xrIdVers xr)
+              let etag = manifestEtag plan vars vcRaw (xrIdVers xr) (xrWitness xr)
+                  -- §10.4: digests are consulted only on priv slices and
+                  -- oneshot POSTs; pub/ctx responses never vary on them.
+                  haveDigest =
+                    if slice == SlicePriv || intro == Oneshot
+                      then requestDigest (requestHeaders req)
+                      else Nothing
                   manifest =
                     Manifest
                       { mQuery = Just (compiledHash c)
@@ -760,7 +1403,7 @@ serveDataSlice o req params c plan slice input intro = do
                       }
                   body =
                     [RManifest manifest]
-                      <> projectRecords refsOnly (xrRecords xr)
+                      <> projectRecords refsOnly (elideKnown haveDigest (xrRecords xr))
                       <> [REnd (EndRecord (xrComplete xr) (Just etag))]
                   keys = coarsenKeys (ocBudgets cfg) (planId plan) xr
                   cc = cacheControlFor slice intro promoted
@@ -783,7 +1426,7 @@ serveDataSlice o req params c plan slice input intro = do
                       let url = introUrl (compiledHash c) plan slice vars refsOnly
                       in [(hLocation, url), (hContentLocation, url)]
                   status = if xrDegraded xr then 207 else 200
-              when (xrDegraded xr) (ocPurge cfg keys)
+              when (xrDegraded xr) (publishPurge o keys)
               if inmMatch req (weakEtag etag)
                 then pure (mkResponse req 304 ((hCacheControl, cc) : common) "")
                 else
@@ -816,10 +1459,14 @@ projectRecords True rs = map unch rs
 
 
 bumpTenure :: Origin -> Text -> IO Bool
-bumpTenure o h = atomically $ do
-  m <- readTVar (oTenure o)
-  let n = 1 + Map.findWithDefault 0 h m
-  writeTVar (oTenure o) (Map.insert h n m)
+bumpTenure o h = do
+  n <- atomically $ do
+    m <- readTVar (oTenure o)
+    let n = 1 + Map.findWithDefault 0 h m
+    writeTVar (oTenure o) (Map.insert h n m)
+    pure n
+  -- §19.3 @lattice.tenure.promotions@: count the crossing, not every hit.
+  when (n == 3) (countTenurePromotion (ocTelemetry (oConfig o)))
   pure (n >= 3)
 
 
@@ -848,15 +1495,21 @@ varyPriv = \case
 {- | The manifest etag input, exactly as pinned: @canonicalJson@ of
 @[planId, {sorted var bindings}, vc payload or \"\", [[id, ver]…]]@ with
 the id\/ver pairs sorted (tombstone versions included, elisions as @\"\"@).
+A response touching @on read@ derived fields (§3.7 Validators) appends a
+fifth element, the sorted witness array ('witnessValue'; exact bytes
+pinned in "Lattice.Server.Execute"); an empty witness keeps the
+four-element input, so responses without derived fields hash exactly as
+before.
 -}
-manifestEtag :: Plan -> Map VarName A.Value -> Text -> [(Text, Text)] -> Text
-manifestEtag plan vars vcRaw idvers =
+manifestEtag :: Plan -> Map VarName A.Value -> Text -> [(Text, Text)] -> Set.Set WitnessEntry -> Text
+manifestEtag plan vars vcRaw idvers witness =
   manifestEtagHash . canonicalJson . A.Array . V.fromList $
     [ A.String (planId plan)
     , A.Object (KM.fromList (map (\(VarName n, v) -> (AK.fromText n, v)) (Map.toAscList vars)))
     , A.String vcRaw
     , A.toJSON (map (\(i, v) -> [i, v]) idvers)
     ]
+      <> (if Set.null witness then [] else [witnessValue witness])
 
 
 weakEtag :: Text -> ByteString
@@ -898,6 +1551,278 @@ introUrl h plan slice vars refsOnly =
         <> map (\(VarName n, v) -> (n, valueToUrlParam v)) (Map.toAscList vars)
         <> (if refsOnly then [("project", "refs")] else [])
     one (k, v) = TE.encodeUtf8 k <> "=" <> encodeQueryComponent (TE.encodeUtf8 v)
+
+
+-- ---------------------------------------------------------------------------
+-- Live queries (spec §12)
+-- ---------------------------------------------------------------------------
+
+{- | Is this hash-form GET a live subscription? The @live@ parameter is
+authoritative (@live=sse@ subscribes, any other value is a 400); absent
+the parameter, an @Accept: text\/event-stream@ header is honored as a
+hint (§12's example sends both).
+-}
+liveRequested :: Request -> [(Text, Text)] -> Either Problem Bool
+liveRequested req params = case lookup "live" params of
+  Just "sse" -> Right True
+  Just other -> Left (badRequest ["unknown live mode: " <> other])
+  Nothing ->
+    Right $ case lookupHeader hAccept (requestHeaders req) of
+      Just accept -> "text/event-stream" `BS.isInfixOf` accept
+      Nothing -> False
+
+
+-- | Live subscribers currently registered (the 'ocLive' cap's meter).
+originLiveSubscribers :: Origin -> IO Int
+originLiveSubscribers = liveSubscriberCount . oLive
+
+
+{- | Serve a §12 subscription: @GET \/q\/{hash}?slice=…&live=sse@.
+
+Only memoized hash-form URLs subscribe (an unknown hash is the ordinary
+404); admission, variable binding, and @project=refs@ are exactly the
+pull path's. Pins where the spec leaves latitude:
+
+* No @slice@ parameter subscribes @pub@ — the pull default (the plan
+  pseudo-slice) has no membership to watch, and an explicit
+  @slice=plan@ is a 400.
+* @X-Have@ \/ @X-Have-Digest@ are ignored: elision against a moving
+  store cannot stay coherent across deltas.
+* A degraded live execution does __not__ self-purge (the pull path's
+  §9.4.5 behavior) — a subscription purging its own registered keys
+  would re-trigger itself forever.
+* @Last-Event-ID@ on reconnect is accepted and ignored: every
+  (re)connect gets a fresh snapshot burst; the delta event ids exist so
+  a smarter origin /could/ resume, not so correctness depends on it.
+* The response carries no @Lattice-Snapshot@\/@Surrogate-Key@\/@ETag@
+  headers: header facts freeze at subscription time while the stream
+  moves, and live queries bypass shared caches by nature (§12).
+* Over the 'liveMaxSubscribers' cap the origin answers
+  @503 lattice:live-over-capacity@.
+-}
+serveLiveQuery :: Origin -> Request -> [(Text, Text)] -> Text -> IO Response
+serveLiveQuery o req params h = withMemo o req h $ \(c, plan) ->
+  case lookup "p" params of
+    Just pid
+      | pid /= planId plan ->
+          pure . problemResponse req $
+            (mkProblem 409 "lattice:plan-superseded")
+              {pExtra = ["plan" .= RPlan (planSliceRecord plan)]}
+    _ -> case maybe (Right SlicePub) parseSliceParam (lookup "slice" params) of
+      Left p -> pure (problemResponse req p)
+      Right SlicePlan ->
+        pure (problemResponse req (badRequest ["live queries subscribe data slices, not the plan pseudo-slice"]))
+      Right slice -> do
+        let cfg = oConfig o
+            outcome = do
+              refsOnly <- refsProjection params
+              vars <- bindVariables (ocSchema cfg) (planVars plan) params
+              pure (refsOnly, vars)
+        case outcome of
+          Left p -> pure (problemResponse req p)
+          Right (refsOnly, vars) ->
+            admitSlice o req params (requiredClaims plan) slice >>= \case
+              Left p -> pure (problemResponse req p)
+              Right (claims, vcRaw) -> do
+                void (bumpTenure o (compiledHash c))
+                let key =
+                      LiveKey
+                        { lkHash = compiledHash c
+                        , lkSlice = slice
+                        , lkVars =
+                            canonicalJsonText
+                              (A.Object (KM.fromList (map (\(VarName n, v) -> (AK.fromText n, v)) (Map.toAscList vars))))
+                        , lkClaims = vcRaw
+                        }
+                    mExpiry = do
+                      verifier <- ocVerifier cfg
+                      vcText <- lookup "vc" params
+                      proofExpiry verifier (TE.encodeUtf8 vcText) (lookupHeader hVcAuth (requestHeaders req))
+                    busSub = do
+                      rd <- subscribeInvalidations o
+                      pure ((\ev -> (ieCursor ev, ieKeys ev)) <$> rd)
+                    execOnce = liveExecuteOnce o c plan slice vars vcRaw claims refsOnly
+                liveSubscribe (ocLive cfg) (oLive o) key busSub execOnce mExpiry (ocNow cfg) >>= \case
+                  Left LiveOverCapacity ->
+                    pure . problemResponse req $
+                      (mkProblem 503 "lattice:live-over-capacity")
+                        {pDetail = Just "live subscriber cap reached; retry later or against another instance"}
+                  Left (LiveExecRefused p) -> pure (problemResponse req p)
+                  Right sub ->
+                    pure
+                      Response
+                        { responseStatus = Status 200
+                        , responseVersion = requestVersion req
+                        , responseHeaders =
+                            [ (hContentType, "text/event-stream")
+                            , (hCacheControl, "no-store")
+                            , planHdr plan
+                            , schemaHdr o
+                            ]
+                              <> varyPriv slice
+                        , responseBody = sseResponseBodyFrames (lsubSource sub)
+                        , responseTrailers = pure []
+                        , responseH2StreamId = 0
+                        , responseCancel = lsubClose sub
+                        , responsePushPromises = pure []
+                        }
+
+
+{- | One §12 (re-)execution: the pull pipeline's execute-and-frame core
+('serveDataSlice') minus HTTP concerns — no tenure bump, no digest
+elision, no degraded self-purge (see 'serveLiveQuery' pins). The
+registered key set is the pull response's @Surrogate-Key@ set
+('coarsenKeys' output, coarsening included: a coarsened plan key makes
+re-execution /more/ eager, never blind).
+-}
+liveExecuteOnce ::
+  Origin ->
+  Compiled ->
+  Plan ->
+  SliceName ->
+  Map VarName A.Value ->
+  Text ->
+  Claims ->
+  Bool ->
+  IO (Either Problem LiveSnapshot)
+liveExecuteOnce o c plan slice vars vcRaw claims refsOnly = do
+  let cfg = oConfig o
+      env =
+        ExecEnv
+          { xSchema = ocSchema cfg
+          , xBudgets = ocBudgets cfg
+          , xBackend = ocBackend cfg
+          , xClaims = claims
+          , xVars = vars
+          , xMode = EmitEq slice
+          , xTelemetry = ocTelemetry cfg
+          }
+  executeRoots env (planRoots plan) >>= \case
+    Left AbortCursorRetired -> pure (Left (mkProblem 410 "lattice:cursor-retired"))
+    Left AbortCursorMalformed -> pure (Left (badRequest ["malformed cursor"]))
+    Left (AbortBudget d) -> pure (Left (badRequest [d]))
+    Right xr -> do
+      let etag = manifestEtag plan vars vcRaw (xrIdVers xr) (xrWitness xr)
+      pure . Right $
+        LiveSnapshot
+          { lsManifest =
+              Manifest
+                { mQuery = Just (compiledHash c)
+                , mMutation = Nothing
+                , mPlan = Just (planId plan)
+                , mSlice = Just slice
+                , mRoot = xrRootMap xr
+                , mEtag = etag
+                , mBatch = Nothing
+                }
+          , lsRecords = projectRecords refsOnly (xrRecords xr)
+          , lsIdVers = Map.fromList (xrIdVers xr)
+          , lsRoot = xrRootMap xr
+          , lsEtag = etag
+          , lsKeys = Set.fromList (coarsenKeys (ocBudgets cfg) (planId plan) xr)
+          , lsComplete = xrComplete xr
+          }
+
+
+-- ---------------------------------------------------------------------------
+-- The invalidation feed (spec §18.6)
+-- ---------------------------------------------------------------------------
+
+{- | @GET \/invalidations?since={outboxCursor}&live=sse@ (§18.6): the
+origin's subscribable invalidation feed, straight off the §11.5 bus. Each
+event is one JSON object @{\"cursor\": n, \"keys\": [\"Post:17\", …]}@ with
+SSE @id: {cursor}@ — the same framing as §12, keep-alive @: ping@ comments
+included ('livePingMicros'; the feed reuses the live-query knob).
+
+* @since@ replays every retained event with a cursor greater than the
+  parameter ('invalidationsSince'), then continues with the live tail,
+  subscribed atomically with the replay cut. A consumer whose first
+  replayed cursor exceeds @since + 1@ knows the bounded window was outrun
+  and resyncs from scratch rather than trusting the gap.
+* @since@ absent subscribes the live tail only. A non-natural @since@ is
+  a 400.
+* Without @live=sse@ the request is a 400: the polling form is out of
+  scope for the reference implementation (the feed is a push surface;
+  resumability comes from @since@, not from polling).
+* The reference implementation leaves the feed UNGATED — invalidation
+  keys are cache metadata, not entity data, but they do reveal write
+  activity, so deployments SHOULD gate the route at the proxy\/service
+  tier (the gateway subscribes as a service principal there).
+-}
+serveInvalidations :: Origin -> Request -> [(Text, Text)] -> IO Response
+serveInvalidations o req params = case lookup "live" params of
+  Just "sse" -> case traverse parseSince (lookup "since" params) of
+    Nothing ->
+      pure (problemResponse req (badRequest ["malformed since cursor: a non-negative integer is required"]))
+    Just mSince -> do
+      (missed, nextEv) <- case mSince of
+        Just n -> invalidationsSince o n
+        Nothing -> ([],) <$> subscribeInvalidations o
+      backlog <- newIORef (SseComment "lattice invalidations" : map invalFrame missed)
+      pure
+        Response
+          { responseStatus = Status 200
+          , responseVersion = requestVersion req
+          , responseHeaders =
+              [ (hContentType, "text/event-stream")
+              , (hCacheControl, "no-store")
+              , schemaHdr o
+              ]
+          , responseBody = sseResponseBodyFrames (popFeedFrame o backlog nextEv)
+          , responseTrailers = pure []
+          , responseH2StreamId = 0
+          , responseCancel = pure ()
+          , responsePushPromises = pure []
+          }
+  _ ->
+    pure
+      ( problemResponse
+          req
+          (badRequest ["the invalidation feed is SSE-only; subscribe with live=sse (§18.6)"])
+      )
+  where
+    parseSince :: Text -> Maybe Word64
+    parseSince t = A.decodeStrict (TE.encodeUtf8 t)
+
+
+-- | One §18.6 feed event: @{\"cursor\": n, \"keys\": […]}@, @id: {cursor}@.
+invalFrame :: InvalEvent -> SseFrame
+invalFrame ev =
+  SseDispatch
+    ServerSentEvent
+      { sseEventType = Nothing
+      , sseEventId = Just (BS8.pack (show (ieCursor ev)))
+      , sseData =
+          BL.toStrict (A.encode (A.object ["cursor" .= ieCursor ev, "keys" .= ieKeys ev]))
+      }
+
+
+{- | The feed's frame source: drain the replay backlog (leading comment
+included), then block on the live tail, emitting a @: ping@ comment per
+idle 'livePingMicros' period (disabled at @<= 0@, like §12). The source
+never ends of its own accord — teardown is the client's disconnect, and
+the bus subscription is just a private 'TChan' handed to GC with the
+response.
+-}
+popFeedFrame :: Origin -> IORef [SseFrame] -> STM InvalEvent -> IO (Maybe SseFrame)
+popFeedFrame o backlog nextEv = do
+  queued <- readIORef backlog
+  case queued of
+    f : rest -> do
+      writeIORef backlog rest
+      pure (Just f)
+    []
+      | pingMicros <= 0 -> Just . invalFrame <$> atomically nextEv
+      | otherwise -> do
+          timer <- registerDelay pingMicros
+          next <-
+            atomically $
+              (Just <$> nextEv) `orElse` (readTVar timer >>= check >> pure Nothing)
+          pure . Just $ case next of
+            Just ev -> invalFrame ev
+            Nothing -> SseComment "ping"
+  where
+    pingMicros = livePingMicros (ocLive (oConfig o))
 
 
 -- ---------------------------------------------------------------------------
@@ -1041,6 +1966,24 @@ verifyVc o req vcText = case decodeClaims vcText of
 -- Point fetches (spec §6.7)
 -- ---------------------------------------------------------------------------
 
+{- | The backend point fetches execute against: 'beLoad' routed through
+the origin's coalescer when one is configured (§6.9). Row loads from
+concurrent point fetches accumulate into per-type windows and flush as
+one 'beLoad' per window; everything per-response — masks, visibility,
+@ETag@, @ver@ pinning — still happens after the batch, per response, in
+'entityResponse' (loads are policy-free, rendering is policy-full).
+Traversal loads reached from a point fetch (bounded edges) coalesce too:
+they are the same loaders queries use. With 'ocCoalesce' unset this is
+exactly 'ocBackend', byte-identical behavior.
+-}
+coalescedBackend :: Origin -> Backend
+coalescedBackend o = case oCoalescer o of
+  Nothing -> be
+  Just cz -> be {beLoad = \ty -> coalescedLoadMany cz ty (beLoad be ty)}
+  where
+    be = ocBackend (oConfig o)
+
+
 serveEntity :: Origin -> Request -> [(Text, Text)] -> Text -> Text -> IO Response
 serveEntity o req params tyText key = do
   let cfg = oConfig o
@@ -1069,10 +2012,11 @@ serveEntity o req params tyText key = do
                       ExecEnv
                         { xSchema = schema
                         , xBudgets = ocBudgets cfg
-                        , xBackend = ocBackend cfg
+                        , xBackend = coalescedBackend o
                         , xClaims = claims
                         , xVars = Map.empty
                         , xMode = EmitAtMost needSlice
+                        , xTelemetry = ocTelemetry cfg
                         }
                 executeSeeds env [(ref, node)] >>= \case
                   Left _ ->
@@ -1096,7 +2040,17 @@ entityResponse o req params ref xr needSlice = do
         catMaybes
           [ Just (snapshotHdr cfg snap)
           , Just (schemaHdr o)
-          , Just (keysHdr [entityKeyOf ref])
+          , -- §3.7 Invalidation: derived deps' entity keys and aggregate
+            -- collection tags join the point fetch's own key so existing
+            -- write sets purge derived values.
+            Just
+              ( keysHdr
+                  ( dedupOrd
+                      ( entityKeyOf ref
+                          : (xrCollectionKeys xr <> Set.toAscList (xrEntityKeys xr))
+                      )
+                  )
+              )
           , (\e -> (hETag, strongEtag e)) <$> etag
           ]
       frame inner etag =
@@ -1138,26 +2092,31 @@ entityResponse o req params ref xr needSlice = do
                 (encodeRecords (frame [RTombstone ref v Nothing] (Just v)))
       | Just er <- entRec -> do
           let v = erVer er
+              etagVal = validatorOf v
+              inner = REntity er : fieldErrs
           case pinned of
             Just want
               | want /= v -> pure (problemResponse req (versionUnavailable req params ref))
               | otherwise ->
+                  -- §3.7: a pinned fetch pins row bytes, but a derived
+                  -- value's deps move independently of @ver@ — with a
+                  -- nonempty witness the response cannot be immutable.
                   pure $
                     mkResponse
                       req
                       200
-                      ([(hContentType, ndjsonType), (hCacheControl, immutableCC)] <> common (Just v))
-                      (encodeRecords (frame [REntity er] (Just v)))
+                      ([(hContentType, ndjsonType), (hCacheControl, ccOf pinnedCC)] <> common (Just etagVal))
+                      (encodeRecords (frame inner (Just etagVal)))
             Nothing
-              | inmMatch req (strongEtag v) ->
-                  pure (mkResponse req 304 ((hCacheControl, unpinnedCC) : common (Just v)) "")
+              | inmMatch req (strongEtag etagVal) ->
+                  pure (mkResponse req 304 ((hCacheControl, ccOf unpinnedCC) : common (Just etagVal)) "")
               | otherwise ->
                   pure $
                     mkResponse
                       req
                       200
-                      ([(hContentType, ndjsonType), (hCacheControl, unpinnedCC)] <> common (Just v))
-                      (encodeRecords (frame [REntity er] (Just v)))
+                      ([(hContentType, ndjsonType), (hCacheControl, ccOf unpinnedCC)] <> common (Just etagVal))
+                      (encodeRecords (frame inner (Just etagVal)))
       | elided ->
           case pinned of
             Just _ -> pure (problemResponse req (versionUnavailable req params ref))
@@ -1172,11 +2131,31 @@ entityResponse o req params ref xr needSlice = do
   where
     cfg = oConfig o
     recs = xrRecords xr
+    witness = xrWitness xr
+    -- §3.7 Validators: a point fetch touching derived fields validates
+    -- with @hash(ver, witness)@ ('witnessEtag') instead of the bare ver.
+    validatorOf v
+      | Set.null witness = v
+      | otherwise = witnessEtag v witness
+    -- §9.4: an entity present with a derived field unavailable is
+    -- delivered, field absent, plus its Field-scoped error records; only
+    -- non-field errors fail the whole fetch.
+    fieldErrs =
+      mapMaybe
+        ( \case
+            r@(RError ErrorRecord {errScope = Just (ScopeField _ _)}) -> Just r
+            _ -> Nothing
+        )
+        recs
+    ccOf base = if null fieldErrs then base else "no-store"
+    pinnedCC = if Set.null witness then immutableCC else unpinnedCC
     firstErr =
       listToMaybe $
         mapMaybe
           ( \case
-              RError e -> Just e
+              RError e
+                | Just (ScopeField _ _) <- errScope e -> Nothing
+                | otherwise -> Just e
               _ -> Nothing
           )
           recs
@@ -1352,6 +2331,7 @@ buildMask _schema ent base strict items = do
             , pfArgs = map (\(a, v) -> (a, ArgLit v)) args
             , pfKey = canonicalFieldKey n args
             , pfLevel = joinLevel base (policyLevel (entityFieldPolicy ent fd))
+            , pfDerivation = fieldDerivation fd
             }
       Nothing -> case lookupEntityRel ent n of
         Just rel -> case rel of
@@ -1452,9 +2432,374 @@ serveMutation o req params name = do
             Left p -> pure (problemResponse req p)
             Right () -> case parseMutationBody schema mdef body of
               Left p -> pure (problemResponse req p)
-              Right invocation ->
-                withIdempotency o req name principalKey body $
-                  runMutation o req name mdef claims callerSlice invocation
+              Right invocation -> do
+                addMutationAttrs o name mdef
+                withIdempotency o req name mdef principalKey body $
+                  runMutation o req name mdef claims callerSlice namedCtx invocation
+
+
+-- ---------------------------------------------------------------------------
+-- Verb bindings (spec §11.7, §11.8)
+-- ---------------------------------------------------------------------------
+
+-- | Context a bound (verb) invocation adds to the ordinary mutation
+-- pipeline: the conditional-request check handed to the effect bracket,
+-- and whether a singular success is a creation (@201@ + @Location@).
+data BoundCtx = BoundCtx
+  { bcPre :: Maybe MutatePrecondition
+  , bcCreated :: Bool
+  }
+
+
+-- | The named @POST /m/{name}@ form: unconditional, never a creation
+-- response. Preconditions and 201 belong to the entity-space spellings.
+namedCtx :: BoundCtx
+namedCtx = BoundCtx {bcPre = Nothing, bcCreated = False}
+
+
+-- | How a bound URL names its target: @/e/{Type}/{key}@ or @/e/{Type}@.
+data BindShape = ShapeKeyed | ShapeCollection
+  deriving stock (Eq, Ord)
+
+
+{- | Every entity-space URL shape the schema binds, to its mutation: a
+singular binding contributes its own shape, a batch collection binding
+(@batch … as VERB \/e\/{Type}@) the collection shape. A creation binding
+is itself the collection shape and serves both the singular create and
+the array batch (§11.8). Shape uniqueness is an elaboration check, so
+this index is well-defined; the schema is small and the fold is cheap
+enough to run per request without touching 'Origin'.
+-}
+bindingIndex :: Schema -> Map (BindVerb, TypeName, BindShape) (MutationName, MutationDef)
+bindingIndex schema = Map.fromList (concatMap shapes (Map.toList (schemaMutations schema)))
+  where
+    shapes (n, mdef) =
+      let single = case mutBinding mdef of
+            Nothing -> []
+            Just b ->
+              [((vbVerb b, vbTarget b, maybe ShapeCollection (const ShapeKeyed) (vbKeyArg b)), (n, mdef))]
+          batchB = case mutBatch mdef >>= bpBound of
+            Nothing -> []
+            Just (v, ty) -> [((v, ty, ShapeCollection), (n, mdef))]
+       in single <> batchB
+
+
+{- | Dispatch an entity-space verb request (§11.7): find the bound
+mutation, admit the caller exactly as the named form does, decode the
+invocation from URL\/headers\/body per verb, and run the ordinary
+mutation pipeline — the binding chooses the wire spelling only. An
+unbound verb\/URL falls back to 404\/405 like any unrouted path.
+-}
+serveBound :: Origin -> Request -> [(Text, Text)] -> BindVerb -> Text -> Maybe Text -> IO Response
+serveBound o req params verb tyText mkey = do
+  let schema = ocSchema (oConfig o)
+      ty = TypeName tyText
+      shape = maybe ShapeCollection (const ShapeKeyed) mkey
+  case Map.lookup (verb, ty, shape) (bindingIndex schema) of
+    Nothing -> pure (fallback o req ("e" : tyText : maybeToList mkey))
+    Just (name, mdef) -> do
+      body <- drainBody (requestBody req)
+      resolvePrincipal o req params >>= \case
+        Left p -> pure (problemResponse req p)
+        Right (claims, principalKey) -> do
+          let hasAuth = isJust (lookupHeader hAuthorization (requestHeaders req))
+              callerSlice
+                | hasAuth = SlicePriv
+                | not (Map.null claims) = SliceCtx
+                | otherwise = SlicePub
+          case checkGuard (mutGuard mdef) claims hasAuth of
+            Left p -> pure (problemResponse req p)
+            Right () -> case boundRequest schema name mdef verb ty mkey req params body of
+              Left resp -> pure resp
+              Right (inv, bctx) -> do
+                addMutationAttrs o name mdef
+                withIdempotency o req name mdef principalKey body $
+                  runMutation o req name mdef claims callerSlice bctx inv
+
+
+{- | Decode a bound invocation: the URL's key segment binds the binding's
+key argument, the body binds per verb (PUT: the single non-key argument's
+full replacement value; PATCH: a merge-patch into the input record
+argument; DELETE: no body; POST: the named form's object-or-array rule),
+and the conditional headers become the effect's 'MutatePrecondition'.
+-}
+boundRequest ::
+  Schema ->
+  MutationName ->
+  MutationDef ->
+  BindVerb ->
+  TypeName ->
+  Maybe Text ->
+  Request ->
+  [(Text, Text)] ->
+  ByteString ->
+  Either Response (Invocation, BoundCtx)
+boundRequest schema name mdef verb ty mkey req params body = case (verb, mkey) of
+  (BindPut, Just key) -> keyed key $ \ka -> do
+    arg <- soleNonKeyArg ka
+    v <- maybe (Left (problem (badRequest ["PUT body must be valid JSON (the full replacement representation)"]))) Right (A.decodeStrict body)
+    args <- argsFor [(ka, A.String key), (adName arg, v)]
+    pure (Singular args)
+  (BindPatch, Just key) -> keyed key $ \ka -> do
+    requireMergePatch
+    arg <- soleNonKeyArg ka
+    obj <- case A.decodeStrict body of
+      Just (A.Object obj) -> Right obj
+      _ -> Left (problem (badRequest ["a merge-patch body must be a JSON object"]))
+    mapLeft problem (patchFieldsOk schema arg obj)
+    args <- argsFor [(ka, A.String key), (adName arg, A.Object obj)]
+    pure (Singular args)
+  (BindDelete, Just key) -> keyed key $ \ka -> do
+    args <- argsFor [(ka, A.String key)]
+    pure (Singular args)
+  (BindCreate, Nothing) -> do
+    noPreconditions
+    arg <- soleArg
+    case A.decodeStrict body of
+      -- §11.8: the singular creation body is the BARE fields of the input
+      -- record (the collection URL receives the representation, PUT-style);
+      -- the array form is the batch, each item the {"key"?, "input": {...}}
+      -- envelope around the same bare-fields record.
+      Just v@(A.Object _) -> do
+        args <- argsFor [(adName arg, v)]
+        pure (Singular args, BoundCtx {bcPre = Nothing, bcCreated = True})
+      Just (A.Array arr) -> do
+        bp <- maybe (Left (problem (mkProblem 400 "lattice:batch-not-supported"))) Right (mutBatch mdef)
+        checkBatchSize bp (length (V.toList arr))
+        items <- traverse (createItem arg) (zip [0 :: Int ..] (V.toList arr))
+        pure (BatchInv (bpAtomicity bp) items, BoundCtx {bcPre = Nothing, bcCreated = False})
+      _ -> Left (problem (badRequest ["a creation POST body must be a JSON object (bare input fields) or array (batch)"]))
+  (BindPatch, Nothing) -> collection $ \ka bp -> do
+    arg <- soleNonKeyArg ka
+    requireMergePatch
+    arr <- case A.decodeStrict body of
+      Just (A.Array arr) -> Right (V.toList arr)
+      _ -> Left (problem (badRequest ["a collection PATCH body must be a JSON array of merge-patches"]))
+    checkBatchSize bp (length arr)
+    items <- traverse (patchItem ka arg) (zip [0 :: Int ..] arr)
+    pure (BatchInv (bpAtomicity bp) items)
+  (BindDelete, Nothing) -> collection $ \ka bp -> do
+    let ids = map snd (filter ((== "id") . fst) params)
+        keys = map snd (filter ((== "key") . fst) params)
+    when (null ids) $
+      Left (problem (badRequest ["a collection DELETE names its targets via id query parameters (§11.8)"]))
+    when (length keys > length ids) $
+      Left (problem (badRequest ["more key parameters than id parameters"]))
+    checkBatchSize bp (length ids)
+    let itemKeyAt ix = fromMaybe (tshow ix) (listToMaybe (drop ix keys))
+        items = zipWith (\ix i -> (itemKeyAt ix, Map.singleton ka (A.String i))) [0 ..] ids
+    pure (BatchInv (bpAtomicity bp) items)
+  _ ->
+    -- Unreachable: 'route' never pairs these verb/shape combinations.
+    Left (problem (mkProblem 404 "lattice:not-found"))
+  where
+    problem = problemResponse req
+    mapLeft f = either (Left . f) Right
+
+    ifMatchHdr = lookupHeader hIfMatch (requestHeaders req)
+    ifNoneHdr = lookupHeader hIfNoneMatch (requestHeaders req)
+
+    -- Keyed form: bind the key argument and run the verb-specific body
+    -- decoding FIRST (RFC 9110 §13.2.2: preconditions are ignored when the
+    -- request would fail anyway, so 415/400 precede 428/412), then parse
+    -- the conditional headers, demanding one on non-lww bindings (428,
+    -- plain per §15).
+    keyed key k = do
+      binding <- maybe (Left (problem (mkProblem 404 "lattice:not-found"))) Right (mutBinding mdef)
+      ka <- maybe (Left (problem (mkProblem 404 "lattice:not-found"))) Right (vbKeyArg binding)
+      inv <- k ka
+      pre <- parsePre binding (Ref ty key)
+      -- A successful create-if-absent PUT created the resource (RFC 9110
+      -- §9.3.4 demands the 201).
+      let creates = (mpCheck <$> pre) == Just PreIfAbsent
+      pure (inv, BoundCtx {bcPre = pre, bcCreated = creates})
+
+    -- Collection form: no preconditions apply; the batch policy and its
+    -- key argument come from the singular binding (elaboration guarantees
+    -- both exist wherever a collection shape is indexed).
+    collection k = do
+      noPreconditions
+      binding <- maybe (Left (problem (mkProblem 404 "lattice:not-found"))) Right (mutBinding mdef)
+      ka <- maybe (Left (problem (mkProblem 404 "lattice:not-found"))) Right (vbKeyArg binding)
+      bp <- maybe (Left (problem (mkProblem 400 "lattice:batch-not-supported"))) Right (mutBatch mdef)
+      inv <- k ka bp
+      pure (inv, BoundCtx {bcPre = Nothing, bcCreated = False})
+
+    noPreconditions =
+      case (ifMatchHdr, ifNoneHdr) of
+        (Nothing, Nothing) -> Right ()
+        _ -> Left (problem (badRequest ["preconditions (If-Match / If-None-Match) apply only to keyed entity URLs"]))
+
+    parsePre binding target = case (ifMatchHdr, ifNoneHdr) of
+      (Just _, Just _) ->
+        Left (problem (badRequest ["supply at most one of If-Match and If-None-Match"]))
+      (Just im, Nothing) -> do
+        v <- strongEtagOf (lenientText im)
+        Right (Just MutatePrecondition {mpTarget = target, mpCheck = PreIfMatch v})
+      (Nothing, Just inm)
+        | T.strip (lenientText inm) == "*" ->
+            if vbVerb binding == BindPut
+              then Right (Just MutatePrecondition {mpTarget = target, mpCheck = PreIfAbsent})
+              else Left (problem (badRequest ["If-None-Match: * applies only to PUT (create-if-absent, §11.7)"]))
+        | otherwise ->
+            Left (problem (badRequest ["only If-None-Match: * (create-if-absent) is supported on bound mutations"]))
+      (Nothing, Nothing)
+        | vbLww binding -> Right Nothing
+        | otherwise ->
+            Left . plainProblem req 428 "Precondition Required" $
+              "mutation `"
+                <> unMutationName name
+                <> "` is verb-bound and not last-writer-wins: supply If-Match: \"<ver>\""
+                <> (if vbVerb binding == BindPut then " or If-None-Match: *" else "")
+
+    -- A single strong quoted etag; weak etags never match state-changing
+    -- preconditions (RFC 9110 §13.1.1) and @*@ is not supported.
+    strongEtagOf raw =
+      let t = T.strip raw
+       in if T.isPrefixOf "\"" t && T.isSuffixOf "\"" t && T.length t >= 2 && not (T.isInfixOf "," t)
+            then Right (T.drop 1 (T.dropEnd 1 t))
+            else Left (problem (badRequest ["If-Match takes a single strong version etag, e.g. If-Match: \"e4\""]))
+
+    soleNonKeyArg ka = case filter ((/= ka) . adName) (mutParams mdef) of
+      [arg] -> Right arg
+      _ -> Left (problem ((mkProblem 500 "lattice:internal") {pDetail = Just "binding arity invariant violated"}))
+
+    -- The creation record argument of a POST binding (elaboration pins
+    -- exactly one, a declared record type).
+    soleArg = case mutParams mdef of
+      [arg] -> Right arg
+      _ -> Left (problem ((mkProblem 500 "lattice:internal") {pDetail = Just "binding arity invariant violated"}))
+
+    -- One bound-batch creation item (§11.8): the {"key"?, "input": {...}}
+    -- envelope; "input" carries the bare-fields creation record.
+    createItem arg (ix, v) = case v of
+      A.Object obj -> do
+        let itemKey = case KM.lookup "key" obj of
+              Just (A.String k) -> k
+              _ -> tshow ix
+        inner <- case KM.lookup "input" obj of
+          Just innerV@(A.Object _) -> Right innerV
+          _ -> Left (problem (badRequest ["batch item " <> tshow ix <> " must carry its creation record under \"input\""]))
+        args <- argsFor [(adName arg, inner)]
+        Right (itemKey, args)
+      _ -> Left (problem (badRequest ["batch item " <> tshow ix <> " must be a JSON object"]))
+
+    argsFor pairs =
+      mapLeft problem $
+        itemArgs schema mdef (KM.fromList (map (\(ArgName a, v) -> (AK.fromText a, v)) pairs))
+
+    requireMergePatch =
+      case lookupHeader hContentType (requestHeaders req) of
+        Just ct
+          | T.toLower (T.strip (T.takeWhile (/= ';') (lenientText ct))) == "application/x-lattice-merge-patch" ->
+              Right ()
+        _ ->
+          Left . problem $
+            (mkProblem 415 "lattice:unsupported-media")
+              {pDetail = Just "PATCH bodies use application/x-lattice-merge-patch"}
+
+    checkBatchSize bp n =
+      if fromIntegral n > bpMaxItems bp
+        then
+          Left . problem $
+            (mkProblem 400 "lattice:batch-too-large")
+              {pDetail = Just ("this mutation admits at most " <> tshow (bpMaxItems bp) <> " items")}
+        else Right ()
+
+    -- One collection-PATCH item (§11.8): the target's key field inline,
+    -- an optional item key under @"key"@, the rest the merge-patch.
+    patchItem ka arg (ix, v) = case v of
+      A.Object obj -> do
+        let keyField = case Map.lookup ty (schemaEntities schema) of
+              Just ent | kf :| [] <- entityKey ent -> unFieldName kf
+              _ -> "id"
+        keyVal <- case KM.lookup (AK.fromText keyField) obj of
+          Just kv -> Right kv
+          Nothing -> Left (problem (badRequest ["batch item " <> tshow ix <> " lacks the key field `" <> keyField <> "`"]))
+        let itemKey = case KM.lookup "key" obj of
+              Just (A.String k) -> k
+              _ -> tshow ix
+            patch = KM.delete "key" (KM.delete (AK.fromText keyField) obj)
+        mapLeft problem (patchFieldsOk schema arg patch)
+        args <- argsFor [(ka, keyVal), (adName arg, A.Object patch)]
+        Right (itemKey, args)
+      _ -> Left (problem (badRequest ["batch item " <> tshow ix <> " must be a merge-patch object"]))
+
+
+-- | Reject merge-patch fields the input record does not declare.
+patchFieldsOk :: Schema -> ArgDef -> A.Object -> Either Problem ()
+patchFieldsOk schema argDef obj = case adType argDef of
+  TNamed rt
+    | Just (DeclRecord fs) <- Map.lookup rt (schemaTypes schema) ->
+        let declared = Set.fromList (map (unFieldName . fst) fs)
+            unknown = filter (\k -> not (Set.member (AK.toText k) declared)) (KM.keys obj)
+         in if null unknown
+              then Right ()
+              else Left (badRequest (map (\k -> "unknown merge-patch field: " <> AK.toText k) unknown))
+  _ -> Right ()
+
+
+{- | An RFC 9457 problem with type @about:blank@: the §15 table gives 412
+and 428 no @lattice:@ code — they are plain HTTP semantics.
+-}
+plainProblem :: Request -> Int -> Text -> Text -> Response
+plainProblem req status title detail =
+  mkResponse
+    req
+    status
+    [(hContentType, "application/problem+json"), (hCacheControl, "no-store")]
+    ( BL.toStrict . A.encode . A.object $
+        [ "type" .= ("about:blank" :: Text)
+        , "title" .= title
+        , "status" .= status
+        , "detail" .= detail
+        ]
+    )
+
+
+{- | The @412@ of a failed conditional request (§11.7): plain HTTP status
+(no problem document) whose body is an ordinary entity stream carrying the
+target's current state — manifest, entity\/tombstone records, end,
+@no-store@ — so a client rebases and retries with no follow-up fetch.
+-}
+preconditionFailed ::
+  Origin ->
+  Request ->
+  MutationName ->
+  MutationDef ->
+  Claims ->
+  SliceName ->
+  Ref ->
+  IO Response
+preconditionFailed o req name mdef claims callerSlice target = do
+  let cfg = oConfig o
+  snap <- beSnapshot (ocBackend cfg)
+  (rendered, _) <- renderOutput o mdef claims callerSlice Nothing [target]
+  let etag = mutationEtag name (recIdVers rendered)
+      recs =
+        [ RManifest
+            Manifest
+              { mQuery = Nothing
+              , mMutation = Just name
+              , mPlan = Nothing
+              , mSlice = Nothing
+              , mRoot = Map.singleton "node" [target]
+              , mEtag = etag
+              , mBatch = Nothing
+              }
+        ]
+          <> rendered
+          <> [REnd (EndRecord True (Just etag))]
+  pure $
+    mkResponse
+      req
+      412
+      [ (hContentType, ndjsonType)
+      , (hCacheControl, "no-store")
+      , snapshotHdr cfg snap
+      , schemaHdr o
+      ]
+      (encodeRecords recs)
 
 
 {- | The mutation principal: the @vc@ payload when presented (proof-checked
@@ -1559,8 +2904,8 @@ completed response with @Idempotency-Replayed: true@, reject digest
 mismatches (@422 lattice:key-reuse@) and concurrent executions
 (@409 lattice:key-in-flight@). The entry is removed if the action throws.
 -}
-withIdempotency :: Origin -> Request -> MutationName -> Text -> ByteString -> IO Response -> IO Response
-withIdempotency o req name principalKey body act =
+withIdempotency :: Origin -> Request -> MutationName -> MutationDef -> Text -> ByteString -> IO Response -> IO Response
+withIdempotency o req name mdef principalKey body act =
   case lookupHeader hIdempotencyKey (requestHeaders req) of
     Nothing -> act
     Just keyBs -> do
@@ -1578,7 +2923,11 @@ withIdempotency o req name principalKey body act =
           pure . problemResponse req $
             (mkProblem 409 "lattice:key-in-flight") {pHeaders = [(hRetryAfter, "1")]}
         Just done@IdemDone {}
-          | idDigest done == digest ->
+          | idDigest done == digest -> do
+              -- §19.2/§19.3: the replay is visible on the span and counted
+              -- by mutation and effect class.
+              countMutationReplay tel (unMutationName name) (effectClassText (mutEffect mdef))
+              addActiveSpanAttrs tel [("lattice.idempotency.replayed", boolA True)]
               pure $
                 mkResponse
                   req
@@ -1588,21 +2937,47 @@ withIdempotency o req name principalKey body act =
           | otherwise -> pure (problemResponse req (mkProblem 422 "lattice:key-reuse"))
         Nothing -> do
           resp <- act `onException` atomically (modifyTVar' (oIdem o) (Map.delete k))
-          let stored =
-                IdemDone
-                  { idDigest = digest
-                  , idStatus = statusInt resp
-                  , idHeaders = responseHeaders resp
-                  , idBody = bodyBytesOf resp
-                  }
-          atomically (modifyTVar' (oIdem o) (Map.insert k stored))
+          -- A 412 is a refused precondition, not an acceptance (§11.2's
+          -- at-most-once applies to accepted keys): storing it would replay
+          -- the stale failure at the client's corrected retry. Release the
+          -- key instead.
+          if (statusInt resp :: Int) == 412
+            then atomically (modifyTVar' (oIdem o) (Map.delete k))
+            else do
+              let stored =
+                    IdemDone
+                      { idDigest = digest
+                      , idStatus = statusInt resp
+                      , idHeaders = responseHeaders resp
+                      , idBody = bodyBytesOf resp
+                      }
+              atomically (modifyTVar' (oIdem o) (Map.insert k stored))
           pure resp
   where
+    tel = ocTelemetry (oConfig o)
     statusInt r = case responseStatus r of
       Status w -> fromIntegral w
     bodyBytesOf r = case responseBody r of
       BodyBytes bs -> bs
       _ -> BS.empty
+
+
+-- | §19.2 mutation-span attributes, added to the enclosing server span.
+addMutationAttrs :: Origin -> MutationName -> MutationDef -> IO ()
+addMutationAttrs o (MutationName n) mdef =
+  addActiveSpanAttrs
+    (ocTelemetry (oConfig o))
+    [ ("lattice.mutation.name", txtA n)
+    , ("lattice.effect_class", txtA (effectClassText (mutEffect mdef)))
+    ]
+
+
+-- | The wire spelling of an effect class (§11.2), as a span attribute value.
+effectClassText :: EffectClass -> Text
+effectClassText = \case
+  Transactional -> "transactional"
+  NaturallyIdempotent _ -> "natural"
+  Workflow -> "workflow"
 
 
 runMutation ::
@@ -1612,15 +2987,21 @@ runMutation ::
   MutationDef ->
   Claims ->
   SliceName ->
+  BoundCtx ->
   Invocation ->
   IO Response
-runMutation o req name mdef claims callerSlice = \case
+runMutation o req name mdef claims callerSlice bctx = \case
   Singular args -> do
-    outcome <- beMutate (ocBackend cfg) name claims args
+    outcome <- beMutate (ocBackend cfg) name claims args (bcPre bctx)
     case outcome of
       MutationDenied -> pure (problemResponse req forbidden)
       MutationFailed bf ->
         pure (problemResponse req ((mkProblem 500 "lattice:internal") {pDetail = bfMessage bf}))
+      MutationPreconditionFailed -> case bcPre bctx of
+        Just p -> preconditionFailed o req name mdef claims callerSlice (mpTarget p)
+        Nothing ->
+          pure . problemResponse req $
+            (mkProblem 500 "lattice:internal") {pDetail = Just "backend reported a precondition failure for an unconditional mutation"}
       MutationDomainError v -> do
         snap <- beSnapshot (ocBackend cfg)
         let er = ErrorRecord Nothing Nothing (Just v) False Nothing
@@ -1643,9 +3024,18 @@ runMutation o req name mdef claims callerSlice = \case
                 [RManifest (mutManifest name Nothing (crResult cr) etag)]
                   <> recs
                   <> [RInvalidated keys Nothing, REnd (EndRecord True (Just etag))]
-              status = if degraded then 207 else 200
-          ocPurge cfg keys
-          pure (mutResponse o req status (crSnapshot cr) keys (encodeRecords bodyRecs))
+              -- Creation (§11.7): 201 with Location at the created entity's
+              -- point-fetch URL, provided the effect produced a result ref.
+              created = bcCreated bctx && not degraded
+              status
+                | degraded = 207
+                | created && locationOf (crResult cr) /= Nothing = 201
+                | otherwise = 200
+          publishPurge o keys
+          let resp = mutResponse o req status (crSnapshot cr) keys (encodeRecords bodyRecs)
+          pure $ case (created, locationOf (crResult cr)) of
+            (True, Just loc) -> resp {responseHeaders = insertHeader hLocation loc (responseHeaders resp)}
+            _ -> resp
   BatchInv BestEffort items -> do
     results <- traverse (runItem o mdef claims callerSlice name) items
     snap <- beSnapshot (ocBackend cfg)
@@ -1659,11 +3049,19 @@ runMutation o req name mdef claims callerSlice = \case
         degraded = any isErrorRec allRecs
         status = if degraded then 207 else 200
         bodyRecs = [RManifest manifest] <> allRecs <> invRecs <> [REnd (EndRecord True (Just etag))]
-    unless (null keys) (ocPurge cfg keys)
+    unless (null keys) (publishPurge o keys)
     pure (mutResponse o req status snap keys (encodeRecords bodyRecs))
   BatchInv AllOrNothing items -> goAll items []
   where
     cfg = oConfig o
+    locationOf refs =
+      ( \r ->
+          "/e/"
+            <> encodePathSegment (TE.encodeUtf8 (unTypeName (refType r)))
+            <> "/"
+            <> encodePathSegment (TE.encodeUtf8 (refKey r))
+      )
+        <$> find (\r -> refType r == mutReturns mdef) refs
     isErrorRec = \case
       RError _ -> True
       _ -> False
@@ -1685,7 +3083,7 @@ runMutation o req name mdef claims callerSlice = \case
           degraded = any isErrorRec allRecs
           status = if degraded then 207 else 200
           bodyRecs = [RManifest manifest] <> allRecs <> invRecs <> [REnd (EndRecord True (Just etag))]
-      unless (null keys) (ocPurge cfg keys)
+      unless (null keys) (publishPurge o keys)
       pure (mutResponse o req status snap keys (encodeRecords bodyRecs))
     goAll (item : rest) acc = do
       out <- runItem o mdef claims callerSlice name item
@@ -1715,11 +3113,17 @@ runItem ::
   (Text, Map ArgName A.Value) ->
   IO ItemOut
 runItem o mdef claims callerSlice name (itemKey, args) = do
-  outcome <- beMutate (ocBackend (oConfig o)) name claims args
+  -- Batch items carry no preconditions (§11.8: per-item concurrency
+  -- control is the item key's job; If-* headers on collection URLs are
+  -- rejected before dispatch).
+  outcome <- beMutate (ocBackend (oConfig o)) name claims args Nothing
   case outcome of
     MutationDenied -> pure (errItem (Just "lattice:forbidden") Nothing Nothing False False)
     MutationFailed bf ->
       pure (errItem (Just (bfCode bf)) Nothing (bfMessage bf) (bfRetryable bf) False)
+    MutationPreconditionFailed ->
+      -- Unreachable from a Nothing precondition; classify as backend fault.
+      pure (errItem (Just "lattice:internal") Nothing (Just "unexpected precondition failure") False False)
     MutationDomainError v -> pure (errItem Nothing (Just v) Nothing False False)
     MutationCommitted cr -> case checkWriteSet schema mdef args (crWrites cr) of
       Left violation ->
@@ -1786,6 +3190,7 @@ renderOutput o mdef claims callerSlice itemKey refs = do
           , xClaims = claims
           , xVars = Map.empty
           , xMode = EmitAtMost callerSlice
+          , xTelemetry = ocTelemetry cfg
           }
   executeSeeds env seeds >>= \case
     Left _ ->
@@ -1973,3 +3378,135 @@ mutResponse o req status snap keys body =
 
 tshow :: (Show a) => a -> Text
 tshow = T.pack . show
+
+
+-- ---------------------------------------------------------------------------
+-- Compatibility registry endpoints (spec §17)
+-- ---------------------------------------------------------------------------
+
+{- | Gate a registry endpoint on 'ocRegistry' (§17.1): the registry is
+optional analysis infrastructure, so an unconfigured origin treats the
+path as unrouted.
+-}
+withRegistry :: Origin -> Request -> (Registry -> IO Response) -> IO Response
+withRegistry o req k = case ocRegistry (oConfig o) of
+  Nothing ->
+    pure . problemResponse req $
+      (mkProblem 404 "lattice:not-found") {pDetail = Just "no compatibility registry configured"}
+  Just reg -> k reg
+
+
+{- | Snapshot the origin's query corpus (§17.4): every memoized canonical
+text with its tenure hit count and the @Lattice-Client@ builds recorded
+against it. One STM transaction, so the cut is consistent; the memo IS
+the corpus — there is nothing to register.
+-}
+exportCorpus :: Origin -> IO [CorpusEntry]
+exportCorpus o = atomically $ do
+  memo <- readTVar (oMemo o)
+  tenure <- readTVar (oTenure o)
+  clients <- readTVar (oClients o)
+  pure
+    [ CorpusEntry
+        { ceText = compiledText c
+        , ceHits = fromIntegral (max 0 (Map.findWithDefault 0 h tenure))
+        , ceClients = Set.toAscList (Map.findWithDefault Set.empty h clients)
+        }
+    | (h, (c, _plan)) <- Map.toList memo
+    ]
+
+
+-- | @GET /schema/corpus@ (§17.4): the corpus export, for the
+-- registry-as-consumer story. Traffic statistics, so never cacheable.
+serveCorpus :: Origin -> Request -> IO Response
+serveCorpus o req = withRegistry o req $ \_reg -> do
+  entries <- exportCorpus o
+  pure (jsonResponse req 200 [(hCacheControl, "no-store")] (A.object ["corpus" .= entries]))
+
+
+{- | Record the advisory @Lattice-Client@ header (§17.1) against a served
+query's hash, for corpus attribution. Only when a registry is configured
+(attribution has no other consumer — the default path stays allocation-free),
+and bounded per hash so a header-spinning client cannot grow the map.
+-}
+recordClient :: Origin -> Request -> Text -> IO ()
+recordClient o req h
+  | Nothing <- ocRegistry (oConfig o) = pure ()
+  | otherwise = for_ (client =<< lookupHeader hLatticeClient (requestHeaders req)) $ \cl ->
+      atomically . modifyTVar' (oClients o) $
+        Map.insertWith
+          (\_new old -> if Set.size old >= clientBound then old else Set.insert cl old)
+          h
+          (Set.singleton cl)
+  where
+    client = either (const Nothing) Just . TE.decodeUtf8'
+
+
+-- | Client builds retained per query hash; advisory data, so clamp hard.
+clientBound :: Int
+clientBound = 64
+
+
+idlMediaType :: ByteString
+idlMediaType = "application/x-lattice-idl"
+
+
+{- | @POST \/schema\/check?mode=…&window=…@ (§17.3): check a candidate IDL
+against the deployment log and the live corpus. The HTTP status describes
+the check request, not the verdict: a checked candidate is @200@ and the
+report body's @pass@ field carries the verdict; @400@ is an unparseable
+candidate or unknown mode\/window; @415@ a wrong media type; @404@ an
+unconfigured registry. CI gates read the body, not the status line.
+-}
+serveSchemaCheck :: Origin -> Request -> [(Text, Text)] -> IO Response
+serveSchemaCheck o req params = withRegistry o req $ \reg ->
+  case lookupHeader hContentType (requestHeaders req) of
+    Just ct
+      | not (idlMediaType `BS.isPrefixOf` ct) ->
+          pure . problemResponse req $
+            (mkProblem 415 "lattice:unsupported-media")
+              {pDetail = Just ("candidate schemas must be " <> TE.decodeUtf8 idlMediaType)}
+    _ -> do
+      body <- drainBody (requestBody req)
+      case TE.decodeUtf8' body of
+        Left _ -> pure (problemResponse req (badRequest ["candidate IDL is not valid UTF-8"]))
+        Right src -> case parseSchema src of
+          Left errs -> pure (problemResponse req (badRequest (map renderIdlError errs)))
+          Right candidate -> case checkParams params of
+            Left p -> pure (problemResponse req p)
+            Right (mode, transitive, window) -> do
+              now <- posixSecondsToUTCTime <$> ocNow (oConfig o)
+              corpus <- exportCorpus o
+              baselines <- map logged <$> registryLog reg
+              let cfg =
+                    CheckConfig
+                      { ccMode = mode
+                      , ccTransitive = transitive
+                      , ccWindow = window
+                      , ccNow = now
+                      , ccBudgets = ocBudgets (oConfig o)
+                      }
+              pure . jsonResponse req 200 [(hCacheControl, "no-store")] $
+                A.toJSON (checkSchemas cfg baselines corpus candidate)
+  where
+    logged e = LoggedSchema {lsDeployedAt = deTime e, lsHash = deHash e, lsSchema = deSchema e}
+
+
+{- | Parse @mode@\/@window@: an absent mode is the §17.3 default gate
+(client-backward, non-transitive); unknown values are 400 per §17.3
+("only an unparseable candidate or unknown mode is a 4xx").
+-}
+checkParams :: [(Text, Text)] -> Either Problem (CheckMode, Bool, Maybe Compat.Window)
+checkParams params = do
+  (mode, transitive) <- case lookup "mode" params of
+    Nothing -> Right (ClientBackward, False)
+    Just m -> maybe (Left (badRequest ["unknown mode: " <> m])) Right (parseCheckMode m)
+  window <- case lookup "window" params of
+    Nothing -> Right Nothing
+    Just w -> maybe (Left (badRequest ["unparseable window: " <> w])) (Right . Just) (parseWindow w)
+  pure (mode, transitive, window)
+
+
+renderIdlError :: SchemaError -> Text
+renderIdlError e = maybe "" (\l -> "line " <> tshow l <> ": ") (seLine e) <> seMessage e
+

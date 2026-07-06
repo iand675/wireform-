@@ -72,6 +72,25 @@ describe("§9.1 entity merge semantics", () => {
     // ... but both still report their refs, and neither commits (§9.4.3).
     expect(outcome.refs).toEqual(["Human:1", "Human:2"]);
     expect(outcome.committed).toBe(false);
+    // A satisfied marker is not a gap.
+    expect(outcome.gaps).toEqual([]);
+  });
+
+  it("unchanged for a ref the store lacks is a gap to point-fetch (§10.4)", () => {
+    const store = new LatticeStore();
+    const outcome = store.applyRecords([{ kind: "unchanged", id: "Human:9", ver: "v1" }]);
+    expect(store.get("Human:9")).toBeUndefined();
+    expect(outcome.gaps).toEqual(["Human:9"]);
+    expect(outcome.committed).toBe(false);
+  });
+
+  it("unchanged at a different ver than stored is also a gap (§10.4)", () => {
+    const store = new LatticeStore();
+    store.applyRecords([entity("Human:1", "v1", { name: "Luke" })]);
+    const outcome = store.applyRecords([{ kind: "unchanged", id: "Human:1", ver: "v2" }]);
+    // The stored entry is kept untouched — the repair is the caller's fetch.
+    expect(store.get("Human:1")).toEqual({ ver: "v1", fields: { name: "Luke" } });
+    expect(outcome.gaps).toEqual(["Human:1"]);
   });
 });
 

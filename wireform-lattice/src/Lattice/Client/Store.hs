@@ -13,8 +13,12 @@ every mutation result uniformly. Merge semantics per applied record:
 * @tombstone@: the entity is evicted and remembered in the tombstone set
   (§9.3). A later @entity@ record for the same ref resurrects it: a fresh
   fact beats a remembered eviction.
-* @unchanged@ and @elided@: no-ops on the entity map (@unchanged@ is a
-  revalidation artifact; @elided@ is a policy fact, not field data).
+* @unchanged@ (§10.4): the origin elided an entity it believes we hold.
+  When the store holds that exact @(id, ver)@ the entry is kept and marked
+  fresh (its entity key leaves the stale set — assembly treats it as
+  present). When it does not — the digest's false positive — the ref is
+  recorded as a __gap__ ('takeGaps') for the client to repair with a
+  point fetch. @elided@ is a policy fact, not field data: a no-op.
 * @invalidated@: the carried surrogate keys accumulate into the stale-key
   set ('staleKeys'), the minimal read-your-writes staleness signal.
 * @manifest@, @error@, @end@, @plan@, @reauth@, and unknown kinds do not
@@ -32,16 +36,19 @@ module Lattice.Client.Store (
   applyRecord,
   mergeEntityRecord,
   lookupEntity,
+  entityVersions,
   isTombstoned,
   snapshotEntities,
   markStale,
   staleKeys,
+  unchangedGaps,
+  takeGaps,
 
   -- * Denormalization
   denormalize,
 ) where
 
-import Control.Concurrent.STM (STM, TVar, modifyTVar', newTVarIO, readTVar)
+import Control.Concurrent.STM (STM, TVar, modifyTVar', newTVarIO, readTVar, writeTVar)
 import Data.Aeson qualified as A
 import Data.Aeson.KeyMap qualified as KM
 import Data.Map.Strict (Map)
@@ -63,21 +70,37 @@ import Lattice.Types
 import Lattice.Value (qvalueToJson)
 import Lattice.Wire
 
--- | What the store knows about one entity: its @ver@ and its fields,
--- keyed by canonical wire field key (e.g. @avatarUrl(size:48)@).
+-- | What the store knows about one entity contribution: a @ver@ and its
+-- fields, keyed by canonical wire field key (e.g. @avatarUrl(size:48)@).
 type StoredEntity = (Text, Map Text A.Value)
 
 
--- | An STM-shared normalized entity store.
+{- | An STM-shared normalized entity store.
+
+Entries are keyed per @(id, src)@ (§18.1: a gateway emits an entity's
+owner record and extension records separately, each versioned by its
+contributing module — the store tracks @ver@ per source and unions
+fields across sources on read). Records without a @src@ tag (every
+monolithic origin) land in the 'Nothing' slot, preserving the exact
+pre-federation semantics.
+-}
 data Store = Store
-  { storeEntities :: TVar (Map Ref StoredEntity)
+  { storeEntities :: TVar (Map Ref (Map (Maybe Text) StoredEntity))
   , storeTombstones :: TVar (Set Ref)
   , storeStale :: TVar (Set SurrogateKey)
+  , storeGaps :: TVar (Set Ref)
+  -- ^ Refs the origin elided as @unchanged@ that this store cannot
+  -- satisfy (§10.4 false positives): repair by point fetch.
   }
 
 
 newStore :: IO Store
-newStore = Store <$> newTVarIO Map.empty <*> newTVarIO Set.empty <*> newTVarIO Set.empty
+newStore =
+  Store
+    <$> newTVarIO Map.empty
+    <*> newTVarIO Set.empty
+    <*> newTVarIO Set.empty
+    <*> newTVarIO Set.empty
 
 
 -- | Apply a response's records in stream order (§9.1 merge semantics,
@@ -91,7 +114,11 @@ applyRecord Store {..} = \case
   REntity er -> do
     modifyTVar' storeTombstones (Set.delete (erId er))
     modifyTVar' storeEntities $ \m ->
-      Map.insert (erId er) (mergeEntityRecord er (Map.lookup (erId er) m)) m
+      let srcs = Map.findWithDefault Map.empty (erId er) m
+          slot = mergeEntityRecord er (Map.lookup (erSrc er) srcs)
+      in Map.insert (erId er) (Map.insert (erSrc er) slot srcs) m
+  -- A tombstone evicts the WHOLE entity: extension records cannot
+  -- outlive the owner's row (§18.1).
   RTombstone ref _ver _item -> do
     modifyTVar' storeEntities (Map.delete ref)
     modifyTVar' storeTombstones (Set.insert ref)
@@ -99,7 +126,13 @@ applyRecord Store {..} = \case
     modifyTVar' storeStale (\s -> foldr Set.insert s keys)
   RManifest {} -> pure ()
   RElided {} -> pure ()
-  RUnchanged {} -> pure ()
+  RUnchanged ref ver -> do
+    ents <- readTVar storeEntities
+    case Map.lookup ref ents of
+      Just srcs
+        | any ((== ver) . fst) (Map.elems srcs) ->
+            modifyTVar' storeStale (Set.delete (entityKeyOf ref))
+      _ -> modifyTVar' storeGaps (Set.insert ref)
   RError {} -> pure ()
   REnd {} -> pure ()
   RPlan {} -> pure ()
@@ -118,17 +151,41 @@ mergeEntityRecord er = \case
   _ -> (erVer er, erFields er)
 
 
+-- | The merged cross-source view: fields union across contributing
+-- sources (disjoint by ownership); the representative @ver@ is the
+-- untagged slot's when present (monolithic origins), else the first
+-- source's in name order.
 lookupEntity :: Store -> Ref -> STM (Maybe StoredEntity)
-lookupEntity store ref = Map.lookup ref <$> readTVar (storeEntities store)
+lookupEntity store ref =
+  (fmap mergeSrcs . Map.lookup ref) <$> readTVar (storeEntities store)
+
+
+-- | Per-source versions of one entity (§18.1: the store keys versions by
+-- (entity, contributing module); 'Nothing' is the untagged slot).
+entityVersions :: Store -> Ref -> STM (Map (Maybe Text) Text)
+entityVersions store ref =
+  maybe Map.empty (Map.map fst) . Map.lookup ref <$> readTVar (storeEntities store)
+
+
+mergeSrcs :: Map (Maybe Text) StoredEntity -> StoredEntity
+mergeSrcs srcs =
+  ( maybe "" fst (headMaybe (Map.elems srcs))
+  , Map.unions (map snd (Map.elems srcs))
+  )
+  where
+    headMaybe = \case
+      [] -> Nothing
+      (x : _) -> Just x
 
 
 isTombstoned :: Store -> Ref -> STM Bool
 isTombstoned store ref = Set.member ref <$> readTVar (storeTombstones store)
 
 
--- | The full entity map, e.g. as input to 'denormalize'.
+-- | The full entity map (merged cross-source view), e.g. as input to
+-- 'denormalize'.
 snapshotEntities :: Store -> STM (Map Ref StoredEntity)
-snapshotEntities = readTVar . storeEntities
+snapshotEntities store = Map.map mergeSrcs <$> readTVar (storeEntities store)
 
 
 -- | Record surrogate keys as stale (mirrors an @invalidated@ record).
@@ -138,6 +195,20 @@ markStale store keys = modifyTVar' (storeStale store) (\s -> foldr Set.insert s 
 
 staleKeys :: Store -> STM (Set SurrogateKey)
 staleKeys = readTVar . storeStale
+
+
+-- | The accumulated @unchanged@ false-positive refs (§10.4), non-destructively.
+unchangedGaps :: Store -> STM (Set Ref)
+unchangedGaps = readTVar . storeGaps
+
+
+-- | Drain the gap set: the caller takes responsibility for repairing
+-- (point-fetching) the returned refs.
+takeGaps :: Store -> STM (Set Ref)
+takeGaps store = do
+  gaps <- readTVar (storeGaps store)
+  writeTVar (storeGaps store) Set.empty
+  pure gaps
 
 
 -- ---------------------------------------------------------------------------

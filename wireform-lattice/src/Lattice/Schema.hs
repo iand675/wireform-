@@ -17,14 +17,29 @@ Implementation-driven IDL clarifications (folded back into the spec):
 * Co-keyed entities (§3.8): @entityCoKey@ records a @joins@/@refines@ base;
   the inherited key spec and key 'FieldDef's are copied in at elaboration,
   so 'entityKey' and 'entityFields' are always self-contained.
+* Derived fields (§3.7): 'fieldDerivation' carries the declared read set,
+  materialization, and optional declassification. 'ViaCollection' names the
+  owning entity's @has many@ relationship /field/ (the surface spelling);
+  the spec model's 'CollectionName' is @colName . relCollection@ of that
+  relationship — the field name is stored so the canonical printer
+  roundtrips the surface text.
 -}
 module Lattice.Schema (
   Schema (..),
+  Deprecation (..),
+  DeclPath (..),
   InterfaceDef (..),
   EntityDef (..),
+  ExtensionDef (..),
+  emptyExtension,
   CoKey (..),
   CoKeyMode (..),
   FieldDef (..),
+  Derivation (..),
+  Dep (..),
+  Aggregate (..),
+  Materialization (..),
+  derivationHidden,
   ArgDef (..),
   RelationshipDef (..),
   Target (..),
@@ -46,6 +61,9 @@ module Lattice.Schema (
   InvalidationSpec (..),
   BatchPolicy (..),
   Atomicity (..),
+  VerbBinding (..),
+  BindVerb (..),
+  bindVerbName,
   Budgets (..),
   defaultBudgets,
 
@@ -69,6 +87,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Data.Time.Calendar (Day)
 import Lattice.Query.AST (QValue, SelectionSet, VarDef)
 import Lattice.Types
 import Numeric.Natural (Natural)
@@ -81,12 +100,52 @@ data Schema = Schema
   -- ^ Declared value types: newtypes, records, sums, enums.
   , schemaInterfaces :: Map InterfaceName InterfaceDef
   , schemaEntities :: Map TypeName EntityDef
+  , schemaExtensions :: Map TypeName ExtensionDef
+  -- ^ @extend entity@ blocks (§18.1): members this module declares on a
+  -- FOREIGN entity. Empty on a fused schema — fusion ("Lattice.Module")
+  -- folds them into the owning entity's declaration.
   , schemaFragments :: Map FragmentName FragmentDef
   -- ^ Schema-declared fragments (late-bound, §4.5).
   , schemaRoots :: Map RootName RootDef
   , schemaMutations :: Map MutationName MutationDef
+  , schemaBreaks :: Map DeclPath Text
+  -- ^ @\@break(approved: "TICKET")@ override annotations (§17.3), keyed by
+  -- the declaration they are attached to. Participate in the canonical IDL
+  -- text but never in plan pertinence.
+  , schemaDeprecations :: Map DeclPath Deprecation
+  -- ^ @\@deprecated(sunset: …, note: …)@ metadata (§17.5), on fields,
+  -- relationships, roots, and mutations.
   }
   deriving stock (Eq, Show)
+
+
+{- | Deprecation metadata (§17.5): the element keeps serving, the metadata
+appears in the published IDL document (so codegen warns), and the checker
+passes its removal once past the sunset date.
+-}
+data Deprecation = Deprecation
+  { depSunset :: Day
+  , depNote :: Text
+  }
+  deriving stock (Eq, Ord, Show)
+
+
+{- | An annotation attachment site: which declaration an IDL annotation
+(@\@break@, @\@deprecated@) is written on. 'OnSchema' (the @schema@ line)
+is the override site for removals of whole top-level declarations, which
+have no surviving declaration of their own in the candidate (§17.3).
+-}
+data DeclPath
+  = OnSchema
+  | OnType TypeName
+  | OnInterface InterfaceName
+  | OnIfaceItem InterfaceName FieldName
+  | OnEntity TypeName
+  | OnEntityItem TypeName FieldName
+  | OnFragment FragmentName
+  | OnRoot RootName
+  | OnMutation MutationName
+  deriving stock (Eq, Ord, Show)
 
 
 {- | A declared interface: its common fields (each entity implementing the
@@ -117,6 +176,31 @@ data EntityDef = EntityDef
   deriving stock (Eq, Show)
 
 
+{- | An @extend entity@ block (§18.1): stored fields, edges, and derived
+fields one module declares on an entity another module owns. The block may
+NOT redeclare the owner's key, visibility default, @fetch by@, co-key, or
+any existing member — but "Lattice.IDL.Parser" is deliberately lenient
+about the first four: the spec pins composition conflicts to FAIL FUSION
+at deploy time (§18.1), so the illegal clauses parse, are recorded here,
+and 'Lattice.Module.fuseModules' rejects them naming the offender.
+-}
+data ExtensionDef = ExtensionDef
+  { extFields :: Map FieldName FieldDef
+  , extRels :: Map FieldName RelationshipDef
+  , extDefaultPolicy :: Maybe Policy
+  -- ^ A @… by default@ line in the block: illegal, recorded for fusion.
+  , extFetchBy :: Maybe (NonEmpty FieldName, Policy)
+  -- ^ A @fetch by@ clause in the block: illegal, recorded for fusion.
+  , extCoKey :: Maybe CoKey
+  -- ^ A @joins@\/@refines@ clause on the block: illegal, recorded for fusion.
+  }
+  deriving stock (Eq, Show)
+
+
+emptyExtension :: ExtensionDef
+emptyExtension = ExtensionDef Map.empty Map.empty Nothing Nothing Nothing
+
+
 -- | How a co-keyed entity couples to its base's record of truth (§3.8).
 data CoKeyMode
   = -- | @joins@: adjacent truth — own @ver@, own surrogate keys, own lifecycle.
@@ -141,8 +225,65 @@ data FieldDef = FieldDef
   -- ^ @avatarUrl(size: Int = 96)@ — declared arguments with defaults.
   , fieldPolicy :: Maybe Policy
   -- ^ 'Nothing' means the entity default applies.
+  , fieldDerivation :: Maybe Derivation
+  -- ^ @derived reads … on read \/ maintained@ (§3.7); 'Nothing' for
+  -- ordinary stored fields.
   }
   deriving stock (Eq, Show)
+
+
+{- | A derived field's declaration (§3.7): the read set (the dual of a
+mutation's write set), how the value materializes, and the optional
+audited declassification.
+-}
+data Derivation = Derivation
+  { derivReads :: NonEmpty Dep
+  , derivMaterialize :: Materialization
+  , derivDeclassify :: Maybe Text
+  -- ^ @\@declassify(approved: \"…\")@: the written justification; its
+  -- presence skips the information-flow domination check (§3.7).
+  }
+  deriving stock (Eq, Show)
+
+
+-- | One element of a derived field's read set (§3.7).
+data Dep
+  = -- | @own(f1, f2)@: stored fields of the owning entity.
+    OwnFields (NonEmpty FieldName)
+  | -- | @\<edge\> ...Fragment@: follow a declared to-one edge, read the
+    -- schema fragment's fields off the target.
+    ViaEdge FieldName FragmentName
+  | -- | @\<rel\> count\/sum(f)\/min(f)\/max(f)@: aggregate over the named
+    -- @has many@ relationship's collection.
+    ViaCollection FieldName Aggregate
+  deriving stock (Eq, Ord, Show)
+
+
+-- | A set-in map-out collection aggregate (§3.7 Planning).
+data Aggregate = AggCount | AggSum FieldName | AggMin FieldName | AggMax FieldName
+  deriving stock (Eq, Ord, Show)
+
+
+-- | When a derived value is computed (§3.7 Materialization).
+data Materialization
+  = -- | Computed in the plan on every read; witnessed by the response.
+    OnRead
+  | -- | Stored on the row, recomputed by the outbox relay; the ordinary
+    -- @ver@ witnesses it.
+    Maintained
+  deriving stock (Eq, Show)
+
+
+{- | Does an @on read@ derivation compile into hidden traversals (§3.7
+Planning)? 'OwnFields'-only read sets resolve from the loaded row itself.
+-}
+derivationHidden :: Derivation -> Bool
+derivationHidden d = any hidden (NE.toList (derivReads d))
+  where
+    hidden = \case
+      OwnFields _ -> False
+      ViaEdge _ _ -> True
+      ViaCollection _ _ -> True
 
 
 data ArgDef = ArgDef
@@ -273,6 +414,8 @@ data MutationDef = MutationDef
   , mutErrors :: Maybe (TypeName, Openness, NonEmpty Text)
   -- ^ Declared domain error sum (§9.4.2).
   , mutBatch :: Maybe BatchPolicy
+  , mutBinding :: Maybe VerbBinding
+  -- ^ Entity-space verb binding (§11.7); 'Nothing' = named @POST /m/{name}@ only.
   }
   deriving stock (Eq, Show)
 
@@ -316,11 +459,51 @@ data InvalidationSpec
 data BatchPolicy = BatchPolicy
   { bpAtomicity :: Atomicity
   , bpMaxItems :: Natural
+  , bpBound :: Maybe (BindVerb, TypeName)
+  -- ^ Bound-batch collection binding (§11.8): @batch … as VERB \/e\/{Type}@.
+  -- Legal only alongside a singular 'VerbBinding' of the same verb and
+  -- target ('BindPatch', 'BindCreate', or 'BindDelete'; PUT never batches).
   }
   deriving stock (Eq, Show)
 
 
 data Atomicity = AllOrNothing | BestEffort
+  deriving stock (Eq, Show)
+
+
+{- | A mutation's entity-space wire spelling (§11.7): the verb of an
+@as VERB \/e\/{Type}[\/{arg}]@ clause. 'BindCreate' is @POST@ to the
+collection URL (the spec's @CREATE@); the keyed verbs carry the key
+argument in the URL's final segment.
+-}
+data BindVerb = BindPut | BindPatch | BindDelete | BindCreate
+  deriving stock (Eq, Ord, Show)
+
+
+-- | The HTTP method token of a 'BindVerb', as printed in the IDL.
+bindVerbName :: BindVerb -> Text
+bindVerbName = \case
+  BindPut -> "PUT"
+  BindPatch -> "PATCH"
+  BindDelete -> "DELETE"
+  BindCreate -> "POST"
+
+
+{- | A verb binding (§11.7): an additional entity-space wire spelling for a
+mutation. The binding chooses the wire spelling only — guard, writes,
+effect class, and invalidation apply identically to the named form.
+
+'vbKeyArg' is the mutation argument bound by the URL's @{arg}@ segment;
+'Nothing' is the collection form, which is 'BindCreate'-only. 'vbLww'
+(@last-writer-wins@) suppresses the @428 Precondition Required@ demand on
+the keyed verbs.
+-}
+data VerbBinding = VerbBinding
+  { vbVerb :: BindVerb
+  , vbTarget :: TypeName
+  , vbKeyArg :: Maybe ArgName
+  , vbLww :: Bool
+  }
   deriving stock (Eq, Show)
 
 

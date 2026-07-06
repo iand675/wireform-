@@ -130,6 +130,24 @@ describe("§5.1 canonical query goldens (cross-implementation pin)", () => {
   });
 });
 
+describe("§5.1 step 4: NFC normalization (cross-implementation pin)", () => {
+  // Pinned with the Haskell side (Lattice.Canonical renderCanonical): a
+  // decomposed "é" (e + U+0301 COMBINING ACUTE ACCENT) in a string literal
+  // collapses to the single code point U+00E9 in the canonical text, so
+  // both implementations hash identical NFC bytes.
+  it("collapses e + U+0301 to U+00E9 in string literals", () => {
+    const canonical = canon('query { search(text: "cafe\u0301") { name } }');
+    expect(canonical).toBe('query{search(text:"caf\u00E9"){name}}');
+    expect(canonical.includes("\u0301")).toBe(false);
+  });
+
+  it("NFC and pre-composed spellings canonicalize identically", () => {
+    const decomposed = canon('query { search(text: "cafe\u0301") { name } }');
+    const composed = canon('query { search(text: "caf\u00E9") { name } }');
+    expect(decomposed).toBe(composed);
+  });
+});
+
 describe("two spellings, one query", () => {
   const reference = `
     query FeedPage($after: Cursor, $limit: I32 = 20) {

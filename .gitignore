@@ -1,3 +1,6 @@
+# Cabal builddirs: the default, plus every session/agent-private
+# `--builddir=dist-<id>` (parallel subagents each build in their own).
+dist-*/
 dist-newstyle/
 dist-derive/
 dist-haddock/

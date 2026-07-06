@@ -1,0 +1,105 @@
+schema verbs.example.com
+
+-- Wave-1 verb-binding fixture (§11.7/§11.8): every legal binding shape on
+-- one small schema —
+--
+--   * PUT  /e/Note/{note}      replace, naturally idempotent;
+--   * PATCH /e/Note/{note}     merge-patch edit, plus the bound batch
+--                              collection form `as PATCH /e/Note`;
+--   * DELETE /e/Note/{note}    delete, naturally idempotent, plus the
+--                              query-param batch `as DELETE /e/Note`;
+--   * POST /e/Note             creation (201 + Location), plus the
+--                              array-vs-object batch on the same URL;
+--   * PATCH /e/Flag/{flag} last-writer-wins
+--                              the declared blind-overwrite exception to
+--                              the 428 precondition demand.
+--
+-- The patch input records (NotePatch, FlagPatch) are all-optional on
+-- purpose: that is what makes merge-patch reapplication a no-op, and the
+-- elaborator rejects PATCH bindings whose input record has any required
+-- field (Test.Lattice.Verbs pins the rejection).
+
+newtype NoteId = Text
+newtype FlagId = Text
+
+data NoteInput {
+  title: Text
+  body:  Text?
+}
+
+data NotePatch {
+  title:  Text?
+  body:   Text?
+  pinned: Bool?
+}
+
+data FlagPatch {
+  raised: Bool?
+}
+
+entity Note by id {
+  visible to all by default
+
+  id:     NoteId
+  title:  Text
+  body:   Text?
+  pinned: Bool?
+
+  fetch by id: public
+}
+
+entity Flag by id {
+  visible to all by default
+
+  id:     FlagId
+  raised: Bool?
+
+  fetch by id: public
+}
+
+get note(id: NoteId) of Note public
+
+get flag(id: FlagId) of Flag public
+
+mutation replaceNote(note: NoteId, input: NoteInput) returns Note {
+  allow       public
+  writes      Note(note)
+  invalidates writes
+  effect      natural
+  as          PUT /e/Note/{note}
+}
+
+mutation editNote(note: NoteId, patch: NotePatch) returns Note {
+  allow       public
+  writes      Note(note)
+  invalidates writes
+  effect      transactional
+  as          PATCH /e/Note/{note}
+  batch       best-effort max 100 as PATCH /e/Note
+}
+
+mutation deleteNote(note: NoteId) returns Note {
+  allow       public
+  writes      Note(note)
+  invalidates writes
+  effect      natural
+  as          DELETE /e/Note/{note}
+  batch       best-effort max 100 as DELETE /e/Note
+}
+
+mutation createNote(input: NoteInput) returns Note {
+  allow       public
+  writes      Note(new)
+  invalidates writes
+  effect      transactional
+  as          POST /e/Note
+  batch       best-effort max 100 as POST /e/Note
+}
+
+mutation setFlag(flag: FlagId, patch: FlagPatch) returns Flag {
+  allow       public
+  writes      Flag(flag)
+  invalidates writes
+  effect      transactional
+  as          PATCH /e/Flag/{flag} last-writer-wins
+}

@@ -1,0 +1,72 @@
+schema derived.example.com
+
+-- Wave-1 derived-fields fixture (§3.7): every dep and materialization
+-- shape on one small schema —
+--
+--   * commentCount  ViaCollection aggregate (`comments count`), on read:
+--                    the hidden aggregate-loader traversal;
+--   * authorLine    ViaEdge dep (`author ...AuthorByline`), on read:
+--                    the hidden to-one traversal, witnessed by the dep
+--                    entity's (id, ver);
+--   * commentTotal  the same aggregate, maintained: stored on the row,
+--                    recomputed by the invalidation-bus relay.
+--
+-- addComment writes the collection tag (Post.comments at the written
+-- comment's postId), which is exactly the surrogate key a derived read
+-- set contributes — so mutations purge derived values with no new
+-- write-side work, and the maintained relay wakes on the same event.
+
+newtype AuthorId  = Text
+newtype PostId    = Text
+newtype CommentId = Text
+
+entity Author by id {
+  visible to all by default
+
+  id:   AuthorId
+  name: Text
+
+  fetch by id: public
+}
+
+entity Post by id {
+  visible to all by default
+
+  id:       PostId
+  title:    Text
+  authorId: AuthorId
+
+  commentCount: W32  derived reads comments count on read
+  authorLine:   Text derived reads author ...AuthorByline on read
+  commentTotal: W32  derived reads comments count maintained
+
+  has one  author: Author by authorId
+
+  has many comments: Comment by postId
+                     ordered by createdAt asc
+                     page 10 max 100
+
+  fetch by id: public
+}
+
+entity Comment by id {
+  visible to all by default
+
+  id:        CommentId
+  postId:    PostId
+  body:      Text
+  createdAt: Timestamp
+
+  fetch by id: public
+}
+
+fragment AuthorByline on Author { name }
+
+get post(id: PostId) of Post public
+
+mutation addComment(comment: CommentId, post: PostId, body: Text) returns Comment {
+  allow       public
+  writes      Comment(new), Post.comments(Comment.postId)
+  invalidates writes
+  effect      transactional
+}

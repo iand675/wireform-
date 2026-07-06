@@ -37,6 +37,32 @@
   nonempty list `[t]+` shared by fields, mutation inputs, and
   variables.
 
+* **`wireform-lattice` deferred features complete** (spec Draft 27
+  amendments pinned as implemented): derived fields (§3.7: `on read`
+  hidden-traversal planning, `maintained` outbox-relay materialization,
+  witness validators, information-flow checking with `@declassify`); cache
+  digests (§10.4: `X-Have` + a bit-level-pinned Golomb-coded set,
+  `unchanged` markers, client gap repair); NFC canonicalization (§5.1) in
+  both language canonicalizers; verb bindings (§11.7-11.8: `as
+  PUT/PATCH/DELETE/POST`, merge-patch, `If-Match`/`428` conditional
+  machinery, bound batches); origin coalescing (§6.9: per-type accumulation
+  windows, single-flight, `coalesceWindowMs` discovery); signed admission
+  (§14.3: Ed25519 over canonical text at memo-miss compile); live queries
+  (§12: SSE subscriptions with single-flight deltas and reauth, plus a
+  client `subscribeQuery`); observability (§19: the span topology, the ten
+  named instruments, explain's span skeleton diffable against live traces);
+  the compatibility registry (§17: four-axis change taxonomy, transitive
+  check windows, `@break`/`@deprecated`, corpus-weighted `POST
+  /schema/check`); the `nodes` root (§14.4); schema modules (§18.1: `extend
+  entity`, order-insensitive fusion, fused in-process backends); the
+  federation gateway (§18.3-18.8: per-upstream `nodes` subplans over
+  ordinary cacheable GETs, `src`-tagged streams, namespaced snapshots and
+  surrogate keys, claim re-minting, feed-driven purges) and the
+  `/invalidations` feed (§18.6). Also: the repo-wide `blake3` build is
+  pinned portable (`constraints: blake3 source` + `BLAKE3_USE_NEON=0`),
+  fixing a null NEON dispatch that segfaulted any >1 KiB hash on aarch64
+  whenever the nix global unit was selected.
+
 ## 0.1.0.0 -- 2026
 
 Initial release of the `wireform` umbrella package and its per-format

@@ -132,6 +132,24 @@ tests =
       it "blog FeedPage" $
         goldenCompiled "test/fixtures/golden/feedpage.canonical.txt" blogSchema feedPageText
 
+    describe "§5.1 step 4: NFC normalization" $ do
+      -- The cross-implementation vector: "café" spelled decomposed
+      -- (e + U+0301) and precomposed (U+00E9) is ONE query identity —
+      -- byte-identical canonical text, colliding hashes. The TypeScript
+      -- canonicalizer must agree on these exact bytes.
+      it "decomposed and precomposed string literals are one identity" $
+        shouldCanonEq starwarsSchema (nfcQuery decomposedCafe) (nfcQuery precomposedCafe)
+      it "the canonical text carries the precomposed form" $ do
+        c <- mustCompileWith starwarsSchema (nfcQuery decomposedCafe)
+        compiledText c `shouldSatisfy` T.isInfixOf precomposedCafe
+        compiledText c `shouldNotSatisfy` T.isInfixOf decomposedCafe
+      it "the pinned cross-language vector: canonical bytes and hash match lattice-ts" $ do
+        -- Verified byte-identical in GHC and node/tsx by the DigestNfc
+        -- wave (lattice-ts canonical.test.ts pins the same two values).
+        c <- mustCompileWith starwarsSchema "query { search(text: \"cafe\x0301\") { name } }"
+        compiledText c `shouldBe` "query{search(text:\"caf\x00E9\"){name}}"
+        compiledHash c `shouldBe` "u_SYA1r8Jk6j5rebZd1GCw"
+
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -144,6 +162,24 @@ shouldCanonEq schema a b = do
   cb <- mustCompileWith schema b
   compiledText cb `shouldBe` compiledText ca
   compiledHash cb `shouldBe` compiledHash ca
+
+
+{- | @café@ with the accent as a combining mark (e + U+0301): the §5.1
+step-4 input that must collapse to 'precomposedCafe'.
+-}
+decomposedCafe :: Text
+decomposedCafe = "cafe\x0301"
+
+
+-- | @café@ with the precomposed U+00E9 — the NFC form.
+precomposedCafe :: Text
+precomposedCafe = "caf\x00E9"
+
+
+-- | A starwars search with the vector inside a string-literal argument.
+nfcQuery :: Text -> Text
+nfcQuery needle =
+  "query { search(text: \"" <> needle <> "\", first: 10) { ... on Human { name } } }"
 
 
 reviewFields :: [Text]

@@ -1,0 +1,22 @@
+schema digest.example.com
+
+-- Wave-1 cache-digest fixture (§10.4): one entity with a public field
+-- (title) and a private one (secret), so a query selecting `secret`
+-- carries a priv slice — the slice on which the client advertises its
+-- store (X-Have / X-Have-Digest) and the origin elides matching
+-- (id, ver) records as `unchanged` markers. `fetch by id: public` keeps
+-- the client's §10.4 false-positive repair (a point fetch) available.
+
+newtype DocId = Text
+
+entity Doc by id {
+  visible to all by default
+
+  id:     DocId
+  title:  Text
+  secret: Text?   private
+
+  fetch by id: public
+}
+
+get doc(id: DocId) of Doc public

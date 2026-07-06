@@ -15,6 +15,12 @@ module Test.Lattice.Fixtures (
   cokeySchema,
   cardText,
   cardSchema,
+  verbsText,
+  verbsSchema,
+  digestText,
+  digestSchema,
+  derivedText,
+  derivedSchema,
   mustParseSchema,
   compileWith,
   mustCompileWith,
@@ -46,6 +52,42 @@ starwarsText = loadFixture "test/fixtures/starwars.lattice"
 blogText :: Text
 blogText = loadFixture "test/fixtures/blog.lattice"
 {-# NOINLINE blogText #-}
+
+
+verbsText :: Text
+verbsText = loadFixture "test/fixtures/verbs.lattice"
+{-# NOINLINE verbsText #-}
+
+
+-- | The §11.7/§11.8 verb-binding fixture: every legal binding shape
+-- (PUT/PATCH/DELETE/POST, bound batches, last-writer-wins).
+verbsSchema :: Schema
+verbsSchema = mustParseSchema verbsText
+{-# NOINLINE verbsSchema #-}
+
+
+digestText :: Text
+digestText = loadFixture "test/fixtures/digest.lattice"
+{-# NOINLINE digestText #-}
+
+
+-- | The §10.4 cache-digest fixture: a public field and a private one on
+-- one entity, so a query selecting @secret@ carries a priv slice.
+digestSchema :: Schema
+digestSchema = mustParseSchema digestText
+{-# NOINLINE digestSchema #-}
+
+
+derivedText :: Text
+derivedText = loadFixture "test/fixtures/derived.lattice"
+{-# NOINLINE derivedText #-}
+
+
+-- | The §3.7 derived-fields fixture: an on-read collection aggregate, an
+-- on-read edge dep, and a maintained aggregate on one Post entity.
+derivedSchema :: Schema
+derivedSchema = mustParseSchema derivedText
+{-# NOINLINE derivedSchema #-}
 
 
 -- | Parse an IDL document, erroring loudly on failure (fixtures must parse).

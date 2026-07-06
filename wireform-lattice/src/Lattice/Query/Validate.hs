@@ -24,6 +24,13 @@ module Lattice.Query.Validate (
   namedContext,
   fieldInContext,
 
+  -- * The implicit @nodes@ root (§14.4)
+  nodesRootName,
+  nodesRefsArg,
+  nodesRootDef,
+  isNodesRootDef,
+  nodesListedTypes,
+
   -- * Surface normalization helpers
   normalizeTypeAlias,
   normalizeLimitArg,
@@ -187,6 +194,75 @@ fieldInContext schema ctx fn = case ctx of
         && colGrouping ca == colGrouping cb
         && colWindow ca == colWindow cb
     agrees _ _ = False
+
+
+-- ---------------------------------------------------------------------------
+-- The implicit @nodes@ root (§14.4)
+-- ---------------------------------------------------------------------------
+
+{- | Every origin serves the protocol-level batched entity root
+@nodes(refs: [EntityRef])@ (§14.4). It is never declared in the IDL; the
+validator and planner inject it, so it exists exactly when the schema does
+NOT declare a root of the same name (a declared @nodes@ root shadows the
+implicit one).
+
+The wire form of an @EntityRef@ is the ordinary ref string @\"Type:key\"@:
+inline as string literals, or bound from one variable declared
+@$refs:EntityRef@ (the protocol-level type name; there is no list spelling
+in variable declarations, and the binding is a JSON array of ref strings).
+Selection dispatches per concrete type with inline fragments exactly like
+an interface target; the dispatch union is the set of types the selection
+names ('nodesListedTypes').
+-}
+nodesRootName :: RootName
+nodesRootName = RootName "nodes"
+
+
+-- | The single declared argument of the implicit root: @refs@, required.
+nodesRefsArg :: ArgDef
+nodesRefsArg =
+  ArgDef
+    { adName = "refs"
+    , adType = TNamed (TypeName "EntityRef")
+    , adDefault = Nothing
+    }
+
+
+{- | The synthesized §14.4 'RootDef' over the selection's dispatch union.
+'rootPolicy' is 'Public': the root itself is reachable by anyone; access is
+gated per entity type by 'entityFetchBy' ('Nothing' forbids), which joins
+into the path exactly like a root policy would — per type.
+-}
+nodesRootDef :: NonEmpty TypeName -> RootDef
+nodesRootDef ts =
+  RootDef
+    { rootKind = RootGet
+    , rootTarget = TargetUnion ts
+    , rootParams = [nodesRefsArg]
+    , rootCollection = Nothing
+    , rootPolicy = Public
+    }
+
+
+{- | Is this 'RootDef' the synthesized implicit @nodes@ root? The @refs@
+parameter's protocol-level @EntityRef@ type cannot be declared in an IDL
+(unknown named types are rejected at elaboration), so the parameter list
+is a reliable marker.
+-}
+isNodesRootDef :: RootDef -> Bool
+isNodesRootDef rd = rootKind rd == RootGet && rootParams rd == [nodesRefsArg]
+
+
+{- | The concrete types a @nodes@ selection dispatches over: its top-level
+inline-fragment alternatives, first occurrence order, deduplicated.
+-}
+nodesListedTypes :: SelectionSet -> [TypeName]
+nodesListedTypes sels = dedup Set.empty [t | SInline t _ <- sels]
+  where
+    dedup _ [] = []
+    dedup seen (t : rest)
+      | Set.member t seen = dedup seen rest
+      | otherwise = t : dedup (Set.insert t seen) rest
 
 
 -- ---------------------------------------------------------------------------
@@ -510,8 +586,10 @@ validateDocument schema budgets Document {..} = do
       SField f ->
         let rn = unFieldName (fName f)
          in case Map.lookup (RootName rn) (schemaRoots schema) of
-              Nothing -> diag ("unknown root field '" <> rn <> "'")
               Just rd -> rootField f rd
+              Nothing
+                | RootName rn == nodesRootName -> nodesRoot f
+                | otherwise -> diag ("unknown root field '" <> rn <> "'")
 
     rootField :: Field -> RootDef -> W
     rootField f rd =
@@ -547,6 +625,37 @@ validateDocument schema budgets Document {..} = do
             Just sub -> case targetContext schema (rootTarget rd) of
               Left e -> diag (desc <> ": " <> e)
               Right ctx -> walkSet queryEnv ctx sub
+       in depthD <> argsW <> subW
+
+    -- The implicit @nodes@ root (§14.4): exactly the declared-root rules
+    -- against the synthesized definition, except that the dispatch union
+    -- is drawn from the selection itself — the types its inline fragments
+    -- name. A selection with no inline fragments has no union to check
+    -- bare fields against and is rejected.
+    nodesRoot :: Field -> W
+    nodesRoot f =
+      let desc = "root 'nodes'"
+          depthD = case fDepth f of
+            Nothing -> mempty
+            Just _ -> diag ("@depth cannot appear on " <> desc <> " (§4.8 rule 4)")
+          argsW =
+            checkArgs
+              queryEnv
+              ArgTarget
+                { atDesc = desc
+                , atDeclared = [nodesRefsArg]
+                , atCollection = Nothing
+                }
+              (fArgs f)
+          subW = case fSelection f of
+            Nothing -> diag (desc <> " requires a selection set (§4.8 rule 5)")
+            Just sub -> case NE.nonEmpty (nodesListedTypes sub) of
+              Nothing ->
+                diag
+                  ( desc
+                      <> " dispatches per concrete type; select with inline fragments (§14.4)"
+                  )
+              Just ts -> walkSet queryEnv (CtxUnion ts) sub
        in depthD <> argsW <> subW
 
     -- ---------------------------------------------------------------

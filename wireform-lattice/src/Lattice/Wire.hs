@@ -61,6 +61,9 @@ module Lattice.Wire (
   hIdempotencyReplayed,
   hVcAuth,
   hXHave,
+  hXHaveDigest,
+  hLatticeQuerySig,
+  hLatticeClient,
 
   -- * Media types
   queryMediaType,
@@ -498,9 +501,12 @@ hIdempotencyKey = "Idempotency-Key"
 hIdempotencyReplayed = "Idempotency-Replayed"
 
 
-hVcAuth, hXHave :: CI ByteString
+hVcAuth, hXHave, hXHaveDigest, hLatticeQuerySig, hLatticeClient :: CI ByteString
 hVcAuth = "X-Vc-Auth"
 hXHave = "X-Have"
+hXHaveDigest = "X-Have-Digest"
+hLatticeQuerySig = "X-Lattice-Query-Sig"
+hLatticeClient = "Lattice-Client"
 
 
 queryMediaType :: ByteString

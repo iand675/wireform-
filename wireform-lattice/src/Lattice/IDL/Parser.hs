@@ -27,6 +27,15 @@ query parser's errors at IDL line numbers.
 Bounded collections with no explicit @max@ default to 100
 (@'maxPageDefault' 'defaultBudgets'@, §3.6): the origin's real 'Budgets'
 are not available at parse time, so the parser pins the protocol default.
+
+Verb bindings (§11.7\/§11.8): a mutation block admits an
+@as VERB \/e\/{Type}[\/{arg}] [last-writer-wins]@ clause (any clause order,
+like every other clause; the canonical printer emits it after @effect@),
+and the @batch@ clause admits a trailing collection binding
+@batch \<atomicity\> max N as VERB \/e\/{Type}@. The two are disambiguated
+by lookahead: an @as@ directly after @max N@ binds to the batch clause
+only when its URL has __no__ key segment; @as VERB \/e\/T\/{arg}@ there is
+left to parse as the mutation's singular @as@ clause.
 -}
 module Lattice.IDL.Parser (
   SchemaError (..),
@@ -41,13 +50,15 @@ import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, isJust, listToMaybe, mapMaybe)
 import Data.Scientific (Scientific, scientific)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
-import Lattice.Query.AST (FragmentDefQ (..), QValue (..), TypeRefQ (..), VarDef (..))
+import Data.Text.Read qualified as TR
+import Data.Time.Calendar (Day, fromGregorianValid)
+import Lattice.Query.AST (FragmentDefQ (..), QValue (..), TypeRefQ (..), VarDef (..), fName, selectionFields)
 import Lattice.Query.Parser (ParseError (..), parseFragmentDef)
 import Lattice.Schema
 import Lattice.Types
@@ -66,8 +77,8 @@ data SchemaError = SchemaError
 parseSchema :: Text -> Either [SchemaError] Schema
 parseSchema src = do
   toks <- singly (lexIdl src)
-  decls <- singly (runP (pDecls src) toks)
-  elaborate decls
+  (decls, anns) <- singly (runPAnns (pDecls src) toks)
+  elaborate anns decls
   where
     singly :: Either SchemaError a -> Either [SchemaError] a
     singly = either (Left . (: [])) Right
@@ -96,7 +107,7 @@ data Tok = Tok
 
 
 punctChars :: [Char]
-punctChars = "{}()[]:,=|?.$@+"
+punctChars = "{}()[]:,=|?.$@+/"
 
 
 {- | Tokenize. @--@ and @#@ comments run to end of line. Identifiers admit
@@ -225,6 +236,9 @@ lexIdl src = go 1 0 (T.unpack src)
 data PSt = PSt
   { psToks :: [Tok]
   , psLine :: !Int
+  , psAnns :: [(Int, DeclPath, Ann)]
+  -- ^ @\@break@\/@\@deprecated@ annotations, recorded at their parse sites
+  -- (reverse order); elaboration validates and installs them.
   }
 
 
@@ -245,8 +259,9 @@ instance Monad P where
   P g >>= f = P (\s -> g s >>= \(a, s') -> unwrapP (f a) s')
 
 
-runP :: P a -> [Tok] -> Either SchemaError a
-runP (P g) toks = fst <$> g (PSt toks 1)
+-- | Run a parser, returning the collected annotations alongside the result.
+runPAnns :: P a -> [Tok] -> Either SchemaError (a, [(Int, DeclPath, Ann)])
+runPAnns (P g) toks = (\(a, s) -> (a, reverse (psAnns s))) <$> g (PSt toks 1 [])
 
 
 pFail :: Int -> Text -> P a
@@ -267,7 +282,7 @@ advanceT =
   P
     ( \s -> case psToks s of
         [] -> Right ((), s)
-        t : ts -> Right ((), PSt ts (tokLine t))
+        t : ts -> Right ((), s {psToks = ts, psLine = tokLine t})
     )
 
 
@@ -278,7 +293,7 @@ popT expected =
         [] ->
           Left
             (SchemaError (Just (psLine s)) ("unexpected end of input; expected " <> expected))
-        t : ts -> Right (t, PSt ts (tokLine t))
+        t : ts -> Right (t, s {psToks = ts, psLine = tokLine t})
     )
 
 
@@ -365,6 +380,107 @@ isCapName t = case T.uncons t of
 
 
 -- ---------------------------------------------------------------------------
+-- Annotations (§17.3 @break, §17.5 @deprecated)
+-- ---------------------------------------------------------------------------
+
+-- | A compatibility annotation, before elaboration attaches it to a site.
+data Ann
+  = AnnBreak Text
+  | AnnDeprecated Deprecation
+
+
+{- | Zero or more leading annotations: @\@break(approved: "…")@ \/
+@\@deprecated(sunset: "YYYY-MM-DD", note: "…")@. Only consumed when the
+token after @\@@ is one of the two annotation keywords, so nothing else
+starting with @\@@ ever misfires.
+-}
+pAnnotations :: P [(Int, Ann)]
+pAnnotations =
+  peekT >>= \case
+    Just t
+      | TkPunct '@' <- tokKind t ->
+          peekKindN 1 >>= \case
+            Just (TkName kw)
+              | kw == "break" || kw == "deprecated" -> do
+                  a <- pAnnotation
+                  (a :) <$> pAnnotations
+            _ -> pure []
+    _ -> pure []
+
+
+pAnnotation :: P (Int, Ann)
+pAnnotation = do
+  pPunct '@'
+  (kw, l) <- pAnyName "an annotation name"
+  case kw of
+    "break" -> do
+      pPunct '('
+      pNameIs "approved"
+      pPunct ':'
+      ticket <- pStringLit "an approval ticket string"
+      pPunct ')'
+      pure (l, AnnBreak ticket)
+    "deprecated" -> do
+      pPunct '('
+      pNameIs "sunset"
+      pPunct ':'
+      ds <- pStringLit "a sunset date string"
+      day <- case parseSunset ds of
+        Just d -> pure d
+        Nothing -> pFail l ("invalid sunset date `" <> ds <> "` (expected YYYY-MM-DD)")
+      pPunct ','
+      pNameIs "note"
+      pPunct ':'
+      note <- pStringLit "a deprecation note string"
+      pPunct ')'
+      pure (l, AnnDeprecated (Deprecation {depSunset = day, depNote = note}))
+    _ -> pFail l "expected `break` or `deprecated`"
+
+
+pStringLit :: Text -> P Text
+pStringLit what = do
+  t <- popT what
+  case tokKind t of
+    TkStr s -> pure s
+    _ -> pFail (tokLine t) ("expected " <> what)
+
+
+-- | @YYYY-MM-DD@, calendar-validated.
+parseSunset :: Text -> Maybe Day
+parseSunset t = case T.splitOn "-" t of
+  [y, m, d] -> do
+    (yy, mm, dd) <- (,,) <$> decimal y <*> decimal m <*> decimal d
+    fromGregorianValid yy (fromInteger mm) (fromInteger dd)
+  _ -> Nothing
+  where
+    decimal :: Text -> Maybe Integer
+    decimal s = case TR.decimal s of
+      Right (n, rest) | T.null rest -> Just n
+      _ -> Nothing
+
+
+-- | Record parsed annotations against their attachment site.
+recordAnns :: DeclPath -> [(Int, Ann)] -> P ()
+recordAnns p as =
+  P (\s -> Right ((), s {psAnns = foldl (\acc (l, a) -> (l, p, a) : acc) (psAnns s) as}))
+
+
+-- | The attachment site of a top-level declaration; the claims block has
+-- no name to attach to.
+declSite :: SDecl -> Maybe DeclPath
+declSite = \case
+  SDSchema _ _ -> Just OnSchema
+  SDClaims _ -> Nothing
+  SDType _ n _ -> Just (OnType (TypeName n))
+  SDInterface _ n _ -> Just (OnInterface (InterfaceName n))
+  SDEntity e -> Just (OnEntity (TypeName (sEntName e)))
+  SDFragment _ n _ -> Just (OnFragment (FragmentName n))
+  SDRoot r -> Just (OnRoot (RootName (srName r)))
+  SDMutation m -> Just (OnMutation (MutationName (smName m)))
+  SDExtend x -> Just (OnEntity (TypeName (sExtName x)))
+
+
+-- ---------------------------------------------------------------------------
 -- Surface declarations
 -- ---------------------------------------------------------------------------
 
@@ -377,6 +493,7 @@ data SDecl
   | SDFragment !Int Text FragmentDef
   | SDRoot SRoot
   | SDMutation SMutation
+  | SDExtend SExtend
 
 
 data SEntity = SEntity
@@ -385,6 +502,16 @@ data SEntity = SEntity
   , sEntKey :: SEntityKey
   , sEntImpl :: [(Int, Text)]
   , sEntItems :: [SItem]
+  }
+
+
+-- | An @extend entity@ block (§18.1): members declared on a foreign entity.
+data SExtend = SExtend
+  { sExtLine :: !Int
+  , sExtName :: Text
+  , sExtCoKey :: Maybe (CoKeyMode, Text)
+  -- ^ An illegal @joins@\/@refines@ clause, recorded for fusion diagnostics.
+  , sExtItems :: [SItem]
   }
 
 
@@ -443,6 +570,8 @@ data SMutation = SMutation
   , smEffect :: Maybe EffectClass
   , smErrors :: Maybe (TypeName, Openness, NonEmpty Text)
   , smBatch :: Maybe BatchPolicy
+  , smBinding :: Maybe (Int, VerbBinding)
+  -- ^ The @as VERB \/e\/…@ clause and its line (§11.7).
   }
 
 
@@ -453,11 +582,18 @@ data SMutation = SMutation
 pDecls :: Text -> P [SDecl]
 pDecls src = go
   where
-    go =
+    go = do
+      anns <- pAnnotations
       peekT >>= \case
-        Nothing -> pure []
+        Nothing -> case anns of
+          [] -> pure []
+          (l, _) : _ -> pFail l "dangling annotation: no declaration follows"
         Just t -> do
           d <- pDecl src t
+          case (anns, declSite d) of
+            ([], _) -> pure ()
+            (_, Just site) -> recordAnns site anns
+            ((l, _) : _, Nothing) -> pFail l "annotations are not allowed on the claims block"
           (d :) <$> go
 
 
@@ -483,7 +619,8 @@ pDecl src t = do
     TkName "get" -> SDRoot <$> pRootDecl RootGet l
     TkName "list" -> SDRoot <$> pRootDecl RootList l
     TkName "mutation" -> SDMutation <$> pMutationDecl l
-    _ -> pFail l "expected a declaration (schema, claims, newtype, enum, data, interface, entity, fragment, get, list, or mutation)"
+    TkName "extend" -> pExtendDecl l
+    _ -> pFail l "expected a declaration (schema, claims, newtype, enum, data, interface, entity, extend, fragment, get, list, or mutation)"
 
 
 pClaimsBlock :: P [(Int, Text, FieldType)]
@@ -915,6 +1052,37 @@ pEntityDecl l = do
           if c then ((il, i) :) <$> go else pure [(il, i)]
 
 
+{- | @extend entity Foo { … }@ (§18.1): members this module declares on a
+FOREIGN entity. The body grammar is the full entity-item grammar and the
+header admits a @joins@\/@refines@ clause, deliberately: the spec pins
+composition conflicts (an extension redeclaring the visibility default,
+@fetch by@, or declaring a co-key) to fail FUSION, not module parse, so
+the illegal clauses parse, are recorded in the model, and
+'Lattice.Module.fuseModules' rejects them naming the offender. A @by@ key
+clause has no such home — an extension never has a key of its own — and
+key redeclaration is caught at fusion as a member collision with the
+owner's key fields.
+-}
+pExtendDecl :: Int -> P SDecl
+pExtendDecl l = do
+  pNameIs "entity"
+  (n, _) <- pAnyName "an entity name"
+  co <- tryCoKeyClause
+  pPunct '{'
+  items <- pItems BodyEntity n
+  pure (SDExtend (SExtend l n co items))
+  where
+    tryCoKeyClause = do
+      j <- tryNameIs "joins"
+      if j
+        then Just . (JoinsBase,) . fst <$> pAnyName "a base entity name"
+        else do
+          r <- tryNameIs "refines"
+          if r
+            then Just . (RefinesBase,) . fst <$> pAnyName "a base entity name"
+            else pure Nothing
+
+
 -- | @id@ or @(orgId, seq)@.
 pKeySpec :: P (NonEmpty Text)
 pKeySpec = do
@@ -942,12 +1110,31 @@ pItems bk owner = go
   where
     go = do
       skipCommas
+      anns <- pAnnotations
       done <- tryPunct '}'
       if done
-        then pure []
+        then case anns of
+          [] -> pure []
+          (l, _) : _ -> pFail l "dangling annotation: no field or relationship follows"
         else do
           it <- pItem
+          case (anns, itemSite it) of
+            ([], _) -> pure ()
+            (_, Just p) -> recordAnns p anns
+            ((l, _) : _, Nothing) ->
+              pFail l "annotations are only allowed on fields and relationships"
           (it :) <$> go
+
+    itemSite = \case
+      SIField _ n _ -> Just (site n)
+      SIRelOne _ n _ _ _ _ -> Just (site n)
+      SIRelMany _ n _ _ _ _ -> Just (site n)
+      SIDefault _ _ -> Nothing
+      SIFetch _ _ _ -> Nothing
+
+    site n = case bk of
+      BodyEntity -> OnEntityItem (TypeName owner) (FieldName n)
+      BodyInterface -> OnIfaceItem (InterfaceName owner) (FieldName n)
 
     pItem = do
       t <- popT "a field, relationship, or `}`"
@@ -992,8 +1179,14 @@ pItems bk owner = go
           _ -> pure []
       pPunct ':'
       ty <- pType
+      deriv <- tryDerivation
       pol <- tryPolicy
-      pure (SIField l n (FieldDef {fieldType = ty, fieldArgs = args, fieldPolicy = pol}))
+      pure
+        ( SIField
+            l
+            n
+            (FieldDef {fieldType = ty, fieldArgs = args, fieldPolicy = pol, fieldDerivation = deriv})
+        )
 
     pRelItem l = do
       t <- popT "`one` or `many`"
@@ -1015,6 +1208,121 @@ pItems bk owner = go
           pol <- tryPolicy
           pure (SIRelMany l n tgt link cls pol)
 
+
+
+{- | The derived-field clause (§3.7), canonical order:
+@derived reads \<dep\>{, \<dep\>} [\@declassify(approved: \"…\")]
+(on read | maintained)@. Only consumed when the next token is the
+@derived@ keyword, so a policy or the next item never misfires.
+-}
+tryDerivation :: P (Maybe Derivation)
+tryDerivation = do
+  isDerived <- tryNameIs "derived"
+  if not isDerived
+    then pure Nothing
+    else do
+      pNameIs "reads"
+      deps <- pDeps
+      decl <- tryDeclassify
+      mat <- pMaterialization
+      pure (Just Derivation {derivReads = deps, derivMaterialize = mat, derivDeclassify = decl})
+
+
+-- | One or more read-set deps, comma-separated.
+pDeps :: P (NonEmpty Dep)
+pDeps = do
+  d <- pDep
+  more <- tryPunct ','
+  if more then (d NE.<|) <$> pDeps else pure (d :| [])
+
+
+{- | One dep: @own(f1, f2)@, @\<edge\> ...Fragment@, or
+@\<rel\> count\/sum(f)\/min(f)\/max(f)@. @own@ is only the keyword when a
+parenthesized field list follows.
+-}
+pDep :: P Dep
+pDep = do
+  (n, _) <- pAnyName "a derived-field dep"
+  isOwn <-
+    if n == "own"
+      then
+        peekKindN 0 >>= \case
+          Just (TkPunct '(') -> pure True
+          _ -> pure False
+      else pure False
+  if isOwn
+    then OwnFields <$> pOwnFields
+    else
+      peekKindN 0 >>= \case
+        Just (TkPunct '.') -> do
+          pPunct '.'
+          pPunct '.'
+          pPunct '.'
+          (frag, _) <- pAnyName "a fragment name"
+          pure (ViaEdge (FieldName n) (FragmentName frag))
+        _ -> ViaCollection (FieldName n) <$> pAggregate
+
+
+-- | @(f1, f2, …)@ after @own@.
+pOwnFields :: P (NonEmpty FieldName)
+pOwnFields = do
+  pPunct '('
+  (f0, _) <- pAnyName "an own dep field"
+  rest <- go
+  pure (FieldName f0 :| map FieldName rest)
+  where
+    go = do
+      c <- tryPunct ','
+      if c
+        then do
+          (f, _) <- pAnyName "an own dep field"
+          (f :) <$> go
+        else pPunct ')' $> []
+
+
+pAggregate :: P Aggregate
+pAggregate = do
+  t <- popT "an aggregate (`count`, `sum(f)`, `min(f)`, `max(f)`)"
+  case tokKind t of
+    TkName "count" -> pure AggCount
+    TkName "sum" -> AggSum <$> pAggField
+    TkName "min" -> AggMin <$> pAggField
+    TkName "max" -> AggMax <$> pAggField
+    _ -> pFail (tokLine t) "expected `count`, `sum(field)`, `min(field)`, or `max(field)`"
+  where
+    pAggField = do
+      pPunct '('
+      (f, _) <- pAnyName "an aggregate field"
+      pPunct ')'
+      pure (FieldName f)
+
+
+-- | @\@declassify(approved: \"…\")@ before the materialization keyword.
+tryDeclassify :: P (Maybe Text)
+tryDeclassify =
+  peekT >>= \case
+    Just t | TkPunct '@' <- tokKind t -> do
+      advanceT
+      pNameIs "declassify"
+      pPunct '('
+      pNameIs "approved"
+      pPunct ':'
+      s <- popT "the approval justification string"
+      j <- case tokKind s of
+        TkStr str -> pure str
+        _ -> pFail (tokLine s) "expected a string after `approved:`"
+      pPunct ')'
+      pure (Just j)
+    _ -> pure Nothing
+
+
+pMaterialization :: P Materialization
+pMaterialization = do
+  t <- popT "`on read` or `maintained`"
+  case tokKind t of
+    TkName "on" -> pNameIs "read" $> OnRead
+    TkName "maintained" -> pure Maintained
+    _ -> pFail (tokLine t) "expected `on read` or `maintained`"
 
 -- | @T@ or @(A | B | C)@.
 pTargetSurface :: P (Int, NonEmpty Text)
@@ -1235,6 +1543,7 @@ pMutationDecl l = do
       , smEffect = Nothing
       , smErrors = Nothing
       , smBatch = Nothing
+      , smBinding = Nothing
       }
   where
     loop sm = do
@@ -1279,9 +1588,14 @@ pMutationDecl l = do
               at <- pAtomicity
               pNameIs "max"
               mx <- pNat "a batch maximum"
-              loop sm {smBatch = Just (BatchPolicy {bpAtomicity = at, bpMaxItems = mx})}
+              bnd <- pBatchBinding
+              loop sm {smBatch = Just (BatchPolicy {bpAtomicity = at, bpMaxItems = mx, bpBound = bnd})}
+            TkName "as" -> do
+              dup cl (smBinding sm) "as"
+              b <- pVerbBinding
+              loop sm {smBinding = Just (cl, b)}
             _ ->
-              pFail cl "expected a mutation clause (allow, writes, invalidates, effect, errors, batch) or `}`"
+              pFail cl "expected a mutation clause (allow, writes, invalidates, effect, errors, batch, as) or `}`"
 
     dup :: Int -> Maybe a -> Text -> P ()
     dup _ Nothing _ = pure ()
@@ -1324,6 +1638,77 @@ pMutationDecl l = do
           (c, _) <- pAnyName "an error constructor"
           (c :) <$> pMoreCtors
         else pure []
+
+    -- The verb of an @as@ binding: an HTTP method token.
+    pBindVerb = do
+      t <- popT "an HTTP verb (PUT, PATCH, DELETE, or POST)"
+      case tokKind t of
+        TkName "PUT" -> pure BindPut
+        TkName "PATCH" -> pure BindPatch
+        TkName "DELETE" -> pure BindDelete
+        TkName "POST" -> pure BindCreate
+        _ -> pFail (tokLine t) "expected `PUT`, `PATCH`, `DELETE`, or `POST` after `as`"
+
+    -- @VERB /e/{Type}[/{arg}] [last-writer-wins]@ (§11.7).
+    pVerbBinding = do
+      v <- pBindVerb
+      pPunct '/'
+      pNameIs "e"
+      pPunct '/'
+      (ty, _) <- pAnyName "a bound entity type"
+      keyed <- tryPunct '/'
+      arg <-
+        if keyed
+          then do
+            pPunct '{'
+            (a, _) <- pAnyName "a key argument"
+            pPunct '}'
+            pure (Just (ArgName a))
+          else pure Nothing
+      lww <- tryNameIs "last-writer-wins"
+      pure VerbBinding {vbVerb = v, vbTarget = TypeName ty, vbKeyArg = arg, vbLww = lww}
+
+    -- The optional collection binding of a batch clause: @as VERB /e/{Type}@
+    -- with NO key segment. An @as@ here is only consumed when the next seven
+    -- tokens shape a collection URL; a keyed URL is left for the singular
+    -- @as@ clause of the mutation block (clauses parse in any order).
+    pBatchBinding = do
+      k0 <- peekKindN 0
+      k1 <- peekKindN 1
+      k2 <- peekKindN 2
+      k3 <- peekKindN 3
+      k4 <- peekKindN 4
+      k5 <- peekKindN 5
+      k6 <- peekKindN 6
+      let verbOf = \case
+            Just (TkName "PUT") -> Just BindPut
+            Just (TkName "PATCH") -> Just BindPatch
+            Just (TkName "DELETE") -> Just BindDelete
+            Just (TkName "POST") -> Just BindCreate
+            _ -> Nothing
+          tyOf = \case
+            Just (TkName t) -> Just t
+            _ -> Nothing
+          collection =
+            k0 == Just (TkName "as")
+              && verbOf k1 /= Nothing
+              && k2 == Just (TkPunct '/')
+              && k3 == Just (TkName "e")
+              && k4 == Just (TkPunct '/')
+              && tyOf k5 /= Nothing
+              && k6 /= Just (TkPunct '/')
+      if not collection
+        then pure Nothing
+        else case (verbOf k1, tyOf k5) of
+          (Just v, Just ty) -> do
+            advanceT
+            advanceT
+            advanceT
+            advanceT
+            advanceT
+            advanceT
+            pure (Just (v, TypeName ty))
+          _ -> pure Nothing
 
 
 pWriteScopes :: P [WriteScopeDecl]
@@ -1399,8 +1784,8 @@ data EntInfo = EntInfo
   }
 
 
-elaborate :: [SDecl] -> Either [SchemaError] Schema
-elaborate decls =
+elaborate :: [(Int, DeclPath, Ann)] -> [SDecl] -> Either [SchemaError] Schema
+elaborate anns decls =
   if null allErrs then Right schema else Left allErrs
   where
     -- ---- buckets --------------------------------------------------------
@@ -1412,6 +1797,7 @@ elaborate decls =
     fragDs = mapMaybe (\case SDFragment l n f -> Just (l, n, f); _ -> Nothing) decls
     rootDs = mapMaybe (\case SDRoot r -> Just r; _ -> Nothing) decls
     mutDs = mapMaybe (\case SDMutation m -> Just m; _ -> Nothing) decls
+    extendDs = mapMaybe (\case SDExtend x -> Just x; _ -> Nothing) decls
 
     -- ---- schema name ----------------------------------------------------
     (sName, nameErrs) = case schemaDs of
@@ -1444,6 +1830,7 @@ elaborate decls =
       let resolved = Map.mapWithKey (resolveCoKey entInfos0) entInfos0
        in (Map.map fst resolved, concatMap snd (Map.elems resolved))
     (ifaceInfos, ifaceDupErrs) = buildIfaceInfos ifaceDs
+    (extInfos, extDupErrs) = buildExtInfos extendDs
 
     entityNames = Map.keysSet entInfos
     ifaceNames = Map.keysSet ifaceInfos
@@ -1565,6 +1952,61 @@ elaborate decls =
 
     hasField :: Map FieldName FieldDef -> Text -> Bool
     hasField m f = Map.member (FieldName f) m
+
+    -- Concrete member entities of a target, with their raw 'EntInfo's
+    -- (derived-field checks read fields, lines, and default policies).
+    memberEntInfos :: Target -> [(Text, EntInfo)]
+    memberEntInfos tgt = mapMaybe (\n -> (,) n <$> Map.lookup n entInfos) names
+      where
+        names = case tgt of
+          TargetEntity (TypeName n) -> [n]
+          TargetUnion ns -> map unTypeName (NE.toList ns)
+          TargetInterface (InterfaceName i) ->
+            maybe [] (map unTypeName . Set.toList) (Map.lookup i implIndex)
+
+    -- The effective default policy of a raw entity (first declaration wins,
+    -- matching 'buildEntity').
+    memberDefaultPol :: EntInfo -> Policy
+    memberDefaultPol mi = case eiDefaults mi of
+      (_, p) : _ -> p
+      [] -> Public
+
+    -- Is a field type numeric for sum/min/max aggregation (§3.7)? Resolves
+    -- newtypes through 'types' (depth-bounded) and looks through optionals.
+    numericType :: FieldType -> Bool
+    numericType = goN (8 :: Int)
+      where
+        goN :: Int -> FieldType -> Bool
+        goN fuel = \case
+          TPrim p -> numericPrim p
+          TOptional t -> goN fuel t
+          TNamed n
+            | fuel > 0
+            , Just (DeclNewtype t _) <- Map.lookup n types ->
+                goN (fuel - 1) t
+          _ -> False
+        numericPrim = \case
+          PI8 -> True
+          PI16 -> True
+          PI32 -> True
+          PI64 -> True
+          PW8 -> True
+          PW16 -> True
+          PW32 -> True
+          PW64 -> True
+          PInteger -> True
+          PDecimal -> True
+          PF32 -> True
+          PF64 -> True
+          _ -> False
+
+    -- The field a sum/min/max aggregate reads; 'Nothing' for @count@.
+    aggregateField :: Aggregate -> Maybe FieldName
+    aggregateField = \case
+      AggCount -> Nothing
+      AggSum f -> Just f
+      AggMin f -> Just f
+      AggMax f -> Just f
 
     -- Link-field rule (see module haddock): strict on single entities;
     -- all-or-nothing on interface/union members.
@@ -1811,6 +2253,17 @@ elaborate decls =
                 SIRelMany _ n' _ _ _ _ -> n == n'
                 _ -> False
 
+        -- ---- derived fields (§3.7): shared checker ------------------------
+        derivedErrs =
+          derivedCheckErrs
+            ectx
+            (eiLine ei)
+            (eiFieldLines ei)
+            (NE.toList (eiKey ei))
+            defPol
+            (eiFields ei)
+            rels
+
         def =
           EntityDef
             { entityKey = fmap FieldName (eiKey ei)
@@ -1821,10 +2274,289 @@ elaborate decls =
             , entityFetchBy = fetchBy
             , entityCoKey = eiCoKey ei
             }
-        errs = defErrs <> keyErrs <> fieldErrs <> relErrs <> fetchErrs <> implErrs
+        errs = defErrs <> keyErrs <> fieldErrs <> relErrs <> fetchErrs <> implErrs <> derivedErrs
 
     entities :: Map TypeName EntityDef
     entities = Map.fromList (map (\(n, d, _, _) -> (n, d)) entityResults)
+
+    {- Derived-field checks (§3.7), shared between entity bodies and
+    @extend entity@ blocks: the read set resolves against the declaring
+    body's OWN fields and relationships. @keyFields@ is empty for
+    extensions (they have no key of their own); @defPol@ is the effective
+    default policy — extensions pass 'Public', the local approximation of
+    the owner's (foreign, invisible) default; the fused elaboration
+    re-checks flow against the real one. -}
+    derivedCheckErrs
+      :: Text
+      -> Int
+      -> Map FieldName Int
+      -> [Text]
+      -> Policy
+      -> Map FieldName FieldDef
+      -> Map FieldName RelationshipDef
+      -> [SchemaError]
+    derivedCheckErrs ectx declLine fieldLines keyFields defPol ownFields rels =
+      Map.foldrWithKey
+        ( \fn fd acc -> case fieldDerivation fd of
+            Nothing -> acc
+            Just d -> derivationErrs fn fd d <> acc
+        )
+        []
+        ownFields
+      where
+        derivationErrs (FieldName f) fd d =
+          let l = fromMaybe declLine (Map.lookup (FieldName f) fieldLines)
+              dctx = ectx <> ", derived field `" <> f <> "`"
+              keyErr =
+                if f `elem` keyFields
+                  then [err l (dctx <> " is a key field; key fields cannot be derived")]
+                  else []
+              argErr =
+                if null (fieldArgs fd)
+                  then []
+                  else [err l (dctx <> " must not declare arguments")]
+              derivedLvl = policyLevel (fromMaybe defPol (fieldPolicy fd))
+              results = map (checkDep l dctx (derivMaterialize d)) (NE.toList (derivReads d))
+              depErrs = concatMap snd results
+              -- §3.7 information flow: the field's policy must dominate the
+              -- join of its deps' policies along dep paths, unless the
+              -- declaration declassifies.
+              flowErr = case derivDeclassify d of
+                Just _ -> []
+                Nothing ->
+                  let depsLvl = List.foldl' joinLevel LPublic (concatMap fst results)
+                   in if joinLevel derivedLvl depsLvl == derivedLvl
+                        then []
+                        else
+                          [ err
+                              l
+                              ( dctx
+                                  <> ": declared policy does not dominate the join of its deps' policies (§3.7 information flow); add `@declassify(approved: \"…\")` to declassify deliberately"
+                              )
+                          ]
+           in keyErr <> argErr <> depErrs <> flowErr
+
+        -- One dep: its contribution to the dep-path policy join (empty when
+        -- the dep is broken) and its check failures.
+        checkDep l dctx mat = \case
+          OwnFields fs ->
+            let one (FieldName g) = case Map.lookup (FieldName g) ownFields of
+                  Nothing -> ([], [err l (dctx <> ": unknown own dep field `" <> g <> "`")])
+                  Just gfd
+                    | isJust (fieldDerivation gfd) ->
+                        ([], [err l (dctx <> ": own dep `" <> g <> "` is itself derived; derivation chaining is not supported")])
+                    | not (null (fieldArgs gfd)) ->
+                        ([], [err l (dctx <> ": own dep `" <> g <> "` is a computed field, not a stored field")])
+                    | otherwise -> ([policyLevel (fromMaybe defPol (fieldPolicy gfd))], [])
+                rs = map one (NE.toList fs)
+             in (concatMap fst rs, concatMap snd rs)
+          ViaEdge (FieldName e) fragN -> case Map.lookup (FieldName e) rels of
+            Nothing -> ([], [err l (dctx <> ": unknown edge `" <> e <> "`")])
+            Just ToMany {} ->
+              ([], [err l (dctx <> ": edge dep `" <> e <> "` is not a to-one relationship")])
+            Just rel ->
+              let matErr = case mat of
+                    Maintained ->
+                      [err l (dctx <> ": maintained derivations cannot read through edges (no reverse index in v1); use `on read`")]
+                    OnRead -> []
+                  relLvl = policyLevel (fromMaybe Public (relPolicy rel))
+               in case Map.lookup fragN fragments of
+                    Nothing ->
+                      ([relLvl], matErr <> [err l (dctx <> ": unknown fragment `" <> unFragmentName fragN <> "`")])
+                    Just fdef ->
+                      let okLabels = case relTarget rel of
+                            TargetEntity (TypeName tn) -> [tn]
+                            TargetInterface (InterfaceName i) -> [i]
+                            TargetUnion ns -> map unTypeName (NE.toList ns)
+                          onErr =
+                            if fragOn fdef `elem` okLabels
+                              then []
+                              else
+                                [ err
+                                    l
+                                    ( dctx
+                                        <> ": fragment `"
+                                        <> unFragmentName fragN
+                                        <> "` is declared on `"
+                                        <> fragOn fdef
+                                        <> "`, not on the edge's target"
+                                    )
+                                ]
+                          fragFields = map fName (selectionFields (fragSelection fdef))
+                          onMember (mn, mi) =
+                            let oneF g = case Map.lookup g (eiFields mi) of
+                                  Nothing -> ([], [])
+                                  Just gfd
+                                    | isJust (fieldDerivation gfd) ->
+                                        ( []
+                                        , [ err
+                                              l
+                                              ( dctx
+                                                  <> ": fragment field `"
+                                                  <> unFieldName g
+                                                  <> "` on `"
+                                                  <> mn
+                                                  <> "` is itself derived; derivation chaining is not supported"
+                                              )
+                                          ]
+                                        )
+                                    | otherwise ->
+                                        ([policyLevel (fromMaybe (memberDefaultPol mi) (fieldPolicy gfd))], [])
+                                frs = map oneF fragFields
+                             in (concatMap fst frs, concatMap snd frs)
+                          mrs = map onMember (memberEntInfos (relTarget rel))
+                       in (relLvl : concatMap fst mrs, matErr <> onErr <> concatMap snd mrs)
+          ViaCollection (FieldName r) agg -> case Map.lookup (FieldName r) rels of
+            Nothing -> ([], [err l (dctx <> ": unknown collection `" <> r <> "`")])
+            Just ToOne {} ->
+              ([], [err l (dctx <> ": collection dep `" <> r <> "` is not a `has many` relationship")])
+            Just rel ->
+              let col = relCollection rel
+                  relLvl = policyLevel (fromMaybe Public (relPolicy rel))
+                  matErr = case mat of
+                    Maintained
+                      | colLink col `notElem` NE.toList (colGrouping col) ->
+                          [ err
+                              l
+                              ( dctx
+                                  <> ": maintained collection dep `"
+                                  <> r
+                                  <> "` must group by its link field (the owner key is recovered from the collection tag)"
+                              )
+                          ]
+                    _ -> []
+                  (aggLvls, aggErrs) = case aggregateField agg of
+                    Nothing -> ([], [])
+                    Just (FieldName g) ->
+                      let one (mn, mi) = case Map.lookup (FieldName g) (eiFields mi) of
+                            Nothing ->
+                              ([], [err l (dctx <> ": aggregate field `" <> g <> "` is not a field of `" <> mn <> "`")])
+                            Just gfd
+                              | isJust (fieldDerivation gfd) ->
+                                  ( []
+                                  , [ err
+                                        l
+                                        ( dctx
+                                            <> ": aggregate field `"
+                                            <> g
+                                            <> "` on `"
+                                            <> mn
+                                            <> "` is itself derived; derivation chaining is not supported"
+                                        )
+                                    ]
+                                  )
+                              | not (numericType (fieldType gfd)) ->
+                                  ([], [err l (dctx <> ": aggregate field `" <> g <> "` on `" <> mn <> "` is not numeric")])
+                              | otherwise ->
+                                  ([policyLevel (fromMaybe (memberDefaultPol mi) (fieldPolicy gfd))], [])
+                          rs = map one (memberEntInfos (relTarget rel))
+                       in (concatMap fst rs, concatMap snd rs)
+               in (relLvl : aggLvls, matErr <> aggErrs)
+
+    -- ---- extensions (§18.1) -----------------------------------------------
+    extensionResults :: [(TypeName, ExtensionDef, [(Int, CollectionName)], [SchemaError])]
+    extensionResults = map buildExtension (Map.toList extInfos)
+
+    buildExtension :: (Text, ExtInfo) -> (TypeName, ExtensionDef, [(Int, CollectionName)], [SchemaError])
+    buildExtension (en, xi) = (TypeName en, def, colls, errs)
+      where
+        ectx = "extension of `" <> en <> "`"
+        ownField = hasField (xiFields xi)
+
+        -- The extended name must be FOREIGN: fusion resolves it. Extending
+        -- a name this module itself declares is a local error — the
+        -- members belong on the declaration.
+        targetErrs
+          | Set.member en entityNames =
+              [err (xiLine xi) (ectx <> ": `" <> en <> "` is declared in this schema — declare the members on the entity instead of extending it")]
+          | Set.member en typeNames =
+              [err (xiLine xi) (ectx <> ": `" <> en <> "` is a value type, not an entity")]
+          | Set.member en ifaceNames =
+              [err (xiLine xi) (ectx <> ": `" <> en <> "` is an interface, not an entity")]
+          | otherwise = []
+
+        (defPolM, defErrs) = case xiDefaults xi of
+          [] -> (Nothing, [])
+          (l0, p) : rest ->
+            ( Just p
+            , map (\(l, _) -> err l ("duplicate default visibility in " <> ectx)) rest
+                <> policyErrs l0 (ectx <> " default visibility") ownField p
+            )
+
+        fieldErrs =
+          Map.foldrWithKey
+            ( \(FieldName f) fd acc ->
+                let l = fromMaybe (xiLine xi) (Map.lookup (FieldName f) (xiFieldLines xi))
+                    fctx = ectx <> ", field `" <> f <> "`"
+                 in tyRefErrs l fctx (fieldType fd)
+                      <> argErrs l fctx (fieldArgs fd)
+                      <> maybe [] (policyErrs l fctx ownField) (fieldPolicy fd)
+                      <> acc
+            )
+            []
+            (xiFields xi)
+
+        (rels, colls, relErrs) = List.foldl' stepRel (Map.empty, [], []) (xiRels xi)
+
+        stepRel (m, cs, es) = \case
+          SIRelOne l n tgtS byF opt pol ->
+            let rctx = ectx <> ", relationship `" <> n <> "`"
+                (tgt, tErrs) = resolveTarget rctx tgtS
+                byErrs =
+                  if ownField byF
+                    then []
+                    else [err l ("`has one` key field `" <> byF <> "` in " <> rctx <> " is not a field this extension declares")]
+                -- §3.4: an optional column cannot promise a required edge.
+                optErrs = case Map.lookup (FieldName byF) (xiFields xi) of
+                  Just fd
+                    | not opt
+                    , TOptional _ <- fieldType fd ->
+                        [err l ("required `has one` in " <> rctx <> " reads the optional link column `" <> byF <> "`; an optional column cannot promise a required edge — declare `has one?` or make the column required")]
+                  _ -> []
+                polErrs = maybe [] (policyErrs l rctx ownField) pol
+                (m', dupE) = insertRel l n (ToOne {relTarget = tgt, relByField = FieldName byF, relOptional = opt, relPolicy = pol}) m
+             in (m', cs, es <> tErrs <> byErrs <> optErrs <> polErrs <> dupE)
+          SIRelMany l n tgtS link cc pol ->
+            let rctx = ectx <> ", relationship `" <> n <> "`"
+                (tgt, tErrs) = resolveTarget rctx tgtS
+                cname = CollectionName (fromMaybe (en <> "." <> n) (ccAs cc))
+                (cdef, cErrs) = buildCollectionDef l rctx tgt cname link (link :| []) cc
+                lErrs = linkErrs l rctx tgt (FieldName link)
+                polErrs = maybe [] (policyErrs l rctx ownField) pol
+                (m', dupE) = insertRel l n (ToMany {relTarget = tgt, relCollection = cdef, relPolicy = pol}) m
+             in (m', cs <> [(l, cname)], es <> tErrs <> cErrs <> lErrs <> polErrs <> dupE)
+          _ -> (m, cs, es)
+
+        insertRel l n rel m
+          | Map.member (FieldName n) (xiFields xi) =
+              (m, [err l ("relationship `" <> n <> "` in " <> ectx <> " duplicates a field name")])
+          | Map.member (FieldName n) m =
+              (m, [err l ("duplicate relationship `" <> n <> "` in " <> ectx)])
+          | otherwise = (Map.insert (FieldName n) rel m, [])
+
+        (fetchM, fetchErrs) = case xiFetches xi of
+          [] -> (Nothing, [])
+          (l, keys, p) : rest ->
+            ( Just (fmap FieldName keys, p)
+            , policyErrs l (ectx <> " fetch policy") ownField p
+                <> map (\(l', _, _) -> err l' ("duplicate `fetch by` in " <> ectx)) rest
+            )
+
+        derivedErrs =
+          derivedCheckErrs ectx (xiLine xi) (xiFieldLines xi) [] (fromMaybe Public defPolM) (xiFields xi) rels
+
+        def =
+          ExtensionDef
+            { extFields = xiFields xi
+            , extRels = rels
+            , extDefaultPolicy = defPolM
+            , extFetchBy = fetchM
+            , extCoKey = (\(mo, b) -> CoKey (TypeName b) mo) <$> xiCoKey xi
+            }
+        errs = targetErrs <> defErrs <> fieldErrs <> relErrs <> fetchErrs <> derivedErrs
+
+    extensions :: Map TypeName ExtensionDef
+    extensions = Map.fromList (map (\(n, d, _, _) -> (n, d)) extensionResults)
 
     -- ---- interfaces ------------------------------------------------------------
     ifaceResults :: [(InterfaceName, InterfaceDef, [SchemaError])]
@@ -1842,6 +2574,10 @@ elaborate decls =
                  in tyRefErrs l fctx (fieldType fd)
                       <> argErrs l fctx (fieldArgs fd)
                       <> maybe [] (policyErrs l fctx ownField) (fieldPolicy fd)
+                      <> ( if isJust (fieldDerivation fd)
+                            then [err l (fctx <> ": interface fields cannot be derived (§3.7); derive on the implementing entities")]
+                            else []
+                         )
                       <> acc
             )
             []
@@ -1954,6 +2690,7 @@ elaborate decls =
     allCollections :: [(Int, CollectionName)]
     allCollections =
       concatMap (\(_, _, cs, _) -> cs) entityResults
+        <> concatMap (\(_, _, cs, _) -> cs) extensionResults
         <> concatMap (\(_, _, _, cs, _) -> cs) rootResults
 
     collectionNames :: Set CollectionName
@@ -2000,6 +2737,107 @@ elaborate decls =
           ExactlyWrites -> []
           WritesPlus extra -> concatMap (writeScopeErrs l mctx paramNames) extra
 
+        -- ---- verb binding (§11.7) ------------------------------------
+        binding = snd <$> smBinding sm
+        bl = maybe l fst (smBinding sm)
+
+        nonKeyParams = case binding >>= vbKeyArg of
+          Nothing -> smParams sm
+          Just ka -> filter ((/= ka) . adName) (smParams sm)
+
+        batchPatchBound =
+          (fst <$> (smBatch sm >>= bpBound)) == Just BindPatch
+
+        bindingErrs = case binding of
+          Nothing -> []
+          Just b ->
+            let vt = bindVerbName (vbVerb b)
+                tn = unTypeName (vbTarget b)
+                targetInfo = Map.lookup tn entInfos
+                targetErrs = case targetInfo of
+                  Nothing -> [err bl (mctx <> " binds unknown entity `" <> tn <> "`")]
+                  Just _ ->
+                    if tn == smReturns sm
+                      then []
+                      else [err bl (mctx <> " binds `/e/" <> tn <> "` but returns `" <> smReturns sm <> "`; a verb binding targets the returned entity")]
+                shapeErrs = case vbVerb b of
+                  BindCreate ->
+                    (case vbKeyArg b of
+                       Nothing -> []
+                       Just _ -> [err bl (mctx <> " POST binding must not name a key segment (creation binds the collection URL `/e/" <> tn <> "`)")])
+                      <> (if vbLww b then [err bl (mctx <> " marks a POST binding last-writer-wins; the marker applies only to keyed bindings")] else [])
+                  _ -> case vbKeyArg b of
+                    Just _ -> []
+                    Nothing -> [err bl (mctx <> " " <> vt <> " binding requires a key segment (`as " <> vt <> " /e/" <> tn <> "/{arg}`)")]
+                keyErrs = case (vbKeyArg b, targetInfo) of
+                  (Just (ArgName a), Just ei)
+                    | not (Set.member a paramNames) ->
+                        [err bl (mctx <> " binding names unknown argument `" <> a <> "`")]
+                    | otherwise -> case eiKey ei of
+                        kf :| [] ->
+                          let keyTy = fieldType <$> Map.lookup (FieldName kf) (eiFields ei)
+                              argTy = adType <$> List.find ((== ArgName a) . adName) (smParams sm)
+                           in if keyTy /= Nothing && argTy == keyTy
+                                then []
+                                else [err bl (mctx <> " binding key argument `" <> a <> "` must have `" <> tn <> "`'s key type")]
+                        _ -> [err bl (mctx <> " binds composite-keyed entity `" <> tn <> "`; verb bindings require a single-field key")]
+                  _ -> []
+                effectErrs = case vbVerb b of
+                  BindPut -> naturalOnly vt
+                  BindDelete -> naturalOnly vt
+                  _ -> []
+                naturalOnly v = case effect of
+                  NaturallyIdempotent _ -> []
+                  _ -> [err bl (mctx <> " binds " <> v <> " but its effect class is not `natural` (PUT and DELETE promise HTTP idempotency)")]
+                arityErrs = case vbVerb b of
+                  BindPut
+                    | [_] <- nonKeyParams -> []
+                    | otherwise -> [err bl (mctx <> " PUT binding requires exactly one non-key argument (the full replacement representation)")]
+                  BindPatch
+                    | [p] <- nonKeyParams -> patchRecordErrs p
+                    | otherwise -> [err bl (mctx <> " PATCH binding requires exactly one non-key argument (the merge-patch record)")]
+                  BindDelete
+                    | null nonKeyParams -> []
+                    | otherwise -> [err bl (mctx <> " DELETE binding admits no arguments besides the key")]
+                  BindCreate
+                    | [p] <- smParams sm -> createRecordErrs p
+                    | otherwise -> [err bl (mctx <> " POST binding requires exactly one argument (the creation record)")]
+                createRecordErrs p = case adType p of
+                  TNamed rt | Just (DeclRecord _) <- Map.lookup rt types -> []
+                  _ ->
+                    [err bl (mctx <> " POST binding argument `" <> unArgName (adName p) <> "` must be a declared record type (the creation body is its bare fields, §11.8)")]
+                patchRecordErrs p = case adType p of
+                  TNamed rt | Just (DeclRecord fs) <- Map.lookup rt types ->
+                    concatMap (patchFieldErrs (unTypeName rt)) fs
+                  _ ->
+                    [err bl (mctx <> " PATCH binding argument `" <> unArgName (adName p) <> "` must be a declared record type (merge-patch semantics)")]
+                patchFieldErrs rt (FieldName f, ft) =
+                  (case ft of
+                     TOptional _ -> []
+                     _ -> [err bl (mctx <> " PATCH binding record `" <> rt <> "` field `" <> f <> "` must be optional (merge-patch reapplication must be a no-op)")])
+                    <> ( if batchPatchBound && Just f == keyFieldOfTarget
+                           then [err bl (mctx <> " PATCH batch binding record `" <> rt <> "` field `" <> f <> "` collides with the bound entity's key field (batch items carry the key inline)")]
+                           else []
+                       )
+                    <> ( if batchPatchBound && f == "key"
+                           then [err bl (mctx <> " PATCH batch binding record `" <> rt <> "` field `key` collides with the batch item key")]
+                           else []
+                       )
+                keyFieldOfTarget = case targetInfo of
+                  Just ei | kf :| [] <- eiKey ei -> Just kf
+                  _ -> Nothing
+             in targetErrs <> shapeErrs <> keyErrs <> effectErrs <> arityErrs
+
+        batchBindErrs = case smBatch sm >>= bpBound of
+          Nothing -> []
+          Just (v, ty) -> case binding of
+            Nothing -> [err l (mctx <> " declares a batch collection binding but no `as` verb binding")]
+            Just b
+              | v == BindPut -> [err l (mctx <> " batch binding uses PUT; PUT never batches")]
+              | otherwise ->
+                  (if v /= vbVerb b then [err l (mctx <> " batch binding verb `" <> bindVerbName v <> "` must match the mutation's bound verb `" <> bindVerbName (vbVerb b) <> "`")] else [])
+                    <> (if ty /= vbTarget b then [err l (mctx <> " batch binding must target `/e/" <> unTypeName (vbTarget b) <> "`, the bound entity")] else [])
+
         def =
           MutationDef
             { mutParams = smParams sm
@@ -2010,6 +2848,7 @@ elaborate decls =
             , mutEffect = effect
             , mutErrors = smErrors sm
             , mutBatch = smBatch sm
+            , mutBinding = binding
             }
         errs =
           pErrs
@@ -2021,6 +2860,8 @@ elaborate decls =
             <> returnsErrs
             <> scopeErrs
             <> invalScopeErrs
+            <> bindingErrs
+            <> batchBindErrs
 
     writeScopeErrs :: Int -> Text -> Set Text -> WriteScopeDecl -> [SchemaError]
     writeScopeErrs l mctx paramNames = \case
@@ -2056,6 +2897,61 @@ elaborate decls =
     (mutations, mutDupErrs) =
       collectMap "mutation" unMutationName (map (\(l, n, d, _) -> (l, n, d)) mutResults)
 
+    -- ---- binding URL-shape registry (§11.7: one mutation per verb + URL) ---------
+    bindingShapes :: [(Int, MutationName, (BindVerb, TypeName, Bool))]
+    bindingShapes =
+      concatMap
+        ( \(l, n, d, _) ->
+            let single = case mutBinding d of
+                  Nothing -> []
+                  Just b -> [(vbVerb b, vbTarget b, vbKeyArg b /= Nothing)]
+                batchB = case mutBatch d >>= bpBound of
+                  Nothing -> []
+                  Just (v, ty) -> [(v, ty, False)]
+             in map (\s -> (l, n, s)) (Set.toList (Set.fromList (single <> batchB)))
+        )
+        mutResults
+
+    bindDupErrs =
+      snd (List.foldl' step (Map.empty, []) bindingShapes)
+      where
+        step (seen, es) (l, n, s@(v, ty, keyed)) = case Map.lookup s seen of
+          Just prev ->
+            ( seen
+            , es
+                <> [ err l $
+                       "mutation `"
+                         <> unMutationName n
+                         <> "` and mutation `"
+                         <> unMutationName prev
+                         <> "` bind the same URL shape `"
+                         <> bindVerbName v
+                         <> " /e/"
+                         <> unTypeName ty
+                         <> (if keyed then "/{key}`" else "`")
+                   ]
+            )
+          Nothing -> (Map.insert s n seen, es)
+
+    -- ---- annotations (§17.3 @break, §17.5 @deprecated) -------------------
+    (annBreaks, annDeprs, annErrs) = List.foldl' step (Map.empty, Map.empty, []) anns
+      where
+        step (bs, ds, es) (l, p, a) = case a of
+          AnnBreak t
+            | Map.member p bs -> (bs, ds, es <> [err l "duplicate @break annotation"])
+            | otherwise -> (Map.insert p t bs, ds, es)
+          AnnDeprecated d
+            | not (deprecatable p) ->
+                (bs, ds, es <> [err l "@deprecated is only allowed on fields, relationships, roots, and mutations"])
+            | Map.member p ds -> (bs, ds, es <> [err l "duplicate @deprecated annotation"])
+            | otherwise -> (bs, Map.insert p d ds, es)
+        deprecatable = \case
+          OnEntityItem _ _ -> True
+          OnIfaceItem _ _ -> True
+          OnRoot _ -> True
+          OnMutation _ -> True
+          _ -> False
+
     -- ---- assembly ------------------------------------------------------------------
     schema =
       Schema
@@ -2064,9 +2960,12 @@ elaborate decls =
         , schemaTypes = types
         , schemaInterfaces = interfaces
         , schemaEntities = entities
+        , schemaExtensions = extensions
         , schemaFragments = fragments
         , schemaRoots = roots
         , schemaMutations = mutations
+        , schemaBreaks = annBreaks
+        , schemaDeprecations = annDeprs
         }
 
     allErrs =
@@ -2080,6 +2979,8 @@ elaborate decls =
         <> ifaceDupErrs
         <> crossDupErrs
         <> concatMap (\(_, _, _, es) -> es) entityResults
+        <> extDupErrs
+        <> concatMap (\(_, _, _, es) -> es) extensionResults
         <> concatMap (\(_, _, es) -> es) ifaceResults
         <> fragDupErrs
         <> fragErrs
@@ -2088,6 +2989,8 @@ elaborate decls =
         <> collDupErrs
         <> concatMap (\(_, _, _, es) -> es) mutResults
         <> mutDupErrs
+        <> bindDupErrs
+        <> annErrs
 
 
 -- | Insert with duplicate detection, keeping the first occurrence.
@@ -2111,17 +3014,7 @@ buildEntInfos = List.foldl' step (Map.empty, [])
 
     mkInfo e =
       let (fields, fieldLines, rels, defaults, fetches, dupErrs) =
-            List.foldl' item (Map.empty, Map.empty, [], [], [], []) (sEntItems e)
-          item (fm, flm, rs, ds, xs, des) = \case
-            SIField l n fd
-              | Map.member (FieldName n) fm ->
-                  (fm, flm, rs, ds, xs, des <> [err l ("duplicate field `" <> n <> "` in entity `" <> sEntName e <> "`")])
-              | otherwise ->
-                  (Map.insert (FieldName n) fd fm, Map.insert (FieldName n) l flm, rs, ds, xs, des)
-            it@(SIRelOne {}) -> (fm, flm, rs <> [it], ds, xs, des)
-            it@(SIRelMany {}) -> (fm, flm, rs <> [it], ds, xs, des)
-            SIDefault l p -> (fm, flm, rs, ds <> [(l, p)], xs, des)
-            SIFetch l k p -> (fm, flm, rs, ds, xs <> [(l, k, p)], des)
+            foldSItems ("entity `" <> sEntName e <> "`") (sEntItems e)
        in ( EntInfo
               { eiLine = sEntLine e
               , eiKeySpec = sEntKey e
@@ -2138,6 +3031,69 @@ buildEntInfos = List.foldl' step (Map.empty, [])
               }
           , dupErrs
           )
+
+
+-- | Partition a body's items (fields, relationships, default-visibility
+-- lines, @fetch by@ clauses), with duplicate-field detection.
+foldSItems
+  :: Text
+  -> [SItem]
+  -> ( Map FieldName FieldDef
+     , Map FieldName Int
+     , [SItem]
+     , [(Int, Policy)]
+     , [(Int, NonEmpty Text, Policy)]
+     , [SchemaError]
+     )
+foldSItems ctx = List.foldl' item (Map.empty, Map.empty, [], [], [], [])
+  where
+    item (fm, flm, rs, ds, xs, des) = \case
+      SIField l n fd
+        | Map.member (FieldName n) fm ->
+            (fm, flm, rs, ds, xs, des <> [err l ("duplicate field `" <> n <> "` in " <> ctx)])
+        | otherwise ->
+            (Map.insert (FieldName n) fd fm, Map.insert (FieldName n) l flm, rs, ds, xs, des)
+      it@(SIRelOne {}) -> (fm, flm, rs <> [it], ds, xs, des)
+      it@(SIRelMany {}) -> (fm, flm, rs <> [it], ds, xs, des)
+      SIDefault l p -> (fm, flm, rs, ds <> [(l, p)], xs, des)
+      SIFetch l k p -> (fm, flm, rs, ds, xs <> [(l, k, p)], des)
+
+
+-- | The raw shape of one @extend entity@ block, pre-elaboration.
+data ExtInfo = ExtInfo
+  { xiLine :: !Int
+  , xiCoKey :: Maybe (CoKeyMode, Text)
+  , xiFields :: Map FieldName FieldDef
+  , xiFieldLines :: Map FieldName Int
+  , xiRels :: [SItem]
+  , xiDefaults :: [(Int, Policy)]
+  , xiFetches :: [(Int, NonEmpty Text, Policy)]
+  }
+
+
+buildExtInfos :: [SExtend] -> (Map Text ExtInfo, [SchemaError])
+buildExtInfos = List.foldl' step (Map.empty, [])
+  where
+    step (m, es) x
+      | Map.member (sExtName x) m =
+          (m, es <> [err (sExtLine x) ("duplicate `extend entity " <> sExtName x <> "`")])
+      | otherwise =
+          let (fields, fieldLines, rels, defaults, fetches, dupErrs) =
+                foldSItems ("extension of `" <> sExtName x <> "`") (sExtItems x)
+           in ( Map.insert
+                  (sExtName x)
+                  ExtInfo
+                    { xiLine = sExtLine x
+                    , xiCoKey = sExtCoKey x
+                    , xiFields = fields
+                    , xiFieldLines = fieldLines
+                    , xiRels = rels
+                    , xiDefaults = defaults
+                    , xiFetches = fetches
+                    }
+                  m
+              , es <> dupErrs
+              )
 
 
 {- | Resolve a co-key declaration (§3.8) against the raw entity map:

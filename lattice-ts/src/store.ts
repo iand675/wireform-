@@ -54,10 +54,16 @@ export interface ApplyOutcome {
    * `tombstone`, or `invalidated` record.
    */
   committed: boolean;
+  /**
+   * `unchanged` markers (§10.4) this store could not satisfy: the ref is
+   * missing or held at a different version — the digest's false positive.
+   * The caller repairs each with a point fetch.
+   */
+  gaps: Ref[];
 }
 
 export function newApplyOutcome(): ApplyOutcome {
-  return { errors: [], invalidated: [], refs: [], committed: false };
+  return { errors: [], invalidated: [], refs: [], committed: false, gaps: [] };
 }
 
 function deepEqual(a: unknown, b: unknown): boolean {
@@ -156,9 +162,17 @@ export class LatticeStore {
         }
         if (this.entities.delete(rec.id)) this.touch(rec.id);
         break;
-      case "unchanged":
-        if (outcome) outcome.refs.push(rec.id);
+      case "unchanged": {
+        // §10.4: keep what we have. A marker for a ref this store lacks —
+        // or holds at a different ver — is a digest false positive the
+        // caller should point-fetch; record it as a gap.
+        if (outcome) {
+          outcome.refs.push(rec.id);
+          const cur = this.entities.get(rec.id);
+          if (!cur || cur.ver !== rec.ver) outcome.gaps.push(rec.id);
+        }
         break;
+      }
       case "elided":
         // The entity exists but this context may not see it; never treat as
         // nonexistence (§9.3), so the store keeps whatever it already holds.

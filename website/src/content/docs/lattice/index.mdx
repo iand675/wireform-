@@ -338,3 +338,6 @@ haddock rather than silently missing:
 | §17.5 traffic-threshold gate | the checker gates on sunset + corpus weights; a traffic threshold is deployment configuration |
 | `SERVER_FORWARD` | implemented as the reversed structural diff (documented approximation) |
 | Resource-mode `103 Early Hints` | not emitted |
+| Gateway `nodes` batching | per (upstream, type, round); folding types into one query per (upstream, round) needs a round-level executor seam |
+| Gateway v1 punts | parameterized computed fields elide across the seam; federated live SSE streams pass through unsplit (no `src`); interface-targeted federated edges and roots unsupported |
+| `src` typing | typed on entity records; tombstone/elided/unchanged/error carry it in wire JSON only |

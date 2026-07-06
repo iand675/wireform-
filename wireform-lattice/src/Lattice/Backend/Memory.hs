@@ -62,10 +62,12 @@ module Lattice.Backend.Memory (
   pageFromRows,
 ) where
 
+import Control.Applicative ((<|>))
 import Control.Concurrent.STM
 import Control.Monad (when)
 import Data.Aeson qualified as A
-import Data.List (elemIndex, sortBy)
+import Data.List (elemIndex, foldl', sortBy)
+import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -208,6 +210,11 @@ data MemoryHooks = MemoryHooks
   -- child-table scan.
   , mhMutations :: Map MutationName (MemoryDb -> Claims -> Map ArgName A.Value -> IO MutationOutcome)
   -- ^ Mutation effects ('beMutate').
+  , mhDerives :: Map (TypeName, FieldName) (DepValues -> Maybe A.Value)
+  -- ^ Derived-field computes ('beDerive', §3.7): pure per-owner functions,
+  -- mapped over the batch; @Nothing@ elides the field for that owner.
+  -- A derived field whose read set is exactly one collection aggregate
+  -- needs no hook: the generic fallback returns the aggregate value.
   , mhFailures :: IO (Maybe BackendFailure)
   -- ^ Fault injection: consulted once per loader call; @Just@ fails that
   -- call. Defaults to @pure Nothing@.
@@ -222,6 +229,7 @@ defaultHooks =
     , mhListOverrides = Map.empty
     , mhChildrenOverrides = Map.empty
     , mhMutations = Map.empty
+    , mhDerives = Map.empty
     , mhFailures = pure Nothing
     }
 
@@ -240,6 +248,9 @@ memoryBackend schema db hooks =
     , beLoad = load
     , beComputed = computed
     , beMutate = mutate
+    , beAggregate = aggregate
+    , beDerive = derive
+    , beStoreDerived = storeDerived
     }
   where
     withFault :: (BackendFailure -> a) -> IO a -> IO a
@@ -273,10 +284,128 @@ memoryBackend schema db hooks =
         Nothing -> pure Nothing
         Just hook -> hook args row
 
-    mutate name claims args =
+    -- Precondition evaluation (§11.7): hooks run their own @atomically@
+    -- blocks, so the check runs in its own STM transaction immediately
+    -- before the hook rather than inside the hook's — an approximation of
+    -- the "same bracket" contract that is exact for this backend's
+    -- single-process demo/test use.
+    mutate name claims args pre =
       case Map.lookup name (mhMutations hooks) of
         Nothing -> pure (MutationFailed (internalError (Just ("no mutation hook for " <> unMutationName name))))
-        Just hook -> hook db claims args
+        Just hook -> do
+          ok <- case pre of
+            Nothing -> pure True
+            Just p -> atomically (preHolds p)
+          if ok
+            then hook db claims args
+            else pure MutationPreconditionFailed
+
+    preHolds p = do
+      row <- readRow db (refType (mpTarget p)) (refKey (mpTarget p))
+      pure $ case (mpCheck p, row) of
+        (PreIfMatch v, RowFound r) -> rowVer r == v
+        (PreIfMatch _, _) -> False
+        (PreIfAbsent, RowFound _) -> False
+        (PreIfAbsent, _) -> True
+
+    -- ---- derived fields (§3.7) ------------------------------------------
+
+    -- One scan pass per call: live rows of the collection's target types,
+    -- grouped per requested 'GroupKey' by comparing each grouping field's
+    -- canonical wire text. Count/sum of an empty group are 0; min/max of
+    -- an empty group produce no entry (the derived field elides).
+    aggregate cname agg gkeys = withFault Left $
+      case Map.lookup cname collectionsByName of
+        Nothing ->
+          pure (Left (internalError (Just ("unknown collection " <> unCollectionName cname))))
+        Just (targets, col) -> atomically $ do
+          rows <- liveRowsOf db targets
+          let one gk = (,) gk <$> aggValue agg (map snd (filter (inGroup col gk) rows))
+          pure (Right (Map.fromList (mapMaybe one gkeys)))
+
+    inGroup col gk (ref, fields) =
+      all matches (zip (NE.toList (colGrouping col)) gk)
+      where
+        matches (g, want)
+          | g == colLink col
+          , Nothing <- Map.lookup g fields =
+              -- Parent-side link storage (grouped-by overrides aside, a
+              -- missing link column cannot match a concrete group).
+              refKey ref == want
+          | otherwise = case Map.lookup g fields of
+              Just v -> renderScalarKey v == want
+              Nothing -> False
+
+    aggValue agg rows = case agg of
+      AggCount -> Just (A.Number (fromIntegral (length rows)))
+      AggSum f -> Just (A.Number (foldl' (+) 0 (numsOf f rows)))
+      AggMin f -> extremumBy (\a b -> compareCanonical a b == LT) f rows
+      AggMax f -> extremumBy (\a b -> compareCanonical a b == GT) f rows
+
+    numsOf f = mapMaybe (\fields -> Map.lookup f fields >>= asNumber)
+
+    asNumber = \case
+      A.Number n -> Just n
+      _ -> Nothing
+
+    extremumBy better f rows = case mapMaybe (Map.lookup f) rows of
+      [] -> Nothing
+      v : vs -> Just (foldl' (\acc x -> if better x acc then x else acc) v vs)
+
+    derive ty field deps = pure $ case Map.lookup (ty, field) (mhDerives hooks) of
+      Just hook -> Map.mapMaybe hook deps
+      Nothing
+        | singleAggregateDep ty field -> Map.mapMaybe soleAggregate deps
+        | otherwise -> Map.empty
+
+    soleAggregate dv = case Map.elems (dvAggregates dv) of
+      [v] -> Just v
+      _ -> Nothing
+
+    singleAggregateDep ty field = case fieldDeriv of
+      Just d
+        | ViaCollection _ _ :| [] <- derivReads d -> True
+      _ -> False
+      where
+        fieldDeriv = do
+          fd <-
+            (lookupEntity schema ty >>= (`lookupEntityField` field))
+              <|> (Map.lookup ty (schemaExtensions schema) >>= Map.lookup field . extFields)
+          fieldDerivation fd
+
+    -- Maintained write-back: store each value on its live owning row (one
+    -- STM transaction per call = the bracketed write), bumping @ver@
+    -- ordinarily; vanished/tombstoned owners are skipped.
+    storeDerived ty field vals = atomically $ do
+      written <- traverse one (Map.toList vals)
+      pure (Map.fromList (concat written))
+      where
+        one (k, v) =
+          readRow db ty k >>= \case
+            RowFound (EntityRow _ fields) -> do
+              putRow db ty k (Map.insert field v fields)
+              readRow db ty k >>= \case
+                RowFound (EntityRow ver' _) -> pure [(k, ver')]
+                _ -> pure []
+            _ -> pure []
+
+    -- Every declared collection (entity rels and roots) by cache-tag name.
+    collectionsByName :: Map CollectionName ([TypeName], CollectionDef)
+    collectionsByName = Map.fromList (entityCols <> extCols <> rootCols)
+      where
+        entityCols = concatMap entOne (Map.elems (schemaEntities schema))
+        entOne ent = mapMaybe relOne (Map.elems (entityRels ent))
+        extCols =
+          concatMap
+            (mapMaybe relOne . Map.elems . extRels)
+            (Map.elems (schemaExtensions schema))
+        relOne = \case
+          ToMany {relTarget = tgt, relCollection = col} ->
+            Just (colName col, (targetTypes schema tgt, col))
+          _ -> Nothing
+        rootCols = mapMaybe rootOne (Map.elems (schemaRoots schema))
+        rootOne rd =
+          (\col -> (colName col, (targetTypes schema (rootTarget rd), col))) <$> rootCollection rd
 
 
 -- ---------------------------------------------------------------------------
@@ -320,7 +449,10 @@ genericChildren ::
   Window ->
   IO (Map Ref (Either BackendFailure Page))
 genericChildren schema db ty field parents window =
-  case lookupEntity schema ty >>= (`lookupEntityRel` field) of
+  case
+    (lookupEntity schema ty >>= (`lookupEntityRel` field))
+      <|> (Map.lookup ty (schemaExtensions schema) >>= Map.lookup field . extRels)
+    of
     Just ToMany {relTarget, relCollection = col} -> do
       let targets = targetTypes schema relTarget
       rows <- atomically (liveRowsOf db targets)

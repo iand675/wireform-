@@ -9,6 +9,27 @@ inexpressible.
 Loads are policy-free: backends fetch rows by key and know nothing about
 callers. Visibility is applied at emission by the server, per response,
 against the response's slice and claims (§6.9).
+
+== Derived fields (§3.7)
+
+Three seams serve derived fields, all batched like every other loader:
+
+* 'beAggregate' resolves one collection aggregate for a set of grouping
+  keys at once (set-in, map-out). A 'GroupKey' is the collection's
+  grouping values in 'Lattice.Schema.colGrouping' order, each the
+  canonical wire text of the grouping field's value on the member rows
+  (for the link field: the parent's key component).
+* 'beDerive' is the registered compute of one derived field: a BATCHED
+  PURE function from dep payloads to values, keyed by the owning
+  entities' keys. A key absent from the result elides the field for that
+  entity (mirroring 'beComputed'). The executor assembles 'DepValues'
+  from the declared read set; the compute never does its own I\/O.
+* 'beStoreDerived' is the write half of @maintained@ materialization: a
+  bracketed backend write of recomputed values onto the owning rows
+  (write scope: exactly those entities), bumping each row's @ver@
+  ordinarily. The result maps each written key to its NEW version; keys
+  absent from the result (vanished\/tombstoned rows) are skipped by the
+  relay. Only the origin's maintained-derivation relay calls this.
 -}
 module Lattice.Backend (
   Backend (..),
@@ -24,12 +45,19 @@ module Lattice.Backend (
   MutationOutcome (..),
   CommitResult (..),
   WriteFact (..),
+  MutatePrecondition (..),
+  PreCheck (..),
+  GroupKey,
+  DepValues (..),
+  emptyDepValues,
 ) where
 
 import Data.Aeson qualified as A
 import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Lattice.Cursor (Cursor)
+import Lattice.Schema (Aggregate)
 import Lattice.Types
 import Numeric.Natural (Natural)
 
@@ -111,9 +139,38 @@ data MutationOutcome
     MutationDomainError A.Value
   | -- | The @allow when@ guard failed.
     MutationDenied
+  | -- | The request's 'MutatePrecondition' evaluated false against the
+    -- target row's current state; nothing committed. The server renders
+    -- the @412@ whose body carries current state (§11.7).
+    MutationPreconditionFailed
   | -- | Infrastructure failure; nothing committed.
     MutationFailed BackendFailure
   deriving stock (Show)
+
+
+{- | A conditional request on a verb-bound mutation (§11.7): the check the
+effect bracket must evaluate against the target row's __current__ version
+before applying the effect — inside the same transaction, never against a
+cache. When the check fails the backend returns
+'MutationPreconditionFailed' and commits nothing.
+-}
+data MutatePrecondition = MutatePrecondition
+  { mpTarget :: Ref
+  -- ^ The row named by the bound entity URL.
+  , mpCheck :: PreCheck
+  }
+  deriving stock (Eq, Show)
+
+
+-- | The precondition proper.
+data PreCheck
+  = -- | @If-Match: \"ver\"@ — proceed only when the row exists at exactly
+    -- this version (strong comparison; a tombstoned or absent row fails).
+    PreIfMatch Text
+  | -- | @If-None-Match: *@ on PUT — create-if-absent: proceed only when
+    -- the row has no current representation (absent or tombstoned).
+    PreIfAbsent
+  deriving stock (Eq, Show)
 
 
 data CommitResult = CommitResult
@@ -141,6 +198,38 @@ data WriteFact
     -- (canonical text, one per grouping field).
     WroteCollection CollectionName [Text]
   deriving stock (Eq, Show)
+
+
+{- | One collection-aggregate grouping instance: the grouping values in
+'Lattice.Schema.colGrouping' order, canonical wire text each (§10.5) —
+the same values that instantiate the collection's surrogate key.
+-}
+type GroupKey = [Text]
+
+
+{- | The dep payloads handed to 'beDerive' for one owning entity,
+assembled by the executor from the field's declared read set (§3.7):
+
+* 'dvOwn' — @own(…)@ deps: the named stored fields off the owning row
+  (absent row fields are absent here too).
+* 'dvEdges' — @\<edge\> ...Fragment@ deps, keyed by edge field name: the
+  resolved target ref and the fragment's top-level scalar fields read off
+  the target row. An unresolved link or an absent\/tombstoned target row
+  leaves the key absent.
+* 'dvAggregates' — collection aggregate deps, keyed by the @has many@
+  relationship's field name: the aggregate value at this owner's
+  grouping key.
+-}
+data DepValues = DepValues
+  { dvOwn :: Map FieldName A.Value
+  , dvEdges :: Map FieldName (Ref, Map FieldName A.Value)
+  , dvAggregates :: Map FieldName A.Value
+  }
+  deriving stock (Eq, Show)
+
+
+emptyDepValues :: DepValues
+emptyDepValues = DepValues Map.empty Map.empty Map.empty
 
 
 {- | The origin backend. All loaders are batched: one call per (type, round),
@@ -175,8 +264,37 @@ data Backend = Backend
       MutationName ->
       Claims ->
       Map ArgName A.Value ->
+      Maybe MutatePrecondition ->
       IO MutationOutcome
   -- ^ Run one mutation effect. The server has already checked the guard
   -- against the claims; backends may re-check. Write-set enforcement
-  -- happens on the returned 'WriteFact's.
+  -- happens on the returned 'WriteFact's. A 'MutatePrecondition' (verb
+  -- bindings, §11.7) MUST be evaluated inside the effect bracket against
+  -- the target row's current version; on failure return
+  -- 'MutationPreconditionFailed' without committing.
+  , beAggregate ::
+      CollectionName ->
+      Aggregate ->
+      [GroupKey] ->
+      IO (Either BackendFailure (Map GroupKey A.Value))
+  -- ^ Resolve one collection aggregate for every grouping key of a round
+  -- at once (§3.7 Planning). Set-in, map-out; a key absent from the
+  -- result elides the dependent derived field for that owner. A 'Left'
+  -- fails every owner in the call (Field-scoped errors).
+  , beDerive ::
+      TypeName ->
+      FieldName ->
+      Map Text DepValues ->
+      IO (Map Text A.Value)
+  -- ^ The batched pure compute of one derived field (§3.7), keyed by
+  -- owning entity key. Absent keys elide the field (like 'beComputed').
+  , beStoreDerived ::
+      TypeName ->
+      FieldName ->
+      Map Text A.Value ->
+      IO (Map Text Text)
+  -- ^ @maintained@ write-back (§3.7 Materialization): store each value on
+  -- its owning row in a bracketed write scoped to exactly that entity,
+  -- bumping @ver@ ordinarily. Returns the NEW version per written key;
+  -- absent keys (vanished rows) are skipped by the relay.
   }

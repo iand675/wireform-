@@ -37,19 +37,27 @@ library
     Lattice.Canonical
     Lattice.Client
     Lattice.Client.Store
+    Lattice.Compat
     Lattice.Compress
     Lattice.Cursor
+    Lattice.Digest
     Lattice.Hash
+    Lattice.Gateway
     Lattice.IDL.Parser
     Lattice.IDL.Print
+    Lattice.Module
     Lattice.Plan
     Lattice.Query.AST
     Lattice.Query.Parser
     Lattice.Query.Validate
+    Lattice.Registry
     Lattice.Schema
     Lattice.Server
     Lattice.Server.Auth
+    Lattice.Server.Coalesce
     Lattice.Server.Execute
+    Lattice.Server.Live
+    Lattice.Telemetry
     Lattice.Types
     Lattice.Value
     Lattice.Wire
@@ -62,11 +70,13 @@ library
     case-insensitive >= 1.2 && < 1.3,
     containers >= 0.6 && < 0.9,
     crypton >= 1.0 && < 1.2,
+    hs-opentelemetry-api >= 1.0 && < 1.1,
     memory >= 0.18 && < 0.19,
     scientific >= 0.3 && < 0.4,
     stm >= 2.5 && < 2.6,
     text >= 2.0 && < 2.2,
     time >= 1.12 && < 1.15,
+    unicode-transforms >= 0.4 && < 0.5,
     vector >= 0.13 && < 0.14,
     wireform-http,
     zlib >= 0.6 && < 0.8
@@ -95,20 +105,36 @@ test-suite wireform-lattice-test
   main-is: Main.hs
   other-modules:
     Test.Lattice.Canonical
+    Test.Lattice.Compat
     Test.Lattice.Compress
     Test.Lattice.Cursor
+    Test.Lattice.Derived
+    Test.Lattice.Digest
+    Test.Lattice.DigestE2E
     Test.Lattice.E2E
+    Test.Lattice.Feed
     Test.Lattice.Fixtures
+    Test.Lattice.Fusion
+    Test.Lattice.Gateway
+    Test.Lattice.Governance
     Test.Lattice.IDL
+    Test.Lattice.Live
+    Test.Lattice.Loop
+    Test.Lattice.Nodes
+    Test.Lattice.Otel
     Test.Lattice.Plan
     Test.Lattice.Query
+    Test.Lattice.Registry
     Test.Lattice.Value
+    Test.Lattice.Verbs
+    Test.Lattice.VerbsE2E
     Test.Lattice.Wire
   ghc-options: -threaded -rtsopts "-with-rtsopts=-N"
   build-depends:
     aeson,
     base,
     bytestring,
+    case-insensitive,
     containers,
     hedgehog >= 1.0 && < 1.8,
     network,

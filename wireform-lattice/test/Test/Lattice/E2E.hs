@@ -44,13 +44,8 @@ around, not skipped silently):
 -}
 module Test.Lattice.E2E (tests) where
 
-import Control.Concurrent (forkIO, killThread)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.STM
-import Control.Exception (bracket, finally)
 import Data.Aeson qualified as A
-import Data.Aeson.Key qualified as AK
-import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BS8
 import Data.Foldable (toList)
@@ -59,26 +54,18 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Text.Encoding qualified as TE
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Lattice.Backend
 import Lattice.Backend.Memory
 import Lattice.Client
 import Lattice.Client.Store qualified as Store
 import Lattice.Schema
-import Lattice.Server (OriginConfig (..), latticeHandler, newOrigin)
-import Lattice.Server.Auth (ProofVerifier, encodeClaims, hmacProof, hmacVerifier)
+import Lattice.Server.Auth (encodeClaims, hmacProof, hmacVerifier)
 import Lattice.Types
 import Lattice.Wire
-import Network.HTTP.Message (Request (..), Response (..))
-import Network.HTTP.Server (ServerConfig (..), defaultServerConfig, runServerOnListener)
-import Network.HTTP.Types.Header (hCacheControl, lookupHeader)
 import Network.HTTP.Types.Method (Method (..))
-import Network.HTTP.Types.Status (statusCode)
-import Network.HTTP.VersionRange (preferHttp1)
-import Network.Socket qualified as NS
-import System.Timeout (timeout)
 import Test.Lattice.Fixtures (blogSchema, cardSchema, cokeySchema, requireRight, starwarsSchema)
+import Test.Lattice.Loop
 import Test.Syd
 import Text.Read (readMaybe)
 
@@ -664,142 +651,6 @@ otherReviewBody =
 
 
 -- ---------------------------------------------------------------------------
--- Loopback fixture: origin on an ephemeral port + counting middleware
--- ---------------------------------------------------------------------------
-
--- | One request as observed at the origin.
-data Hit = Hit
-  { hitMethod :: Method
-  , hitTarget :: ByteString
-  , hitStatus :: Int
-  , hitCache :: Maybe ByteString
-  , hitSurrogates :: Maybe ByteString
-  }
-  deriving stock (Show)
-
-
--- | A running loopback origin.
-data Loop = Loop
-  { loopPort :: String
-  , loopHits :: TVar [Hit]
-  , loopBreakEdges :: TVar Bool
-  -- ^ When set, every 'beChildren' call fails with 'upstreamUnavailable'.
-  }
-
-
-withLoopback ::
-  Schema ->
-  MemoryHooks ->
-  [(TypeName, Map FieldName A.Value)] ->
-  Maybe ProofVerifier ->
-  (Loop -> IO a) ->
-  IO a
-withLoopback schema hooks rows verifier action = do
-  db <- newMemoryDb
-  atomically (mapM_ (seedRow schema db) rows)
-  breakEdges <- newTVarIO False
-  hits <- newTVarIO []
-  let inner = memoryBackend schema db hooks
-      backend =
-        inner
-          { beChildren = \ty field parents win -> do
-              broken <- readTVarIO breakEdges
-              if broken
-                then pure (Map.fromList (map (\(r, _) -> (r, Left upstreamUnavailable)) parents))
-                else beChildren inner ty field parents win
-          }
-  origin <-
-    newOrigin
-      OriginConfig
-        { ocSchema = schema
-        , ocBudgets = defaultBudgets
-        , ocBackend = backend
-        , ocVerifier = verifier
-        , ocSnapshotDomain = "e2e"
-        , ocPurge = const (pure ())
-        , ocCors = False
-        , ocNow = getPOSIXTime
-        }
-  let handler req = do
-        resp <- latticeHandler origin req
-        atomically (modifyTVar' hits (mkHit req resp :))
-        pure resp
-  withServerSocket $ \sock port -> do
-    let scfg =
-          defaultServerConfig
-            { serverHost = "127.0.0.1"
-            , serverPort = show port
-            , serverVersionRange = preferHttp1
-            , serverHandler = handler
-            }
-    ready <- newEmptyMVar
-    tid <- forkIO (putMVar ready () >> runServerOnListener scfg sock)
-    takeMVar ready
-    action Loop {loopPort = show port, loopHits = hits, loopBreakEdges = breakEdges}
-      `finally` killThread tid
-
-
--- | Bind port 0 on the loopback interface and hand back the listener plus
--- the port the kernel chose (the repo's standard test pattern).
-withServerSocket :: (NS.Socket -> Int -> IO a) -> IO a
-withServerSocket k = do
-  let hints = NS.defaultHints {NS.addrFlags = [NS.AI_PASSIVE], NS.addrSocketType = NS.Stream}
-  addrs <- NS.getAddrInfo (Just hints) (Just "127.0.0.1") (Just "0")
-  case addrs of
-    [] -> expectationFailure "no loopback address available for the test bind"
-    (addr : _) ->
-      bracket (NS.openSocket addr) NS.close $ \sock -> do
-        NS.setSocketOption sock NS.ReuseAddr 1
-        NS.bind sock (NS.addrAddress addr)
-        NS.listen sock 128
-        bound <- NS.getSocketName sock
-        case bound of
-          NS.SockAddrInet p _ -> k sock (fromIntegral p)
-          _ -> expectationFailure "loopback listener bound to a non-inet address"
-
-
-mkHit :: Request -> Response -> Hit
-mkHit req resp =
-  Hit
-    { hitMethod = requestMethod req
-    , hitTarget = requestTarget req
-    , hitStatus = fromIntegral (statusCode (responseStatus resp))
-    , hitCache = lookupHeader hCacheControl (responseHeaders resp)
-    , hitSurrogates = lookupHeader hSurrogateKey (responseHeaders resp)
-    }
-
-
-resetHits :: Loop -> IO ()
-resetHits loop = atomically (writeTVar (loopHits loop) [])
-
-
--- | Chronological @/q@ traffic since the last reset.
-queryHits :: Loop -> IO [Hit]
-queryHits loop = do
-  hs <- readTVarIO (loopHits loop)
-  pure (filter (\h -> "/q" `BS8.isPrefixOf` hitTarget h) (reverse hs))
-
-
-{- | The @Surrogate-Key@ tokens of the single @\/m\/@ POST since the last
-reset. Exact-token comparison on purpose: @User:u2@ is a substring of
-@AdminUser:u2@, so infix assertions would be unsound here.
--}
-surrogateKeysOfMutation :: Loop -> IO [Text]
-surrogateKeysOfMutation loop = do
-  hs <- readTVarIO (loopHits loop)
-  case filter (\h -> "/m/" `BS8.isPrefixOf` hitTarget h) (reverse hs) of
-    [h] -> pure (maybe [] (T.words . TE.decodeUtf8) (hitSurrogates h))
-    other -> expectationFailure ("expected exactly one mutation hit, saw: " <> show other)
-
-
-seedRow :: Schema -> MemoryDb -> (TypeName, Map FieldName A.Value) -> STM ()
-seedRow schema db (ty, fields) =
-  case entityRowKey schema ty fields of
-    Just key -> putRow db ty key fields
-    Nothing -> error ("E2E seed row for " <> T.unpack (unTypeName ty) <> " lacks its key field")
-
-
--- ---------------------------------------------------------------------------
 -- Star Wars origin
 -- ---------------------------------------------------------------------------
 
@@ -1245,10 +1096,6 @@ cardTagOrder ctl db _claims args =
 -- Clients and operations
 -- ---------------------------------------------------------------------------
 
-clientFor :: Loop -> (ClientConfig -> ClientConfig) -> (LatticeClient -> IO a) -> IO a
-clientFor loop f = withLatticeClient (f defaultClientConfig {ccPort = loopPort loop})
-
-
 schemaClient :: Loop -> (LatticeClient -> IO a) -> IO a
 schemaClient loop = clientFor loop (\c -> c {ccSchema = Just starwarsSchema})
 
@@ -1270,143 +1117,5 @@ cardClient :: Loop -> (LatticeClient -> IO a) -> IO a
 cardClient loop = clientFor loop (\c -> c {ccSchema = Just cardSchema})
 
 
--- | Server-dependent awaits fail loudly instead of hanging the suite.
-io :: String -> IO a -> IO a
-io label act =
-  timeout (15 * 1000000) act
-    >>= maybe (expectationFailure ("E2E timed out waiting for " <> label)) pure
-
-
-runQuery :: LatticeClient -> Text -> Map VarName A.Value -> IO QueryResult
-runQuery lc txt vars = io "query" (query lc txt vars) >>= requireRight
-
-
 runCreateReview :: LatticeClient -> A.Value -> Maybe Text -> IO MutationResult
 runCreateReview lc input mIdem = io "mutation" (mutate lc "createReview" input mIdem) >>= requireRight
-
-
-runMutate :: LatticeClient -> MutationName -> A.Value -> IO MutationResult
-runMutate lc name input = io "mutation" (mutate lc name input Nothing) >>= requireRight
-
-
-expectProblem :: Int -> Text -> IO (Either LatticeError a) -> IO ()
-expectProblem st suffix act =
-  io "problem response" act >>= \case
-    Left (HttpProblem got typ _) -> do
-      got `shouldBe` st
-      typ `shouldSatisfy` T.isSuffixOf suffix
-    Left other -> expectationFailure ("expected an HTTP problem, got: " <> show other)
-    Right _ -> expectationFailure "expected an HTTP problem, got a success"
-
-
-{- | The action must fail with an HTTP problem of the given status whose
-diagnostics (or detail) name the offender.
--}
-expectProblemNaming :: Int -> Text -> IO (Either LatticeError a) -> IO ()
-expectProblemNaming st needle act =
-  io "problem response" act >>= \case
-    Left (HttpProblem got _ body) -> do
-      got `shouldBe` st
-      maybe [] problemTexts body `shouldSatisfy` any (T.isInfixOf needle)
-    Left other -> expectationFailure ("expected an HTTP problem, got: " <> show other)
-    Right _ -> expectationFailure "expected an HTTP problem, got a success"
-
-
--- | Diagnostic strings of a decoded RFC 9457 body: @diagnostics@ + @detail@.
-problemTexts :: A.Value -> [Text]
-problemTexts = \case
-  A.Object o -> diag (KM.lookup "diagnostics" o) <> det (KM.lookup "detail" o)
-    where
-      diag = \case
-        Just (A.Array xs) -> mapMaybe asString (toList xs)
-        _ -> []
-      det = \case
-        Just (A.String t) -> [t]
-        _ -> []
-      asString = \case
-        A.String t -> Just t
-        _ -> Nothing
-  _ -> []
-
-
--- | The action must fail with an HTTP problem of the given status (the
--- §6.7 tombstone @410@ carries an NDJSON frame, not a problem body).
-expectStatus :: Int -> IO (Either LatticeError a) -> IO ()
-expectStatus st act =
-  io "problem response" act >>= \case
-    Left (HttpProblem got _ _) -> got `shouldBe` st
-    Left other -> expectationFailure ("expected an HTTP problem, got: " <> show other)
-    Right _ -> expectationFailure "expected an HTTP problem, got a success"
-
-
--- ---------------------------------------------------------------------------
--- JSON tree assertions
--- ---------------------------------------------------------------------------
-
-rootValue :: Text -> QueryResult -> IO A.Value
-rootValue name r =
-  maybe
-    (expectationFailure ("query data carries no root '" <> T.unpack name <> "': " <> show (qrData r)))
-    pure
-    (Map.lookup name (qrData r))
-
-
-mutationResult :: MutationResult -> IO A.Value
-mutationResult mr =
-  maybe
-    (expectationFailure ("mutation data carries no result root: " <> show (mrData mr)))
-    pure
-    (Map.lookup "result" (mrData mr))
-
-
-objectField :: Text -> A.Value -> IO A.Value
-objectField key v = case v of
-  A.Object o ->
-    maybe
-      (expectationFailure ("no field '" <> T.unpack key <> "' in " <> show v))
-      pure
-      (KM.lookup (AK.fromText key) o)
-  _ -> expectationFailure ("expected an object, got: " <> show v)
-
-
--- | The unique field whose canonical key starts with the prefix — for
--- parameterized occurrences like @friends(first:2)@ whose exact argument
--- rendering the test should not restate.
-fieldByPrefix :: Text -> A.Value -> IO A.Value
-fieldByPrefix prefix v = case v of
-  A.Object o -> case filter (\(k, _) -> prefix `T.isPrefixOf` AK.toText k) (KM.toList o) of
-    [(_, inner)] -> pure inner
-    other ->
-      expectationFailure
-        ("expected exactly one '" <> T.unpack prefix <> "…' field, matching keys: " <> show (map fst other))
-  _ -> expectationFailure ("expected an object, got: " <> show v)
-
-
-hasFieldPrefix :: Text -> A.Value -> Bool
-hasFieldPrefix prefix v = case v of
-  A.Object o -> any (\k -> prefix `T.isPrefixOf` AK.toText k) (KM.keys o)
-  _ -> False
-
-
-asArray :: A.Value -> IO [A.Value]
-asArray = \case
-  A.Array xs -> pure (toList xs)
-  v -> expectationFailure ("expected an array, got: " <> show v)
-
-
-asText :: A.Value -> IO Text
-asText = \case
-  A.String t -> pure t
-  v -> expectationFailure ("expected a string, got: " <> show v)
-
-
-textField :: Text -> A.Value -> IO Text
-textField key v = objectField key v >>= asText
-
-
-pageNames :: A.Value -> IO [Text]
-pageNames pv = objectField "items" pv >>= asArray >>= traverse (textField "name")
-
-
-pageRefTexts :: A.Value -> IO [Text]
-pageRefTexts pv = objectField "items" pv >>= asArray >>= traverse (textField "$ref")

@@ -1,0 +1,3 @@
+X-Have: Post:17@e41,User:9@b02,Review:5001@e2,Droid:2001@e1
+X-Have-Digest: v1;fp=10;count=4;lhPYJ08g
+X-Have-Digest(fp=8): v1;fp=8;count=4;mE2z-nQ

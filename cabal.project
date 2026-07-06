@@ -102,5 +102,24 @@ package wireform-kafka-protocol
 -- blake3's SIMD flags default on and unconditionally compile x86
 -- intrinsics C files on non-x86_64 (broken on aarch64). The portable
 -- path is plenty: wireform-lattice only hashes short query/IDL texts.
+--
+-- Three levers, all needed on aarch64:
+--  * `flags:` turns the x86 intrinsics off when building from source.
+--  * `-optc-DBLAKE3_USE_NEON=0`: the package's vendored cbits do NOT ship
+--    blake3_neon.c, but blake3_impl.h auto-defines BLAKE3_USE_NEON=1 on
+--    aarch64, so the dispatch references an undefined symbol that darwin's
+--    dynamic lookup resolves to NULL — SIGSEGV in blake3_compress_subtree_wide
+--    for any input over one chunk (1024 B) unless some other loaded image
+--    happens to define it. Forcing NEON off makes dispatch take the portable
+--    path unconditionally.
+--  * `constraints: blake3 source` keeps the solver off the nix dev shell's
+--    pre-built global-DB unit (default flags, same null-dispatch trap; an
+--    installed unit's .conf records no flag assignment, so flags alone
+--    cannot exclude it).
 package blake3
   flags: -avx512 -avx2 -sse41 -sse2
+  ghc-options: -optc-DBLAKE3_USE_NEON=0
+
+constraints:
+  blake3 source
+
