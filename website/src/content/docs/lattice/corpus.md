@@ -773,6 +773,60 @@ keys the mutation path would.
 
 ---
 
+## 16. Non-null and list cardinality
+
+**GraphQL**
+
+```graphql
+type Order {
+  id: ID!
+  memo: String              # nullable is the default
+  lineItems: [LineItem!]!   # non-null list of non-null items... but can be []
+}
+
+input CreateOrder {
+  lineItems: [LineItemInput!]!   # nothing requires nonemptiness
+}
+```
+
+GraphQL's `!` fights its own default (everything nullable unless annotated),
+cannot say "at least one" (`[T!]!` still admits `[]`), and enforces non-null
+by **null propagation**: a violation nulls the nearest nullable ancestor, so
+one bad row can blank out an entire subtree of otherwise-good data.
+
+**Lattice**
+
+```
+entity Order by id {
+  visible to all by default
+  id:    OrderId
+  memo:  String?                  -- optional is the annotation, required the default
+
+  has one  buyer:  User by buyerId          -- exactly one: a dangle is an error
+  has one? coupon: Coupon by couponId       -- zero-or-one, declared
+
+  has many lineItems: LineItem by orderId
+           min 1 max 200                    -- "an order has line items"
+}
+
+mutation createOrder(lines: [LineInput]+) returns Order { ... }
+```
+
+The defaults flip and the gaps fill in. Fields are required unless marked
+`?`, so the annotation burden sits on the exception. `has one` is a contract
+that the edge resolves; `has one?` is the declared maybe (and a required edge
+over an optional link column is rejected at elaboration — the schema cannot
+promise what the column cannot). Bounded collections take a `min` floor, and
+the nonempty list `[t]+` lives in the one type language fields, mutation
+inputs, and variables share — so "you cannot create an order with no lines"
+is the same declaration that types the field (spec §3.4–3.6). Violations
+behave like every other Lattice integrity problem: an `Edge`-scoped
+`lattice:cardinality` / `lattice:collection-underflow` error record in a
+`207` response that keeps the rest of the data — there is no null
+propagation, because a normalized entity stream has no tree to blank out.
+
+---
+
 ## Index
 
 | # | GraphQL feature | Lattice equivalent | Spec section |
@@ -792,3 +846,4 @@ keys the mutation path would.
 | 13 | Subscriptions | Live queries over ordinary query URLs | 12 |
 | 14 | Introspection | Content-addressed schema documents | 7.1 |
 | 15 | Shared ids: subclassing / 1:1 joins | Co-keyed entities: `refines` / `joins` | 3.8 |
+| 16 | Non-null (`!`), list cardinality | Required-by-default + `?`, `has one?`, `min N`, `[t]+` | 3.4-3.6 |

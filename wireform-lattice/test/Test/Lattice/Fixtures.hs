@@ -13,6 +13,8 @@ module Test.Lattice.Fixtures (
   starwarsSchema,
   blogSchema,
   cokeySchema,
+  cardText,
+  cardSchema,
   mustParseSchema,
   compileWith,
   mustCompileWith,
@@ -75,6 +77,77 @@ cokeyText = loadFixture "test/fixtures/cokey.lattice"
 cokeySchema :: Schema
 cokeySchema = mustParseSchema cokeyText
 {-# NOINLINE cokeySchema #-}
+
+{- | The §3.4–§3.6 cardinality fixture, inline on purpose: it exercises
+every new cardinality surface — a required to-one (bare @has one@ =
+exactly one), a declared-optional to-one (@has one?@ over an optional
+link column), a floored bounded collection (@min 1 max 200@), and the
+nonempty list type @[Text]+@ in field, newtype, and mutation-argument
+position. Shared by the IDL, Plan, Query, and E2E suites.
+-}
+cardText :: Text
+cardText =
+  T.unlines
+    [ "schema card.example.com"
+    , ""
+    , "newtype OrderId = Text"
+    , "newtype CustomerId = Text"
+    , "newtype ItemId = Text"
+    , "newtype Tags = [Text]+"
+    , ""
+    , "entity Customer by id {"
+    , "  visible to all by default"
+    , ""
+    , "  id:   CustomerId"
+    , "  name: Text"
+    , ""
+    , "  fetch by id: public"
+    , "}"
+    , ""
+    , "entity Order by id {"
+    , "  visible to all by default"
+    , ""
+    , "  id:         OrderId"
+    , "  customerId: CustomerId"
+    , "  reviewerId: CustomerId?"
+    , "  note:       Text"
+    , "  tags:       [Text]+"
+    , "  memo:       [Text]+?"
+    , ""
+    , "  has one customer: Customer by customerId"
+    , "  has one? reviewer: Customer by reviewerId"
+    , ""
+    , "  has many lineItems: LineItem by orderId min 1 max 200"
+    , ""
+    , "  fetch by id: public"
+    , "}"
+    , ""
+    , "entity LineItem by id {"
+    , "  visible to all by default"
+    , ""
+    , "  id:      ItemId"
+    , "  orderId: OrderId"
+    , "  sku:     Text"
+    , ""
+    , "  fetch by id: public"
+    , "}"
+    , ""
+    , "get order(id: OrderId) of Order public"
+    , ""
+    , "get orderTagged(tags: Tags) of Order public"
+    , ""
+    , "mutation tagOrder(order: OrderId, tags: [Text]+) returns Order {"
+    , "  allow       public"
+    , "  writes      Order(order)"
+    , "  invalidates writes"
+    , "  effect      transactional"
+    , "}"
+    ]
+
+
+cardSchema :: Schema
+cardSchema = mustParseSchema cardText
+{-# NOINLINE cardSchema #-}
 
 
 -- | Compile query text under 'defaultBudgets'.

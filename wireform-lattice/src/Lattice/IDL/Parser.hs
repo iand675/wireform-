@@ -96,7 +96,7 @@ data Tok = Tok
 
 
 punctChars :: [Char]
-punctChars = "{}()[]:,=|?.$@"
+punctChars = "{}()[]:,=|?.$@+"
 
 
 {- | Tokenize. @--@ and @#@ comments run to end of line. Identifiers admit
@@ -400,13 +400,14 @@ data SEntityKey
 data SItem
   = SIDefault !Int Policy
   | SIField !Int Text FieldDef
-  | SIRelOne !Int Text (Int, NonEmpty Text) Text (Maybe Policy)
+  | SIRelOne !Int Text (Int, NonEmpty Text) Text Bool (Maybe Policy)
   | SIRelMany !Int Text (Int, NonEmpty Text) Text CollClauses (Maybe Policy)
   | SIFetch !Int (NonEmpty Text) Policy
 
 
 data CollClauses = CollClauses
-  { ccMax :: Maybe Natural
+  { ccMin :: Maybe Natural
+  , ccMax :: Maybe Natural
   , ccTrunc :: Bool
   , ccOrder :: [(Text, Direction)]
   , ccPage :: Maybe Natural
@@ -416,7 +417,7 @@ data CollClauses = CollClauses
 
 
 emptyClauses :: CollClauses
-emptyClauses = CollClauses Nothing False [] Nothing Nothing Nothing
+emptyClauses = CollClauses Nothing Nothing False [] Nothing Nothing Nothing
 
 
 data SRoot = SRoot
@@ -684,7 +685,8 @@ pBasicType = do
     TkPunct '[' -> do
       inner <- pType
       pPunct ']'
-      pure (TList inner)
+      plus <- tryPunct '+'
+      pure (if plus then TList1 inner else TList inner)
     TkPunct '(' -> do
       inner <- pType
       pPunct ')'
@@ -996,19 +998,19 @@ pItems bk owner = go
     pRelItem l = do
       t <- popT "`one` or `many`"
       which <- case tokKind t of
-        TkName "one" -> pure True
-        TkName "many" -> pure False
+        TkName "one" -> Just <$> tryPunct '?'
+        TkName "many" -> pure Nothing
         _ -> pFail (tokLine t) "expected `one` or `many` after `has`"
       (n, _) <- pAnyName "a relationship name"
       pPunct ':'
       tgt <- pTargetSurface
       pNameIs "by"
       (link, _) <- pAnyName "a link field"
-      if which
-        then do
+      case which of
+        Just opt -> do
           pol <- tryPolicy
-          pure (SIRelOne l n tgt link pol)
-        else do
+          pure (SIRelOne l n tgt link opt pol)
+        Nothing -> do
           cls <- pCollClauses owner
           pol <- tryPolicy
           pure (SIRelMany l n tgt link cls pol)
@@ -1048,6 +1050,16 @@ pCollClauses ctx = go emptyClauses
       k1 <- peekKindN 1
       k2 <- peekKindN 2
       case k0 of
+        Just (TkName "min")
+          | Just (TkInt _) <- k1 -> do
+              dup (ccMin cc) "min"
+              advanceT
+              n <- pNat "a minimum"
+              nk0 <- peekKindN 0
+              nk1 <- peekKindN 1
+              case (nk0, nk1) of
+                (Just (TkName "max"), Just (TkInt _)) -> go cc {ccMin = Just n}
+                _ -> failHere "`min` must be immediately followed by `max`"
         Just (TkName "max")
           | Just (TkInt _) <- k1 -> do
               dup (ccMax cc) "max"
@@ -1481,10 +1493,17 @@ elaborate decls =
                 [err l ("interface `" <> n <> "` cannot appear in a value-type position (in " <> ctx <> ")")]
             | otherwise -> [err l ("unknown type `" <> n <> "` in " <> ctx)]
           TOptional t -> go t
-          TList t -> go t
+          TList t -> elemErrs t <> go t
+          TList1 t -> elemErrs t <> go t
           TSet t -> go t
           TMap k v -> go k <> go v
           TVec _ t -> go t
+
+        -- §3.5.2: element optionality is rejected — a list contains values.
+        elemErrs = \case
+          TOptional _ ->
+            [err l ("optional element type in " <> ctx <> ": a list contains values — an element's absence is its absence from the list")]
+          _ -> []
 
     argErrs :: Int -> Text -> [ArgDef] -> [SchemaError]
     argErrs l ctx = concatMap (\a -> tyRefErrs l (ctx <> ", argument `" <> unArgName (adName a) <> "`") (adType a))
@@ -1588,25 +1607,40 @@ elaborate decls =
     buildWindow :: Int -> Text -> CollClauses -> (Windowing, [SchemaError])
     buildWindow l ctx cc = case (ccOrder cc, ccPage cc) of
       ([], Nothing) ->
-        ( Bounded (fromMaybe defaultMax (ccMax cc)) (if ccTrunc cc then Truncate else Overflow)
-        , []
+        ( Bounded minB maxB (if ccTrunc cc then Truncate else Overflow)
+        , floorErrs
         )
       ([], Just _) ->
-        ( Bounded (fromMaybe defaultMax (ccMax cc)) Overflow
-        , [err l ("`page` in " <> ctx <> " requires an `ordered by` keyset")]
+        ( Bounded minB maxB Overflow
+        , err l ("`page` in " <> ctx <> " requires an `ordered by` keyset") : floorErrs
         )
       (o : os, _) ->
         ( Paginated
             CursorSpec
               { csKeyset = fmap (\(f, d) -> (FieldName f, d)) (o :| os)
               , csDefaultPage = ccPage cc
-              , csMaxPage = fromMaybe defaultMax (ccMax cc)
+              , csMaxPage = maxB
               , csTotal = CountNone
               }
-        , if ccTrunc cc
-            then [err l ("`truncate` in " <> ctx <> " applies only to bounded collections")]
-            else []
+        , concat
+            [ if ccTrunc cc
+                then [err l ("`truncate` in " <> ctx <> " applies only to bounded collections")]
+                else []
+            , case ccMin cc of
+                Just _ ->
+                  [err l ("`min` in " <> ctx <> " applies only to bounded collections: an empty page is indistinguishable from end-of-pagination")]
+                Nothing -> []
+            ]
         )
+      where
+        minB = fromMaybe 0 (ccMin cc)
+        maxB = fromMaybe defaultMax (ccMax cc)
+        floorErrs =
+          case ccMin cc of
+            Just m
+              | m > maxB ->
+                  [err l ("`min " <> T.pack (show m) <> "` exceeds `max " <> T.pack (show maxB) <> "` in " <> ctx)]
+            _ -> []
 
     buildCollectionDef
       :: Int
@@ -1626,7 +1660,7 @@ elaborate decls =
           keysetErrs = case win of
             Paginated cs ->
               columnErrs l "keyset column" ctx tgt (map (unFieldName . fst) (NE.toList (csKeyset cs)))
-            Bounded _ _ -> []
+            Bounded {} -> []
        in ( CollectionDef
               { colLink = FieldName link
               , colName = cname
@@ -1691,16 +1725,23 @@ elaborate decls =
         (rels, colls, relErrs) = List.foldl' stepRel (Map.empty, [], []) (eiRels ei)
 
         stepRel (m, cs, es) = \case
-          SIRelOne l n tgtS byF pol ->
+          SIRelOne l n tgtS byF opt pol ->
             let (tgt, tErrs) = resolveTarget (ectx <> ", relationship `" <> n <> "`") tgtS
                 rctx = ectx <> ", relationship `" <> n <> "`"
                 byErrs =
                   if ownField byF
                     then []
                     else [err l ("`has one` key field `" <> byF <> "` in " <> rctx <> " is not a declared field of `" <> en <> "`")]
+                -- §3.4: an optional column cannot promise a required edge.
+                optErrs = case Map.lookup (FieldName byF) (eiFields ei) of
+                  Just fd
+                    | not opt
+                    , TOptional _ <- fieldType fd ->
+                        [err l ("required `has one` in " <> rctx <> " reads the optional link column `" <> byF <> "`; an optional column cannot promise a required edge — declare `has one?` or make the column required")]
+                  _ -> []
                 polErrs = maybe [] (policyErrs l rctx ownField) pol
-                (m', dupE) = insertRel l n (ToOne {relTarget = tgt, relByField = FieldName byF, relPolicy = pol}) m
-             in (m', cs, es <> tErrs <> byErrs <> polErrs <> dupE)
+                (m', dupE) = insertRel l n (ToOne {relTarget = tgt, relByField = FieldName byF, relOptional = opt, relPolicy = pol}) m
+             in (m', cs, es <> tErrs <> byErrs <> optErrs <> polErrs <> dupE)
           SIRelMany l n tgtS link cc pol ->
             let rctx = ectx <> ", relationship `" <> n <> "`"
                 (tgt, tErrs) = resolveTarget rctx tgtS
@@ -1756,7 +1797,7 @@ elaborate decls =
               relImplErrs =
                 concatMap
                   ( \relItem -> case relItem of
-                      SIRelOne _ n _ _ _ -> checkRelName n
+                      SIRelOne _ n _ _ _ _ -> checkRelName n
                       SIRelMany _ n _ _ _ _ -> checkRelName n
                       _ -> []
                   )
@@ -1766,7 +1807,7 @@ elaborate decls =
                   then []
                   else [err l (ectx <> " implements `" <> i <> "` but does not declare its relationship `" <> n <> "`")]
               relNamed n = \case
-                SIRelOne _ n' _ _ _ -> n == n'
+                SIRelOne _ n' _ _ _ _ -> n == n'
                 SIRelMany _ n' _ _ _ _ -> n == n'
                 _ -> False
 
@@ -1807,14 +1848,21 @@ elaborate decls =
             fields
         (rels, relErrs) = List.foldl' stepRel (Map.empty, []) relItems
         stepRel (m, es) = \case
-          SIRelOne rl rn tgtS byF pol ->
+          SIRelOne rl rn tgtS byF opt pol ->
             let rctx = ictx <> ", relationship `" <> rn <> "`"
                 (tgt, tErrs) = resolveTarget rctx tgtS
                 byErrs =
                   if ownField byF
                     then []
                     else [err rl ("`has one` key field `" <> byF <> "` in " <> rctx <> " is not a declared field of `" <> n <> "`")]
-             in (Map.insert (FieldName rn) (ToOne {relTarget = tgt, relByField = FieldName byF, relPolicy = pol}) m, es <> tErrs <> byErrs)
+                -- §3.4: an optional column cannot promise a required edge.
+                optErrs = case Map.lookup (FieldName byF) fields of
+                  Just fd
+                    | not opt
+                    , TOptional _ <- fieldType fd ->
+                        [err rl ("required `has one` in " <> rctx <> " reads the optional link column `" <> byF <> "`; an optional column cannot promise a required edge — declare `has one?` or make the column required")]
+                  _ -> []
+             in (Map.insert (FieldName rn) (ToOne {relTarget = tgt, relByField = FieldName byF, relOptional = opt, relPolicy = pol}) m, es <> tErrs <> byErrs <> optErrs)
           SIRelMany rl rn tgtS link cc pol ->
             let rctx = ictx <> ", relationship `" <> rn <> "`"
                 (tgt, tErrs) = resolveTarget rctx tgtS

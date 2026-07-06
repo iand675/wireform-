@@ -70,6 +70,11 @@ tests =
           blogSchema
           "tags"
           "query { feed { tags(first: 5) { name } } }"
+      it "a floor does not paginate: a min-floored bounded collection takes no arguments (§3.6)" $
+        rejectsMentioning
+          cardSchema
+          "lineItems"
+          "query Q($id: OrderId) { order(id: $id) { lineItems(first: 5) { sku } } }"
       it "an undeclared argument names the argument" $
         rejectsMentioning starwarsSchema "zap" "query { hero(zap: 3) { name } }"
 

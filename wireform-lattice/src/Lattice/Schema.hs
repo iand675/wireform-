@@ -57,8 +57,11 @@ module Lattice.Schema (
   sharedTruthFamily,
   interfaceMembers,
   schemaFragmentsOn,
+  violatesList1,
 ) where
 
+import Data.Aeson qualified as A
+import Data.Aeson.KeyMap qualified as KM
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
@@ -159,6 +162,10 @@ data RelationshipDef
       { relTarget :: Target
       , relByField :: FieldName
       -- ^ The key-holding field on /this/ entity.
+      , relOptional :: Bool
+      -- ^ 'False' for the bare @has one@ (exactly one: an unresolved target
+      -- is an Edge-scoped @lattice:cardinality@ error, §3.4); 'True' for
+      -- @has one?@ (zero or one: absence is legal and renders as absence).
       , relPolicy :: Maybe Policy
       }
   | ToMany
@@ -200,7 +207,10 @@ data CollectionDef = CollectionDef
 
 
 data Windowing
-  = Bounded Natural OverflowPolicy
+  = -- | Whole set, no cursor: min and max cardinality plus the overflow
+    -- policy. @min@ defaults to 0; a positive floor makes a short scan an
+    -- Edge-scoped @lattice:collection-underflow@ error (§3.6).
+    Bounded Natural Natural OverflowPolicy
   | Paginated CursorSpec
   deriving stock (Eq, Show)
 
@@ -390,3 +400,36 @@ interfaceMembers s i = maybe mempty ifaceMemberSet (Map.lookup i (schemaInterfac
 -- | Schema fragments declared on the given type (or interface) name.
 schemaFragmentsOn :: Schema -> Text -> Map FragmentName FragmentDef
 schemaFragmentsOn s ty = Map.filter (\f -> fragOn f == ty) (schemaFragments s)
+
+
+{- | Does a wire value bind an empty array somewhere a nonempty list
+(@[t]+@, 'TList1', §3.5.2) governs it? Structural, not a typechecker:
+descends options, list\/set\/vector elements, and object-form map values,
+resolving newtypes through 'schemaTypes' (depth-bounded against
+pathological chains). Only the emptiness rule is checked; a value that
+does not match its type's shape is someone else's diagnostic.
+-}
+violatesList1 :: Schema -> FieldType -> A.Value -> Bool
+violatesList1 schema = go (8 :: Int)
+  where
+    go :: Int -> FieldType -> A.Value -> Bool
+    go fuel ft v
+      | fuel <= 0 = False
+      | otherwise = case ft of
+          TList1 t
+            | A.Array xs <- v -> null xs || any (go fuel t) xs
+          TList t
+            | A.Array xs <- v -> any (go fuel t) xs
+          TSet t
+            | A.Array xs <- v -> any (go fuel t) xs
+          TVec _ t
+            | A.Array xs <- v -> any (go fuel t) xs
+          TMap _ tv
+            | A.Object o <- v -> any (go fuel tv) (KM.elems o)
+          TOptional t
+            | A.Null <- v -> False
+            | otherwise -> go fuel t v
+          TNamed n
+            | Just (DeclNewtype t _) <- Map.lookup n (schemaTypes schema) ->
+                go (fuel - 1) t v
+          _ -> False

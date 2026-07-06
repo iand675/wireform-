@@ -1,6 +1,7 @@
-{- | IDL front-end contracts (spec §3.4, §3.8): the fixtures elaborate,
-canonical IDL round-trips and is a fixpoint, co-keyed entities inherit
-their base's key, and elaboration rejections name the offending
+{- | IDL front-end contracts (spec §3.4, §3.5, §3.6, §3.8): the fixtures
+elaborate, canonical IDL round-trips and is a fixpoint, co-keyed entities
+inherit their base's key, cardinality declarations elaborate into the
+pinned model shapes, and elaboration rejections name the offending
 declaration.
 -}
 module Test.Lattice.IDL (tests) where
@@ -15,14 +16,19 @@ import Lattice.IDL.Print (canonicalIdl)
 import Lattice.Schema (
   CoKey (..),
   CoKeyMode (..),
+  CollectionDef (..),
   EntityDef (..),
   FieldDef (..),
+  OverflowPolicy (..),
+  RelationshipDef (..),
   Schema,
+  Windowing (..),
   lookupEntity,
   lookupEntityField,
+  lookupEntityRel,
   sharedTruthFamily,
  )
-import Lattice.Types (FieldName, FieldType, TypeName, unTypeName)
+import Lattice.Types (FieldName, FieldType (..), Prim (..), TypeName, unTypeName)
 import Test.Lattice.Fixtures
 import Test.Syd
 
@@ -251,6 +257,157 @@ tests =
               , "}"
               ]
 
+    describe "§3.4–§3.6 cardinality declarations" $ do
+      it "the card fixture parses and elaborates" $
+        parseSchema cardText `shouldSatisfy` isRight
+
+      describe "elaborated model shapes" $ do
+        it "bare `has one` is the exactly-one contract (relOptional = False)" $ do
+          rel <- relOf cardSchema "Order" "customer"
+          case rel of
+            ToOne {relByField = by, relOptional = opt} -> do
+              by `shouldBe` "customerId"
+              opt `shouldBe` False
+            other -> expectationFailure ("expected a to-one, got: " <> show other)
+        it "`has one?` declares absence legal (relOptional = True)" $ do
+          rel <- relOf cardSchema "Order" "reviewer"
+          case rel of
+            ToOne {relByField = by, relOptional = opt} -> do
+              by `shouldBe` "reviewerId"
+              opt `shouldBe` True
+            other -> expectationFailure ("expected a to-one, got: " <> show other)
+        it "`min 1 max 200` elaborates the floored bounded window" $ do
+          w <- windowOf cardSchema "Order" "lineItems"
+          w `shouldBe` Bounded 1 200 Overflow
+        it "an omitted min defaults to 0 (blog Post.tags)" $ do
+          w <- windowOf blogSchema "Post" "tags"
+          w `shouldBe` Bounded 0 50 Overflow
+        it "min composes with the truncate overflow policy" $ do
+          schema <-
+            requireRight . parseSchema $
+              entitySchema
+                [ "entity Buddy by id {"
+                , "  visible to all by default"
+                , "  id: Text"
+                , "  homeId: Text"
+                , "}"
+                , ""
+                , "entity Home by id {"
+                , "  visible to all by default"
+                , "  id: Text"
+                , "  has many pals: Buddy by homeId min 1 max 5 truncate"
+                , "}"
+                ]
+          w <- windowOf schema "Home" "pals"
+          w `shouldBe` Bounded 1 5 Truncate
+        it "`[Text]+` elaborates to the nonempty list type" $ do
+          order <- entityOf cardSchema "Order"
+          keyFieldType order "tags" `shouldBe` Just (TList1 (TPrim PText))
+        it "`[Text]+?` is absent-or-nonempty (option over nonempty list)" $ do
+          order <- entityOf cardSchema "Order"
+          keyFieldType order "memo" `shouldBe` Just (TOptional (TList1 (TPrim PText)))
+
+      describe "canonical IDL (§7.1)" $ do
+        it "parseSchema . canonicalIdl is the identity on the card model" $
+          parseSchema (canonicalIdl cardSchema) `shouldBe` Right cardSchema
+        it "canonical IDL is a fixpoint (card)" $
+          fmap canonicalIdl (parseSchema (canonicalIdl cardSchema))
+            `shouldBe` Right (canonicalIdl cardSchema)
+        it "the new surface prints canonically: has one?, min before max, [t]+, [t]+?" $ do
+          let canon = canonicalIdl cardSchema
+          canon `shouldSatisfy` T.isInfixOf "has one? reviewer: Customer by reviewerId"
+          canon `shouldSatisfy` T.isInfixOf "has many lineItems: LineItem by orderId min 1 max 200"
+          canon `shouldSatisfy` T.isInfixOf "tags: [Text]+"
+          canon `shouldSatisfy` T.isInfixOf "memo: [Text]+?"
+          canon `shouldSatisfy` T.isInfixOf "newtype Tags = [Text]+"
+        it "bare `has one` and an unfloored `max` print exactly as before" $ do
+          canonicalIdl cardSchema
+            `shouldSatisfy` T.isInfixOf "has one customer: Customer by customerId"
+          canonicalIdl cardSchema
+            `shouldNotSatisfy` T.isInfixOf "has one? customer"
+          -- The blog model uses only the old surface: its canonical text
+          -- carries no optional-edge marker and no floor (its golden pins
+          -- the exact bytes; this pins the absence of the new syntax).
+          canonicalIdl blogSchema `shouldNotSatisfy` T.isInfixOf "has one?"
+          canonicalIdl blogSchema `shouldNotSatisfy` T.isInfixOf "min "
+
+      describe "rejections name the offender" $ do
+        it "element optionality [t?] in field position names the field" $
+          rejectsMentioning "chaos" $
+            entitySchema
+              [ "entity Buddy by id {"
+              , "  visible to all by default"
+              , "  id: Text"
+              , "  chaos: [Text?]"
+              , "}"
+              ]
+        it "element optionality [t?] in argument position names the argument" $
+          rejectsMentioning "xs" $
+            entitySchema
+              [ "entity Buddy by id {"
+              , "  visible to all by default"
+              , "  id: Text"
+              , "}"
+              , ""
+              , "mutation touch(b: Text, xs: [Text?]) returns Buddy {"
+              , "  allow       public"
+              , "  writes      Buddy(b)"
+              , "  invalidates writes"
+              , "  effect      transactional"
+              , "}"
+              ]
+        it "a floor above the cap (min 5 max 2) names the relationship" $
+          rejectsMentioning "pals" $
+            entitySchema
+              [ "entity Buddy by id {"
+              , "  visible to all by default"
+              , "  id: Text"
+              , "  homeId: Text"
+              , "}"
+              , ""
+              , "entity Home by id {"
+              , "  visible to all by default"
+              , "  id: Text"
+              , "  has many pals: Buddy by homeId min 5 max 2"
+              , "}"
+              ]
+        it "a floor on a paginated collection names the relationship" $
+          rejectsMentioning "pals" $
+            entitySchema
+              [ "entity Buddy by id {"
+              , "  visible to all by default"
+              , "  id: Text"
+              , "  homeId: Text"
+              , "  name: Text"
+              , "}"
+              , ""
+              , "entity Home by id {"
+              , "  visible to all by default"
+              , "  id: Text"
+              , "  has many pals: Buddy by homeId min 1 max 10"
+              , "                 ordered by name asc page 5"
+              , "}"
+              ]
+        it "a required `has one` over an optional link column names the edge" $ do
+          let doc byLine =
+                entitySchema
+                  [ "entity Buddy by id {"
+                  , "  visible to all by default"
+                  , "  id: Text"
+                  , "}"
+                  , ""
+                  , "entity Doc by id {"
+                  , "  visible to all by default"
+                  , "  id: Text"
+                  , "  editorId: Text?"
+                  , byLine
+                  , "}"
+                  ]
+          rejectsMentioning "editor" (doc "  has one editor: Buddy by editorId")
+          -- The declared-optional sibling over the same column is the fix.
+          parseSchema (doc "  has one? editor: Buddy by editorId")
+            `shouldSatisfy` isRight
+
 
 -- | A minimal schema document around the given declaration lines.
 entitySchema :: [Text] -> Text
@@ -280,6 +437,24 @@ entityOf s t =
 -- | The declared (or, on a co-keyed entity, inherited) type of a field.
 keyFieldType :: EntityDef -> FieldName -> Maybe FieldType
 keyFieldType e f = fieldType <$> lookupEntityField e f
+
+
+-- | The relationship must exist on the entity (fixture invariant).
+relOf :: Schema -> TypeName -> FieldName -> IO RelationshipDef
+relOf s t f = do
+  e <- entityOf s t
+  maybe
+    (expectationFailure ("entity " <> T.unpack (unTypeName t) <> " is missing relationship"))
+    pure
+    (lookupEntityRel e f)
+
+
+-- | The windowing of a @has many@ relationship (fixture invariant).
+windowOf :: Schema -> TypeName -> FieldName -> IO Windowing
+windowOf s t f =
+  relOf s t f >>= \case
+    ToMany {relCollection = col} -> pure (colWindow col)
+    other -> expectationFailure ("expected a to-many, got: " <> show other)
 
 
 {- | Spec §3.8's composite-key case: a @joins@ companion of a base keyed

@@ -920,12 +920,20 @@ bindVariables schema vdefs params = do
     bindOne vd = case lookup (unVarName (vdName vd)) params of
       Just txt -> case urlParamToValue (textyVar schema (vdType vd)) txt of
         Left e -> Left (badRequest ["invalid value for $" <> unVarName (vdName vd) <> ": " <> e])
-        Right v -> Right (Just (vdName vd, v))
+        Right v -> checked vd v
       Nothing -> case vdDefault vd >>= qvalueToJson of
-        Just v -> Right (Just (vdName vd, v))
+        Just v -> checked vd v
         Nothing
           | trOptional (vdType vd) -> Right Nothing
           | otherwise -> Left (badRequest ["missing required variable $" <> unVarName (vdName vd)])
+    -- §3.5.2: a variable binding an empty array where its declared
+    -- (newtype-resolved) type is a nonempty list is rejected at the request.
+    checked vd v
+      | violatesList1 schema (varFieldType (vdType vd)) v =
+          Left (badRequest ["invalid value for $" <> unVarName (vdName vd) <> ": an empty array violates its nonempty list type"])
+      | otherwise = Right (Just (vdName vd, v))
+    varFieldType tr =
+      (if trOptional tr then TOptional else id) (TNamed (TypeName (trName tr)))
 
 
 {- | Is a variable's declared type texty (bound verbatim rather than
@@ -1442,7 +1450,7 @@ serveMutation o req params name = do
                 | otherwise = SlicePub
           case checkGuard (mutGuard mdef) claims hasAuth of
             Left p -> pure (problemResponse req p)
-            Right () -> case parseMutationBody mdef body of
+            Right () -> case parseMutationBody schema mdef body of
               Left p -> pure (problemResponse req p)
               Right invocation ->
                 withIdempotency o req name principalKey body $
@@ -1483,9 +1491,9 @@ forbidden :: Problem
 forbidden = mkProblem 403 "lattice:forbidden"
 
 
-parseMutationBody :: MutationDef -> ByteString -> Either Problem Invocation
-parseMutationBody mdef body = case A.decodeStrict body of
-  Just (A.Object obj) -> Singular <$> itemArgs mdef obj
+parseMutationBody :: Schema -> MutationDef -> ByteString -> Either Problem Invocation
+parseMutationBody schema mdef body = case A.decodeStrict body of
+  Just (A.Object obj) -> Singular <$> itemArgs schema mdef obj
   Just (A.Array arr) -> case mutBatch mdef of
     Nothing -> Left (mkProblem 400 "lattice:batch-not-supported")
     Just bp -> do
@@ -1495,7 +1503,7 @@ parseMutationBody mdef body = case A.decodeStrict body of
           ( (mkProblem 400 "lattice:batch-too-large")
               {pDetail = Just ("this mutation admits at most " <> tshow (bpMaxItems bp) <> " items")}
           )
-      parsed <- traverse (batchItem mdef) (zip [0 :: Int ..] items)
+      parsed <- traverse (batchItem schema mdef) (zip [0 :: Int ..] items)
       Right (BatchInv (bpAtomicity bp) parsed)
   _ -> Left (badRequest ["mutation body must be a JSON object or array"])
 
@@ -1504,8 +1512,8 @@ parseMutationBody mdef body = case A.decodeStrict body of
 @{\"key\"?, \"input\": {…}}@ envelope (recognized only when @input@ is not
 itself a declared parameter). Items without a key get their position.
 -}
-batchItem :: MutationDef -> (Int, A.Value) -> Either Problem (Text, Map ArgName A.Value)
-batchItem mdef (ix, v) = case v of
+batchItem :: Schema -> MutationDef -> (Int, A.Value) -> Either Problem (Text, Map ArgName A.Value)
+batchItem schema mdef (ix, v) = case v of
   A.Object obj -> do
     let keyTxt = case KM.lookup "key" obj of
           Just (A.String k) -> k
@@ -1515,13 +1523,13 @@ batchItem mdef (ix, v) = case v of
         inputObj = case (KM.lookup "input" rest, KM.size rest, inputDeclared) of
           (Just (A.Object inner), 1, False) -> inner
           _ -> rest
-    args <- itemArgs mdef inputObj
+    args <- itemArgs schema mdef inputObj
     Right (keyTxt, args)
   _ -> Left (badRequest ["batch item " <> tshow ix <> " must be a JSON object"])
 
 
-itemArgs :: MutationDef -> A.Object -> Either Problem (Map ArgName A.Value)
-itemArgs mdef obj = do
+itemArgs :: Schema -> MutationDef -> A.Object -> Either Problem (Map ArgName A.Value)
+itemArgs schema mdef obj = do
   let declared = map adName (mutParams mdef)
       unknown = filter (\k -> ArgName (AK.toText k) `notElem` declared) (KM.keys obj)
   unless (null unknown) $
@@ -1530,7 +1538,12 @@ itemArgs mdef obj = do
   Right (Map.fromList (catMaybes pairs))
   where
     one ad = case KM.lookup (AK.fromText (unArgName (adName ad))) obj of
-      Just v -> Right (Just (adName ad, v))
+      Just v
+        -- §3.5.2: an empty array in a nonempty-list (@[t]+@) input is
+        -- rejected at the request, like any other type mismatch.
+        | violatesList1 schema (adType ad) v ->
+            Left (badRequest ["invalid value for input field " <> unArgName (adName ad) <> ": an empty array violates its nonempty list type"])
+        | otherwise -> Right (Just (adName ad, v))
       Nothing -> case adDefault ad >>= qvalueToJson of
         Just v -> Right (Just (adName ad, v))
         Nothing

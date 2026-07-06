@@ -262,8 +262,8 @@ renderArgDefs as = "(" <> T.intercalate ", " (map one as) <> ")"
 
 renderRel :: CollectionName -> FieldName -> RelationshipDef -> Text
 renderRel autoName (FieldName f) = \case
-  ToOne tgt (FieldName byF) pol ->
-    "has one " <> f <> ": " <> renderTarget tgt <> " by " <> byF <> polSuffix pol
+  ToOne tgt (FieldName byF) opt pol ->
+    "has one" <> (if opt then "? " else " ") <> f <> ": " <> renderTarget tgt <> " by " <> byF <> polSuffix pol
   ToMany tgt col pol ->
     "has many " <> f <> ": " <> renderTarget tgt
       <> " by "
@@ -278,10 +278,13 @@ renderRel autoName (FieldName f) = \case
 
 renderWindow :: Windowing -> Text
 renderWindow = \case
-  Bounded n op ->
-    " max " <> tshow n <> case op of
-      Truncate -> " truncate"
-      Overflow -> ""
+  Bounded minN maxN op ->
+    (if minN > 0 then " min " <> tshow minN else "")
+      <> " max "
+      <> tshow maxN
+      <> case op of
+        Truncate -> " truncate"
+        Overflow -> ""
   Paginated cs ->
     " ordered by "
       <> T.intercalate ", " (map col (NE.toList (csKeyset cs)))
@@ -366,6 +369,7 @@ renderType = \case
   TNamed (TypeName n) -> n
   TOptional t -> renderType t <> "?"
   TList t -> "[" <> renderType t <> "]"
+  TList1 t -> "[" <> renderType t <> "]+"
   TSet t -> "Set " <> renderTypeArg t
   TMap k v -> "Map " <> renderTypeArg k <> " " <> renderTypeArg v
   TVec n t -> "Vec " <> tshow n <> " " <> renderTypeArg t

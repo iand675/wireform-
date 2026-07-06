@@ -25,11 +25,17 @@
   asynchronous/out-of-band invalidation pinned in spec §11.5 with a
   TLA+ model of the pipeline (`wireform-lattice/tla/`, `tlc` in the
   dev shell; the intent-time-purge stale-refill race is a checked
-  counterexample), and co-keyed entities (§3.8) — `entity P joins B`
+  counterexample); co-keyed entities (§3.8) — `entity P joins B`
   (1:1 identifying join, independent invalidation) vs `entity R
   refines B` (subclass view: shared ver, family-wide surrogate-key
-  fan-out and tombstone cascade), with identity edges (`has one
-  profile: UserProfile by id`) planning as ordinary to-ones.
+  fan-out and tombstone cascade), with identity edges (`has one?
+  profile: UserProfile by id`) planning as ordinary to-ones; and
+  cardinality declarations (§3.4–3.6) — `has one` promises resolution
+  (Edge-scoped `lattice:cardinality` on a dangle) with `has one?` as
+  the declared maybe, bounded collections take a `min N` floor
+  (`lattice:collection-underflow`), and the type language gains the
+  nonempty list `[t]+` shared by fields, mutation inputs, and
+  variables.
 
 ## 0.1.0.0 -- 2026
 

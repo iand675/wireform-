@@ -5,7 +5,9 @@ schema cokey.example.com
 -- record of truth, adjacent lifecycle), and a `refines` view of the SAME
 -- record of truth (AdminUser — shared ver, family-wide invalidation).
 -- Identity edges are ordinary to-ones over the key field, legal in both
--- directions; no new traversal construct exists.
+-- directions; no new traversal construct exists. The joins companion may
+-- be absent for any base key, so the edge to it is declared `has one?`
+-- (§3.4/§3.8); the companion's edge back to its base is total.
 
 newtype UserId = Text
 
@@ -15,7 +17,7 @@ entity User by id {
   id:   UserId
   name: Text
 
-  has one profile: UserProfile by id
+  has one? profile: UserProfile by id
 
   fetch by id: public
 }

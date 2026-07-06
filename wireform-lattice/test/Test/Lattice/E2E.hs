@@ -18,6 +18,11 @@ importable from here):
   joins User@ (adjacent truth), @AdminUser refines User@ (same truth),
   identity edges both ways, and mutations exercising family-fanout
   surrogate keys and the base-deletion tombstone cascade.
+* Cardinality (the inline @cardText@ fixture, §3.4–§3.6): a dangling
+  required @has one@, a floored bounded collection scanning short, a
+  @[Text]+@ mutation argument and query variable, and a stored row
+  violating its nonempty list type — every cardinality error path plus
+  its clean positive control.
 
 Every request is recorded by a counting middleware (method, target,
 status, response @Cache-Control@), which makes ladder assertions exact:
@@ -73,7 +78,7 @@ import Network.HTTP.Types.Status (statusCode)
 import Network.HTTP.VersionRange (preferHttp1)
 import Network.Socket qualified as NS
 import System.Timeout (timeout)
-import Test.Lattice.Fixtures (blogSchema, cokeySchema, requireRight, starwarsSchema)
+import Test.Lattice.Fixtures (blogSchema, cardSchema, cokeySchema, requireRight, starwarsSchema)
 import Test.Syd
 import Text.Read (readMaybe)
 
@@ -304,7 +309,7 @@ tests =
               _ -> expectationFailure ("expected two posts, got: " <> show posts)
 
     describe "§3.8 co-keyed entities (cokey fixture)" $ do
-      it "identity edges traverse both directions; a missing joins row is an absent to-one" $
+      it "identity edges traverse both directions; a missing joins row is a clean absent to-one (has one?)" $
         withCoKey $ \loop ->
           cokeyClient loop $ \lc -> do
             r <- runQuery lc walkQ (Map.singleton "id" (A.String ckU1))
@@ -320,9 +325,16 @@ tests =
             back <- objectField "user" prof
             backName <- textField "name" back
             backName `shouldBe` "Ada"
-            -- Grace has no profile row: the identity edge renders as an
-            -- ordinary absent to-one — a bare ref, no entity fact.
+            -- Grace has no profile row: the edge is declared `has one?`
+            -- (§3.4/§3.8), so absence is legal — the identity edge renders
+            -- as an ordinary absent to-one (a bare ref, no entity fact) and
+            -- the response is a clean 200, never a degraded 207.
+            resetHits loop
             r2 <- runQuery lc walkQ (Map.singleton "id" (A.String ckU2))
+            qrDegraded r2 `shouldBe` False
+            qrErrors r2 `shouldBe` []
+            hs <- queryHits loop
+            map (\h -> (hitMethod h, hitStatus h)) hs `shouldBe` [(GET, 200)]
             user2 <- rootValue "user" r2
             prof2 <- objectField "profile" user2
             prof2 `shouldNotSatisfy` hasFieldPrefix "bio"
@@ -397,6 +409,169 @@ tests =
                 bio `shouldBe` "Analytical engines"
               _ -> expectationFailure ("expected exactly one node, got: " <> show nodes)
 
+    describe "§3.4–§3.6 cardinality (card fixture)" $ do
+      it "a dangling required to-one degrades to 207: Edge-scoped lattice:cardinality, rest intact" $
+        withCard $ \loop _ctl ->
+          cardClient loop $ \lc -> do
+            resetHits loop
+            r <- runQuery lc cardCustomerQ (Map.singleton "id" (A.String "o1"))
+            -- §3.4: `has one` means exactly one; a dangle is reported, never
+            -- silent absence, and the response degrades to 207 (§9.4.6).
+            qrDegraded r `shouldBe` True
+            case qrErrors r of
+              [e] -> do
+                errCode e `shouldBe` Just "lattice:cardinality"
+                errScope e `shouldBe` Just (ScopeEdge (Ref "Order" "o1") "customer")
+                errRetryable e `shouldBe` False
+              other -> expectationFailure ("expected one Edge-scoped error, got: " <> show other)
+            -- The rest of the data is intact: the sibling scalar emits, and
+            -- the edge field still carries the dangling ref …
+            order <- rootValue "order" r
+            note <- textField "note" order
+            note `shouldBe` "first"
+            customer <- objectField "customer" order
+            refText <- textField "$ref" customer
+            refText `shouldBe` "Customer:ghost"
+            customer `shouldNotSatisfy` hasFieldPrefix "name"
+            -- … but no Customer entity fact exists to back it.
+            let isCustomer = \case
+                  REntity er -> refType (erId er) == "Customer"
+                  _ -> False
+            filter isCustomer (qrRecords r) `shouldBe` []
+            hs <- queryHits loop
+            map hitStatus hs `shouldSatisfy` elem 207
+
+      it "a resolving required to-one is silent: clean 200, target loaded" $
+        withCard $ \loop _ctl ->
+          cardClient loop $ \lc -> do
+            resetHits loop
+            r <- runQuery lc cardCustomerQ (Map.singleton "id" (A.String "o2"))
+            qrDegraded r `shouldBe` False
+            qrErrors r `shouldBe` []
+            order <- rootValue "order" r
+            customer <- objectField "customer" order
+            name <- textField "name" customer
+            name `shouldBe` "Nia"
+            hs <- queryHits loop
+            map hitStatus hs `shouldSatisfy` notElem 207
+
+      it "a floored collection scanning short degrades to 207: lattice:collection-underflow, partial emitted" $
+        withCard $ \loop _ctl ->
+          cardClient loop $ \lc -> do
+            resetHits loop
+            r <- runQuery lc cardItemsQ (Map.singleton "id" (A.String "o2"))
+            -- §3.6: underflow mirrors overflow — report the integrity
+            -- violation, keep the rest of the response, degrade to 207.
+            qrDegraded r `shouldBe` True
+            case qrErrors r of
+              [e] -> do
+                errCode e `shouldBe` Just "lattice:collection-underflow"
+                errScope e `shouldBe` Just (ScopeEdge (Ref "Order" "o2") "lineItems")
+                errRetryable e `shouldBe` False
+              other -> expectationFailure ("expected one Edge-scoped error, got: " <> show other)
+            order <- rootValue "order" r
+            note <- textField "note" order
+            note `shouldBe` "second"
+            -- Underflow emits what exists (here: nothing) PLUS the error,
+            -- where overflow's policy omits the occurrence entirely.
+            items <- objectField "lineItems" order >>= asArray
+            items `shouldBe` []
+            hs <- queryHits loop
+            map hitStatus hs `shouldSatisfy` elem 207
+
+      it "a floored collection meeting its min is silent: clean 200" $
+        withCard $ \loop _ctl ->
+          cardClient loop $ \lc -> do
+            resetHits loop
+            r <- runQuery lc cardItemsQ (Map.singleton "id" (A.String "o1"))
+            qrDegraded r `shouldBe` False
+            qrErrors r `shouldBe` []
+            order <- rootValue "order" r
+            skus <- objectField "lineItems" order >>= asArray >>= traverse (textField "sku")
+            skus `shouldBe` ["Widget"]
+            hs <- queryHits loop
+            map hitStatus hs `shouldSatisfy` notElem 207
+
+      it "an empty [t]+ mutation argument is 400 naming the arg; the effect never runs, nothing is written" $
+        withCard $ \loop ctl ->
+          cardClient loop $ \lc -> do
+            expectProblemNaming
+              400
+              "tags"
+              (mutate lc "tagOrder" (A.object [("order", A.String "o3"), ("tags", A.toJSON ([] :: [Text]))]) Nothing)
+            -- §3.5.2: rejected at the request — the declared effect never
+            -- executed …
+            writes <- readTVarIO (cardTagWrites ctl)
+            writes `shouldBe` 0
+            -- … and a follow-up read sees the seeded row untouched.
+            r <- runQuery lc cardTagsQ (Map.singleton "id" (A.String "o3"))
+            order <- rootValue "order" r
+            note <- textField "note" order
+            note `shouldBe` "third"
+            tags <- objectField "tags" order >>= asArray
+            tags `shouldBe` [A.String "gamma"]
+
+      it "a nonempty [t]+ mutation argument commits and is visible to the next read" $
+        withCard $ \loop ctl ->
+          cardClient loop $ \lc -> do
+            mr <- runMutate lc "tagOrder" (A.object [("order", A.String "o3"), ("tags", A.toJSON (["rush"] :: [Text]))])
+            mrCommitted mr `shouldBe` True
+            writes <- readTVarIO (cardTagWrites ctl)
+            writes `shouldBe` 1
+            r <- runQuery lc cardTagsQ (Map.singleton "id" (A.String "o3"))
+            order <- rootValue "order" r
+            note <- textField "note" order
+            note `shouldBe` "tagged"
+            tags <- objectField "tags" order >>= asArray
+            tags `shouldBe` [A.String "rush"]
+
+      it "an empty [t]+ variable is 400 before any origin work" $
+        withCard $ \loop ctl ->
+          rawClient loop $ \lc -> do
+            expectProblemNaming
+              400
+              "ts"
+              (query lc cardTaggedQ (Map.singleton "ts" (A.toJSON ([] :: [Text]))))
+            -- The rejection happens at variable binding: the origin's root
+            -- loader was never consulted.
+            calls <- readTVarIO (cardTaggedCalls ctl)
+            calls `shouldBe` 0
+
+      it "a nonempty [t]+ variable reaches the root loader (positive control)" $
+        withCard $ \loop ctl ->
+          rawClient loop $ \lc -> do
+            r <- runQuery lc cardTaggedQ (Map.singleton "ts" (A.toJSON (["gift"] :: [Text])))
+            nodes <- rootValue "orderTagged" r >>= asArray
+            case nodes of
+              [obj] -> do
+                note <- textField "note" obj
+                note `shouldBe` "third"
+              _ -> expectationFailure ("expected exactly one root hit, got: " <> show nodes)
+            calls <- readTVarIO (cardTaggedCalls ctl)
+            calls `shouldBe` 1
+
+      it "row data violating [t]+ is a Field-scoped lattice:integrity error; the field still emits" $
+        withCard $ \loop _ctl ->
+          cardClient loop $ \lc -> do
+            resetHits loop
+            r <- runQuery lc cardTagsQ (Map.singleton "id" (A.String "o4"))
+            -- §3.5.2: an empty array is invalid wherever the type governs;
+            -- backend rows are reported, not silently passed through.
+            qrDegraded r `shouldBe` True
+            case qrErrors r of
+              [e] -> do
+                errCode e `shouldBe` Just "lattice:integrity"
+                errScope e `shouldBe` Just (ScopeField (Ref "Order" "o4") "tags")
+                errRetryable e `shouldBe` False
+              other -> expectationFailure ("expected one Field-scoped error, got: " <> show other)
+            order <- rootValue "order" r
+            note <- textField "note" order
+            note `shouldBe` "fourth"
+            tags <- objectField "tags" order >>= asArray
+            tags `shouldBe` []
+            hs <- queryHits loop
+            map hitStatus hs `shouldSatisfy` elem 207
+
 
 -- ---------------------------------------------------------------------------
 -- Query texts
@@ -450,6 +625,24 @@ feedTagsQ = "query FeedTags($org: OrgId) { feed(orgId: $org, first: 10) { title 
 
 walkQ :: Text
 walkQ = "query Walk($id: UserId) { user(id: $id) { name profile { bio user { name } } } }"
+
+
+cardCustomerQ :: Text
+cardCustomerQ = "query OrderCustomer($id: OrderId) { order(id: $id) { note customer { name } } }"
+
+
+cardItemsQ :: Text
+cardItemsQ = "query OrderItems($id: OrderId) { order(id: $id) { note lineItems { sku } } }"
+
+
+cardTagsQ :: Text
+cardTagsQ = "query OrderTags($id: OrderId) { order(id: $id) { note tags } }"
+
+
+-- | @Tags@ is a newtype over @[Text]+@: the variable-shaped spelling of
+-- the nonempty list type (§3.5.2).
+cardTaggedQ :: Text
+cardTaggedQ = "query Tagged($ts: Tags) { orderTagged(tags: $ts) { note } }"
 
 
 reviewBody :: A.Value
@@ -951,6 +1144,104 @@ ckDeleteUser db _claims args =
 
 
 -- ---------------------------------------------------------------------------
+-- Cardinality origin (card fixture, §3.4–§3.6)
+-- ---------------------------------------------------------------------------
+
+{- | Live handles into the card origin's hooks: invocation counters for
+the @orderTagged@ get root and the @tagOrder@ mutation effect, so the
+[t]+ rejection tests can assert the origin did no work.
+-}
+data CardCtl = CardCtl
+  { cardTaggedCalls :: TVar Int
+  , cardTagWrites :: TVar Int
+  }
+
+
+withCard :: (Loop -> CardCtl -> IO a) -> IO a
+withCard action = do
+  ctl <- CardCtl <$> newTVarIO 0 <*> newTVarIO 0
+  withLoopback cardSchema (cardHooks ctl) cardRows Nothing (\loop -> action loop ctl)
+
+
+{- | One customer, four orders: @o1@'s customer dangles (its required
+@has one@ is a broken contract) but its floored @lineItems@ is satisfied;
+@o2@ resolves its customer but scans zero line items (underflow); @o3@ is
+fully clean (the mutation-output target); @o4@'s stored @tags@ violates
+its @[Text]+@ type (row-data integrity).
+-}
+cardRows :: [(TypeName, Map FieldName A.Value)]
+cardRows =
+  [ ("Customer", Map.fromList [("id", A.String "c1"), ("name", A.String "Nia")])
+  , orderRow "o1" "ghost" "first" ["intro"]
+  , orderRow "o2" "c1" "second" ["beta"]
+  , orderRow "o3" "c1" "third" ["gamma"]
+  , orderRow "o4" "c1" "fourth" []
+  , itemRow "li1" "o1" "Widget"
+  , itemRow "li3" "o3" "Gadget"
+  , itemRow "li4" "o4" "Gizmo"
+  ]
+  where
+    orderRow key cust note tags =
+      ( "Order"
+      , Map.fromList
+          [ ("id", A.String key)
+          , ("customerId", A.String cust)
+          , ("note", A.String note)
+          , ("tags", A.toJSON (tags :: [Text]))
+          ]
+      )
+    itemRow key order sku =
+      ( "LineItem"
+      , Map.fromList [("id", A.String key), ("orderId", A.String order), ("sku", A.String sku)]
+      )
+
+
+cardHooks :: CardCtl -> MemoryHooks
+cardHooks ctl =
+  defaultHooks
+    { mhGetRoots =
+        Map.fromList
+          [ ("order", ckByIdRoot "Order")
+          , ("orderTagged", cardTaggedRoot ctl)
+          ]
+    , mhMutations = Map.fromList [("tagOrder", cardTagOrder ctl)]
+    }
+
+
+-- | @orderTagged(tags)@: a fixed hit, counting invocations — the [t]+
+-- variable tests assert whether the origin's loader ever ran.
+cardTaggedRoot :: CardCtl -> MemoryDb -> Map ArgName A.Value -> IO (Maybe Ref)
+cardTaggedRoot ctl _db _args = do
+  atomically (modifyTVar' (cardTaggedCalls ctl) (+ 1))
+  pure (Just (Ref "Order" "o3"))
+
+
+{- | @tagOrder(order, tags)@: overwrite the order's @tags@ and stamp its
+@note@, counting invocations — the [t]+ argument tests assert both that
+the effect never ran and that a follow-up read sees no write.
+-}
+cardTagOrder :: CardCtl -> MemoryDb -> Claims -> Map ArgName A.Value -> IO MutationOutcome
+cardTagOrder ctl db _claims args =
+  case (Map.lookup "order" args, Map.lookup "tags" args) of
+    (Just (A.String o), Just tags@(A.Array _)) -> do
+      atomically (modifyTVar' (cardTagWrites ctl) (+ 1))
+      atomically $ do
+        existing <- readRow db "Order" o
+        let base = case existing of
+              RowFound row -> rowFields row
+              _ -> Map.singleton "id" (A.String o)
+        putRow db "Order" o (Map.insert "tags" tags (Map.insert "note" (A.String "tagged") base))
+        tok <- snapshotToken db
+        pure . MutationCommitted $
+          CommitResult
+            { crResult = [Ref "Order" o]
+            , crWrites = [WroteEntity (Ref "Order" o)]
+            , crSnapshot = tok
+            }
+    _ -> pure (MutationFailed (internalError (Just "tagOrder: order and tags arguments required")))
+
+
+-- ---------------------------------------------------------------------------
 -- Clients and operations
 -- ---------------------------------------------------------------------------
 
@@ -973,6 +1264,10 @@ blogClientWith loop org proof =
 
 cokeyClient :: Loop -> (LatticeClient -> IO a) -> IO a
 cokeyClient loop = clientFor loop (\c -> c {ccSchema = Just cokeySchema})
+
+
+cardClient :: Loop -> (LatticeClient -> IO a) -> IO a
+cardClient loop = clientFor loop (\c -> c {ccSchema = Just cardSchema})
 
 
 -- | Server-dependent awaits fail loudly instead of hanging the suite.
@@ -1002,6 +1297,36 @@ expectProblem st suffix act =
       typ `shouldSatisfy` T.isSuffixOf suffix
     Left other -> expectationFailure ("expected an HTTP problem, got: " <> show other)
     Right _ -> expectationFailure "expected an HTTP problem, got a success"
+
+
+{- | The action must fail with an HTTP problem of the given status whose
+diagnostics (or detail) name the offender.
+-}
+expectProblemNaming :: Int -> Text -> IO (Either LatticeError a) -> IO ()
+expectProblemNaming st needle act =
+  io "problem response" act >>= \case
+    Left (HttpProblem got _ body) -> do
+      got `shouldBe` st
+      maybe [] problemTexts body `shouldSatisfy` any (T.isInfixOf needle)
+    Left other -> expectationFailure ("expected an HTTP problem, got: " <> show other)
+    Right _ -> expectationFailure "expected an HTTP problem, got a success"
+
+
+-- | Diagnostic strings of a decoded RFC 9457 body: @diagnostics@ + @detail@.
+problemTexts :: A.Value -> [Text]
+problemTexts = \case
+  A.Object o -> diag (KM.lookup "diagnostics" o) <> det (KM.lookup "detail" o)
+    where
+      diag = \case
+        Just (A.Array xs) -> mapMaybe asString (toList xs)
+        _ -> []
+      det = \case
+        Just (A.String t) -> [t]
+        _ -> []
+      asString = \case
+        A.String t -> Just t
+        _ -> Nothing
+  _ -> []
 
 
 -- | The action must fail with an HTTP problem of the given status (the

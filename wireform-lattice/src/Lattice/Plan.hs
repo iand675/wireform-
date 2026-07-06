@@ -901,7 +901,7 @@ variable-bound (§14.1).
 -}
 windowBound :: Windowing -> [(ArgName, BoundArg)] -> Natural
 windowBound w args = case w of
-  Bounded n _ -> n
+  Bounded _ n _ -> n
   Paginated cs ->
     let cap = csMaxPage cs
     in case lookup "first" args <|> lookup "last" args of
@@ -1048,6 +1048,7 @@ namedIn = \case
   TNamed t -> Set.singleton t
   TOptional f -> namedIn f
   TList f -> namedIn f
+  TList1 f -> namedIn f
   TSet f -> namedIn f
   TMap k v -> namedIn k <> namedIn v
   TVec _ f -> namedIn f

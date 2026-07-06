@@ -775,12 +775,9 @@ validateDocument schema budgets Document {..} = do
           perArg (Argument an v) =
             case Map.lookup an declaredMap of
               Just ad ->
-                varUsesField
-                  env
-                  ("argument '" <> unArgName an <> "' of " <> atDesc)
-                  (adType ad)
-                  (isJust (adDefault ad))
-                  v
+                let site = "argument '" <> unArgName an <> "' of " <> atDesc
+                 in varUsesField env site (adType ad) (isJust (adDefault ad)) v
+                      <> (emptyList1Diags schema site (adType ad) v, Set.empty)
               Nothing
                 | paginated && an `elem` pageArgNames ->
                     varUsesField
@@ -810,7 +807,7 @@ validateDocument schema budgets Document {..} = do
                           <> " is not declared (§4.8 rule 6)"
                       )
           bounded = case atCollection of
-            Just (_, col, _) | Bounded _ _ <- colWindow col -> True
+            Just (_, col, _) | Bounded {} <- colWindow col -> True
             _ -> False
           groupingSlots :: Map ArgName FieldType
           groupingSlots = case atCollection of
@@ -888,6 +885,7 @@ validateDocument schema budgets Document {..} = do
           _ -> mempty
         elemType t = case stripOptional t of
           TList e -> e
+          TList1 e -> e
           TSet e -> e
           TVec _ e -> e
           other -> other
@@ -981,6 +979,32 @@ stripOptional :: FieldType -> FieldType
 stripOptional = \case
   TOptional t -> t
   t -> t
+
+
+{- | An empty list literal bound where a nonempty list (@[t]+@, §3.5.2)
+governs it: compile-rejected, like any other argument shape violation.
+Structural walk over the literal, descending list-like elements and
+resolving newtypes (depth-bounded); variable /values/ are checked at bind
+time instead, since a literal never sees them.
+-}
+emptyList1Diags :: Schema -> Text -> FieldType -> QValue -> [Text]
+emptyList1Diags schema site = go (8 :: Int)
+  where
+    go :: Int -> FieldType -> QValue -> [Text]
+    go fuel ft v
+      | fuel <= 0 = []
+      | otherwise = case (ft, v) of
+          (TOptional t, _) -> go fuel t v
+          (TList1 _, QList []) ->
+            [site <> " is an empty list, but its type is a nonempty list ([t]+)"]
+          (TList1 e, QList vs) -> concatMap (go fuel e) vs
+          (TList e, QList vs) -> concatMap (go fuel e) vs
+          (TSet e, QList vs) -> concatMap (go fuel e) vs
+          (TVec _ e, QList vs) -> concatMap (go fuel e) vs
+          (TNamed tn, _)
+            | Just (DeclNewtype t _) <- Map.lookup tn (schemaTypes schema) ->
+                go (fuel - 1) t v
+          _ -> []
 
 
 {- | The (canonical name, optionality) of a type as it appears in a variable

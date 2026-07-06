@@ -12,7 +12,7 @@ entity User by id {
   visible to all by default
   id: UserId
   name: Text
-  has one profile: UserProfile by id
+  has one? profile: UserProfile by id
   fetch by id: public
 }
 

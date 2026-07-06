@@ -405,7 +405,7 @@ pageFromRows ::
   [(Ref, Map FieldName A.Value)] ->
   Page
 pageFromRows schema targets windowing window rows = case windowing of
-  Bounded _ policy ->
+  Bounded _ _ policy ->
     let cap = fromIntegral $ case window of
           WWhole n -> n
           WPage {wCount} -> wCount

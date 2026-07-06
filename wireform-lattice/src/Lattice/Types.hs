@@ -248,12 +248,17 @@ parseSlice = \case
 {- | A field/argument/variable type. @TNamed@ references a declared newtype,
 product, sum, or enum; entity types never appear in 'FieldType' position
 (edges are relationships, a disjoint grammar position).
+
+@TList1@ is the nonempty list @[t]+@ (§3.5.2): same wire form as @TList@,
+an empty array is invalid wherever the type governs — the emptiness check
+is a validation, not an encoding.
 -}
 data FieldType
   = TPrim Prim
   | TNamed TypeName
   | TOptional FieldType
   | TList FieldType
+  | TList1 FieldType
   | TSet FieldType
   | TMap FieldType FieldType
   | TVec Natural FieldType

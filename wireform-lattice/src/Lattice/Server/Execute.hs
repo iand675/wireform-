@@ -38,9 +38,16 @@ Execution follows the pinned origin design:
 * __Failures.__ A 'BackendFailure' from 'beLoad' is an Entity-scoped
   error; from 'beChildren' an Edge-scoped error; from a root loader a
   Root-scoped error. 'RowAbsent' reached via an edge emits nothing (the
-  ref dangles); 'RowTombstone' emits a tombstone record. Exceeding
-  'maxRoundFanout' at runtime truncates that scope's children and
-  reports a non-retryable Edge\/Root-scoped @lattice:internal@ error.
+  ref dangles) — except through a required @has one@ ('relOptional'
+  'False'), where the dangle is a non-retryable Edge-scoped
+  @lattice:cardinality@ error (§3.4); required targets are
+  existence-probed even when the edge's selection is empty (point-fetch
+  masks, mutation output). A bounded collection producing fewer than its
+  declared @min@ items reports @lattice:collection-underflow@, the mirror
+  of overflow: what exists still emits (§3.6). 'RowTombstone' emits a
+  tombstone record. Exceeding 'maxRoundFanout' at runtime truncates that
+  scope's children and reports a non-retryable Edge\/Root-scoped
+  @lattice:internal@ error.
   An exception escaping mid-execution marks the result incomplete
   ('xrComplete' 'False'); the caller still renders what was produced.
 * __Surrogate keys.__ @Type:key@ for every reached (loaded or attempted)
@@ -230,6 +237,8 @@ data St = St
   , stCollKeys :: [SurrogateKey]
   -- ^ Reversed.
   , stCovered :: Set SurrogateKey
+  , stPendingOne :: [(Ref, FieldName, Ref)]
+  -- ^ Required to-one obligations, reversed: (parent, edge field, target).
   , stRootMap :: Map Text [Ref]
   , stIncomplete :: Bool
   }
@@ -246,6 +255,7 @@ emptySt =
     , stEntityKeys = Set.empty
     , stCollKeys = []
     , stCovered = Set.empty
+    , stPendingOne = []
     , stRootMap = Map.empty
     , stIncomplete = False
     }
@@ -339,6 +349,7 @@ runEngine env seed = do
     counter <- newIORef (0 :: Int)
     jobs0 <- seed stRef counter
     rounds env stRef (fromIntegral (maxDepth (xBudgets env)) + 2) jobs0
+    checkCardinality stRef
   case outcome of
     Left (ExecAbortEx a) -> pure (Left a)
     Right () -> Right . finalize <$> readIORef stRef
@@ -425,6 +436,7 @@ rootJobs env stRef counter (name, pr)
                 pure []
               Right page -> do
                 _ <- overflowError stRef (Just (ScopeRoot name)) Nothing col page
+                underflowError stRef (Just (ScopeRoot name)) col page
                 modifyIORef' stRef $ \s ->
                   markCovered (pageRefs page) s {stCollKeys = rootCollectionKey col bound : stCollKeys s}
                 pure (pageRefs page)
@@ -550,10 +562,23 @@ emitField env stRef ent ref row pf
                     (pfName pf)
                     (computedArgs fd (bindRuntimeArgs (xVars env) (pfArgs pf)))
                     row
-            for_ mval $ \v ->
+            for_ mval $ \v -> do
+              -- §3.5.2: an empty array where a nonempty list (@[t]+@)
+              -- governs the row data is a Field-scoped integrity error;
+              -- the value still emits.
+              when' (violatesList1 (xSchema env) (fieldType fd) v) $
+                addError stRef $
+                  ErrorRecord
+                    { errScope = Just (ScopeField ref (pfName pf))
+                    , errCode = Just "lattice:integrity"
+                    , errDomain = Nothing
+                    , errRetryable = False
+                    , errMessage = Just "row value violates its nonempty list type"
+                    }
               modifyIORef' stRef (addFieldSt ref (rowVer row) key v)
   where
     key = runtimeKey (xVars env) (pfName pf) (pfArgs pf) (pfKey pf)
+    when' b act = if b then act else pure ()
 
 
 -- | Declared arguments of a computed field, bound values first, defaults filling gaps.
@@ -581,17 +606,33 @@ edgeStep env stRef counter tasks j row pe = case depthGate of
     | not (rowPredicates (xClaims env) row (fromMaybe Public (relPolicy (peRel pe)))) ->
         pure ([], tasks)
     | otherwise -> case peRel pe of
-        ToOne {relTarget = tgt, relByField = byF} ->
+        ToOne {relTarget = tgt, relByField = byF, relOptional = opt} ->
           case Map.lookup byF (rowFields row) >>= refFromValue (xSchema env) tgt of
-            Nothing -> pure ([], tasks)
+            Nothing -> do
+              -- §3.4: the bare `has one` promises resolution; a link column
+              -- holding no usable value is an immediate cardinality failure.
+              when' (not opt) $
+                addError stRef (cardinalityError (jRef j) (peField pe))
+              pure ([], tasks)
             Just childRef -> do
               when' (emitsAt (xMode env) (peLevel pe)) $
                 modifyIORef' stRef (addFieldSt (jRef j) (rowVer row) key (refValue childRef))
+              when' (not opt) $
+                modifyIORef' stRef $ \s ->
+                  s {stPendingOne = (jRef j, peField pe, childRef) : stPendingOne s}
               kids <- case nodeFor (peSelection pe) (refType childRef) of
-                Nothing -> pure []
                 Just childNode ->
                   enqueue env stRef counter (ScopeEdge (jRef j) (peField pe)) $
                     [Job childRef childNode (childFuelOf pe (jFuel j))]
+                Nothing
+                  | opt -> pure []
+                  | otherwise ->
+                      -- Existence probe: a required to-one must witness its
+                      -- target even when the selection stops at the ref
+                      -- (point-fetch masks, mutation output); the empty
+                      -- selection loads the row and traverses nothing.
+                      enqueue env stRef counter (ScopeEdge (jRef j) (peField pe)) $
+                        [Job childRef (NodeSelection [] []) (childFuelOf pe (jFuel j))]
               pure (kids, tasks)
         ToMany {relCollection = col} -> do
           win <- abortEither (windowFor col (bindRuntimeArgs (xVars env) (peArgs pe)))
@@ -659,6 +700,7 @@ runEdgeTask env stRef counter ((pty, field, key), task) = do
           pure []
         Right page -> do
           omit <- overflowError stRef (Just (ScopeEdge pref field)) (Just pref) (etCol task) page
+          underflowError stRef (Just (ScopeEdge pref field)) (etCol task) page
           when' (emitsAt (xMode env) (peLevel pe) && not omit) $
             modifyIORef' stRef $
               addFieldSt pref (rowVer prow) key (pageValueOf (colWindow (etCol task)) page)
@@ -681,7 +723,7 @@ is a plain array of ref strings (spec §9.1); a paginated one is the
 -}
 pageValueOf :: Windowing -> Page -> A.Value
 pageValueOf w page = case w of
-  Bounded _ _ -> A.toJSON (map renderRef (pageRefs page))
+  Bounded {} -> A.toJSON (map renderRef (pageRefs page))
   Paginated _ ->
     pageToJSON
       PageValue
@@ -710,8 +752,54 @@ overflowError stRef scope _ref col page
           , errMessage = Nothing
           }
       pure $ case colWindow col of
-        Bounded _ Overflow -> True
+        Bounded _ _ Overflow -> True
         _ -> False
+
+
+{- | Report @lattice:collection-underflow@ when a bounded collection with a
+declared floor produced fewer than @min@ items (spec §3.6). The mirror of
+'overflowError': the items that exist still emit, the response degrades.
+-}
+underflowError :: IORef St -> Maybe Scope -> CollectionDef -> Page -> IO ()
+underflowError stRef scope col page = case colWindow col of
+  Bounded minN _ _
+    | fromIntegral (length (pageRefs page)) < minN ->
+        addError stRef $
+          ErrorRecord
+            { errScope = scope
+            , errCode = Just "lattice:collection-underflow"
+            , errDomain = Nothing
+            , errRetryable = False
+            , errMessage = Nothing
+            }
+  _ -> pure ()
+
+
+{- | Resolve the round-deferred half of required to-one enforcement (§3.4):
+every obligation recorded at 'edgeStep' whose target row loaded absent is
+a dangling link — a non-retryable Edge-scoped @lattice:cardinality@ error.
+A tombstoned target resolved (the deletion is on the wire); a backend
+failure already reported Entity-scoped and stays a load failure, not an
+integrity verdict.
+-}
+checkCardinality :: IORef St -> IO ()
+checkCardinality stRef = do
+  st <- readIORef stRef
+  for_ (reverse (stPendingOne st)) $ \(pref, field, childRef) ->
+    case Map.lookup childRef (stRows st) of
+      Just (Right RowAbsent) -> addError stRef (cardinalityError pref field)
+      _ -> pure ()
+
+
+cardinalityError :: Ref -> FieldName -> ErrorRecord
+cardinalityError pref field =
+  ErrorRecord
+    { errScope = Just (ScopeEdge pref field)
+    , errCode = Just "lattice:cardinality"
+    , errDomain = Nothing
+    , errRetryable = False
+    , errMessage = Nothing
+    }
 
 
 {- | The surrogate key of one scanned edge collection. Grouping values are
@@ -770,7 +858,7 @@ default and the size argument is absent).
 -}
 windowFor :: CollectionDef -> [(ArgName, A.Value)] -> Either ExecAbort Window
 windowFor col args = case colWindow col of
-  Bounded n _ -> Right (WWhole n)
+  Bounded _ n _ -> Right (WWhole n)
   Paginated cs -> do
     let num name = argNatural =<< lookup name args
         cur name = case lookup name args of

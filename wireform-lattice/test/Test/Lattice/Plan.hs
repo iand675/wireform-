@@ -1,7 +1,8 @@
-{- | Plan contracts (spec §7.3, §8.1, §14.1, §3.8): the path-join slice
-partition, plan identity moving with pertinent declarations only (co-key
-declarations and their base transitively included), and the static
-plan budgets naming their bound.
+{- | Plan contracts (spec §7.3, §8.1, §14.1, §3.8, §3.4–§3.6): the
+path-join slice partition, plan identity moving with pertinent
+declarations only (co-key declarations and their base transitively
+included, cardinality declarations included), and the static plan budgets
+naming their bound.
 -}
 module Test.Lattice.Plan (tests) where
 
@@ -83,6 +84,25 @@ tests =
         planQueryHash widenedUser `shouldBe` planQueryHash baseUser
         planId widenedUser `shouldBe` planId baseUser
         planId widenedAdmin `shouldBe` planId baseAdmin
+
+    describe "§3.4/§3.6 cardinality declarations are pertinent (§7.3)" $ do
+      it "flipping `has one?` to `has one` moves a touching query's planId" $ do
+        base <- planOf cokeySchema identityWalkQ
+        flipped <- planOf cokeyProfileRequired identityWalkQ
+        -- Same canonical text, same query hash: identity is text-only …
+        planQueryHash flipped `shouldBe` planQueryHash base
+        -- … but the edge's cardinality is a pertinent declaration (§3.4).
+        planId flipped `shouldNotBe` planId base
+      it "adding `min` to a bounded collection moves a selecting query's planId" $ do
+        base <- planOf blogSchema feedTagsPlanQ
+        floored <- planOf blogTagsFloored feedTagsPlanQ
+        planQueryHash floored `shouldBe` planQueryHash base
+        planId floored `shouldNotBe` planId base
+      it "the floor is not pertinent to a query never touching the declaring entity" $ do
+        base <- planOf blogSchema meQ
+        floored <- planOf blogTagsFloored meQ
+        planQueryHash floored `shouldBe` planQueryHash base
+        planId floored `shouldBe` planId base
 
     describe "§14.1 plan budgets reject naming the bound" $ do
       it "maxDepth: a depth-3 traversal against maxDepth=2" $ do
@@ -184,6 +204,32 @@ cokeyPlusAuditor =
         , "}"
         ]
 {-# NOINLINE cokeyPlusAuditor #-}
+
+
+-- | A query selecting the floored collection's edge (blog @Post.tags@).
+feedTagsPlanQ :: Text
+feedTagsPlanQ = "query FeedTags($org: OrgId) { feed(orgId: $org, first: 10) { title tags { name } } }"
+
+
+-- | A query touching only @User@ (no Post declaration is pertinent).
+meQ :: Text
+meQ = "query Me { me { name } }"
+
+
+-- | The cokey schema with the partial identity edge flipped to required.
+cokeyProfileRequired :: Schema
+cokeyProfileRequired =
+  mustParseSchema
+    (T.replace "has one? profile" "has one profile" cokeyText)
+{-# NOINLINE cokeyProfileRequired #-}
+
+
+-- | The blog schema with a floor added to the bounded @Post.tags@.
+blogTagsFloored :: Schema
+blogTagsFloored =
+  mustParseSchema
+    (T.replace "tags: Tag by postId max 50" "tags: Tag by postId min 1 max 50" blogText)
+{-# NOINLINE blogTagsFloored #-}
 
 
 -- | The plan must be rejected with a diagnostic naming the violated bound.
