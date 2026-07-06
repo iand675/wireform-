@@ -62,6 +62,10 @@
           # wireform-websocket/scripts/autobahn-summary.py (the Autobahn
           # conformance summariser the interop pipeline shells out to).
           pkgs.python3
+          # TLA+ tools (tlc, tlasany, pcal) for the model-checked
+          # protocol arguments — currently the Lattice invalidation
+          # pipeline model in wireform-lattice/tla/ (run ./check.sh).
+          pkgs.tlaplus
         ];
 
         # ------------------------------------------------------------

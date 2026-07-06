@@ -24,6 +24,7 @@ corpus live in the docs site: [`/lattice/`](https://iand675.github.io/wireform-/
 | Client | `Lattice.Client` (+ `.Store`) | Transport ladder, normalized entity store, schema-directed denormalization |
 | Demo origin | `example/` (`cabal run example-lattice`) | The corpus Star Wars schema on port 8917, with CDN-harness hooks |
 | CDN tiers | `cdn/` | Varnish (vmod_xkey) VCL + harness and a plug-and-play Cloudflare Worker, both proven by `cdn/conformance.mjs` |
+| TLA+ model | `tla/` (`./check.sh`) | Model-checked §11.5 invalidation-pipeline claims: quiescent coherence under at-least-once reordered purge delivery, read-your-writes independent of purge timing, and the intent-time-purge stale-refill race as a TLC counterexample. `tlc` ships in the dev shell |
 
 The TypeScript client (`lattice-ts/`, repo root) is a zero-runtime-dependency
 Apollo-style library with React bindings whose headline is **merged
