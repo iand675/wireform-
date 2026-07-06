@@ -103,9 +103,17 @@ printInterface (InterfaceName n) i =
 printEntity :: TypeName -> EntityDef -> Text
 printEntity (TypeName n) e =
   block
-    ("entity " <> n <> " by " <> renderKey (entityKey e) <> impls <> " {")
+    ("entity " <> n <> keyClause <> impls <> " {")
     (defaultLine : fieldLines <> relLines <> fetchLines)
   where
+    -- A co-keyed entity (§3.8) declares no @by@ clause; its key fields are
+    -- inherited from the base and omitted from the printed body so
+    -- parse ∘ print round-trips.
+    keyClause = case entityCoKey e of
+      Nothing -> " by " <> renderKey (entityKey e)
+      Just (CoKey (TypeName b) JoinsBase) -> " joins " <> b
+      Just (CoKey (TypeName b) RefinesBase) -> " refines " <> b
+
     impls
       | Set.null (entityImplements e) = ""
       | otherwise =
@@ -117,7 +125,13 @@ printEntity (TypeName n) e =
       Private -> "private by default"
       RequiresClaims ps -> "visible when " <> renderPreds ps <> " by default"
 
-    fieldLines = map fieldLine (Map.toAscList (entityFields e))
+    bodyFields = case entityCoKey e of
+      Nothing -> entityFields e
+      Just _ ->
+        Map.withoutKeys
+          (entityFields e)
+          (Set.fromList (NE.toList (entityKey e)))
+    fieldLines = map fieldLine (Map.toAscList bodyFields)
     relLines =
       map (\(f, r) -> renderRel (defaultCollName n f) f r) (Map.toAscList (entityRels e))
     fetchLines = case entityFetchBy e of

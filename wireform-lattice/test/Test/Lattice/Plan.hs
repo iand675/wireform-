@@ -1,5 +1,6 @@
-{- | Plan contracts (spec §7.3, §8.1, §14.1): the path-join slice partition,
-plan identity moving with pertinent declarations only, and the static
+{- | Plan contracts (spec §7.3, §8.1, §14.1, §3.8): the path-join slice
+partition, plan identity moving with pertinent declarations only (co-key
+declarations and their base transitively included), and the static
 plan budgets naming their bound.
 -}
 module Test.Lattice.Plan (tests) where
@@ -52,6 +53,37 @@ tests =
         planQueryHash widened `shouldBe` planQueryHash base
         planId widened `shouldBe` planId base
 
+    describe "§3.8 co-keyed declarations are pertinent (§7.3/§17.2)" $ do
+      it "an identity-edge walk plans as an ordinary to-one (both directions, pub-only)" $ do
+        p <- planOf cokeySchema identityWalkQ
+        Map.keys (planSlices p) `shouldBe` [SlicePub]
+        Map.lookup SlicePub (planSlices p)
+          `shouldBe` Just (SliceInfo [] ["user"])
+      it "identity edges consume depth like any to-one" $ do
+        c <- mustCompileWith cokeySchema identityWalkQ
+        planQuery cokeySchema defaultBudgets {maxDepth = 2} c
+          `rejectsNaming` "maxDepth budget 2"
+      it "flipping refines to joins moves a refinement query's planId" $ do
+        base <- planOf cokeySchema adminQ
+        flipped <- planOf cokeyAdminJoins adminQ
+        -- Same canonical text, same query hash: identity is text-only …
+        planQueryHash flipped `shouldBe` planQueryHash base
+        -- … but the truth coupling is a pertinent declaration (§3.8).
+        planId flipped `shouldNotBe` planId base
+      it "editing the base entity moves a refinement query's planId (transitive pertinence)" $ do
+        base <- planOf cokeySchema adminQ
+        widened <- planOf cokeyUserWidened adminQ
+        planQueryHash widened `shouldBe` planQueryHash base
+        planId widened `shouldNotBe` planId base
+      it "adding a new co-keyed entity is additive: existing planIds do not move (§17.2)" $ do
+        baseUser <- planOf cokeySchema userOnlyQ
+        baseAdmin <- planOf cokeySchema adminQ
+        widenedUser <- planOf cokeyPlusAuditor userOnlyQ
+        widenedAdmin <- planOf cokeyPlusAuditor adminQ
+        planQueryHash widenedUser `shouldBe` planQueryHash baseUser
+        planId widenedUser `shouldBe` planId baseUser
+        planId widenedAdmin `shouldBe` planId baseAdmin
+
     describe "§14.1 plan budgets reject naming the bound" $ do
       it "maxDepth: a depth-3 traversal against maxDepth=2" $ do
         c <- mustCompileWith blogSchema "query { feed { comments { author { name } } } }"
@@ -76,6 +108,21 @@ tests =
 
 heroQ :: Text
 heroQ = "query Hero { hero { name friends(first: 10) { name } } }"
+
+
+-- | A query touching only the refinement (its base is pertinent transitively).
+adminQ :: Text
+adminQ = "query Admin($id: UserId) { admin(id: $id) { permissions } }"
+
+
+-- | A query touching only the base entity.
+userOnlyQ :: Text
+userOnlyQ = "query UserOnly($id: UserId) { user(id: $id) { name } }"
+
+
+-- | Identity edges walked in both directions: User → profile → user.
+identityWalkQ :: Text
+identityWalkQ = "query Walk($id: UserId) { user(id: $id) { name profile { bio user { name } } } }"
 
 
 planOf :: Schema -> Text -> IO Plan
@@ -106,6 +153,37 @@ blogPlusWidget =
         , "}"
         ]
 {-# NOINLINE blogPlusWidget #-}
+
+
+-- | The cokey schema with AdminUser's truth coupling flipped refines→joins.
+cokeyAdminJoins :: Schema
+cokeyAdminJoins =
+  mustParseSchema
+    (T.replace "entity AdminUser refines User" "entity AdminUser joins User" cokeyText)
+{-# NOINLINE cokeyAdminJoins #-}
+
+
+-- | The cokey schema with a field added to the BASE entity only.
+cokeyUserWidened :: Schema
+cokeyUserWidened =
+  mustParseSchema
+    (T.replace "  name: Text" "  name: Text\n  nickname: Text" cokeyText)
+{-# NOINLINE cokeyUserWidened #-}
+
+
+-- | The cokey schema plus a second refinement no query here touches.
+cokeyPlusAuditor :: Schema
+cokeyPlusAuditor =
+  mustParseSchema $
+    cokeyText
+      <> T.unlines
+        [ ""
+        , "entity AuditorUser refines User {"
+        , "  visible to all by default"
+        , "  scope: Text"
+        , "}"
+        ]
+{-# NOINLINE cokeyPlusAuditor #-}
 
 
 -- | The plan must be rejected with a diagnostic naming the violated bound.

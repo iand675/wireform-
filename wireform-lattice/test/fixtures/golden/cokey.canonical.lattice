@@ -1,0 +1,52 @@
+schema cokey.example.com
+
+newtype UserId = Text
+
+entity AdminUser refines User {
+  visible to all by default
+  permissions: Text
+  fetch by id: public
+}
+
+entity User by id {
+  visible to all by default
+  id: UserId
+  name: Text
+  has one profile: UserProfile by id
+  fetch by id: public
+}
+
+entity UserProfile joins User {
+  visible to all by default
+  bio: Text
+  location: Text?
+  has one user: User by id
+  fetch by id: public
+}
+
+get admin(id: UserId) of AdminUser public
+
+get profile(id: UserId) of UserProfile public
+
+get user(id: UserId) of User public
+
+mutation deleteUser(user: UserId) returns User {
+  allow public
+  writes User(user)
+  invalidates writes
+  effect transactional
+}
+
+mutation promoteAdmin(user: UserId) returns AdminUser {
+  allow public
+  writes AdminUser(user)
+  invalidates writes
+  effect transactional
+}
+
+mutation setProfile(user: UserId, bio: Text) returns UserProfile {
+  allow public
+  writes UserProfile(user)
+  invalidates writes
+  effect transactional
+}

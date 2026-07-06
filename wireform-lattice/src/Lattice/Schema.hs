@@ -14,11 +14,16 @@ Implementation-driven IDL clarifications (folded back into the spec):
   anonymous interface with no common fields.
 * A mutation write set may name @Type(new)@: an entity of that type created
   by the effect, whose key is only known at commit time.
+* Co-keyed entities (§3.8): @entityCoKey@ records a @joins@/@refines@ base;
+  the inherited key spec and key 'FieldDef's are copied in at elaboration,
+  so 'entityKey' and 'entityFields' are always self-contained.
 -}
 module Lattice.Schema (
   Schema (..),
   InterfaceDef (..),
   EntityDef (..),
+  CoKey (..),
+  CoKeyMode (..),
   FieldDef (..),
   ArgDef (..),
   RelationshipDef (..),
@@ -49,11 +54,12 @@ module Lattice.Schema (
   lookupEntityField,
   lookupEntityRel,
   entityFieldPolicy,
+  sharedTruthFamily,
   interfaceMembers,
   schemaFragmentsOn,
 ) where
 
-import Data.List.NonEmpty (NonEmpty)
+import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -101,6 +107,27 @@ data EntityDef = EntityDef
   , entityImplements :: Set InterfaceName
   , entityFetchBy :: Maybe Policy
   -- ^ The @nodes@ / point-fetch policy; 'Nothing' forbids by-ref fetching.
+  , entityCoKey :: Maybe CoKey
+  -- ^ Co-keyed entity (§3.8): the base whose key this entity inherits;
+  -- 'Nothing' for ordinary entities.
+  }
+  deriving stock (Eq, Show)
+
+
+-- | How a co-keyed entity couples to its base's record of truth (§3.8).
+data CoKeyMode
+  = -- | @joins@: adjacent truth — own @ver@, own surrogate keys, own lifecycle.
+    JoinsBase
+  | -- | @refines@: same truth — shared @ver@; writes mint keys for the whole
+    -- family; deleting the base tombstones the family.
+    RefinesBase
+  deriving stock (Eq, Show)
+
+
+-- | A @joins@/@refines@ declaration: the base entity and the coupling mode.
+data CoKey = CoKey
+  { ckBase :: TypeName
+  , ckMode :: CoKeyMode
   }
   deriving stock (Eq, Show)
 
@@ -337,6 +364,23 @@ lookupEntityRel e f = Map.lookup f (entityRels e)
 -- | The effective policy of a field, falling back to the entity default.
 entityFieldPolicy :: EntityDef -> FieldDef -> Policy
 entityFieldPolicy e fd = maybe (entityDefaultPolicy e) id (fieldPolicy fd)
+
+
+{- | The types sharing one record of truth with the given type (§3.8): the
+family base plus every @refines@ co-keyed entity of it. A refinement
+resolves via its base; a @joins@ companion, an uncoupled entity, or an
+unknown type is a singleton. The base is the head; refinements follow in
+ascending name order.
+-}
+sharedTruthFamily :: Schema -> TypeName -> NonEmpty TypeName
+sharedTruthFamily s t = case lookupEntity s t of
+  Just e | Just (CoKey base RefinesBase) <- entityCoKey e -> familyOf base
+  _ -> familyOf t
+  where
+    familyOf base = base :| Map.foldrWithKey (refinement base) [] (schemaEntities s)
+    refinement base n e acc = case entityCoKey e of
+      Just (CoKey b RefinesBase) | b == base -> n : acc
+      _ -> acc
 
 
 interfaceMembers :: Schema -> InterfaceName -> Set TypeName

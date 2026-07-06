@@ -95,6 +95,8 @@ import Data.ByteString.Lazy qualified as BL
 import Data.Char (isAlphaNum)
 import Data.Foldable (traverse_)
 import Data.List (find, sort, sortOn)
+import Data.List.NonEmpty (NonEmpty (..))
+import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe, isJust, listToMaybe, mapMaybe, maybeToList)
@@ -1616,13 +1618,14 @@ runMutation o req name mdef claims callerSlice = \case
               , REnd (EndRecord True (Just etag))
               ]
         pure (mutResponse o req 207 snap [] (encodeRecords recs))
-      MutationCommitted cr -> case checkWriteSet mdef args (crWrites cr) of
+      MutationCommitted cr -> case checkWriteSet (ocSchema cfg) mdef args (crWrites cr) of
         Left violation ->
           pure (problemResponse req ((mkProblem 500 "lattice:write-scope") {pDetail = Just violation}))
         Right () -> do
           keys <- invalidationKeys o mdef args (crWrites cr)
-          (recs, degraded) <- renderOutput o mdef claims callerSlice Nothing (crResult cr)
-          let etag = mutationEtag name (recIdVers recs)
+          (rendered, degraded) <- renderOutput o mdef claims callerSlice Nothing (crResult cr)
+          let recs = rendered <> familyTombstones (ocSchema cfg) Nothing (crWrites cr) rendered
+              etag = mutationEtag name (recIdVers recs)
               bodyRecs =
                 [RManifest (mutManifest name Nothing (crResult cr) etag)]
                   <> recs
@@ -1705,23 +1708,25 @@ runItem o mdef claims callerSlice name (itemKey, args) = do
     MutationFailed bf ->
       pure (errItem (Just (bfCode bf)) Nothing (bfMessage bf) (bfRetryable bf) False)
     MutationDomainError v -> pure (errItem Nothing (Just v) Nothing False False)
-    MutationCommitted cr -> case checkWriteSet mdef args (crWrites cr) of
+    MutationCommitted cr -> case checkWriteSet schema mdef args (crWrites cr) of
       Left violation ->
         -- The effect committed backend-side; report the violation
         -- item-scoped so sibling verdicts survive (module haddock).
         pure (errItem (Just "lattice:write-scope") Nothing (Just violation) False True)
       Right () -> do
         keys <- invalidationKeys o mdef args (crWrites cr)
-        (recs, _) <- renderOutput o mdef claims callerSlice (Just itemKey) (crResult cr)
+        (rendered, _) <- renderOutput o mdef claims callerSlice (Just itemKey) (crResult cr)
         pure
           ItemOut
-            { ioRecords = recs
+            { ioRecords =
+                rendered <> familyTombstones schema (Just itemKey) (crWrites cr) rendered
             , ioInvalidated = Just (RInvalidated keys (Just itemKey))
             , ioKeys = keys
             , ioResult = crResult cr
             , ioCommitted = True
             }
   where
+    schema = ocSchema (oConfig o)
     errItem code domainV msg retryable committed =
       ItemOut
         { ioRecords =
@@ -1785,9 +1790,13 @@ renderOutput o mdef claims callerSlice itemKey refs = do
         other -> other
 
 
--- | Enforce the declared write set over the effect's facts (spec §11.4).
-checkWriteSet :: MutationDef -> Map ArgName A.Value -> [WriteFact] -> Either Text ()
-checkWriteSet mdef args = traverse_ checkFact
+{- | Enforce the declared write set over the effect's facts (spec §11.4).
+A declared scope naming any member of a shared-truth family admits writes
+recorded against any other member (§3.8): the family is one record of
+truth, so the scope is instantiated at the family.
+-}
+checkWriteSet :: Schema -> MutationDef -> Map ArgName A.Value -> [WriteFact] -> Either Text ()
+checkWriteSet schema mdef args = traverse_ checkFact
   where
     decls = mutWrites mdef
     checkFact = \case
@@ -1806,13 +1815,16 @@ checkWriteSet mdef args = traverse_ checkFact
         else Left ("write outside declared write set: " <> renderRef r)
     entMatch r = \case
       WEntity t ke
-        | t == refType r -> case ke of
+        | elem (refType r) (sharedTruthFamily schema t) -> case ke of
             KeyNew -> True
             KeyArg a -> (renderScalarKey <$> Map.lookup a args) == Just (refKey r)
       _ -> False
 
 
-{- | Invalidation keys: one per write fact, plus the declared
+{- | Invalidation keys: one per write fact — expanded through the written
+entity's shared-truth family (§3.8): a write to any @refines@ family
+member mints the entity keys of the base and every refinement, while a
+@joins@ companion stays a singleton — plus the declared
 @invalidates writes + …@ extras instantiated against the arguments
 (@GroupOfWritten T.f@ loads the written rows and reads @f@).
 -}
@@ -1821,24 +1833,33 @@ invalidationKeys o mdef args facts = do
   extras <- case mutInvalidates mdef of
     ExactlyWrites -> pure []
     WritesPlus ds -> concat <$> traverse extraKey ds
-  pure (dedupOrd (map factKey facts <> extras))
+  pure (dedupOrd (concatMap factKey facts <> extras))
   where
     backend = ocBackend (oConfig o)
+    schema = ocSchema (oConfig o)
     factKey = \case
-      WroteEntity r -> entityKeyOf r
-      DeletedEntity r _ -> entityKeyOf r
-      WroteCollection c vals -> collectionKey c vals
+      WroteEntity r -> familyKeys r
+      DeletedEntity r _ -> familyKeys r
+      WroteCollection c vals -> [collectionKey c vals]
+    familyKeys r =
+      map
+        (\t -> entityKeyOf (Ref t (refKey r)))
+        (NE.toList (sharedTruthFamily schema (refType r)))
+    -- Written keys attributable to type @t@: facts recorded against any
+    -- member of @t@'s shared-truth family count (same row, same key).
     writtenOf t =
       mapMaybe
         ( \case
-            WroteEntity r | refType r == t -> Just (refKey r)
-            DeletedEntity r _ | refType r == t -> Just (refKey r)
+            WroteEntity r | sameTruth r -> Just (refKey r)
+            DeletedEntity r _ | sameTruth r -> Just (refKey r)
             _ -> Nothing
         )
         facts
+      where
+        sameTruth r = elem (refType r) (sharedTruthFamily schema t)
     extraKey = \case
       WEntity t (KeyArg a) ->
-        pure (maybeToList (entityKeyOf . Ref t . renderScalarKey <$> Map.lookup a args))
+        pure (maybe [] (familyKeys . Ref t . renderScalarKey) (Map.lookup a args))
       WEntity _ KeyNew -> pure []
       WCollection c (GroupArg a) ->
         pure (maybeToList ((\v -> collectionKey c [renderScalarKey v]) <$> Map.lookup a args))
@@ -1854,6 +1875,41 @@ invalidationKeys o mdef args facts = do
                   _ -> Nothing
               )
               keys
+
+
+{- | Family tombstones (§3.8): deleting the __base__ of a shared-truth
+family tombstones every member — a refinement of a deleted row cannot
+outlive it. Synthesized from the @DeletedEntity@ facts at the base's
+tombstone version (the family shares one @ver@ sequence), skipping
+members the rendered output already tombstoned. Deleting a refinement
+alone does not cascade: the base outlives its projections.
+-}
+familyTombstones :: Schema -> Maybe Text -> [WriteFact] -> [Record] -> [Record]
+familyTombstones schema itemKey facts rendered = concatMap expand facts
+  where
+    present =
+      Set.fromList
+        ( mapMaybe
+            ( \case
+                RTombstone r _ _ -> Just r
+                _ -> Nothing
+            )
+            rendered
+        )
+    expand = \case
+      DeletedEntity r v -> case sharedTruthFamily schema (refType r) of
+        base :| rest@(_ : _)
+          | base == refType r ->
+              mapMaybe
+                ( \t ->
+                    let r' = Ref t (refKey r)
+                     in if Set.member r' present
+                          then Nothing
+                          else Just (RTombstone r' v itemKey)
+                )
+                (base : rest)
+        _ -> []
+      _ -> []
 
 
 mutManifest :: MutationName -> Maybe BatchInfo -> [Ref] -> Text -> Manifest

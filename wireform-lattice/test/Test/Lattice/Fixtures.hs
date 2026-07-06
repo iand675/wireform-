@@ -9,8 +9,10 @@ fixed for the lifetime of a test run.
 module Test.Lattice.Fixtures (
   starwarsText,
   blogText,
+  cokeyText,
   starwarsSchema,
   blogSchema,
+  cokeySchema,
   mustParseSchema,
   compileWith,
   mustCompileWith,
@@ -61,6 +63,18 @@ starwarsSchema = mustParseSchema starwarsText
 blogSchema :: Schema
 blogSchema = mustParseSchema blogText
 {-# NOINLINE blogSchema #-}
+
+
+cokeyText :: Text
+cokeyText = loadFixture "test/fixtures/cokey.lattice"
+{-# NOINLINE cokeyText #-}
+
+
+-- | The §3.8 co-keyed fixture: @UserProfile joins User@, @AdminUser
+-- refines User@, identity edges in both directions.
+cokeySchema :: Schema
+cokeySchema = mustParseSchema cokeyText
+{-# NOINLINE cokeySchema #-}
 
 
 -- | Compile query text under 'defaultBudgets'.

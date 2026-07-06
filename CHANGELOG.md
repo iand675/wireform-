@@ -21,7 +21,15 @@
   conformance checker (request coalescing, tag purging, slice
   isolation, idempotent replay through the cache). Companion
   TypeScript client `lattice-ts/` (zero runtime deps, React bindings,
-  merged multi-root query batching).
+  merged multi-root query batching). Later amendments (all Draft 27):
+  asynchronous/out-of-band invalidation pinned in spec §11.5 with a
+  TLA+ model of the pipeline (`wireform-lattice/tla/`, `tlc` in the
+  dev shell; the intent-time-purge stale-refill race is a checked
+  counterexample), and co-keyed entities (§3.8) — `entity P joins B`
+  (1:1 identifying join, independent invalidation) vs `entity R
+  refines B` (subclass view: shared ver, family-wide surrogate-key
+  fan-out and tombstone cascade), with identity edges (`has one
+  profile: UserProfile by id`) planning as ordinary to-ones.
 
 ## 0.1.0.0 -- 2026
 

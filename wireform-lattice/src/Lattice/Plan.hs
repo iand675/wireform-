@@ -961,13 +961,18 @@ touched entity, root, schema fragment, and interface, plus the closure of
 named type declarations reachable from touched entities' fields, root and
 fragment parameters, and referenced claims — each in canonical IDL form,
 sorted by a @kind name@ key.
+
+Touching a co-keyed entity (§3.8) makes its base pertinent too: the key
+spec is inherited, so a base change must move every referencing plan id.
+The reverse direction stays open — adding a refinement is additive and
+leaves plans over the base untouched (§17.2).
 -}
 renderPertinent :: Schema -> Touched -> Text
 renderPertinent schema Touched {..} =
   T.intercalate "\n" (map snd (sortOn fst entries))
   where
     entries =
-      mapMaybe entityEntry (Set.toList tEntities)
+      mapMaybe entityEntry (Set.toList touchedEntities)
         <> mapMaybe rootEntry (Set.toList tRoots)
         <> mapMaybe fragmentEntry (Set.toList tFragments)
         <> mapMaybe interfaceEntry (Set.toList tInterfaces)
@@ -992,11 +997,16 @@ renderPertinent schema Touched {..} =
       fmap
         (\d -> ("type " <> unTypeName t, Print.printTypeDecl t d))
         (Map.lookup t (schemaTypes schema))
+    -- Touched entities plus the co-key base of each (§3.8).
+    touchedEntities = Set.foldr addBase tEntities tEntities
+    addBase t acc = case Map.lookup t (schemaEntities schema) of
+      Just e | Just ck <- entityCoKey e -> Set.insert (ckBase ck) acc
+      _ -> acc
     pertinentTypes = closeTypes schema seedTypes
     seedTypes =
       Set.unions
         [ Set.unions (map claimSeed (Set.toList tClaims))
-        , Set.unions (map entitySeed (Set.toList tEntities))
+        , Set.unions (map entitySeed (Set.toList touchedEntities))
         , Set.unions (map rootSeed (Set.toList tRoots))
         , Set.unions (map fragSeed (Set.toList tFragments))
         ]

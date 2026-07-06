@@ -6,7 +6,9 @@ the semantic model of "Lattice.Schema".
 Elaboration also runs the schema-level checks: dangling type references,
 unregistered claims in policies (§3.1), collections whose link field is
 missing on the target, interface implementors missing declared fields,
-write sets naming unknown collections, and @invalidates ⊇ writes@ (§11.4).
+write sets naming unknown collections, @invalidates ⊇ writes@ (§11.4), and
+co-key declarations (§3.8): unknown or chained bases, key-field
+re-declarations, and stray @by@ clauses on @joins@/@refines@ entities.
 
 Link-field rule (spec clarification, ruled by Main 2026-07-05): a @has many@
 (or field-backed @list@ root) link field must be a declared field of the
@@ -380,10 +382,19 @@ data SDecl
 data SEntity = SEntity
   { sEntLine :: !Int
   , sEntName :: Text
-  , sEntKey :: NonEmpty Text
+  , sEntKey :: SEntityKey
   , sEntImpl :: [(Int, Text)]
   , sEntItems :: [SItem]
   }
+
+
+-- | The key clause of an entity declaration: @by <keyspec>@, or a
+-- co-key declaration @joins <Base>@ \/ @refines <Base>@ (§3.8).
+data SEntityKey
+  = SKeyBy (NonEmpty Text)
+  | -- | Mode, base name, and whether the declaration illegally also
+    -- carries a @by@ clause (rejected at elaboration).
+    SKeyCo CoKeyMode Text !Bool
 
 
 data SItem
@@ -856,13 +867,42 @@ data BodyKind = BodyEntity | BodyInterface
 pEntityDecl :: Int -> P SDecl
 pEntityDecl l = do
   (n, _) <- pAnyName "an entity name"
-  pNameIs "by"
-  key <- pKeySpec
+  key <- pEntityKey
   impls <- pImplements
   pPunct '{'
   items <- pItems BodyEntity n
   pure (SDEntity (SEntity l n key impls items))
   where
+    -- @by <keyspec>@, @joins <Base>@, or @refines <Base>@ — a stray @by@
+    -- next to a co-key clause (either order) is recorded and rejected at
+    -- elaboration, naming the entity.
+    pEntityKey = do
+      isBy <- tryNameIs "by"
+      if isBy
+        then do
+          key <- pKeySpec
+          co <- tryCoKey
+          case co of
+            Just (mode, base) -> pure (SKeyCo mode base True)
+            Nothing -> pure (SKeyBy key)
+        else do
+          co <- tryCoKey
+          case co of
+            Nothing -> pFail l "expected `by`, `joins`, or `refines` after the entity name"
+            Just (mode, base) -> do
+              hasBy <- tryNameIs "by"
+              if hasBy
+                then pKeySpec $> SKeyCo mode base True
+                else pure (SKeyCo mode base False)
+    tryCoKey = do
+      j <- tryNameIs "joins"
+      if j
+        then Just . (JoinsBase,) . fst <$> pAnyName "a base entity name"
+        else do
+          r <- tryNameIs "refines"
+          if r
+            then Just . (RefinesBase,) . fst <$> pAnyName "a base entity name"
+            else pure Nothing
     pImplements = do
       has <- tryNameIs "implements"
       if has then go else pure []
@@ -1330,9 +1370,16 @@ err l = SchemaError (Just l)
 
 data EntInfo = EntInfo
   { eiLine :: !Int
+  , eiKeySpec :: SEntityKey
+  -- ^ Surface key clause; co-keys are resolved by 'resolveCoKey'.
   , eiKey :: NonEmpty Text
+  -- ^ Effective key: own @by@ spec, or the base's once resolved
+  -- (placeholder until 'resolveCoKey' runs on a co-keyed entity).
+  , eiCoKey :: Maybe CoKey
+  -- ^ Set by 'resolveCoKey' for @joins@/@refines@ entities.
   , eiImpl :: [(Int, Text)]
   , eiFields :: Map FieldName FieldDef
+  -- ^ Declared fields, plus the base's key 'FieldDef's once resolved.
   , eiFieldLines :: Map FieldName Int
   , eiRels :: [SItem]
   , eiDefaults :: [(Int, Policy)]
@@ -1380,7 +1427,10 @@ elaborate decls =
               concatMap (\c -> concatMap (tyRefErrs l ctx . snd) (ctorFields c)) (NE.toList cs)
             DeclEnum _ _ -> []
 
-    (entInfos, entErrs) = buildEntInfos entityDs
+    (entInfos0, entErrs) = buildEntInfos entityDs
+    (entInfos, coKeyErrs) =
+      let resolved = Map.mapWithKey (resolveCoKey entInfos0) entInfos0
+       in (Map.map fst resolved, concatMap snd (Map.elems resolved))
     (ifaceInfos, ifaceDupErrs) = buildIfaceInfos ifaceDs
 
     entityNames = Map.keysSet entInfos
@@ -1606,10 +1656,17 @@ elaborate decls =
                 <> policyErrs l0 (ectx <> " default visibility") ownField p
             )
 
+        -- Inherited key fields of a co-keyed entity (§3.8): present by
+        -- construction ('resolveCoKey'), and already checked in the base's
+        -- own context — skipped below to avoid duplicate diagnostics.
+        inheritedKeys = case eiCoKey ei of
+          Nothing -> Set.empty
+          Just _ -> Set.fromList (map FieldName (NE.toList (eiKey ei)))
+
         keyErrs =
           concatMap
             ( \k ->
-                if ownField k
+                if ownField k || Set.member (FieldName k) inheritedKeys
                   then []
                   else [err (eiLine ei) (ectx <> " key field `" <> k <> "` is not declared")]
             )
@@ -1620,10 +1677,13 @@ elaborate decls =
             ( \(FieldName f) fd acc ->
                 let l = fromMaybe (eiLine ei) (Map.lookup (FieldName f) (eiFieldLines ei))
                     fctx = ectx <> ", field `" <> f <> "`"
-                 in tyRefErrs l fctx (fieldType fd)
-                      <> argErrs l fctx (fieldArgs fd)
-                      <> maybe [] (policyErrs l fctx ownField) (fieldPolicy fd)
-                      <> acc
+                 in if Set.member (FieldName f) inheritedKeys
+                      then acc
+                      else
+                        tyRefErrs l fctx (fieldType fd)
+                          <> argErrs l fctx (fieldArgs fd)
+                          <> maybe [] (policyErrs l fctx ownField) (fieldPolicy fd)
+                          <> acc
             )
             []
             (eiFields ei)
@@ -1718,6 +1778,7 @@ elaborate decls =
             , entityRels = rels
             , entityImplements = Set.fromList (map (InterfaceName . snd) (eiImpl ei))
             , entityFetchBy = fetchBy
+            , entityCoKey = eiCoKey ei
             }
         errs = defErrs <> keyErrs <> fieldErrs <> relErrs <> fetchErrs <> implErrs
 
@@ -1967,6 +2028,7 @@ elaborate decls =
         <> typeDupErrs
         <> typeBodyErrs
         <> entErrs
+        <> coKeyErrs
         <> ifaceDupErrs
         <> crossDupErrs
         <> concatMap (\(_, _, _, es) -> es) entityResults
@@ -2014,7 +2076,11 @@ buildEntInfos = List.foldl' step (Map.empty, [])
             SIFetch l k p -> (fm, flm, rs, ds, xs <> [(l, k, p)], des)
        in ( EntInfo
               { eiLine = sEntLine e
-              , eiKey = sEntKey e
+              , eiKeySpec = sEntKey e
+              , eiKey = case sEntKey e of
+                  SKeyBy ks -> ks
+                  SKeyCo {} -> "id" :| []
+              , eiCoKey = Nothing
               , eiImpl = sEntImpl e
               , eiFields = fields
               , eiFieldLines = fieldLines
@@ -2024,6 +2090,55 @@ buildEntInfos = List.foldl' step (Map.empty, [])
               }
           , dupErrs
           )
+
+
+{- | Resolve a co-key declaration (§3.8) against the raw entity map:
+install the base's key spec and key 'FieldDef's, and collect the co-key
+checks — unknown base, chained co-keying, key-field re-declaration, and a
+stray @by@ clause on a co-keyed declaration.
+-}
+resolveCoKey :: Map Text EntInfo -> Text -> EntInfo -> (EntInfo, [SchemaError])
+resolveCoKey infos en ei = case eiKeySpec ei of
+  SKeyBy _ -> (ei, [])
+  SKeyCo mode base hasBy ->
+    let kw = case mode of
+          JoinsBase -> "joins"
+          RefinesBase -> "refines"
+        ectx = "entity `" <> en <> "` " <> kw <> " `" <> base <> "`"
+        l = eiLine ei
+        withCo e' = e' {eiCoKey = Just (CoKey (TypeName base) mode)}
+        byErrs =
+          if hasBy
+            then [err l (ectx <> " and must not declare a `by` clause; the key is inherited from the base")]
+            else []
+     in case Map.lookup base infos of
+          Nothing ->
+            (withCo ei, byErrs <> [err l (ectx <> ", which is not a declared entity")])
+          Just bi -> case eiKeySpec bi of
+            SKeyCo {} ->
+              (withCo ei, byErrs <> [err l (ectx <> ", which is itself co-keyed; declare every companion against the one base")])
+            SKeyBy bkey ->
+              let keyNames = Set.fromList (map FieldName (NE.toList bkey))
+                  redeclErrs =
+                    mapMaybe
+                      ( \k ->
+                          if Map.member (FieldName k) (eiFields ei)
+                            then
+                              Just
+                                ( err
+                                    (fromMaybe l (Map.lookup (FieldName k) (eiFieldLines ei)))
+                                    (ectx <> " and re-declares its key field `" <> k <> "`; key fields are inherited")
+                                )
+                            else Nothing
+                      )
+                      (NE.toList bkey)
+               in ( (withCo ei)
+                      { eiKey = bkey
+                      , eiFields = Map.union (eiFields ei) (Map.restrictKeys (eiFields bi) keyNames)
+                      , eiFieldLines = Map.union (eiFieldLines ei) (Map.restrictKeys (eiFieldLines bi) keyNames)
+                      }
+                  , byErrs <> redeclErrs
+                  )
 
 
 buildIfaceInfos

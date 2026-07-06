@@ -14,6 +14,10 @@ importable from here):
 * Blog (@test/fixtures/blog.lattice@): the claim-gated @feed@ root
   behind an HMAC 'ProofVerifier', plus a 51-tag post overflowing the
   bounded @Post.tags@ collection.
+* Co-key (@test/fixtures/cokey.lattice@): spec §3.8 — @UserProfile
+  joins User@ (adjacent truth), @AdminUser refines User@ (same truth),
+  identity edges both ways, and mutations exercising family-fanout
+  surrogate keys and the base-deletion tombstone cascade.
 
 Every request is recorded by a counting middleware (method, target,
 status, response @Cache-Control@), which makes ladder assertions exact:
@@ -50,6 +54,7 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Lattice.Backend
 import Lattice.Backend.Memory
@@ -68,7 +73,7 @@ import Network.HTTP.Types.Status (statusCode)
 import Network.HTTP.VersionRange (preferHttp1)
 import Network.Socket qualified as NS
 import System.Timeout (timeout)
-import Test.Lattice.Fixtures (blogSchema, requireRight, starwarsSchema)
+import Test.Lattice.Fixtures (blogSchema, cokeySchema, requireRight, starwarsSchema)
 import Test.Syd
 import Text.Read (readMaybe)
 
@@ -298,6 +303,100 @@ tests =
                 tagsTwo `shouldBe` []
               _ -> expectationFailure ("expected two posts, got: " <> show posts)
 
+    describe "§3.8 co-keyed entities (cokey fixture)" $ do
+      it "identity edges traverse both directions; a missing joins row is an absent to-one" $
+        withCoKey $ \loop ->
+          cokeyClient loop $ \lc -> do
+            r <- runQuery lc walkQ (Map.singleton "id" (A.String ckU1))
+            user <- rootValue "user" r
+            adaName <- textField "name" user
+            adaName `shouldBe` "Ada"
+            prof <- objectField "profile" user
+            -- wire identity is the companion's own type-qualified pair
+            profRef <- textField "$ref" prof
+            profRef `shouldBe` "UserProfile:u1"
+            bio <- textField "bio" prof
+            bio `shouldBe` "Analytical engines"
+            back <- objectField "user" prof
+            backName <- textField "name" back
+            backName `shouldBe` "Ada"
+            -- Grace has no profile row: the identity edge renders as an
+            -- ordinary absent to-one — a bare ref, no entity fact.
+            r2 <- runQuery lc walkQ (Map.singleton "id" (A.String ckU2))
+            user2 <- rootValue "user" r2
+            prof2 <- objectField "profile" user2
+            prof2 `shouldNotSatisfy` hasFieldPrefix "bio"
+            prof2 `shouldNotSatisfy` hasFieldPrefix "$ver"
+            let isProfileEntity = \case
+                  REntity er -> refType (erId er) == "UserProfile"
+                  _ -> False
+            filter isProfileEntity (qrRecords r2) `shouldBe` []
+
+      it "a refines write mints surrogate keys for the whole family (§10.5)" $
+        withCoKey $ \loop ->
+          cokeyClient loop $ \lc -> do
+            resetHits loop
+            mr <- runMutate lc "promoteAdmin" (A.object [("user", A.String ckU2)])
+            mrCommitted mr `shouldBe` True
+            mrInvalidated mr `shouldSatisfy` elem "AdminUser:u2"
+            mrInvalidated mr `shouldSatisfy` elem "User:u2"
+            keys <- surrogateKeysOfMutation loop
+            keys `shouldSatisfy` elem "AdminUser:u2"
+            keys `shouldSatisfy` elem "User:u2"
+
+      it "a joins write mints only its own surrogate keys; the companion may appear later" $
+        withCoKey $ \loop ->
+          cokeyClient loop $ \lc -> do
+            resetHits loop
+            mr <-
+              runMutate
+                lc
+                "setProfile"
+                (A.object [("user", A.String ckU2), ("bio", A.String "New here")])
+            mrCommitted mr `shouldBe` True
+            mrInvalidated mr `shouldSatisfy` elem "UserProfile:u2"
+            mrInvalidated mr `shouldSatisfy` notElem "User:u2"
+            keys <- surrogateKeysOfMutation loop
+            keys `shouldSatisfy` elem "UserProfile:u2"
+            keys `shouldSatisfy` notElem "User:u2"
+            -- the fresh companion is now reachable over the identity edge
+            r <- runQuery lc walkQ (Map.singleton "id" (A.String ckU2))
+            user <- rootValue "user" r
+            prof <- objectField "profile" user
+            bio <- textField "bio" prof
+            bio `shouldBe` "New here"
+
+      it "deleting the base tombstones the family, not the joins companion; the refinement 410s" $
+        withCoKey $ \loop ->
+          cokeyClient loop $ \lc -> do
+            resetHits loop
+            mr <- runMutate lc "deleteUser" (A.object [("user", A.String ckU1)])
+            mrCommitted mr `shouldBe` True
+            mrInvalidated mr `shouldSatisfy` elem "User:u1"
+            mrInvalidated mr `shouldSatisfy` elem "AdminUser:u1"
+            mrInvalidated mr `shouldSatisfy` notElem "UserProfile:u1"
+            keys <- surrogateKeysOfMutation loop
+            keys `shouldSatisfy` elem "User:u1"
+            keys `shouldSatisfy` elem "AdminUser:u1"
+            keys `shouldSatisfy` notElem "UserProfile:u1"
+            -- The response's tombstone records covered the family: the
+            -- client store witnessed both evictions, and only those.
+            let store = clientStore lc
+            tombUser <- atomically (Store.isTombstoned store (Ref "User" ckU1))
+            tombAdmin <- atomically (Store.isTombstoned store (Ref "AdminUser" ckU1))
+            tombProfile <- atomically (Store.isTombstoned store (Ref "UserProfile" ckU1))
+            (tombUser, tombAdmin, tombProfile) `shouldBe` (True, True, False)
+            -- At the origin the refinement cannot outlive the row …
+            expectStatus 410 (pointFetch lc (Ref "AdminUser" ckU1) ["permissions"])
+            -- … while the joins companion's adjacent truth survives.
+            rp <- io "point fetch" (pointFetch lc (Ref "UserProfile" ckU1) ["bio"]) >>= requireRight
+            nodes <- rootValue "node" rp >>= asArray
+            case nodes of
+              [obj] -> do
+                bio <- textField "bio" obj
+                bio `shouldBe` "Analytical engines"
+              _ -> expectationFailure ("expected exactly one node, got: " <> show nodes)
+
 
 -- ---------------------------------------------------------------------------
 -- Query texts
@@ -349,6 +448,10 @@ feedTagsQ :: Text
 feedTagsQ = "query FeedTags($org: OrgId) { feed(orgId: $org, first: 10) { title tags { name } } }"
 
 
+walkQ :: Text
+walkQ = "query Walk($id: UserId) { user(id: $id) { name profile { bio user { name } } } }"
+
+
 reviewBody :: A.Value
 reviewBody =
   A.object
@@ -377,6 +480,7 @@ data Hit = Hit
   , hitTarget :: ByteString
   , hitStatus :: Int
   , hitCache :: Maybe ByteString
+  , hitSurrogates :: Maybe ByteString
   }
   deriving stock (Show)
 
@@ -468,6 +572,7 @@ mkHit req resp =
     , hitTarget = requestTarget req
     , hitStatus = fromIntegral (statusCode (responseStatus resp))
     , hitCache = lookupHeader hCacheControl (responseHeaders resp)
+    , hitSurrogates = lookupHeader hSurrogateKey (responseHeaders resp)
     }
 
 
@@ -480,6 +585,18 @@ queryHits :: Loop -> IO [Hit]
 queryHits loop = do
   hs <- readTVarIO (loopHits loop)
   pure (filter (\h -> "/q" `BS8.isPrefixOf` hitTarget h) (reverse hs))
+
+
+{- | The @Surrogate-Key@ tokens of the single @\/m\/@ POST since the last
+reset. Exact-token comparison on purpose: @User:u2@ is a substring of
+@AdminUser:u2@, so infix assertions would be unsound here.
+-}
+surrogateKeysOfMutation :: Loop -> IO [Text]
+surrogateKeysOfMutation loop = do
+  hs <- readTVarIO (loopHits loop)
+  case filter (\h -> "/m/" `BS8.isPrefixOf` hitTarget h) (reverse hs) of
+    [h] -> pure (maybe [] (T.words . TE.decodeUtf8) (hitSurrogates h))
+    other -> expectationFailure ("expected exactly one mutation hit, saw: " <> show other)
 
 
 seedRow :: Schema -> MemoryDb -> (TypeName, Map FieldName A.Value) -> STM ()
@@ -716,6 +833,124 @@ expiredProof org = do
 
 
 -- ---------------------------------------------------------------------------
+-- Co-keyed origin (cokey fixture, §3.8)
+-- ---------------------------------------------------------------------------
+
+ckU1, ckU2 :: Text
+ckU1 = "u1"
+ckU2 = "u2"
+
+
+withCoKey :: (Loop -> IO a) -> IO a
+withCoKey = withLoopback cokeySchema ckHooks ckRows Nothing
+
+
+{- | Ada (u1) has both companions seeded: a UserProfile row (adjacent
+truth) and an AdminUser row (same truth). Grace (u2) is a bare User: her
+identity edges dangle until a mutation writes a companion row.
+-}
+ckRows :: [(TypeName, Map FieldName A.Value)]
+ckRows =
+  [ ("User", Map.fromList [("id", A.String ckU1), ("name", A.String "Ada")])
+  , ("User", Map.fromList [("id", A.String ckU2), ("name", A.String "Grace")])
+  ,
+    ( "UserProfile"
+    , Map.fromList
+        [ ("id", A.String ckU1)
+        , ("bio", A.String "Analytical engines")
+        , ("location", A.String "London")
+        ]
+    )
+  , ("AdminUser", Map.fromList [("id", A.String ckU1), ("permissions", A.String "all")])
+  ]
+
+
+ckHooks :: MemoryHooks
+ckHooks =
+  defaultHooks
+    { mhGetRoots =
+        Map.fromList
+          [ ("user", ckByIdRoot "User")
+          , ("profile", ckByIdRoot "UserProfile")
+          , ("admin", ckByIdRoot "AdminUser")
+          ]
+    , mhMutations =
+        Map.fromList
+          [ ("setProfile", ckSetProfile)
+          , ("promoteAdmin", ckPromoteAdmin)
+          , ("deleteUser", ckDeleteUser)
+          ]
+    }
+
+
+ckByIdRoot :: TypeName -> MemoryDb -> Map ArgName A.Value -> IO (Maybe Ref)
+ckByIdRoot ty _db args = pure $ case Map.lookup "id" args of
+  Just (A.String k) -> Just (Ref ty k)
+  _ -> Nothing
+
+
+{- | @setProfile(user, bio)@: upsert the joins companion. Adjacent truth:
+the write fact names only UserProfile (§3.8).
+-}
+ckSetProfile :: MemoryDb -> Claims -> Map ArgName A.Value -> IO MutationOutcome
+ckSetProfile db _claims args =
+  case (Map.lookup "user" args, Map.lookup "bio" args) of
+    (Just (A.String u), Just bio@(A.String _)) -> atomically $ do
+      putRow db "UserProfile" u (Map.fromList [("id", A.String u), ("bio", bio)])
+      tok <- snapshotToken db
+      pure . MutationCommitted $
+        CommitResult
+          { crResult = [Ref "UserProfile" u]
+          , crWrites = [WroteEntity (Ref "UserProfile" u)]
+          , crSnapshot = tok
+          }
+    _ -> pure (MutationFailed (internalError (Just "setProfile: user and bio arguments required")))
+
+
+{- | @promoteAdmin(user)@: write the refinement. Same truth: the server
+fans the one write fact out to the whole family's keys (§3.8\/§10.5).
+-}
+ckPromoteAdmin :: MemoryDb -> Claims -> Map ArgName A.Value -> IO MutationOutcome
+ckPromoteAdmin db _claims args =
+  case Map.lookup "user" args of
+    Just (A.String u) -> atomically $ do
+      putRow db "AdminUser" u (Map.fromList [("id", A.String u), ("permissions", A.String "all")])
+      tok <- snapshotToken db
+      pure . MutationCommitted $
+        CommitResult
+          { crResult = [Ref "AdminUser" u]
+          , crWrites = [WroteEntity (Ref "AdminUser" u)]
+          , crSnapshot = tok
+          }
+    _ -> pure (MutationFailed (internalError (Just "promoteAdmin: user argument required")))
+
+
+{- | @deleteUser(user)@: the base row and its refinement are one record of
+truth, so the effect deletes both storage rows; the write fact names the
+BASE only and the server expands the family (tombstones and keys,
+§3.8). The joins companion's row is its own truth and stays.
+-}
+ckDeleteUser :: MemoryDb -> Claims -> Map ArgName A.Value -> IO MutationOutcome
+ckDeleteUser db _claims args =
+  case Map.lookup "user" args of
+    Just (A.String u) -> atomically $ do
+      deleteRow db "User" u
+      deleteRow db "AdminUser" u
+      tomb <- readRow db "User" u
+      tok <- snapshotToken db
+      let ver = case tomb of
+            RowTombstone v -> v
+            _ -> "t:1"
+      pure . MutationCommitted $
+        CommitResult
+          { crResult = [Ref "User" u]
+          , crWrites = [DeletedEntity (Ref "User" u) ver]
+          , crSnapshot = tok
+          }
+    _ -> pure (MutationFailed (internalError (Just "deleteUser: user argument required")))
+
+
+-- ---------------------------------------------------------------------------
 -- Clients and operations
 -- ---------------------------------------------------------------------------
 
@@ -736,6 +971,10 @@ blogClientWith loop org proof =
   clientFor loop (\c -> c {ccSchema = Just blogSchema, ccClaims = Just (orgClaims org, proof)})
 
 
+cokeyClient :: Loop -> (LatticeClient -> IO a) -> IO a
+cokeyClient loop = clientFor loop (\c -> c {ccSchema = Just cokeySchema})
+
+
 -- | Server-dependent awaits fail loudly instead of hanging the suite.
 io :: String -> IO a -> IO a
 io label act =
@@ -751,12 +990,26 @@ runCreateReview :: LatticeClient -> A.Value -> Maybe Text -> IO MutationResult
 runCreateReview lc input mIdem = io "mutation" (mutate lc "createReview" input mIdem) >>= requireRight
 
 
+runMutate :: LatticeClient -> MutationName -> A.Value -> IO MutationResult
+runMutate lc name input = io "mutation" (mutate lc name input Nothing) >>= requireRight
+
+
 expectProblem :: Int -> Text -> IO (Either LatticeError a) -> IO ()
 expectProblem st suffix act =
   io "problem response" act >>= \case
     Left (HttpProblem got typ _) -> do
       got `shouldBe` st
       typ `shouldSatisfy` T.isSuffixOf suffix
+    Left other -> expectationFailure ("expected an HTTP problem, got: " <> show other)
+    Right _ -> expectationFailure "expected an HTTP problem, got a success"
+
+
+-- | The action must fail with an HTTP problem of the given status (the
+-- §6.7 tombstone @410@ carries an NDJSON frame, not a problem body).
+expectStatus :: Int -> IO (Either LatticeError a) -> IO ()
+expectStatus st act =
+  io "problem response" act >>= \case
+    Left (HttpProblem got _ _) -> got `shouldBe` st
     Left other -> expectationFailure ("expected an HTTP problem, got: " <> show other)
     Right _ -> expectationFailure "expected an HTTP problem, got a success"
 

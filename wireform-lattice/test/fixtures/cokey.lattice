@@ -1,0 +1,67 @@
+schema cokey.example.com
+
+-- Spec §3.8 co-keyed entities, made self-contained: one base entity
+-- (User), a `joins` companion behind the same key (UserProfile — its OWN
+-- record of truth, adjacent lifecycle), and a `refines` view of the SAME
+-- record of truth (AdminUser — shared ver, family-wide invalidation).
+-- Identity edges are ordinary to-ones over the key field, legal in both
+-- directions; no new traversal construct exists.
+
+newtype UserId = Text
+
+entity User by id {
+  visible to all by default
+
+  id:   UserId
+  name: Text
+
+  has one profile: UserProfile by id
+
+  fetch by id: public
+}
+
+entity UserProfile joins User {
+  visible to all by default
+
+  bio:      Text
+  location: Text?
+
+  has one user: User by id
+
+  fetch by id: public
+}
+
+entity AdminUser refines User {
+  visible to all by default
+
+  permissions: Text
+
+  fetch by id: public
+}
+
+get user(id: UserId) of User public
+
+get profile(id: UserId) of UserProfile public
+
+get admin(id: UserId) of AdminUser public
+
+mutation setProfile(user: UserId, bio: Text) returns UserProfile {
+  allow       public
+  writes      UserProfile(user)
+  invalidates writes
+  effect      transactional
+}
+
+mutation promoteAdmin(user: UserId) returns AdminUser {
+  allow       public
+  writes      AdminUser(user)
+  invalidates writes
+  effect      transactional
+}
+
+mutation deleteUser(user: UserId) returns User {
+  allow       public
+  writes      User(user)
+  invalidates writes
+  effect      transactional
+}

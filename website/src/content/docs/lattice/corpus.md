@@ -706,6 +706,73 @@ GraphQL's introspection system exists because a GraphQL schema is, at the protoc
 
 ---
 
+## 15. Shared ids across types: subclassing and 1:1 joins
+
+**GraphQL**
+
+```graphql
+# The two shapes teams actually ship. Either "subclassing": one row whose
+# admin view is a type sharing the User's ID space...
+type User  { id: ID!, name: String! }
+type AdminUser { id: ID!, permissions: [Role!]! }   # same id as its User
+
+# ...or an identifying 1:1 join, PK = FK:
+type UserProfile { id: ID!, bio: String, location: String }
+type User { id: ID!, name: String!, profile: UserProfile }
+```
+
+GraphQL's spec has nothing to say about either — both types mint unrelated
+identities in every client cache, and whether an `updateAdminUser` mutation
+should invalidate a cached `User` is tribal knowledge encoded in resolver
+comments and `refetchQueries` lists.
+
+**Lattice**
+
+```
+entity User by id {
+  visible to all by default
+  id:   UserId
+  name: String
+
+  has one profile: UserProfile by id     -- identity edge: link field is the key
+  has one admin:   AdminUser   by id
+}
+
+-- 1:1 identifying join: its OWN record of truth behind the shared id.
+entity UserProfile joins User {
+  visible to all by default
+  bio:      Markdown?
+  location: String?
+
+  has one user: User by id
+}
+
+-- Subclass view: the SAME record of truth as the base.
+entity AdminUser refines User {
+  private by default
+  permissions: [Role]   visible when caller.role = Admin
+}
+```
+
+The id reuse that GraphQL leaves as convention is a declaration here, because
+the two cases mean opposite things on the network (Section 3.8). `joins`
+declares *adjacent truth*: `UserProfile:7` has its own `ver`, its own
+surrogate keys, its own lifecycle — a profile edit does not purge any cached
+response that only touched `User.name`. `refines` declares *the same truth*:
+one shared `ver` sequence, and a write to any family member mints surrogate
+keys for the whole family (`AdminUser:7` **and** `User:7`), so a permissions
+change invalidates every cached view of that row; deleting the `User`
+tombstones the family. The decision rule is invalidation coupling, not ORM
+aesthetics: one write invalidating both views ⇒ `refines`; independently
+aging truths ⇒ `joins`. Ids reused across *unrelated* types need nothing at
+all — identity is always the type-qualified pair, so `Invoice:42` and
+`User:42` never meet in a cache key, a ref, or a purge. And because the
+family fan-out is static in the schema, an out-of-band writer (a consumer
+materializing rows off a Kafka topic, Section 11.5) mints exactly the same
+keys the mutation path would.
+
+---
+
 ## Index
 
 | # | GraphQL feature | Lattice equivalent | Spec section |
@@ -724,3 +791,4 @@ GraphQL's introspection system exists because a GraphQL schema is, at the protoc
 | 12 | Bulk mutation workarounds | Declared `batch` policy | 11.8 |
 | 13 | Subscriptions | Live queries over ordinary query URLs | 12 |
 | 14 | Introspection | Content-addressed schema documents | 7.1 |
+| 15 | Shared ids: subclassing / 1:1 joins | Co-keyed entities: `refines` / `joins` | 3.8 |
