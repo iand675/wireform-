@@ -75,6 +75,6 @@ The docs landing page (`/lattice/`) carries the authoritative coverage
 matrix. Every formerly deferred area now ships: derived fields (§3.7),
 cache digests (§10.4), verb bindings (§11.7), live queries (§12), signed
 admission (§14.3), the `nodes` root (§14.4), the compatibility registry
-(§17), modules + federation (§18), and the OTel conventions (§19). The
-matrix's "simplifications" table lists the deliberate, haddock-documented
-edges that remain.
+(§17), modules + federation (§18), and the OTel conventions (§19). A few
+corners are still cut on purpose (see the matrix's "simplifications"
+table); each one is noted in its module's haddock.
