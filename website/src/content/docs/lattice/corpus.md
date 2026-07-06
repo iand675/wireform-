@@ -6,19 +6,19 @@ sidebar:
   label: GraphQL comparison corpus
 ---
 
-This is a companion to the Lattice protocol specification, not a replacement for it. Where the spec argues from first principles, this document works forward from examples any GraphQL-familiar reader already has memorized, and shows the Lattice port next to the original. The goal is a corpus usable enough to drive early client and origin implementations against, not just a comparison table.
+This is a companion to the Lattice protocol specification, not a replacement for it. The spec argues from first principles. This document works forward from examples that any GraphQL-familiar reader already has memorized, and shows the Lattice port next to the original. The goal is a corpus usable enough to drive early client and origin implementations, not just a comparison table.
 
 ## How to read an entry
 
-Each entry has three parts: the GraphQL original (schema fragment and operation), the Lattice port (IDL fragment and query or mutation), and a note on what changed and why, with a pointer into the spec for anything that needs the full argument. Since Lattice's query surface is GraphQL-shaped, most entries port almost verbatim, and the value of those entries is in the note: what looks identical often behaves differently underneath (a normalized entity stream instead of a JSON tree, mandatory pagination, collection-based invalidation). A few constructs have no Lattice equivalent at all, aliasing and `@include`/`@skip`, and those entries explain the replacement rather than pretending the syntax maps.
+Each entry has three parts: the GraphQL original (schema fragment and operation), the Lattice port (IDL fragment and query or mutation), and a note on what changed and why, with a pointer into the spec where the full argument lives. Lattice's query surface is GraphQL-shaped, so most entries port almost verbatim. The value of those entries is in the note: what looks identical often behaves differently underneath (a normalized entity stream instead of a JSON tree, mandatory pagination, collection-based invalidation). A few constructs have no Lattice equivalent at all (aliasing, `@include`, `@skip`); those entries explain the replacement rather than pretending the syntax maps.
 
-Spec section numbers below refer to the current draft (Draft 26): the query language is GraphQL-shaped (brace-nested, fragments, field arguments), and the schema (IDL) reads as a domain model where `has many` and `list` define their collection inline.
+Spec section numbers below refer to the current specification. The query language is GraphQL-shaped (brace-nested, with fragments and field arguments), and the schema (IDL) reads as a domain model where `has many` and `list` define their collection inline.
 
 ---
 
 ## 0. Shared schema
 
-Most entries below share one small schema, adapted from the schema GraphQL's own documentation has used for years to teach the language (a galaxy far, far away; characters, films, and a review system). Recognizable on purpose. Presented once here in both languages; later entries assume it.
+Most entries below share one small schema. It is adapted from the schema GraphQL's own documentation has used for years to teach the language (a galaxy far, far away; characters, films, and a review system). It is recognizable on purpose. It appears once here in both languages, and later entries assume it.
 
 ### GraphQL SDL
 
@@ -172,7 +172,11 @@ mutation createReview(episode: Episode, stars: W8, commentary: Text?) returns Re
 }
 ```
 
-Since Draft 27 `Character` **is** declared: an `interface` names the fields every implementer shares (`name`, `appearsIn`, and the `friends` collection), and `Human`/`Droid` opt in with `implements Character`. Nothing is ever *stored* as a bare `Character` — entities remain concretely typed, and an interface has no entity identity of its own; the declaration exists so that relationship targets (`has many friends: Character`) and fragment positions (`fragment CharacterName on Character`) resolve, and so the compiler can check that every member declares the common fields compatibly. The `friends` collection spans both concrete types (a friend list mixes species freely, same as the original); its `by ownerId` link column is declared by no member, which the Draft 27 rule permits as a storage-level join column — friendship is many-to-many, so the loader resolves it from the join storage rather than a scalar foreign key, and a schema wanting the join to be a queryable entity would reify it (Section 3.6). `SearchResult`'s union needs no declaration: the `search` root's target is written inline as the alternative list, an anonymous interface with no common fields. `search` is also the corpus's example of a **parameter-backed** list root: `text` is a query parameter, not a stored column, so the collection's cache-tag family groups by the parameter (`search:{text}`), and its keyset orders by a real column (`name`) so cursors stay derivable.
+`Character` is declared as an interface. An `interface` names the fields every implementer shares (`name`, `appearsIn`, and the `friends` collection), and `Human` and `Droid` opt in with `implements Character`. Nothing is ever *stored* as a bare `Character`. Entities remain concretely typed, and an interface has no entity identity of its own. The declaration exists so that relationship targets (`has many friends: Character`) and fragment positions (`fragment CharacterName on Character`) resolve, and so the compiler can check that every member declares the common fields compatibly.
+
+The `friends` collection spans both concrete types: a friend list mixes species freely, same as the original. Its `by ownerId` link column is declared by no member, which the spec permits as a storage-level join column. Friendship is many-to-many, so the loader resolves it from join storage rather than a scalar foreign key. A schema that wants the join to be a queryable entity would reify it (Section 3.6).
+
+`SearchResult`'s union needs no declaration. The `search` root's target is written inline as the alternative list, an anonymous interface with no common fields. `search` is also the corpus's example of a **parameter-backed** list root: `text` is a query parameter, not a stored column, so the collection's cache-tag family groups by the parameter (`search:{text}`), and its keyset orders by a real column (`name`) so cursors stay derivable.
 
 ---
 
@@ -202,7 +206,7 @@ query Hero {
 }
 ```
 
-Nearly the same query. `friends` takes a page argument (`first: 10`) because the schema declares it a *paginated* collection: a character's friend list can grow without a natural bound, so it is walked, not returned whole. A collection small by nature (a character's `appearsIn` episodes, say) would be declared *bounded* and would need no argument (Section 3.6). GraphQL's list fields are unbounded by default and page only if you build Relay connections by hand; Lattice makes the bounded-versus-paginated call once, in the schema, and small lists stay plain arrays. What differs underneath is bigger than pagination: the response is a normalized entity stream, not the nested JSON tree GraphQL returns (Entry 11).
+Nearly the same query. `friends` takes a page argument (`first: 10`) because the schema declares it a *paginated* collection: a character's friend list can grow without a natural bound, so it is walked, not returned whole. A collection that is small by nature (a character's `appearsIn` episodes, say) would be declared *bounded* and would need no argument (Section 3.6). GraphQL's list fields are unbounded by default and page only if you build Relay connections by hand. Lattice makes the bounded-versus-paginated call once, in the schema, and small lists stay plain arrays. What differs underneath is bigger than pagination: the response is a normalized entity stream, not the nested JSON tree GraphQL returns (Entry 11).
 
 ---
 
@@ -232,7 +236,7 @@ query HeroNameAndFriends($episode: Episode) {
 }
 ```
 
-Essentially identical to GraphQL. The one thing to know is a restriction you cannot see here: `hero(episode: $episode)` works because `episode` is a grouping key the schema declared, and argument-based filtering is permitted *only* on grouping keys, not on arbitrary fields (Section 4.6). A GraphQL server could accept any resolver argument; Lattice accepts only the ones the schema pre-committed to serving and invalidating.
+Essentially identical to GraphQL. One restriction is not visible here: `hero(episode: $episode)` works because `episode` is a grouping key the schema declared, and argument-based filtering is permitted *only* on grouping keys, not on arbitrary fields (Section 4.6). A GraphQL server can accept any resolver argument. Lattice accepts only the ones the schema pre-committed to serving and invalidating.
 
 ---
 
@@ -249,7 +253,7 @@ query FetchTwoHeroes {
 
 **Lattice: no direct port**
 
-There is no alias mechanism (Section 4.1). GraphQL aliasing exists to disambiguate two selections of one field in a response tree; Lattice's wire is keyed by entity identity and canonical field name, so there is no tree and nothing to relabel, and the same root field cannot appear twice under two client-chosen labels. Two workarounds, and the choice between them is a substantive design decision, not a formatting one.
+There is no alias mechanism (Section 4.1). GraphQL aliasing exists to disambiguate two selections of one field in a response tree. Lattice's wire is keyed by entity identity and canonical field name, so there is no tree and nothing to relabel, and the same root field cannot appear twice under two client-chosen labels. There are two workarounds, and the choice between them is a substantive design decision, not a formatting one.
 
 **As two requests:**
 
@@ -258,7 +262,7 @@ query EmpireHero { hero(episode: EMPIRE) { name } }
 query JediHero   { hero(episode: JEDI)   { name } }
 ```
 
-Two canonical texts, two hashes, two independently cacheable and independently tenured responses. If "the Empire hero" and "the Jedi hero" are actually two different pieces of UI with two different change rates (one show's cast is fixed, another's is still airing), this is a better fit than GraphQL's version, which fuses them into one response that can only be as fresh, or as cacheable, as its least stable half.
+Two canonical texts, two hashes, two independently cacheable and independently tenured responses. If the Empire hero and the Jedi hero are actually two different pieces of UI with two different change rates (one show's cast is fixed, another's is still airing), this is a better fit than GraphQL's version. GraphQL fuses them into one response that can only be as fresh, or as cacheable, as its least stable half.
 
 **As two schema-declared roots**, if the pairing itself is a stable product concept worth naming:
 
@@ -267,14 +271,16 @@ get empireHero of Human  where episode = Empire  public
 get jediHero   of Human  where episode = Jedi    public
 ```
 
-now expressible as one multi-root query (Section 4.3) if a single combined fetch is actually wanted:
+These can be combined into one multi-root query (Section 4.3) if a single fetch is wanted:
 
 ```
 query Heroes {
   empireHero { name }
   jediHero   { name }
 }
-``` This is the pattern to reach for when an aliasing use in the wild isn't really "two arbitrary calls to the same field" but "two fixed, named things that happen to share an implementation," which describes a fair fraction of aliasing actually seen in production GraphQL schemas.
+```
+
+This fits the common case where an aliasing use is not really "two arbitrary calls to the same field" but "two fixed, named things that happen to share an implementation." That is how most aliasing in production GraphQL schemas is actually used.
 
 ---
 
@@ -318,7 +324,7 @@ import "fragments/character.lq"
 query JediHero { hero(episode: JEDI) { ...Comparison } }
 ```
 
-This is a near-verbatim port: Lattice fragments are GraphQL fragments (Section 4.5), spread with `...Comparison`, defined in a shared file and `import`ed. The only thing that doesn't carry over is fusing both heroes into one operation via aliasing, for the reasons in Entry 3; each query expands at build time into its own self-contained canonical text, with no fragment reference remaining and no server-side knowledge that a fragment was involved. Two builds that expand identically share one cache identity automatically, which a build system reusing fragments gets for free.
+This is a near-verbatim port. Lattice fragments are GraphQL fragments (Section 4.5), spread with `...Comparison`, defined in a shared file, and `import`ed. The only thing that does not carry over is fusing both heroes into one operation via aliasing, for the reasons in Entry 3. Each query expands at build time into its own self-contained canonical text, with no fragment reference remaining and no server-side knowledge that a fragment was involved. Two builds that expand identically share one cache identity automatically, which a build system reusing fragments gets for free.
 
 ---
 
@@ -337,7 +343,7 @@ query Hero($episode: Episode, $withFriends: Boolean!) {
 
 **Lattice: no port, by design**
 
-Conditional field inclusion is absent (Section 4.7), because a client-toggleable selection multiplies a query's cache identity by the size of the toggle space, which is precisely the property content addressing depends on staying small and enumerable. Two replacements, matching the guidance already in the spec:
+Conditional field inclusion is absent (Section 4.7). A client-toggleable selection multiplies a query's cache identity by the size of the toggle space, which is exactly the property content addressing depends on staying small and enumerable. Two replacements match the guidance already in the spec:
 
 **Split into two queries**, the usual answer:
 
@@ -354,9 +360,9 @@ query HeroNameAndFriends($episode: Episode) {
 }
 ```
 
-A client fetches the first when the friends panel is collapsed and the second when it opens, and each caches at whatever rate its own audience produces, rather than one response whose freshness has to serve both cases.
+A client fetches the first when the friends panel is collapsed and the second when it opens. Each caches at whatever rate its own audience produces, rather than one response whose freshness has to serve both cases.
 
-**Over-fetch**, when the excluded field is cheap: drop the conditional entirely and always request `friends`. For a small, always-resident field this is very often the better trade than a second query, and the spec says so plainly (Section 4.7) rather than treating every over-fetch as a defeat.
+**Over-fetch**, when the excluded field is cheap: drop the conditional entirely and always request `friends`. For a small, always-resident field this is often the better trade than a second query. The spec says so plainly (Section 4.7) rather than treating every over-fetch as a defeat.
 
 ---
 
@@ -386,34 +392,34 @@ query Search($text: Text) {
 }
 ```
 
-This is GraphQL, verbatim: inline fragments `... on Type` are Lattice's interface-dispatch mechanism too (Section 4.4). The difference is not syntactic; the difference is what happens to a concrete type the query doesn't mention. A GraphQL union member with no matching inline fragment returns `{}` (well, the `__typename` if requested, otherwise effectively nothing distinguishable). A Lattice interface edge emits an unlisted concrete type as a bare typed ref, identity only, which a client can render as a placeholder or point-fetch on demand rather than silently dropping. The loaders behind this batch per concrete type (Section 4.5), so adding a third or fourth searchable type later costs the plan one more per-type loader dispatch, not a new round.
+This is GraphQL, verbatim: inline fragments `... on Type` are Lattice's interface-dispatch mechanism too (Section 4.4). The difference is not syntactic. The difference is what happens to a concrete type the query does not mention. A GraphQL union member with no matching inline fragment returns `{}` (the `__typename`, if requested; otherwise effectively nothing distinguishable). A Lattice interface edge emits an unlisted concrete type as a bare typed ref, identity only, which a client can render as a placeholder or point-fetch on demand rather than silently dropping. The loaders behind this batch per concrete type (Section 4.5), so adding a third or fourth searchable type later costs the plan one more per-type loader dispatch, not a new round.
 
 ---
 
 ## 7. Scalars
 
-**GraphQL** ships five built-in scalars: `Int` (32-bit signed), `Float` (IEEE 754 double), `String`, `Boolean`, `ID` (serialized as a string, opaque). Everything else, dates, money, UUIDs, is either a custom scalar with server-defined and often under-specified serialization, or smuggled through `String`.
+**GraphQL** ships five built-in scalars: `Int` (32-bit signed), `Float` (IEEE 754 double), `String`, `Boolean`, and `ID` (serialized as a string, opaque). Everything else (dates, money, UUIDs) is either a custom scalar with server-defined and often under-specified serialization, or smuggled through `String`.
 
 **Lattice** starts from a wider catalog because the wire format has to survive hashing into etags and round-tripping through JavaScript clients without corruption (Section 3.5.3):
 
 | GraphQL | Lattice | Why it's different |
 |---|---|---|
-| `Int` | `I32` (or `I8`/`I16`/`W8`/`W16`/`W32` as the domain calls for) | GraphQL's `Int` is always 32-bit signed regardless of what's actually being counted; Lattice makes the width and signedness a deliberate modeling choice. |
-| `Float` | `F64` (or `F32`) | Same IEEE representation, but Lattice pins the canonical rendering (shortest round-trip, no `NaN`/`Infinity` on the wire) so two encoders can't disagree about `0.1` and silently fork a cache entry. |
-| `String` | `Text` | Both UTF-8; Lattice additionally requires NFC normalization, since text feeds into canonicalization elsewhere in the protocol. |
+| `Int` | `I32` (or `I8`/`I16`/`W8`/`W16`/`W32` as the domain calls for) | GraphQL's `Int` is always 32-bit signed regardless of what is being counted. Lattice makes the width and signedness a deliberate modeling choice. |
+| `Float` | `F64` (or `F32`) | Same IEEE representation, but Lattice pins the canonical rendering (shortest round-trip, no `NaN`/`Infinity` on the wire) so two encoders cannot disagree about `0.1` and silently fork a cache entry. |
+| `String` | `Text` | Both are UTF-8. Lattice additionally requires NFC normalization, because text feeds into canonicalization elsewhere in the protocol. |
 | `Boolean` | `Bool` | No difference. |
-| `ID` | a declared `newtype`, e.g. `newtype HumanId = Uuid` | GraphQL's `ID` erases the underlying representation and the type it identifies; a Lattice newtype keeps both, nominally distinct (`HumanId` and `DroidId` cannot be confused at the type level) at zero wire cost. |
-| a custom `Money` scalar, usually serialized as a float and quietly wrong | `Decimal` | Arbitrary-precision, serialized as a normalized decimal string, exactly the representation a ledger or an order book needs and a float categorically cannot give you. |
-| a custom scalar for large IDs, often serialized as a string to dodge `Int`'s 32-bit ceiling | `I64` / `W64` / `Integer` | Built in, and specified to serialize as a decimal string precisely because a bare JSON number here is where a JavaScript client silently loses precision above 2^53. |
-| nothing built in for binary data | `Bytes`, `Bytes n`, `Bit n` | GraphQL has no native byte-string scalar at all; every GraphQL API either invents a base64-string custom scalar per field or avoids binary data entirely. |
+| `ID` | a declared `newtype`, e.g. `newtype HumanId = Uuid` | GraphQL's `ID` erases the underlying representation and the type it identifies. A Lattice newtype keeps both, nominally distinct (`HumanId` and `DroidId` cannot be confused at the type level), at zero wire cost. |
+| a custom `Money` scalar, usually serialized as a float and quietly wrong | `Decimal` | Arbitrary-precision, serialized as a normalized decimal string. This is the representation a ledger or order book needs and a float categorically cannot give. |
+| a custom scalar for large IDs, often serialized as a string to dodge `Int`'s 32-bit ceiling | `I64` / `W64` / `Integer` | Built in, and specified to serialize as a decimal string because a bare JSON number here is where a JavaScript client silently loses precision above 2^53. |
+| nothing built in for binary data | `Bytes`, `Bytes n`, `Bit n` | GraphQL has no native byte-string scalar at all. Every GraphQL API either invents a base64-string custom scalar per field or avoids binary data entirely. |
 
-The general pattern: GraphQL's scalar set covers what a typical CRUD API needs and leaves everything precision-sensitive, money, wide integers, binary data, to ad hoc custom scalars with no shared serialization convention across servers. Lattice's catalog is wider up front specifically so that a trading system, a ledger, or anything else where a silently-wrong float or a truncated integer costs money doesn't have to invent its own scalar and hope every client agrees on how to parse it.
+The general pattern: GraphQL's scalar set covers what a typical CRUD API needs and leaves everything precision-sensitive (money, wide integers, binary data) to ad hoc custom scalars with no shared serialization convention across servers. Lattice's catalog is wider up front so that a trading system, a ledger, or anything else where a silently-wrong float or a truncated integer costs money does not have to invent its own scalar and hope every client agrees on how to parse it.
 
 ---
 
 ## 8. Pagination: Relay connections
 
-**GraphQL**, following the Relay connection spec, which is where most production GraphQL APIs get their pagination pattern (GitHub's and Shopify's public APIs both use it directly):
+**GraphQL**, following the Relay connection spec, which is where most production GraphQL APIs get their pagination pattern:
 
 ```graphql
 {
@@ -467,9 +473,11 @@ query HeroFriends {
 {"kind":"entity","id":"Human:1003","ver":"c19","fields":{"name":"Leia Organa"}}
 ```
 
-Two things are gone: the requirement to paginate at all (a bounded collection is a plain array, Section 3.6), and, when you do paginate, the `edges { cursor, node { ... } }` wrapper. It's worth being specific about the wrapper, since Relay's design was reasonable given what it had to work with. Relay needed a place to hang a per-edge `cursor` inside a response that is otherwise a plain nested tree, so it introduced an intermediate `edges` object whose only job is carrying that cursor next to the node it belongs to. Lattice's wire format has no tree to begin with, entities are flat, deduplicated, referenced by id, so there's nothing for an edge wrapper to attach to, and there doesn't need to be: a cursor is a canonical encoding of an item's own keyset column values (Section 3.2), so *any* client already holding `Human:1002` with its `name` field can derive that item's cursor locally without the server ever having sent one. `pageInfo.hasNextPage` collapses to `next != null`. `pageInfo.endCursor` is just `next`. Nothing here is a reduced version of Relay's design, it's Relay's design with the wrapper removed once the reason for the wrapper no longer applies.
+Two things are gone. First, the requirement to paginate at all: a bounded collection is a plain array (Section 3.6). Second, when you do paginate, the `edges { cursor, node { ... } }` wrapper.
 
-The one substantive capability difference: Relay connections are forward-and-optionally-backward via `first`/`after` and `last`/`before`, which Lattice matches exactly (Section 3.6), plus an `around` window Relay doesn't have, for jumping to a page centered on a permalinked item without walking from the start.
+The wrapper deserves explanation, because Relay's design was reasonable for what it had to work with. Relay needed a place to hang a per-edge `cursor` inside a response that is otherwise a plain nested tree. It introduced an intermediate `edges` object whose only job is carrying that cursor next to the node it belongs to. Lattice's wire format has no tree to begin with. Entities are flat, deduplicated, and referenced by id, so there is nothing for an edge wrapper to attach to, and there does not need to be. A cursor is a canonical encoding of an item's own keyset column values (Section 3.2), so any client that already holds `Human:1002` with its `name` field can derive that item's cursor locally without the server ever sending one. `pageInfo.hasNextPage` collapses to `next != null`. `pageInfo.endCursor` is just `next`. This is not a reduced version of Relay's design. It is Relay's design with the wrapper removed once the reason for the wrapper no longer applies.
+
+The one substantive capability difference: Relay connections are forward-and-optionally-backward via `first`/`after` and `last`/`before`, which Lattice matches exactly (Section 3.6). Lattice also adds an `around` window Relay does not have, for jumping to a page centered on a permalinked item without walking from the start.
 
 ---
 
@@ -486,7 +494,7 @@ The one substantive capability difference: Relay connections are forward-and-opt
 }
 ```
 
-This is the textbook example DataLoader exists to fix. A naive resolver-per-field GraphQL server executes one query to list the posts, then, for each post, a separate resolver call to fetch its author, N+1 round trips to the data layer for N posts. The fix is not part of the GraphQL language; it's an application-level cache-and-batch library (DataLoader) that every non-trivial GraphQL server is expected to wire in by hand, per field, and it is easy to forget on a field nobody thought to test with more than one result.
+This is the textbook example DataLoader exists to fix. A naive resolver-per-field GraphQL server executes one query to list the posts, then a separate resolver call to fetch each post's author: N+1 round trips to the data layer for N posts. The fix is not part of the GraphQL language. It is an application-level cache-and-batch library (DataLoader) that every non-trivial GraphQL server is expected to wire in by hand, per field, and it is easy to forget on a field nobody thought to test with more than one result.
 
 **Lattice**
 
@@ -506,7 +514,9 @@ type Loader parent child =
   NESet (Key parent) -> m (Map (Key parent) (Page (Key child)))
 ```
 
-There is no function type in the schema model that takes one parent key and returns one child; per-row resolution is not a thing a schema author can accidentally write, the same way a Haskell function typed `[a] -> [b]` cannot secretly be implemented by looping and hitting the database once per element without the type giving any indication that's what's happening, except here the type itself forecloses it rather than merely obscuring it. The plan for this query is one round for `posts`, then one round batching every distinct author id the first round produced into a single `User` loader call (Section 19.2); the trace is two spans regardless of whether there are three posts or three thousand. GraphQL's version of this query has an execution cost that scales with result size in a way its own syntax gives no warning about; Lattice's has a plan whose structure is fixed at compile time and whose cost is visible in `explain` before a single row is fetched.
+There is no function type in the schema model that takes one parent key and returns one child. Per-row resolution is not a thing a schema author can accidentally write. This is like a Haskell function typed `[a] -> [b]` that cannot secretly be implemented by looping and hitting the database once per element without the type giving any indication that is what is happening, except here the type itself forecloses the failure rather than merely obscuring it.
+
+The plan for this query is one round for `posts`, then one round batching every distinct author id the first round produced into a single `User` loader call (Section 19.2). The trace is two spans regardless of whether there are three posts or three thousand. GraphQL's version of this query has an execution cost that scales with result size in a way its own syntax gives no warning about. Lattice's plan has a structure fixed at compile time, and its cost is visible in `explain` before a single row is fetched.
 
 ---
 
@@ -545,7 +555,9 @@ Idempotency-Key: 7e2c1a90-...
 {"kind":"end","complete":true}
 ```
 
-The domain content is identical; everything else around it is new because GraphQL's mutation model stops at "here is a field that runs a side effect and returns some data," and Lattice's starts there. The IDL declaration from Section 0 additionally states, and the compiler checks: exactly which rows this mutation may write (`writes Review(new), reviews(episode)`), exactly what a client retrying this call is protected against (`Idempotency-Key`, at-most-once acceptance, Section 11.2), and exactly what caches this write invalidates (`invalidated`, flowing to any CDN sitting in front of a query that lists reviews for this episode). None of that has a GraphQL equivalent; a GraphQL mutation resolver is free to be non-idempotent, and a retried `createReview` after a dropped connection creates a second review with no protocol-level way to have prevented it, short of the client and server privately agreeing on some ad hoc deduplication scheme.
+The domain content is identical. Everything else around it is new, because GraphQL's mutation model stops at "here is a field that runs a side effect and returns some data," and Lattice's starts there. The IDL declaration from Section 0 additionally states, and the compiler checks, three things: exactly which rows this mutation may write (`writes Review(new), reviews(episode)`); exactly what a client retrying this call is protected against (`Idempotency-Key`, at-most-once acceptance, Section 11.2); and exactly what caches this write invalidates (`invalidated`, flowing to any CDN sitting in front of a query that lists reviews for this episode).
+
+None of that has a GraphQL equivalent. A GraphQL mutation resolver is free to be non-idempotent, and a retried `createReview` after a dropped connection creates a second review with no protocol-level way to prevent it, short of the client and server privately agreeing on some ad hoc deduplication scheme.
 
 ---
 
@@ -574,7 +586,7 @@ The domain content is identical; everything else around it is new because GraphQ
 }
 ```
 
-This is GraphQL's canonical partial-failure form, and it's an awkward one to consume: the response is `200 OK` regardless of what's in `errors`, `data` and `errors` can both be present with no formal statement of how they relate beyond the `path` array, and a client has to walk `path` against the tree it just parsed to figure out which value the error actually concerns, `null` at that position for a nullable field or a hole further up for a non-nullable one.
+This is GraphQL's canonical partial-failure form, and it is an awkward one to consume. The response is `200 OK` regardless of what is in `errors`. `data` and `errors` can both be present with no formal statement of how they relate beyond the `path` array. A client has to walk `path` against the tree it just parsed to figure out which value the error concerns: `null` at that position for a nullable field, or a hole further up for a non-nullable one.
 
 **Lattice**
 
@@ -590,13 +602,17 @@ HTTP/1.1 207 Multi-Status
 {"kind":"end","complete":true}
 ```
 
-The failure is scoped to `Human:1002` directly, by entity id, rather than by a path a client has to interpret relative to a tree that mixes it into `data`. The status line itself carries the coarse signal, `207` rather than `200` (Section 9.4.6), for any infrastructure that only inspects headers, while the in-body `error` record remains what a client actually acts on: it names what failed (`Scope`, Section 9.4.1), how (`code`, drawn from the same `lattice:` namespace as whole-request errors, Section 9.4.2), and whether retrying is worth it (`retryable`). GraphQL's design has no equivalent of `retryable` at all; every error is presented identically whether it's a transient timeout or a permanent validation failure, leaving the client to guess. And GraphQL's response stays cacheable-by-convention at `200` even when it's visibly degraded; a `207` here is specifically excluded from RFC 9111's default-cacheable status list, so a shared cache defaults to caution on exactly the response that most needs it (Section 9.4.6), and the origin additionally self-purges its own surrogate keys immediately so the degraded copy doesn't linger even under an explicit override.
+The failure is scoped to `Human:1002` directly, by entity id, rather than by a path a client has to interpret relative to a tree that mixes it into `data`. The status line carries the coarse signal, `207` rather than `200` (Section 9.4.6), for any infrastructure that only inspects headers. The in-body `error` record remains what a client actually acts on: it names what failed (`Scope`, Section 9.4.1), how (`code`, drawn from the same `lattice:` namespace as whole-request errors, Section 9.4.2), and whether retrying is worth it (`retryable`).
+
+GraphQL's design has no equivalent of `retryable` at all. Every error is presented identically whether it is a transient timeout or a permanent validation failure, leaving the client to guess. And GraphQL's response stays cacheable-by-convention at `200` even when it is visibly degraded. A `207` here is specifically excluded from RFC 9111's default-cacheable status list, so a shared cache defaults to caution on exactly the response that most needs it (Section 9.4.6). The origin additionally self-purges its own surrogate keys immediately so the degraded copy does not linger even under an explicit override.
 
 ---
 
 ## 12. Bulk mutations
 
-**GraphQL** has no native construct for "apply this mutation to many inputs in one call." Community practice has landed on a few different workarounds, none of them satisfying: a mutation field that accepts a list argument (`createReviews(reviews: [ReviewInput!]!): [Review]`, which the schema author has to hand-write per mutation, with no shared idempotency or partial-failure story); transport-level query batching (several unrelated GraphQL *operations* packed into one HTTP request by a client-side link, which batches network calls, not domain semantics, and gives the server no idea the operations are related); or, for truly large volumes, an entirely separate asynchronous API bolted on next to GraphQL, Shopify's bulk operations API being the best-known instance, which accepts a mutation, runs it as a background job, and has the client poll or subscribe for a JSONL result file, because GraphQL's synchronous request-response mutation model was never going to scale to bulk without leaving the language.
+**GraphQL** has no native construct for "apply this mutation to many inputs in one call." Community practice has landed on a few workarounds, none of them satisfying.
+
+One is a mutation field that accepts a list argument (`createReviews(reviews: [ReviewInput!]!): [Review]`), which the schema author hand-writes per mutation, with no shared idempotency or partial-failure story. Another is transport-level query batching: several unrelated GraphQL *operations* packed into one HTTP request by a client-side link. That batches network calls, not domain semantics, and gives the server no idea the operations are related. For truly large volumes, teams bolt on an entirely separate asynchronous API next to GraphQL. Shopify's bulk operations API is one example: it accepts a mutation, runs it as a background job, and has the client poll or subscribe for a JSONL result file. GraphQL's synchronous request-response mutation model was never going to scale to bulk without leaving the language.
 
 **Lattice**
 
@@ -629,7 +645,9 @@ HTTP/1.1 207 Multi-Status
 {"kind":"end","complete":true}
 ```
 
-Bulk invocation (Section 11.8) is a declared property of the mutation, not a separately hand-rolled field, and it comes with the same guarantees the singular form has, extended rather than abandoned: an envelope-level `Idempotency-Key` protecting the submission, a per-item `key` protecting each item independently (so resubmitting a batch with one new order appended doesn't reprocess the two that already committed), a declared `errors` vocabulary an item's failure is reported against, and a runtime-enforced write-set bracket per item (Section 11.4). Shopify needed a second API and an asynchronous job-and-poll model to get bulk operations working at all; here it's the same mutation, same schema declaration, same protocol, with `best-effort` chosen because canceling three orders has no reason to be all-or-nothing. Where a batch does need one-transaction-or-nothing semantics, `AllOrNothing` is available for mutations whose effect class supports it (Section 11.8), which a synchronous, job-free bulk API of this kind was never in a position to offer either way.
+Bulk invocation (Section 11.8) is a declared property of the mutation, not a separately hand-rolled field. It comes with the same guarantees the singular form has, extended rather than abandoned: an envelope-level `Idempotency-Key` protecting the submission; a per-item `key` protecting each item independently (so resubmitting a batch with one new order appended does not reprocess the two that already committed); a declared `errors` vocabulary an item's failure is reported against; and a runtime-enforced write-set bracket per item (Section 11.4).
+
+The Shopify approach needed a second API and an asynchronous job-and-poll model to get bulk operations working at all. Here it is the same mutation, the same schema declaration, the same protocol, with `best-effort` chosen because canceling three orders has no reason to be all-or-nothing. Where a batch does need one-transaction-or-nothing semantics, `AllOrNothing` is available for mutations whose effect class supports it (Section 11.8). A synchronous, job-free bulk API of this kind was never in a position to offer that either way.
 
 ---
 
@@ -665,7 +683,7 @@ query CommentsOnPost($postId: PostId) {
 }
 ```
 
-There is no separate subscription language or a distinct `Subscription` root type; any hash-form query URL can be opened live (Section 12). GraphQL's subscription and its equivalent query for the same data are two different operations, defined against two different schema roots, that a client has to keep in sync by hand, one for the initial load and a structurally different one for updates after. Here they are the same query used two ways: fetched once for the initial render, or opened with `live=sse` for a push stream of the identical wire records whenever an invalidation touches something the query's surrogate keys cover. A client's parsing and store-merge code doesn't know or care which mode produced a given record.
+There is no separate subscription language or distinct `Subscription` root type; any hash-form query URL can be opened live (Section 12). GraphQL's subscription and its equivalent query for the same data are two different operations, defined against two different schema roots, that a client has to keep in sync by hand: one for the initial load and a structurally different one for updates after. Here they are the same query used two ways. It is fetched once for the initial render, or opened with `live=sse` for a push stream of the identical wire records whenever an invalidation touches something the query's surrogate keys cover. A client's parsing and store-merge code does not know or care which mode produced a given record.
 
 ---
 
@@ -702,7 +720,7 @@ entity Human by id {
 }
 ```
 
-GraphQL's introspection system exists because a GraphQL schema is, at the protocol level, private server state that clients need a query to ask about. A Lattice schema is instead a plain, content-addressed, publicly cacheable document (Section 7.1), fetched with an ordinary `GET`, servable forever once fetched by hash, and readable by a human or a codegen tool without executing anything against the API it describes. Nothing is lost in dropping introspection-as-a-query: everything `__schema` and `__type` exist to expose is already sitting in the one document every client, and every piece of tooling in Section 20, was going to need to read anyway.
+GraphQL's introspection system exists because a GraphQL schema is, at the protocol level, private server state that clients need a query to ask about. A Lattice schema is instead a plain, content-addressed, publicly cacheable document (Section 7.1), fetched with an ordinary `GET`, servable forever once fetched by hash, and readable by a human or a codegen tool without executing anything against the API it describes. The capability introspection provides is not lost: everything `__schema` and `__type` exist to expose is already in the one document every client, and every piece of tooling in Section 20, was going to need to read anyway.
 
 ---
 
@@ -721,10 +739,7 @@ type UserProfile { id: ID!, bio: String, location: String }
 type User { id: ID!, name: String!, profile: UserProfile }
 ```
 
-GraphQL's spec has nothing to say about either — both types mint unrelated
-identities in every client cache, and whether an `updateAdminUser` mutation
-should invalidate a cached `User` is tribal knowledge encoded in resolver
-comments and `refetchQueries` lists.
+GraphQL's spec does not address either case. Both types mint unrelated identities in every client cache, and whether an `updateAdminUser` mutation should invalidate a cached `User` is left to resolver comments and `refetchQueries` lists, with no protocol-level guidance.
 
 **Lattice**
 
@@ -754,22 +769,9 @@ entity AdminUser refines User {
 }
 ```
 
-The id reuse that GraphQL leaves as convention is a declaration here, because
-the two cases mean opposite things on the network (Section 3.8). `joins`
-declares *adjacent truth*: `UserProfile:7` has its own `ver`, its own
-surrogate keys, its own lifecycle — a profile edit does not purge any cached
-response that only touched `User.name`. `refines` declares *the same truth*:
-one shared `ver` sequence, and a write to any family member mints surrogate
-keys for the whole family (`AdminUser:7` **and** `User:7`), so a permissions
-change invalidates every cached view of that row; deleting the `User`
-tombstones the family. The decision rule is invalidation coupling, not ORM
-aesthetics: one write invalidating both views ⇒ `refines`; independently
-aging truths ⇒ `joins`. Ids reused across *unrelated* types need nothing at
-all — identity is always the type-qualified pair, so `Invoice:42` and
-`User:42` never meet in a cache key, a ref, or a purge. And because the
-family fan-out is static in the schema, an out-of-band writer (a consumer
-materializing rows off a Kafka topic, Section 11.5) mints exactly the same
-keys the mutation path would.
+The id reuse that GraphQL leaves as convention is a declaration here, because the two cases mean opposite things on the network (Section 3.8). `joins` declares *adjacent truth*: `UserProfile:7` has its own `ver`, its own surrogate keys, and its own lifecycle. A profile edit does not purge any cached response that only touched `User.name`. `refines` declares *the same truth*: one shared `ver` sequence, and a write to any family member mints surrogate keys for the whole family (`AdminUser:7` and `User:7`), so a permissions change invalidates every cached view of that row, and deleting the `User` tombstones the family.
+
+The decision rule is invalidation coupling, not ORM aesthetics. One write invalidating both views means `refines`. Independently aging truths mean `joins`. Ids reused across *unrelated* types need nothing at all: identity is always the type-qualified pair, so `Invoice:42` and `User:42` never meet in a cache key, a ref, or a purge. And because the family fan-out is static in the schema, an out-of-band writer (a consumer materializing rows off a Kafka topic, Section 11.5) mints exactly the same keys the mutation path would.
 
 ---
 
@@ -789,10 +791,7 @@ input CreateOrder {
 }
 ```
 
-GraphQL's `!` fights its own default (everything nullable unless annotated),
-cannot say "at least one" (`[T!]!` still admits `[]`), and enforces non-null
-by **null propagation**: a violation nulls the nearest nullable ancestor, so
-one bad row can blank out an entire subtree of otherwise-good data.
+GraphQL's `!` works against its own default (everything is nullable unless annotated). It cannot express "at least one" (`[T!]!` still admits `[]`), and it enforces non-null by **null propagation**: a violation nulls the nearest nullable ancestor, so one bad row can blank out an entire subtree of otherwise-good data.
 
 **Lattice**
 
@@ -812,18 +811,7 @@ entity Order by id {
 mutation createOrder(lines: [LineInput]+) returns Order { ... }
 ```
 
-The defaults flip and the gaps fill in. Fields are required unless marked
-`?`, so the annotation burden sits on the exception. `has one` is a contract
-that the edge resolves; `has one?` is the declared maybe (and a required edge
-over an optional link column is rejected at elaboration — the schema cannot
-promise what the column cannot). Bounded collections take a `min` floor, and
-the nonempty list `[t]+` lives in the one type language fields, mutation
-inputs, and variables share — so "you cannot create an order with no lines"
-is the same declaration that types the field (spec §3.4–3.6). Violations
-behave like every other Lattice integrity problem: an `Edge`-scoped
-`lattice:cardinality` / `lattice:collection-underflow` error record in a
-`207` response that keeps the rest of the data — there is no null
-propagation, because a normalized entity stream has no tree to blank out.
+The defaults flip and the gaps fill in. Fields are required unless marked `?`, so the annotation burden sits on the exception. `has one` is a contract that the edge resolves; `has one?` is the declared maybe (and a required edge over an optional link column is rejected at elaboration, because the schema cannot promise what the column cannot). Bounded collections take a `min` floor, and the nonempty list `[t]+` lives in the one type language that fields, mutation inputs, and variables share. So "you cannot create an order with no lines" is the same declaration that types the field (spec §3.4-3.6). Violations behave like every other Lattice integrity problem: an `Edge`-scoped `lattice:cardinality` / `lattice:collection-underflow` error record in a `207` response that keeps the rest of the data. There is no null propagation, because a normalized entity stream has no tree to blank out.
 
 ---
 
