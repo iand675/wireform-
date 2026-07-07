@@ -923,7 +923,7 @@ preflight req =
     204
     [ ("Access-Control-Allow-Origin", "*")
     , ("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, QUERY, OPTIONS")
-    , ("Access-Control-Allow-Headers", "Content-Type, Idempotency-Key, If-Match, If-None-Match, X-Vc-Auth, X-Have, X-Have-Digest, Lattice-Query-Name")
+    , ("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key, If-Match, If-None-Match, X-Vc-Auth, X-Have, X-Have-Digest, Lattice-Query-Name")
     , ("Access-Control-Max-Age", "600")
     ]
     ""
