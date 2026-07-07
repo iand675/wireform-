@@ -190,3 +190,43 @@ it:
 Store gaps (refs the stream did not accompany with entities) are filled with
 point fetches (§6.7), version-pinned where the ref's `ver` is known. Those
 responses are immutable and cache forever.
+
+## The explorer: a GraphiQL for Lattice
+
+`@wireform/lattice/explorer` is an embeddable, dependency-free web IDE built on
+the client. It is the concrete form of the [Tooling chapter](../spec/#20-tooling-non-normative)'s
+interactive explorer (§6.5's one-shot form and §20.4's development mode exist
+for exactly this workflow). Mount it into any element:
+
+```ts
+import { mountExplorer } from "@wireform/lattice/explorer";
+
+mountExplorer(document.getElementById("app")!, { base: "http://localhost:8917" });
+```
+
+It fetches discovery, follows it to the origin's canonical IDL document, and
+parses that into a tooling model that powers two panes:
+
+- **Query workshop** — a schema-aware editor (completion for roots, fields,
+  edges, `... on Type`, enum argument values, and variables; auto-indent; live
+  grammar linting) with a clickable docs sidebar. Running a query climbs the
+  transport ladder you choose and shows the denormalized data, the raw
+  entity-stream records, the [`explain`](../spec/#20-2-explain) plan (path-join
+  slices, loader rounds, surrogate keys, budget use), and every response
+  header.
+- **IDL authoring** — an IDL editor with live structural validation and a
+  one-click compatibility check (`POST /schema/check`, §17.3) against the
+  origin's deployed schema.
+
+The IDE is assembled from exported, individually usable pieces — `parseSchema`
+(the browser-side IDL model), `completeQuery` / `lintQuery` (editor services),
+`highlightQuery` / `highlightIdl`, and the headless `ExplorerSession`
+(run / explain / checkIdl over an injectable `fetch`). Like the client, the
+explorer is deliberately not authoritative: the origin owns canonicalization,
+hashing, and validation, so the browser-side `parseSchema` is a tooling parser
+for docs and completion, never a second source of truth.
+
+```bash
+cabal run example-lattice            # a Lattice origin on :8917
+cd lattice-ts && npm run explorer:dev
+```

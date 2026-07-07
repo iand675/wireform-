@@ -6,7 +6,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./react": "./src/react.ts"
+    "./react": "./src/react.ts",
+    "./explorer": "./src/explorer/index.ts"
   },
   "files": [
     "src",
@@ -21,7 +22,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "example:dev": "npm run dev --workspace example",
-    "example:build": "npm run build --workspace example"
+    "example:build": "npm run build --workspace example",
+    "explorer:dev": "vite explorer-example"
   },
   "peerDependencies": {
     "react": ">=18"

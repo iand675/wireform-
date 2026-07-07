@@ -4,8 +4,9 @@ A zero-runtime-dependency TypeScript client for the [Lattice](../website/src/con
 cache-native graph query protocol, with Apollo-style React bindings.
 
 ```
-@wireform/lattice        the protocol client: gql, LatticeClient, store, mergeQueries
-@wireform/lattice/react  LatticeProvider, useLatticeQuery, useLatticeMutation
+@wireform/lattice          the protocol client: gql, LatticeClient, store, mergeQueries
+@wireform/lattice/react    LatticeProvider, useLatticeQuery, useLatticeMutation
+@wireform/lattice/explorer mountExplorer — an embeddable GraphiQL-style web IDE
 ```
 
 The library has **no runtime dependencies**. React is an optional peer
@@ -197,6 +198,63 @@ arrived — a scoped error on the output selection never retracts a commit.
   schema-dependent (default erasure, slice partition, validation beyond the
   grammar) is the origin's job and arrives via re-canonicalization and plan
   discovery.
+
+## The explorer (`@wireform/lattice/explorer`)
+
+An embeddable, dependency-free web IDE for Lattice, in the spirit of GraphiQL:
+workshop queries against a live origin and author IDLs, both schema-aware.
+Mount it into any element:
+
+```ts
+import { mountExplorer } from "@wireform/lattice/explorer";
+
+const explorer = mountExplorer(document.getElementById("app")!, {
+  base: "http://localhost:8917",   // a Lattice origin
+  // claims, vcAuth, slice, defaultQuery, defaultMode, fetch are all optional
+});
+```
+
+It fetches discovery, follows it to the origin's canonical IDL document
+(`GET /schema/{hash}`), and parses it into a tooling model that drives:
+
+- **Query workshop** — a syntax-highlighted editor with schema-aware
+  completion (roots, fields, edges, `... on Type`, enum argument values,
+  variables), auto-indent, live grammar linting (via this package's `parse`),
+  and a clickable schema-docs sidebar. Run climbs the transport ladder you
+  pick (`introduce` — the default, which also fetches the `explain` plan —
+  `oneshot`, or `inline`) and shows the **denormalized data**, the **raw
+  entity-stream records**, the **`explain` plan** (path-join slices, loader
+  rounds, surrogate keys, budget consumption), and **every response header**.
+- **IDL authoring** — an IDL editor with live structural validation and a
+  one-click compatibility **`/schema/check`** against the origin's deployed
+  schema (§17.3). The docs sidebar re-renders from the text as you type.
+
+The panes are resizable (drag the gutters). Everything the IDE is built from
+is exported for building your own tooling:
+
+```ts
+import {
+  parseSchema,      // browser-side IDL → tooling schema model
+  completeQuery,    // schema-aware completion at a caret offset
+  lintQuery,        // grammar + conservative schema diagnostics
+  ExplorerSession,  // headless run/explain/checkIdl over an injectable fetch
+  highlightQuery, highlightIdl,
+} from "@wireform/lattice/explorer";
+```
+
+`ExplorerSession` is fully headless (no DOM) and takes a `fetch`, so the run,
+explain, and check orchestration is unit-testable against a mock origin. The
+browser-side `parseSchema` is a **tooling** parser: the origin remains the
+authority for canonicalization, hashing, and validation — the explorer never
+computes any of those, exactly as the client never computes query hashes.
+
+### The explorer example
+
+```bash
+cabal run example-lattice          # a Lattice origin on :8917 (repo root)
+cd lattice-ts && npm run explorer:dev   # then open the printed URL
+VITE_LATTICE_BASE=http://localhost:9000 npm run explorer:dev  # point elsewhere
+```
 
 ## The example app
 
