@@ -54,6 +54,7 @@ module Lattice.Wire (
   hLatticePlan,
   hLatticeSchema,
   hLatticeSnapshot,
+  hLatticeSnapshotFloor,
   hLatticeOutcome,
   hLatticeQueryName,
   hSurrogateKey,
@@ -64,6 +65,11 @@ module Lattice.Wire (
   hXHaveDigest,
   hLatticeQuerySig,
   hLatticeClient,
+
+  -- * Snapshot vectors (§13.1, §10.2)
+  parseSnapshotVector,
+  renderSnapshotVector,
+  compareSnapshotTokens,
 
   -- * Media types
   queryMediaType,
@@ -82,6 +88,8 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, mapMaybe)
 import Data.Text (Text)
+import Data.Text qualified as T
+import Data.Text.Read qualified as TR
 import Lattice.Types
 
 
@@ -487,10 +495,11 @@ planKey planId = "plan:" <> planId
 -- Headers and media types
 -- ---------------------------------------------------------------------------
 
-hLatticePlan, hLatticeSchema, hLatticeSnapshot, hLatticeOutcome :: CI ByteString
+hLatticePlan, hLatticeSchema, hLatticeSnapshot, hLatticeSnapshotFloor, hLatticeOutcome :: CI ByteString
 hLatticePlan = "Lattice-Plan"
 hLatticeSchema = "Lattice-Schema"
 hLatticeSnapshot = "Lattice-Snapshot"
+hLatticeSnapshotFloor = "Lattice-Snapshot-Floor"
 hLatticeOutcome = "Lattice-Outcome"
 
 
@@ -511,3 +520,46 @@ hLatticeClient = "Lattice-Client"
 
 queryMediaType :: ByteString
 queryMediaType = "application/x-lattice-query"
+
+
+-- ---------------------------------------------------------------------------
+-- Snapshot vectors (§13.1, §10.2)
+-- ---------------------------------------------------------------------------
+
+{- | Parse a @Lattice-Snapshot@ \/ @Lattice-Snapshot-Floor@ dictionary value:
+@dom="tok", dom2="tok2"@ → @[(dom, tok)]@. Lenient — malformed members are
+skipped rather than failing the header, matching how caches treat unknown
+extension members.
+-}
+parseSnapshotVector :: Text -> [(Text, Text)]
+parseSnapshotVector = mapMaybe member . T.splitOn ","
+  where
+    member raw = do
+      let (dom, rest) = T.breakOn "=" (T.strip raw)
+      value <- T.stripPrefix "=" rest
+      tok <- T.stripSuffix "\"" =<< T.stripPrefix "\"" (T.strip value)
+      if T.null dom then Nothing else Just (T.strip dom, tok)
+
+
+-- | Render the dictionary form 'parseSnapshotVector' reads.
+renderSnapshotVector :: [(Text, Text)] -> Text
+renderSnapshotVector =
+  T.intercalate ", " . map (\(dom, tok) -> dom <> "=\"" <> tok <> "\"")
+
+
+{- | The reference token ordering (§13.1: "origins expose the comparison in
+the SDK"). Tokens whose text after the last @:@ parses as a decimal compare
+numerically on it (@mem:9@ < @mem:41@, the reference origin's scheme);
+otherwise shorter-then-lexicographic, which orders fixed-alphabet
+counter-like tokens (hex LSN segments included) correctly as they grow.
+Deployments with token schemes this misorders supply their own comparison
+('Lattice.Client.ccTokenCompare').
+-}
+compareSnapshotTokens :: Text -> Text -> Ordering
+compareSnapshotTokens a b = case (decimalTail a, decimalTail b) of
+  (Just x, Just y) -> compare x y
+  _ -> compare (T.length a) (T.length b) <> compare a b
+  where
+    decimalTail t = case TR.decimal (T.takeWhileEnd (/= ':') t) of
+      Right (n, rest) | T.null rest -> Just (n :: Integer)
+      _ -> Nothing

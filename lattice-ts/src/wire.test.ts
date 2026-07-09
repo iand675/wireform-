@@ -8,15 +8,19 @@ import { describe, expect, it } from "vitest";
 import type { EntityRecord, ErrorRecord, LatticeRecord, ManifestRecord } from "./wire.ts";
 import {
   LatticeWireError,
+  compareSnapshotTokens,
+  intervalsConsistent,
   isPageValue,
   isRef,
   isRefArray,
   isRefValue,
   parseRecord,
   parseRef,
+  parseSnapshotVector,
   readRecords,
   recordsOfText,
   refType,
+  validityIntervals,
 } from "./wire.ts";
 
 /** A Response whose body arrives in exactly the given byte chunks. */
@@ -187,5 +191,60 @@ describe("refs and field-value shapes", () => {
     expect(isPageValue({ $page: {} })).toBe(false);
     expect(isRefArray(["User:1", { $ref: "User:2" }])).toBe(true);
     expect(isRefArray(["User:1", "plain string"])).toBe(false);
+  });
+});
+
+describe("validity intervals (spec 10.2, 13.2 g2-g3)", () => {
+  it("parses snapshot vectors leniently", () => {
+    expect(parseSnapshotVector('main="mem:41"')).toEqual([["main", "mem:41"]]);
+    expect(parseSnapshotVector('shard3="lsn:0/00C21F40", shard7="lsn:0/1B00A2F0"')).toEqual([
+      ["shard3", "lsn:0/00C21F40"],
+      ["shard7", "lsn:0/1B00A2F0"],
+    ]);
+    // malformed members are skipped, not fatal
+    expect(parseSnapshotVector('main="mem:1", bogus, ="x", other="y"')).toEqual([
+      ["main", "mem:1"],
+      ["other", "y"],
+    ]);
+  });
+
+  it("orders tokens numerically on decimal tails, else length-then-lex", () => {
+    expect(compareSnapshotTokens("mem:9", "mem:41")).toBeLessThan(0);
+    expect(compareSnapshotTokens("mem:41", "mem:41")).toBe(0);
+    expect(compareSnapshotTokens("mem:100", "mem:99")).toBeGreaterThan(0);
+    // non-decimal tails: shorter-then-lexicographic (counter-like growth)
+    expect(compareSnapshotTokens("0/9F", "0/100A")).toBeLessThan(0);
+    expect(compareSnapshotTokens("0/AA", "0/AB")).toBeLessThan(0);
+  });
+
+  it("defaults absent floors to the point interval", () => {
+    const ivs = validityIntervals('main="mem:5"', undefined);
+    expect(ivs).toEqual({ main: { floor: "mem:5", token: "mem:5" } });
+    const withFloor = validityIntervals('main="mem:5"', 'main="mem:2"');
+    expect(withFloor).toEqual({ main: { floor: "mem:2", token: "mem:5" } });
+  });
+
+  it("accepts overlapping intervals despite unequal tokens (the point of floors)", () => {
+    const pub = validityIntervals('main="mem:2"', 'main="mem:0"');
+    const priv = validityIntervals('main="mem:9"', 'main="mem:1"');
+    expect(intervalsConsistent([pub, priv])).toBe(true);
+  });
+
+  it("rejects disjoint intervals (read skew) and point-interval divergence", () => {
+    const stale = validityIntervals('main="mem:2"', 'main="mem:0"');
+    const fresh = validityIntervals('main="mem:9"', 'main="mem:7"');
+    expect(intervalsConsistent([stale, fresh])).toBe(false);
+    // no floors -> degenerates to token equality
+    const a = validityIntervals('main="mem:2"', undefined);
+    const b = validityIntervals('main="mem:3"', undefined);
+    expect(intervalsConsistent([a, b])).toBe(false);
+  });
+
+  it("checks domains independently (federation vectors, 18.5)", () => {
+    const one = validityIntervals('posts/main="mem:5", social/main="mem:9"', 'posts/main="mem:1"');
+    const two = validityIntervals('posts/main="mem:4"', 'posts/main="mem:2"');
+    expect(intervalsConsistent([one, two])).toBe(true);
+    const skewed = validityIntervals('social/main="mem:20"', 'social/main="mem:15"');
+    expect(intervalsConsistent([one, skewed])).toBe(false);
   });
 });

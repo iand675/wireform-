@@ -639,6 +639,7 @@ pathSubject = \case
   OnFragment f -> unFragmentName f
   OnRoot r -> unRootName r
   OnMutation m -> unMutationName m
+  OnDirective d -> unDirectiveName d
 
 
 -- ---------------------------------------------------------------------------

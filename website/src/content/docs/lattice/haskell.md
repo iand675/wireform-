@@ -17,6 +17,7 @@ entity store.
 
 | Module | Role |
 |---|---|
+| `Lattice` | Umbrella / default surface: re-exports `Lattice.Types`, `Lattice.Typed`, and `Lattice.TH` — `import Lattice` is all a loader author needs beyond `Lattice.Backend` |
 | `Lattice.Types` | Protocol vocabulary: names, `Ref`, visibility policies and the `Level` join-semilattice (§8.1), the §3.5 type language, `Claims` |
 | `Lattice.Schema` | The semantic schema model (§3.1) plus origin budgets (§14.1) |
 | `Lattice.IDL.Parser` | `parseSchema`: IDL text → `Schema`, with schema-level checks |
@@ -31,6 +32,7 @@ entity store.
 | `Lattice.Wire` | NDJSON records, surrogate keys, protocol header names (§9, §10.5) |
 | `Lattice.Backend` | The origin backend contract: set-in, map-out loaders |
 | `Lattice.Backend.Memory` | In-memory backend for demos and tests |
+| `Lattice.Typed`, `Lattice.TH` | Typed rows for loader authors: IDL-generated records + canonical wire-form codecs over the dynamic row representation (re-exported by `Lattice`) |
 | `Lattice.Server` | The origin HTTP handler on wireform-http (§6, §9-§11) |
 | `Lattice.Server.Auth` | `vc` claims payload + pluggable proof verification, bundled HMAC (§8.2) |
 | `Lattice.Server.Execute` | Round-batched plan execution, derived-field witnesses, write-set enforcement |
@@ -153,7 +155,7 @@ response, against the response's slice and claims.
 | `beGetRoot` | `RootName -> Map ArgName Value -> IO (Either BackendFailure (Maybe Ref))` | Resolve a `get` root to at most one entity. |
 | `beListRoot` | `RootName -> Map ArgName Value -> Window -> IO (Either BackendFailure Page)` | Scan a `list` root's collection at the given grouping-key arguments and window (whole bounded set, or a keyset page). |
 | `beChildren` | `TypeName -> FieldName -> [(Ref, EntityRow)] -> Window -> IO (Map Ref (Either BackendFailure Page))` | Resolve a `has many` edge **for every parent in the round at once**: the set-in, map-out loader. |
-| `beLoad` | `TypeName -> [Text] -> IO (Map Text (Either BackendFailure LoadResult))` | Load entity rows by key, batched per type per round; `LoadResult` distinguishes found, absent, and tombstoned. |
+| `beLoad` | `TypeName -> Projection -> [Text] -> IO (Map Text (Either BackendFailure LoadResult))` | Load entity rows by key, batched per type per round; `LoadResult` distinguishes found, absent, and tombstoned. The `Projection` is the plan's requested projection for the type (§3.1). |
 | `beComputed` | `TypeName -> FieldName -> Map ArgName Value -> EntityRow -> IO (Maybe Value)` | Evaluate an argument-taking field (e.g. `avatarUrl(size: 96)`) against a loaded row; `Nothing` elides the field. |
 | `beMutate` | `MutationName -> Claims -> Map ArgName Value -> IO MutationOutcome` | Run one mutation effect. A committed outcome reports `WriteFact`s; the server enforces the declared write set over them (§11.4) and derives the `invalidated` record and purge keys from them. |
 
@@ -161,8 +163,79 @@ Failures are values, not exceptions. `BackendFailure` (with the
 `loaderTimeout`, `upstreamUnavailable`, or `internalError` vocabulary) becomes
 a scoped `error` record (§9.4.2) that degrades exactly the affected entities.
 
+**Requested projections (§3.1).** Every `beLoad` carries a `Projection`:
+`ProjectAll`, or `ProjectFields` naming the exact stored fields the plan can
+read off those rows — selected scalars, `RhsField` policy comparands, `has
+one` link fields, `grouped by` override fields, and derived-field read sets.
+`Lattice.Plan.planProjections` computes the map from a compiled plan (it is
+also what the `explain` document's `projections` key renders), and the
+executor threads it to every load; point fetches and mutation-output
+rendering pass `ProjectAll` because they render the whole visible entity by
+design. A SQL backend turns the projection into its `SELECT` column list;
+consulting it is optional, and returning whole rows is always correct. Rows
+are dynamic (`Map FieldName Value`), so no higher-kinded record machinery is
+involved: the projection is a plain value a backend interprets against its
+own field-to-column table. Two contract points to keep in mind:
+
+- A returned row must include every projected field the stored row has;
+  omitting one silently elides that field from responses.
+- `beChildren` parent rows come from projected loads. A children resolver
+  needing other parent-side state (say, an edge-backing `friendIds` column no
+  query ever selects) reads its own storage rather than the handed-in rows.
+
 `Lattice.Backend.Memory` implements the contract over in-memory maps. It is
-the backend the demo origin and the test suite run on.
+the backend the demo origin and the test suite run on, and it filters loaded
+rows to the projection **strictly**, so the whole test corpus proves the
+planner's projections cover everything the executor reads.
+
+**Typed loaders (`Lattice.Typed` + `Lattice.TH`).** Loader authors do not
+have to traffic in raw `A.Value` maps. A Template Haskell splice generates
+IDL-conforming Haskell types — newtypes, enums (open ones gain an
+`…'Unknown` case, §3.5.4), records, sums (`{"$tag": …}` on the wire), and
+one higher-kinded record per entity:
+
+```haskell
+{-# LANGUAGE DataKinds, StandaloneDeriving, TemplateHaskell, TypeFamilies #-}
+import Lattice   -- the umbrella: types, the codegen splice, and loader combinators
+
+$(latticeTypes "schema/api.lattice")
+-- generates, per entity:
+--   data Human f = Human
+--     { humanId         :: Field f 'Req HumanId
+--     , humanName       :: Field f 'Req Text
+--     , humanHomePlanet :: Field f 'Opt Text   -- Text? in the IDL
+--     }
+```
+
+`Human Full` (writes, whole rows: required fields bare, optional `Maybe`)
+and `Human Partial` (loads: everything `Maybe` — absent means "not on the
+row", whether unfetched under a narrow projection or genuinely missing;
+those collapse on the wire by design). The generated `LatticeValue` /
+`LatticeEntity` instances pin the §3.5.3 canonical wire forms internally —
+wide integers as decimal strings, bytes as unpadded base64url, timestamps
+as RFC 3339 `Z` — so a loader can't get them wrong by hand.
+
+A loader returns typed rows keyed by the entity's key type; `found` /
+`absent` / `tombstone` / `loadFailed` build each per-key result (no
+`Either`/wrapper nesting), and `loaders` combines them into a `beLoad`:
+
+```haskell
+humanLoader :: EntityLoader
+humanLoader = entityLoader @Human $ \_proj keys -> do
+  rows <- dbFetchHumans keys        -- your storage, batched
+  pure $ Map.fromList $ flip map rows $ \(k, ver, n) ->
+    (HumanId k, found ver Human { humanName = Just n, .. })
+
+-- the origin backend: beLoad IS the combined typed loaders
+backend :: Backend
+backend = someBackend { beLoad = loaders [humanLoader, droidLoader] }
+-- checkLoaderCoverage schema [humanLoader, droidLoader] == Right () at startup
+```
+
+`loaders` maps a type with no loader to a loud `lattice:internal` batch
+error, and a structurally impossible key to `absent`. `putEntity` /
+`putEntityWith` seed the memory backend from typed rows. The
+`Map FieldName Value` representation never surfaces.
 
 For the `ctx` slice, the server checks the `vc` claims payload against its
 proof with a `Lattice.Server.Auth.ProofVerifier`. The bundled scheme is
@@ -279,13 +352,27 @@ visible-but-withheld, and a mutation response's `invalidated` keys mark
 intersecting cached query results stale.
 
 ```haskell
--- Illustrative: the client surface is landing alongside this page;
--- names below sketch the shape and will firm up.
-withLatticeClient config $ \client -> do
-  result <- runQuery client heroQuery mempty
-  -- result: the root refs plus a store view of every entity the stream carried
+withLatticeClient defaultClientConfig $ \client -> do
+  result <- query client heroQuery mempty
+  -- qrData: the denormalized per-root trees; qrConsistent: §13.2 g3
   ...
 ```
+
+`query` fetches every nonempty slice of the plan and assembles them as a
+**consistent cut** (§13.2 guarantee 3): each response's
+`Lattice-Snapshot-Floor`/`Lattice-Snapshot` pair is a per-domain validity
+interval, and the assembly is accepted when the intervals intersect.
+Non-overlapping assemblies are repaired with `Cache-Control: no-cache`
+refetches of the slices below the page's greatest floor, at most
+`ccConvergeRetries` rounds (default 2, `ccTokenCompare` orders tokens);
+the outcome is reported as `qrConsistent`, with newest-wins rendering as
+the degrade arm. Two stronger tiers skip the protocol entirely because the
+origin composes under one snapshot (§13.2 guarantee 7): `queryPage` (the
+one-shot `slice=page` POST, §6.5) and `subscribeQuery` with
+`soTarget = SubscribePage` (§12 page subscriptions, every burst a
+consistent cut). The consistency machinery is model-checked in
+`wireform-lattice/tla/` — see the corpus README for the invariants and the
+broken-variant counterexamples.
 
 The wire vocabulary the client consumes comes from `Lattice.Wire`: record
 types, tolerant decoding of unknown kinds and scopes (§9.4.1), and header

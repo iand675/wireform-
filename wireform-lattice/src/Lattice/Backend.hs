@@ -10,6 +10,37 @@ Loads are policy-free: backends fetch rows by key and know nothing about
 callers. Visibility is applied at emission by the server, per response,
 against the response's slice and claims (§6.9).
 
+== Projections: load only what the plan reads
+
+Every 'beLoad' call carries a 'Projection': the set of stored fields the
+executor can possibly read off the returned rows for that entity type,
+derived statically from the compiled plan ('Lattice.Plan.planProjections').
+A backend MAY use it to fetch less — the canonical example is a SQL
+backend rendering @SELECT@ column lists:
+
+@
+load ty proj keys = case proj of
+  ProjectAll      -> ... "SELECT * FROM t WHERE key IN (...)"
+  ProjectFields fs -> ... "SELECT ver, k1, k2, " <> columnsFor fs <> " ..."
+@
+
+The contract is one-directional: a returned row MUST include every
+projected field the stored row actually has (an absent projected field
+reads as an absent field — silent data loss, not an error), and MAY
+include more; ignoring the projection and returning full rows is always
+correct. 'rowVer' is required regardless. Rows are dynamic
+(@Map FieldName Value@), so the projection is a plain value — no
+higher-kinded row machinery is needed at this seam; a typed-row backend
+adapter (e.g. an HKD record @User f@ with @f ~ Maybe@ per column) can be
+layered on top by interpreting the same 'Projection' against its
+field-to-column table.
+
+Parent rows handed to 'beChildren' (and the owner rows a derived-field
+compute reads through 'DepValues') come from projected loads: they carry
+the link/grouping fields plus whatever the plan selected, not the whole
+row. A children resolver that wants other parent-side state must read its
+own storage — it /is/ the storage.
+
 == Derived fields (§3.7)
 
 Three seams serve derived fields, all batched like every other loader:
@@ -33,6 +64,9 @@ Three seams serve derived fields, all batched like every other loader:
 -}
 module Lattice.Backend (
   Backend (..),
+  Projection (..),
+  projectsField,
+  projectRow,
   EntityRow (..),
   LoadResult (..),
   Page (..),
@@ -56,6 +90,8 @@ import Data.Aeson qualified as A
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Lattice.Cursor (Cursor)
 import Lattice.Schema (Aggregate)
 import Lattice.Types
@@ -68,6 +104,43 @@ data EntityRow = EntityRow
   , rowFields :: Map FieldName A.Value
   }
   deriving stock (Eq, Show)
+
+
+{- | The stored fields a 'beLoad' caller can possibly read off the returned
+rows for one entity type, derived from the compiled plan
+('Lattice.Plan.planProjections'). See the module haddock (/Projections/)
+for the contract; '<>' is union with 'ProjectAll' absorbing.
+-}
+data Projection
+  = ProjectAll
+  | ProjectFields (Set FieldName)
+  deriving stock (Eq, Show)
+
+
+instance Semigroup Projection where
+  ProjectAll <> _ = ProjectAll
+  _ <> ProjectAll = ProjectAll
+  ProjectFields a <> ProjectFields b = ProjectFields (Set.union a b)
+
+
+-- | @'ProjectFields' 'Set.empty'@: nothing beyond @ver@ is read (existence
+-- probes, empty nodes selections).
+instance Monoid Projection where
+  mempty = ProjectFields Set.empty
+
+
+projectsField :: Projection -> FieldName -> Bool
+projectsField ProjectAll _ = True
+projectsField (ProjectFields fs) f = Set.member f fs
+
+
+-- | Restrict a row to the projected fields ('ProjectAll' is identity).
+-- Backends that fetch full rows anyway (in-memory tables) apply this to
+-- honor the projection strictly, which keeps callers honest about what
+-- they declared.
+projectRow :: Projection -> EntityRow -> EntityRow
+projectRow ProjectAll row = row
+projectRow (ProjectFields fs) row = row {rowFields = Map.restrictKeys (rowFields row) fs}
 
 
 data LoadResult
@@ -249,9 +322,15 @@ data Backend = Backend
       Window ->
       IO (Map Ref (Either BackendFailure Page))
   -- ^ Resolve a @has many@ edge for every parent in the round at once
-  -- (parent type, edge field, loaded parents). Set-in, map-out.
-  , beLoad :: TypeName -> [Text] -> IO (Map Text (Either BackendFailure LoadResult))
-  -- ^ Load entity rows by key, batched per type per round.
+  -- (parent type, edge field, loaded parents). Set-in, map-out. Parent
+  -- rows are projected (module haddock, /Projections/): they carry the
+  -- link\/grouping fields and the plan's selections; a resolver needing
+  -- other parent-side state reads its own storage.
+  , beLoad :: TypeName -> Projection -> [Text] -> IO (Map Text (Either BackendFailure LoadResult))
+  -- ^ Load entity rows by key, batched per type per round. The
+  -- 'Projection' is the static upper bound on the fields the caller will
+  -- read (module haddock, /Projections/); returning fuller rows is
+  -- always correct.
   , beComputed ::
       TypeName ->
       FieldName ->

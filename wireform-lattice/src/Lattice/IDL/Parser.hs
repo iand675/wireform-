@@ -387,6 +387,8 @@ isCapName t = case T.uncons t of
 data Ann
   = AnnBreak Text
   | AnnDeprecated Deprecation
+  | AnnDirective DirectiveApp
+  | AnnDescription Text
 
 
 {- | Zero or more leading annotations: @\@break(approved: "…")@ \/
@@ -400,12 +402,32 @@ pAnnotations =
     Just t
       | TkPunct '@' <- tokKind t ->
           peekKindN 1 >>= \case
-            Just (TkName kw)
-              | kw == "break" || kw == "deprecated" -> do
-                  a <- pAnnotation
-                  (a :) <$> pAnnotations
+            Just (TkName _) -> do
+              a <- pAnnotation
+              (a :) <$> pAnnotations
             _ -> pure []
     _ -> pure []
+
+
+{- | Leading metadata on a declaration or item (§3.9): an optional
+description string, then zero or more @\@@-annotations (@\@break@,
+@\@deprecated@, and directive applications) in any order. The description
+comes first, matching the canonical rendering, so @parseSchema .
+canonicalIdl@ round-trips.
+-}
+pLeading :: P [(Int, Ann)]
+pLeading = do
+  mdesc <- pDescriptionMaybe
+  anns <- pAnnotations
+  pure (maybe anns (\(l, t) -> (l, AnnDescription t) : anns) mdesc)
+
+
+-- | A leading documentation string, when the next token is one.
+pDescriptionMaybe :: P (Maybe (Int, Text))
+pDescriptionMaybe =
+  peekT >>= \case
+    Just t | TkStr s <- tokKind t -> advanceT >> pure (Just (tokLine t, s))
+    _ -> pure Nothing
 
 
 pAnnotation :: P (Int, Ann)
@@ -434,7 +456,7 @@ pAnnotation = do
       note <- pStringLit "a deprecation note string"
       pPunct ')'
       pure (l, AnnDeprecated (Deprecation {depSunset = day, depNote = note}))
-    _ -> pFail l "expected `break` or `deprecated`"
+    _ -> pDirectiveApp l (DirectiveName kw)
 
 
 pStringLit :: Text -> P Text
@@ -443,6 +465,64 @@ pStringLit what = do
   case tokKind t of
     TkStr s -> pure s
     _ -> pFail (tokLine t) ("expected " <> what)
+
+
+{- | A directive application (§3.9): @\@name(arg: value, …)@ or bare
+@\@name@. The name has already been consumed by 'pAnnotation'.
+-}
+pDirectiveApp :: Int -> DirectiveName -> P (Int, Ann)
+pDirectiveApp l name = do
+  args <- pDirectiveArgs
+  pure (l, AnnDirective (DirectiveApp name args))
+
+
+-- | @(arg: value, …)@ after a directive application's name, or nothing.
+pDirectiveArgs :: P [(ArgName, QValue)]
+pDirectiveArgs = do
+  open <- tryPunct '('
+  if not open
+    then pure []
+    else do
+      empty' <- tryPunct ')'
+      if empty' then pure [] else go
+  where
+    go = do
+      (n, _) <- pAnyName "a directive argument name"
+      pPunct ':'
+      v <- pQValueLit
+      c <- tryPunct ','
+      let a = (ArgName n, v)
+      if c then (a :) <$> go else pPunct ')' $> [a]
+
+
+-- | A @directive \@name(params) [repeatable] on LOC {| LOC}@ declaration.
+pDirectiveDecl :: Int -> P SDecl
+pDirectiveDecl l = do
+  pPunct '@'
+  (n, _) <- pAnyName "a directive name"
+  params <- pOptParamList
+  rep <- tryNameIs "repeatable"
+  pNameIs "on"
+  locs <- pLocations
+  pure (SDDirective l (DirectiveName n) params rep locs)
+
+
+-- | A parameter list only when a @(@ opens it (a no-argument directive
+-- omits the parens).
+pOptParamList :: P [ArgDef]
+pOptParamList =
+  peekT >>= \case
+    Just t | TkPunct '(' <- tokKind t -> pParamList
+    _ -> pure []
+
+
+-- | @LOC {| LOC}@: one or more directive locations.
+pLocations :: P [DirLocation]
+pLocations = do
+  (n, l) <- pAnyName "a directive location"
+  loc <- maybe (pFail l ("unknown directive location `" <> n <> "`")) pure (parseDirLocation n)
+  more <- tryPunct '|'
+  if more then (loc :) <$> pLocations else pure [loc]
 
 
 -- | @YYYY-MM-DD@, calendar-validated.
@@ -478,6 +558,7 @@ declSite = \case
   SDRoot r -> Just (OnRoot (RootName (srName r)))
   SDMutation m -> Just (OnMutation (MutationName (smName m)))
   SDExtend x -> Just (OnEntity (TypeName (sExtName x)))
+  SDDirective _ n _ _ _ -> Just (OnDirective n)
 
 
 -- ---------------------------------------------------------------------------
@@ -494,6 +575,7 @@ data SDecl
   | SDRoot SRoot
   | SDMutation SMutation
   | SDExtend SExtend
+  | SDDirective !Int DirectiveName [ArgDef] Bool [DirLocation]
 
 
 data SEntity = SEntity
@@ -583,7 +665,7 @@ pDecls :: Text -> P [SDecl]
 pDecls src = go
   where
     go = do
-      anns <- pAnnotations
+      anns <- pLeading
       peekT >>= \case
         Nothing -> case anns of
           [] -> pure []
@@ -620,7 +702,8 @@ pDecl src t = do
     TkName "list" -> SDRoot <$> pRootDecl RootList l
     TkName "mutation" -> SDMutation <$> pMutationDecl l
     TkName "extend" -> pExtendDecl l
-    _ -> pFail l "expected a declaration (schema, claims, newtype, enum, data, interface, entity, extend, fragment, get, list, or mutation)"
+    TkName "directive" -> pDirectiveDecl l
+    _ -> pFail l "expected a declaration (schema, claims, newtype, enum, data, interface, entity, extend, fragment, get, list, mutation, or directive)"
 
 
 pClaimsBlock :: P [(Int, Text, FieldType)]
@@ -1110,7 +1193,7 @@ pItems bk owner = go
   where
     go = do
       skipCommas
-      anns <- pAnnotations
+      anns <- pLeading
       done <- tryPunct '}'
       if done
         then case anns of
@@ -1798,6 +1881,8 @@ elaborate anns decls =
     rootDs = mapMaybe (\case SDRoot r -> Just r; _ -> Nothing) decls
     mutDs = mapMaybe (\case SDMutation m -> Just m; _ -> Nothing) decls
     extendDs = mapMaybe (\case SDExtend x -> Just x; _ -> Nothing) decls
+    directiveDs =
+      mapMaybe (\case SDDirective l n args rep locs -> Just (l, n, args, rep, locs); _ -> Nothing) decls
 
     -- ---- schema name ----------------------------------------------------
     (sName, nameErrs) = case schemaDs of
@@ -2933,18 +3018,45 @@ elaborate anns decls =
             )
           Nothing -> (Map.insert s n seen, es)
 
+    -- ---- directive declarations + applications (§3.9) -------------------
+    (directiveDecls, directiveDeclErrs) =
+      let entries =
+            map (\(l, n, args, rep, locs) -> (l, n, DirectiveDef args rep (Set.fromList locs))) directiveDs
+          (m, dupErrs) = collectMap "directive" unDirectiveName entries
+          reservedErrs =
+            mapMaybe
+              ( \(l, n, _, _, _) ->
+                  if Set.member (unDirectiveName n) reservedDirectiveNames
+                    then Just (err l ("directive `@" <> unDirectiveName n <> "` reuses a reserved annotation name"))
+                    else Nothing
+              )
+              directiveDs
+          argRefErrs =
+            concatMap
+              (\(l, n, args, _, _) -> argErrs l ("directive `@" <> unDirectiveName n <> "`") args)
+              directiveDs
+       in (m, dupErrs <> reservedErrs <> argRefErrs)
+
+    (directiveApps, directiveAppErrs) =
+      validateDirectiveApps directiveDecls (declPathLocation schema) rawDirApps
+
     -- ---- annotations (§17.3 @break, §17.5 @deprecated) -------------------
-    (annBreaks, annDeprs, annErrs) = List.foldl' step (Map.empty, Map.empty, []) anns
+    (annBreaks, annDeprs, annDescrs, rawDirApps, annErrs) =
+      List.foldl' step (Map.empty, Map.empty, Map.empty, [], []) anns
       where
-        step (bs, ds, es) (l, p, a) = case a of
+        step (bs, ds, dess, dirs, es) (l, p, a) = case a of
           AnnBreak t
-            | Map.member p bs -> (bs, ds, es <> [err l "duplicate @break annotation"])
-            | otherwise -> (Map.insert p t bs, ds, es)
+            | Map.member p bs -> (bs, ds, dess, dirs, es <> [err l "duplicate @break annotation"])
+            | otherwise -> (Map.insert p t bs, ds, dess, dirs, es)
           AnnDeprecated d
             | not (deprecatable p) ->
-                (bs, ds, es <> [err l "@deprecated is only allowed on fields, relationships, roots, and mutations"])
-            | Map.member p ds -> (bs, ds, es <> [err l "duplicate @deprecated annotation"])
-            | otherwise -> (bs, Map.insert p d ds, es)
+                (bs, ds, dess, dirs, es <> [err l "@deprecated is only allowed on fields, relationships, roots, and mutations"])
+            | Map.member p ds -> (bs, ds, dess, dirs, es <> [err l "duplicate @deprecated annotation"])
+            | otherwise -> (bs, Map.insert p d ds, dess, dirs, es)
+          AnnDescription t
+            | Map.member p dess -> (bs, ds, dess, dirs, es <> [err l "duplicate description"])
+            | otherwise -> (bs, ds, Map.insert p t dess, dirs, es)
+          AnnDirective app -> (bs, ds, dess, dirs <> [(l, p, app)], es)
         deprecatable = \case
           OnEntityItem _ _ -> True
           OnIfaceItem _ _ -> True
@@ -2966,6 +3078,9 @@ elaborate anns decls =
         , schemaMutations = mutations
         , schemaBreaks = annBreaks
         , schemaDeprecations = annDeprs
+        , schemaDirectiveDecls = directiveDecls
+        , schemaDirectives = directiveApps
+        , schemaDescriptions = annDescrs
         }
 
     allErrs =
@@ -2991,6 +3106,80 @@ elaborate anns decls =
         <> mutDupErrs
         <> bindDupErrs
         <> annErrs
+        <> directiveDeclErrs
+        <> directiveAppErrs
+
+
+{- | Validate directive applications (§3.9) against the declared registry:
+unknown directive, disallowed location, unknown\/duplicate\/missing
+arguments, and a non-repeatable directive applied more than once at one
+site. Returns the canonical per-site application map (each site sorted by
+name then arguments, each application's arguments sorted by name) plus
+every error.
+-}
+validateDirectiveApps
+  :: Map DirectiveName DirectiveDef
+  -> (DeclPath -> Maybe DirLocation)
+  -> [(Int, DeclPath, DirectiveApp)]
+  -> (Map DeclPath [DirectiveApp], [SchemaError])
+validateDirectiveApps decls locOf raws =
+  (Map.map canonSite grouped, perAppErrs <> repeatErrs)
+  where
+    perAppErrs = concatMap appErrs raws
+    grouped =
+      Map.fromListWith
+        (flip (<>))
+        (map (\(_, p, app) -> (p, [canonApp app])) raws)
+    canonSite = List.sortOn (\a -> (daName a, daArgs a))
+    canonApp (DirectiveApp name args) = DirectiveApp name (List.sortOn fst args)
+
+    appErrs (l, p, DirectiveApp name suppliedArgs) =
+      case Map.lookup name decls of
+        Nothing -> [err l ("unknown directive `@" <> unDirectiveName name <> "`")]
+        Just def -> locErr <> unknownErrs <> dupErrs <> missingErrs
+          where
+            here = "` on directive `@" <> unDirectiveName name <> "`"
+            locErr = case locOf p of
+              Nothing -> [err l ("directive `@" <> unDirectiveName name <> "` cannot be applied here")]
+              Just loc
+                | Set.member loc (dirLocations def) -> []
+                | otherwise ->
+                    [err l ("directive `@" <> unDirectiveName name <> "` is not allowed on " <> dirLocationName loc)]
+            declaredNames = Set.fromList (map adName (dirArgs def))
+            suppliedNames = map fst suppliedArgs
+            unknownErrs =
+              mapMaybe
+                ( \(a, _) ->
+                    if Set.member a declaredNames
+                      then Nothing
+                      else Just (err l ("unknown argument `" <> unArgName a <> here))
+                )
+                suppliedArgs
+            dupErrs =
+              map (\a -> err l ("duplicate argument `" <> unArgName a <> here)) (duplicates suppliedNames)
+            missingErrs =
+              mapMaybe
+                ( \ad ->
+                    if not (isJust (adDefault ad)) && notElem (adName ad) suppliedNames
+                      then Just (err l ("missing required argument `" <> unArgName (adName ad) <> here))
+                      else Nothing
+                )
+                (dirArgs def)
+
+    repeatErrs = concatMap perName (Map.toList bySiteName)
+      where
+        bySiteName =
+          Map.fromListWith (<>) (map (\(l, p, DirectiveApp name _) -> ((p, name), [l])) raws)
+        perName ((_, name), ls) = case Map.lookup name decls of
+          Just def
+            | not (dirRepeatable def) && length ls > 1 ->
+                [err (maximum ls) ("directive `@" <> unDirectiveName name <> "` is not repeatable")]
+          _ -> []
+
+
+-- | The elements appearing more than once in a list (each reported once).
+duplicates :: Ord a => [a] -> [a]
+duplicates xs = Map.keys (Map.filter (> (1 :: Int)) (Map.fromListWith (+) (map (\x -> (x, 1)) xs)))
 
 
 -- | Insert with duplicate detection, keeping the first occurrence.

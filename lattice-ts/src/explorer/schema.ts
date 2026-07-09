@@ -34,6 +34,23 @@ export interface ArgModel {
   readonly name: string;
   readonly type: string;
   readonly default?: string;
+  /** A documentation string preceding the argument, if any. */
+  readonly description?: string;
+}
+
+/** A single directive APPLICATION at a declaration site (`@name(arg: value)`). */
+export interface DirectiveApp {
+  readonly name: string;
+  readonly args: ReadonlyArray<{ name: string; value: string }>;
+}
+
+/** A top-level directive DECLARATION (`directive @name(params) [repeatable] on LOC …`). */
+export interface DirectiveDecl {
+  readonly name: string;
+  readonly args: readonly ArgModel[];
+  readonly repeatable: boolean;
+  readonly locations: readonly string[];
+  readonly description?: string;
 }
 
 /** A scalar/value field on an entity or interface. */
@@ -45,6 +62,10 @@ export interface FieldModel {
   readonly derived?: string;
   /** A per-field visibility clause (`private`, `visible when …`), if any. */
   readonly policy?: string;
+  /** A documentation string preceding the field, if any. */
+  readonly description?: string;
+  /** Directive applications (`@name(...)`) attached to the field. */
+  readonly directives?: readonly DirectiveApp[];
 }
 
 /** A `has one`/`has many` relationship. */
@@ -61,6 +82,10 @@ export interface EdgeModel {
   readonly page?: number;
   readonly max?: number;
   readonly policy?: string;
+  /** A documentation string preceding the relationship, if any. */
+  readonly description?: string;
+  /** Directive applications (`@name(...)`) attached to the relationship. */
+  readonly directives?: readonly DirectiveApp[];
 }
 
 export interface EntityModel {
@@ -71,6 +96,10 @@ export interface EntityModel {
   readonly fields: readonly FieldModel[];
   readonly edges: readonly EdgeModel[];
   readonly fetchBy?: { readonly key: string; readonly policy: string };
+  /** A documentation string preceding the entity, if any. */
+  readonly description?: string;
+  /** Directive applications (`@name(...)`) attached to the entity. */
+  readonly directives?: readonly DirectiveApp[];
 }
 
 export interface InterfaceModel {
@@ -79,17 +108,40 @@ export interface InterfaceModel {
   readonly edges: readonly EdgeModel[];
   /** Concrete entity types that `implements` this interface (derived). */
   readonly members: readonly string[];
+  /** A documentation string preceding the interface, if any. */
+  readonly description?: string;
+  /** Directive applications (`@name(...)`) attached to the interface. */
+  readonly directives?: readonly DirectiveApp[];
 }
 
 export interface EnumModel {
   readonly name: string;
   readonly open: boolean;
   readonly values: readonly string[];
+  /** A documentation string preceding the enum, if any. */
+  readonly description?: string;
+  /** Directive applications (`@name(...)`) attached to the enum. */
+  readonly directives?: readonly DirectiveApp[];
 }
 
 export interface RecordModel {
   readonly name: string;
   readonly fields: readonly ArgModel[];
+  /** A documentation string preceding the record, if any. */
+  readonly description?: string;
+  /** Directive applications (`@name(...)`) attached to the record. */
+  readonly directives?: readonly DirectiveApp[];
+}
+
+/** A `newtype Name = Type` declaration (a transparent alias of a base type). */
+export interface NewtypeModel {
+  readonly name: string;
+  /** The underlying type expression. */
+  readonly type: string;
+  /** A documentation string preceding the newtype, if any. */
+  readonly description?: string;
+  /** Directive applications (`@name(...)`) attached to the newtype. */
+  readonly directives?: readonly DirectiveApp[];
 }
 
 export interface FragmentModel {
@@ -98,6 +150,10 @@ export interface FragmentModel {
   readonly args: readonly ArgModel[];
   /** The raw selection-set text between the braces. */
   readonly selection: string;
+  /** A documentation string preceding the fragment, if any. */
+  readonly description?: string;
+  /** Directive applications (`@name(...)`) attached to the fragment. */
+  readonly directives?: readonly DirectiveApp[];
 }
 
 export interface RootModel {
@@ -110,6 +166,10 @@ export interface RootModel {
   readonly page?: number;
   readonly max?: number;
   readonly policy?: string;
+  /** A documentation string preceding the root, if any. */
+  readonly description?: string;
+  /** Directive applications (`@name(...)`) attached to the root. */
+  readonly directives?: readonly DirectiveApp[];
 }
 
 export interface MutationModel {
@@ -123,6 +183,10 @@ export interface MutationModel {
   /** `as VERB /e/…` verb bindings (§11.7). */
   readonly bindings: readonly string[];
   readonly batch?: string;
+  /** A documentation string preceding the mutation, if any. */
+  readonly description?: string;
+  /** Directive applications (`@name(...)`) attached to the mutation. */
+  readonly directives?: readonly DirectiveApp[];
 }
 
 export interface SchemaDiagnostic {
@@ -132,7 +196,7 @@ export interface SchemaDiagnostic {
 
 export interface SchemaModel {
   readonly name: string;
-  readonly newtypes: ReadonlyMap<string, string>;
+  readonly newtypes: ReadonlyMap<string, NewtypeModel>;
   readonly enums: ReadonlyMap<string, EnumModel>;
   readonly records: ReadonlyMap<string, RecordModel>;
   readonly claims: readonly ArgModel[];
@@ -142,6 +206,10 @@ export interface SchemaModel {
   readonly roots: ReadonlyMap<string, RootModel>;
   readonly mutations: ReadonlyMap<string, MutationModel>;
   readonly diagnostics: readonly SchemaDiagnostic[];
+  /** The schema-level documentation string (the leading `str` before `schema`). */
+  readonly description?: string;
+  /** Declared directives (`directive @name …`) keyed by name. */
+  readonly directiveDecls: ReadonlyMap<string, DirectiveDecl>;
 }
 
 // ---------------------------------------------------------------------------
@@ -229,16 +297,26 @@ const TOP_KEYWORDS: Record<string, true> = {
   get: true,
   list: true,
   mutation: true,
+  directive: true,
 };
 
 const POLICY_START: Record<string, true> = { public: true, private: true, visible: true };
+
+/** Reserved structural annotations: consumed while parsing but never surfaced as user directives. */
+const RESERVED_DIRECTIVES: Record<string, true> = { break: true, deprecated: true, declassify: true, depth: true };
+
+/** Leading metadata (a documentation string + directive applications) preceding a declaration or item. */
+interface LeadingMeta {
+  readonly description?: string;
+  readonly directives: DirectiveApp[];
+}
 
 class Parser {
   private pos = 0;
   private readonly diagnostics: SchemaDiagnostic[] = [];
 
   private name = "";
-  private readonly newtypes = new Map<string, string>();
+  private readonly newtypes = new Map<string, NewtypeModel>();
   private readonly enums = new Map<string, EnumModel>();
   private readonly records = new Map<string, RecordModel>();
   private claims: ArgModel[] = [];
@@ -247,6 +325,8 @@ class Parser {
   private readonly fragments = new Map<string, FragmentModel>();
   private readonly roots = new Map<string, RootModel>();
   private readonly mutations = new Map<string, MutationModel>();
+  private description?: string;
+  private readonly directiveDecls = new Map<string, DirectiveDecl>();
   /** Deferred targets to resolve to interface/entity once all decls are seen. */
   private readonly pendingRefs: Array<{ target: { kind: "entity" | "interface"; name: string } }> = [];
 
@@ -284,7 +364,11 @@ class Parser {
 
   parse(): SchemaModel {
     while (this.pos < this.toks.length) {
-      const t = this.peek()!;
+      // Leading metadata (an optional documentation string then zero or more
+      // `@`-annotations) attaches to the declaration that follows it.
+      const meta = this.parseLeadingMeta();
+      const t = this.peek();
+      if (!t) break;
       if (t.kind !== "name") {
         this.pos++;
         continue;
@@ -293,39 +377,43 @@ class Parser {
         case "schema":
           this.pos++;
           this.name = this.readName();
+          if (meta.description !== undefined) this.description = meta.description;
           break;
         case "newtype":
-          this.parseNewtype();
+          this.parseNewtype(meta);
           break;
         case "enum":
-          this.parseEnum();
+          this.parseEnum(meta);
           break;
         case "data":
-          this.parseRecord();
+          this.parseRecord(meta);
           break;
         case "claims":
           this.parseClaims();
           break;
         case "interface":
-          this.parseInterface();
+          this.parseInterface(meta);
           break;
         case "entity":
-          this.parseEntity(false);
+          this.parseEntity(false, meta);
           break;
         case "extend":
-          this.parseExtend();
+          this.parseExtend(meta);
           break;
         case "fragment":
-          this.parseFragment();
+          this.parseFragment(meta);
           break;
         case "get":
-          this.parseRoot("get");
+          this.parseRoot("get", meta);
           break;
         case "list":
-          this.parseRoot("list");
+          this.parseRoot("list", meta);
           break;
         case "mutation":
-          this.parseMutation();
+          this.parseMutation(meta);
+          break;
+        case "directive":
+          this.parseDirectiveDecl(meta);
           break;
         default:
           this.pos++;
@@ -345,6 +433,87 @@ class Parser {
       roots: this.roots,
       mutations: this.mutations,
       diagnostics: this.diagnostics,
+      ...(this.description !== undefined ? { description: this.description } : {}),
+      directiveDecls: this.directiveDecls,
+    };
+  }
+
+  /**
+   * The leading metadata before a declaration or entity/interface item: an
+   * optional documentation `str`, then zero or more `@`-annotations. The
+   * reserved structural annotations (`@break`/`@deprecated`/…) are consumed
+   * here too but excluded from the surfaced directive list.
+   */
+  private parseLeadingMeta(): LeadingMeta {
+    let description: string | undefined;
+    const directives: DirectiveApp[] = [];
+    if (this.peek()?.kind === "str") {
+      description = this.next()!.value;
+    }
+    while (this.isPunct("@")) {
+      const app = this.parseAnnotation();
+      if (app && !RESERVED_DIRECTIVES[app.name]) directives.push(app);
+    }
+    return description !== undefined ? { description, directives } : { directives };
+  }
+
+  /** Parse a single `@Name` or `@Name(arg: value, …)` directive application. */
+  private parseAnnotation(): DirectiveApp | undefined {
+    this.pos++; // @
+    const name = this.readName();
+    if (!name) return undefined;
+    const args: Array<{ name: string; value: string }> = [];
+    if (this.isPunct("(")) {
+      this.pos++;
+      while (this.peek() && !this.isPunct(")")) {
+        if (this.peek()!.kind !== "name") {
+          this.pos++;
+          continue;
+        }
+        const argName = this.readName();
+        if (!this.expectPunct(":")) continue;
+        args.push({ name: argName, value: this.readValueText() });
+      }
+      this.expectPunct(")");
+    }
+    return { name, args };
+  }
+
+  /** `directive @Name(params) [repeatable] on LOC [| LOC]*`. */
+  private parseDirectiveDecl(meta: LeadingMeta): void {
+    this.pos++; // directive
+    this.expectPunct("@");
+    const name = this.readName();
+    if (!name) return;
+    const args = this.isPunct("(") ? this.parseArgList() : [];
+    let repeatable = false;
+    if (this.isName("repeatable")) {
+      repeatable = true;
+      this.pos++;
+    }
+    const locations: string[] = [];
+    if (this.isName("on")) {
+      this.pos++;
+      if (this.peek()?.kind === "name") locations.push(this.readName());
+      while (this.isPunct("|")) {
+        this.pos++;
+        if (this.peek()?.kind === "name") locations.push(this.readName());
+      }
+    }
+    this.directiveDecls.set(name, {
+      name,
+      args,
+      repeatable,
+      locations,
+      ...(meta.description !== undefined ? { description: meta.description } : {}),
+    });
+  }
+
+  /** The conditional `description` + `directives` spread for a decl/item model. */
+  private metaSpread(meta: LeadingMeta): { description?: string; directives?: readonly DirectiveApp[] } {
+    return {
+      ...(meta.description !== undefined ? { description: meta.description } : {}),
+      ...(meta.directives.length > 0 ? { directives: meta.directives } : {}),
     };
   }
 
@@ -404,17 +573,17 @@ class Parser {
     return "";
   }
 
-  private parseNewtype(): void {
+  private parseNewtype(meta: LeadingMeta): void {
     this.pos++; // newtype
     const name = this.readName();
     if (!this.expectPunct("=")) {
       this.diag(`newtype ${name}: expected '='`);
       return;
     }
-    this.newtypes.set(name, this.parseType());
+    this.newtypes.set(name, { name, type: this.parseType(), ...this.metaSpread(meta) });
   }
 
-  private parseEnum(): void {
+  private parseEnum(meta: LeadingMeta): void {
     this.pos++; // enum
     const name = this.readName();
     let open = false;
@@ -432,10 +601,10 @@ class Parser {
       this.pos++;
       if (this.peek()?.kind === "name") values.push(this.readName());
     }
-    this.enums.set(name, { name, open, values });
+    this.enums.set(name, { name, open, values, ...this.metaSpread(meta) });
   }
 
-  private parseRecord(): void {
+  private parseRecord(meta: LeadingMeta): void {
     this.pos++; // data
     const name = this.readName();
     if (!this.expectPunct("{")) {
@@ -443,7 +612,7 @@ class Parser {
       return;
     }
     const fields = this.parseArgLikeUntilBrace();
-    this.records.set(name, { name, fields });
+    this.records.set(name, { name, fields, ...this.metaSpread(meta) });
   }
 
   private parseClaims(): void {
@@ -456,6 +625,9 @@ class Parser {
   private parseArgLikeUntilBrace(): ArgModel[] {
     const out: ArgModel[] = [];
     while (this.peek() && !this.isPunct("}")) {
+      let description: string | undefined;
+      if (this.peek()!.kind === "str") description = this.next()!.value;
+      if (!this.peek() || this.isPunct("}")) break;
       if (this.peek()!.kind !== "name") {
         this.pos++;
         continue;
@@ -471,7 +643,12 @@ class Parser {
         this.pos++;
         def = this.readValueText();
       }
-      out.push(def !== undefined ? { name: fieldName, type, default: def } : { name: fieldName, type });
+      out.push({
+        name: fieldName,
+        type,
+        ...(def !== undefined ? { default: def } : {}),
+        ...(description !== undefined ? { description } : {}),
+      });
     }
     this.expectPunct("}");
     return out;
@@ -483,6 +660,9 @@ class Parser {
     if (!this.isPunct("(")) return out;
     this.pos++;
     while (this.peek() && !this.isPunct(")")) {
+      let description: string | undefined;
+      if (this.peek()!.kind === "str") description = this.next()!.value;
+      if (!this.peek() || this.isPunct(")")) break;
       if (this.peek()!.kind !== "name") {
         this.pos++;
         continue;
@@ -495,7 +675,12 @@ class Parser {
         this.pos++;
         def = this.readValueText();
       }
-      out.push(def !== undefined ? { name: argName, type, default: def } : { name: argName, type });
+      out.push({
+        name: argName,
+        type,
+        ...(def !== undefined ? { default: def } : {}),
+        ...(description !== undefined ? { description } : {}),
+      });
     }
     this.expectPunct(")");
     return out;
@@ -547,15 +732,15 @@ class Parser {
     return t;
   }
 
-  private parseInterface(): void {
+  private parseInterface(meta: LeadingMeta): void {
     this.pos++; // interface
     const name = this.readName();
     if (!this.expectPunct("{")) return;
     const { fields, edges } = this.parseBody();
-    this.interfaces.set(name, { name, fields, edges, members: [] });
+    this.interfaces.set(name, { name, fields, edges, members: [], ...this.metaSpread(meta) });
   }
 
-  private parseEntity(isExtend: boolean): void {
+  private parseEntity(isExtend: boolean, meta: LeadingMeta): void {
     this.pos++; // entity
     const name = this.readName();
     const key: string[] = [];
@@ -590,15 +775,16 @@ class Parser {
           fields: body.fields,
           edges: body.edges,
           ...(body.fetchBy ? { fetchBy: body.fetchBy } : {}),
+          ...this.metaSpread(meta),
         };
     this.entities.set(name, merged);
   }
 
-  private parseExtend(): void {
+  private parseExtend(meta: LeadingMeta): void {
     this.pos++; // extend
     if (this.isName("entity")) {
       // reuse entity parsing; merge into existing declaration if present
-      this.parseEntity(true);
+      this.parseEntity(true, meta);
     } else {
       // unknown extend form; skip to next top-level keyword
       this.skipToTopLevel();
@@ -617,13 +803,18 @@ class Parser {
     let defaultPolicy: string | undefined;
     let fetchBy: { key: string; policy: string } | undefined;
     while (this.peek() && !this.isPunct("}")) {
-      const t = this.peek()!;
+      // Leading metadata (description + directive applications) attaches to the
+      // field/relationship that follows it; on default-policy and `fetch` lines
+      // there is nothing to attach to, so it is simply dropped.
+      const meta = this.parseLeadingMeta();
+      const t = this.peek();
+      if (!t || this.isPunct("}")) break;
       if (t.kind !== "name") {
         this.pos++;
         continue;
       }
       if (t.value === "has") {
-        const e = this.parseEdge();
+        const e = this.parseEdge(meta);
         if (e) edges.push(e);
         continue;
       }
@@ -637,7 +828,7 @@ class Parser {
         continue;
       }
       // field: `name [(args)] : type [derived …] [policy]`
-      const f = this.parseField();
+      const f = this.parseField(meta);
       if (f) fields.push(f);
       else this.pos++;
     }
@@ -673,7 +864,7 @@ class Parser {
     return nx?.kind === "punct" && (nx.value === ":" || nx.value === "(");
   }
 
-  private parseField(): FieldModel | undefined {
+  private parseField(meta: LeadingMeta): FieldModel | undefined {
     const name = this.readName();
     const args = this.isPunct("(") ? this.parseArgList() : [];
     if (!this.expectPunct(":")) {
@@ -693,6 +884,7 @@ class Parser {
       args,
       ...(derived !== undefined ? { derived } : {}),
       ...(policy !== undefined ? { policy } : {}),
+      ...this.metaSpread(meta),
     };
   }
 
@@ -755,7 +947,7 @@ class Parser {
     return { key, policy };
   }
 
-  private parseEdge(): EdgeModel | undefined {
+  private parseEdge(meta: LeadingMeta): EdgeModel | undefined {
     this.pos++; // has
     let kind: "one" | "many" = "one";
     if (this.isName("many")) {
@@ -814,6 +1006,7 @@ class Parser {
       ...(page !== undefined ? { page } : {}),
       ...(max !== undefined ? { max } : {}),
       ...(policy !== undefined ? { policy } : {}),
+      ...this.metaSpread(meta),
     };
   }
 
@@ -826,7 +1019,7 @@ class Parser {
     return undefined;
   }
 
-  private parseFragment(): void {
+  private parseFragment(meta: LeadingMeta): void {
     this.pos++; // fragment
     const name = this.readName();
     const args = this.isPunct("(") ? this.parseArgList() : [];
@@ -837,10 +1030,10 @@ class Parser {
       return;
     }
     const { text: selection } = this.captureBraces();
-    this.fragments.set(name, { name, on, args, selection });
+    this.fragments.set(name, { name, on, args, selection, ...this.metaSpread(meta) });
   }
 
-  private parseRoot(kind: "get" | "list"): void {
+  private parseRoot(kind: "get" | "list", meta: LeadingMeta): void {
     this.pos++; // get | list
     const name = this.readName();
     const args = this.isPunct("(") ? this.parseArgList() : [];
@@ -886,10 +1079,11 @@ class Parser {
       ...(page !== undefined ? { page } : {}),
       ...(max !== undefined ? { max } : {}),
       ...(policy !== undefined ? { policy } : {}),
+      ...this.metaSpread(meta),
     });
   }
 
-  private parseMutation(): void {
+  private parseMutation(meta: LeadingMeta): void {
     this.pos++; // mutation
     const name = this.readName();
     const args = this.isPunct("(") ? this.parseArgList() : [];
@@ -957,6 +1151,7 @@ class Parser {
       ...(effect !== undefined ? { effect } : {}),
       bindings,
       ...(batch !== undefined ? { batch } : {}),
+      ...this.metaSpread(meta),
     });
   }
 
@@ -1100,4 +1295,15 @@ export function entityMembers(
 ): { fields: readonly FieldModel[]; edges: readonly EdgeModel[] } {
   const e = schema.entities.get(type);
   return { fields: e?.fields ?? [], edges: e?.edges ?? [] };
+}
+
+/** Compact one-line rendering of a directive application (`@audit`, `@audit(level: "debug")`). */
+export function directiveLabel(d: DirectiveApp): string {
+  if (d.args.length === 0) return "@" + d.name;
+  return "@" + d.name + "(" + d.args.map((a) => `${a.name}: ${a.value}`).join(", ") + ")";
+}
+
+/** Compact space-joined rendering of directive applications (`@audit @pii`). */
+export function directivesLabel(ds: readonly DirectiveApp[] | undefined): string {
+  return (ds ?? []).map(directiveLabel).join(" ");
 }

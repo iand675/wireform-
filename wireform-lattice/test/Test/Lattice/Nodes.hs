@@ -366,9 +366,9 @@ withNodesCounting calls =
     nodesSpec
       { lsWrap = \inner ->
           inner
-            { beLoad = \ty keys -> do
+            { beLoad = \ty proj keys -> do
                 atomically (modifyTVar' calls ((ty, length keys) :))
-                beLoad inner ty keys
+                beLoad inner ty proj keys
             }
       }
 

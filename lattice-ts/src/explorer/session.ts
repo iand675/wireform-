@@ -84,6 +84,8 @@ export interface RunHeaders {
   readonly plan?: string;
   readonly schema?: string;
   readonly snapshot?: string;
+  /** `Lattice-Snapshot-Floor` (§10.2): the validity interval's left end. */
+  readonly snapshotFloor?: string;
   readonly etag?: string;
   readonly cacheControl?: string;
   readonly location?: string;
@@ -217,6 +219,8 @@ export interface ExplainDoc {
   readonly rounds?: ReadonlyArray<{ round: number; loaders: ReadonlyArray<LoaderInfo> }>;
   readonly surrogateKeys?: ReadonlyArray<{ collection: string; grouping: string[] }>;
   readonly budgets?: Readonly<Record<string, { used: number; limit: number }>>;
+  /** Per-type loader projections (§3.1): `"*"` (whole rows) or a sorted field list. */
+  readonly projections?: Readonly<Record<string, "*" | readonly string[]>>;
   readonly [k: string]: unknown;
 }
 
@@ -269,6 +273,7 @@ function headersOf(resp: Response): RunHeaders {
     ...(all[HEADERS.plan] !== undefined ? { plan: all[HEADERS.plan] } : {}),
     ...(all[HEADERS.schema] !== undefined ? { schema: all[HEADERS.schema] } : {}),
     ...(all[HEADERS.snapshot] !== undefined ? { snapshot: all[HEADERS.snapshot] } : {}),
+    ...(all[HEADERS.snapshotFloor] !== undefined ? { snapshotFloor: all[HEADERS.snapshotFloor] } : {}),
     ...(all["etag"] !== undefined ? { etag: all["etag"] } : {}),
     ...(all["cache-control"] !== undefined ? { cacheControl: all["cache-control"] } : {}),
     ...(all["location"] !== undefined ? { location: all["location"] } : {}),

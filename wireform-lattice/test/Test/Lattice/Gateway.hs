@@ -661,9 +661,9 @@ mkUp schema secret rows mkHooks = do
       inner = memoryBackend schema db hooks
       backend =
         inner
-          { beLoad = \ty keys -> do
+          { beLoad = \ty proj keys -> do
               atomically (modifyTVar' loads ((ty, length keys) :))
-              beLoad inner ty keys
+              beLoad inner ty proj keys
           }
   origin <-
     newOrigin

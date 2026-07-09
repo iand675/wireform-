@@ -1,0 +1,76 @@
+schema directives.example.com
+
+-- Directive declarations (§3.9): a closed registry of user-defined
+-- annotations. Reserved names (@break/@deprecated/@declassify/@depth) may
+-- not be redeclared.
+
+"Emit an audit-log entry when this element is read or written."
+directive @audit(level: Text = "info") repeatable on ENTITY | FIELD | MUTATION
+
+"Internal-only; excluded from generated public clients."
+directive @internal on FIELD | RELATIONSHIP
+
+"Personally identifiable information."
+directive @pii on FIELD
+
+"Throttle an entry point."
+directive @rateLimit(perMinute: I32, burst: I32 = 0) on ROOT | MUTATION
+
+"A human-readable label for a declared type."
+directive @label(text: Text) on TYPE
+
+claims {
+  role: Text
+}
+
+"A stable, opaque user identifier."
+@label(text: "User ID")
+newtype UserId = Uuid
+
+"A registered account holder."
+@audit(level: "sensitive")
+entity User by id {
+  visible to all by default
+  "The user's stable key."
+  id: UserId
+  "Public display name."
+  name: Text
+  "Contact email — never shared-cached."
+  @pii
+  email: Text private
+  "Posts authored by this user."
+  @internal
+  has many posts: Post by authorId
+                  ordered by createdAt desc
+                  page 20 max 100
+}
+
+entity Post by id {
+  visible to all by default
+  id: Uuid
+  authorId: UserId
+  "When the post was created."
+  @audit
+  @audit(level: "debug")
+  createdAt: Timestamp
+}
+
+"Fetch a single user by id."
+@rateLimit(perMinute: 60)
+get user(id: UserId) of User public
+
+"List posts by author, newest first."
+@rateLimit(perMinute: 30, burst: 10)
+list posts of Post by authorId
+              ordered by createdAt desc
+              page 20 max 100 public
+
+"Publish a new post."
+@audit(level: "sensitive")
+@rateLimit(perMinute: 5)
+mutation publish(author: UserId, body: Text) returns Post {
+  allow       public
+  writes      Post(new)
+  invalidates writes
+  effect      transactional
+}

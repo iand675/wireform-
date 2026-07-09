@@ -109,6 +109,7 @@ export default defineConfig({
 					label: "Lattice",
 					items: [
 						{ label: "Overview", slug: "lattice" },
+						{ label: "Read consistency", slug: "lattice/consistency" },
 						{ label: "Specification", slug: "lattice/spec" },
 						{ label: "GraphQL comparison corpus", slug: "lattice/corpus" },
 						{ label: "Haskell guide", slug: "lattice/haskell" },

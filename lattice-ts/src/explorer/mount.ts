@@ -12,7 +12,16 @@
  */
 
 import type { FetchLike } from "../client.ts";
-import { completeQuery, lintQuery, type Diagnostic } from "./complete.ts";
+import {
+  completeQuery,
+  findInsertionPoints,
+  hoverAt,
+  isInsertValidAt,
+  lintQuery,
+  type Diagnostic,
+  type InsertionPoint,
+  type InsertTarget,
+} from "./complete.ts";
 import { createEditor, type Editor } from "./editor.ts";
 import { highlightIdl, highlightJson, highlightQuery } from "./highlight.ts";
 import {
@@ -29,8 +38,10 @@ import {
   type SlicesRun,
 } from "./session.ts";
 import {
+  directiveLabel,
   parseSchema,
   targetLabel,
+  type DirectiveApp,
   type EdgeModel,
   type FieldModel,
   type SchemaModel,
@@ -215,24 +226,39 @@ const ICON_SEARCH =
 const ICON_CLEAR =
   '<svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 4L12 12M12 4L4 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
 
-function fieldRow(f: FieldModel, filter: string, onInsert: (text: string) => void): HTMLElement {
+/** Directive-application chips (`@audit`, `@pii`); the full form is in the tooltip. */
+function dirChips(directives: readonly DirectiveApp[] | undefined): HTMLElement[] {
+  return (directives ?? []).map((d) => h("span", { class: "lx-dir", title: directiveLabel(d) }, "@" + d.name));
+}
+
+/** A description sub-line (the documentation string) for a declaration or member. */
+function descEl(text: string | undefined): HTMLElement | undefined {
+  return text ? h("div", { class: "lx-desc" }, text) : undefined;
+}
+
+/** Docs-tree insertion callback: raw text plus the optional semantic target that drives smart placement. */
+type InsertFn = (text: string, target?: InsertTarget) => void;
+
+function fieldRow(f: FieldModel, filter: string, owner: string, onInsert: InsertFn): HTMLElement {
   const name = h("span", { class: "lx-row-name", title: f.derived ?? f.policy ?? "" });
   highlightText(name, f.name, filter);
-  name.addEventListener("click", () => onInsert(f.name));
+  name.addEventListener("click", () => onInsert(f.name, { kind: "member", name: f.name, owner }));
   return h(
     "div",
     { class: "lx-row lx-mem" },
     h("span", { class: "lx-dot" }, "·"),
     name,
     h("span", { class: "lx-row-type" }, `: ${f.type}`),
+    ...dirChips(f.directives),
     f.derived ? h("span", { class: "lx-tag" }, "derived") : undefined,
+    descEl(f.description),
   );
 }
 
-function edgeRow(e: EdgeModel, filter: string, onInsert: (text: string) => void): HTMLElement {
+function edgeRow(e: EdgeModel, filter: string, owner: string, onInsert: InsertFn): HTMLElement {
   const name = h("span", { class: "lx-row-name" });
   highlightText(name, e.name, filter);
-  name.addEventListener("click", () => onInsert(`${e.name} { }`));
+  name.addEventListener("click", () => onInsert(`${e.name} { }`, { kind: "member", name: e.name, owner }));
   const tag = e.kind === "many" ? "many" : e.optional ? "one?" : "one";
   return h(
     "div",
@@ -240,7 +266,9 @@ function edgeRow(e: EdgeModel, filter: string, onInsert: (text: string) => void)
     h("span", { class: "lx-dot lx-dot-edge" }, "→"),
     name,
     h("span", { class: "lx-row-type" }, targetLabel(e.target)),
+    ...dirChips(e.directives),
     h("span", { class: "lx-tag" }, tag),
+    descEl(e.description),
   );
 }
 
@@ -259,8 +287,15 @@ function group(title: string, open: boolean, rows: HTMLElement[]): HTMLElement |
   return details;
 }
 
-/** A collapsible entity/interface with a name, key/members chip, and member rows. */
-function typeBox(name: string, chip: string, members: HTMLElement[], filter: string): HTMLElement {
+/** A collapsible entity/interface with a name, key/members chip, description, and member rows. */
+function typeBox(
+  name: string,
+  chip: string,
+  members: HTMLElement[],
+  filter: string,
+  description?: string,
+  directives?: readonly DirectiveApp[],
+): HTMLElement {
   const nameEl = h("span", { class: "lx-ent-name" });
   highlightText(nameEl, name, filter);
   const summary = h(
@@ -268,14 +303,17 @@ function typeBox(name: string, chip: string, members: HTMLElement[], filter: str
     {},
     h("span", { class: "lx-chev" }),
     nameEl,
+    ...dirChips(directives),
     chip ? h("span", { class: "lx-key" }, chip) : undefined,
   );
   const body = h("div", { class: "lx-ent-body" });
+  const d = descEl(description);
+  if (d) body.appendChild(d);
   for (const m of members) body.appendChild(m);
   return h("details", { class: "lx-ent" }, summary, body);
 }
 
-function renderDocs(host: HTMLElement, model: SchemaModel, onInsert: (text: string) => void, onMutation?: (name: string) => void): void {
+function renderDocs(host: HTMLElement, model: SchemaModel, onInsert: InsertFn, onMutation?: (name: string) => void): void {
   const prevFilter = host.querySelector<HTMLInputElement>(".lx-search")?.value ?? "";
   clear(host);
   const search = document.createElement("input");
@@ -306,13 +344,14 @@ function renderDocs(host: HTMLElement, model: SchemaModel, onInsert: (text: stri
     clear(tree);
     const f = filter.trim().toLowerCase();
     const match = (name: string): boolean => f === "" || name.toLowerCase().includes(f);
+    if (model.description && f === "") tree.appendChild(h("div", { class: "lx-schema-desc" }, model.description));
 
     const rootRows: HTMLElement[] = [];
     for (const r of model.roots.values()) {
       if (!match(r.name)) continue;
       const name = h("span", { class: "lx-row-name" });
       highlightText(name, r.name, f);
-      name.addEventListener("click", () => onInsert(`${r.name} { }`));
+      name.addEventListener("click", () => onInsert(`${r.name} { }`, { kind: "root", name: r.name }));
       const argSig = r.args.length ? `(${r.args.map((a) => `${a.name}: ${a.type}`).join(", ")})` : "";
       rootRows.push(
         h(
@@ -322,6 +361,8 @@ function renderDocs(host: HTMLElement, model: SchemaModel, onInsert: (text: stri
           name,
           argSig ? h("span", { class: "lx-row-type" }, argSig) : undefined,
           h("span", { class: "lx-row-arrow" }, `→ ${targetLabel(r.target)}`),
+          ...dirChips(r.directives),
+          descEl(r.description),
         ),
       );
     }
@@ -331,18 +372,18 @@ function renderDocs(host: HTMLElement, model: SchemaModel, onInsert: (text: stri
       const members = [...e.fields, ...e.edges];
       if (!match(e.name) && !members.some((m) => match(m.name))) continue;
       const rows: HTMLElement[] = [];
-      for (const fld of e.fields) if (match(fld.name) || match(e.name)) rows.push(fieldRow(fld, f, onInsert));
-      for (const edg of e.edges) if (match(edg.name) || match(e.name)) rows.push(edgeRow(edg, f, onInsert));
-      entityRows.push(typeBox(e.name, e.key.join(", "), rows, f));
+      for (const fld of e.fields) if (match(fld.name) || match(e.name)) rows.push(fieldRow(fld, f, e.name, onInsert));
+      for (const edg of e.edges) if (match(edg.name) || match(e.name)) rows.push(edgeRow(edg, f, e.name, onInsert));
+      entityRows.push(typeBox(e.name, e.key.join(", "), rows, f, e.description, e.directives));
     }
 
     const ifaceRows: HTMLElement[] = [];
     for (const i of model.interfaces.values()) {
       if (!match(i.name)) continue;
       const rows: HTMLElement[] = [];
-      for (const fld of i.fields) rows.push(fieldRow(fld, f, onInsert));
-      for (const edg of i.edges) rows.push(edgeRow(edg, f, onInsert));
-      ifaceRows.push(typeBox(i.name, i.members.join(", "), rows, f));
+      for (const fld of i.fields) rows.push(fieldRow(fld, f, i.name, onInsert));
+      for (const edg of i.edges) rows.push(edgeRow(edg, f, i.name, onInsert));
+      ifaceRows.push(typeBox(i.name, i.members.join(", "), rows, f, i.description, i.directives));
     }
 
     const mutationRows: HTMLElement[] = [];
@@ -363,6 +404,8 @@ function renderDocs(host: HTMLElement, model: SchemaModel, onInsert: (text: stri
           name,
           h("span", { class: "lx-row-type" }, `(${argSig})`),
           m.returns ? h("span", { class: "lx-row-arrow" }, `→ ${m.returns}`) : undefined,
+          ...dirChips(m.directives),
+          descEl(m.description),
         ),
       );
     }
@@ -379,10 +422,12 @@ function renderDocs(host: HTMLElement, model: SchemaModel, onInsert: (text: stri
           h("span", { class: "lx-kind lx-kind-enum" }, "enum"),
           name,
           h("span", { class: "lx-row-type" }, en.values.join(" | ")),
+          ...dirChips(en.directives),
+          descEl(en.description),
         ),
       );
     }
-    for (const [name, under] of model.newtypes) {
+    for (const [name, nt] of model.newtypes) {
       if (!match(name)) continue;
       const nameEl = h("span", { class: "lx-ent-name" });
       highlightText(nameEl, name, f);
@@ -392,7 +437,69 @@ function renderDocs(host: HTMLElement, model: SchemaModel, onInsert: (text: stri
           { class: "lx-row" },
           h("span", { class: "lx-kind lx-kind-newtype" }, "new"),
           nameEl,
-          h("span", { class: "lx-row-type" }, `= ${under}`),
+          h("span", { class: "lx-row-type" }, `= ${nt.type}`),
+          ...dirChips(nt.directives),
+          descEl(nt.description),
+        ),
+      );
+    }
+    for (const rec of model.records.values()) {
+      if (!match(rec.name)) continue;
+      const nameEl = h("span", { class: "lx-ent-name" });
+      highlightText(nameEl, rec.name, f);
+      const fieldSig = rec.fields.map((fd) => `${fd.name}: ${fd.type}`).join(", ");
+      typeRows.push(
+        h(
+          "div",
+          { class: "lx-row", title: fieldSig },
+          h("span", { class: "lx-kind lx-kind-record" }, "data"),
+          nameEl,
+          h("span", { class: "lx-row-type" }, `{ ${fieldSig} }`),
+          ...dirChips(rec.directives),
+          descEl(rec.description),
+        ),
+      );
+    }
+
+    const directiveRows: HTMLElement[] = [];
+    for (const d of model.directiveDecls.values()) {
+      if (!match(d.name)) continue;
+      const nameEl = h("span", { class: "lx-ent-name" });
+      highlightText(nameEl, "@" + d.name, f);
+      const params = d.args.length
+        ? `(${d.args.map((a) => `${a.name}: ${a.type}${a.default !== undefined ? ` = ${a.default}` : ""}`).join(", ")})`
+        : "";
+      directiveRows.push(
+        h(
+          "div",
+          { class: "lx-row" },
+          h("span", { class: "lx-kind lx-kind-dir" }, "dir"),
+          nameEl,
+          params ? h("span", { class: "lx-row-type" }, params) : undefined,
+          h("span", { class: "lx-row-arrow" }, `→ ${d.locations.join(" | ")}`),
+          d.repeatable ? h("span", { class: "lx-tag" }, "repeatable") : undefined,
+          descEl(d.description),
+        ),
+      );
+    }
+
+    const fragmentRows: HTMLElement[] = [];
+    for (const fr of model.fragments.values()) {
+      if (!match(fr.name) && !match(fr.on)) continue;
+      const nameEl = h("span", { class: "lx-row-name" });
+      highlightText(nameEl, fr.name, f);
+      nameEl.addEventListener("click", () => onInsert(`...${fr.name}`));
+      const argSig = fr.args.length ? `(${fr.args.map((a) => `${a.name}: ${a.type}`).join(", ")})` : "";
+      fragmentRows.push(
+        h(
+          "div",
+          { class: "lx-row", title: fr.selection.trim() },
+          h("span", { class: "lx-kind lx-kind-frag" }, "frag"),
+          nameEl,
+          argSig ? h("span", { class: "lx-row-type" }, argSig) : undefined,
+          h("span", { class: "lx-row-arrow" }, `on ${fr.on}`),
+          ...dirChips(fr.directives),
+          descEl(fr.description),
         ),
       );
     }
@@ -402,6 +509,8 @@ function renderDocs(host: HTMLElement, model: SchemaModel, onInsert: (text: stri
       group("Entities", f !== "", entityRows),
       group("Interfaces", false, ifaceRows),
       group("Mutations", false, mutationRows),
+      group("Fragments", false, fragmentRows),
+      group("Directives", false, directiveRows),
       group("Types", false, typeRows),
     ];
     let shown = 0;
@@ -422,7 +531,14 @@ function renderDocs(host: HTMLElement, model: SchemaModel, onInsert: (text: stri
       );
     }
 
-    const matches = rootRows.length + entityRows.length + ifaceRows.length + mutationRows.length + typeRows.length;
+    const matches =
+      rootRows.length +
+      entityRows.length +
+      ifaceRows.length +
+      mutationRows.length +
+      fragmentRows.length +
+      directiveRows.length +
+      typeRows.length;
     count.textContent = String(matches);
     count.style.display = f === "" ? "none" : "";
     const hasText = filter.length > 0;
@@ -498,6 +614,20 @@ function renderExplain(host: HTMLElement, explain: ExplainDoc | undefined): void
   if (explain.surrogateKeys && explain.surrogateKeys.length) {
     const sec = h("div", { class: "lx-explain-sec" }, h("h4", {}, "Surrogate keys"));
     for (const k of explain.surrogateKeys) sec.appendChild(h("div", { class: "lx-row-type", style: "padding:2px 0" }, `${k.collection} — grouping [${k.grouping.join(", ")}]`));
+    host.appendChild(sec);
+  }
+  const projections = Object.entries(explain.projections ?? {});
+  if (projections.length) {
+    const sec = h("div", { class: "lx-explain-sec" }, h("h4", {}, "Loader projections"));
+    const table = h("table", { class: "lx-kv" });
+    for (const [ty, proj] of projections) {
+      const cell =
+        proj === "*"
+          ? h("td", {}, h("span", { class: "lx-chip" }, "whole rows"))
+          : h("td", {}, proj.join(", "));
+      table.appendChild(h("tr", {}, h("td", {}, ty), cell));
+    }
+    sec.appendChild(table);
     host.appendChild(sec);
   }
   const rounds = explain.rounds ?? [];
@@ -979,7 +1109,7 @@ export function mountExplorer(container: HTMLElement, options: ExplorerOptions):
     if (!e) return;
     const isCurrent = hash === liveHash;
     model = isCurrent && liveSchema ? liveSchema.model : parseSchema(e.idl);
-    renderDocs(querySidebar, model, (t) => queryEditor.insertAtCaret(t), selectMutationInUI);
+    renderDocs(querySidebar, model, insertMember, selectMutationInUI);
     refreshMutations();
     idlEditor.setValue(e.idl);
     refreshIdl();
@@ -1086,6 +1216,7 @@ export function mountExplorer(container: HTMLElement, options: ExplorerOptions):
     onRun: () => void run(),
     onChange: () => refreshLint(),
     complete: (text, offset) => completeQuery(text, offset, model),
+    hover: (text, offset) => hoverAt(text, offset, model),
   });
   const varsArea = document.createElement("textarea");
   varsArea.spellcheck = false;
@@ -1394,6 +1525,119 @@ export function mountExplorer(container: HTMLElement, options: ExplorerOptions):
   queryTab.addEventListener("click", () => showView("query"));
   schemaTab.addEventListener("click", () => showView("schema"));
 
+  // -- smart field insertion (docs tree -> valid query position) -------------
+  // Clicking a docs-tree member normally drops it at the caret. When the caret
+  // is not a valid spot for that member, we instead find every selection set
+  // where it *is* valid: apply the sole candidate silently, or pop a chooser.
+  let closeChooser: (() => void) | null = null;
+
+  const applyInsertion = (p: InsertionPoint): void => {
+    queryEditor.applyEdit(p.start, p.end, p.text, p.caret);
+  };
+
+  const showInsertionChooser = (label: string, points: InsertionPoint[]): void => {
+    closeChooser?.();
+    let selected = 0;
+    const chooser = h("div", { class: "lx-insert-chooser", role: "listbox" });
+    chooser.appendChild(
+      h(
+        "div",
+        { class: "lx-insert-head" },
+        "Insert ",
+        h("code", { class: "lx-insert-name" }, label),
+        " where?",
+      ),
+    );
+    const rows: HTMLElement[] = [];
+    const render = (): void => {
+      rows.forEach((r, i) => r.classList.toggle("lx-insert-sel", i === selected));
+      const pt = points[selected];
+      if (pt) queryEditor.setPreview(pt.line);
+    };
+    const commit = (): void => {
+      const p = points[selected];
+      close();
+      if (p) applyInsertion(p);
+    };
+    function close(): void {
+      document.removeEventListener("keydown", onKey, true);
+      document.removeEventListener("mousedown", onDocDown, true);
+      queryEditor.setPreview(null);
+      chooser.remove();
+      closeChooser = null;
+    }
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        selected = (selected + 1) % points.length;
+        render();
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        selected = (selected - 1 + points.length) % points.length;
+        render();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        commit();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        close();
+      }
+    };
+    const onDocDown = (e: MouseEvent): void => {
+      if (!chooser.contains(e.target as Node)) close();
+    };
+    points.forEach((p, i) => {
+      const row = h(
+        "div",
+        { class: "lx-insert-row", role: "option" },
+        h("span", { class: "lx-insert-type" }, p.typeLabel),
+        p.exact ? h("span", { class: "lx-insert-exact" }, "exact") : undefined,
+        h("span", { class: "lx-insert-line" }, `line ${p.line + 1}`),
+        h("span", { class: "lx-insert-preview" }, p.preview || "{ }"),
+      );
+      row.addEventListener("mouseenter", () => {
+        selected = i;
+        render();
+      });
+      row.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        selected = i;
+        commit();
+      });
+      rows.push(row);
+      chooser.appendChild(row);
+    });
+    chooser.appendChild(h("div", { class: "lx-insert-hint" }, "↑↓ choose · Enter insert · Esc cancel"));
+    closeChooser = close;
+    document.addEventListener("keydown", onKey, true);
+    document.addEventListener("mousedown", onDocDown, true);
+    queryEditorWrap.appendChild(chooser);
+    render();
+  };
+
+  const insertMember = (text: string, target?: InsertTarget): void => {
+    showView("query");
+    if (!target) {
+      queryEditor.insertAtCaret(text);
+      return;
+    }
+    const doc = queryEditor.getValue();
+    if (isInsertValidAt(doc, queryEditor.getCaret(), model, target)) {
+      queryEditor.insertAtCaret(text);
+      return;
+    }
+    const points = findInsertionPoints(doc, model, target, text);
+    if (points.length === 0) {
+      queryEditor.insertAtCaret(text);
+      return;
+    }
+    if (points.length === 1) {
+      applyInsertion(points[0]!);
+      return;
+    }
+    showInsertionChooser(target.name, points);
+  };
+
   const connect = async (next: string): Promise<void> => {
     const clean = next.trim().replace(/\/+$/, "");
     if (!clean || clean === currentBase) {
@@ -1438,10 +1682,7 @@ export function mountExplorer(container: HTMLElement, options: ExplorerOptions):
     renderDocs(
       schemaSidebar,
       m,
-      (t) => {
-        showView("query");
-        queryEditor.insertAtCaret(t);
-      },
+      insertMember,
       (name) => {
         showView("query");
         selectMutationInUI(name);
@@ -1528,7 +1769,7 @@ export function mountExplorer(container: HTMLElement, options: ExplorerOptions):
       renderSchemaOptions(liveHash);
       pastBadge.style.display = "none";
       admissionChip.textContent = `admission: ${loaded.discovery.admission ?? "?"}`;
-      renderDocs(querySidebar, model, (t) => queryEditor.insertAtCaret(t), selectMutationInUI);
+      renderDocs(querySidebar, model, insertMember, selectMutationInUI);
       refreshMutations();
       idlEditor.setValue(loaded.idl);
       refreshIdl();
@@ -1537,7 +1778,7 @@ export function mountExplorer(container: HTMLElement, options: ExplorerOptions):
     } catch (e) {
       liveHash = "";
       renderSchemaOptions("");
-      renderDocs(querySidebar, model, (t) => queryEditor.insertAtCaret(t), selectMutationInUI);
+      renderDocs(querySidebar, model, insertMember, selectMutationInUI);
       refreshMutations();
       querySidebar.appendChild(
         teach(

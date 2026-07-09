@@ -449,6 +449,12 @@ searchRoot db args window = do
 {- | The @friends@ edge: resolve each parent's @friendIds@ (ref strings) to
 live targets and page them by target name via 'pageFromRows', so cursors
 behave exactly like the generic machinery's.
+
+@friendIds@ is read from this backend's own tables, NOT off the handed-in
+parent rows: those are projected to what the plan reads
+("Lattice.Backend", /Projections/), and no query selects @friendIds@ —
+edge-backing state is exactly what the projection contract tells
+resolvers to self-serve.
 -}
 friendsChildren :: Schema -> MemoryDb -> [(Ref, EntityRow)] -> Window -> IO (Map Ref (Either BackendFailure Page))
 friendsChildren schema db parents window = do
@@ -456,9 +462,9 @@ friendsChildren schema db parents window = do
     humans <- tableRows db "Human"
     droids <- tableRows db "Droid"
     pure (Map.fromList [("Human" :: TypeName, humans), ("Droid", droids)])
-  let nameOf ref = do
-        table <- Map.lookup (refType ref) tables
-        row <- Map.lookup (refKey ref) table
+  let rowOf ref = Map.lookup (refType ref) tables >>= Map.lookup (refKey ref)
+      nameOf ref = do
+        row <- rowOf ref
         A.String n <- Map.lookup "name" (rowFields row)
         pure n
       resolve v = do
@@ -466,11 +472,11 @@ friendsChildren schema db parents window = do
         ref <- parseRef refText
         n <- nameOf ref
         pure (ref, Map.singleton "name" (A.String n))
-      friendRows parentRow = case Map.lookup "friendIds" (rowFields parentRow) of
+      friendRows pref = case rowOf pref >>= Map.lookup "friendIds" . rowFields of
         Just (A.Array ids) -> mapMaybe resolve (toList ids)
         _ -> []
-      pageFor (_, parentRow) =
-        pageFromRows schema ["Human", "Droid"] (friendsWindowing schema) window (friendRows parentRow)
+      pageFor (pref, _) =
+        pageFromRows schema ["Human", "Droid"] (friendsWindowing schema) window (friendRows pref)
   pure (Map.fromList (map (\p -> (fst p, Right (pageFor p))) parents))
 
 

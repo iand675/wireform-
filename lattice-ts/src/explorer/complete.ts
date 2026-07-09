@@ -21,7 +21,7 @@ import type {
   SchemaModel,
   Target,
 } from "./schema.ts";
-import { entityMembers, membersOf, targetLabel, targetTypes } from "./schema.ts";
+import { directivesLabel, entityMembers, membersOf, targetLabel, targetTypes } from "./schema.ts";
 
 // ---------------------------------------------------------------------------
 // Tokens (query grammar)
@@ -322,26 +322,358 @@ export function analyzeQueryContext(text: string, offset: number, schema: Schema
 }
 
 // ---------------------------------------------------------------------------
+// Smart field insertion
+//
+// When the docs tree drops a member into the query, the caret may be somewhere
+// the member is not selectable (a different type's selection set, an argument
+// list, the document header). These helpers decide whether the caret is a valid
+// drop site and, if not, enumerate every selection set where the member *would*
+// be valid so the UI can place it (or offer a choice).
+
+/** A member the docs tree wants to drop into the query. */
+export type InsertTarget =
+  | { readonly kind: "root"; readonly name: string }
+  | { readonly kind: "member"; readonly name: string; readonly owner: string };
+
+/** Whether `target` is a selectable member of the type in scope. */
+function memberValidIn(schema: SchemaModel, type: TypeContext, target: InsertTarget): boolean {
+  if (target.kind === "root") return type.kind === "root" && schema.roots.has(target.name);
+  // A concrete member needs a concrete/interface selection set; the query root
+  // holds only roots, and a union set admits members only through a fragment.
+  if (type.kind === "root" || type.kind === "union") return false;
+  const { fields, edges } = membersOf(schema, type);
+  return fields.some((f) => f.name === target.name) || edges.some((e) => e.name === target.name);
+}
+
+/** Is a caret drop at `offset` already a valid spot for `target`? */
+export function isInsertValidAt(text: string, offset: number, schema: SchemaModel, target: InsertTarget): boolean {
+  const ctx = analyzeQueryContext(text, offset, schema);
+  return ctx.scope === "selection" && memberValidIn(schema, ctx.type, target);
+}
+
+/** A concrete place the member can be dropped, with a ready-to-apply edit. */
+export interface InsertionPoint {
+  /** Splice range start in the document. */
+  readonly start: number;
+  /** Splice range end (equals `start` unless an empty `{ }` is being expanded). */
+  readonly end: number;
+  /** Replacement text (already newline- and indent-formatted). */
+  readonly text: string;
+  /** Absolute caret offset in the document after the edit is applied. */
+  readonly caret: number;
+  /** Display label of the enclosing type (`root`, `Human`, `(Human | Droid)`). */
+  readonly typeLabel: string;
+  /** 0-based line of the enclosing selection set's opening brace. */
+  readonly line: number;
+  /** Trimmed source line of the opening brace, for a chooser preview. */
+  readonly preview: string;
+  /** The enclosing type is exactly the member's declared owner. */
+  readonly exact: boolean;
+}
+
+/** One resolved selection set spanning `open` (the `{`) to `close` (the `}`). */
+interface SelectionSet {
+  readonly type: TypeContext;
+  readonly open: number;
+  readonly close: number;
+}
+
+/** Every selection set in `text`, each with its resolved type context. */
+function selectionSets(text: string, schema: SchemaModel): SelectionSet[] {
+  const toks = lexQuery(text);
+  const stack: { type: TypeContext; open: number }[] = [];
+  const sets: SelectionSet[] = [];
+  let pendingField: string | undefined;
+  let pendingOn: string | undefined;
+  let parenDepth = 0;
+  let afterSpread = false;
+  let afterOn = false;
+  for (const t of toks) {
+    if (parenDepth > 0) {
+      if (t.kind === "punct" && t.value === "(") parenDepth++;
+      else if (t.kind === "punct" && t.value === ")") parenDepth--;
+      continue;
+    }
+    switch (t.kind) {
+      case "punct":
+        if (t.value === "{") {
+          const parent = stack.length === 0 ? ROOT : stack[stack.length - 1]!.type;
+          let ty: TypeContext | undefined;
+          if (stack.length === 0) ty = ROOT;
+          else if (pendingOn) ty = { kind: "entity", name: pendingOn };
+          else if (pendingField) ty = childType(schema, parent, pendingField);
+          stack.push({ type: ty ?? ROOT, open: t.start });
+          pendingField = undefined;
+          pendingOn = undefined;
+        } else if (t.value === "}") {
+          const fr = stack.pop();
+          if (fr) sets.push({ type: fr.type, open: fr.open, close: t.start });
+        } else if (t.value === "(") {
+          parenDepth = 1;
+        }
+        afterSpread = false;
+        afterOn = false;
+        break;
+      case "spread":
+        afterSpread = true;
+        afterOn = false;
+        break;
+      case "name":
+        if (afterOn) {
+          pendingOn = t.value;
+          afterOn = false;
+          afterSpread = false;
+        } else if (afterSpread && t.value === "on") {
+          afterOn = true;
+        } else if (afterSpread) {
+          afterSpread = false;
+        } else {
+          pendingField = t.value;
+        }
+        break;
+      default:
+        afterSpread = false;
+        afterOn = false;
+    }
+  }
+  // Unclosed sets (caret mid-edit): treat end-of-text as their close.
+  while (stack.length) {
+    const fr = stack.pop()!;
+    sets.push({ type: fr.type, open: fr.open, close: text.length });
+  }
+  return sets;
+}
+
+/** Build the edit that drops `body` as a member of the set spanning `open`..`close`. */
+function insertionForSet(text: string, set: SelectionSet, target: InsertTarget, body: string): InsertionPoint {
+  const lineStart = text.lastIndexOf("\n", set.open - 1) + 1;
+  const baseIndent = /^[ \t]*/.exec(text.slice(lineStart, set.open))?.[0] ?? "";
+  const inner = baseIndent + "  ";
+  const empty = text.slice(set.open + 1, set.close).trim() === "";
+  // An empty `{ }` is expanded to three lines; a populated set gets the member
+  // spliced in as a new first line so existing formatting is left untouched.
+  const start = set.open + 1;
+  const end = empty ? set.close : set.open + 1;
+  const insText = empty ? `\n${inner}${body}\n${baseIndent}` : `\n${inner}${body}`;
+  const bodyStart = start + 1 + inner.length; // past the leading "\n" + indent
+  const brace = body.indexOf("{ }");
+  const caret = brace >= 0 ? bodyStart + brace + 2 : bodyStart + body.length;
+  const nl = text.indexOf("\n", set.open);
+  const preview = text.slice(lineStart, nl === -1 ? text.length : nl).trim();
+  const line = text.slice(0, set.open).split("\n").length - 1;
+  const typeLabel = set.type.kind === "root" ? "root" : targetLabel(set.type);
+  const exact =
+    target.kind === "member" &&
+    (set.type.kind === "entity" || set.type.kind === "interface") &&
+    set.type.name === target.owner;
+  return { start, end, text: insText, caret, typeLabel, line, preview, exact };
+}
+
+/**
+ * Every selection set where `target` (rendered as `body`) can be validly
+ * dropped, ordered with exact-owner matches first, then by document position.
+ */
+export function findInsertionPoints(
+  text: string,
+  schema: SchemaModel,
+  target: InsertTarget,
+  body: string,
+): InsertionPoint[] {
+  const points: InsertionPoint[] = [];
+  for (const set of selectionSets(text, schema)) {
+    if (memberValidIn(schema, set.type, target)) points.push(insertionForSet(text, set, target, body));
+  }
+  points.sort((a, b) => (a.exact === b.exact ? a.start - b.start : a.exact ? -1 : 1));
+  return points;
+}
+
+// ---------------------------------------------------------------------------
+// Hover
+
+/** A schema-grounded description of the identifier under the pointer. */
+export interface HoverInfo {
+  readonly kind: CompletionKind;
+  /** The identifier the hover describes (`author`, `@audit`, `UserByline`). */
+  readonly title: string;
+  /** A one-line signature (`: Text`, `has many: (Human | Droid) (paginated)`). */
+  readonly signature?: string;
+  /** The element's documentation string, when the schema declares one. */
+  readonly doc?: string;
+  /** An extra metadata line (derived read-set, policy, directive applications). */
+  readonly meta?: string;
+}
+
+/** The identifier spanning `offset` (both directions), plus the char before it. */
+function wordAt(text: string, offset: number): { start: number; word: string; lead: string } {
+  let start = offset;
+  let end = offset;
+  while (start > 0 && NAME_CHAR.test(text[start - 1]!)) start--;
+  while (end < text.length && NAME_CHAR.test(text[end]!)) end++;
+  return { start, word: text.slice(start, end), lead: text[start - 1] ?? "" };
+}
+
+function fieldHover(f: FieldModel): HoverInfo {
+  const argSig = f.args.length ? `(${f.args.map((a) => `${a.name}: ${a.type}`).join(", ")})` : "";
+  const meta = [directivesLabel(f.directives), f.derived, f.policy].filter(Boolean).join(" · ");
+  return {
+    kind: "field",
+    title: f.name,
+    signature: `${argSig}: ${f.type}`,
+    ...(f.description ? { doc: f.description } : {}),
+    ...(meta ? { meta } : {}),
+  };
+}
+
+function edgeHover(e: EdgeModel): HoverInfo {
+  const opt = e.optional ? "?" : "";
+  const paged = e.kind === "many" ? " (paginated)" : "";
+  const meta = directivesLabel(e.directives);
+  return {
+    kind: "edge",
+    title: e.name,
+    signature: `has ${e.kind}${opt}: ${targetLabel(e.target)}${paged}`,
+    ...(e.description ? { doc: e.description } : {}),
+    ...(meta ? { meta } : {}),
+  };
+}
+
+function rootHover(schema: SchemaModel, name: string): HoverInfo | null {
+  const r = schema.roots.get(name);
+  if (!r) return null;
+  const argSig = r.args.length ? `(${r.args.map((a) => `${a.name}: ${a.type}`).join(", ")})` : "";
+  const meta = directivesLabel(r.directives);
+  return {
+    kind: "root",
+    title: r.name,
+    signature: `${r.kind}${argSig} → ${targetLabel(r.target)}`,
+    ...(r.description ? { doc: r.description } : {}),
+    ...(meta ? { meta } : {}),
+  };
+}
+
+function fragmentHover(schema: SchemaModel, name: string): HoverInfo | null {
+  const fr = schema.fragments.get(name);
+  if (!fr) return null;
+  return {
+    kind: "fragment",
+    title: fr.name,
+    signature: `fragment on ${fr.on}`,
+    ...(fr.description ? { doc: fr.description } : {}),
+    ...(directivesLabel(fr.directives) ? { meta: directivesLabel(fr.directives) } : {}),
+  };
+}
+
+function typeHover(schema: SchemaModel, name: string): HoverInfo | null {
+  const e = schema.entities.get(name);
+  if (e) {
+    const meta = directivesLabel(e.directives);
+    return {
+      kind: "type",
+      title: name,
+      signature: `entity by ${e.key.join(", ")}`,
+      ...(e.description ? { doc: e.description } : {}),
+      ...(meta ? { meta } : {}),
+    };
+  }
+  const i = schema.interfaces.get(name);
+  if (i) return { kind: "type", title: name, signature: "interface", ...(i.description ? { doc: i.description } : {}) };
+  const en = schema.enums.get(name);
+  if (en) return { kind: "enum", title: name, signature: en.values.join(" | "), ...(en.description ? { doc: en.description } : {}) };
+  const rec = schema.records.get(name);
+  if (rec) return { kind: "type", title: name, signature: `{ ${rec.fields.map((fd) => `${fd.name}: ${fd.type}`).join(", ")} }`, ...(rec.description ? { doc: rec.description } : {}) };
+  const nt = schema.newtypes.get(name);
+  if (nt) return { kind: "type", title: name, signature: `= ${nt.type}`, ...(nt.description ? { doc: nt.description } : {}) };
+  return null;
+}
+
+function argHover(schema: SchemaModel, ctx: QueryContext, word: string): HoverInfo | null {
+  if (ctx.ownerField === undefined) return null;
+  const a = argsFor(schema, ctx.type, ctx.ownerField).find((x) => x.name === word);
+  if (!a) return null;
+  return {
+    kind: "arg",
+    title: a.name,
+    signature: `: ${a.type}${a.default !== undefined ? ` = ${a.default}` : ""}`,
+    ...(a.description ? { doc: a.description } : {}),
+  };
+}
+
+function memberHover(schema: SchemaModel, type: TypeContext, word: string): HoverInfo | null {
+  if (type.kind === "root") return rootHover(schema, word);
+  const scopes = type.kind === "union" ? type.members.map((m) => entityMembers(schema, m)) : [membersOf(schema, type)];
+  for (const s of scopes) {
+    const fld = s.fields.find((x) => x.name === word);
+    if (fld) return fieldHover(fld);
+    const edg = s.edges.find((x) => x.name === word);
+    if (edg) return edgeHover(edg);
+  }
+  return null;
+}
+
+/**
+ * Resolve the identifier under `offset` to a schema-grounded 'HoverInfo', or
+ * `null` when nothing in scope names it. Reuses 'analyzeQueryContext' to
+ * recover the type context (so `name` under `post { author { name } }` resolves
+ * against the author's type), then dispatches on where the caret sits: a root,
+ * a selected field/edge, an argument, a `... on` type, a fragment spread, or a
+ * `@directive` application.
+ */
+export function hoverAt(text: string, offset: number, schema: SchemaModel): HoverInfo | null {
+  const { start, word, lead } = wordAt(text, offset);
+  if (!word) return null;
+  if (lead === "@") {
+    const d = schema.directiveDecls.get(word);
+    if (!d) return null;
+    const params = d.args.length ? `(${d.args.map((a) => `${a.name}: ${a.type}`).join(", ")})` : "";
+    return {
+      kind: "keyword",
+      title: "@" + word,
+      signature: `directive${params} on ${d.locations.join(" | ")}`,
+      ...(d.description ? { doc: d.description } : {}),
+    };
+  }
+  if (lead === "$") return null;
+  const ctx = analyzeQueryContext(text, start, schema);
+  switch (ctx.scope) {
+    case "root":
+      return rootHover(schema, word);
+    case "args":
+    case "argValue":
+      return argHover(schema, ctx, word);
+    case "onType":
+      return typeHover(schema, word);
+    case "spread":
+      return fragmentHover(schema, word);
+    case "selection":
+      return memberHover(schema, ctx.type, word);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Completion
 
 function fieldItem(f: FieldModel): CompletionItem {
   const argSig = f.args.length ? `(${f.args.map((a) => `${a.name}: ${a.type}`).join(", ")})` : "";
+  const meta = [directivesLabel(f.directives), f.derived, f.policy].filter(Boolean).join(" · ");
+  const doc = [f.description, meta].filter(Boolean).join("\n");
   return {
     label: f.name,
     kind: "field",
     detail: `${argSig}: ${f.type}`,
-    ...(f.derived || f.policy ? { doc: [f.derived, f.policy].filter(Boolean).join(" · ") } : {}),
+    ...(doc ? { doc } : {}),
   };
 }
 
 function edgeItem(e: EdgeModel): CompletionItem {
   const opt = e.kind === "one" && e.optional ? "?" : "";
   const paged = e.kind === "many" ? " (paginated)" : "";
+  const doc = [e.description, directivesLabel(e.directives)].filter(Boolean).join("\n");
   return {
     label: e.name,
     kind: "edge",
     detail: `has ${e.kind}${opt}: ${targetLabel(e.target)}${paged}`,
     insertText: e.name + " { }",
+    ...(doc ? { doc } : {}),
   };
 }
 
@@ -368,11 +700,13 @@ function itemsForContext(ctx: QueryContext, schema: SchemaModel): CompletionItem
       const out: CompletionItem[] = [];
       for (const r of schema.roots.values()) {
         const argSig = r.args.length ? `(${r.args.map((a) => `${a.name}: ${a.type}`).join(", ")})` : "";
+        const doc = [r.description, directivesLabel(r.directives)].filter(Boolean).join("\n");
         out.push({
           label: r.name,
           kind: "root",
           detail: `${r.kind}${argSig} of ${targetLabel(r.target)}`,
           insertText: r.name + " { }",
+          ...(doc ? { doc } : {}),
         });
       }
       return out;
@@ -405,6 +739,7 @@ function itemsForContext(ctx: QueryContext, schema: SchemaModel): CompletionItem
         kind: "arg",
         detail: a.type + (a.default !== undefined ? ` = ${a.default}` : ""),
         insertText: a.name + ": ",
+        ...(a.description ? { doc: a.description } : {}),
       }));
     }
     case "argValue": {

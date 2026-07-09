@@ -11,14 +11,16 @@ this module only decides /which/ frames exist, never how they render.
 
 == Table shape (§12)
 
-Subscribers group by 'LiveKey' — query hash, slice, canonically-rendered
-variable bindings, and the raw @vc@ claims payload. Every member of a
-group would receive byte-identical executions, so the group is the
-single-flight unit: one worker thread per group holds the group's bus
-subscription (created __before__ the first snapshot executes, so no event
-can fall between snapshot and registration), drains every queued bus
-event in one gulp, and runs at most one re-execution for the batch —
-concurrent triggers coalesce, and the output fans out to every member.
+Subscribers group by 'LiveKey' — query hash, watch target (one slice or
+the whole page), canonically-rendered variable bindings, the raw @vc@
+claims payload, and (page targets with a nonempty priv slice only) a
+digest of the private credential. Every member of a group would receive
+byte-identical executions, so the group is the single-flight unit: one
+worker thread per group holds the group's bus subscription (created
+__before__ the first snapshot executes, so no event can fall between
+snapshot and registration), drains every queued bus event in one gulp,
+and runs at most one re-execution for the batch — concurrent triggers
+coalesce, and the output fans out to every member.
 
 == Registered keys
 
@@ -31,13 +33,18 @@ not yet have seen an in-flight event, and a union can only over-trigger
 
 == Delta pins
 
-A re-execution whose manifest etag equals the previous emission's pushes
-nothing (a coarsened-key false positive). Otherwise the delta is: a fresh
-manifest first /iff/ root membership changed, then entity records whose
-@(id, ver)@ changed against the previous emission, then tombstones whose
-@(id, ver)@ changed, then the end record with the new etag. Delta events
-carry @id: {outbox cursor}@ of the last coalesced trigger; snapshot
-events carry no id.
+A re-execution whose per-section etag vector equals the previous
+emission's pushes nothing (a coarsened-key false positive). Otherwise the
+delta walks the sections in slice order: a fresh manifest first /iff/
+that section's root membership changed, then entity records whose
+rendered bytes changed, then changed tombstones, and after every section
+the end record. Diff identity is @(slice, id)@ — the same entity may
+legitimately ride in two sections with different field subsets (§8.1
+plans a fragment once per level). Delta events carry @id: {outbox
+cursor}@ of the last coalesced trigger; snapshot events carry no id.
+A page re-execution that cannot obtain a single-snapshot window reports
+"skip" (@Right Nothing@): members stay, and the intersecting write that
+caused the contention has already queued the group's next trigger.
 
 == Slow and dead subscribers
 
@@ -70,6 +77,8 @@ module Lattice.Server.Live (
 
   -- * Subscribing
   LiveKey (..),
+  LiveTarget (..),
+  LiveSection (..),
   LiveSnapshot (..),
   LiveSub (..),
   LiveRefused (..),
@@ -130,33 +139,51 @@ defaultLiveConfig =
 -- State
 -- ---------------------------------------------------------------------------
 
-{- | The §12 single-flight identity: hash-form query, slice, canonical
-variable bindings, raw @vc@ claims payload (@\"\"@ when absent).
-Execution output is a function of exactly this tuple, so members of one
-group can share every emission.
+{- | The §12 single-flight identity: hash-form query, watch target,
+canonical variable bindings, raw @vc@ claims payload (@\"\"@ when absent),
+and the private-credential digest (@\"\"@ except on page targets whose
+plan has a nonempty priv slice — the page re-entangles audiences, so its
+single-flight identity includes the principal). Execution output is a
+function of exactly this tuple, so members of one group can share every
+emission.
 -}
 data LiveKey = LiveKey
   { lkHash :: Text
-  , lkSlice :: SliceName
+  , lkTarget :: LiveTarget
   , lkVars :: Text
   , lkClaims :: Text
+  , lkAuth :: Text
   }
   deriving stock (Eq, Ord, Show)
 
 
+-- | What a subscription watches: one authorization slice, or the whole
+-- page multiplexed over one stream (§12 page subscriptions).
+data LiveTarget = LiveSlice SliceName | LivePage
+  deriving stock (Eq, Ord, Show)
+
+
+{- | One slice's contribution to an execution: framed as
+@manifest → records@, concatenated in slice order across sections.
+-}
+data LiveSection = LiveSection
+  { lsecSlice :: SliceName
+  , lsecManifest :: Manifest
+  , lsecRecords :: [Record]
+  -- ^ Entity\/tombstone\/elided\/error records, already projected.
+  , lsecRoot :: Map Text [Ref]
+  -- ^ Root membership (the per-section manifest-changed test).
+  , lsecEtag :: Text
+  }
+
+
 {- | One execution's live-relevant projection, built by the origin's
-executor: the framed record stream is @manifest → records → end@.
+executor. Per-slice subscriptions carry exactly one section; page
+subscriptions one per nonempty slice, composed under a single snapshot.
 -}
 data LiveSnapshot = LiveSnapshot
-  { lsManifest :: Manifest
-  , lsRecords :: [Record]
-  -- ^ Entity\/tombstone\/elided\/error records, already projected.
-  , lsIdVers :: Map Text Text
-  -- ^ @(id, ver)@ of every emitted record (kept for callers; the delta
-  -- diff itself compares rendered bytes — see 'recordBytes').
-  , lsRoot :: Map Text [Ref]
-  -- ^ Root membership (the manifest-changed test).
-  , lsEtag :: Text
+  { lsSections :: [LiveSection]
+  -- ^ Slice order.
   , lsKeys :: Set SurrogateKey
   -- ^ The response's surrogate keys — what the group registers.
   , lsComplete :: Bool
@@ -165,18 +192,20 @@ data LiveSnapshot = LiveSnapshot
 
 {- | The group's last emission, the basis every delta diffs against.
 
-The diff basis is the /rendered bytes/ per id, not @(id, ver)@ alone: a
-paginated-edge occurrence or an @on read@ derived value rides in its
-owner's @fields@ and can change while the owner's @ver@ stands still
+The diff basis is the /rendered bytes/ per @(slice, id)@, not @(id, ver)@
+alone: a paginated-edge occurrence or an @on read@ derived value rides in
+its owner's @fields@ and can change while the owner's @ver@ stands still
 (e.g. a comment insert that never touches the post row). Byte equality
 is exact and strictly more sensitive than the version pair, so every
-@(id, ver)@ change still re-emits.
+@(id, ver)@ change still re-emits. The slice component keeps sections
+independent: one entity emitted in two sections diffs per section.
 -}
 data LiveEmission = LiveEmission
-  { leBytes :: Map Text ByteString
-  -- ^ id → the record's encoded bytes at last emission.
-  , leEtag :: Text
-  , leRoot :: Map Text [Ref]
+  { leBytes :: Map (SliceName, Text) ByteString
+  -- ^ (slice, id) → the record's encoded bytes at last emission.
+  , leEtags :: [(SliceName, Text)]
+  -- ^ Per-section etag vector, in slice order.
+  , leRoots :: Map SliceName (Map Text [Ref])
   , leKeys :: Set SurrogateKey
   }
 
@@ -290,11 +319,27 @@ snapshotFrames :: LiveSnapshot -> [SseFrame]
 snapshotFrames snap =
   map
     (recordFrame Nothing)
-    (RManifest (lsManifest snap) : lsRecords snap <> [endRecord snap])
+    (concatMap sectionRecords (lsSections snap) <> [endRecord snap])
 
 
+sectionRecords :: LiveSection -> [Record]
+sectionRecords sec = RManifest (lsecManifest sec) : lsecRecords sec
+
+
+{- | Single-section streams keep the one-slice wire shape (the end record
+carries the etag); page streams carry the validators on their per-section
+manifests instead (§6.5 framing) and end with none.
+-}
 endRecord :: LiveSnapshot -> Record
-endRecord snap = REnd (EndRecord (lsComplete snap) (Just (lsEtag snap)))
+endRecord snap = REnd (EndRecord (lsComplete snap) etag)
+  where
+    etag = case lsSections snap of
+      [sec] -> Just (lsecEtag sec)
+      _ -> Nothing
+
+
+etagVector :: LiveSnapshot -> [(SliceName, Text)]
+etagVector = map (\sec -> (lsecSlice sec, lsecEtag sec)) . lsSections
 
 
 {- | The id of an id-bearing record, rendered as the wire spells it.
@@ -310,51 +355,55 @@ recordId = \case
   _ -> Nothing
 
 
--- | id → rendered bytes for every id-bearing record of an execution.
-recordBytes :: [Record] -> Map Text ByteString
-recordBytes recs =
-  Map.fromList [(i, encodeRecord r) | r <- recs, Just i <- [recordId r]]
+-- | (slice, id) → rendered bytes for every id-bearing record.
+recordBytes :: [LiveSection] -> Map (SliceName, Text) ByteString
+recordBytes secs = Map.fromList $ do
+  sec <- secs
+  r <- lsecRecords sec
+  case recordId r of
+    Nothing -> []
+    Just i -> [((lsecSlice sec, i), encodeRecord r)]
 
 
-{- | The §12 delta, or @[]@ when the emission is unchanged (etag-equal —
-a coarsened-key false positive re-execution). Pin order: fresh manifest
-/iff/ root membership changed, then changed entity records, then changed
-tombstones (elisions ride in this bucket: a row leaving visibility is
-the same kind of fact), then the end record with the new etag. Changed =
-the id's rendered bytes differ from the previous emission's (new ids
+{- | The §12 delta, or @[]@ when the emission is unchanged (etag-vector
+equal — a coarsened-key false positive re-execution). Pin order, per
+section in slice order: fresh manifest /iff/ that section's root
+membership changed, then changed entity records, then changed tombstones
+(elisions ride in this bucket: a row leaving visibility is the same kind
+of fact); after all sections, the end record. Changed = the @(slice,
+id)@'s rendered bytes differ from the previous emission's (new ids
 included).
 -}
 deltaFrames :: Word64 -> LiveEmission -> LiveSnapshot -> [SseFrame]
 deltaFrames cursor prev snap
-  | lsEtag snap == leEtag prev = []
+  | etagVector snap == leEtags prev = []
   | otherwise =
       map (recordFrame (Just cursor)) $
-        [RManifest (lsManifest snap) | membershipChanged]
-          <> entities
-          <> others
-          <> [endRecord snap]
+        concatMap sectionDelta (lsSections snap) <> [endRecord snap]
   where
-    membershipChanged = lsRoot snap /= leRoot prev
-    changed r = case recordId r of
-      Nothing -> False
-      Just i -> Map.lookup i (leBytes prev) /= Just (encodeRecord r)
-    entities = [r | r@(REntity _) <- lsRecords snap, changed r]
-    others =
-      [ r
-      | r <- lsRecords snap
-      , changed r
-      , case r of
-          REntity _ -> False
-          _ -> True
-      ]
+    sectionDelta sec = manifestPart <> entities <> others
+      where
+        manifestPart
+          | Map.lookup (lsecSlice sec) (leRoots prev) /= Just (lsecRoot sec) =
+              [RManifest (lsecManifest sec)]
+          | otherwise = []
+        changed r = case recordId r of
+          Nothing -> False
+          Just i -> Map.lookup (lsecSlice sec, i) (leBytes prev) /= Just (encodeRecord r)
+        isEntity = \case
+          REntity _ -> True
+          _ -> False
+        changedRecs = filter changed (lsecRecords sec)
+        entities = filter isEntity changedRecs
+        others = filter (not . isEntity) changedRecs
 
 
 emissionOf :: LiveSnapshot -> LiveEmission
 emissionOf snap =
   LiveEmission
-    { leBytes = recordBytes (lsRecords snap)
-    , leEtag = lsEtag snap
-    , leRoot = lsRoot snap
+    { leBytes = recordBytes (lsSections snap)
+    , leEtags = etagVector snap
+    , leRoots = Map.fromList (map (\sec -> (lsecSlice sec, lsecRoot sec)) (lsSections snap))
     , leKeys = lsKeys snap
     }
 
@@ -377,6 +426,10 @@ data LiveSub = LiveSub
 
 data LiveRefused e
   = LiveOverCapacity
+  | LiveContention
+  -- ^ The initial page snapshot could not be composed under a single
+  -- storage snapshot after bounded retries (§12; the origin answers
+  -- @503 lattice:snapshot-contention@).
   | LiveExecRefused e
   -- ^ The initial snapshot execution refused (the pull path's problem).
 
@@ -394,7 +447,9 @@ liveSubscribe ::
   -- (outbox cursor, purged keys).
   IO (STM (Word64, [SurrogateKey])) ->
   -- | Execute the plan once (the pull pipeline minus framing).
-  IO (Either e LiveSnapshot) ->
+  -- @Right Nothing@ = transient single-snapshot contention on a page
+  -- target: refused at subscribe time, skipped on a delta.
+  IO (Either e (Maybe LiveSnapshot)) ->
   -- | The presented proof's expiry, when it carries one (§12 reauth).
   Maybe POSIXTime ->
   -- | The origin's clock.
@@ -416,7 +471,8 @@ liveSubscribe cfg st key subscribeBus execute mExpiry now = do
         joined <- withMVar (lgLock grp) $ \_ ->
           execute >>= \case
             Left e -> pure (Left (LiveExecRefused e))
-            Right snap -> Right <$> register grp created snap
+            Right Nothing -> pure (Left LiveContention)
+            Right (Just snap) -> Right <$> register grp created snap
         case joined of
           Left e -> do
             when created (retireGroup grp)
@@ -437,7 +493,7 @@ liveSubscribe cfg st key subscribeBus execute mExpiry now = do
           grp <-
             LiveGroup
               <$> newMVar ()
-              <*> newTVarIO (LiveEmission Map.empty "" Map.empty Set.empty)
+              <*> newTVarIO (LiveEmission Map.empty [] Map.empty Set.empty)
               <*> newTVarIO Map.empty
               <*> newTVarIO False
           atomically (modifyTVar' (liveGroups st) (Map.insert key grp))
@@ -529,7 +585,10 @@ liveSubscribe cfg st key subscribeBus execute mExpiry now = do
               try execute >>= \case
                 Left (_ :: SomeException) -> closeMembers
                 Right (Left _) -> closeMembers
-                Right (Right snap) -> do
+                -- Transient page contention: keep every member; the
+                -- intersecting write already queued the next trigger.
+                Right (Right Nothing) -> pure []
+                Right (Right (Just snap)) -> do
                   let frames = deltaFrames cursor prev snap
                   atomically $ do
                     writeTVar (lgLast grp) (emissionOf snap)

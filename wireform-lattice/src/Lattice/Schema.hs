@@ -28,6 +28,13 @@ module Lattice.Schema (
   Schema (..),
   Deprecation (..),
   DeclPath (..),
+  DirLocation (..),
+  dirLocationName,
+  parseDirLocation,
+  DirectiveDef (..),
+  DirectiveApp (..),
+  reservedDirectiveNames,
+  declPathLocation,
   InterfaceDef (..),
   EntityDef (..),
   ExtensionDef (..),
@@ -68,6 +75,7 @@ module Lattice.Schema (
   defaultBudgets,
 
   -- * Lookups
+  descriptionOf,
   lookupEntity,
   lookupEntityField,
   lookupEntityRel,
@@ -115,6 +123,19 @@ data Schema = Schema
   , schemaDeprecations :: Map DeclPath Deprecation
   -- ^ @\@deprecated(sunset: …, note: …)@ metadata (§17.5), on fields,
   -- relationships, roots, and mutations.
+  , schemaDirectiveDecls :: Map DirectiveName DirectiveDef
+  -- ^ User-declared directives (§3.9): the closed directive registry a
+  -- @directive \@name(…) on …@ line contributes. Part of the published
+  -- canonical IDL (so of the schema hash) but never of plan pertinence.
+  , schemaDirectives :: Map DeclPath [DirectiveApp]
+  -- ^ Directive /applications/ (§3.9), keyed by the declaration they are
+  -- written on and held in canonical order (by name, then canonical
+  -- arguments). Metadata: like descriptions, they move the schema hash
+  -- but never a plan id, and are non-breaking on every §17 axis.
+  , schemaDescriptions :: Map DeclPath Text
+  -- ^ Documentation strings (§3.9), one per declaration or item. Same
+  -- hash\/pertinence\/compatibility treatment as directive applications;
+  -- surfaced by codegen and tooling (the explorer's hover + completion).
   }
   deriving stock (Eq, Show)
 
@@ -145,8 +166,113 @@ data DeclPath
   | OnFragment FragmentName
   | OnRoot RootName
   | OnMutation MutationName
+  | OnDirective DirectiveName
+  -- ^ A @directive@ declaration: carries only a description (no directive
+  -- targets a directive declaration), so 'declPathLocation' rejects it.
   deriving stock (Eq, Ord, Show)
 
+
+{- | A place a directive may be written (§3.9), the @on@ clause of a
+@directive@ declaration. Entity\/interface fields and relationships are
+distinct sites ('DLField' vs 'DLRelationship'), matching the IDL's
+disjoint field and edge grammar.
+-}
+data DirLocation
+  = DLSchema
+  | DLType
+  | DLInterface
+  | DLEntity
+  | DLField
+  | DLRelationship
+  | DLFragment
+  | DLRoot
+  | DLMutation
+  deriving stock (Eq, Ord, Show, Enum, Bounded)
+
+
+-- | The @on@-clause spelling of a location.
+dirLocationName :: DirLocation -> Text
+dirLocationName = \case
+  DLSchema -> "SCHEMA"
+  DLType -> "TYPE"
+  DLInterface -> "INTERFACE"
+  DLEntity -> "ENTITY"
+  DLField -> "FIELD"
+  DLRelationship -> "RELATIONSHIP"
+  DLFragment -> "FRAGMENT"
+  DLRoot -> "ROOT"
+  DLMutation -> "MUTATION"
+
+
+parseDirLocation :: Text -> Maybe DirLocation
+parseDirLocation = \case
+  "SCHEMA" -> Just DLSchema
+  "TYPE" -> Just DLType
+  "INTERFACE" -> Just DLInterface
+  "ENTITY" -> Just DLEntity
+  "FIELD" -> Just DLField
+  "RELATIONSHIP" -> Just DLRelationship
+  "FRAGMENT" -> Just DLFragment
+  "ROOT" -> Just DLRoot
+  "MUTATION" -> Just DLMutation
+  _ -> Nothing
+
+
+{- | A declared directive (§3.9): its argument signature, whether it may be
+applied more than once at one site, and the set of locations it targets.
+Argument order is the declaration order (like a field's arguments); it is
+not semantic.
+-}
+data DirectiveDef = DirectiveDef
+  { dirArgs :: [ArgDef]
+  , dirRepeatable :: Bool
+  , dirLocations :: Set DirLocation
+  }
+  deriving stock (Eq, Show)
+
+
+{- | A directive application (§3.9): the directive name and its supplied
+arguments, held sorted by argument name so the canonical rendering and
+equality are order-insensitive.
+-}
+data DirectiveApp = DirectiveApp
+  { daName :: DirectiveName
+  , daArgs :: [(ArgName, QValue)]
+  }
+  deriving stock (Eq, Show)
+
+
+{- | Directive names the protocol reserves for its built-in annotations
+(§17.3 @\@break@, §17.5 @\@deprecated@, §3.7 @\@declassify@, §4.2
+@\@depth@): a @directive@ declaration may not redeclare one.
+-}
+reservedDirectiveNames :: Set Text
+reservedDirectiveNames = Set.fromList ["break", "deprecated", "declassify", "depth"]
+
+
+{- | The directive location a declaration site occupies, or 'Nothing' when
+no directive may target it (the @directive@ declaration itself, or an item
+whose owner\/kind is unresolved). Entity and interface items resolve to
+'DLField' or 'DLRelationship' by looking the member up on its owner.
+-}
+declPathLocation :: Schema -> DeclPath -> Maybe DirLocation
+declPathLocation s = \case
+  OnSchema -> Just DLSchema
+  OnType _ -> Just DLType
+  OnInterface _ -> Just DLInterface
+  OnEntity _ -> Just DLEntity
+  OnFragment _ -> Just DLFragment
+  OnRoot _ -> Just DLRoot
+  OnMutation _ -> Just DLMutation
+  OnDirective _ -> Nothing
+  OnEntityItem t f -> lookupEntity s t >>= itemLoc (entityFields) (entityRels) f
+  OnIfaceItem i f ->
+    Map.lookup i (schemaInterfaces s) >>= itemLoc ifaceFields ifaceRels f
+  where
+    itemLoc fields rels f rec
+      | Map.member f (fields rec) = Just DLField
+      | Map.member f (rels rec) = Just DLRelationship
+      | otherwise = Nothing
 
 {- | A declared interface: its common fields (each entity implementing the
 interface must declare a compatible field or relationship of that name)
@@ -541,6 +667,17 @@ defaultBudgets =
 -- ---------------------------------------------------------------------------
 -- Lookups
 -- ---------------------------------------------------------------------------
+
+{- | The documentation string (§3.9) attached to a declaration or item, if
+any. The clean accessor over 'schemaDescriptions' for codegen and tooling:
+@descriptionOf s (OnEntityItem "User" "email")@ is the doc comment written
+on that field. Descriptions are metadata (they move the schema hash but
+never a @planId@), so this never affects planning — only what codegen emits
+and what the explorer shows in hover and completion.
+-}
+descriptionOf :: Schema -> DeclPath -> Maybe Text
+descriptionOf s p = Map.lookup p (schemaDescriptions s)
+
 
 lookupEntity :: Schema -> TypeName -> Maybe EntityDef
 lookupEntity s t = Map.lookup t (schemaEntities s)

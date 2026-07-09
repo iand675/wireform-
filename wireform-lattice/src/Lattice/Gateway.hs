@@ -723,22 +723,29 @@ collectionOwners fused = Map.fromList (entityCols <> rootCols)
       ]
 
 
-{- | The argument-free fields of @t@ that module @m@ contributes, as
-declared by the __upstream's served schema__ (the wire truth for what @m@
-can answer). Falls back to the served key fields so a selection is never
-empty.
+{- | The argument-free fields of @t@ that module @m@ contributes AND the
+projection wants, as declared by the __upstream's served schema__ (the
+wire truth for what @m@ can answer). No fallback: empty means this
+module has nothing the caller needs.
+-}
+ownedFieldsFor :: GwCore -> Up -> ModuleName -> TypeName -> Projection -> [FieldName]
+ownedFieldsFor core up m t proj = case Map.lookup t (schemaEntities (uSchema up)) of
+  Nothing -> []
+  Just ed -> map fst (filter wanted (Map.toList (entityFields ed)))
+    where
+      wanted (f, fd) =
+        null (fieldArgs fd)
+          && fieldOwnerOf (cFused core) t f == Just m
+          && projectsField proj f
+
+
+{- | 'ownedFieldsFor' at 'ProjectAll', falling back to the served key
+fields so a selection is never empty.
 -}
 fieldsFor :: GwCore -> Up -> ModuleName -> TypeName -> [FieldName]
-fieldsFor core up m t = case Map.lookup t (schemaEntities (uSchema up)) of
-  Nothing -> []
-  Just ed ->
-    let owned =
-          [ f
-          | (f, fd) <- Map.toList (entityFields ed)
-          , null (fieldArgs fd)
-          , fieldOwnerOf (cFused core) t f == Just m
-          ]
-    in if null owned then NE.toList (entityKey ed) else owned
+fieldsFor core up m t = case ownedFieldsFor core up m t ProjectAll of
+  [] -> maybe [] (NE.toList . entityKey) (Map.lookup t (schemaEntities (uSchema up)))
+  owned -> owned
 
 
 selectionTextOf :: [FieldName] -> Text
@@ -782,14 +789,19 @@ gatewayBackend core =
           pure (T.intercalate "," [u <> "/" <> v | (u, v) <- Map.toAscList snaps])
 
     -- One nodes query per contributing upstream for the round's key set.
-    load t keys = case typeOwner fused t of
+    load t proj keys = case typeOwner fused t of
       Nothing -> pure (Map.fromList [(k, Left (missing "type")) | k <- keys])
       Just owner -> do
-        let contributors = owner : extendersOf fused t
+        -- An extender none of whose fields the projection wants adds
+        -- nothing to the merge: skip its upstream roundtrip entirely.
+        let contributes m = case upOf m of
+              Nothing -> True -- surfaces the missing-upstream error below
+              Just up -> not (null (ownedFieldsFor core up m t proj))
+            contributors = owner : filter contributes (extendersOf fused t)
         parts <- forM contributors $ \m -> case upOf m of
           Nothing -> pure (m, Left (missing "type"))
           Just up -> do
-            r <- nodesFetch core up m t keys
+            r <- nodesFetch core up m t proj keys
             pure (m, r)
         let (results, extErrs) = assembleLoad t keys owner parts
         recordSrcErrors core [(Just (ScopeEntity ref), m, f) | (ref, m, f) <- extErrs]
@@ -840,10 +852,18 @@ headMay = \case
   (x : _) -> Just x
 
 
--- | One @nodes@ query for a key set at one upstream.
-nodesFetch :: GwCore -> Up -> ModuleName -> TypeName -> [Text] -> IO (Either BackendFailure UpResult)
-nodesFetch core up m t keys = do
-  let fields = fieldsFor core up m t
+{- | One @nodes@ query for a key set at one upstream, its selection
+narrowed to the gateway plan's 'Projection' for the type — the fused
+plan's field needs propagate to each upstream, whose own planner then
+narrows its local 'beLoad' the same way. The key-fields fallback keeps
+the selection nonempty when the projection touches none of this module's
+fields (the load still verifies existence and fetches @ver@).
+-}
+nodesFetch :: GwCore -> Up -> ModuleName -> TypeName -> Projection -> [Text] -> IO (Either BackendFailure UpResult)
+nodesFetch core up m t proj keys = do
+  let fields = case ownedFieldsFor core up m t proj of
+        [] -> maybe [] (NE.toList . entityKey) (Map.lookup t (schemaEntities (uSchema up)))
+        owned -> owned
       text =
         "query ($refs: EntityRef) { nodes(refs: $refs) { ... on "
           <> unTypeName t

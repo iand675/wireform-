@@ -9,14 +9,22 @@ module Test.Lattice.IDL (tests) where
 import Data.Either (isRight)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
+import Data.Map.Strict qualified as Map
+import Data.Maybe (isJust)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Lattice.IDL.Parser (SchemaError (..), parseSchema)
 import Lattice.IDL.Print (canonicalIdl)
 import Lattice.Schema (
+  ArgDef (..),
   CoKey (..),
   CoKeyMode (..),
   CollectionDef (..),
+  DeclPath (..),
+  DirLocation (..),
+  DirectiveApp (..),
+  DirectiveDef (..),
   EntityDef (..),
   FieldDef (..),
   OverflowPolicy (..),
@@ -26,6 +34,9 @@ import Lattice.Schema (
   lookupEntity,
   lookupEntityField,
   lookupEntityRel,
+  schemaDescriptions,
+  schemaDirectiveDecls,
+  schemaDirectives,
   sharedTruthFamily,
  )
 import Lattice.Types (FieldName, FieldType (..), Prim (..), TypeName, unTypeName)
@@ -407,6 +418,164 @@ tests =
           -- The declared-optional sibling over the same column is the fix.
           parseSchema (doc "  has one? editor: Buddy by editorId")
             `shouldSatisfy` isRight
+
+    describe "§3.9 directives + descriptions" $ do
+      it "directives.lattice parses and elaborates" $
+        parseSchema directivesText `shouldSatisfy` isRight
+
+      describe "canonical IDL (§7.1)" $ do
+        it "directives canonical IDL golden" $
+          pureGoldenTextFile
+            "test/fixtures/golden/directives.canonical.lattice"
+            (canonicalIdl directivesSchema)
+        it "parseSchema . canonicalIdl is the identity on the directives model" $
+          parseSchema (canonicalIdl directivesSchema) `shouldBe` Right directivesSchema
+        it "canonical IDL is a fixpoint (directives)" $
+          fmap canonicalIdl (parseSchema (canonicalIdl directivesSchema))
+            `shouldBe` Right (canonicalIdl directivesSchema)
+
+      describe "the elaborated model carries the registry, applications, and docs" $ do
+        it "the five declared directives register in the closed registry" $
+          Map.keys (schemaDirectiveDecls directivesSchema)
+            `shouldBe` ["audit", "internal", "label", "pii", "rateLimit"]
+        it "a declaration's repeatable/locations/args match its `directive` line (@audit)" $
+          case Map.lookup "audit" (schemaDirectiveDecls directivesSchema) of
+            Nothing -> expectationFailure "the fixture declares no @audit directive"
+            Just def -> do
+              dirRepeatable def `shouldBe` True
+              dirLocations def `shouldBe` Set.fromList [DLEntity, DLField, DLMutation]
+              map adName (dirArgs def) `shouldBe` ["level"]
+              map (isJust . adDefault) (dirArgs def) `shouldBe` [True]
+        it "both @audit applications on the repeated field are stored, args-sorted" $
+          case Map.lookup (OnEntityItem "Post" "createdAt") (schemaDirectives directivesSchema) of
+            Nothing -> expectationFailure "no directives stored on Post.createdAt"
+            Just apps -> do
+              map daName apps `shouldBe` ["audit", "audit"]
+              map (map fst . daArgs) apps `shouldBe` [[], ["level"]]
+        it "application arguments are stored sorted by name (@rateLimit on `list posts`)" $
+          case Map.lookup (OnRoot "posts") (schemaDirectives directivesSchema) of
+            Nothing -> expectationFailure "no directives stored on the posts root"
+            Just apps ->
+              map (\a -> (daName a, map fst (daArgs a))) apps
+                `shouldBe` [("rateLimit", ["burst", "perMinute"])]
+        it "descriptions attach to their declaration site with exact text" $ do
+          Map.lookup (OnType "UserId") (schemaDescriptions directivesSchema)
+            `shouldBe` Just "A stable, opaque user identifier."
+          Map.lookup (OnEntity "User") (schemaDescriptions directivesSchema)
+            `shouldBe` Just "A registered account holder."
+          Map.lookup (OnEntityItem "User" "id") (schemaDescriptions directivesSchema)
+            `shouldBe` Just "The user's stable key."
+          Map.lookup (OnDirective "audit") (schemaDescriptions directivesSchema)
+            `shouldBe` Just "Emit an audit-log entry when this element is read or written."
+
+      describe "elaboration rejections name the offender" $ do
+        it "applying an undeclared directive names it" $
+          rejectsMentioning "phantom" $
+            entitySchema
+              [ "@phantom"
+              , "entity Buddy by id {"
+              , "  visible to all by default"
+              , "  id: Text"
+              , "}"
+              ]
+        it "applying a directive at a disallowed location names it (FIELD on an ENTITY)" $
+          rejectsMentioning "onField" $
+            entitySchema
+              [ "directive @onField on FIELD"
+              , ""
+              , "@onField"
+              , "entity Buddy by id {"
+              , "  visible to all by default"
+              , "  id: Text"
+              , "}"
+              ]
+        it "an unknown argument names the argument" $
+          rejectsMentioning "bogus" $
+            entitySchema
+              [ "directive @tagme(label: Text = \"x\") on ENTITY"
+              , ""
+              , "@tagme(bogus: \"y\")"
+              , "entity Buddy by id {"
+              , "  visible to all by default"
+              , "  id: Text"
+              , "}"
+              ]
+        it "a missing required (no-default) argument names it" $
+          rejectsMentioning "ticket" $
+            entitySchema
+              [ "directive @needs(ticket: Text) on ENTITY"
+              , ""
+              , "@needs"
+              , "entity Buddy by id {"
+              , "  visible to all by default"
+              , "  id: Text"
+              , "}"
+              ]
+        it "a duplicate argument in one application names it" $
+          rejectsMentioning "tone" $
+            entitySchema
+              [ "directive @dupe(tone: Text = \"soft\") on ENTITY"
+              , ""
+              , "@dupe(tone: \"a\", tone: \"b\")"
+              , "entity Buddy by id {"
+              , "  visible to all by default"
+              , "  id: Text"
+              , "}"
+              ]
+        it "a second application of a non-repeatable directive names it" $
+          rejectsMentioning "once" $
+            entitySchema
+              [ "directive @once on ENTITY"
+              , ""
+              , "@once"
+              , "@once"
+              , "entity Buddy by id {"
+              , "  visible to all by default"
+              , "  id: Text"
+              , "}"
+              ]
+        it "a directive declaration reusing a reserved name names it" $
+          rejectsMentioning "break" $
+            entitySchema
+              [ "directive @break on FIELD"
+              , ""
+              , "entity Buddy by id {"
+              , "  visible to all by default"
+              , "  id: Text"
+              , "}"
+              ]
+        it "two directive declarations of one name name it" $
+          rejectsMentioning "twice" $
+            entitySchema
+              [ "directive @twice on FIELD"
+              , "directive @twice on ENTITY"
+              , ""
+              , "entity Buddy by id {"
+              , "  visible to all by default"
+              , "  id: Text"
+              , "}"
+              ]
+        it "a FIELD directive applied to a `has many` edge is rejected (FIELD /= RELATIONSHIP)" $
+          rejectsMentioning "fieldOnly" $
+            entitySchema
+              [ "directive @fieldOnly on FIELD"
+              , ""
+              , "entity Buddy by id {"
+              , "  visible to all by default"
+              , "  id: Text"
+              , "  homeId: Text"
+              , "  name: Text"
+              , "}"
+              , ""
+              , "entity Home by id {"
+              , "  visible to all by default"
+              , "  id: Text"
+              , "  @fieldOnly"
+              , "  has many pals: Buddy by homeId"
+              , "                 ordered by name asc"
+              , "                 page 20 max 100"
+              , "}"
+              ]
 
 
 -- | A minimal schema document around the given declaration lines.

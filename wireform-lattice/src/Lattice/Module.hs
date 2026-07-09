@@ -96,6 +96,9 @@ data FusionError
   | -- | The same claim name declared with two different types: visibility
     -- payloads must mean one thing (§18.1).
     FEClaimConflict ClaimName ModuleName ModuleName
+  | -- | The same directive name declared incompatibly by two modules
+    -- (§3.9): the directive registry is shared vocabulary, like claims.
+    FEDirectiveConflict DirectiveName ModuleName ModuleName
   | -- | A root, mutation, fragment, or interface name declared by two
     -- modules (first field is the declaration kind).
     FENameConflict Text Text ModuleName ModuleName
@@ -222,6 +225,13 @@ fuseModules mods0
         FEClaimConflict
         [(c, m, t) | (m, s) <- parsed, (c, t) <- Map.toAscList (schemaClaims s)]
 
+    -- Directives (§3.9): identical declarations dedupe (shared vocabulary),
+    -- differing ones conflict — like claims.
+    (directiveU, directiveErrs) =
+      unionDedupe
+        FEDirectiveConflict
+        [(n, m, d) | (m, s) <- parsed, (n, d) <- Map.toAscList (schemaDirectiveDecls s)]
+
     -- Fragments, roots, mutations: strict disjoint union.
     (fragU, fragErrs) =
       strictDisjoint (FENameConflict "fragment" . unFragmentName) $
@@ -266,7 +276,7 @@ fuseModules mods0
              in (acc', es <> clauseErrs <> memberErrs)
 
     conflictErrs =
-      twoOwnerErrs <> typeErrs <> ifaceErrs <> claimErrs <> fragErrs <> rootErrs <> mutErrs <> extErrs
+      twoOwnerErrs <> typeErrs <> ifaceErrs <> claimErrs <> fragErrs <> rootErrs <> mutErrs <> extErrs <> directiveErrs
 
     -- ---- folding --------------------------------------------------------
     mergedEntities = Map.mapWithKey fold entityOwnership
@@ -299,6 +309,9 @@ fuseModules mods0
         , schemaMutations = Map.map snd mutU
         , schemaBreaks = Map.unions (map (schemaBreaks . snd) parsed)
         , schemaDeprecations = Map.unions (map (schemaDeprecations . snd) parsed)
+        , schemaDirectiveDecls = Map.map snd directiveU
+        , schemaDirectives = Map.unionsWith (<>) (map (schemaDirectives . snd) parsed)
+        , schemaDescriptions = Map.unions (map (schemaDescriptions . snd) parsed)
         }
 
     -- The fused text is printed from the fold, then RE-ELABORATED: the
@@ -405,13 +418,13 @@ fuseBackends backends fused =
     -- cannot resurrect an entity. Any contributing load failure fails the
     -- key: a silently partial record would be indistinguishable from a
     -- complete one.
-    load t keys = case typeOwner t >>= (`Map.lookup` backends) of
+    load t proj keys = case typeOwner t >>= (`Map.lookup` backends) of
       Nothing -> pure (Map.fromList (map (\k -> (k, Left (missing "type"))) keys))
       Just ob -> do
-        base <- beLoad ob t keys
+        base <- beLoad ob t proj keys
         extra <-
           traverse
-            (\m -> traverse (\b -> beLoad b t keys) (Map.lookup m backends))
+            (\m -> traverse (\b -> beLoad b t proj keys) (Map.lookup m backends))
             (extendersOf t)
         let mergeKey k r0 = List.foldl' (mergeOne k) r0 (catMaybes extra)
             mergeOne k acc extMap = case acc of

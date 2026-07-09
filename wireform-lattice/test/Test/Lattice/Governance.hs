@@ -276,9 +276,9 @@ withNotesWrap cfg customWrap action = do
   loads <- newTVarIO (0 :: Int)
   let count b =
         b
-          { beLoad = \ty ks -> do
+          { beLoad = \ty proj ks -> do
               atomically (modifyTVar' loads (+ 1))
-              beLoad b ty ks
+              beLoad b ty proj ks
           }
   withLoop
     (loopSpec verbsSchema)
@@ -316,18 +316,18 @@ bigWindow = CoalesceConfig {ccWindowMicros = 10_000_000, ccMaxBatch = 64}
 explodeOnBoom :: Backend -> Backend
 explodeOnBoom b =
   b
-    { beLoad = \ty ks ->
+    { beLoad = \ty proj ks ->
         if "boom" `elem` ks
           then throwIO (userError "loader exploded")
-          else beLoad b ty ks
+          else beLoad b ty proj ks
     }
 
 
 leftOnBad :: Backend -> Backend
 leftOnBad b =
   b
-    { beLoad = \ty ks -> do
-        m <- beLoad b ty ks
+    { beLoad = \ty proj ks -> do
+        m <- beLoad b ty proj ks
         pure (Map.mapWithKey (\k v -> if k == "bad" then Left upstreamUnavailable else v) m)
     }
 

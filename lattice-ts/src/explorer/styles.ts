@@ -177,6 +177,12 @@ export const EXPLORER_CSS = `
   position: absolute; box-sizing: border-box; border-radius: 2px;
   background: color-mix(in oklab, var(--lx-accent) 20%, transparent); box-shadow: inset 0 0 0 1px hsl(var(--ring) / 0.7);
 }
+.lattice-explorer .lx-preview-layer { position: absolute; inset: 0; z-index: 1; overflow: hidden; pointer-events: none; }
+.lattice-explorer .lx-preview-hl {
+  position: absolute; left: 0; right: 0;
+  background: color-mix(in oklab, hsl(var(--primary)) 16%, transparent);
+  box-shadow: inset 2px 0 0 hsl(var(--primary));
+}
 .lattice-explorer .lx-editor-panel { position: relative; flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
 .lattice-explorer .lx-mut-inputcap { padding: 6px 12px 2px; flex: 0 0 auto; }
 .lattice-explorer .lx-mut-select { height: 30px; font-size: 12px; max-width: 240px; }
@@ -218,6 +224,48 @@ export const EXPLORER_CSS = `
 .lattice-explorer .lx-kind-keyword, .lattice-explorer .lx-kind-fragment { background: var(--lx-fg-dim); }
 .lattice-explorer .lx-comp-label { color: var(--lx-fg); }
 .lattice-explorer .lx-comp-detail { color: var(--lx-fg-dim); margin-left: auto; padding-left: 12px; }
+.lattice-explorer .lx-hover {
+  position: absolute; z-index: 30; max-width: 360px; pointer-events: none;
+  background: hsl(var(--popover)); color: hsl(var(--popover-foreground));
+  border: 1px solid hsl(var(--border)); border-radius: var(--radius);
+  box-shadow: 0 10px 30px -10px hsl(0 0% 0% / 0.55), 0 4px 8px -4px hsl(0 0% 0% / 0.35);
+  padding: 8px 10px; font-family: var(--lx-mono); font-size: 12px; line-height: 1.5;
+  animation: lx-pop 0.1s cubic-bezier(0.25, 1, 0.5, 1); transform-origin: top left;
+}
+.lattice-explorer .lx-hover-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.lattice-explorer .lx-hover-kind {
+  font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px;
+  color: #08111f; border-radius: 4px; padding: 1px 5px; flex: 0 0 auto;
+}
+.lattice-explorer .lx-hover-title { color: var(--lx-fg); font-weight: 600; }
+.lattice-explorer .lx-hover-sig { color: var(--lx-fg-dim); }
+.lattice-explorer .lx-hover-doc { margin-top: 6px; font-family: var(--lx-sans); font-style: italic; color: var(--lx-fg); line-height: 1.5; white-space: pre-wrap; }
+.lattice-explorer .lx-hover-meta { margin-top: 5px; font-size: 11px; color: var(--lx-accent); }
+
+/* Smart-insertion chooser (docs tree -> valid query position) */
+.lattice-explorer .lx-insert-chooser {
+  position: absolute; z-index: 40; top: 12px; left: 50%; transform: translateX(-50%);
+  min-width: 280px; max-width: min(440px, calc(100% - 24px)); max-height: calc(100% - 24px); overflow: auto;
+  background: hsl(var(--popover)); color: hsl(var(--popover-foreground));
+  border: 1px solid hsl(var(--border)); border-radius: var(--radius);
+  box-shadow: 0 12px 34px -10px hsl(0 0% 0% / 0.6), 0 4px 10px -4px hsl(0 0% 0% / 0.4);
+  padding: 6px; font-family: var(--lx-sans); font-size: 12px;
+  animation: lx-pop 0.11s cubic-bezier(0.25, 1, 0.5, 1); transform-origin: top center;
+}
+.lattice-explorer .lx-insert-head { padding: 4px 8px 6px; color: var(--lx-fg-dim); }
+.lattice-explorer .lx-insert-name { font-family: var(--lx-mono); color: var(--lx-field); background: var(--lx-panel-2); border-radius: 4px; padding: 1px 5px; }
+.lattice-explorer .lx-insert-row {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer;
+}
+.lattice-explorer .lx-insert-sel { background: rgba(110,168,254,.22); }
+.lattice-explorer .lx-insert-type { font-family: var(--lx-mono); font-weight: 600; color: var(--lx-type); flex: 0 0 auto; }
+.lattice-explorer .lx-insert-exact {
+  font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; flex: 0 0 auto;
+  color: hsl(var(--primary-foreground)); background: hsl(var(--primary)); border-radius: 4px; padding: 1px 5px;
+}
+.lattice-explorer .lx-insert-line { color: var(--lx-fg-dim); flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.lattice-explorer .lx-insert-preview { font-family: var(--lx-mono); color: var(--lx-fg-dim); margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lattice-explorer .lx-insert-hint { padding: 6px 8px 3px; color: var(--lx-fg-dim); font-size: 11px; }
 
 /* Variables + diagnostics */
 .lattice-explorer .lx-vars { border-top: 1px solid var(--lx-border); background: var(--lx-panel); display: none; }
@@ -345,6 +393,8 @@ export const EXPLORER_CSS = `
 .lattice-explorer .lx-kind-mut { background: var(--lx-kw); }
 .lattice-explorer .lx-kind-enum { background: var(--lx-num); }
 .lattice-explorer .lx-kind-newtype { background: var(--lx-var); }
+.lattice-explorer .lx-kind-record { background: var(--lx-field); }
+.lattice-explorer .lx-kind-frag { background: var(--lx-fg-dim); }
 
 .lattice-explorer .lx-ent > summary { display: flex; align-items: center; gap: 7px; padding: 5px 12px 5px 15px; transition: background 0.1s; }
 .lattice-explorer .lx-ent > summary:hover { background: color-mix(in oklab, var(--lx-accent) 9%, transparent); }
@@ -358,6 +408,10 @@ export const EXPLORER_CSS = `
 .lattice-explorer .lx-dot { flex: 0 0 auto; width: 11px; text-align: center; color: var(--lx-fg-dim); font-family: var(--lx-mono); font-size: 11px; }
 .lattice-explorer .lx-dot-edge { color: var(--lx-accent); }
 .lattice-explorer .lx-tag { margin-left: auto; font-family: var(--lx-mono); font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--lx-fg-dim); border: 1px solid var(--lx-border); border-radius: 4px; padding: 0 5px; align-self: center; }
+.lattice-explorer .lx-dir { flex: 0 0 auto; font-family: var(--lx-mono); font-size: 9px; letter-spacing: 0.2px; color: var(--lx-accent); border: 1px solid color-mix(in oklab, var(--lx-accent) 35%, var(--lx-border)); background: color-mix(in oklab, var(--lx-accent) 12%, transparent); border-radius: 4px; padding: 0 5px; align-self: center; }
+.lattice-explorer .lx-kind-dir { background: var(--lx-accent-2); }
+.lattice-explorer .lx-desc { flex: 1 0 100%; margin: 2px 0 1px; padding-left: 17px; font-family: var(--lx-sans); font-size: 11px; font-style: italic; color: var(--lx-fg-dim); line-height: 1.45; }
+.lattice-explorer .lx-schema-desc { padding: 8px 14px 6px; font-family: var(--lx-sans); font-size: 12px; font-style: italic; color: var(--lx-fg-dim); line-height: 1.5; border-bottom: 1px solid var(--lx-border); }
 .lattice-explorer .lx-empty { padding: 28px 24px; color: var(--lx-fg-dim); text-align: center; line-height: 1.7; }
 .lattice-explorer .lx-report { font-family: var(--lx-mono); font-size: 12px; }
 .lattice-explorer .lx-report-pass { color: var(--lx-accent-2); font-weight: 700; }

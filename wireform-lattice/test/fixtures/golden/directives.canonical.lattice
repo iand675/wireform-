@@ -1,0 +1,59 @@
+schema directives.example.com
+
+claims {
+  role: Text
+}
+
+"Emit an audit-log entry when this element is read or written."
+directive @audit(level: Text = "info") repeatable on ENTITY | FIELD | MUTATION
+
+"Internal-only; excluded from generated public clients."
+directive @internal on FIELD | RELATIONSHIP
+
+"A human-readable label for a declared type."
+directive @label(text: Text) on TYPE
+
+"Personally identifiable information."
+directive @pii on FIELD
+
+"Throttle an entry point."
+directive @rateLimit(perMinute: I32, burst: I32 = 0) on ROOT | MUTATION
+
+"A stable, opaque user identifier."
+@label(text: "User ID")
+newtype UserId = Uuid
+
+entity Post by id {
+  visible to all by default
+  authorId: UserId
+  "When the post was created." @audit @audit(level: "debug") createdAt: Timestamp
+  id: Uuid
+}
+
+"A registered account holder."
+@audit(level: "sensitive")
+entity User by id {
+  visible to all by default
+  "Contact email — never shared-cached." @pii email: Text private
+  "The user's stable key." id: UserId
+  "Public display name." name: Text
+  "Posts authored by this user." @internal has many posts: Post by authorId ordered by createdAt desc page 20 max 100
+}
+
+"List posts by author, newest first."
+@rateLimit(burst: 10, perMinute: 30)
+list posts of Post by authorId ordered by createdAt desc page 20 max 100 public
+
+"Fetch a single user by id."
+@rateLimit(perMinute: 60)
+get user(id: UserId) of User public
+
+"Publish a new post."
+@audit(level: "sensitive")
+@rateLimit(perMinute: 5)
+mutation publish(author: UserId, body: Text) returns Post {
+  allow public
+  writes Post(new)
+  invalidates writes
+  effect transactional
+}

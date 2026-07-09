@@ -9,9 +9,18 @@ module Test.Lattice.Plan (tests) where
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
+import Lattice.Hash (schemaHash)
+import Lattice.IDL.Print (canonicalIdl)
 import Lattice.Plan (Plan (..), planQuery, planSliceRecord)
 import Lattice.Query.Validate (CompileError (..))
-import Lattice.Schema (Budgets (..), Schema, defaultBudgets)
+import Lattice.Schema (
+  Budgets (..),
+  Schema,
+  defaultBudgets,
+  schemaDescriptions,
+  schemaDirectiveDecls,
+  schemaDirectives,
+ )
 import Lattice.Types (SliceName (..))
 import Lattice.Wire (PlanRecord (..), SliceInfo (..))
 import Test.Lattice.Fixtures
@@ -120,6 +129,22 @@ tests =
         c <- mustCompileWith starwarsSchema heroQ
         planQuery starwarsSchema defaultBudgets {maxRoundFanout = 5} c
           `rejectsNaming` "maxRoundFanout budget 5"
+
+    describe "§3.9/§7.3 documentation + directives are metadata, not plan pertinence" $ do
+      let bareDirectives =
+            directivesSchema
+              { schemaDescriptions = mempty
+              , schemaDirectives = mempty
+              , schemaDirectiveDecls = mempty
+              }
+          getUserQ = "query GetUser($id: UserId) { user(id: $id) { name } }"
+      it "stripping every directive and description leaves the planId identical" $ do
+        full <- planOf directivesSchema getUserQ
+        bare <- planOf bareDirectives getUserQ
+        planId bare `shouldBe` planId full
+      it "but the published schema hash moves (they are part of the canonical document)" $
+        schemaHash (canonicalIdl bareDirectives)
+          `shouldNotBe` schemaHash (canonicalIdl directivesSchema)
 
 
 -- ---------------------------------------------------------------------------

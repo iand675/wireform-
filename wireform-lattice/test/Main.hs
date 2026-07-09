@@ -5,6 +5,7 @@ import Test.Syd (describe, sydTest)
 import Test.Lattice.Canonical qualified
 import Test.Lattice.Compress qualified
 import Test.Lattice.Compat qualified
+import Test.Lattice.Consistency qualified
 import Test.Lattice.Cursor qualified
 import Test.Lattice.Digest qualified
 import Test.Lattice.Derived qualified
@@ -19,8 +20,10 @@ import Test.Lattice.Live qualified
 import Test.Lattice.Plan qualified
 import Test.Lattice.Nodes qualified
 import Test.Lattice.Otel qualified
+import Test.Lattice.Projection qualified
 import Test.Lattice.Query qualified
 import Test.Lattice.Registry qualified
+import Test.Lattice.Typed qualified
 import Test.Lattice.Value qualified
 import Test.Lattice.Verbs qualified
 import Test.Lattice.VerbsE2E qualified
@@ -35,6 +38,7 @@ main =
       Test.Lattice.Query.tests
       Test.Lattice.Canonical.tests
       Test.Lattice.Plan.tests
+      Test.Lattice.Projection.tests
       Test.Lattice.Wire.tests
       Test.Lattice.Digest.tests
       Test.Lattice.Cursor.tests
@@ -47,9 +51,11 @@ main =
       Test.Lattice.Derived.tests
       Test.Lattice.Registry.tests
       Test.Lattice.Compat.tests
+      Test.Lattice.Consistency.tests
       Test.Lattice.Live.tests
       Test.Lattice.Feed.tests
       Test.Lattice.Nodes.tests
       Test.Lattice.Fusion.tests
       Test.Lattice.Gateway.tests
       Test.Lattice.Otel.tests
+      Test.Lattice.Typed.tests

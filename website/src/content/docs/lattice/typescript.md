@@ -14,6 +14,15 @@ covers only the client-visible slice of the protocol: the transport ladder,
 wire decode into the store, point-fetch gap-filling, mutations, and
 invalidation-driven refetch. It covers nothing server-side.
 
+A `LatticeClient` query is one request for one slice, and a single response
+is internally snapshot-consistent (§13.2 guarantee 1), so the client needs
+no cross-request reconciliation of its own. For code that *does* assemble
+several responses into one view, `wire.ts` exports the §13.2 interval
+vocabulary — `parseSnapshotVector`, `validityIntervals`,
+`intervalsConsistent`, and the reference `compareSnapshotTokens` — so the
+consistent-cut test (`max floors <= min tokens` per domain over the
+`Lattice-Snapshot-Floor`/`Lattice-Snapshot` headers) is one function call.
+
 :::note
 The library is landing alongside this page; API names below follow its
 public surface and the page will firm up with it.

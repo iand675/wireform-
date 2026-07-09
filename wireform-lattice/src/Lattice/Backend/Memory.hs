@@ -45,6 +45,8 @@ module Lattice.Backend.Memory (
   MemoryDb,
   newMemoryDb,
   putRow,
+  putEntity,
+  putEntityWith,
   deleteRow,
   readRow,
   tableRows,
@@ -72,12 +74,14 @@ import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Lattice.Backend
 import Lattice.Cursor (Cursor (..), encodeCursor)
 import Lattice.Schema
 import Lattice.Types
+import Lattice.Typed (Full, LatticeEntity (..))
 import Lattice.Value (canonicalJson, renderScalarKey)
 import Numeric.Natural (Natural)
 
@@ -115,6 +119,29 @@ putRow db ty key fields = do
       table' = Map.insert key (StoredRow nextSeq (Just fields)) table
   writeTVar (dbTables db) (Map.insert ty table' tables)
   writeTVar (dbDirty db) True
+
+
+{- | 'putRow' for a typed full row ("Lattice.Typed"): the table key comes
+from the row's own key fields, the stored fields from 'toRowFields'.
+-}
+putEntity :: forall e. LatticeEntity e => MemoryDb -> e Full -> STM ()
+putEntity db row = putEntityWith db row Map.empty
+
+
+{- | 'putEntity' plus backend-private extra fields (edge-backing state
+like link lists that no query selects and the IDL does not declare — see
+the /Projections/ contract in "Lattice.Backend"). Typed fields win
+collisions.
+-}
+putEntityWith :: forall e. LatticeEntity e => MemoryDb -> e Full -> Map FieldName A.Value -> STM ()
+putEntityWith db row extras =
+  putRow
+    db
+    (entityName p)
+    (renderEntityKey p (fullRowKey row))
+    (Map.union (toRowFields row) extras)
+  where
+    p = Proxy @e
 
 
 {- | Delete a row, leaving a tombstone whose version renders as @t:\<n\>@.
@@ -259,9 +286,16 @@ memoryBackend schema db hooks =
         Just f -> pure (onFail f)
         Nothing -> act
 
-    load ty keys =
+    -- Rows are filtered to the projection on purpose (not just for
+    -- economy): every test running over this backend thereby proves the
+    -- executor's declared projections cover everything it reads.
+    load ty proj keys =
       withFault (\f -> Map.fromList (map (\k -> (k, Left f)) keys)) $
-        atomically (Map.fromList <$> traverse (\k -> (\r -> (k, Right r)) <$> readRow db ty k) keys)
+        atomically (Map.fromList <$> traverse (\k -> (\r -> (k, Right (projectResult r))) <$> readRow db ty k) keys)
+      where
+        projectResult = \case
+          RowFound r -> RowFound (projectRow proj r)
+          other -> other
 
     getRoot name args = withFault Left $
       case Map.lookup name (mhGetRoots hooks) of

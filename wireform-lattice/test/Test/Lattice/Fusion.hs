@@ -35,13 +35,22 @@ import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
-import Lattice.Backend (Backend (..), EntityRow (..), LoadResult (..))
+import Lattice.Backend (Backend (..), EntityRow (..), LoadResult (..), Projection (..))
 import Lattice.Backend.Memory (MemoryHooks (..), defaultHooks, memoryBackend, newMemoryDb, putRow)
 import Lattice.Client (LatticeClient)
 import Lattice.IDL.Parser (SchemaError (..), parseSchema)
 import Lattice.IDL.Print (canonicalIdl)
 import Lattice.Module
-import Lattice.Schema (EntityDef (..), Schema, lookupEntity)
+import Lattice.Schema (
+  DeclPath (..),
+  DirectiveApp (..),
+  EntityDef (..),
+  Schema,
+  lookupEntity,
+  schemaDescriptions,
+  schemaDirectiveDecls,
+  schemaDirectives,
+ )
 import Lattice.Types
 import Lattice.Wire (EntityRecord (..), Record (..), hLatticeSnapshot, queryMediaType)
 import Network.HTTP.Types.Method (Method (..))
@@ -265,6 +274,35 @@ tests =
         f <- fuseRight [postsModule, socialModule]
         T.count "newtype PostId" (fusedIdl f) `shouldBe` 1
 
+    describe "§3.9 directive vocabulary fuses like claims" $ do
+      it "identical directive declarations dedupe; the fused schema carries the directive" $ do
+        f <- fuseRight [dirModule "alpha" "Alpha", dirModule "beta" "Beta"]
+        Map.keys (schemaDirectiveDecls (fusedSchema f)) `shouldBe` ["tag"]
+      it "the same directive name declared incompatibly is a FEDirectiveConflict" $
+        fuseExpecting
+          [dirModule "alpha" "Alpha", dirModuleFieldOnly "beta" "Beta"]
+          (FEDirectiveConflict "tag" "alpha" "beta")
+      it "a directive application and description survive folding into the fused schema" $ do
+        f <-
+          fuseRight
+            [ docModule
+            , mkModule
+                "extra"
+                [ "entity Extra by id {"
+                , "  visible to all by default"
+                , ""
+                , "  id: Text"
+                , ""
+                , "  fetch by id: public"
+                , "}"
+                ]
+            ]
+        Map.lookup (OnEntity "Doc") (schemaDescriptions (fusedSchema f))
+          `shouldBe` Just "A documented entity."
+        case Map.lookup (OnEntity "Doc") (schemaDirectives (fusedSchema f)) of
+          Just apps -> map daName apps `shouldBe` ["tag"]
+          Nothing -> expectationFailure "the @tag application did not survive fusion"
+
     describe "§18.1 fuseBackends: a query through the seam" $ do
       it "the tree joins owner fields, extension fields, and the extension edge" $
         withFused $ \loop _postsB ->
@@ -393,6 +431,61 @@ mkModule name body =
     }
 
 
+-- | A module declaring one @\@tag@ directive (@ENTITY | FIELD@) plus an entity.
+dirModule :: Text -> Text -> SchemaModule
+dirModule name ent =
+  mkModule
+    name
+    [ "directive @tag(name: Text) on ENTITY | FIELD"
+    , ""
+    , "entity " <> ent <> " by id {"
+    , "  visible to all by default"
+    , ""
+    , "  id: Text"
+    , ""
+    , "  fetch by id: public"
+    , "}"
+    ]
+
+
+-- | The same @\@tag@ NAME declared on an incompatible location set (FIELD
+-- only), so fusing it with 'dirModule' is a directive conflict.
+dirModuleFieldOnly :: Text -> Text -> SchemaModule
+dirModuleFieldOnly name ent =
+  mkModule
+    name
+    [ "directive @tag(name: Text) on FIELD"
+    , ""
+    , "entity " <> ent <> " by id {"
+    , "  visible to all by default"
+    , ""
+    , "  id: Text"
+    , ""
+    , "  fetch by id: public"
+    , "}"
+    ]
+
+
+-- | A module whose entity carries a @\@tag@ application and a description,
+-- so the fold must preserve both into 'fusedSchema'.
+docModule :: SchemaModule
+docModule =
+  mkModule
+    "docs"
+    [ "directive @tag(name: Text) on ENTITY | FIELD"
+    , ""
+    , "\"A documented entity.\""
+    , "@tag(name: \"hello\")"
+    , "entity Doc by id {"
+    , "  visible to all by default"
+    , ""
+    , "  id: Text"
+    , ""
+    , "  fetch by id: public"
+    , "}"
+    ]
+
+
 withClaims :: SchemaModule -> SchemaModule
 withClaims m =
   m {smIdl = smIdl m <> T.unlines ["", "newtype OrgId = Text", "", "claims {", "  org: OrgId", "}"]}
@@ -462,7 +555,7 @@ fusedClient loop = clientFor loop id
 -- | The owner backend's current version of @Post:p1@.
 postOwnerVer :: Backend -> IO Text
 postOwnerVer postsB = do
-  loaded <- beLoad postsB "Post" ["p1"]
+  loaded <- beLoad postsB "Post" ProjectAll ["p1"]
   case Map.lookup "p1" loaded of
     Just (Right (RowFound row)) -> pure (rowVer row)
     other -> expectationFailure ("the posts backend does not hold Post:p1: " <> show other)

@@ -17,7 +17,7 @@ describe("parseSchema — starwars fixture", () => {
   });
 
   it("reads newtypes and enums", () => {
-    expect(s.newtypes.get("HumanId")).toBe("Text");
+    expect(s.newtypes.get("HumanId")?.type).toBe("Text");
     const ep = s.enums.get("Episode");
     expect(ep?.open).toBe(false);
     expect(ep?.values).toEqual(["NewHope", "Empire", "Jedi"]);
@@ -173,5 +173,169 @@ mutation deleteReview(review: ReviewId) returns Review {
     // The body brace-matcher must have consumed exactly the mutation block.
     expect(s.diagnostics).toEqual([]);
     expect(entityMembers(s, "Saga").edges.map((e) => e.name)).toEqual(["sagaReviews"]);
+  });
+});
+
+describe("parseSchema — directives + descriptions (directives fixture)", () => {
+  const s = parseSchema(readFixture("directives.lattice"));
+
+  it("recovers every directive declaration with its shape", () => {
+    expect([...s.directiveDecls.keys()].sort()).toEqual(["audit", "internal", "label", "pii", "rateLimit"]);
+
+    const audit = s.directiveDecls.get("audit");
+    expect(audit?.repeatable).toBe(true);
+    expect(audit?.locations).toEqual(["ENTITY", "FIELD", "MUTATION"]);
+
+    // `directive @rateLimit(perMinute: I32, burst: I32 = 0)` — two params, and
+    // only the second carries a default recovered from its `= …` clause.
+    const rl = s.directiveDecls.get("rateLimit");
+    expect(rl?.args.map((a) => a.name)).toEqual(["perMinute", "burst"]);
+    expect(rl?.args[0]?.default).toBeUndefined();
+    expect(rl?.args[1]?.default).toBe("0");
+    expect(rl?.repeatable).toBe(false);
+  });
+
+  it("attaches a description + directive to a scalar field", () => {
+    const email = s.entities.get("User")?.fields.find((f) => f.name === "email");
+    expect(email?.description).toBe("Contact email — never shared-cached.");
+    expect(email?.directives).toEqual([{ name: "pii", args: [] }]);
+  });
+
+  it("attaches a description + directive to a relationship (edge)", () => {
+    const posts = s.entities.get("User")?.edges.find((e) => e.name === "posts");
+    expect(posts?.description).toBe("Posts authored by this user.");
+    expect(posts?.directives).toEqual([{ name: "internal", args: [] }]);
+  });
+
+  it("attaches a description + directive-with-arg to an entity", () => {
+    const user = s.entities.get("User");
+    expect(user?.description).toBe("A registered account holder.");
+    expect(user?.directives).toEqual([{ name: "audit", args: [{ name: "level", value: '"sensitive"' }] }]);
+  });
+
+  it("attaches directives to a root and a mutation", () => {
+    expect(s.roots.get("user")?.directives).toEqual([
+      { name: "rateLimit", args: [{ name: "perMinute", value: "60" }] },
+    ]);
+    const publish = s.mutations.get("publish");
+    expect(publish?.directives?.map((d) => d.name)).toEqual(["audit", "rateLimit"]);
+    expect(publish?.directives?.[0]).toEqual({ name: "audit", args: [{ name: "level", value: '"sensitive"' }] });
+  });
+
+  it("preserves BOTH applications of a repeated directive on one field", () => {
+    const createdAt = s.entities.get("Post")?.fields.find((f) => f.name === "createdAt");
+    expect(createdAt?.directives).toEqual([
+      { name: "audit", args: [] },
+      { name: "audit", args: [{ name: "level", value: '"debug"' }] },
+    ]);
+  });
+});
+
+describe("parseSchema — schema-level description", () => {
+  it("attaches a leading doc string before `schema` to the model description", () => {
+    // The directives fixture carries no schema-level doc string, so this is
+    // exercised directly: a leading JSON string before `schema` becomes the
+    // model description.
+    const s = parseSchema('"The public API surface." schema api.example.com\n');
+    expect(s.description).toBe("The public API surface.");
+  });
+
+  it("does not misattach a following declaration's doc string to the schema", () => {
+    // The first string in the fixture is @audit's doc, not the schema's.
+    expect(parseSchema(readFixture("directives.lattice")).description).toBeUndefined();
+  });
+});
+
+describe("parseSchema — docs on newtypes, records, and fragments", () => {
+  // Documentation strings on these three declaration kinds were previously
+  // dropped on the floor; assert each leading JSON doc string (and the
+  // newtype's leading @internal directive) now lands on the model.
+  const s = parseSchema(`schema demo.example.com
+
+"A user's stable identifier."
+@internal
+newtype UserId = Text
+
+"An address-book entry."
+data Contact {
+  email: Text
+}
+
+entity User by id {
+  id: UserId
+  name: Text
+}
+
+"A short display byline."
+fragment UserByline on User { name }
+`);
+
+  it("parses the well-formed inline schema with zero diagnostics", () => {
+    expect(s.diagnostics).toEqual([]);
+  });
+
+  it("captures a newtype's doc string, directive, and underlying type", () => {
+    const nt = s.newtypes.get("UserId");
+    expect(nt?.description).toBe("A user's stable identifier.");
+    expect(nt?.directives).toEqual([{ name: "internal", args: [] }]);
+    expect(nt?.type).toBe("Text");
+  });
+
+  it("captures a data record's doc string", () => {
+    expect(s.records.get("Contact")?.description).toBe("An address-book entry.");
+  });
+
+  it("captures a fragment's doc string", () => {
+    expect(s.fragments.get("UserByline")?.description).toBe("A short display byline.");
+  });
+});
+
+describe("parseSchema — canonical form equivalence (line-terminator-insensitive)", () => {
+  const fx = parseSchema(readFixture("directives.lattice"));
+  const cn = parseSchema(readFixture("golden/directives.canonical.lattice"));
+  const decls = (s: typeof fx) => [...s.directiveDecls].sort(([a], [b]) => (a < b ? -1 : 1));
+
+  it("recovers identical directive declarations from multi-line and inline forms", () => {
+    expect(decls(cn)).toEqual(decls(fx));
+  });
+
+  it("recovers identical element metadata regardless of layout", () => {
+    const createdAt = (s: typeof fx) => {
+      const f = s.entities.get("Post")?.fields.find((x) => x.name === "createdAt");
+      return { description: f?.description, directives: f?.directives };
+    };
+    // Repeated @audit applications on a multi-line field vs. an inline one.
+    expect(createdAt(cn)).toEqual(createdAt(fx));
+
+    const email = (s: typeof fx) => {
+      const f = s.entities.get("User")?.fields.find((x) => x.name === "email");
+      return { description: f?.description, directives: f?.directives, policy: f?.policy };
+    };
+    // Description + directive + policy, inline in the canonical form.
+    expect(email(cn)).toEqual(email(fx));
+  });
+});
+
+describe("parseSchema — tolerance (never throws on malformed directive input)", () => {
+  const malformed = [
+    "directive @x on", // declaration missing its locations
+    "@ent", // dangling annotation with no declaration to attach to
+    '"a dangling leading doc string"', // description attached to nothing
+    "directive @y(a:", // unterminated parameter list
+    "directive @z(a: Text =", // dangling default value
+  ];
+
+  it("returns a well-formed model instead of throwing", () => {
+    for (const src of malformed) {
+      const s = parseSchema(src);
+      expect(s.directiveDecls).toBeInstanceOf(Map);
+      expect(Array.isArray(s.diagnostics)).toBe(true);
+    }
+  });
+
+  it("partially recovers a directive declaration missing its locations", () => {
+    const s = parseSchema("directive @x on");
+    expect(s.directiveDecls.get("x")?.locations).toEqual([]);
+    expect(s.directiveDecls.get("x")?.repeatable).toBe(false);
   });
 });

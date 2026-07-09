@@ -10,7 +10,7 @@ sidebar:
 This is the **living specification**. The reference implementation is [`wireform-lattice`](../haskell/), and the worked GraphQL comparison corpus is [a companion document](../corpus/).
 ::::
 
-**Status:** Draft 27
+**Status:** Draft 32
 **Requires:** RFC 9110 (HTTP Semantics), RFC 9111 (HTTP Caching), RFC 9457 (Problem Details), RFC 8941 (Structured Field Values), RFC 5861 (stale-if-error), RFC 10008 (QUERY)
 
 ---
@@ -156,6 +156,8 @@ data Policy
 
 Policies appear in three positions: on fields, on relationship edges, and on roots. All three participate in the path join (Section 8.1). A policy on a root or edge governs membership visibility (which entities the traversal reveals), while a field policy governs attribute visibility.
 
+**Requested projection.** A loader receives, alongside its key set, the plan's **requested projection** for the type it loads: the set of stored fields the compiled plan will read off those rows (the selected scalars, the link and grouping fields traversal needs, and the own-field dependencies of derived fields, Section 3.7). The projection is a static artifact of the plan, identical for every caller regardless of claims, so it never enters the cache key and is safe to share across a coalesced batch (Section 6.9). Consulting it is optional and purely an optimization: a loader MAY narrow its storage read to the projected columns (for example, restricting a SQL `SELECT`), but a loader that returns whole rows is always correct, because visibility and field masking are applied per response at emission (Section 6.9), never in the load. Returning a superset of the projection is fine; returning less than it is a bug. With `@defer` (Section 9.5) the projection is computed per delivery phase, so the critical phase loads a narrow column set and the deferred phase loads the rest.
+
 ### 3.2 Cursors
 
 A cursor is the canonical encoding (base64url over canonical wire forms, Section 3.5.3) of an item's keyset column values, plus a hash of the generating `CursorSpec`. Cursors are therefore deterministic, session-free, and **derivable**: any holder of an entity whose selection includes the keyset columns can mint that entity's cursor locally, which gives per-item resumption at zero wire cost (Section 3.6). Determinism keeps paginated URLs stable as cache keys: two clients requesting the same page produce byte-identical URLs. Presenting a cursor against a changed spec is rejected `410 lattice:cursor-retired` (Section 17.2). Transparency makes a cursor exactly as sensitive as its columns; treat cursors in URLs the way variable values are treated (Section 16). `defaultPage` lets queries traverse `Many` edges without explicit arguments; canonicalization erases arguments equal to defaults, so the two spellings share one identity.
@@ -257,6 +259,7 @@ list feed of Post by orgId
      ordered by rank desc
      page 20 max 100
      visible when caller.org = orgId
+     cache max-age 30s
 
 list bookmarks of Post by authorId
      ordered by createdAt desc
@@ -284,6 +287,7 @@ mutation publishPost(post: PostId) returns Post {
 - `fetch by id: <policy>` governs who may load this entity by reference through the `nodes` root (Section 14.4); omit it to forbid by-ref fetching entirely.
 - `list name of Type ...` and `get name of Type ...` are the entry points (roots): `list` for a paginated many, `get` for a single entity, each carrying its own visibility. Both may declare parameters, as in `get hero(episode: Episode?) of (Human | Droid)`. A `list` root is **field-backed** (`by <field>`: the link and grouping key are a target field) or **parameter-backed** (`list search(text: Text) of (...)`: no `by`, and the collection's grouping key is its parameters). The parameter-backed form means that full-text-style entry points, whose input is not a stored column, still get a well-defined cache-tag family (`search:{text}`).
 - `mutation m(args) returns Type { allow when <pred>; writes <scopes>; invalidates ...; effect <class> }` is covered in Section 11. In a write set, `Post(post)` means "the Post whose key is the `post` argument"; `Review(new)` means "a Review this effect creates" (Section 11.4); and `feed(Post.orgId)` means "the `feed` collection grouped at the written Post's orgId," which invalidates exactly the cached feed pages that could contain the post. `effect natural` takes an optional quoted justification, `effect natural "set-to-state"`, which is the written rationale Section 11.2 requires.
+- A `cache` clause on the `schema` line, a root, an entity, a field, or an edge declares a **cache policy** that overrides the per-slice default (Section 10.9): `cache no-store` / `private` / `revalidate` / `max-age 30s` / `immutable` / `no-tenure`. It composes by most-restrictive-wins across everything a response touches, may only tighten shareability below the slice, and is a pertinent declaration, so changing it re-keys the affected plans.
 
 The formal meaning of every line is the semantic model of Section 3.1. This surface exists so that the model can be read without the Haskell.
 
@@ -496,6 +500,58 @@ Bare key reuse across *unrelated* types needs no declaration at all. Identity is
 
 Traversal needs no new construct: an identity edge is an ordinary `has one` whose link field is the key field (`has one profile: UserProfile by id`). It is legal in both directions, and planned and budgeted like any to-one. Chained co-keying (`refines` or `joins` of a co-keyed entity) is rejected; declare every companion against the one base. Adding a co-keyed entity is additive under the Section 17.2 taxonomy (existing plans do not move), while the new invalidation coupling applies to writes from the moment of deploy.
 
+### 3.9 Documentation and directives
+
+The IDL carries two kinds of author metadata that ride in the published document but never change what a query means or how it is cached: **documentation strings** and **directives**. Both are part of the canonical IDL text (Section 7.1), so publishing either moves the schema hash, and both are excluded from plan identity (Section 7.3), so adding, editing, or removing them never moves a `planId`. Under the Section 17.2 taxonomy they are additive on every axis: a description or directive change compiles, plans, means, and paginates identically. A directive is declared once (below) and may be applied at IDL sites and — when its declared locations include a query site — in query documents (Section 4.8). Of the directives usable in a query, only the two protocol-semantic built-ins `@depth` and `@defer` (Section 4.2, Section 9.5) survive canonicalization and reach execution or the cache key; a *custom* directive applied in a query is erased by canonicalization (Section 5.1), exactly like the query name and comments, so it is source-level metadata for codegen and tooling that never reaches the wire, the plan, or the cache.
+
+**Documentation.** A string literal immediately before a declaration, or before a field or relationship inside an entity or interface, is that element's description:
+
+```lattice
+"A registered account holder."
+entity User by id {
+  visible to all by default
+  "The user's stable key."
+  id: UserId
+  "Contact email; never shared-cached."
+  email: Text private
+}
+```
+
+A description attaches to the `schema` line, a type declaration, an interface, an entity, a field, a relationship, an interface member, a fragment, a `get` or `list` root, a mutation, and a `directive` declaration. It is documentation only: code generators emit it as doc comments, and tooling (Section 20) shows it in hover and completion. A description is a single JSON string (RFC 8259), so multi-line text is written with `\n` escapes. In the canonical text it prints as that string on its own line, before any directives, so the parser round-trips it.
+
+**Directives.** A directive is a named, typed annotation attached to declared sites, for concerns the protocol does not model itself: audit tags, code-generation hints, lint rules, ownership metadata. The IDL lets a schema declare its own directive vocabulary, usable at IDL sites and — where the declaration says so — in query documents too (Section 4.8, "Query-side directives" below). A directive is declared before it is used:
+
+```lattice
+"Emit an audit-log entry when this element is read or written."
+directive @audit(level: Text = "info") repeatable on ENTITY | FIELD | MUTATION
+
+directive @internal on FIELD | RELATIONSHIP
+```
+
+A declaration names the directive, its arguments (the type language of Section 3.5, each with an optional default), whether it is `repeatable` (may be applied more than once at one site), and the set of locations it targets. The IDL-site locations are `SCHEMA`, `TYPE`, `INTERFACE`, `ENTITY`, `FIELD`, `RELATIONSHIP`, `FRAGMENT`, `ROOT`, and `MUTATION` (a field and a relationship are distinct sites, matching the IDL's disjoint field and edge grammar); the query-site locations are `QUERY` (the query definition), `SELECTION` (a selected field or edge), and `SPREAD` (a fragment spread). A declaration listing any query-site location makes the directive applicable in query documents ("Query-side directives" below); one listing only IDL-site locations may not appear in a query, and vice versa. An application is written in the same leading position as the compatibility annotations below:
+
+```lattice
+@audit(level: "sensitive")
+entity Post by id {
+  visible to all by default
+  id: Uuid
+  "When the post was created."
+  @audit
+  @audit(level: "debug")
+  createdAt: Timestamp
+}
+```
+
+Applications are checked at elaboration. Applying an undeclared directive, applying one at a location its declaration does not list, an unknown or missing required argument, a duplicated argument, or a second application of a non-repeatable directive at one site is a schema error that names the offender. Elaboration does not otherwise interpret a directive; its meaning belongs to the deployment, read from the published document by codegen and tooling.
+
+The five annotations the protocol defines itself are its built-in directives: `@break` (Section 17.3), `@deprecated` (Section 17.5), `@declassify` (Section 3.7), `@depth` (Section 4.2), and `@defer` (Section 4.2, Section 9.5). Those names are reserved, so a `directive` declaration may not redeclare them, and they keep their fixed grammar and meaning.
+
+**Query-side directives.** A directive whose declared locations include a query site — `QUERY` (the query definition), `SELECTION` (a selected field or edge), `SPREAD` (a fragment spread) — may be applied in a query document at those sites: `feed @track(event: "feed_view") { ... }`, `...UserByline @component("Byline")`, or `query @owner("growth") { ... }`. Applications are checked against the registry exactly as IDL applications are — an undeclared directive, a wrong location, an unknown, missing, or duplicated argument, or a non-repeatable directive applied twice is `400 lattice:compile-rejected` — and their arguments MUST be literals: a query-side application takes no variables, since it is erased before variables bind. The engine never interprets a directive, so a custom query directive cannot touch membership, emission, or caching; canonicalization erases it (Section 5.1) so it never enters the query hash, the plan id, or the wire. That is what lets a schema hand query authors a shared annotation vocabulary — analytics events, UI-component bindings, ownership, PII masks — with none of it fragmenting the content-addressed cache. Anything that must change what the origin *does* stays a built-in (`@depth`, `@defer`); custom directives are metadata only.
+
+**Canonical rendering.** Directive declarations print as a block sorted by name, after the `claims` block and before the type declarations. At every site the leading metadata prints in a fixed order: the description, then directive applications sorted by name and then by argument, then `@break`, then `@deprecated`. A directive application's arguments print sorted by argument name. None of this is part of a query's pertinent declarations, so it never enters a `planId`; all of it is part of the canonical IDL, so it is covered by the schema hash and served verbatim at `GET /schema/{schemaHash}` (Section 7.1).
+
+**Composition.** The directive registry is shared vocabulary, like the claim registry. Fusing modules (Section 18) union their directive declarations: identical declarations dedupe, and two incompatible declarations of one name fail fusion. Descriptions and applications fold into the owning declaration alongside its fields and edges.
+
 ---
 
 ## 4. Query Language
@@ -542,7 +598,9 @@ Two argument roles carry what the SQL surface spelled as clauses, both now ordin
 - **Pagination**: `comments(first: 3)`, `feed(after: $after, first: 20)`, or `last`/`before`, or `around` for a centered window. Paginated collections (Section 3.6) accept these; a bounded collection (a tag list) takes none and returns its whole set, so `tags { name }` is complete as written. A paginated collection with no `defaultPage` requires an explicit page argument; one with a `defaultPage` may be traversed bare. `limit` is accepted as a surface synonym for `first` and normalized to `first` in canonical text, except on fields that genuinely declare an argument named `limit`.
 - **Index-parameter filtering**: `hero(episode: $episode)` selects by a collection's grouping key. This is the only filtering permitted, and it is exactly what the schema's collection already groups and invalidates by (Section 4.6); it is not a general `where`.
 
-Recursion uses the one sanctioned directive, `@depth(n)`, on a self-referential edge: `replies(first: 5) @depth(3)`. It is a compile-time expansion into `n` plan levels, part of the canonical text and not a runtime toggle, so it neither fragments cache nor reopens the directive door for anything conditional.
+Recursion uses one of the two sanctioned directives, `@depth(n)`, on a self-referential edge: `replies(first: 5) @depth(3)`. It is a compile-time expansion into `n` plan levels, part of the canonical text and not a runtime toggle, so it neither fragments cache nor reopens the directive door for anything conditional.
+
+Deferral uses the other, `@defer`, on any non-root field: `recommendations @defer` on a scalar, or `comments(first: 20) @defer { body }` on an edge. It marks the field for delivery in a later stream phase (Section 9.5) so the critical path renders first and the origin may withhold the deferred field's storage work until then. Like `@depth`, `@defer` takes no arguments and is part of the canonical text: it is a static split, not a runtime toggle, so it neither fragments cache nor reopens the conditional-selection door of Section 4.7 (a `@defer` query is one more canonical text, not a toggle space of them).
 
 A query document carries a name (documentation only; identity is the canonical text) and typed variable declarations with optional defaults.
 
@@ -627,7 +685,7 @@ Runtime string assembly of per-request variants is discouraged. It recreates the
 
 ### 4.8 Grammar
 
-The grammar is normative. It is given in EBNF over a token stream. `[x]` is optional, `{x}` is zero or more, `|` is alternation, and quoted strings are case-sensitive terminals. **Ignored tokens** (spaces, tabs, line terminators, commas, and `#`-to-end-of-line comments) may appear between any two tokens. They are required only where two adjacent tokens would otherwise lex as one: two Names, or a Name and a NumberValue. Commas are never syntax. Everything that feels familiar from GraphQL is deliberate. The differences are the absence of productions (no alias, no general directive, no operation types besides `query`) rather than the presence of new ones.
+The grammar is normative. It is given in EBNF over a token stream. `[x]` is optional, `{x}` is zero or more, `|` is alternation, and quoted strings are case-sensitive terminals. **Ignored tokens** (spaces, tabs, line terminators, commas, and `#`-to-end-of-line comments) may appear between any two tokens. They are required only where two adjacent tokens would otherwise lex as one: two Names, or a Name and a NumberValue. Commas are never syntax. Everything that feels familiar from GraphQL is deliberate. The differences are mostly the absence of productions (no alias, no conditional `@include`/`@skip`, no operation types besides `query`) rather than the presence of new ones; the one directive facility (`Directive`) carries the two execution-semantic built-ins `@depth`/`@defer` plus schema-declared metadata directives that canonicalization erases (Section 3.9).
 
 ```
 Document        = { Definition }
@@ -635,7 +693,7 @@ Definition      = Import | QueryDef | FragmentDef
 
 Import          = "import" StringValue
 
-QueryDef        = "query" [ Name ] [ VarDefs ] SelectionSet
+QueryDef        = "query" [ Name ] [ VarDefs ] { Directive } SelectionSet
 VarDefs         = "(" VarDef { VarDef } ")"
 VarDef          = Variable ":" TypeRef [ "=" Value ]
 TypeRef         = Name [ "?" ]
@@ -645,10 +703,12 @@ FragmentDef     = "fragment" Name [ VarDefs ] "on" Name SelectionSet
 SelectionSet    = "{" Selection { Selection } "}"
 Selection       = Field | InlineFragment | FragmentSpread
 
-Field           = Name [ Arguments ] [ Depth ] [ SelectionSet ]
+Field           = Name [ Arguments ] [ Depth ] [ Defer ] { Directive } [ SelectionSet ]
 Depth           = "@depth" "(" IntValue ")"
+Defer           = "@defer"
+Directive       = "@" Name [ Arguments ]
 
-FragmentSpread  = "..." Name [ Arguments ]
+FragmentSpread  = "..." Name [ Arguments ] { Directive }
 InlineFragment  = "..." "on" Name SelectionSet
 
 Arguments       = "(" Argument { Argument } ")"
@@ -682,13 +742,13 @@ Documents are UTF-8; canonicalization additionally requires NFC (Section 5.1). `
 1. A document contains **exactly one** `QueryDef`, any number of `FragmentDef`s, and any number of `Import`s.
 2. The names `query`, `fragment`, `import`, `on`, `true`, and `false` are reserved. They are not usable as fragment names, variable names, or enum values. This is what disambiguates `... on T {}` from `...fragName`, and `EnumValue` from `BooleanValue`.
 3. **Aliases cannot exist.** There is no production for them, and rule 1 of Section 4.1 is enforced by the grammar rather than by a validator.
-4. `@depth` is the entire directive grammar. A `Field` carrying `Depth` MUST NOT carry a `SelectionSet`, MUST be an edge whose target type is the type of the enclosing selection, and means: repeat the enclosing selection set at this edge, unrolled `n` levels, with the innermost level omitting the recursive edge (Section 4.2). Any other `@` token is a parse error, not a validation error. `n` MUST be an integer `>= 1`; `@depth(0)` and negative depths are rejected `400 lattice:compile-rejected`. The unrolled depth counts fully against `maxDepth` (Section 14.1).
+4. The directive grammar is `@depth`, `@defer`, and custom `Directive` applications (Section 3.9). **`@depth`:** a `Field` carrying `Depth` MUST NOT carry a `SelectionSet`, MUST be an edge whose target type is the type of the enclosing selection, and means: repeat the enclosing selection set at this edge, unrolled `n` levels, with the innermost level omitting the recursive edge (Section 4.2). `n` MUST be an integer `>= 1`; `@depth(0)` and negative depths are rejected `400 lattice:compile-rejected`. The unrolled depth counts fully against `maxDepth` (Section 14.1). **`@defer`:** a `Field` MAY carry `Defer`, on a scalar or an edge, and it takes no arguments; it marks the field for deferred delivery (Section 9.5). `@defer` on a root field is rejected `400 lattice:compile-rejected`, since root membership is never deferred (the manifest is always the critical phase's first record). A field carrying both `Depth` and `Defer` defers its entire recursive expansion; the built-ins precede any custom `Directive` on a field. **Custom directives:** any other `@Name` parses as a `Directive` application (so it is a validation matter, not a parse error) and MUST resolve to a schema-declared directive whose locations include the application site (`QUERY`, `SELECTION`, or `SPREAD`), with literal arguments only (no variables), else `400 lattice:compile-rejected`. The reserved names (`depth`, `defer`, `break`, `deprecated`, `declassify`) may not be used as a custom `Directive`. Custom applications carry no execution or cache meaning and are erased by canonicalization (Section 5.1), so they never affect the query hash, the plan, the wire, or `maxDepth`.
 5. A scalar field takes no `SelectionSet`; an edge field requires one (or `Depth`). An interface edge's selection set contains only interface-declared fields and `InlineFragment`s, and each inline fragment's type must implement the interface (Section 4.4).
 6. Every argument must be declared. Field arguments are declared by the field's IDL declaration. The arguments `first`/`after`/`last`/`before`/`around` appear only on paginated collections, with `first`/`last` mutually exclusive, `after` only with `first`, `before` only with `last`, and `around` exclusive of both. Grouping-key arguments appear on the roots and edges whose collections declare them. Bounded collections take no arguments (Section 3.6). Explicit `null` does not exist as a `Value`; omission is the only spelling of absence.
 7. Every declared variable is used and every used variable is declared, with compatible types. An unused declaration is rejected rather than ignored, because it would otherwise vary the canonical text without varying meaning. Variable names must additionally not collide with the reserved URL parameter names (`p`, `slice`, `vc`, `project`, `live`, `d`, `dv`, `intent`), since variables bind as URL query parameters in the hash form (Section 6.1).
 8. Every `FragmentSpread` names a fragment defined in the document, reachable through an `Import`, or declared in the schema. The spread graph (excluding rule-4 recursion, which does not use spreads) is acyclic. A spread's `on` type must be compatible with the spread site. A local fragment whose name collides with a schema fragment of the same type is rejected with `lattice:fragment-shadow` (Section 4.5).
 
-**Closure under canonicalization.** The canonical text (Section 5.1) is itself a sentence of this grammar, in a restricted form: exactly one `QueryDef`, anonymous (Section 5.1 erases the name, which is why `Name` is optional above), no `Import`s, no local `FragmentDef`s (all expanded), and `FragmentSpread`s only to schema fragments (the late-bound references that survive expansion). A parser for this grammar therefore reads both what developers write and what origins hash. The difference between the two is one total function, not a second language.
+**Closure under canonicalization.** The canonical text (Section 5.1) is itself a sentence of this grammar, in a restricted form: exactly one `QueryDef`, anonymous (Section 5.1 erases the name, which is why `Name` is optional above), no `Import`s, no local `FragmentDef`s (all expanded), no custom `Directive` applications (erased with the name and comments; only `@depth`/`@defer` survive), and `FragmentSpread`s only to schema fragments (the late-bound references that survive expansion). A parser for this grammar therefore reads both what developers write and what origins hash. The difference between the two is one total function, not a second language.
 
 ---
 
@@ -700,10 +760,10 @@ A query document is canonicalized by:
 
 1. Applying default values for omitted arguments, then erasing the argument when equal to its default. Stating a default explicitly and omitting it are one identity.
 2. Expanding all local fragment spreads inline, then sorting: fields within each selection set by (name, canonical arguments); root fields by name; arguments by name; variables by name; interface inline-fragment alternatives by concrete type name. Schema fragment references are kept as references (late-bound), but their spread point is normalized.
-3. Erasing the query name and comments.
+3. Erasing the query name, comments, and custom directive applications (Section 3.9 query-side directives); the built-in `@depth` and `@defer` are semantic and survive.
 4. Serializing with no insignificant whitespace, UTF-8, NFC-normalized.
 
-The serialization of step 4 is pinned. Selections within a set are separated by a single space (`{title author{name}}`). Arguments and variable declarations are comma-separated with no spaces (`comments(after:$c,first:3)`, `query($a:Cursor,$b:I32=20){...}`). String values render as RFC 8259 JSON strings. Numbers render as canonical JSON numbers (below). Inline fragments render `... on Type{...}`, and spreads render `...Name` or `...Name(size:96)`. `@depth(n)` follows the argument list directly. Wire field keys (`avatarUrl(size:48)`, Section 9.1) use the same argument rendering, so exactly one rendering exists protocol-wide.
+The serialization of step 4 is pinned. Selections within a set are separated by a single space (`{title author{name}}`). Arguments and variable declarations are comma-separated with no spaces (`comments(after:$c,first:3)`, `query($a:Cursor,$b:I32=20){...}`). String values render as RFC 8259 JSON strings. Numbers render as canonical JSON numbers (below). Inline fragments render `... on Type{...}`, and spreads render `...Name` or `...Name(size:96)`. `@depth(n)` follows the argument list directly, and `@defer` follows `@depth(n)` (both after the arguments and before any selection set), so a field renders in the fixed order `name(args)@depth(n)@defer{...}`. Wire field keys (`avatarUrl(size:48)`, Section 9.1) use the same argument rendering, so exactly one rendering exists protocol-wide.
 
 Content addresses derived from canonical texts are pinned with them. The **query hash** is the first 16 bytes (128 bits) of `BLAKE3(canonical text)` in unpadded base64url (22 characters). The **schema hash** is `"s"` plus the same 16-byte truncation over the canonical IDL. The **plan id** is `"pl_"` plus the first 12 bytes of `BLAKE3(canonical text || 0x00 || pertinent declarations)`. The **manifest etag** is `"m:"` plus a 12-byte truncation (Section 10.2 names its input). **Canonical JSON**, used wherever this specification says "canonically serialized" (claims payloads, cursors, etag inputs), is: object keys sorted by Unicode code point, no insignificant whitespace, and the number rendering of Section 3.5.3.
 
@@ -810,13 +870,17 @@ This has semantics identical to Section 6.3 (it executes, memoizes, and grants `
 
 `POST /q?intent=oneshot` executes without memoization, without a `Location` grant, and with `Cache-Control: no-store`. This is the explicit escape hatch for queries that are certain to be unique (interactive explorers). It exists so that the uncacheable path is a visible opt-in rather than a silent default.
 
+`slice=page` on a one-shot request (Section 6.6) additionally makes it the **strict consistency tier**: the origin executes every nonempty data slice of the plan and composes them into one response under a single per-domain storage snapshot (Section 13.2 guarantee 7). Admission is strict — the request must carry credentials admitting every nonempty slice (Section 8.2), or it is rejected with the failing slice's ordinary `401`/`403`; a caller wanting less fetches individual slices. The body is the slices' entity streams concatenated in slice order (`pub`, `ctx`, `priv`), each section opening with its own manifest record (which names its slice and carries its etag); one `end` record closes the response, carrying no `etag` field, since the per-section manifests carry the validators. An origin that cannot obtain a single-snapshot window after bounded retries answers `503 lattice:snapshot-contention` with `Retry-After` rather than silently serving a mixed-snapshot page.
+
 ### 6.6 Slices as URL structure
 
-The `slice` parameter selects the authorization slice (Section 8). Values: `pub`, `ctx`, `priv`, and the pseudo-slice `plan`.
+The `slice` parameter selects the authorization slice (Section 8). Values: `pub`, `ctx`, `priv`, the pseudo-slice `plan`, and the composite `page`.
 
 `slice=plan` returns the current plan document for the query: its plan id, the slice structure, per-slice claim dependencies, and root-to-slice assignment, all derivable from (canonical text, pertinent schema declarations) alone. It contains no entity data and no membership, so it is publicly cacheable regardless of the query's policies, with a short TTL (`public, s-maxage=60`, per the plan-slice row of Section 10.1). It is the one per-query "current" pointer, playing the role that `/schema/current` plays for the whole schema. The immutable form `GET /q/{hash}/plan/{planId}` serves any plan document the instance can still derive, cacheable forever. A hash-form or inline GET with **no** `slice` parameter is equivalent to `slice=plan`. An introduction (`QUERY` or `POST ?intent=introduce`, Sections 6.3 and 6.4) with no `slice` executes the `pub` slice instead, since an introduction exists to execute and grant a `Location`, not to return the plan document. Data slices always name their plan explicitly via `p`.
 
 Each data slice is a distinct URL and therefore a distinct cache entry, with its own `Cache-Control` and cache key structure.
+
+`slice=page` names the whole logical page — every nonempty data slice at once. It is valid exactly where shared caches are already out of the loop: one-shot POSTs (Section 6.5) and live subscriptions (Section 12). On the cached GET forms and on introductions it is rejected with `400`: a multi-slice response has no single audience, so admitting it to a shared cache would re-entangle the partition Section 8 exists to keep separate — the slices *are* the cache key structure.
 
 ### 6.7 Entity fetches and field masks
 
@@ -849,6 +913,8 @@ Schema fragments remain the preferred spelling where they fit. They are the unit
 The response `ETag` is the entity `ver` regardless of mask, so revalidation may report change for a field outside the mask. This over-revalidates (one wasted refetch of a small body) and never under-revalidates. Implementations wanting per-mask precision may hash the masked field values instead, at the cost of a validator computation per mask. The protocol permits either since both are correct.
 
 Row absence and field absence are different facts and the status codes keep them apart: `404` (or `410` for a tombstone) is about the *row*. A fetch of an existing row whose mask names only fields that are unset, optional-and-absent, or not yet materialized (a `maintained` derivation before its first recompute, Section 3.7) succeeds with `200` and those fields simply absent from the record; the response still carries the row's `ETag` and cache policy. Only a mask naming fields the type does not declare is a `400`.
+
+`@defer` (Section 9.5) has no effect on a point fetch. A masked fetch is a single-resource response (Section 9.4.6) with nothing to stage, so a `@defer` inside a schema fragment used as a mask is ignored and every masked field is returned in the one response.
 
 ### 6.8 Consumption profiles: stream mode and resource mode
 
@@ -1041,11 +1107,11 @@ Responses are newline-delimited JSON records over chunked transfer (or the ident
 {"kind":"end","complete":true,"etag":"m:9ac2"}
 ```
 
-Record kinds carried in an entity stream: `manifest`, `entity`, `tombstone`, `elided`, `unchanged`, `error`, `invalidated`, `end`. (`plan` is the sole record of a `slice=plan` response, Section 9.2; `reauth` appears only on live subscriptions, Section 12.) The set is open: clients MUST tolerate an unrecognized `kind` by keeping it verbatim and ignoring it (Section 9.4.1). Parameterized fields are keyed by their canonical argument form. Records emitted by a federating gateway additionally carry `src` (Section 18.4).
+Record kinds carried in an entity stream: `manifest`, `entity`, `patch`, `tombstone`, `elided`, `unchanged`, `checkpoint`, `error`, `invalidated`, `end`. (`patch` and `checkpoint` appear only on deferred responses, Section 9.5; `plan` is the sole record of a `slice=plan` response, Section 9.2; `reauth` appears only on live subscriptions, Section 12.) The set is open: clients MUST tolerate an unrecognized `kind` by keeping it verbatim and ignoring it (Section 9.4.1). Parameterized fields are keyed by their canonical argument form. Records emitted by a federating gateway additionally carry `src` (Section 18.4).
 
 Consequences of normalization:
 
-- **Deferral is ordering.** The planner emits critical-path entities first; clients render incrementally. No defer directives.
+- **Deferral is delivery ordering, not conditional selection.** The planner always emits critical-path facts first, and a client renders incrementally as they arrive. A query MAY additionally mark selections `@defer` (Section 4.2) to name the critical/deferred split explicitly; the origin then streams the deferred facts after a flushed `checkpoint` boundary, so the critical path renders at its own latency (Section 9.5). Because `@defer` is unconditional and part of the canonical text, it never multiplies cache identities the way a runtime `@include`/`@skip` would (Section 4.7).
 - **Deduplication is structural.** An entity appearing via ten edges, or under several fragments, is transmitted once with the union of required fields.
 - **The client store is a version-keyed entity map**, patched by every response and every mutation result uniformly.
 
@@ -1063,6 +1129,8 @@ The first record of every successful data-slice response:
 Multiple roots share one manifest, one etag, and one set of surrogate keys, since they are one query with one response. Independent per-root cache identity, when wanted, comes from writing independent queries (Section 4.3), not from splitting one query's response.
 
 Root membership lists deliberately carry **no cursor envelope**. Unlike an edge occurrence's `$page` value, the manifest's ref arrays are plain, and resumption cursors for a paginated `list` root are *derived* from the boundary item's keyset columns per Section 3.2 (which is why the compiler warns when a query paginates without selecting them). `root` gives result order per root name (the stream itself is unordered beyond planner priority) and appears in the slice that owns the root per Section 8.1; membership never appears in a slice below its path level. The snapshot token travels as the `Lattice-Snapshot` response header rather than in the manifest, so revalidation refreshes it (Section 10.2).
+
+When an origin streams a deferred response (Section 9.5), the deferred entities' `(id, ver)` pairs are not yet known when the manifest is emitted. Such an origin MUST omit `etag` from the manifest record and carry the authoritative manifest etag only on the `end` record; a buffered origin (which knows the full fact set up front) MAY carry it in both, identically. A client takes the response validator from `end`, falling back to the manifest's `etag` when present.
 
 A `slice=plan` response consists of a single record:
 
@@ -1156,6 +1224,32 @@ Whether a given response can actually *use* `207` depends on whether the origin 
 
 For infrastructure that inspects headers but not bodies, a `Lattice-Outcome: degraded` signal SHOULD accompany any response that contains an `error` record; a response with no `error` record either omits the field or carries `Lattice-Outcome: ok`, and consumers MUST treat absence as `ok`. An origin that buffers the response (and so knows the outcome before the status line) MAY emit it as a response header; a streaming origin emits it as a trailer. Trailer support is inconsistent enough across HTTP/1.1 intermediaries that this is a convenience, never the mechanism a client is permitted to depend on in place of the body.
 
+### 9.5 Deferred delivery
+
+A `@defer` on a query field (Section 4.2, Section 4.8 rule 4) splits a response into **delivery phases**. A response whose query carries no `@defer` is one phase, byte-shaped exactly as the rest of this section describes. A response whose query carries any `@defer` has a **critical phase** followed by a **deferred phase**. The split is a static property of the canonical text, fixed per query identity, so it adds no runtime variance to the cache key.
+
+**Phases.** The critical phase carries the manifest and every fact the query did not defer: all root membership, all non-deferred fields, and every entity reached through non-deferred edges. It ends with a flushed `checkpoint` record. The deferred phase then carries the `@defer`-marked facts and ends with the `end` record. All deferred selections, at any depth, collapse into this one deferred phase; an origin MAY stage the deferred phase into further flush boundaries (each an additional `checkpoint`) by planner priority, but two phases are the normative model, and a client MUST treat every record after a `checkpoint` as belonging to a later phase than the records before it.
+
+```ndjson
+{"kind":"manifest","query":"8f2c41a9","plan":"pl_9dK2","slice":"ctx","root":{"feed":["Post:17"]}}
+{"kind":"entity","id":"Post:17","ver":"e41","fields":{"title":"...","author":{"$ref":"User:9"}}}
+{"kind":"entity","id":"User:9","ver":"b02","fields":{"name":"..."}}
+{"kind":"checkpoint"}
+{"kind":"patch","id":"Post:17","ver":"e41","fields":{"comments(first:20)":{"$page":{"items":[{"$ref":"Comment:301"}],"next":"cur_ab3"}}}}
+{"kind":"entity","id":"Comment:301","ver":"c19","fields":{"body":"..."}}
+{"kind":"end","complete":true,"etag":"m:9ac2"}
+```
+
+**`checkpoint`.** `{"kind":"checkpoint"}` marks the end of a phase and is the origin's flush point. An origin serving a deferred query SHOULD flush the transport at each `checkpoint` (a chunked-transfer flush, or an SSE dispatch on a live subscription) so the critical phase arrives at its own latency rather than the whole response's. This is the "flush the critical path, then load the rest" seam: a handler may emit and flush the critical records before it has issued the deferred phase's loads at all. A client MAY use `checkpoint` as a render signal (the critical set is complete) or ignore it and process records as they arrive; beyond phase membership, record order carries no meaning. A response with no deferred selections emits no `checkpoint`.
+
+**`patch`.** A deferred field on an entity already emitted in an earlier phase is delivered as `{"kind":"patch","id":"Post:17","ver":"e41","fields":{...}}`: the client merges `fields` into its existing store entry for that id, leaving fields already present untouched. The `ver` MUST equal the entity's `ver` — every phase of one response executes under the same per-domain snapshot (Section 13.2), so a deferred load of an already-emitted row observes the same version — which is what lets the client apply the patch to the row it already holds. A deferred field on an entity first emitted *in* the deferred phase needs no patch; it rides that entity's ordinary `entity` record. A deferred **edge** is delivered as a `patch` supplying the edge's page or ref array on its owner, followed by the reached entities as ordinary `entity` records in the deferred phase, so the owner's critical record omits the edge entirely and the membership scan itself defers.
+
+**Deferral is delivery, not membership.** The deferred entities, deferred collection tags, and deferred field values are part of the response's fact set exactly as if they had not been deferred: the manifest etag (Section 10.2) hashes them, the `Surrogate-Key` header covers them, and the response is cached, revalidated, and purged as one whole. `@defer` changes *when* facts cross the wire, never *which* facts the response contains. Because the etag hashes the full set, a streaming origin does not know it until the deferred phase completes and so carries it on `end` rather than the manifest (Section 9.2); one query's buffered and streamed executions still produce the same fact set and the same weak etag, which is what keeps that move — and `304` revalidation — correct. `@defer` is itself part of the canonical text, so it participates in identity exactly like `@depth`: the deferred query and its non-deferred twin deliver the same entity and collection facts but are distinct canonical texts, hence distinct query hashes, plan ids, `plan:` keys, and manifest etags in distinct cache entries (the deferred variant's body additionally carries the `checkpoint`/`patch` framing). Deferral never lets two different queries share one cached response; it makes one query's response arrive in phases.
+
+**Errors.** A scoped error discovered in the deferred phase follows Section 9.4 unchanged: it is an in-stream `error` record, `complete` stays `true` when the origin attempted the whole plan, and any error at any scope self-purges the response's surrogate keys (Section 9.4.5). Because a streaming origin discovers deferred failures strictly after the status line, `207` (Section 9.4.6) remains available only on a pre-stream signal; the in-body `error` record and the `Lattice-Outcome` trailer stay authoritative.
+
+**Loading.** Deferral is where the loader projection (Section 3.1) pays off. The critical phase's per-type projection excludes `@defer`-marked fields and does not scan deferred edges, so a backend that consults the projection issues a narrower storage read on the critical path (fewer columns, no deferred joins or aggregates) and defers the expensive reads to the deferred phase's loader round. The two are the same set-in map-out loaders (Section 3.1) run in two rounds under one snapshot. Budgets (Section 14.1) still count every deferred traversal in full: deferral stages when work is delivered, it does not remove any.
+
 ---
 
 ## 10. Caching
@@ -1171,11 +1265,13 @@ For infrastructure that inspects headers but not bodies, a `Lattice-Outcome: deg
 
 TTLs are per-query-per-slice policy, set by the schema author or defaulted; the values above are illustrative. `stale-while-revalidate` is RECOMMENDED on shared slices because soft purges (Section 10.6) rely on it to avoid thundering herds. `stale-if-error` (RFC 5861) SHOULD accompany it on shared slices with a deployment-configured window (reference default `stale-if-error=600`), so that when the origin is unreachable or returns 5xx, a cache may serve a stale but correct body rather than propagating the error; because every response also carries surrogate keys, a served-stale body is still subject to purge the moment the origin recovers and invalidates, bounding how long an error can extend staleness.
 
+How the schema author sets those TTLs — and how any site overrides the per-slice default for the cases where the derived behavior is wrong (a volatile public field, a type kept out of shared caches, a rarely-changing entity cached longer, data that must revalidate on every use) — is the declared cache policy of Section 10.9. Absent any `cache` clause, the defaults above apply verbatim.
+
 ### 10.2 Validators and snapshot refresh
 
 Two granularities of validator:
 
-**Entity versions.** Every entity carries `ver`, an opaque token derived from the storage layer's row version. The canonical entity endpoint:
+**Entity versions.** Every entity carries `ver`, an opaque token derived from the storage layer's row version. `ver` MUST change on every write to the row, including writes that restore an earlier value (row-version counters and LSN-derived tokens do this naturally): equal `ver` means identical row state, which is what entity-level `304`s, the store's version rule (Section 3.5.1), and the manifest etag all stand on. The canonical entity endpoint:
 
 ```
 GET /e/Post/17?fragment=Card
@@ -1186,9 +1282,24 @@ supports `If-None-Match` per RFC 9110 and returns `304` when current. Point fetc
 
 **Manifest etags.** A query response's `ETag` is the manifest etag, and it is **weak**: `ETag: W/"m:9ac2"`. It hashes the plan id, variable bindings, claims payload where applicable, and the sorted `(id, ver)` vector of every entity in the response, including tombstones and elisions. Weakness is deliberate: record emission order is planner priority and MAY vary between executions, so equal etags promise semantically identical responses (identical fact sets), not identical bytes. Since byte ranges are already rejected over entity streams (Section 10.3), nothing is lost.
 
+When the response is streamed with deferred delivery (Section 9.5), this same etag is carried on the `end` record instead of the manifest, since the full `(id, ver)` vector is known only after the deferred phase; its input and meaning are unchanged, and `304` revalidation still compares it against the whole fact set.
+
 `If-None-Match` on any query URL yields `304 Not Modified` when no constituent entity has changed and membership is identical. Origins SHOULD maintain the version vector for recently served manifests keyed by manifest etag so revalidation does not re-execute the plan. When that memo is cold, revalidation degrades to re-execution plus comparison, which is still correct.
 
 The snapshot token is the response header `Lattice-Snapshot`. Per RFC 9111, a cache receiving a `304` updates the stored response's header fields from the `304`. Carrying the token as a header therefore means **revalidation refreshes the snapshot** even though the body is unchanged. This matters for convergence (Section 13.2): a body can be simultaneously old and current, and the refreshed token is what says so. `304` responses MUST carry `Lattice-Snapshot` and the same `Surrogate-Key` header as the full response would, so revalidation also refreshes the cache's tag associations.
+
+**Validity floors.** `Lattice-Snapshot` says *when* a response was computed; a companion header says *since when* it has been true:
+
+```
+Lattice-Snapshot: main="lsn:0/5A3F1B00"
+Lattice-Snapshot-Floor: main="lsn:0/59F02C00"
+```
+
+Same dictionary grammar, one member per domain the response touched. The floor is the newest intersecting invalidation: per domain, the greatest token at or below the response's snapshot token at which any key in the response's `Surrogate-Key` set was invalidated (Section 11.5), or the origin's retention horizon when nothing intersecting is retained. The pair asserts an **interval**: the response's fact set is identical at every token in `[floor, token]`, because nothing it depends on changed inside it. The assertion is exactly as trustworthy as the invalidation discipline it rides on — an effect whose declared write set under-covers (Section 11.4) already breaks cache purging; floors add no new obligation, they surface the one that exists.
+
+Floors only ever widen safely upward: an origin that cannot bound a key's last invalidation (index cold, entry evicted, keys coarsened) MUST raise the floor toward the token, and `floor = token` — the point interval — is always sound. A client MUST assume the point interval when the header is absent, which is also the complete backward-compatibility story. `304` responses MUST carry `Lattice-Snapshot-Floor` alongside `Lattice-Snapshot`, recomputed like the token itself; per RFC 9111 the refresh rewrites the stored headers, so one client's revalidation widens the cached entry's interval for every later reader. What intervals buy is Section 13.2's cross-slice consistency: they turn snapshot divergence between the slices of one page from a fact the client can merely observe into a proposition it can decide.
+
+**Prefix completeness.** The floor computation MUST observe every invalidation at or below the response's snapshot token. An index fed asynchronously after commit visibility — the natural first implementation over an outbox relay — can under-state a floor and falsely certify an interval containing a not-yet-indexed intersecting write, which is the one way this mechanism produces a wrong answer rather than a conservative one. Conforming strategies, by backend shape: read the outbox through the same storage snapshot as the data (transactional stores — PostgreSQL, SQLite); update the index before the write becomes visible, or refuse to certify past in-flight effects (an in-process origin); index log entries as they are applied (a materialized view over a log — a Kafka consumer's floor index is prefix-complete by construction); or clamp the floor to the token whenever the index may lag. The `FloorsStaleIndex` configuration in the reference repository's TLA+ corpus exhibits the race.
 
 ### 10.3 Range and resumption
 
@@ -1257,6 +1368,8 @@ stateDiagram-v2
 
 The organic query working set is highly repetitive (the empirical fact that motivated persisted queries) and quickly earns full tenure; one-off adversarial queries occupy shared cache slots for seconds. Tenure state is advisory and losable.
 
+A root or the `schema` line may declare `cache no-tenure` (Section 10.9) to exempt its queries from this ramp, serving them at full policy TTL from first sight. It is advisory and aimed at query sets an origin already trusts: under open admission (Section 14.3) an origin MAY ignore it, since honoring it on an open root would let an adversary skip the ramp by minting novel queries there; under signed admission, where only the author's own queries compile, novel-query pollution is already precluded and the exemption is safe.
+
 ### 10.8 Error response caching
 
 Every error response carries explicit cache directives; heuristic cacheability is never relied on.
@@ -1269,6 +1382,58 @@ Every error response carries explicit cache directives; heuristic cacheability i
 | `lattice:cursor-retired` | `public, s-maxage=60` |
 | `lattice:plan-superseded` | `no-store` (answers differ across a mixed fleet mid-deploy) |
 | auth failures (`401`/`403`) | `no-store` |
+
+### 10.9 Declared cache policy
+
+The per-slice `Cache-Control` of Section 10.1 is a *default*, not a fixed law. A schema author declares, on any site, a **cache policy** that deviates from it, for the cases where the derived behavior is wrong: a public field that is nonetheless volatile, a cheap type that should not sit in shared caches, a reference entity that changes so rarely it may be cached far longer, or data that must be revalidated on every use. Like visibility (Section 8.1), cache policy is a declared, static property of the schema and the query, never a runtime toggle: it is part of the canonical IDL (Section 7.1), so the schema hash covers it, and it is a pertinent declaration (Section 7.3), so changing it moves the `planId` of every query it touches and old-policy cache entries are superseded by re-keying (Section 13.3) rather than served stale.
+
+**The clause.** A `cache` clause attaches to the `schema` line (a deployment-wide default), a root, an entity, a field, or an edge:
+
+```lattice
+schema api.example.com cache max-age 5m        -- deployment-wide freshness default
+
+entity Session by id { cache no-store  ... }   -- nothing from a Session is ever stored
+
+entity Post by id {
+  price:     Money  cache revalidate            -- may store, but revalidate every use
+  signedUrl: Url    cache no-store              -- keep out of every cache
+  archived:  Bool   cache immutable             -- author asserts it never changes
+}
+
+list feed of Post by orgId ... cache max-age 30s   -- this entry point's baseline freshness
+```
+
+The vocabulary maps onto HTTP `Cache-Control` but is written as readable policy; clauses combine at one site (`cache private, max-age 10s`):
+
+| Clause | Effect | HTTP |
+|---|---|---|
+| `no-store` | never stored, shared or private | `no-store` |
+| `private` | client store only, never a shared cache | `private` |
+| `revalidate` | may store, must revalidate on every use | `no-cache` |
+| `max-age <dur>` | freshness lifetime (`10s`, `5m`, `1h`, `7d`) | caps `s-maxage` (shared) / `max-age` (priv) |
+| `immutable` | the value never changes (an audited assertion) | `immutable`, effectively infinite lifetime |
+| `no-tenure` | exempt from the introductory ramp (Section 10.7) | — |
+
+**Composition takes the most restrictive contributor.** A response touches many declarations; its effective cache policy is the tightest over the slice default, the schema default, the entered root, and every entity, field, and edge the plan reached. Freshness is the minimum `max-age`; storability keeps the smallest of `shared` ⊐ `private` ⊐ `no-store`; any `revalidate` makes the whole response `no-cache`; `immutable` survives only when *every* contributor is immutable (so a point fetch of an immutable entity is immutable, but a query mixing it with mutable data is not). Touching one `no-store` field makes the whole response `no-store`, exactly as touching one `Private` field raises a whole path's visibility level. This is the same most-restrictive-wins discipline as the visibility join (Section 8.1) — its dual on the cacheability lattice, where "more cacheable" is the top — and `explain` (Section 20.2) reports the derivation per element, the answer to "why is this response not cacheable."
+
+**Per-element clauses may only tighten; widening is a baseline decision.** A field, entity, or edge `cache` clause can only make a response *less* cacheable than the derived default — a shorter lifetime, `no-store`, `private`, `revalidate` — because a part may never make the whole more cacheable than its siblings allow. Freshness is *widened* only at the top: the `schema` default or the entered root's `cache max-age` sets the ceiling the meet works down from. `immutable` is the one per-element widening, and it is an explicit, audited assertion (like `@declassify` for information flow, Section 3.7) that the author vouches the data never changes. A widened lifetime is safe because every response still carries surrogate keys (Section 10.5) and stays purgeable: a longer TTL only widens the window before a purge or an out-of-band change is reflected, which the author is asserting is acceptable.
+
+**The slice is a shareability ceiling.** A clause can tighten shareability but never loosen it past the slice: a `priv` response is `private` and may be declared `no-store`, but no clause can make it `shared`/`public`; a `ctx` or `pub` response may be pulled down to `private` or `no-store`. There is deliberately no clause that widens shareability, because that is exactly the leak the Section 8.1 path join and Section 16 exist to prevent — a cache annotation must not be able to publish gated membership. Storability tightening is always safe and always available; freshness and revalidation are orthogonal to it.
+
+**What stays fixed.** Mutation responses are `no-store` regardless (Section 11.3); a `cache` clause cannot loosen that. Error responses follow Section 10.8. The `plan` pseudo-slice and the schema/dictionary documents keep their own directives (Sections 6.6, 7.1). None of these is a `cache`-clause site.
+
+**Model.** In the Section 3.1 model this is one optional field on the sites that already carry a `Policy`:
+
+```haskell
+data CachePolicy = CachePolicy
+  { store     :: Storability   -- Shared | Private | NoStore
+  , freshness :: Freshness     -- Default | MaxAge Duration | Revalidate | Immutable
+  , tenure    :: Tenure        -- Ramped | NoTenure
+  }
+-- response policy = the meet over the slice default and every touched site's CachePolicy
+```
+
+Absent a clause, a site is `Default` on every axis and contributes nothing to the meet, so a schema that declares no `cache` clause behaves exactly as Section 10.1 describes. This section is entirely opt-in.
 
 ---
 
@@ -1540,7 +1705,13 @@ A subscription's authorization is its proof (Section 8.2), and a long-lived conn
 
 Boundary rules that pull-path machinery does not carry over: the SSE response itself bears no `ETag`, `Surrogate-Key`, or `Lattice-Snapshot` headers (they would describe one instant of a long-lived stream; snapshot movement is visible in the records); cache digests are ignored on subscriptions; a degraded re-execution pushes its scoped errors in-stream but does not self-purge (the purge would re-trigger the subscription it came from); the `plan` pseudo-slice is not subscribable, and an absent `slice` parameter subscribes `pub`. Reauth applies to any presented proof that carries an expiry, whatever the slice: expiry is a property of the credential, not of the data it gates. An origin over its subscriber capacity answers `503 lattice:live-over-capacity`, `no-store`.
 
+**One subscription, one slice — or the whole page.** A per-slice subscription watches exactly the slice named by its `slice` parameter (an absent parameter subscribes `pub`). Each per-slice stream is internally snapshot-coherent (Section 13.2 guarantee 1) and is single-flighted independently, which is what lets one execution's output fan out to every subscriber in the same audience. The convergence protocol of Section 13.2 guarantee 3 remains a *pull* construct: its remedy is a `Cache-Control: no-cache` refetch, and a push stream has nothing to refetch — a client fusing several concurrent per-slice subscriptions into one view therefore does not inherit cross-slice snapshot reconciliation. What it does inherit is the store's version rule (Section 3.5.1): an entity's field set is always drawn from a single `ver`, because a record at a new `ver` **replaces** the store entry rather than unioning into it, and only same-`ver` records from different slices union their disjoint fields. Stale-value mixing across slices is thus impossible — you never see one entity's field at `e2` beside another of its fields at `e1`. The only observable artifact of per-slice streams delivering one entity's version bump at different instants is transient field *absence* (never staleness), repairable at once with a point fetch (Section 6.7). Applications that want more than that subscribe the page.
+
+**Page subscriptions.** `slice=page` (Section 6.6) subscribes every nonempty data slice of the plan over one stream — the push-side answer to cross-slice consistency, where the pull side's answer is Section 13.2's interval protocol. Admission is strict, as on the one-shot form (Section 6.5): the request must carry credentials admitting every nonempty slice. Every burst — the initial snapshot and each delta — MUST be composed under a single per-domain storage snapshot, so a page subscriber never observes cross-slice skew at all: the stream is a sequence of consistent cuts. Burst framing follows the one-shot page form: sections in slice order, each opening with its own manifest (a delta re-emits a section's manifest only when that section's root membership changed), one `end` record closing the burst. Because the same entity can legitimately appear in more than one section with different field subsets (Section 8.1 plans a fragment once per level), delta suppression is per `(slice, entity)`, not per entity. A page stream's single-flight identity necessarily includes the private credential whenever the plan's priv slice is nonempty — the page re-entangles the audiences that per-slice fanout keeps separate, which is the fanout price of the consistency guarantee; deployments that need shared fanout at scale subscribe per-slice and accept the store rule above. Reauth is unchanged: expiry is a property of whichever presented credential expires first. An origin that cannot compose the initial snapshot under one snapshot after bounded retries refuses the subscription with `503 lattice:snapshot-contention`; a delta re-execution that cannot is skipped rather than pushed mixed — the intersecting write that caused the contention has already queued the next trigger, so the skip is self-healing under sustained writes.
+
 Live queries bypass shared caches by nature. Deployments SHOULD terminate them on a separate tier so subscription fanout cannot degrade the cacheable read path.
+
+Deferral (Section 9.5) composes with subscriptions unchanged: the initial snapshot streams its critical phase, a `checkpoint`, then its deferred phase, and each delta re-emits changed records in whichever phase they belong to (a delta touching only deferred facts pushes them after a `checkpoint`, exactly as the snapshot did). Over SSE the `checkpoint` is one more `data:` event, and the origin flushes the dispatch at it.
 
 ---
 
@@ -1562,11 +1733,14 @@ Tokens are opaque and totally ordered **within a domain** (an LSN, a Spanner tim
 ### 13.2 Guarantees
 
 1. **Per-slice, per-domain snapshot isolation.** Within one response, all records from a given domain were computed against that domain's single token in `Lattice-Snapshot`; across domains, no relationship holds, whether within one origin or across upstreams.
-2. **Cross-slice divergence is permitted and detectable.** The slices of one logical page may be served from different snapshots (independent cache entries age independently). Snapshot distance alone is **not** actionable: a revalidated response is current regardless of its body's age, and its refreshed token says so (Section 10.2).
-3. **Convergence triggers on conflict, not distance.** The client acts when two responses assert different `ver` for one entity: it SHOULD refetch the slice(s) with the older snapshot using `Cache-Control: no-cache`, at most K times (default 2), then render with newest-snapshot-wins per entity and surface residual staleness to the application. Absent a `ver` conflict, divergence is unobservable and MUST NOT generate traffic.
+2. **Every response is a validity interval, not an instant.** The `Lattice-Snapshot-Floor` / `Lattice-Snapshot` pair (Section 10.2) bounds, per domain, the token range over which the response's fact set is unchanged; an absent floor means the point interval. The slices of one logical page may still be served from different snapshots (independent cache entries age independently), but intervals make the divergence *decidable*: token distance alone remains non-actionable, because a revalidated response is current regardless of its body's age — and its refreshed interval says so.
+3. **Page assembly converges on interval overlap.** A page assembly is a **consistent cut** for a domain iff its slices' validity intervals intersect: `max(floors) <= min(tokens)`. Any token in the intersection witnesses a storage state in which every slice's rendered fact set held simultaneously, so an assembly that passes the test is exactly as consistent as the same page served in one response (guarantee 1) — cross-request assembly reaches the single-response ceiling, and no more. When the intervals fail to intersect, the client SHOULD revalidate the slices whose token lies below the page's greatest floor with `Cache-Control: no-cache` (`If-None-Match` makes the common answer a cheap `304` that widens the stored interval for every later reader, Section 10.2), at most K times (default 2), then render newest-snapshot-wins per entity and surface residual staleness to the application. A `ver` conflict — two responses asserting different `ver` for one entity — is a corollary trigger: the write that moved the `ver` invalidated that entity's key, which sits in both responses' `Surrogate-Key` sets, so the later response's floor necessarily exceeds the earlier one's token. Clients MAY keep it as a local fast check; the interval test subsumes it and additionally catches skew between slices that share no entity, which the conflict rule alone cannot see. Intervals that do intersect are proof of consistency: absent an overlap failure, divergence is unobservable and MUST NOT generate traffic.
 4. **Mutation ordering.** A mutation response's `Lattice-Snapshot` token for a domain is the commit token at which that mutation's effects became visible in that domain. Consequently any subsequent response whose token for the same domain is >= the mutation's token reflects those effects. Read-your-writes for membership (Section 11.6) is exactly this comparison.
 5. **No cross-query guarantees.** Two different queries observe independently aged caches; applications requiring a consistent multi-query view issue them as one query.
-6. **Resource mode weakens 1 to per-entity.** Under the resource profile (Section 6.8) only the refs projection is snapshot-consistent; entity attributes are each their own snapshot. The convergence protocol still applies via `ver` conflicts against the refs projection's versions.
+6. **Resource mode weakens 1 to per-entity.** Under the resource profile (Section 6.8) only the refs projection is snapshot-consistent; entity attributes are each their own snapshot. Every point fetch carries its own validity interval, and guarantee 3's cut criterion applies across the refs projection and the point fetches together, so resource-mode assemblies converge by the same test.
+7. **The composed forms are single-snapshot.** A one-shot page response (Section 6.5) and every burst of a page subscription (Section 12) are composed by the origin under a single per-domain snapshot: consistency there is structural, with nothing for the client to check.
+
+Guarantees 3 and 7 — the cut test's soundness (including the §10.2 prefix-completeness precondition and replica-lagged reads), its traffic economics, and single-snapshot composition — are machine-checked in the reference repository's TLA+ corpus (`wireform-lattice/tla/`); the broken-variant configurations there are the counterexample traces behind this section's MUSTs.
 
 ### 13.3 Plan supersession
 
@@ -1588,7 +1762,7 @@ During mixed-fleet windows, `plan-superseded` answers differ by instance, which 
 Compilation on memo miss is the only request path whose cost scales with attacker-controlled input. Bounds, all published in discovery and enforced before planning where possible:
 
 - decompressed canonical text size cap (default 64 KiB);
-- root count (`maxRoots`), fragment count, per-fragment field count, traversal-graph depth caps; `@depth` expansion and interface alternative fan-out count fully;
+- root count (`maxRoots`), fragment count, per-fragment field count, traversal-graph depth caps; `@depth` expansion and interface alternative fan-out count fully, and `@defer` selections count fully as well (deferral stages when work is delivered, not how much of it a request does, Section 9.5);
 - plan budgets: max batching rounds, max per-round fan-out (computed from each collection's `max`, whether bounded or paginated, and, for round 0, the sum across all roots' page sizes), max distinct loaders, max surrogate keys before coarsening;
 - compile timeout with `503 lattice:compile-budget`.
 
@@ -1652,6 +1826,7 @@ The two mechanisms share the `lattice:` code namespace but apply at different gr
 | `lattice:batch-duplicate-key` | 400 | a batch invocation carries two items with the same `key`; rejected before any item executes |
 | `lattice:plan-superseded` | 409 | request named a plan id this instance no longer serves; body carries the current plan document |
 | `lattice:rate-limited` | 429 | request-rate budget exceeded; MUST carry `Retry-After` |
+| `lattice:snapshot-contention` | 503 | a composed multi-slice form (Sections 6.5, 12) could not obtain a single-snapshot window after bounded retries; MUST carry `Retry-After`; `no-store` |
 | `lattice:version-unavailable` | 404 | version-pinned fetch for a `ver` the origin no longer holds; `no-store`, `Content-Location` names the unpinned URL (Section 6.9) |
 | `lattice:key-in-flight` | 409 | idempotency key currently executing; retry after `Retry-After` |
 | `lattice:admission-denied` | 403 | signed mode, bad or missing signature |
@@ -1677,6 +1852,7 @@ Mid-stream failures use the `error` record (Section 9.4), since the status line 
 - **Payloads in URLs:** the `vc` parameter puts coarse claims into URL logs. The payload is designed to be low-sensitivity (org-granularity attributes shared by many principals) and carries no proof; the proof never appears in a URL. Deployments whose claims are themselves sensitive use the header binding at the cost of `Vary` dependence and browser preflights.
 - **Query text in URLs:** inline-form URLs expose query structure to every log on the path. Query structure is not secret in this design (it is content-addressed and servable via `/source`); variable *values* are the sensitive part and appear in URLs in all forms, so URL-logging hygiene requirements are identical to any REST API.
 - **`nodes` as enumeration oracle:** Section 14.4.
+- **Floors reveal write recency:** `Lattice-Snapshot-Floor` discloses when a response's dependency set last changed — the same class of signal as `Last-Modified`, at surrogate-key granularity. Deployments treating write timing itself as sensitive on a slice can widen floors (the point interval is always sound) at the cost of more convergence revalidation.
 - **Idempotency store as oracle:** replay responses are returned only for matching `(mutation, principal, key, digest)`; a key is not a capability that lets another principal read a stored response.
 - **Snapshot tokens as side channel:** tokens reveal coarse write-rate information about the origin. Deployments that treat write-rate as sensitive (for example where token deltas would reveal customer transaction volume) MAY coarsen token granularity, for instance by quantizing the LSN or advancing tokens on a fixed interval rather than per commit. The protocol requires only that comparison semantics (ordering and membership, Section 11.6) be preserved under any such coarsening.
 - **Tenure state:** advisory only; its loss or corruption affects TTLs, never correctness or authorization.
@@ -1828,6 +2004,8 @@ flowchart TD
 
 Because responses are normalized entity streams, the gateway performs no tree stitching. It forwards upstream records as they arrive, tagged with `src`, interleaved by its own plan priorities, and synthesizes a single fused manifest. Scoped errors forward with their scopes intact, so one upstream's partial failure degrades exactly that upstream's entities. Deferral, partial loading, and the client store all work unchanged. A client cannot tell federated from monolithic by the record stream, only by the snapshot header's domain namespaces (Section 13.1):
 
+Explicit `@defer` (Section 9.5) composes here without new machinery: a fused query's deferred selections are deferred in the corresponding upstream subplans, each subplan's deferred records forward in the fused response's deferred phase tagged with `src`, and the gateway emits its own `checkpoint` once every upstream has delivered its critical phase. `patch` records forward like any other, since a fused entity is still keyed by identity.
+
 ```
 Lattice-Snapshot: posts/main="lsn:0/5A3F1B00", social/main="lsn:0/00C21F40"
 ```
@@ -1835,6 +2013,8 @@ Lattice-Snapshot: posts/main="lsn:0/5A3F1B00", social/main="lsn:0/00C21F40"
 ### 18.5 Consistency across upstreams
 
 Section 13's guarantees apply per upstream: snapshot isolation within each upstream's contribution to a response, ordered tokens per upstream, and the convergence protocol applied component-wise on the snapshot vector. Across upstreams there is no snapshot relationship at all, and the specification says so rather than implying one: a fused response may pair a Post from one instant with its reactions from another. Applications needing tighter coupling than that must get both facts from one owner.
+
+Validity floors (Section 10.2) ride the same vector: a fused response carries per-upstream floors under the same namespacing, the guarantee-3 cut test applies component-wise, and an upstream that sends no floor contributes point intervals — the conservative default, never an unsound one.
 
 Read-your-writes composes: a mutation routes to one owning upstream (Section 18.7) and returns that upstream's snapshot token; the membership rule of Section 11.6 compares against that component of subsequent responses' vectors.
 
@@ -1907,7 +2087,7 @@ Attributes (registry prefix `lattice.`):
 | `lattice.derivation.name` | recompute spans | |
 | `lattice.snapshot.domains` | server spans | domain names only, never tokens |
 
-SDKs SHOULD emit a client-side page-assembly span parenting the slice requests, with convergence retries (Section 13.2) recorded as span events carrying the conflicting entity id.
+SDKs SHOULD emit a client-side page-assembly span parenting the slice requests, with convergence revalidations (Section 13.2 guarantee 3) recorded as span events carrying the failing domain and interval bounds, and — when a `ver` conflict was the local trigger — the conflicting entity id.
 
 ### 19.3 Metrics
 
@@ -1924,7 +2104,8 @@ Named instruments, so the specification's repeated "instrument from day one" inj
 | `lattice.tenure.promotions` | counter | organic working-set behavior vs. adversarial churn |
 | `lattice.plan.supersessions` | counter | deploy-boundary health; sustained nonzero outside deploys is a bug |
 | `lattice.mutation.replays` | counter | by mutation and effect class |
-| `lattice.convergence.retries` | counter | cross-slice conflict rate |
+| `lattice.convergence.retries` | counter | interval-overlap failures per page assembly; the observed cross-slice skew rate |
+| `lattice.page.contention` | counter | single-snapshot composition retries on the composed forms (Sections 6.5, 12) |
 
 ### 19.4 Telemetry and shared caches
 
@@ -1960,8 +2141,10 @@ An IDL and query-language LSP falls out of the same codebase and makes the SELEC
 `GET /q/{hash}/explain` (and `lattice plan` offline) returns the compiled plan as data:
 
 - per plan element: its path, the policy join derivation (`feed@root:Claims{org} ⊔ title:Public = Claims{org}`), and the resulting slice, which is the exact answer to "why is this field not publicly cached";
+- per plan element: its cache-policy meet (`feed@root:s-maxage=30s ⊓ price:no-cache ⊓ signedUrl:no-store = no-store`) and the resulting response `Cache-Control`, the dual of the visibility join above and the exact answer to "why is this response not cacheable" (Section 10.9);
 - rounds: which loaders batch together at each depth, with the fan-out bound per round;
 - surrogate keys with the collection and grouping key that produced each;
+- per entity type: the requested projection (Section 3.1) the plan hands its loaders, as a field-name array (`"*"` where a computed field forces whole rows) — the exact answer to "which columns does this query make my storage read";
 - budget consumption against the origin's published limits;
 - the expected span skeleton (Section 19.2), so live traces diff against the static plan;
 - the structural manifest the query produces (roots, slices, claim dependencies).

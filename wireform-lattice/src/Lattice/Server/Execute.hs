@@ -186,7 +186,18 @@ data ExecEnv = ExecEnv
   , xMode :: EmitMode
   , xTelemetry :: LatticeTelemetry
   -- ^ §19 instrumentation; 'Lattice.Telemetry.noTelemetry' when off.
+  , xProjections :: Map TypeName Projection
+  -- ^ Per-type load projections ('Lattice.Plan.planProjections'): the
+  -- static upper bound on the row fields this execution reads, handed to
+  -- every 'beLoad'. Types absent from the map load 'ProjectAll' — pass
+  -- 'Map.empty' where the whole visible entity renders by design (point
+  -- fetches, mutation output).
   }
+
+
+-- | The 'beLoad' projection for one type ('ProjectAll' when unmapped).
+projectionOf :: ExecEnv -> TypeName -> Projection
+projectionOf env ty = Map.findWithDefault ProjectAll ty (xProjections env)
 
 
 {- | What emits. Traversal is always rank-bounded; emission is either
@@ -800,7 +811,7 @@ loadRound env stRef jobs = do
             jobs
   for_ (Map.toAscList needed) $ \(ty, keys) -> do
     loaded <- loaderSpan env (unTypeName ty) (Set.size keys) $
-      beLoad (xBackend env) ty (Set.toAscList keys)
+      beLoad (xBackend env) ty (projectionOf env ty) (Set.toAscList keys)
     for_ (Set.toAscList keys) $ \k -> do
       let ref = Ref ty k
           res = fromMaybe (Right RowAbsent) (Map.lookup k loaded)
@@ -1032,7 +1043,7 @@ runDeriveTasks env stRef counter tasks
                 -- Hidden derived-field batch: batch_size only, no span
                 -- (module haddock of "Lattice.Telemetry").
                 recordLoaderBatch (xTelemetry env) (unTypeName ty) (Set.size keys)
-                  *> ((,) ty <$> beLoad (xBackend env) ty (Set.toAscList keys))
+                  *> ((,) ty <$> beLoad (xBackend env) ty (projectionOf env ty) (Set.toAscList keys))
             )
             (Map.toAscList byType)
         let loaded =

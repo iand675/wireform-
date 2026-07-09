@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lattice &mdash; Live Sensors (SSE)</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #141924;
+    --panel-2: #1b2230;
+    --line: #263042;
+    --text: #e6ebf2;
+    --muted: #8a97ab;
+    --accent: #4cc2ff;
+    --ok: #43d17f;
+    --warn: #f0b429;
+    --err: #ff5c6c;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: radial-gradient(1200px 700px at 80% -10%, #16202f 0%, var(--bg) 55%);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 20px 28px;
+    border-bottom: 1px solid var(--line);
+    flex-wrap: wrap;
+  }
+  header h1 {
+    font-size: 18px;
+    margin: 0;
+    letter-spacing: 0.2px;
+    font-weight: 650;
+  }
+  header .sub { color: var(--muted); font-size: 13px; }
+  .spacer { flex: 1; }
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    font-size: 13px;
+    font-family: var(--mono);
+  }
+  .dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--muted);
+    box-shadow: 0 0 0 0 rgba(76,194,255,0.5);
+  }
+  .pill.live .dot { background: var(--ok); animation: pulse 1.8s infinite; }
+  .pill.connecting .dot { background: var(--warn); }
+  .pill.error .dot { background: var(--err); }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(67,209,127,0.5); }
+    70% { box-shadow: 0 0 0 8px rgba(67,209,127,0); }
+    100% { box-shadow: 0 0 0 0 rgba(67,209,127,0); }
+  }
+  button {
+    font-family: var(--sans);
+    font-size: 13px;
+    color: var(--text);
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 7px 14px;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: 0.5; cursor: default; border-color: var(--line); }
+  main { padding: 24px 28px 48px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 16px;
+  }
+  .card {
+    background: linear-gradient(180deg, var(--panel) 0%, var(--panel-2) 100%);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 18px;
+    position: relative;
+    overflow: hidden;
+    transition: border-color 0.4s ease;
+  }
+  .card.bump { border-color: var(--accent); }
+  .card .name { font-size: 15px; font-weight: 600; }
+  .card .badge {
+    display: inline-block;
+    margin-top: 4px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--muted);
+    font-family: var(--mono);
+  }
+  .card .reading {
+    margin: 14px 0 2px;
+    font-family: var(--mono);
+    font-size: 40px;
+    font-weight: 600;
+    line-height: 1;
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+  }
+  .card .reading .unit { font-size: 16px; color: var(--muted); font-weight: 500; }
+  .card .ts { color: var(--muted); font-size: 12px; font-family: var(--mono); margin-top: 8px; }
+  .spark { margin-top: 12px; width: 100%; height: 42px; display: block; }
+  .spark polyline { fill: none; stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; }
+  .spark .fill { fill: rgba(76,194,255,0.10); stroke: none; }
+  .log {
+    margin-top: 28px;
+    background: #0a0d13;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    font-family: var(--mono);
+    font-size: 12px;
+    max-height: 220px;
+    overflow-y: auto;
+    padding: 12px 14px;
+  }
+  .log .row { color: var(--muted); padding: 1px 0; white-space: pre-wrap; word-break: break-all; }
+  .log .row .k { color: var(--accent); }
+  .log .row.delta .k { color: var(--ok); }
+  .log .row.err .k { color: var(--err); }
+  .meta { color: var(--muted); font-size: 12px; font-family: var(--mono); margin-top: 6px; }
+  .section-title { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin: 0 0 10px; }
+  code { color: var(--accent); font-family: var(--mono); }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Lattice &mdash; Live Sensors</h1>
+    <div class="sub">a &sect;12 live query streamed over Server-Sent Events</div>
+  </div>
+  <div class="spacer"></div>
+  <span id="status" class="pill"><span class="dot"></span><span id="statusText">idle</span></span>
+  <button id="toggle">Connect</button>
+</header>
+
+<main>
+  <div id="grid" class="grid"></div>
+
+  <div class="meta">
+    query hash <code id="hash">&mdash;</code> &nbsp;&middot;&nbsp; etag <code id="etag">&mdash;</code> &nbsp;&middot;&nbsp; deltas <code id="deltas">0</code>
+  </div>
+
+  <p class="section-title" style="margin-top:28px;">Wire log (raw NDJSON records off the stream)</p>
+  <div id="log" class="log"></div>
+</main>
+
+<script>
+"use strict";
+
+// The single Lattice query this page subscribes to. The client never
+// computes the content hash; it POSTs the text once (the "introduction"),
+// learns the hash URL from the Location header, then opens an EventSource
+// on that URL with live=sse. Reconnection is the browser's job.
+const QUERY_TEXT = `query LiveSensors {
+  sensors(site: "hq") {
+    id
+    name
+    metric
+    unit
+    reading
+    updatedAt
+  }
+}`;
+
+const HISTORY = 48;           // sparkline sample window
+const base = location.origin; // page is served by the origin itself
+
+// ---- normalized store ---------------------------------------------------
+// entities: ref -> latest fields ; order: root membership from the manifest.
+const entities = new Map();
+const history = new Map();     // ref -> [readings]
+let rootOrder = [];
+let deltaCount = 0;
+let es = null;                 // active EventSource
+let wantOpen = false;
+
+const $ = (id) => document.getElementById(id);
+
+function setStatus(cls, text) {
+  const pill = $("status");
+  pill.className = "pill " + cls;
+  $("statusText").textContent = text;
+}
+
+function log(kind, obj) {
+  const el = $("log");
+  const row = document.createElement("div");
+  row.className = "row " + (kind || "");
+  const k = obj.kind || kind || "?";
+  row.innerHTML = '<span class="k">' + k + '</span> ' +
+    escapeHtml(JSON.stringify(obj)).slice(0, 400);
+  el.prepend(row);
+  while (el.childElementCount > 200) el.removeChild(el.lastChild);
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+}
+
+// ---- introduction + subscription ---------------------------------------
+
+async function introduce() {
+  const resp = await fetch(base + "/q", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-lattice-query" },
+    body: QUERY_TEXT,
+  });
+  if (!resp.ok) throw new Error("introduce failed: HTTP " + resp.status);
+  const loc = resp.headers.get("Location");
+  if (!loc) throw new Error("introduction returned no Location header");
+  // Surface the hash for display (…/q/{hash}?…).
+  const m = loc.match(/\/q\/([^?]+)/);
+  $("hash").textContent = m ? m[1] : loc;
+  return loc;
+}
+
+function subscribe(loc) {
+  const url = base + loc + "&live=sse";
+  es = new EventSource(url);
+
+  es.onopen = () => setStatus("live", "live");
+
+  es.onmessage = (ev) => {
+    let rec;
+    try { rec = JSON.parse(ev.data); } catch (_) { return; }
+    applyRecord(rec);
+  };
+
+  es.onerror = () => {
+    // EventSource auto-reconnects; reflect the transient state.
+    if (wantOpen) setStatus("connecting", "reconnecting...");
+  };
+}
+
+async function connect() {
+  wantOpen = true;
+  setStatus("connecting", "introducing query...");
+  $("toggle").textContent = "Disconnect";
+  try {
+    const loc = await introduce();
+    setStatus("connecting", "subscribing...");
+    subscribe(loc);
+  } catch (e) {
+    setStatus("error", "error");
+    log("err", { kind: "client-error", message: String(e) });
+    wantOpen = false;
+    $("toggle").textContent = "Connect";
+  }
+}
+
+function disconnect() {
+  wantOpen = false;
+  if (es) { es.close(); es = null; }
+  setStatus("", "idle");
+  $("toggle").textContent = "Connect";
+}
+
+// ---- record application -------------------------------------------------
+
+function applyRecord(rec) {
+  switch (rec.kind) {
+    case "manifest": {
+      const roots = rec.root || {};
+      rootOrder = roots.sensors || rootOrder;
+      $("etag").textContent = short(rec.etag);
+      log("", rec);
+      break;
+    }
+    case "entity": {
+      entities.set(rec.id, rec.fields || {});
+      pushHistory(rec.id, rec.fields);
+      log("", rec);
+      render(rec.id);
+      break;
+    }
+    case "end": {
+      if (rec.etag) $("etag").textContent = short(rec.etag);
+      break;
+    }
+    case "invalidated":
+    case "error": {
+      log("err", rec);
+      break;
+    }
+    default:
+      log("", rec);
+  }
+}
+
+// EventSource carries the id: cursor as ev.lastEventId, but onmessage
+// hides which record it rode on; instead we mark deltas by detecting a
+// second-or-later emission of an entity we already knew.
+function pushHistory(ref, fields) {
+  if (!fields || typeof fields.reading !== "number") return;
+  let h = history.get(ref);
+  if (!h) { h = []; history.set(ref, h); }
+  if (h.length > 0) { deltaCount++; $("deltas").textContent = deltaCount; }
+  h.push(fields.reading);
+  if (h.length > HISTORY) h.shift();
+}
+
+function short(etag) {
+  if (!etag) return "\u2014";
+  return etag.length > 14 ? etag.slice(0, 14) + "\u2026" : etag;
+}
+
+// ---- rendering ----------------------------------------------------------
+
+function render(changedRef) {
+  const grid = $("grid");
+  const order = rootOrder.length ? rootOrder : Array.from(entities.keys());
+
+  for (const ref of order) {
+    const f = entities.get(ref);
+    if (!f) continue;
+    let card = document.getElementById("card-" + ref);
+    if (!card) {
+      card = document.createElement("div");
+      card.className = "card";
+      card.id = "card-" + ref;
+      card.innerHTML =
+        '<div class="name"></div>' +
+        '<div class="badge"></div>' +
+        '<div class="reading"><span class="val"></span><span class="unit"></span></div>' +
+        '<div class="ts"></div>' +
+        sparkSvg();
+      grid.appendChild(card);
+    }
+    card.querySelector(".name").textContent = f.name || ref;
+    card.querySelector(".badge").textContent = f.metric || "";
+    card.querySelector(".val").textContent =
+      typeof f.reading === "number" ? f.reading.toFixed(1) : "\u2014";
+    card.querySelector(".unit").textContent = f.unit || "";
+    card.querySelector(".ts").textContent = relTime(f.updatedAt);
+    drawSpark(card.querySelector(".spark"), history.get(ref) || []);
+
+    if (ref === changedRef) {
+      card.classList.add("bump");
+      setTimeout(() => card.classList.remove("bump"), 400);
+    }
+  }
+}
+
+function sparkSvg() {
+  return '<svg class="spark" viewBox="0 0 100 42" preserveAspectRatio="none">' +
+    '<polygon class="fill" points=""/><polyline points=""/></svg>';
+}
+
+function drawSpark(svg, data) {
+  if (!svg || data.length < 2) return;
+  const min = Math.min(...data), max = Math.max(...data);
+  const span = (max - min) || 1;
+  const n = data.length;
+  const pts = data.map((v, i) => {
+    const x = (i / (n - 1)) * 100;
+    const y = 40 - ((v - min) / span) * 36 - 2;
+    return x.toFixed(1) + "," + y.toFixed(1);
+  });
+  svg.querySelector("polyline").setAttribute("points", pts.join(" "));
+  svg.querySelector("polygon").setAttribute(
+    "points", "0,42 " + pts.join(" ") + " 100,42");
+}
+
+function relTime(iso) {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  if (isNaN(t)) return iso;
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (s < 1) return "just now";
+  if (s < 60) return s + "s ago";
+  const m = Math.floor(s / 60);
+  return m + "m ago";
+}
+
+// refresh the "Ns ago" labels without a stream event
+setInterval(() => {
+  for (const [ref, f] of entities) {
+    const card = document.getElementById("card-" + ref);
+    if (card && f.updatedAt) card.querySelector(".ts").textContent = relTime(f.updatedAt);
+  }
+}, 1000);
+
+$("toggle").addEventListener("click", () => (wantOpen ? disconnect() : connect()));
+
+// auto-connect on load
+connect();
+</script>
+</body>
+</html>

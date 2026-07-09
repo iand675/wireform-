@@ -234,6 +234,32 @@ same schema-declared collection grouping keys, so they always agree. No
 hand-maintained `refetchQueries` lists. (Spec: [§11
 Mutations](./spec/#_11-mutations), [§10.5 Surrogate keys](./spec/#_10-caching).)
 
+## Why reads stay consistent (and exactly how much)
+
+Splitting a query into independently-cached slices raises an obvious worry: if a
+page is assembled from several requests that each hit the cache at a different
+age, could it show a combination of facts that never coexisted? That is real
+read skew, and Lattice's answer is neither "pin everything to one snapshot"
+(which destroys the cache) nor "require identical snapshots" (which refetches
+constantly on a busy database).
+
+Instead, every response is a **validity window, not an instant**: alongside its
+`Lattice-Snapshot` token it carries a `Lattice-Snapshot-Floor` marking the last
+time anything it depends on changed. A page assembled from several reads is a
+**consistent cut** exactly when their windows overlap (`max(floors) ≤
+min(tokens)`), which makes the check a single cheap comparison. Unrelated writes
+move tokens but not floors, so quiet pages pass for free; a relevant write is
+repaired with an ordinary `no-cache` revalidation that usually comes back as a
+`304`. The guarantee is honest: a passing assembly is exactly as consistent as
+the same page fetched in one response, no more. When you want that guarantee
+handed to you with zero client logic, a one-shot `slice=page` composes every
+slice under a single snapshot, trading cacheability for structural consistency.
+
+This is the part of the protocol whose semantics are easiest to get subtly
+wrong, so it has its own walkthrough: **[Read consistency](./consistency/)**.
+(Spec: [§13 Consistency Model](./spec/#_13-consistency-model), [§10.2
+floors](./spec/#_10-caching).)
+
 ## Why N+1 is not expressible
 
 Relationship loaders in Lattice are **set-in, map-out**: they take a set of
@@ -270,6 +296,9 @@ Lattice fits the shape you already have.
 
 ## In this section
 
+- [Read consistency](./consistency/): a plain-language tour of what a read
+  guarantees, how independently-cached slices assemble into a consistent view,
+  and exactly how much consistency you can rely on.
 - [Specification](./spec/): the normative protocol document.
 - [Lattice for GraphQL developers](./corpus/): a worked comparison corpus,
   entry by entry against the GraphQL constructs you already know.
@@ -300,6 +329,7 @@ merged multi-root queries, and React bindings.
 | Area | Spec | Coverage |
 |---|---|---|
 | IDL parser + the type system (incl. cardinality, co-keyed entities) | §3.4-3.8 | Haskell |
+| Documentation strings + schema directives (declare/apply, locations, `repeatable`, reserved names) | §3.9 | Haskell (parse, validate, canonical, fusion); TS explorer surfaces docs + directives in hover/completion |
 | Derived fields: `on read` planning, `maintained` relay, witness validators, information flow | §3.7 | Haskell |
 | Query language + normative grammar | §4, §4.8 | Haskell (full); TS parses enough to canonicalize and merge |
 | Canonicalization + query hash (NFC-normalized) | §5.1 | Haskell; TS canonicalizes but never hashes; both NFC-normalize |
@@ -307,6 +337,7 @@ merged multi-root queries, and React bindings.
 | Transport ladder | §6.1-6.5 | Haskell (all rungs); TS: introduce + hash GET + inline GET |
 | Point fetches, field masks, `ver`-pinned immutable fetches | §6.7 | Haskell + TS (store gap-filling) |
 | Origin coalescing: accumulation windows + single-flight | §6.9 | Haskell (`coalesceWindowMs` in discovery; deterministic flush hooks for tests) |
+| Requested projections: per-type loader field sets, `explain` `projections` key, gateway-narrowed upstream selections | §3.1, §20.2 | Haskell (`planProjections`; the memory backend filters rows strictly, SQL backends map to `SELECT` lists) |
 | Discovery document | §7.1 | Haskell + TS |
 | `source` / `explain` inspection endpoints (explain carries the §19.2 span skeleton) | §7.2, §20.2 | Haskell |
 | Plan identity (`planId` over pertinent declarations) | §7.3 | Haskell |
@@ -314,10 +345,14 @@ merged multi-root queries, and React bindings.
 | `vc` payload/proof, bundled HMAC verifier | §8.2 | Haskell |
 | Wire format, incl. scoped errors + `207 Multi-Status` | §9 | Haskell + TS (decode + normalized store, tolerant unknowns) |
 | Caching headers, surrogate keys, weak manifest ETags | §10 | Haskell |
+| Validity floors (`Lattice-Snapshot-Floor`): the per-key invalidation index, prefix-completeness gate, floors on data slices / point fetches / 304s | §10.2 | Haskell origin; TS ships the interval vocabulary (`validityIntervals`, `intervalsConsistent`) |
+| Cross-slice consistent cuts: interval-overlap convergence, K-bounded `no-cache` repair, `qrConsistent` | §13.2 g2–g3 | Haskell client; model-checked in `wireform-lattice/tla/` |
+| Composed page forms: one-shot `slice=page` single-snapshot responses, `503 lattice:snapshot-contention` | §6.5, §13.2 g7 | Haskell origin + client (`queryPage`) |
 | Cache digests: `X-Have`, the pinned Golomb-coded set, `unchanged` markers | §10.4 | Haskell client + origin (priv/oneshot only); TS store applies `unchanged` |
 | Mutations: `Named` binding, effect classes, idempotency keys, write-set enforcement, `invalidated` records, batch | §11 | Haskell; TS: invocation + invalidation-driven refetch |
 | Verb bindings: `as PUT/PATCH/DELETE/POST`, merge-patch, conditional requests, bound batches | §11.7-11.8 | Haskell |
 | Live queries: SSE subscriptions, single-flight deltas, reauth | §12 | Haskell origin + client |
+| Page subscriptions: `slice=page` multiplexed streams, single-snapshot bursts, per-`(slice, entity)` delta suppression | §12 | Haskell origin + client (`SubscribePage`) |
 | Signed admission (Ed25519 over canonical text) | §14.3 | Haskell |
 | The `nodes` root (per-type gating, emit-nothing denials) | §14.4 | Haskell |
 | Compatibility: change taxonomy, check modes + transitive windows, `@break`/`@deprecated`, corpus-weighted reports, `POST /schema/check` | §17 | Haskell |

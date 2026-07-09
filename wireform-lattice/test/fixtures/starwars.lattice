@@ -1,3 +1,4 @@
+"The Star Wars corpus schema: characters, starships, and their reviews."
 schema starwars.example.com
 
 -- The corpus schema (Lattice for GraphQL Developers, §0), adjusted where the
@@ -10,15 +11,24 @@ schema starwars.example.com
 --   * `list search` is a parameter-backed list root (its `text` is a query
 --     parameter, not a field of the targets), ordered by a real field;
 --   * newtypes for the id types are declared.
+--
+-- Documentation strings and one `@stability` directive (§3.9) annotate the
+-- surface so the explorer's hover and completion have something to show.
+
+"API-stability marker surfaced to generated clients and the explorer."
+directive @stability(level: Text = "stable") on ENTITY | FIELD | ROOT | MUTATION
 
 newtype HumanId    = Text
 newtype DroidId    = Text
 newtype StarshipId = Text
 newtype ReviewId   = Text
 
+"Which film a thing appears in."
 enum Episode closed = NewHope | Empire | Jedi
 
+"Anything in the saga with a name and friends: a Human or a Droid."
 interface Character {
+  "The character's common name."
   name:      Text
   appearsIn: [Episode]
 
@@ -27,11 +37,13 @@ interface Character {
                     page 10 max 50
 }
 
+"A person in the saga."
 entity Human by id implements Character {
   visible to all by default
 
   id:         HumanId
   name:       Text
+  "The character's homeworld, if known."
   homePlanet: Text?
   appearsIn:  [Episode]
 
@@ -42,11 +54,13 @@ entity Human by id implements Character {
   fetch by id: public
 }
 
+"An astromech, protocol, or other droid."
 entity Droid by id implements Character {
   visible to all by default
 
   id:              DroidId
   name:            Text
+  "What the droid was built to do."
   primaryFunction: Text?
   appearsIn:       [Episode]
 
@@ -67,11 +81,13 @@ entity Starship by id {
   fetch by id: public
 }
 
+"A fan review of one episode."
 entity Review by id {
   visible to all by default
 
   id:         ReviewId
   episode:    Episode
+  "A rating from 0 to 5."
   stars:      W8
   commentary: Text?
   createdAt:  Timestamp
@@ -81,18 +97,24 @@ entity Review by id {
 
 fragment CharacterName on Character { name }
 
+"The hero of an episode (R2-D2 by default, Luke for Empire)."
 get hero(episode: Episode?) of (Human | Droid) public
 
+"Reviews of an episode, newest first."
 list reviews of Review by episode
      ordered by createdAt desc
      page 10 max 50
      public
 
+"Full-text-ish name search across characters and starships."
+@stability(level: "experimental")
 list search(text: Text) of (Human | Droid | Starship)
      ordered by name asc
      page 10 max 50
      public
 
+"Post a new review of an episode."
+@stability
 mutation createReview(episode: Episode, stars: W8, commentary: Text?) returns Review {
   allow       public
   writes      Review(new), reviews(episode)

@@ -18,6 +18,7 @@ module Lattice.Types (
   FragmentName (..),
   ClaimName (..),
   InterfaceName (..),
+  DirectiveName (..),
 
   -- * Entity references
   Ref (..),
@@ -99,6 +100,10 @@ newtype ClaimName = ClaimName {unClaimName :: Text}
 
 
 newtype InterfaceName = InterfaceName {unInterfaceName :: Text}
+  deriving newtype (Eq, Ord, Show, IsString)
+
+
+newtype DirectiveName = DirectiveName {unDirectiveName :: Text}
   deriving newtype (Eq, Ord, Show, IsString)
 
 

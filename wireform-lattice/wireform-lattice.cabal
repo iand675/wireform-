@@ -57,7 +57,9 @@ library
     Lattice.Server.Coalesce
     Lattice.Server.Execute
     Lattice.Server.Live
+    Lattice.TH
     Lattice.Telemetry
+    Lattice.Typed
     Lattice.Types
     Lattice.Value
     Lattice.Wire
@@ -74,6 +76,7 @@ library
     memory >= 0.18 && < 0.19,
     scientific >= 0.3 && < 0.4,
     stm >= 2.5 && < 2.6,
+    template-haskell >= 2.19 && < 2.24,
     text >= 2.0 && < 2.2,
     time >= 1.12 && < 1.15,
     unicode-transforms >= 0.4 && < 0.5,
@@ -98,6 +101,42 @@ executable example-lattice
     wireform-http,
     wireform-lattice
 
+executable example-sensors
+  import: defaults
+  hs-source-dirs: example
+  main-is: SensorsMain.hs
+  other-modules: SensorsPage
+  ghc-options: -threaded -rtsopts "-with-rtsopts=-N"
+  build-depends:
+    aeson,
+    base,
+    bytestring,
+    containers,
+    stm,
+    template-haskell,
+    text,
+    time,
+    wireform-http,
+    wireform-lattice
+
+executable example-auth
+  import: defaults
+  hs-source-dirs: example
+  main-is: AuthMain.hs
+  other-modules: AuthPage
+  ghc-options: -threaded -rtsopts "-with-rtsopts=-N"
+  build-depends:
+    aeson,
+    base,
+    bytestring,
+    containers,
+    stm,
+    template-haskell,
+    text,
+    time,
+    wireform-http,
+    wireform-lattice
+
 test-suite wireform-lattice-test
   import: defaults
   type: exitcode-stdio-1.0
@@ -107,6 +146,7 @@ test-suite wireform-lattice-test
     Test.Lattice.Canonical
     Test.Lattice.Compat
     Test.Lattice.Compress
+    Test.Lattice.Consistency
     Test.Lattice.Cursor
     Test.Lattice.Derived
     Test.Lattice.Digest
@@ -123,8 +163,10 @@ test-suite wireform-lattice-test
     Test.Lattice.Nodes
     Test.Lattice.Otel
     Test.Lattice.Plan
+    Test.Lattice.Projection
     Test.Lattice.Query
     Test.Lattice.Registry
+    Test.Lattice.Typed
     Test.Lattice.Value
     Test.Lattice.Verbs
     Test.Lattice.VerbsE2E

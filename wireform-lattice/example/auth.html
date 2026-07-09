@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lattice - Auth Slices (pub / ctx / priv)</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #141924;
+    --panel-2: #1b2230;
+    --border: #26303f;
+    --text: #c9d4e3;
+    --muted: #6b7a8f;
+    --accent: #34d3ee;
+    --pub: #4ade80;
+    --ctx: #fbbf24;
+    --priv: #f472b6;
+    --locked: #3a4658;
+    --danger: #fb7185;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 24px;
+  }
+  a { color: var(--accent); }
+  h1 { font-size: 20px; margin: 0 0 2px; letter-spacing: 0.2px; }
+  h1 .accent { color: var(--accent); }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; max-width: 900px; }
+  code, .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+
+  .bar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 14px 16px; margin-bottom: 16px;
+  }
+  .bar .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; margin-right: 4px; }
+  .persona {
+    border: 1px solid var(--border); background: var(--panel-2); color: var(--text);
+    padding: 8px 14px; border-radius: 999px; cursor: pointer; font-size: 13px;
+    transition: border-color .15s, background .15s, color .15s;
+  }
+  .persona:hover { border-color: var(--accent); }
+  .persona.active { border-color: var(--accent); background: rgba(52,211,238,0.12); color: #eaf6fb; }
+  .persona .who { font-weight: 600; }
+  .persona .claims { color: var(--muted); font-size: 11px; margin-left: 6px; }
+  .persona.active .claims { color: var(--accent); }
+
+  .creds {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 12px 16px; margin-bottom: 16px; font-size: 12px;
+  }
+  .creds .row { display: flex; gap: 10px; align-items: baseline; padding: 2px 0; }
+  .creds .k { color: var(--muted); width: 92px; flex: none; text-transform: uppercase; letter-spacing: 0.5px; font-size: 11px; }
+  .creds .v { color: var(--text); word-break: break-all; }
+  .creds .v.empty { color: var(--locked); }
+
+  .slices { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 20px; }
+  .slice { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .slice header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 14px; border-bottom: 1px solid var(--border);
+  }
+  .slice .name { font-weight: 700; letter-spacing: 0.3px; display: flex; align-items: center; gap: 8px; }
+  .dot { width: 9px; height: 9px; border-radius: 999px; display: inline-block; }
+  .slice.pub .dot { background: var(--pub); }
+  .slice.ctx .dot { background: var(--ctx); }
+  .slice.priv .dot { background: var(--priv); }
+  .slice.pub .name { color: var(--pub); }
+  .slice.ctx .name { color: var(--ctx); }
+  .slice.priv .name { color: var(--priv); }
+  .status { font-size: 11px; color: var(--muted); font-family: ui-monospace, monospace; }
+  .status.ok { color: var(--pub); }
+  .status.err { color: var(--danger); }
+  .status.locked { color: var(--locked); }
+  .slice .body { padding: 12px 14px; }
+  .gate { color: var(--muted); font-size: 12px; }
+  .contrib { font-family: ui-monospace, monospace; font-size: 12px; }
+  .contrib .ent { padding: 4px 0; border-bottom: 1px dashed var(--border); }
+  .contrib .ent:last-child { border-bottom: 0; }
+  .contrib .id { color: var(--accent); }
+  .contrib .ver { color: var(--muted); }
+  .contrib .fld { color: var(--text); }
+  .contrib .none { color: var(--locked); font-style: italic; }
+  .hdrs { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; font-family: ui-monospace, monospace; font-size: 11px; }
+  .hdrs .h { display: flex; gap: 8px; padding: 1px 0; }
+  .hdrs .hn { color: var(--muted); flex: none; }
+  .hdrs .hv { color: var(--text); word-break: break-all; }
+
+  .board { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .board h2 { font-size: 14px; margin: 0; padding: 14px 16px; border-bottom: 1px solid var(--border); }
+  .board h2 .hint { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 8px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 10px 16px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; font-weight: 600; }
+  td .title { font-weight: 600; }
+  td .from { color: var(--muted); font-size: 12px; }
+  .pill { font-size: 10px; padding: 1px 7px; border-radius: 999px; border: 1px solid; }
+  .pill.pub { color: var(--pub); border-color: var(--pub); }
+  .pill.ctx { color: var(--ctx); border-color: var(--ctx); }
+  .pill.priv { color: var(--priv); border-color: var(--priv); }
+  .hidden-cell { color: var(--locked); font-style: italic; display: inline-flex; align-items: center; gap: 6px; }
+  .val { font-family: ui-monospace, monospace; }
+
+  .legend { margin-top: 18px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+  .legend b.pub { color: var(--pub); }
+  .legend b.ctx { color: var(--ctx); }
+  .legend b.priv { color: var(--priv); }
+  .qbox { margin-top: 16px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+  .qbox pre { margin: 0; font-size: 12px; color: var(--text); white-space: pre-wrap; }
+  .qbox .cap { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 6px; }
+</style>
+</head>
+<body>
+  <h1><span class="accent">Lattice</span> &mdash; auth slices compose</h1>
+  <div class="sub">
+    One query, three visibility slices. Emission is slice-exact, so <b>pub</b>, <b>ctx</b>,
+    and <b>priv</b> return <em>disjoint</em> field sets that the client merges by
+    <code>(id, ver)</code>. Pick an identity and watch which fields each slice contributes &mdash;
+    the gates are predicates over your claims, so the same cache partition shows different callers
+    different data.
+  </div>
+
+  <div class="bar">
+    <span class="label">Identity</span>
+    <button class="persona" data-persona="anon"><span class="who">Anonymous</span><span class="claims">no claims</span></button>
+    <button class="persona" data-persona="member"><span class="who">Member</span><span class="claims">org=acme role=Member</span></button>
+    <button class="persona" data-persona="admin"><span class="who">Admin</span><span class="claims">org=acme role=Admin</span></button>
+    <button class="persona" data-persona="outsider"><span class="who">Outsider</span><span class="claims">org=globex role=Admin</span></button>
+  </div>
+
+  <div class="creds" id="creds">
+    <div class="row"><span class="k">signed in</span><span class="v empty" id="cWho">nobody &mdash; anonymous, pub slice only</span></div>
+    <div class="row"><span class="k">vc</span><span class="v empty" id="cVc">-</span></div>
+    <div class="row"><span class="k">X-Vc-Auth</span><span class="v empty" id="cProof">-</span></div>
+    <div class="row"><span class="k">Authorization</span><span class="v empty" id="cToken">-</span></div>
+  </div>
+
+  <div class="slices">
+    <section class="slice pub">
+      <header><span class="name"><span class="dot"></span>pub</span><span class="status" id="sPub">-</span></header>
+      <div class="body"><div class="gate">Public fields. Shared-cacheable, long TTL &mdash; one entry for everyone.</div>
+        <div class="contrib" id="cbPub"></div><div class="hdrs" id="hdPub"></div></div>
+    </section>
+    <section class="slice ctx">
+      <header><span class="name"><span class="dot"></span>ctx</span><span class="status" id="sCtx">-</span></header>
+      <div class="body"><div class="gate">Claim-gated fields. Needs <code>vc</code> + <code>X-Vc-Auth</code>; shared-cacheable keyed by claims.</div>
+        <div class="contrib" id="cbCtx"></div><div class="hdrs" id="hdCtx"></div></div>
+    </section>
+    <section class="slice priv">
+      <header><span class="name"><span class="dot"></span>priv</span><span class="status" id="sPriv">-</span></header>
+      <div class="body"><div class="gate">Per-viewer fields. Needs <code>Authorization</code>; <code>private</code>, <code>Vary: Authorization</code>.</div>
+        <div class="contrib" id="cbPriv"></div><div class="hdrs" id="hdPriv"></div></div>
+    </section>
+  </div>
+
+  <div class="board">
+    <h2>Merged board<span class="hint">pub &cup; ctx &cup; priv, reconstructed by the client store (spec section 3.5.1: same ver unions, new ver replaces)</span></h2>
+    <table>
+      <thead><tr><th>Post</th><th>Author</th><th>Email</th><th>Views</th><th>Bookmarked</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+  <div class="legend">
+    <div><b class="pub">pub</b> &rarr; <code>title</code>, author <code>name</code> &mdash; <code>visible to all</code>.</div>
+    <div><b class="ctx">ctx</b> &rarr; author <code>email</code> (<code>visible when caller.org = orgId</code>) and <code>views</code> (<code>visible when caller.role = Admin</code>).</div>
+    <div><b class="priv">priv</b> &rarr; <code>bookmarked</code> (<code>private</code>) &mdash; per viewer, never shared-cached.</div>
+  </div>
+
+  <div class="qbox">
+    <div class="cap">the one query, fetched at every slice</div>
+    <pre id="qtext"></pre>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+
+  var QUERY = [
+    "query Board($org: OrgId) {",
+    "  posts(orgId: $org) {",
+    "    title",
+    "    views",
+    "    bookmarked",
+    "    author { name email }",
+    "  }",
+    "}"
+  ].join("\n");
+  var ORG = "acme";
+  document.getElementById("qtext").textContent = QUERY;
+
+  // Which slice each rendered field comes from (for the merged board's lock hints).
+  var FIELD_SLICE = { title: "pub", name: "pub", email: "ctx", views: "ctx", bookmarked: "priv" };
+
+  var creds = null;         // { vc, proof, token, org, role } or null (anon)
+  var current = "anon";
+
+  function $(id) { return document.getElementById(id); }
+
+  function setStatus(el, text, cls) {
+    el.textContent = text;
+    el.className = "status" + (cls ? " " + cls : "");
+  }
+
+  // ---- credentials (the demo auth service) -------------------------------
+
+  async function login(persona) {
+    var r = await fetch("/auth/login?persona=" + encodeURIComponent(persona), { cache: "no-store" });
+    var j = await r.json();
+    if (j.anonymous || !j.vc) return null;
+    return { vc: j.vc, proof: j.proof, token: j.token, org: j.org, role: j.role };
+  }
+
+  function renderCreds() {
+    if (!creds) {
+      $("cWho").textContent = "nobody \u2014 anonymous, pub slice only";
+      $("cWho").className = "v empty";
+      ["cVc", "cProof", "cToken"].forEach(function (id) { $(id).textContent = "-"; $(id).className = "v empty"; });
+      return;
+    }
+    $("cWho").textContent = "org=" + creds.org + "  role=" + creds.role;
+    $("cWho").className = "v";
+    $("cVc").textContent = creds.vc; $("cVc").className = "v";
+    $("cProof").textContent = creds.proof; $("cProof").className = "v";
+    $("cToken").textContent = "Bearer " + creds.token; $("cToken").className = "v";
+  }
+
+  // ---- one introduction per slice ----------------------------------------
+
+  function parseNdjson(text) {
+    var recs = [];
+    text.split("\n").forEach(function (line) {
+      line = line.trim();
+      if (!line) return;
+      try { recs.push(JSON.parse(line)); } catch (e) { /* ignore */ }
+    });
+    return recs;
+  }
+
+  // POST the query text to introduce it at `slice`, carrying the right creds.
+  async function introduce(slice) {
+    var url = "/q?slice=" + slice + "&org=" + encodeURIComponent(ORG);
+    var headers = { "Content-Type": "application/x-lattice-query" };
+    if (slice === "ctx" || slice === "priv") {
+      if (!creds) return { locked: true };
+      url += "&vc=" + encodeURIComponent(creds.vc);
+      headers["X-Vc-Auth"] = creds.proof;
+    }
+    if (slice === "priv") {
+      if (!creds) return { locked: true };
+      headers["Authorization"] = "Bearer " + creds.token;
+    }
+    var r = await fetch(url, { method: "POST", headers: headers, body: QUERY, cache: "no-store" });
+    var body = await r.text();
+    return {
+      status: r.status,
+      records: parseNdjson(body),
+      headers: {
+        "Cache-Control": r.headers.get("Cache-Control"),
+        "Vary": r.headers.get("Vary"),
+        "Surrogate-Key": r.headers.get("Surrogate-Key")
+      }
+    };
+  }
+
+  // ---- the client store merge (mirrors Lattice.Client.Store, spec 3.5.1) --
+
+  function applyRecords(store, records) {
+    records.forEach(function (rec) {
+      if (rec.kind !== "entity") return;
+      var cur = store[rec.id];
+      if (cur && cur.ver === rec.ver) {
+        // same version: union the disjoint field sets this slice contributes
+        Object.keys(rec.fields).forEach(function (k) { cur.fields[k] = rec.fields[k]; });
+      } else {
+        // new (or first) version: replace with exactly the carried fields
+        store[rec.id] = { ver: rec.ver, fields: Object.assign({}, rec.fields) };
+      }
+    });
+  }
+
+  function rootOrder(records) {
+    for (var i = 0; i < records.length; i++) {
+      if (records[i].kind === "manifest" && records[i].root && records[i].root.posts) {
+        return records[i].root.posts;
+      }
+    }
+    return null;
+  }
+
+  // ---- rendering ----------------------------------------------------------
+
+  function renderContribution(elId, result, needsWhat) {
+    var el = $(elId);
+    if (result.locked) { el.innerHTML = '<div class="none">requires ' + needsWhat + "</div>"; return; }
+    var ents = result.records.filter(function (r) { return r.kind === "entity"; });
+    if (!ents.length) { el.innerHTML = '<div class="none">no fields at this slice</div>'; return; }
+    el.innerHTML = ents.map(function (r) {
+      var flds = Object.keys(r.fields).map(function (k) {
+        var v = r.fields[k];
+        if (v && typeof v === "object" && v.$ref) v = "&rarr; " + v.$ref;
+        return '<span class="fld">' + k + "</span>";
+      }).join(", ");
+      return '<div class="ent"><span class="id">' + r.id + '</span> <span class="ver">' + r.ver + "</span> { " + flds + " }</div>";
+    }).join("");
+  }
+
+  function renderHeaders(elId, result) {
+    var el = $(elId);
+    if (result.locked || !result.headers) { el.innerHTML = ""; return; }
+    var h = result.headers, rows = [];
+    ["Cache-Control", "Vary", "Surrogate-Key"].forEach(function (n) {
+      if (h[n]) rows.push('<div class="h"><span class="hn">' + n + ':</span><span class="hv">' + h[n] + "</span></div>");
+    });
+    el.innerHTML = rows.join("");
+  }
+
+  function lockCell(field) {
+    var slice = FIELD_SLICE[field] || "ctx";
+    var need = slice === "priv" ? "sign in (priv)" : "claims (ctx)";
+    return '<span class="hidden-cell">hidden &middot; <span class="pill ' + slice + '">' + slice + "</span> " + need + "</span>";
+  }
+
+  function cellValue(fields, field) {
+    if (Object.prototype.hasOwnProperty.call(fields, field)) {
+      var v = fields[field];
+      if (typeof v === "boolean") return '<span class="val">' + (v ? "yes" : "no") + "</span>";
+      return '<span class="val">' + v + "</span>";
+    }
+    return lockCell(field);
+  }
+
+  function renderBoard(store, order) {
+    var tb = $("rows");
+    if (!order) { tb.innerHTML = '<tr><td colspan="5" class="from">no posts</td></tr>'; return; }
+    tb.innerHTML = order.map(function (ref) {
+      var post = store[ref];
+      if (!post) return "";
+      var f = post.fields;
+      var authorRef = f.author && f.author.$ref;
+      var author = authorRef ? store[authorRef] : null;
+      var af = author ? author.fields : {};
+      var titleCell = '<div class="title">' + (f.title !== undefined ? f.title : lockCell("title")) + "</div>"
+        + '<div class="from">' + ref + " &middot; " + post.ver + "</div>";
+      var authorCell = author && af.name !== undefined ? af.name : (authorRef ? lockCell("name") : "-");
+      return "<tr>"
+        + "<td>" + titleCell + "</td>"
+        + "<td>" + authorCell + "</td>"
+        + "<td>" + (author ? cellValue(af, "email") : "-") + "</td>"
+        + "<td>" + cellValue(f, "views") + "</td>"
+        + "<td>" + cellValue(f, "bookmarked") + "</td>"
+        + "</tr>";
+    }).join("");
+  }
+
+  // ---- orchestration ------------------------------------------------------
+
+  async function run() {
+    var store = {};
+
+    var pub = await introduce("pub");
+    setStatus($("sPub"), pub.locked ? "locked" : (pub.status + (pub.status === 200 ? " OK" : "")), pub.locked ? "locked" : (pub.status === 200 ? "ok" : "err"));
+    renderContribution("cbPub", pub, "");
+    renderHeaders("hdPub", pub);
+    var order = null;
+    if (!pub.locked && pub.status === 200) { applyRecords(store, pub.records); order = rootOrder(pub.records); }
+
+    var ctx = await introduce("ctx");
+    setStatus($("sCtx"), ctx.locked ? "needs claims" : (ctx.status + (ctx.status === 200 ? " OK" : "")), ctx.locked ? "locked" : (ctx.status === 200 ? "ok" : "err"));
+    renderContribution("cbCtx", ctx, "claims (pick Member / Admin / Outsider)");
+    renderHeaders("hdCtx", ctx);
+    if (!ctx.locked && ctx.status === 200) applyRecords(store, ctx.records);
+
+    var priv = await introduce("priv");
+    setStatus($("sPriv"), priv.locked ? "needs sign-in" : (priv.status + (priv.status === 200 ? " OK" : "")), priv.locked ? "locked" : (priv.status === 200 ? "ok" : "err"));
+    renderContribution("cbPriv", priv, "sign-in (pick any named identity)");
+    renderHeaders("hdPriv", priv);
+    if (!priv.locked && priv.status === 200) applyRecords(store, priv.records);
+
+    renderBoard(store, order);
+  }
+
+  async function selectPersona(persona) {
+    current = persona;
+    document.querySelectorAll(".persona").forEach(function (b) {
+      b.classList.toggle("active", b.getAttribute("data-persona") === persona);
+    });
+    creds = persona === "anon" ? null : await login(persona);
+    renderCreds();
+    await run();
+  }
+
+  document.querySelectorAll(".persona").forEach(function (b) {
+    b.addEventListener("click", function () { selectPersona(b.getAttribute("data-persona")); });
+  });
+
+  // Start anonymous.
+  selectPersona("anon");
+})();
+</script>
+</body>
+</html>

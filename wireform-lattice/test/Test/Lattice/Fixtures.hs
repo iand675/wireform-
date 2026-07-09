@@ -21,6 +21,8 @@ module Test.Lattice.Fixtures (
   digestSchema,
   derivedText,
   derivedSchema,
+  directivesText,
+  directivesSchema,
   mustParseSchema,
   compileWith,
   mustCompileWith,
@@ -88,6 +90,20 @@ derivedText = loadFixture "test/fixtures/derived.lattice"
 derivedSchema :: Schema
 derivedSchema = mustParseSchema derivedText
 {-# NOINLINE derivedSchema #-}
+
+
+directivesText :: Text
+directivesText = loadFixture "test/fixtures/directives.lattice"
+{-# NOINLINE directivesText #-}
+
+
+-- | The §3.9 documentation + schema-directive fixture: directive
+-- declarations (args, defaults, @repeatable@), applications on schema,
+-- type, entity, field, relationship, root, and mutation sites, and
+-- descriptions throughout.
+directivesSchema :: Schema
+directivesSchema = mustParseSchema directivesText
+{-# NOINLINE directivesSchema #-}
 
 
 -- | Parse an IDL document, erroring loudly on failure (fixtures must parse).

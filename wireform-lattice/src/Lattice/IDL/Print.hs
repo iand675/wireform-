@@ -51,6 +51,7 @@ canonicalIdl s =
     schemaLine = ann OnSchema "\n" <> "schema " <> schemaName s
     blocks =
       claimsBlocks
+        <> directiveBlocks
         <> map (\(n, d) -> ann (OnType n) "\n" <> printTypeDecl n d) (Map.toAscList (schemaTypes s))
         <> map (\(n, d) -> ann (OnInterface n) "\n" <> printInterfaceIn s n d) (Map.toAscList (schemaInterfaces s))
         <> map (\(n, d) -> ann (OnEntity n) "\n" <> printEntityIn s n d) (Map.toAscList (schemaEntities s))
@@ -61,6 +62,10 @@ canonicalIdl s =
     claimsBlocks
       | Map.null (schemaClaims s) = []
       | otherwise = [printClaims (schemaClaims s)]
+    directiveBlocks =
+      map
+        (\(n, d) -> ann (OnDirective n) "\n" <> renderDirectiveDecl n d)
+        (Map.toAscList (schemaDirectiveDecls s))
 
     printClaims cm =
       block "claims {" (map claimLine (Map.toAscList cm))
@@ -76,8 +81,13 @@ pertinence ("Lattice.Plan" prints declarations without them).
 -}
 annPrefix :: Schema -> DeclPath -> Text -> Text
 annPrefix s p sep =
-  maybe "" (\t -> "@break(approved: " <> jsonString t <> ")" <> sep) (Map.lookup p (schemaBreaks s))
+  descPrefix
+    <> dirPrefix
+    <> maybe "" (\t -> "@break(approved: " <> jsonString t <> ")" <> sep) (Map.lookup p (schemaBreaks s))
     <> maybe "" (\d -> renderDeprecation d <> sep) (Map.lookup p (schemaDeprecations s))
+  where
+    descPrefix = maybe "" (\t -> jsonString t <> sep) (Map.lookup p (schemaDescriptions s))
+    dirPrefix = foldMap (\a -> renderDirectiveApp a <> sep) (Map.findWithDefault [] p (schemaDirectives s))
 
 
 renderDeprecation :: Deprecation -> Text
@@ -87,6 +97,30 @@ renderDeprecation d =
     <> "\", note: "
     <> jsonString (depNote d)
     <> ")"
+
+
+{- | Canonical @directive \@name(params) [repeatable] on LOC | LOC@ line
+(§3.9). Locations print in the fixed 'DirLocation' order; parameters in
+declaration order like any argument list.
+-}
+renderDirectiveDecl :: DirectiveName -> DirectiveDef -> Text
+renderDirectiveDecl (DirectiveName n) d =
+  "directive @"
+    <> n
+    <> renderArgDefs (dirArgs d)
+    <> (if dirRepeatable d then " repeatable" else "")
+    <> " on "
+    <> T.intercalate " | " (map dirLocationName (Set.toAscList (dirLocations d)))
+
+
+-- | A directive application: @\@name@ or @\@name(a: v, b: v)@ (arguments
+-- in canonical, name-sorted order — the model already stores them sorted).
+renderDirectiveApp :: DirectiveApp -> Text
+renderDirectiveApp (DirectiveApp (DirectiveName n) args) = "@" <> n <> renderArgs args
+  where
+    renderArgs [] = ""
+    renderArgs as = "(" <> T.intercalate ", " (map one as) <> ")"
+    one (ArgName a, v) = a <> ": " <> renderQValue v
 
 
 
@@ -109,6 +143,9 @@ bare =
     , schemaMutations = Map.empty
     , schemaBreaks = Map.empty
     , schemaDeprecations = Map.empty
+    , schemaDirectiveDecls = Map.empty
+    , schemaDirectives = Map.empty
+    , schemaDescriptions = Map.empty
     }
 
 printTypeDecl :: TypeName -> TypeDecl -> Text

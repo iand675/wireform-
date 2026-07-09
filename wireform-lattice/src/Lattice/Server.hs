@@ -160,7 +160,7 @@ module Lattice.Server (
 
 import Control.Concurrent (forkIO)
 import Control.Concurrent.STM
-import Control.Exception (SomeAsyncException (..), SomeException, catch, fromException, onException, throwIO, try)
+import Control.Exception (SomeAsyncException (..), SomeException, bracket_, catch, fromException, onException, throwIO, try)
 import Control.Monad (unless, void, when)
 import Data.Aeson.Types qualified as A
 import Data.Aeson ((.=))
@@ -175,7 +175,7 @@ import Data.ByteString.Lazy qualified as BL
 import Data.Char (isAlphaNum)
 import Data.Foldable (for_, traverse_)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
-import Data.List (elemIndex, find, sort, sortOn)
+import Data.List (elemIndex, find, foldl', sort, sortOn)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
@@ -216,6 +216,7 @@ import Lattice.Telemetry (
   addSpanAttrs,
   boolA,
   countMutationReplay,
+  countPageContention,
   countPlanSupersession,
   countTenurePromotion,
   elapsedMs,
@@ -314,6 +315,13 @@ data Origin = Origin
   -- ^ Bounded replay window for @/invalidations?since=@ resumption.
   , oInvalBus :: TChan InvalEvent
   -- ^ Broadcast channel; subscribe via 'subscribeInvalidations'.
+  , oFloors :: TVar FloorIndex
+  -- ^ §10.2 validity-floor index: the last intersecting invalidation per
+  -- surrogate key, recorded in domain-token space.
+  , oPendingEffects :: TVar Int
+  -- ^ §10.2 prefix-completeness gate: effects between commit and floor
+  -- indexing. While nonzero, floors refuse to certify past the response
+  -- token (point interval) — see 'withEffectGate' and 'floorTokenFor'.
   , oClients :: TVar (Map Text (Set.Set Text))
   -- ^ Advisory @Lattice-Client@ builds seen per query hash (§17.1),
   -- recorded only when 'ocRegistry' is configured; corpus attribution.
@@ -381,6 +389,12 @@ publishPurgeAt o keys = do
       Seq.drop (Seq.length l + 1 - invalLogBound) (l Seq.|> ev)
     writeTChan (oInvalBus o) ev
     pure n
+  -- §10.2: index the purge in domain-token space so later responses can
+  -- bound their validity floors. beSnapshot runs post-commit, so the
+  -- recorded token is at or after the write's visibility point —
+  -- conservative (may widen floors upward), never unsound.
+  tok <- beSnapshot (ocBackend (oConfig o))
+  atomically (modifyTVar' (oFloors o) (recordFloors n tok keys))
   -- §19.2 relay span around the CDN hook: purge.key_count + outbox.cursor
   -- attributes, linked (not parented) to the publishing context. The
   -- hook's wall time is the origin-observable @lattice.invalidation.lag@.
@@ -397,6 +411,92 @@ publishPurgeAt o keys = do
       (\_ -> elapsedMs (ocPurge (oConfig o) keys))
   recordInvalidationLag tel lagMs
   pure n
+
+
+-- ---------------------------------------------------------------------------
+-- Validity floors (§10.2)
+-- ---------------------------------------------------------------------------
+
+{- | Last intersecting invalidation per surrogate key, in domain-token
+space. 'fiEpoch' is the retention horizon: the floor for keys the index
+has never seen (or has evicted) — initialized to the backend token at
+origin birth, raised by eviction. Floors only ever widen upward (§10.2),
+so a lost entry costs convergence traffic, never soundness.
+-}
+data FloorIndex = FloorIndex
+  { fiKeys :: !(Map SurrogateKey (Word64, SnapshotToken))
+  -- ^ key → (publish cursor, backend token at publish).
+  , fiEpoch :: !(Word64, SnapshotToken)
+  }
+
+
+initialFloorIndex :: SnapshotToken -> FloorIndex
+initialFloorIndex tok = FloorIndex Map.empty (0, tok)
+
+
+-- | Entries retained; beyond it the oldest half folds into the epoch.
+floorIndexBound :: Int
+floorIndexBound = 8192
+
+
+recordFloors :: Word64 -> SnapshotToken -> [SurrogateKey] -> FloorIndex -> FloorIndex
+recordFloors n tok keys fi = prune fi {fiKeys = inserted}
+  where
+    inserted = foldl' (\m k -> Map.insert k (n, tok) m) (fiKeys fi) keys
+    prune f
+      | Map.size (fiKeys f) <= floorIndexBound = f
+      | otherwise =
+          let es = sortOn (fst . snd) (Map.toList (fiKeys f))
+              (evicted, kept) = splitAt (Map.size (fiKeys f) - floorIndexBound `div` 2) es
+              epoch' = case reverse evicted of
+                ((_, e) : _) | fst e > fst (fiEpoch f) -> e
+                _ -> fiEpoch f
+          in FloorIndex (Map.fromList kept) epoch'
+
+
+{- | The §10.2 floor for a response depending on @keys@: the newest
+intersecting invalidation's token (the epoch for unknown keys), clamped
+to the response's own snapshot token — a publish racing this response's
+execution may already have indexed a token past @snap@, and the interval
+past @snap@ is simply not claimed.
+
+Prefix completeness (§10.2, model-checked by @tla/FloorsStaleIndex.cfg@):
+the pending-effects gate is read AFTER the caller took @snap@. If it is
+zero, every gated effect either finished indexing its floors (visible to
+the read below) or had not yet begun committing (invisible at @snap@); if
+it is nonzero, some write may be committed but not yet indexed, and the
+only sound floor is the point interval.
+-}
+floorTokenFor :: Origin -> [SurrogateKey] -> SnapshotToken -> IO SnapshotToken
+floorTokenFor o keys snap = do
+  pending <- readTVarIO (oPendingEffects o)
+  if pending > 0
+    then pure snap
+    else do
+      fi <- readTVarIO (oFloors o)
+      let pick acc k = case Map.lookup k (fiKeys fi) of
+            Just e | fst e > fst acc -> e
+            _ -> acc
+          flr = snd (foldl' pick (fiEpoch fi) keys)
+      pure (if compareSnapshotTokens flr snap == GT then snap else flr)
+
+
+floorHdr :: OriginConfig -> SnapshotToken -> Header
+floorHdr cfg flr =
+  (hLatticeSnapshotFloor, TE.encodeUtf8 (ocSnapshotDomain cfg <> "=\"" <> flr <> "\""))
+
+
+{- | Bracket a fact-changing effect (a mutation-serving request, a
+maintained-derivation recompute pass) so §10.2 prefix completeness holds:
+between the effect's commit and its floor indexing, 'floorTokenFor'
+answers with the point interval. Coarse by design — the gate spans the
+whole request — because a floor may only ever be too high, never too low.
+-}
+withEffectGate :: Origin -> IO a -> IO a
+withEffectGate o =
+  bracket_
+    (atomically (modifyTVar' (oPendingEffects o) (+ 1)))
+    (atomically (modifyTVar' (oPendingEffects o) (subtract 1)))
 
 
 {- | Subscribe to the live invalidation bus. Returns a blocking STM read
@@ -497,7 +597,7 @@ originating mutation (§19.1), and a committing recompute records its
 trigger-to-commit wall time as @lattice.derivation.lag@.
 -}
 maintainedRecomputeFrom :: Origin -> Maybe SpanContext -> [SurrogateKey] -> IO ([SurrogateKey], Maybe Word64)
-maintainedRecomputeFrom o mctx keys = do
+maintainedRecomputeFrom o mctx keys = withEffectGate o $ do
   let schema = ocSchema (oConfig o)
       be = ocBackend (oConfig o)
       work =
@@ -528,15 +628,11 @@ maintainedRecomputeFrom o mctx keys = do
           unless (null written) (recordDerivationLag tel (derivName md) ms)
           pure written
     recomputeBody be md owners = do
-      loaded <- beLoad be (mdType md) owners
-      let rows =
-            mapMaybe
-              ( \k -> case Map.lookup k loaded of
-                  Just (Right (RowFound row)) -> Just (k, row)
-                  _ -> Nothing
-              )
-              owners
-          reads' = NE.toList (derivReads (mdDeriv md))
+      -- The recompute reads exactly the derivation's row-side read set:
+      -- @own(…)@ deps, grouped-by override fields of 'ViaCollection'
+      -- deps, and the maintained field itself (value-identical writes
+      -- are skipped by comparing the stored value).
+      let reads' = NE.toList (derivReads (mdDeriv md))
           ownNames =
             concatMap
               ( \case
@@ -544,6 +640,26 @@ maintainedRecomputeFrom o mctx keys = do
                   _ -> []
               )
               reads'
+          proj =
+            ProjectFields . Set.fromList $
+              mdField md
+                : ownNames
+                  <> concatMap
+                    ( \case
+                        ViaCollection rf _
+                          | Just ToMany {relCollection = col} <- lookupEntityRel (mdEnt md) rf ->
+                              NE.filter (/= colLink col) (colGrouping col)
+                        _ -> []
+                    )
+                    reads'
+      loaded <- beLoad be (mdType md) proj owners
+      let rows =
+            mapMaybe
+              ( \k -> case Map.lookup k loaded of
+                  Just (Right (RowFound row)) -> Just (k, row)
+                  _ -> Nothing
+              )
+              owners
           aggDeps =
             mapMaybe
               ( \case
@@ -655,6 +771,8 @@ newOrigin cfg = do
     <*> newTVarIO 0
     <*> newTVarIO Seq.empty
     <*> newBroadcastTChanIO
+    <*> (newTVarIO . initialFloorIndex =<< beSnapshot (ocBackend cfg))
+    <*> newTVarIO 0
     <*> newTVarIO Map.empty
     <*> newLiveState
 
@@ -1292,10 +1410,18 @@ serveQuery o req params input intro =
             pure . problemResponse req $
               (mkProblem 409 "lattice:plan-superseded")
                 {pExtra = ["plan" .= RPlan (planSliceRecord plan)]}
-      _ -> case maybe (Right defSlice) parseSliceParam (lookup "slice" params) of
-        Left p -> pure (problemResponse req p)
-        Right SlicePlan -> pure (planResponse o req c plan input intro)
-        Right slice -> serveDataSlice o req params c plan slice input intro
+      _ -> case lookup "slice" params of
+        Just "page"
+          | intro == Oneshot -> servePage o req params c plan
+          | otherwise ->
+              -- §6.6: the composed page form is valid only where shared
+              -- caches are already out of the loop.
+              pure . problemResponse req $
+                badRequest ["slice=page is valid only on one-shot POSTs and live subscriptions"]
+        mslice -> case maybe (Right defSlice) parseSliceParam mslice of
+          Left p -> pure (problemResponse req p)
+          Right SlicePlan -> pure (planResponse o req c plan input intro)
+          Right slice -> serveDataSlice o req params c plan slice input intro
   where
     defSlice = case intro of
       NotIntro -> SlicePlan
@@ -1374,6 +1500,7 @@ serveDataSlice o req params c plan slice input intro = do
                   , xVars = vars
                   , xMode = EmitEq slice
                   , xTelemetry = ocTelemetry cfg
+                  , xProjections = planProjections schema plan
                   }
           executeRoots env (planRoots plan) >>= \case
             Left AbortCursorRetired -> pure (problemResponse req (mkProblem 410 "lattice:cursor-retired"))
@@ -1381,6 +1508,8 @@ serveDataSlice o req params c plan slice input intro = do
             Left (AbortBudget d) -> pure (problemResponse req (badRequest [d]))
             Right xr -> do
               snap <- beSnapshot (ocBackend cfg)
+              let keys = coarsenKeys (ocBudgets cfg) (planId plan) xr
+              flr <- floorTokenFor o keys snap
               promoted <- case intro of
                 Oneshot -> pure True
                 _ -> bumpTenure o (compiledHash c)
@@ -1405,13 +1534,13 @@ serveDataSlice o req params c plan slice input intro = do
                     [RManifest manifest]
                       <> projectRecords refsOnly (elideKnown haveDigest (xrRecords xr))
                       <> [REnd (EndRecord (xrComplete xr) (Just etag))]
-                  keys = coarsenKeys (ocBudgets cfg) (planId plan) xr
                   cc = cacheControlFor slice intro promoted
                   common =
                     [ (hETag, weakEtag etag)
                     , planHdr plan
                     , schemaHdr o
                     , snapshotHdr cfg snap
+                    , floorHdr cfg flr
                     , keysHdr keys
                     ]
                       <> varyPriv slice
@@ -1436,6 +1565,136 @@ serveDataSlice o req params c plan slice input intro = do
                       status
                       ([(hContentType, ndjsonType), (hCacheControl, cc)] <> common <> outcomeHdrs <> introHdrs)
                       (encodeRecords body)
+
+
+-- | The nonempty data slices of a plan, in slice order (§6.5/§12 framing).
+pageSlices :: Plan -> [SliceName]
+pageSlices plan = case filter (/= SlicePlan) (Map.keys (planSlices plan)) of
+  [] -> [SlicePub]
+  ds -> ds
+
+
+-- | Optimistic single-snapshot composition attempts before
+-- @503 lattice:snapshot-contention@ (§6.5) / burst skip (§12).
+pageComposeAttempts :: Int
+pageComposeAttempts = 4
+
+
+{- | @slice=page@ on a one-shot POST (§6.5): every nonempty data slice of
+the plan, composed under a single per-domain snapshot (§13.2 guarantee 7)
+by optimistic validation — observe the token, execute every slice, observe
+again, retry on movement, and answer @503 lattice:snapshot-contention@
+when the window never quiesces (model: @tla/LatticePageComposition.tla@).
+Admission is strict: the request must carry credentials admitting every
+nonempty slice. Framing: slice-ordered sections, each opening with its
+own manifest (which carries that slice's etag); one @end@ record with no
+etag closes the response.
+-}
+servePage :: Origin -> Request -> [(Text, Text)] -> Compiled -> Plan -> IO Response
+servePage o req params c plan = do
+  let outcome = do
+        refsOnly <- refsProjection params
+        vars <- bindVariables (ocSchema cfg) (planVars plan) params
+        pure (refsOnly, vars)
+  case outcome of
+    Left p -> pure (problemResponse req p)
+    Right (refsOnly, vars) ->
+      admitAll (pageSlices plan) >>= \case
+        Left p -> pure (problemResponse req p)
+        Right creds -> do
+          addActiveSpanAttrs
+            (ocTelemetry cfg)
+            [ ("lattice.query.hash", txtA (compiledHash c))
+            , ("lattice.plan.id", txtA (planId plan))
+            , ("lattice.slice", txtA "page")
+            ]
+          attempt creds vars refsOnly pageComposeAttempts
+  where
+    cfg = oConfig o
+
+    admitAll = go []
+      where
+        go acc [] = pure (Right (reverse acc))
+        go acc (s : rest) =
+          admitSlice o req params (requiredClaims plan) s >>= \case
+            Left p -> pure (Left p)
+            Right (claims, vcRaw) -> go ((s, claims, vcRaw) : acc) rest
+
+    attempt creds vars refsOnly n = do
+      t0 <- beSnapshot (ocBackend cfg)
+      execAll creds vars >>= \case
+        Left resp -> pure resp
+        Right secs -> do
+          t1 <- beSnapshot (ocBackend cfg)
+          if t0 == t1
+            then emit secs vars refsOnly t1
+            else do
+              -- §19.3 @lattice.page.contention@: a write moved the token
+              -- mid-composition; the composition is discarded, never mixed.
+              countPageContention (ocTelemetry cfg)
+              if n > 1
+                then attempt creds vars refsOnly (n - 1)
+                else
+                  pure . problemResponse req $
+                    (mkProblem 503 "lattice:snapshot-contention")
+                      { pDetail = Just "could not compose the page under a single snapshot; retry shortly"
+                      , pHeaders = [(hRetryAfter, "1")]
+                      }
+
+    execAll creds vars = go [] creds
+      where
+        go acc [] = pure (Right (reverse acc))
+        go acc ((slice, claims, vcRaw) : rest) = do
+          let env =
+                ExecEnv
+                  { xSchema = ocSchema cfg
+                  , xBudgets = ocBudgets cfg
+                  , xBackend = ocBackend cfg
+                  , xClaims = claims
+                  , xVars = vars
+                  , xMode = EmitEq slice
+                  , xTelemetry = ocTelemetry cfg
+                  , xProjections = planProjections (ocSchema cfg) plan
+                  }
+          executeRoots env (planRoots plan) >>= \case
+            Left AbortCursorRetired -> pure (Left (problemResponse req (mkProblem 410 "lattice:cursor-retired")))
+            Left AbortCursorMalformed -> pure (Left (problemResponse req (badRequest ["malformed cursor"])))
+            Left (AbortBudget d) -> pure (Left (problemResponse req (badRequest [d])))
+            Right xr -> go ((slice, vcRaw, xr) : acc) rest
+
+    emit secs vars refsOnly snap = do
+      let keys = dedupOrd (concatMap (\(_, _, xr) -> coarsenKeys (ocBudgets cfg) (planId plan) xr) secs)
+      flr <- floorTokenFor o keys snap
+      let haveDigest = requestDigest (requestHeaders req) -- §10.4: consulted on one-shot POSTs
+          sectionRecs (slice, vcRaw, xr) =
+            let etag = manifestEtag plan vars vcRaw (xrIdVers xr) (xrWitness xr)
+                manifest =
+                  Manifest
+                    { mQuery = Just (compiledHash c)
+                    , mMutation = Nothing
+                    , mPlan = Just (planId plan)
+                    , mSlice = Just slice
+                    , mRoot = xrRootMap xr
+                    , mEtag = etag
+                    , mBatch = Nothing
+                    }
+            in RManifest manifest : projectRecords refsOnly (elideKnown haveDigest (xrRecords xr))
+          degraded = any (\(_, _, xr) -> xrDegraded xr) secs
+          complete = all (\(_, _, xr) -> xrComplete xr) secs
+          body = concatMap sectionRecs secs <> [REnd (EndRecord complete Nothing)]
+          hdrs =
+            [ (hContentType, ndjsonType)
+            , (hCacheControl, "no-store")
+            , planHdr plan
+            , schemaHdr o
+            , snapshotHdr cfg snap
+            , floorHdr cfg flr
+            , keysHdr keys
+            ]
+              <> (if degraded then [(hLatticeOutcome, "degraded")] else [])
+          status = if degraded then 207 else 200
+      when degraded (publishPurge o keys)
+      pure (mkResponse req status hdrs (encodeRecords body))
 
 
 requiredClaims :: Plan -> [ClaimName]
@@ -1608,64 +1867,120 @@ serveLiveQuery o req params h = withMemo o req h $ \(c, plan) ->
           pure . problemResponse req $
             (mkProblem 409 "lattice:plan-superseded")
               {pExtra = ["plan" .= RPlan (planSliceRecord plan)]}
-    _ -> case maybe (Right SlicePub) parseSliceParam (lookup "slice" params) of
-      Left p -> pure (problemResponse req p)
-      Right SlicePlan ->
-        pure (problemResponse req (badRequest ["live queries subscribe data slices, not the plan pseudo-slice"]))
-      Right slice -> do
-        let cfg = oConfig o
-            outcome = do
-              refsOnly <- refsProjection params
-              vars <- bindVariables (ocSchema cfg) (planVars plan) params
-              pure (refsOnly, vars)
-        case outcome of
-          Left p -> pure (problemResponse req p)
-          Right (refsOnly, vars) ->
-            admitSlice o req params (requiredClaims plan) slice >>= \case
-              Left p -> pure (problemResponse req p)
-              Right (claims, vcRaw) -> do
-                void (bumpTenure o (compiledHash c))
-                let key =
-                      LiveKey
-                        { lkHash = compiledHash c
-                        , lkSlice = slice
-                        , lkVars =
-                            canonicalJsonText
-                              (A.Object (KM.fromList (map (\(VarName n, v) -> (AK.fromText n, v)) (Map.toAscList vars))))
-                        , lkClaims = vcRaw
-                        }
-                    mExpiry = do
-                      verifier <- ocVerifier cfg
-                      vcText <- lookup "vc" params
-                      proofExpiry verifier (TE.encodeUtf8 vcText) (lookupHeader hVcAuth (requestHeaders req))
-                    busSub = do
-                      rd <- subscribeInvalidations o
-                      pure ((\ev -> (ieCursor ev, ieKeys ev)) <$> rd)
-                    execOnce = liveExecuteOnce o c plan slice vars vcRaw claims refsOnly
-                liveSubscribe (ocLive cfg) (oLive o) key busSub execOnce mExpiry (ocNow cfg) >>= \case
-                  Left LiveOverCapacity ->
-                    pure . problemResponse req $
-                      (mkProblem 503 "lattice:live-over-capacity")
-                        {pDetail = Just "live subscriber cap reached; retry later or against another instance"}
-                  Left (LiveExecRefused p) -> pure (problemResponse req p)
-                  Right sub ->
-                    pure
-                      Response
-                        { responseStatus = Status 200
-                        , responseVersion = requestVersion req
-                        , responseHeaders =
-                            [ (hContentType, "text/event-stream")
-                            , (hCacheControl, "no-store")
-                            , planHdr plan
-                            , schemaHdr o
-                            ]
-                              <> varyPriv slice
-                        , responseBody = sseResponseBodyFrames (lsubSource sub)
-                        , responseTrailers = pure []
-                        , responseH2StreamId = 0
-                        , responseCancel = lsubClose sub
-                        , responsePushPromises = pure []
-                        }
+    _ -> case lookup "slice" params of
+      Just "page" -> serveLiveTarget o req params c plan LivePage
+      mslice -> case maybe (Right SlicePub) parseSliceParam mslice of
+        Left p -> pure (problemResponse req p)
+        Right SlicePlan ->
+          pure (problemResponse req (badRequest ["live queries subscribe data slices, not the plan pseudo-slice"]))
+        Right slice -> serveLiveTarget o req params c plan (LiveSlice slice)
+
+
+{- | The shared §12 subscription body, per watch target. A page target
+admits every nonempty slice strictly (§12 page subscriptions), keys its
+single-flight group on the private credential whenever the plan's priv
+slice is nonempty (the page re-entangles the audiences that per-slice
+fanout keeps separate), and composes every burst under a single snapshot
+via 'executePageOnce'.
+-}
+serveLiveTarget :: Origin -> Request -> [(Text, Text)] -> Compiled -> Plan -> LiveTarget -> IO Response
+serveLiveTarget o req params c plan target = do
+  let outcome = do
+        refsOnly <- refsProjection params
+        vars <- bindVariables (ocSchema cfg) (planVars plan) params
+        pure (refsOnly, vars)
+  case outcome of
+    Left p -> pure (problemResponse req p)
+    Right (refsOnly, vars) ->
+      admitTarget >>= \case
+        Left p -> pure (problemResponse req p)
+        Right creds -> do
+          void (bumpTenure o (compiledHash c))
+          let key =
+                LiveKey
+                  { lkHash = compiledHash c
+                  , lkTarget = target
+                  , lkVars =
+                      canonicalJsonText
+                        (A.Object (KM.fromList (map (\(VarName n, v) -> (AK.fromText n, v)) (Map.toAscList vars))))
+                  , lkClaims = claimsComponent creds
+                  , lkAuth = authComponent creds
+                  }
+              mExpiry = do
+                verifier <- ocVerifier cfg
+                vcText <- lookup "vc" params
+                proofExpiry verifier (TE.encodeUtf8 vcText) (lookupHeader hVcAuth (requestHeaders req))
+              busSub = do
+                rd <- subscribeInvalidations o
+                pure ((\ev -> (ieCursor ev, ieKeys ev)) <$> rd)
+              execOnce = case target of
+                LiveSlice slice -> case find (\(s, _, _) -> s == slice) creds of
+                  Just (_, claims, vcRaw) ->
+                    fmap Just <$> liveExecuteOnce o c plan slice vars vcRaw claims refsOnly
+                  Nothing -> pure (Left (mkProblem 500 "lattice:internal"))
+                LivePage -> executePageOnce o c plan vars refsOnly creds
+          liveSubscribe (ocLive cfg) (oLive o) key busSub execOnce mExpiry (ocNow cfg) >>= \case
+            Left LiveOverCapacity ->
+              pure . problemResponse req $
+                (mkProblem 503 "lattice:live-over-capacity")
+                  {pDetail = Just "live subscriber cap reached; retry later or against another instance"}
+            Left LiveContention ->
+              pure . problemResponse req $
+                (mkProblem 503 "lattice:snapshot-contention")
+                  { pDetail = Just "could not compose the initial page snapshot under a single token; retry shortly"
+                  , pHeaders = [(hRetryAfter, "1")]
+                  }
+            Left (LiveExecRefused p) -> pure (problemResponse req p)
+            Right sub ->
+              pure
+                Response
+                  { responseStatus = Status 200
+                  , responseVersion = requestVersion req
+                  , responseHeaders =
+                      [ (hContentType, "text/event-stream")
+                      , (hCacheControl, "no-store")
+                      , planHdr plan
+                      , schemaHdr o
+                      ]
+                        <> vary
+                  , responseBody = sseResponseBodyFrames (lsubSource sub)
+                  , responseTrailers = pure []
+                  , responseH2StreamId = 0
+                  , responseCancel = lsubClose sub
+                  , responsePushPromises = pure []
+                  }
+  where
+    cfg = oConfig o
+
+    targetSlices = case target of
+      LiveSlice s -> [s]
+      LivePage -> pageSlices plan
+
+    admitTarget = go [] targetSlices
+      where
+        go acc [] = pure (Right (reverse acc))
+        go acc (s : rest) =
+          admitSlice o req params (requiredClaims plan) s >>= \case
+            Left p -> pure (Left p)
+            Right (claims, vcRaw) -> go ((s, claims, vcRaw) : acc) rest
+
+    claimsComponent creds = case target of
+      LiveSlice _ -> case creds of
+        ((_, _, r) : _) -> r
+        [] -> ""
+      LivePage -> maybe "" (\(_, _, r) -> r) (find (\(s, _, _) -> s == SliceCtx) creds)
+
+    -- §12: a page group's identity includes the principal when priv is in
+    -- play; per-slice groups keep the pre-existing audience sharing.
+    authComponent creds = case target of
+      LivePage
+        | SlicePriv `elem` map (\(s, _, _) -> s) creds ->
+            maybe "" (b64url . blake3) (lookupHeader hAuthorization (requestHeaders req))
+      _ -> ""
+
+    vary = case target of
+      LiveSlice s -> varyPriv s
+      LivePage -> if SlicePriv `elem` targetSlices then varyPriv SlicePriv else []
 
 
 {- | One §12 (re-)execution: the pull pipeline's execute-and-frame core
@@ -1696,6 +2011,7 @@ liveExecuteOnce o c plan slice vars vcRaw claims refsOnly = do
           , xVars = vars
           , xMode = EmitEq slice
           , xTelemetry = ocTelemetry cfg
+          , xProjections = planProjections (ocSchema cfg) plan
           }
   executeRoots env (planRoots plan) >>= \case
     Left AbortCursorRetired -> pure (Left (mkProblem 410 "lattice:cursor-retired"))
@@ -1705,23 +2021,105 @@ liveExecuteOnce o c plan slice vars vcRaw claims refsOnly = do
       let etag = manifestEtag plan vars vcRaw (xrIdVers xr) (xrWitness xr)
       pure . Right $
         LiveSnapshot
-          { lsManifest =
-              Manifest
-                { mQuery = Just (compiledHash c)
-                , mMutation = Nothing
-                , mPlan = Just (planId plan)
-                , mSlice = Just slice
-                , mRoot = xrRootMap xr
-                , mEtag = etag
-                , mBatch = Nothing
-                }
-          , lsRecords = projectRecords refsOnly (xrRecords xr)
-          , lsIdVers = Map.fromList (xrIdVers xr)
-          , lsRoot = xrRootMap xr
-          , lsEtag = etag
+          { lsSections =
+              [ LiveSection
+                  { lsecSlice = slice
+                  , lsecManifest =
+                      Manifest
+                        { mQuery = Just (compiledHash c)
+                        , mMutation = Nothing
+                        , mPlan = Just (planId plan)
+                        , mSlice = Just slice
+                        , mRoot = xrRootMap xr
+                        , mEtag = etag
+                        , mBatch = Nothing
+                        }
+                  , lsecRecords = projectRecords refsOnly (xrRecords xr)
+                  , lsecRoot = xrRootMap xr
+                  , lsecEtag = etag
+                  }
+              ]
           , lsKeys = Set.fromList (coarsenKeys (ocBudgets cfg) (planId plan) xr)
           , lsComplete = xrComplete xr
           }
+
+
+{- | One §12 page (re-)execution: every nonempty slice composed under a
+single per-domain snapshot via the same optimistic validation as
+'servePage' (model: @tla/LatticePageComposition.tla@). @Right Nothing@
+means contention persisted through the bounded retries: refused at
+subscribe time (@503 lattice:snapshot-contention@), skipped on a delta —
+the intersecting write that caused it has already queued the group's next
+trigger, so the skip is self-healing.
+-}
+executePageOnce ::
+  Origin ->
+  Compiled ->
+  Plan ->
+  Map VarName A.Value ->
+  Bool ->
+  [(SliceName, Claims, Text)] ->
+  IO (Either Problem (Maybe LiveSnapshot))
+executePageOnce o c plan vars refsOnly creds = attempt pageComposeAttempts
+  where
+    cfg = oConfig o
+
+    attempt n = do
+      t0 <- beSnapshot (ocBackend cfg)
+      execAll [] creds >>= \case
+        Left p -> pure (Left p)
+        Right secs -> do
+          t1 <- beSnapshot (ocBackend cfg)
+          if t0 == t1
+            then pure (Right (Just (toSnapshot secs)))
+            else do
+              countPageContention (ocTelemetry cfg)
+              if n > 1 then attempt (n - 1) else pure (Right Nothing)
+
+    execAll acc [] = pure (Right (reverse acc))
+    execAll acc ((slice, claims, vcRaw) : rest) = do
+      let env =
+            ExecEnv
+              { xSchema = ocSchema cfg
+              , xBudgets = ocBudgets cfg
+              , xBackend = ocBackend cfg
+              , xClaims = claims
+              , xVars = vars
+              , xMode = EmitEq slice
+              , xTelemetry = ocTelemetry cfg
+              , xProjections = planProjections (ocSchema cfg) plan
+              }
+      executeRoots env (planRoots plan) >>= \case
+        Left AbortCursorRetired -> pure (Left (mkProblem 410 "lattice:cursor-retired"))
+        Left AbortCursorMalformed -> pure (Left (badRequest ["malformed cursor"]))
+        Left (AbortBudget d) -> pure (Left (badRequest [d]))
+        Right xr -> execAll ((slice, vcRaw, xr) : acc) rest
+
+    toSnapshot secs =
+      LiveSnapshot
+        { lsSections = map toSection secs
+        , lsKeys = Set.fromList (concatMap (\(_, _, xr) -> coarsenKeys (ocBudgets cfg) (planId plan) xr) secs)
+        , lsComplete = all (\(_, _, xr) -> xrComplete xr) secs
+        }
+
+    toSection (slice, vcRaw, xr) =
+      let etag = manifestEtag plan vars vcRaw (xrIdVers xr) (xrWitness xr)
+      in LiveSection
+           { lsecSlice = slice
+           , lsecManifest =
+               Manifest
+                 { mQuery = Just (compiledHash c)
+                 , mMutation = Nothing
+                 , mPlan = Just (planId plan)
+                 , mSlice = Just slice
+                 , mRoot = xrRootMap xr
+                 , mEtag = etag
+                 , mBatch = Nothing
+                 }
+           , lsecRecords = projectRecords refsOnly (xrRecords xr)
+           , lsecRoot = xrRootMap xr
+           , lsecEtag = etag
+           }
 
 
 -- ---------------------------------------------------------------------------
@@ -1979,7 +2377,12 @@ exactly 'ocBackend', byte-identical behavior.
 coalescedBackend :: Origin -> Backend
 coalescedBackend o = case oCoalescer o of
   Nothing -> be
-  Just cz -> be {beLoad = \ty -> coalescedLoadMany cz ty (beLoad be ty)}
+  -- The point-fetch path always passes ProjectAll ('serveEntity',
+  -- mutation output), so every join of a window carries the same
+  -- projection — the coalescer's loader-equivalence contract holds by
+  -- construction. Pin it here so a future non-ProjectAll caller cannot
+  -- silently mix projections inside one window.
+  Just cz -> be {beLoad = \ty _proj -> coalescedLoadMany cz ty (beLoad be ty ProjectAll)}
   where
     be = ocBackend (oConfig o)
 
@@ -2017,6 +2420,9 @@ serveEntity o req params tyText key = do
                         , xVars = Map.empty
                         , xMode = EmitAtMost needSlice
                         , xTelemetry = ocTelemetry cfg
+                        , -- Point fetches render the whole visible entity
+                          -- (§6.7 masks): loads are ProjectAll by design.
+                          xProjections = Map.empty
                         }
                 executeSeeds env [(ref, node)] >>= \case
                   Left _ ->
@@ -2036,21 +2442,19 @@ entityResponse ::
   IO Response
 entityResponse o req params ref xr needSlice = do
   snap <- beSnapshot (ocBackend cfg)
+  -- §3.7 Invalidation: derived deps' entity keys and aggregate collection
+  -- tags join the point fetch's own key so existing write sets purge
+  -- derived values.
+  let keys =
+        dedupOrd
+          (entityKeyOf ref : (xrCollectionKeys xr <> Set.toAscList (xrEntityKeys xr)))
+  flr <- floorTokenFor o keys snap
   let common etag =
         catMaybes
           [ Just (snapshotHdr cfg snap)
+          , Just (floorHdr cfg flr)
           , Just (schemaHdr o)
-          , -- §3.7 Invalidation: derived deps' entity keys and aggregate
-            -- collection tags join the point fetch's own key so existing
-            -- write sets purge derived values.
-            Just
-              ( keysHdr
-                  ( dedupOrd
-                      ( entityKeyOf ref
-                          : (xrCollectionKeys xr <> Set.toAscList (xrEntityKeys xr))
-                      )
-                  )
-              )
+          , Just (keysHdr keys)
           , (\e -> (hETag, strongEtag e)) <$> etag
           ]
       frame inner etag =
@@ -2412,7 +2816,7 @@ data ItemOut = ItemOut
 
 
 serveMutation :: Origin -> Request -> [(Text, Text)] -> MutationName -> IO Response
-serveMutation o req params name = do
+serveMutation o req params name = withEffectGate o $ do
   let cfg = oConfig o
       schema = ocSchema cfg
   case Map.lookup name (schemaMutations schema) of
@@ -2491,7 +2895,7 @@ mutation pipeline — the binding chooses the wire spelling only. An
 unbound verb\/URL falls back to 404\/405 like any unrouted path.
 -}
 serveBound :: Origin -> Request -> [(Text, Text)] -> BindVerb -> Text -> Maybe Text -> IO Response
-serveBound o req params verb tyText mkey = do
+serveBound o req params verb tyText mkey = withEffectGate o $ do
   let schema = ocSchema (oConfig o)
       ty = TypeName tyText
       shape = maybe ShapeCollection (const ShapeKeyed) mkey
@@ -3191,6 +3595,9 @@ renderOutput o mdef claims callerSlice itemKey refs = do
           , xVars = Map.empty
           , xMode = EmitAtMost callerSlice
           , xTelemetry = ocTelemetry cfg
+          , -- Mutation output renders the whole visible field set
+            -- ('outputSelection'): loads are ProjectAll by design.
+            xProjections = Map.empty
           }
   executeSeeds env seeds >>= \case
     Left _ ->
@@ -3284,7 +3691,7 @@ invalidationKeys o mdef args facts = do
       WCollection c (GroupOfWritten t f) -> case writtenOf t of
         [] -> pure []
         keys -> do
-          rows <- beLoad backend t keys
+          rows <- beLoad backend t (ProjectFields (Set.singleton f)) keys
           pure $
             mapMaybe
               ( \k -> case Map.lookup k rows of

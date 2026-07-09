@@ -78,12 +78,14 @@ module Lattice.Client (
 
   -- * Operations
   query,
+  queryPage,
   mutate,
   pointFetch,
 
   -- * Live queries (spec §12)
   subscribeQuery,
   SubscribeOptions (..),
+  SubscribeTarget (..),
   defaultSubscribeOptions,
   LiveEvent (..),
   Subscription (..),
@@ -141,7 +143,7 @@ import Network.HTTP.Connection (
 import Network.HTTP.Message (Request (..), Response (..), Scheme (..))
 import Network.HTTP.PercentEncoding (encodePathSegment, renderQueryString)
 import Network.HTTP.Types.Body (Body (..))
-import Network.HTTP.Types.Header (Headers, hAccept, lookupHeader)
+import Network.HTTP.Types.Header (Headers, hAccept, hCacheControl, lookupHeader)
 import Network.HTTP.Types.Method (Method (..))
 import Network.HTTP.Types.Status (statusCode)
 import Network.HTTP.Types.Version qualified as V
@@ -161,6 +163,15 @@ data ClientConfig = ClientConfig
   -- ^ Presented claims and the @X-Vc-Auth@ proof header value.
   , ccAuthorization :: Maybe ByteString
   -- ^ @Authorization@ header value for priv-slice fetches.
+  , ccConvergeRetries :: Int
+  -- ^ §13.2 guarantee 3 K: rounds of @no-cache@ convergence refetches per
+  -- page assembly before rendering newest-wins ('qrConsistent' 'False').
+  -- @0@ disables repair (the check still runs; it is free).
+  , ccTokenCompare :: Text -> Text -> Ordering
+  -- ^ Snapshot-token ordering within a domain (§13.1: "origins expose the
+  -- comparison in the SDK"). The default 'compareSnapshotTokens' handles
+  -- the reference origin's @mem:N@ scheme and counter-like tokens
+  -- generally; deployments with exotic token schemes supply their own.
   }
 
 
@@ -174,6 +185,8 @@ defaultClientConfig =
     , ccSchema = Nothing
     , ccClaims = Nothing
     , ccAuthorization = Nothing
+    , ccConvergeRetries = 2
+    , ccTokenCompare = compareSnapshotTokens
     }
 
 
@@ -263,6 +276,13 @@ data QueryResult = QueryResult
   -- ^ Every record received, in slice order (pub, ctx, priv).
   , qrDegraded :: Bool
   -- ^ Any scoped error record, or any @207 Multi-Status@ response.
+  , qrConsistent :: Bool
+  -- ^ §13.2 guarantee 3: the fetched slices' validity intervals
+  -- intersect (after any convergence refetches), so this result is a
+  -- consistent cut — exactly as consistent as one response would have
+  -- been. 'False' means K was exhausted under sustained intersecting
+  -- writes: rendering is newest-wins per entity and this flag is the
+  -- surfaced residual staleness.
   }
   deriving stock (Eq, Show)
 
@@ -316,7 +336,12 @@ query lc text vars = case ccSchema (lcConfig lc) of
         let slices = nonEmptySlices (Map.keys (planSlices plan))
             key = compiledText compiled
         r <- runSlices lc key key (compiledHash compiled) (Just (planId plan)) slices slices vars
-        either (pure . Left) (finishQuery lc (compiledDoc compiled) vars) r
+        r' <-
+          either
+            (pure . Left)
+            (convergeStreams lc key key (compiledHash compiled) (Just (planId plan)) slices vars)
+            r
+        either (pure . Left) (finishQuery lc (compiledDoc compiled) vars) r'
   Nothing -> case parseDocument text of
     Left pe ->
       pure
@@ -331,7 +356,13 @@ query lc text vars = case ccSchema (lcConfig lc) of
         Just kq ->
           runSlices lc text text (kqHash kq) (kqPlanId kq) (kqSlices kq) (kqSlices kq) vars
         Nothing -> introduceFirst lc text vars
-      either (pure . Left) (finishQuery lc doc vars) r
+      -- An introduction may have just taught us the hash; converge with it.
+      known' <- readTVarIO (lcKnown lc)
+      r' <- case (r, Map.lookup text known') of
+        (Right streams, Just kq) ->
+          convergeStreams lc text text (kqHash kq) (kqPlanId kq) (kqSlices kq) vars streams
+        _ -> pure r
+      either (pure . Left) (finishQuery lc doc vars) r'
   where
     nonEmptySlices ss = case filter (/= SlicePlan) ss of
       [] -> [SlicePub]
@@ -354,7 +385,7 @@ runSlices lc memoKey bodyText hash mPlanId memoSlices toFetch vars = go toFetch 
   where
     go [] acc = pure (Right (reverse acc))
     go (s : rest) acc = do
-      r <- fetchSlice lc memoKey bodyText hash mPlanId memoSlices s vars
+      r <- fetchSlice lc [] memoKey bodyText hash mPlanId memoSlices s vars
       case r of
         Left e -> pure (Left e)
         Right ss -> go rest (ss : acc)
@@ -362,6 +393,9 @@ runSlices lc memoKey bodyText hash mPlanId memoSlices toFetch vars = go toFetch 
 
 fetchSlice ::
   LatticeClient ->
+  -- | Extra request headers (the convergence refetch sends
+  -- @Cache-Control: no-cache@, §13.2 guarantee 3).
+  Headers ->
   Text ->
   Text ->
   Text ->
@@ -370,7 +404,7 @@ fetchSlice ::
   SliceName ->
   Map VarName A.Value ->
   IO (Either LatticeError SliceStream)
-fetchSlice lc memoKey bodyText hash mPlanId memoSlices slice vars = do
+fetchSlice lc extra memoKey bodyText hash mPlanId memoSlices slice vars = do
   haveHdrs <- advertiseHeaders lc slice
   let (credParams, credHeaders) = credsFor (lcConfig lc) slice
       planParam = maybe [] (\p -> [("p", encodeUtf8 p)]) mPlanId
@@ -380,7 +414,7 @@ fetchSlice lc memoKey bodyText hash mPlanId memoSlices slice vars = do
           <> credParams
           <> varParams vars
       target = targetFor ("/q/" <> encodePathSegment (encodeUtf8 hash)) params
-  r <- sendRaw lc (mkReq lc GET target (credHeaders <> haveHdrs) BodyEmpty)
+  r <- sendRaw lc (mkReq lc GET target (extra <> credHeaders <> haveHdrs) BodyEmpty)
   case r of
     Left e -> pure (Left e)
     Right rr
@@ -512,6 +546,7 @@ finishQuery lc doc vars streams0 = do
       snapshot <- atomically (snapshotEntities (lcStore lc))
       let merged = lastManifest {mRoot = Map.unionsWith mergeRootRefs (map mRoot manifests)}
           errs = concatMap ssErrors streams
+          consistent = streamsConsistent (ccTokenCompare (lcConfig lc)) streams
       pure
         ( Right
             QueryResult
@@ -520,8 +555,168 @@ finishQuery lc doc vars streams0 = do
               , qrErrors = errs
               , qrRecords = allRecords
               , qrDegraded = not (null errs) || any (\s -> ssStatus s == 207) streams
+              , qrConsistent = consistent
               }
         )
+
+
+-- ---------------------------------------------------------------------------
+-- Cross-slice convergence (spec §13.2 guarantee 3)
+-- ---------------------------------------------------------------------------
+
+{- | Per-domain validity interval of one slice response: domain →
+(floor, token). The floor defaults to the token — the point interval —
+when the origin sent no @Lattice-Snapshot-Floor@ (§10.2 backward
+compatibility).
+-}
+streamIntervals :: SliceStream -> Map Text (Text, Text)
+streamIntervals ss =
+  Map.mapWithKey (\d t -> (Map.findWithDefault t d flrs, t)) toks
+  where
+    dec h = maybe "" decodeUtf8Lenient (lookupHeader h (ssHeaders ss))
+    toks = Map.fromList (parseSnapshotVector (dec hLatticeSnapshot))
+    flrs = Map.fromList (parseSnapshotVector (dec hLatticeSnapshotFloor))
+
+
+{- | §13.2 guarantee 3's cut test: per domain, @max floors <= min tokens@
+across the slices that touched it. Intersecting intervals name a witness
+token at which every rendered fact set held simultaneously.
+-}
+streamsConsistent :: (Text -> Text -> Ordering) -> [SliceStream] -> Bool
+streamsConsistent cmp streams = all domainOk (Map.elems byDomain)
+  where
+    byDomain :: Map Text [(Text, Text)]
+    byDomain = Map.unionsWith (<>) (map (Map.map (: []) . streamIntervals) streams)
+    domainOk ivs =
+      let maxF = foldr1 (\a b -> if cmp a b == GT then a else b) (map fst ivs)
+          minT = foldr1 (\a b -> if cmp a b == LT then a else b) (map snd ivs)
+      in cmp maxF minT /= GT
+
+
+{- | The repair arm of §13.2 guarantee 3: while the assembly's intervals
+fail to intersect, refetch the slices whose token sits below the page's
+greatest floor with @Cache-Control: no-cache@ (revalidating through the
+shared cache, which refreshes the shared copy as a side effect), at most
+'ccConvergeRetries' rounds. A still-inconsistent assembly is returned as
+is: 'finishQuery' renders newest-wins and reports it via 'qrConsistent'.
+-}
+convergeStreams ::
+  LatticeClient ->
+  Text ->
+  Text ->
+  Text ->
+  Maybe Text ->
+  [SliceName] ->
+  Map VarName A.Value ->
+  [SliceStream] ->
+  IO (Either LatticeError [SliceStream])
+convergeStreams lc memoKey bodyText hash mPlanId memoSlices vars =
+  go (ccConvergeRetries (lcConfig lc))
+  where
+    cmp = ccTokenCompare (lcConfig lc)
+    go k streams
+      | k <= 0 || streamsConsistent cmp streams = pure (Right streams)
+      | otherwise = do
+          let maxFloors =
+                Map.unionsWith
+                  (\a b -> if cmp a b == GT then a else b)
+                  (map (Map.map fst . streamIntervals) streams)
+              stale ss =
+                any
+                  (\(d, (_, t)) -> maybe False (\f -> cmp t f == LT) (Map.lookup d maxFloors))
+                  (Map.toList (streamIntervals ss))
+          refreshed <- traverse (\ss -> if stale ss then refetch ss else pure (Right ss)) streams
+          case sequence refreshed of
+            Left e -> pure (Left e)
+            Right streams' -> go (k - 1) streams'
+    refetch ss =
+      fetchSlice
+        lc
+        [(hCacheControl, "no-cache")]
+        memoKey
+        bodyText
+        hash
+        mPlanId
+        memoSlices
+        (ssSlice ss)
+        vars
+
+
+{- | The §6.5 strict tier: @POST \/q?intent=oneshot&slice=page@ — every
+nonempty slice of the plan in one response, composed by the origin under
+a single per-domain snapshot (§13.2 guarantee 7), so 'qrConsistent' holds
+by construction. No memoization and @no-store@: this trades every
+shared-cache benefit for structural consistency, suiting
+consistency-critical reads rather than the steady state. Requires
+credentials admitting every nonempty slice; an origin under sustained
+write contention answers @503 lattice:snapshot-contention@ (retryable).
+-}
+queryPage :: LatticeClient -> Text -> Map VarName A.Value -> IO (Either LatticeError QueryResult)
+queryPage lc text vars = case docOf of
+  Left e -> pure (Left e)
+  Right (bodyText, doc) -> do
+    -- §10.4: digests are honored on one-shot POSTs.
+    haveHdrs <- advertiseHeaders lc SlicePriv
+    let (credParams, credHeaders) = allCreds (lcConfig lc)
+        params = [("intent", "oneshot"), ("slice", "page")] <> credParams <> varParams vars
+        headers = ("Content-Type", queryMediaType) : credHeaders <> haveHdrs
+    r <- sendRaw lc (mkReq lc POST (targetFor "/q" params) headers (BodyBytes (encodeUtf8 bodyText)))
+    case r of
+      Left e -> pure (Left e)
+      Right rr
+        | is2xx rr -> either (pure . Left) (finishQuery lc doc vars) (classifyPageStream rr)
+        | otherwise -> do
+            absorbFailureRecords lc rr
+            pure (Left (problemOf rr))
+  where
+    docOf = case ccSchema (lcConfig lc) of
+      Just schema -> case compileText schema defaultBudgets text of
+        Left ce -> Left (ClientCompileError ce)
+        Right compiled -> Right (compiledText compiled, compiledDoc compiled)
+      Nothing -> case parseDocument text of
+        Left pe ->
+          Left
+            ( DecodeError
+                ("query parse error at offset " <> tshow (peOffset pe) <> ": " <> peMessage pe)
+            )
+        Right doc -> Right (text, doc)
+
+
+{- | Split a §6.5 page response into per-section streams: each section
+opens with its manifest, which names its slice; the response headers ride
+on every section (they describe the shared single-snapshot composition).
+-}
+classifyPageStream :: RawResult -> Either LatticeError [SliceStream]
+classifyPageStream rr = do
+  recs <- parseNdjson (rrBody rr)
+  case splitAtManifests recs of
+    [] -> Left (DecodeError "page response carried no manifest record")
+    sections -> Right (map toStream sections)
+  where
+    toStream (m, body) =
+      SliceStream
+        { ssSlice = fromMaybe SlicePub (mSlice m)
+        , ssStatus = rrStatus rr
+        , ssHeaders = rrHeaders rr
+        , ssRecords = RManifest m : body
+        , ssManifest = Just m
+        , ssErrors = errorRecordsOf body
+        }
+
+
+-- | Group records into (manifest, section body) runs; the trailing end
+-- record joins the last section.
+splitAtManifests :: [Record] -> [(Manifest, [Record])]
+splitAtManifests = go
+  where
+    go [] = []
+    go (RManifest m : rest) =
+      let (body, more) = break isManifest rest
+      in (m, body) : go more
+    go (_ : rest) = go rest
+    isManifest = \case
+      RManifest _ -> True
+      _ -> False
 
 
 {- | Merge one root's ref lists across slices, losing nothing. Ordinary
@@ -644,6 +839,7 @@ pointFetch lc ref mask = do
                         , qrErrors = errs
                         , qrRecords = recs
                         , qrDegraded = not (null errs) || rrStatus rr == 207
+                        , qrConsistent = True
                         }
                   )
       | otherwise -> do
@@ -657,9 +853,12 @@ pointFetch lc ref mask = do
 
 -- | Knobs for one 'subscribeQuery'.
 data SubscribeOptions = SubscribeOptions
-  { soSlice :: SliceName
-  -- ^ The data slice to subscribe. One subscription is one slice — the
-  -- multi-slice merge of 'query' has no live analogue in v1.
+  { soTarget :: SubscribeTarget
+  -- ^ What to watch. 'SubscribeSlice' watches one slice (shared-fanout
+  -- friendly; the store rule keeps cross-slice fusion coherent per
+  -- entity). 'SubscribePage' multiplexes every nonempty slice over one
+  -- stream whose every burst is a single-snapshot consistent cut (§12
+  -- page subscriptions); it requires credentials admitting all of them.
   , soReconnectMicros :: Int
   -- ^ Pause before each reconnect attempt (@0@ = immediate). Tests use
   -- @0@; production keeps a small backoff so a dead origin is not
@@ -668,10 +867,15 @@ data SubscribeOptions = SubscribeOptions
   deriving stock (Eq, Show)
 
 
+-- | What a subscription watches (§12).
+data SubscribeTarget = SubscribeSlice SliceName | SubscribePage
+  deriving stock (Eq, Show)
+
+
 defaultSubscribeOptions :: SubscribeOptions
 defaultSubscribeOptions =
   SubscribeOptions
-    { soSlice = SlicePub
+    { soTarget = SubscribeSlice SlicePub
     , soReconnectMicros = 1_000_000
     }
 
@@ -717,27 +921,27 @@ subscribeQuery ::
   (LiveEvent -> IO ()) ->
   IO (Either LatticeError Subscription)
 subscribeQuery lc text vars opts onEvent =
-  resolveLiveTarget lc text slice vars >>= \case
+  resolveLiveTarget lc text introSlice vars >>= \case
     Left e -> pure (Left e)
     Right (memoKey, hash, mPlanId) -> do
       stopV <- newTVarIO False
       lastIdV <- newTVarIO Nothing
       first <-
-        openLive lc hash mPlanId slice vars lastIdV >>= \case
+        openLive lc hash mPlanId target vars lastIdV >>= \case
           Left e | isUnknownQuery e ->
             -- First contact through this origin: introduce the text
             -- (remembering its Location), absorb the pull records it
             -- returns, and retry the subscribe once.
-            introduce lc memoKey text [slice] slice vars >>= \case
+            introduce lc memoKey text [introSlice] introSlice vars >>= \case
               Left e2 -> pure (Left e2)
               Right ss -> do
                 atomically (applyRecords (lcStore lc) (ssRecords ss))
-                openLive lc hash mPlanId slice vars lastIdV
+                openLive lc hash mPlanId target vars lastIdV
           other -> pure other
       case first of
         Left e -> pure (Left e)
         Right stream -> do
-          tid <- forkIO (liveLoop lc hash mPlanId slice opts vars stopV lastIdV onEvent stream)
+          tid <- forkIO (liveLoop lc hash mPlanId target opts vars stopV lastIdV onEvent stream)
           pure . Right $
             Subscription
               { subscriptionCancel = do
@@ -745,7 +949,12 @@ subscribeQuery lc text vars opts onEvent =
                   killThread tid
               }
   where
-    slice = soSlice opts
+    target = soTarget opts
+    -- A page target cannot itself introduce (§6.6); first contact
+    -- introduces under the credential-implied slice, like 'query'.
+    introSlice = case target of
+      SubscribeSlice s -> s
+      SubscribePage -> impliedSlice (lcConfig lc)
 
 
 {- | The subscribe spelling of 'query''s hash resolution: local
@@ -796,25 +1005,32 @@ openLive ::
   LatticeClient ->
   Text ->
   Maybe Text ->
-  SliceName ->
+  SubscribeTarget ->
   Map VarName A.Value ->
   TVar (Maybe ByteString) ->
   IO (Either LatticeError LiveStream)
-openLive lc hash mPlanId slice vars lastIdV = do
+openLive lc hash mPlanId target vars lastIdV = do
   lastId <- readTVarIO lastIdV
-  let (credParams, credHeaders) = credsFor (lcConfig lc) slice
+  let (credParams, credHeaders) = case target of
+        SubscribeSlice s -> credsFor (lcConfig lc) s
+        -- §12 page subscriptions: strict admission over every nonempty
+        -- slice, so present everything we have.
+        SubscribePage -> allCreds (lcConfig lc)
+      sliceParam = case target of
+        SubscribeSlice s -> renderSlice s
+        SubscribePage -> "page"
       params =
         maybe [] (\p -> [("p", encodeUtf8 p)]) mPlanId
-          <> [("slice", encodeUtf8 (renderSlice slice)), ("live", "sse")]
+          <> [("slice", encodeUtf8 sliceParam), ("live", "sse")]
           <> credParams
           <> varParams vars
-      target = targetFor ("/q/" <> encodePathSegment (encodeUtf8 hash)) params
+      url = targetFor ("/q/" <> encodePathSegment (encodeUtf8 hash)) params
       headers =
         [(hAccept, "text/event-stream")]
           <> credHeaders
           <> maybe [] (\i -> [("Last-Event-ID", i)]) lastId
       attempt = do
-        resp <- lcSend lc (mkReq lc GET target headers BodyEmpty)
+        resp <- lcSend lc (mkReq lc GET url headers BodyEmpty)
         let status = fromIntegral (statusCode (responseStatus resp))
         if status /= 200
           then do
@@ -853,7 +1069,7 @@ liveLoop ::
   LatticeClient ->
   Text ->
   Maybe Text ->
-  SliceName ->
+  SubscribeTarget ->
   SubscribeOptions ->
   Map VarName A.Value ->
   TVar Bool ->
@@ -861,7 +1077,7 @@ liveLoop ::
   (LiveEvent -> IO ()) ->
   LiveStream ->
   IO ()
-liveLoop lc hash mPlanId slice opts vars stopV lastIdV onEvent = loop
+liveLoop lc hash mPlanId target opts vars stopV lastIdV onEvent = loop
   where
     loop stream = do
       survived <- drain stream [] False `finally` lstAbort stream
@@ -870,7 +1086,7 @@ liveLoop lc hash mPlanId slice opts vars stopV lastIdV onEvent = loop
     reconnect = do
       go <- pauseFor (soReconnectMicros opts)
       when go $
-        openLive lc hash mPlanId slice vars lastIdV >>= \case
+        openLive lc hash mPlanId target vars lastIdV >>= \case
           Left _ -> reconnect
           Right stream -> loop stream
 

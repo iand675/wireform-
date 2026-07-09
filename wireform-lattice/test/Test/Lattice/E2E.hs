@@ -723,7 +723,9 @@ swHooks schema =
 
 {- | The @friends@ edge: resolve each parent's @friendIds@ (ref strings) to
 live targets and page them by target name through 'pageFromRows', so
-cursors behave exactly like the generic machinery's.
+cursors behave exactly like the generic machinery's. @friendIds@ is read
+from the backend's own tables, not the projected parent rows
+("Lattice.Backend", /Projections/).
 -}
 swFriends :: Schema -> MemoryDb -> [(Ref, EntityRow)] -> Window -> IO (Map Ref (Either BackendFailure Page))
 swFriends schema db parents window = do
@@ -731,9 +733,9 @@ swFriends schema db parents window = do
     humans <- tableRows db "Human"
     droids <- tableRows db "Droid"
     pure (Map.fromList [("Human" :: TypeName, humans), ("Droid", droids)])
-  let nameOf ref = do
-        table <- Map.lookup (refType ref) tables
-        row <- Map.lookup (refKey ref) table
+  let rowOf ref = Map.lookup (refType ref) tables >>= Map.lookup (refKey ref)
+      nameOf ref = do
+        row <- rowOf ref
         A.String n <- Map.lookup "name" (rowFields row)
         pure n
       resolve v = do
@@ -741,11 +743,11 @@ swFriends schema db parents window = do
         ref <- parseRef refText
         n <- nameOf ref
         pure (ref, Map.singleton "name" (A.String n))
-      friendRows parentRow = case Map.lookup "friendIds" (rowFields parentRow) of
+      friendRows pref = case rowOf pref >>= Map.lookup "friendIds" . rowFields of
         Just (A.Array ids) -> mapMaybe resolve (toList ids)
         _ -> []
-      pageFor (_, parentRow) =
-        pageFromRows schema ["Human", "Droid"] (swFriendsWindowing schema) window (friendRows parentRow)
+      pageFor (pref, _) =
+        pageFromRows schema ["Human", "Droid"] (swFriendsWindowing schema) window (friendRows pref)
   pure (Map.fromList (map (\p -> (fst p, Right (pageFor p))) parents))
 
 

@@ -47,6 +47,7 @@ module Lattice.Plan (
   BoundArg (..),
   planQuery,
   planSliceRecord,
+  planProjections,
   explainJson,
 
   -- * Pagination argument names
@@ -71,6 +72,7 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
+import Lattice.Backend (Projection (..))
 import Lattice.Canonical (Compiled (..), canonicalFieldKey)
 import Lattice.Hash (planIdHash)
 import Lattice.IDL.Print qualified as Print
@@ -883,6 +885,152 @@ nodeLevels fuel (NodeSelection fs es) =
     <> concatMap (\e -> peLevel e : typedLevels (fuel - 1) (peSelection e)) es
 
 
+
+-- ---------------------------------------------------------------------------
+-- Load projections
+-- ---------------------------------------------------------------------------
+
+{- | Per-type load projections: for every entity type the plan can load,
+the static upper bound on the stored fields the executor reads off that
+type's rows ("Lattice.Backend"'s /Projections/ contract). This is the
+introspection surface for "what data is this query asking for" — a SQL
+backend renders it as its @SELECT@ column lists.
+
+Included per type, mirroring the executor's row reads exactly:
+
+* selected stored and @maintained@ fields ('Lattice.Server.Execute.emitField');
+* 'RhsField' names of every policy evaluated against that type's rows —
+  field emission policies, edge policies (parent row), and the @nodes@
+  root's @fetch by@ row gates;
+* @has one@ link fields ('relByField') of traversed edges, including the
+  hidden links of @on read@ 'ViaEdge' deps;
+* grouped-by override fields of scanned collections (surrogate-key
+  derivation reads them off the parent row; the link field itself reads
+  the parent /key/, not the row);
+* @on read@ read sets: @own(…)@ fields on the owner, the dep fragment's
+  top-level fields on each 'ViaEdge' target type, and 'ViaCollection'
+  grouping overrides on the owner.
+
+A selected field with declared arguments widens its type to 'ProjectAll':
+'Lattice.Backend.beComputed' receives the whole row and declares no read
+set. Types the plan never loads are absent; look up with a 'ProjectAll'
+default.
+
+\@depth\@ knots are cycle-broken per path (the tied expansion repeats the
+enclosing selection, so one pass per @(type, edge)@ contributes every
+field name; levels differ across tie instances but names do not).
+-}
+planProjections :: Schema -> Plan -> Map TypeName Projection
+planProjections schema plan =
+  Map.unionsWith (<>) (map rootProjections (Map.toList (planRoots plan)))
+  where
+    rootProjections (_, pr) =
+      Map.unionsWith
+        (<>)
+        ( fetchByGates pr
+            : map
+              (\(t, node) -> projNode Set.empty t node)
+              (Map.toList (tsPerType (prSelection pr)))
+        )
+
+    -- §14.4: a nodes job's fetch-by gate is evaluated against the loaded
+    -- row when it carries 'RhsField' predicates.
+    fetchByGates pr
+      | isNodesRootDef (prDef pr) =
+          Map.fromListWith
+            (<>)
+            ( map
+                (\t -> (t, fieldsProj (maybe [] policyRowFields (entityFetchBy =<< lookupEntity schema t))))
+                (Map.keys (tsPerType (prSelection pr)))
+            )
+      | otherwise = Map.empty
+
+    projNode :: Set (TypeName, FieldName) -> TypeName -> NodeSelection -> Map TypeName Projection
+    projNode seen t node = case lookupEntity schema t of
+      Nothing -> Map.empty
+      Just ent ->
+        Map.unionsWith
+          (<>)
+          ( map (projField t ent) (nsFields node)
+              <> map (projEdge seen t) (nsEdges node)
+          )
+
+    projField t ent pf = case lookupEntityField ent (pfName pf) of
+      Nothing -> Map.empty
+      Just fd ->
+        let pol = here (policyRowFields (entityFieldPolicy ent fd))
+            value = case fieldDerivation fd of
+              Just d
+                | OnRead <- derivMaterialize d ->
+                    Map.unionsWith (<>) (map (projDep t ent) (NE.toList (derivReads d)))
+              -- Maintained values read from the row like stored fields.
+              _
+                | null (fieldArgs fd) -> here [pfName pf]
+                -- beComputed receives the whole row; no declared read set.
+                | otherwise -> Map.singleton t ProjectAll
+        in Map.unionWith (<>) pol value
+      where
+        here = Map.singleton t . fieldsProj
+
+    projDep t ent = \case
+      OwnFields ns -> Map.singleton t (fieldsProj (NE.toList ns))
+      ViaEdge e frag -> case lookupEntityRel ent e of
+        Just rel@ToOne {} ->
+          Map.unionsWith
+            (<>)
+            ( Map.singleton t (fieldsProj [relByField rel])
+                : map
+                  (\tt -> Map.singleton tt (fieldsProj (fragmentTopFields frag)))
+                  (targetTypes schema (relTarget rel))
+            )
+        _ -> Map.empty
+      ViaCollection rf _ -> case lookupEntityRel ent rf of
+        Just ToMany {relCollection = col} -> Map.singleton t (groupingProj col)
+        _ -> Map.empty
+
+    projEdge seen t pe =
+      let parent =
+            Map.singleton t . fieldsProj $
+              policyRowFields (fromMaybe Public (relPolicy (peRel pe)))
+                <> case peRel pe of
+                  ToOne {relByField = byF} -> [byF]
+                  ToMany {} -> []
+          grouping = case peRel pe of
+            ToOne {} -> Map.empty
+            ToMany {relCollection = col} -> Map.singleton t (groupingProj col)
+          -- A depth edge's expansion is cyclically tied; one pass per
+          -- (enclosing type, edge) along a path sees every field name.
+          recurse
+            | isJust (peDepth pe) && Set.member (t, peField pe) seen = Map.empty
+            | otherwise =
+                let seen' = if isJust (peDepth pe) then Set.insert (t, peField pe) seen else seen
+                in Map.unionsWith
+                    (<>)
+                    (map (\(tt, node) -> projNode seen' tt node) (Map.toList (tsPerType (peSelection pe))))
+      in Map.unionsWith (<>) [parent, grouping, recurse]
+
+    -- Surrogate-key grouping values read off the parent row for grouped-by
+    -- overrides; the link field reads the parent's key component instead.
+    groupingProj col = fieldsProj (NE.filter (/= colLink col) (colGrouping col))
+
+    fragmentTopFields frag = case Map.lookup frag (schemaFragments schema) of
+      Nothing -> []
+      Just fdef -> map fName (selectionFields (fragSelection fdef))
+
+    fieldsProj = ProjectFields . Set.fromList
+
+
+-- | The 'RhsField' names a policy's predicates compare against.
+policyRowFields :: Policy -> [FieldName]
+policyRowFields = \case
+  RequiresClaims preds -> mapMaybe rhsField preds
+  Public -> []
+  Private -> []
+  where
+    rhsField p = case cpRhs p of
+      RhsField f -> Just f
+      _ -> Nothing
+
 -- ---------------------------------------------------------------------------
 -- Budgets (§14.1): static depth, rounds, per-round fan-out
 -- ---------------------------------------------------------------------------
@@ -1253,10 +1401,23 @@ explainJson schema budgets plan =
     , "budgets" .= budgetsJson
     , "slices" .= slicesJson
     , "spans" .= skeleton
+    , "projections" .= projectionsJson
     ]
   where
     rounds = planLoaderRounds (planRoots plan)
     indexedRounds = zip [0 :: Int ..] rounds
+
+    -- Loader projections (§20.2): what each beLoad round may read per type.
+    projectionsJson =
+      A.object
+        ( map
+            ( \(t, proj) ->
+                AK.fromText (unTypeName t) .= case proj of
+                  ProjectAll -> A.String "*"
+                  ProjectFields fs -> A.toJSON (map unFieldName (Set.toAscList fs))
+            )
+            (Map.toAscList (planProjections schema plan))
+        )
 
     -- Elements: per root, the join derivation of every field and edge.
     elements = concatMap rootElements (Map.toList (planRoots plan))

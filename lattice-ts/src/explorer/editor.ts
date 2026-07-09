@@ -7,7 +7,7 @@
  * not a full code-mirror.
  */
 
-import type { CompletionItem } from "./complete.ts";
+import type { CompletionItem, HoverInfo } from "./complete.ts";
 
 export interface EditorOptions {
   readonly language: "query" | "idl";
@@ -18,6 +18,8 @@ export interface EditorOptions {
   readonly onChange?: (value: string) => void;
   /** Query completion provider; omitted for the IDL editor. */
   readonly complete?: (text: string, offset: number) => CompletionItem[];
+  /** Schema-aware hover provider; omitted for the IDL editor. */
+  readonly hover?: (text: string, offset: number) => HoverInfo | null;
   /** Show a line-number gutter (default true). */
   readonly lineNumbers?: boolean;
 }
@@ -31,6 +33,12 @@ export interface Editor {
   revealOffset(offset: number): void;
   /** Insert text at the caret (used by the docs tree), placing the caret inside a `{ }` if present. */
   insertAtCaret(text: string): void;
+  /** Current caret position (selection start). */
+  getCaret(): number;
+  /** Apply a splice `[start, end) -> text` and move the caret to `caret`. */
+  applyEdit(start: number, end: number, text: string, caret: number): void;
+  /** Highlight `line` (0-based) as an insertion preview, or clear with `null`. */
+  setPreview(line: number | null): void;
 }
 
 const NAME_CHAR = /[A-Za-z0-9_]/;
@@ -99,6 +107,9 @@ export function createEditor(opts: EditorOptions): Editor {
   const braceLayer = document.createElement("div");
   braceLayer.className = "lx-brace-layer";
   braceLayer.setAttribute("aria-hidden", "true");
+  const previewLayer = document.createElement("div");
+  previewLayer.className = "lx-preview-layer";
+  previewLayer.setAttribute("aria-hidden", "true");
   const ta = document.createElement("textarea");
   ta.className = "lx-input";
   ta.spellcheck = false;
@@ -108,6 +119,7 @@ export function createEditor(opts: EditorOptions): Editor {
   ta.value = opts.value ?? "";
   el.appendChild(pre);
   el.appendChild(braceLayer);
+  el.appendChild(previewLayer);
   if (showGutter) el.appendChild(gutter);
   el.appendChild(ta);
 
@@ -115,6 +127,15 @@ export function createEditor(opts: EditorOptions): Editor {
   popup.className = "lx-completions";
   popup.style.display = "none";
   el.appendChild(popup);
+
+  // Schema-aware hover tooltip (query editor only): a floating card that
+  // follows the pointer and shows the hovered identifier's signature + docs.
+  const tip = document.createElement("div");
+  tip.className = "lx-hover";
+  tip.style.display = "none";
+  el.appendChild(tip);
+  let hoverTimer = 0;
+  let hoverOffset = -1;
 
   let items: CompletionItem[] = [];
   let selected = 0;
@@ -208,6 +229,74 @@ export function createEditor(opts: EditorOptions): Editor {
     items = [];
   };
 
+  const hideHover = (): void => {
+    clearTimeout(hoverTimer);
+    hoverTimer = 0;
+    tip.style.display = "none";
+    hoverOffset = -1;
+  };
+
+  /** Map a viewport point to a character offset in the textarea, or -1. */
+  const offsetFromPoint = (clientX: number, clientY: number): number => {
+    const rect = ta.getBoundingClientRect();
+    const { w, h } = charMetrics();
+    const { padL, padT } = padMetrics();
+    const line = Math.floor((clientY - rect.top - padT + ta.scrollTop) / h);
+    const col = Math.round((clientX - rect.left - padL + ta.scrollLeft) / w);
+    if (line < 0 || col < 0) return -1;
+    const lines = ta.value.split("\n");
+    if (line >= lines.length) return -1;
+    const lineText = lines[line]!;
+    if (col > lineText.length) return -1;
+    let off = 0;
+    for (let k = 0; k < line; k++) off += lines[k]!.length + 1;
+    return off + col;
+  };
+
+  const showHover = (clientX: number, clientY: number): void => {
+    if (!opts.hover || popup.style.display === "block") return hideHover();
+    const off = offsetFromPoint(clientX, clientY);
+    if (off < 0) return hideHover();
+    if (off === hoverOffset && tip.style.display === "block") return;
+    const info = opts.hover(ta.value, off);
+    if (!info) return hideHover();
+    hoverOffset = off;
+    const head = document.createElement("div");
+    head.className = "lx-hover-head";
+    const kind = document.createElement("span");
+    kind.className = "lx-hover-kind lx-kind-" + info.kind;
+    kind.textContent = info.kind;
+    const title = document.createElement("span");
+    title.className = "lx-hover-title";
+    title.textContent = info.title;
+    head.appendChild(kind);
+    head.appendChild(title);
+    if (info.signature) {
+      const sig = document.createElement("span");
+      sig.className = "lx-hover-sig";
+      sig.textContent = info.signature;
+      head.appendChild(sig);
+    }
+    tip.replaceChildren(head);
+    if (info.doc) {
+      const doc = document.createElement("div");
+      doc.className = "lx-hover-doc";
+      doc.textContent = info.doc;
+      tip.appendChild(doc);
+    }
+    if (info.meta) {
+      const meta = document.createElement("div");
+      meta.className = "lx-hover-meta";
+      meta.textContent = info.meta;
+      tip.appendChild(meta);
+    }
+    const erect = el.getBoundingClientRect();
+    tip.style.display = "block";
+    const maxLeft = Math.max(4, el.clientWidth - tip.offsetWidth - 8);
+    tip.style.left = `${Math.min(Math.max(4, clientX - erect.left), maxLeft)}px`;
+    tip.style.top = `${clientY - erect.top + 20}px`;
+  };
+
   const renderPopup = (): void => {
     if (items.length === 0) {
       closePopup();
@@ -293,20 +382,35 @@ export function createEditor(opts: EditorOptions): Editor {
   };
 
   ta.addEventListener("input", () => {
+    hideHover();
     paint();
     opts.onChange?.(ta.value);
     triggerCompletion(false);
   });
   ta.addEventListener("scroll", () => {
+    hideHover();
     pre.scrollTop = ta.scrollTop;
     pre.scrollLeft = ta.scrollLeft;
     updateGutter();
     updateBraces();
+    previewLayer.replaceChildren();
     if (popup.style.display === "block") renderPopup();
   });
   ta.addEventListener("keyup", updateBraces);
   ta.addEventListener("click", updateBraces);
+  if (opts.hover) {
+    ta.addEventListener("mousemove", (e) => {
+      clearTimeout(hoverTimer);
+      const { clientX, clientY } = e;
+      hoverTimer = window.setTimeout(() => {
+        hoverTimer = 0;
+        showHover(clientX, clientY);
+      }, 200);
+    });
+    ta.addEventListener("mouseleave", hideHover);
+  }
   ta.addEventListener("blur", () => {
+    hideHover();
     // Delay so a click on a completion row (mousedown) still registers.
     setTimeout(closePopup, 120);
   });
@@ -433,6 +537,38 @@ export function createEditor(opts: EditorOptions): Editor {
       paint();
       opts.onChange?.(ta.value);
       ta.focus();
+    },
+    getCaret: () => ta.selectionStart,
+    applyEdit: (start: number, end: number, text: string, caret: number) => {
+      ta.value = ta.value.slice(0, start) + text + ta.value.slice(end);
+      const pos = Math.max(0, Math.min(caret, ta.value.length));
+      ta.selectionStart = ta.selectionEnd = pos;
+      const line = ta.value.slice(0, pos).split("\n").length - 1;
+      const { h } = charMetrics();
+      ta.scrollTop = Math.max(0, line * h - ta.clientHeight / 2);
+      previewLayer.replaceChildren();
+      paint();
+      opts.onChange?.(ta.value);
+      ta.focus();
+    },
+    setPreview: (line: number | null) => {
+      previewLayer.replaceChildren();
+      if (line === null) return;
+      const { h } = charMetrics();
+      const { padT } = padMetrics();
+      // Scroll the target line into view (without disturbing the caret) so the
+      // preview highlight is actually visible before it is drawn.
+      const top = line * h;
+      if (top < ta.scrollTop || top + h > ta.scrollTop + ta.clientHeight) {
+        ta.scrollTop = Math.max(0, top - ta.clientHeight / 2);
+        pre.scrollTop = ta.scrollTop;
+        updateGutter();
+      }
+      const box = document.createElement("div");
+      box.className = "lx-preview-hl";
+      box.style.top = `${padT + line * h - ta.scrollTop}px`;
+      box.style.height = `${h}px`;
+      previewLayer.appendChild(box);
     },
   };
 }

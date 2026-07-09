@@ -401,6 +401,7 @@ export const HEADERS = {
   plan: "lattice-plan",
   schema: "lattice-schema",
   snapshot: "lattice-snapshot",
+  snapshotFloor: "lattice-snapshot-floor",
   outcome: "lattice-outcome",
   queryName: "lattice-query-name",
   surrogateKey: "surrogate-key",
@@ -425,3 +426,99 @@ export const RESERVED_PARAMS: Record<string, true> = {
   dv: true,
   intent: true,
 };
+
+// ---------------------------------------------------------------------------
+// Snapshot vectors and validity intervals (§10.2, §13.1, §13.2 g2–g3)
+
+/**
+ * Parse a `Lattice-Snapshot` / `Lattice-Snapshot-Floor` dictionary value
+ * (`dom="tok", dom2="tok2"`) into `[domain, token]` pairs. Lenient:
+ * malformed members are skipped.
+ */
+export function parseSnapshotVector(value: string): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  for (const raw of value.split(",")) {
+    const eq = raw.indexOf("=");
+    if (eq < 0) continue;
+    const dom = raw.slice(0, eq).trim();
+    const tok = raw.slice(eq + 1).trim();
+    if (!dom || tok.length < 2 || !tok.startsWith('"') || !tok.endsWith('"')) continue;
+    out.push([dom, tok.slice(1, -1)]);
+  }
+  return out;
+}
+
+/**
+ * The reference snapshot-token ordering (§13.1: "origins expose the
+ * comparison in the SDK"): tokens whose text after the last `:` parses as
+ * a decimal compare numerically (`mem:9` < `mem:41`); otherwise
+ * shorter-then-lexicographic. Deployments with token schemes this
+ * misorders supply their own comparator.
+ */
+export function compareSnapshotTokens(a: string, b: string): number {
+  const tail = (t: string): number | undefined => {
+    const s = t.slice(t.lastIndexOf(":") + 1);
+    return /^[0-9]+$/.test(s) ? Number(s) : undefined;
+  };
+  const x = tail(a);
+  const y = tail(b);
+  if (x !== undefined && y !== undefined) return x === y ? 0 : x < y ? -1 : 1;
+  if (a.length !== b.length) return a.length < b.length ? -1 : 1;
+  return a === b ? 0 : a < b ? -1 : 1;
+}
+
+/** One response's per-domain validity interval (§10.2). */
+export interface ValidityInterval {
+  readonly floor: string;
+  readonly token: string;
+}
+
+/**
+ * Per-domain validity intervals of one response, from its
+ * `Lattice-Snapshot` and `Lattice-Snapshot-Floor` header values. An absent
+ * floor member means the point interval (§10.2 backward compatibility).
+ */
+export function validityIntervals(
+  snapshot: string | undefined,
+  floor: string | undefined,
+): Record<string, ValidityInterval> {
+  const out: Record<string, ValidityInterval> = {};
+  if (!snapshot) return out;
+  const floors = new Map(floor ? parseSnapshotVector(floor) : []);
+  for (const [dom, token] of parseSnapshotVector(snapshot)) {
+    out[dom] = { floor: floors.get(dom) ?? token, token };
+  }
+  return out;
+}
+
+/**
+ * The §13.2 guarantee-3 consistent-cut test over the responses of one
+ * logical page: per domain, `max(floors) <= min(tokens)`. Intersecting
+ * intervals name a witness token at which every response's fact set held
+ * simultaneously — the assembly is exactly as consistent as one response.
+ * On failure, refetch the responses whose token sits below the page's
+ * greatest floor with `Cache-Control: no-cache` and re-test (bounded).
+ */
+export function intervalsConsistent(
+  responses: ReadonlyArray<Record<string, ValidityInterval>>,
+  compare: (a: string, b: string) => number = compareSnapshotTokens,
+): boolean {
+  const domains = new Map<string, ValidityInterval[]>();
+  for (const ivs of responses) {
+    for (const [dom, iv] of Object.entries(ivs)) {
+      const list = domains.get(dom);
+      if (list) list.push(iv);
+      else domains.set(dom, [iv]);
+    }
+  }
+  for (const ivs of domains.values()) {
+    let maxFloor = ivs[0]!.floor;
+    let minToken = ivs[0]!.token;
+    for (const iv of ivs) {
+      if (compare(iv.floor, maxFloor) > 0) maxFloor = iv.floor;
+      if (compare(iv.token, minToken) < 0) minToken = iv.token;
+    }
+    if (compare(maxFloor, minToken) > 0) return false;
+  }
+  return true;
+}

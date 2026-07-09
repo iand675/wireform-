@@ -120,6 +120,7 @@ module Lattice.Telemetry (
   countPlanSupersession,
   countMutationReplay,
   countConvergenceRetry,
+  countPageContention,
 
   -- * Timing
   elapsedMs,
@@ -258,6 +259,9 @@ data LatticeTelemetry = LatticeTelemetry
   -- ^ @lattice.mutation.replays@ — by mutation and effect class.
   , ltConvergenceRetries :: Counter Int64
   -- ^ @lattice.convergence.retries@ — registered; client-side (module haddock).
+  , ltPageContention :: Counter Int64
+  -- ^ @lattice.page.contention@ — single-snapshot composition retries on the
+  -- composed multi-slice forms (§6.5 one-shot page, §12 page subscriptions).
   }
 
 
@@ -296,6 +300,7 @@ newLatticeTelemetry tp mp = do
     <*> cnt "lattice.plan.supersessions" "responses answered plan-superseded"
     <*> cnt "lattice.mutation.replays" "idempotency-key replays, by mutation and effect class"
     <*> cnt "lattice.convergence.retries" "client cross-slice convergence retries"
+    <*> cnt "lattice.page.contention" "single-snapshot composition retries on page forms"
 
 
 -- | The default: everything is a no-op and 'telemetryEnabled' is 'False'.
@@ -313,6 +318,7 @@ noTelemetry =
     , ltPlanSupersessions = noCnt
     , ltMutationReplays = noCnt
     , ltConvergenceRetries = noCnt
+    , ltPageContention = noCnt
     }
   where
     noHist = Histogram {histogramRecord = \_ _ -> pure (), histogramEnabled = pure False}
@@ -517,6 +523,11 @@ countTenurePromotion tel =
 countPlanSupersession :: LatticeTelemetry -> IO ()
 countPlanSupersession tel =
   whenOn tel $ counterAdd (ltPlanSupersessions tel) 1 (mkAttrs [])
+
+
+countPageContention :: LatticeTelemetry -> IO ()
+countPageContention tel =
+  whenOn tel $ counterAdd (ltPageContention tel) 1 (mkAttrs [])
 
 
 -- | @lattice.mutation.replays@ by mutation name and effect class.
