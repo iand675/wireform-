@@ -259,7 +259,6 @@ list feed of Post by orgId
      ordered by rank desc
      page 20 max 100
      visible when caller.org = orgId
-     cache max-age 30s
 
 list bookmarks of Post by authorId
      ordered by createdAt desc
@@ -275,6 +274,8 @@ mutation publishPost(post: PostId) returns Post {
   effect      natural "publish is set-to-state"   -- retry is a no-op (Section 11.2)
 }
 ```
+
+> **Reference implementation status.** The `cache` clause and its declared cache policy (Section 10.9) are specified extensions, not capabilities of the current `wireform-lattice` IDL implementation. Its parser rejects `cache` and its schema model has no cache-policy field. The reference origin emits the per-slice `Cache-Control` defaults of Section 10.1; an implementation adding the clause applies the rules of Section 10.9.
 
 **Reading the schema.** A quick key to the vocabulary, all of which is sugar over the model in Section 3.1:
 
@@ -306,6 +307,7 @@ Algebraic data types are **structural values**: they have no identity, no `ver`,
 ```lattice
 newtype PostId = Uuid
 newtype Iban   = Text(match "^[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}$")
+newtype Last4  = Text(len 4)
 
 data Money = Money { amount: Decimal, currency: Currency }
 
@@ -313,7 +315,7 @@ enum Currency closed = USD | EUR | GBP
 enum CardNetwork open  = Visa | Mastercard | Amex
 
 data PaymentMethod open
-  = Card { last4: Text(len 4), network: CardNetwork }
+  = Card { last4: Last4, network: CardNetwork }
   | Sepa { iban: Iban }
   | Ach  { routing: W32, account: Text }
 ```
@@ -340,7 +342,7 @@ data PaymentMethod open
 | `Timestamp` | RFC 3339, UTC `Z` only, minimal fractional digits |
 | `Date`, `TimeOfDay`, `Duration` | ISO 8601, minimal digits |
 | `Cursor` | opaque (Section 3.2) |
-| `Ref T` | `"Type:key"` typed entity reference |
+| `EntityRef` | `"Type:key"` entity-reference string. It is not a declarable field-type primitive: it is the synthesized parameter type of the `nodes` root (Section 14.4), and the wire form of each response reference (`$ref` values and bounded reference arrays). |
 | `Json` | RFC 8785 (JCS) canonical JSON; an escape hatch, discouraged |
 
 Sums serialize as `{"$tag":"Card", ...fields}` with fields sorted; enums as `"USD"`. Collections rest on a distinction between deterministic order and semantic order. Canonical serialization needs only determinism, and every type already has a deterministic order via its canonical bytes. `Set t` serializes as elements sorted by canonical encoding. `Map k v` serializes as pairs sorted by key encoding, collapsing to a JSON object exactly when the key's canonical form is a string (`Text`, `Uuid`, enums, and newtypes of these). `Vec n t` and `[t]` preserve element order.
@@ -424,11 +426,11 @@ These apply to paginated collections:
 
 ### 3.7 Derived fields
 
-Stored fields have a row and a `ver`; production schemas also need fields computed from other data: denormalized counts, cross-entity composites, formatted projections. A derived field declares a **read set**, the dual of a mutation's write set, and everything else is derived from that declaration rather than remembered by convention:
+Stored fields have a row and a `ver`; production schemas also need fields computed from other data: denormalized counts, cross-entity composites, formatted projections. A derived field declares a **read set**, the dual of a mutation's write set, and everything else is derived from that declaration rather than remembered by convention. Dependencies render in declaration order in canonical IDL, so reordering them changes the schema hash and pertinent plan ids:
 
 ```haskell
 data Derivation = Derivation
-  { reads       :: NESet Dep
+  { reads       :: NonEmpty Dep          -- declaration order is preserved in canonical IDL
   , compute     :: ComputeRef          -- pure and batched: Map (Key e) DepValues -> Map (Key e) Value
   , materialize :: Materialization
   }
@@ -449,10 +451,15 @@ entity Post by id {
   authorLine: Text derived
     reads   author ...UserByline             -- follow the author edge, read that fragment
     on read
+  slug: Text derived
+    reads   own(title, id)                    -- stored fields of this entity
+    on read
 }
 ```
 
 **Planning.** Deps compile into hidden traversals in the ordinary round structure: `ViaEdge` deps batch through the target's loaders, `ViaCollection` aggregates batch as set-in map-out aggregate loaders, and depth, round, and fan-out budgets count them fully. A derived field cannot express per-row resolution any more than an edge can.
+
+**Constraints.** A derived field is checked at elaboration and a violation names the offender. A key field cannot be derived, and a derived field declares no arguments. Derivation does not chain: a dependency may not name another derived or argument-taking field, whether through `own(...)`, an edge fragment, or a collection member. Interface members cannot be derived; derive on implementing entities instead. A `maintained` derivation cannot read through an edge and must use `on read`; a `maintained` collection dependency must group by its link field.
 
 **Invalidation.** The read set compiles to surrogate keys mechanically: `ViaEdge` deps contribute the dep entities' keys, `ViaCollection` deps contribute the collection's cache tag at its grouping key. Mutations already emit those same tags from their write sets, so a response containing a derived value is purged by exactly the writes that change it, with read side and write side agreeing because both name the same collection.
 
@@ -498,7 +505,7 @@ The two forms differ in exactly one thing, **truth coupling**:
 
 Bare key reuse across *unrelated* types needs no declaration at all. Identity is always the type-qualified pair, so `Invoice:42` and `User:42` never meet, not in cache keys, not in the client store, not in refs, and not in invalidation. The declarations above exist for the two cases where the reused id *does* carry meaning, and they make that meaning static. The family fan-out is derivable from the schema by any writer holding the row images (the out-of-band rule of Section 11.5). The plan compiler counts the co-key declaration, and transitively the base, among a query's pertinent declarations (Section 7.3). And `ver` convergence (Section 13.2) is untouched, because conflict detection was always per `(type, key)`: co-keyed types never produce a false conflict against each other.
 
-Traversal needs no new construct: an identity edge is an ordinary `has one` whose link field is the key field (`has one profile: UserProfile by id`). It is legal in both directions, and planned and budgeted like any to-one. Chained co-keying (`refines` or `joins` of a co-keyed entity) is rejected; declare every companion against the one base. Adding a co-keyed entity is additive under the Section 17.2 taxonomy (existing plans do not move), while the new invalidation coupling applies to writes from the moment of deploy.
+Traversal needs no new construct: an identity edge is an ordinary `has one` whose link field is the key field (`has one? profile: UserProfile by id`, optional because a `joins` companion may be absent; the reverse edge `has one user: User by id` is total). It is legal in both directions, and planned and budgeted like any to-one. Chained co-keying (`refines` or `joins` of a co-keyed entity) is rejected; declare every companion against the one base. Adding a co-keyed entity is additive under the Section 17.2 taxonomy (existing plans do not move), while the new invalidation coupling applies to writes from the moment of deploy.
 
 ### 3.9 Documentation and directives
 
@@ -528,7 +535,7 @@ directive @audit(level: Text = "info") repeatable on ENTITY | FIELD | MUTATION
 directive @internal on FIELD | RELATIONSHIP
 ```
 
-A declaration names the directive, its arguments (the type language of Section 3.5, each with an optional default), whether it is `repeatable` (may be applied more than once at one site), and the set of locations it targets. The IDL-site locations are `SCHEMA`, `TYPE`, `INTERFACE`, `ENTITY`, `FIELD`, `RELATIONSHIP`, `FRAGMENT`, `ROOT`, and `MUTATION` (a field and a relationship are distinct sites, matching the IDL's disjoint field and edge grammar); the query-site locations are `QUERY` (the query definition), `SELECTION` (a selected field or edge), and `SPREAD` (a fragment spread). A declaration listing any query-site location makes the directive applicable in query documents ("Query-side directives" below); one listing only IDL-site locations may not appear in a query, and vice versa. An application is written in the same leading position as the compatibility annotations below:
+A declaration names the directive, its arguments (the type language of Section 3.5, each with an optional default), whether it is `repeatable` (may be applied more than once at one site), and the set of locations it targets. The IDL-site locations are `SCHEMA`, `TYPE`, `INTERFACE`, `ENTITY`, `FIELD`, `RELATIONSHIP`, `FRAGMENT`, `ROOT`, and `MUTATION` (a field and a relationship are distinct sites, matching the IDL's disjoint field and edge grammar). The protocol also reserves `QUERY` (the query definition), `SELECTION` (a selected field or edge), and `SPREAD` (a fragment spread) for query-side directives. These query-site locations and their applications are specified for a future revision; today a directive accepted by the reference implementation may target only IDL sites.
 
 ```lattice
 @audit(level: "sensitive")
@@ -544,9 +551,11 @@ entity Post by id {
 
 Applications are checked at elaboration. Applying an undeclared directive, applying one at a location its declaration does not list, an unknown or missing required argument, a duplicated argument, or a second application of a non-repeatable directive at one site is a schema error that names the offender. Elaboration does not otherwise interpret a directive; its meaning belongs to the deployment, read from the published document by codegen and tooling.
 
+> **Reference implementation status.** The protocol's query-site directive surface is specified but not implemented by the current `wireform-lattice` parser. It accepts only IDL-site directive locations and accepts only `@depth` in queries. `QUERY`, `SELECTION`, and `SPREAD` are rejected as IDL location names; custom query-side applications and `@defer` are parse errors. The current reserved-name set contains `break`, `deprecated`, `declassify`, and `depth`; `defer` is a protocol-reserved name that the reference implementation has not yet added to that set.
+
 The five annotations the protocol defines itself are its built-in directives: `@break` (Section 17.3), `@deprecated` (Section 17.5), `@declassify` (Section 3.7), `@depth` (Section 4.2), and `@defer` (Section 4.2, Section 9.5). Those names are reserved, so a `directive` declaration may not redeclare them, and they keep their fixed grammar and meaning.
 
-**Query-side directives.** A directive whose declared locations include a query site — `QUERY` (the query definition), `SELECTION` (a selected field or edge), `SPREAD` (a fragment spread) — may be applied in a query document at those sites: `feed @track(event: "feed_view") { ... }`, `...UserByline @component("Byline")`, or `query @owner("growth") { ... }`. Applications are checked against the registry exactly as IDL applications are — an undeclared directive, a wrong location, an unknown, missing, or duplicated argument, or a non-repeatable directive applied twice is `400 lattice:compile-rejected` — and their arguments MUST be literals: a query-side application takes no variables, since it is erased before variables bind. The engine never interprets a directive, so a custom query directive cannot touch membership, emission, or caching; canonicalization erases it (Section 5.1) so it never enters the query hash, the plan id, or the wire. That is what lets a schema hand query authors a shared annotation vocabulary — analytics events, UI-component bindings, ownership, PII masks — with none of it fragmenting the content-addressed cache. Anything that must change what the origin *does* stays a built-in (`@depth`, `@defer`); custom directives are metadata only.
+**Query-side directives.** This is a specified extension. An implementation that adds the `QUERY`, `SELECTION`, and `SPREAD` locations may apply declared directives at those sites, validate applications against the directive registry, require literal arguments, and erase those metadata applications during canonicalization. The current reference implementation does not parse these applications; see the reference-status note above and Section 4.8.
 
 **Canonical rendering.** Directive declarations print as a block sorted by name, after the `claims` block and before the type declarations. At every site the leading metadata prints in a fixed order: the description, then directive applications sorted by name and then by argument, then `@break`, then `@deprecated`. A directive application's arguments print sorted by argument name. None of this is part of a query's pertinent declarations, so it never enters a `planId`; all of it is part of the canonical IDL, so it is covered by the schema hash and served verbatim at `GET /schema/{schemaHash}` (Section 7.1).
 
@@ -642,11 +651,11 @@ A fragment is a named selection on a type, written `fragment Name on Type { ... 
 - **Local fragments** are defined in a query document, or in a shared `.lq` file that is `import`ed. They are **expanded into the canonical text at build time**. The server never sees a fragment as a distinct concept; two builds that expand to the same selection share one identity. This is the ordinary fragment, and the default answer to "share this selection."
 
 ```lattice
--- fragments/user.lq
+# fragments/user.lq
 fragment UserByline on User { name avatarUrl(size: 48) }
 fragment UserProfile on User { ...UserByline email }
 
--- queries/feed.lq
+# queries/feed.lq
 import "fragments/user.lq"
 query FeedPage($after: Cursor) {
   feed(after: $after, first: 20) { title author { ...UserByline } }
@@ -668,7 +677,7 @@ Lattice looks like GraphQL and borrows SQL's discipline about what a cacheable r
 | `order by` chosen per query (SQL) | ordering fixed by the collection's declaration | Client-chosen ordering multiplies cache identities and breaks keyset-cursor stability (Section 3.2). |
 | aggregates / `group by` (SQL), computed fields (GraphQL resolvers) | schema-declared derived fields (Section 3.7) | A runtime aggregate has an invalidation footprint that must be declared to be purgeable; a derived field carries exactly that footprint. |
 | aliases (GraphQL) | absent | No response tree; fields are keyed by canonical form (Section 4.1). |
-| `@include`/`@skip` (GraphQL) | separate queries, or over-fetch (Section 4.8) | Conditional selection multiplies cache identities by the toggle space. |
+| `@include`/`@skip` (GraphQL) | separate queries, or over-fetch (Section 4.7) | Conditional selection multiplies cache identities by the toggle space. |
 | N+1 via per-field resolvers (GraphQL) | inexpressible; loaders are set-in map-out (Section 3.1) | Per-row resolution is not a type a schema author can write. |
 
 A Lattice query may only ask for things the schema has pre-committed to serving and invalidating. That is a narrower contract than GraphQL's resolver-can-do-anything or SQL's relational completeness, and it is what lets every response carry a correct, mechanically-derived set of cache tags.
@@ -722,6 +731,8 @@ EnumValue       = Name
 ListValue       = "[" { Value } "]"
 ```
 
+> **Reference implementation status.** The current `wireform-lattice` query parser implements `@depth` as the complete directive grammar. Any other `@Name`, including `@defer` and a schema-declared custom directive, is rejected at parse time. The `Directive` positions and custom-directive rule below define the specified extension for an implementation that adds query-side directive support; documents targeting the reference origin must contain no query directive other than `@depth`.
+
 Lexical productions:
 
 ```
@@ -760,10 +771,13 @@ A query document is canonicalized by:
 
 1. Applying default values for omitted arguments, then erasing the argument when equal to its default. Stating a default explicitly and omitting it are one identity.
 2. Expanding all local fragment spreads inline, then sorting: fields within each selection set by (name, canonical arguments); root fields by name; arguments by name; variables by name; interface inline-fragment alternatives by concrete type name. Schema fragment references are kept as references (late-bound), but their spread point is normalized.
+2a. Merging identical selections bottom-up: fields with the same name and canonical arguments union their selection sets recursively and retain the greater `@depth`; identical schema-fragment spreads deduplicate; inline fragments on the same concrete type union their selection sets. Within one selection set, fields render first, then schema-fragment spreads ordered by name and canonical arguments, then interface inline fragments ordered by concrete type name. This ordering and merging are part of the canonical text.
 3. Erasing the query name, comments, and custom directive applications (Section 3.9 query-side directives); the built-in `@depth` and `@defer` are semantic and survive.
+The custom-directive erasure in step 3 is likewise part of the query-side-directive extension. In the current reference parser it is vacuous because query-side directives do not parse (Sections 3.9 and 4.8).
+
 4. Serializing with no insignificant whitespace, UTF-8, NFC-normalized.
 
-The serialization of step 4 is pinned. Selections within a set are separated by a single space (`{title author{name}}`). Arguments and variable declarations are comma-separated with no spaces (`comments(after:$c,first:3)`, `query($a:Cursor,$b:I32=20){...}`). String values render as RFC 8259 JSON strings. Numbers render as canonical JSON numbers (below). Inline fragments render `... on Type{...}`, and spreads render `...Name` or `...Name(size:96)`. `@depth(n)` follows the argument list directly, and `@defer` follows `@depth(n)` (both after the arguments and before any selection set), so a field renders in the fixed order `name(args)@depth(n)@defer{...}`. Wire field keys (`avatarUrl(size:48)`, Section 9.1) use the same argument rendering, so exactly one rendering exists protocol-wide.
+The serialization of step 4 is pinned. Selections within a set are separated by a single space (`{title author{name}}`). Arguments and variable declarations are comma-separated with no spaces (`comments(after:$c,first:3)`, `query($a:Cursor,$b:I32=20){...}`). String values render as RFC 8259 JSON strings. Numbers render as canonical JSON numbers (below). Inline fragments render `... on Type{...}`, and spreads render `...Name` or `...Name(size:96)`. `@depth(n)` follows the argument list directly, and `@defer` follows `@depth(n)` (both after the arguments and before any selection set), so a field renders in the fixed order `name(args)@depth(n)@defer{...}`. The `@defer` half of this rendering is part of the specified deferred-delivery extension; the reference `wireform-lattice` canonicalizer does not parse or render `@defer` (Section 9.5). Wire field keys (`avatarUrl(size:48)`, Section 9.1) use the same argument rendering, so exactly one rendering exists protocol-wide.
 
 Content addresses derived from canonical texts are pinned with them. The **query hash** is the first 16 bytes (128 bits) of `BLAKE3(canonical text)` in unpadded base64url (22 characters). The **schema hash** is `"s"` plus the same 16-byte truncation over the canonical IDL. The **plan id** is `"pl_"` plus the first 12 bytes of `BLAKE3(canonical text || 0x00 || pertinent declarations)`. The **manifest etag** is `"m:"` plus a 12-byte truncation (Section 10.2 names its input). **Canonical JSON**, used wherever this specification says "canonically serialized" (claims payloads, cursors, etag inputs), is: object keys sorted by Unicode code point, no insignificant whitespace, and the number rendering of Section 3.5.3.
 
@@ -792,7 +806,7 @@ Consumption note: with raw DEFLATE there is no `Z_NEED_DICT` signal, so inflater
 A query has several request encodings, ordered here from most to least cacheable. A client SHOULD use the most cacheable rung available to it and drop to a lower rung only on the specific, named condition below, not speculatively:
 
 1. **Hash form** (Section 6.1) is the steady state, used once the client knows the query hash and its plan id. A `404 lattice:unknown-query` response (the origin's memo lacks the hash) drops the client to an introduction rung.
-2. **Inline form** (Section 6.2) introduces a query whose DEFLATE-compressed canonical text fits the URL budget of Section 6.2. A client whose compressed text exceeds that budget uses the QUERY form instead.
+2. **Inline form** (Section 6.2) introduces a query whose DEFLATE-compressed canonical text fits the URL budget of Section 6.2. A client whose compressed text exceeds that budget introduces via QUERY where it is available, or drops directly to the POST introduction floor. The reference browser client omits QUERY and uses POST in that case.
 3. **QUERY form** (Section 6.3) introduces a query too large for a URL. A `405 Method Not Allowed` (an intermediary predating RFC 10008 rejects the method) drops the client to the POST form.
 4. **POST introduction** (Section 6.4) always reaches the origin and is the compatibility floor.
 
@@ -835,6 +849,8 @@ GET /q?d={base64url(deflate(canonicalText))}&dv={dictHash}&slice=pub&after=cur_8
 ```
 
 This form suits canonical texts whose base64url `d=` value fits the client's inline URL budget (client-configured, default 6144 bytes, sized to leave headroom under the RFC 9110 8000-octet request-line floor for the rest of the URL). It requires no origin state and no extra round trip. A client MUST skip the inline rung when raw-DEFLATE encoding is unavailable or the encoded `d=` value would exceed that budget, and MUST fall from the inline rung to an introduction rung (Sections 6.3, 6.4) on any of `404` (unknown query), `405` (method rejected), `414` (URI too long), or `501` (encoding unsupported); any other status is treated as the response. Responses to inline-form requests SHOULD include `Location` with the hash-form URL so clients can upgrade.
+
+An inline request whose `dv` names a dictionary the origin never published receives `400 lattice:unknown-dictionary` with `Cache-Control: no-store`. A client receiving that response should retry without `dv` or fall to an introduction form: the dictionary is a compression hint, not a correctness input (Section 5.2).
 
 ### 6.3 QUERY form (introduction path for large documents)
 
@@ -937,6 +953,8 @@ Properties, stated so neither profile is chosen on folklore:
 - **Overhead.** With HPACK/QPACK, marginal request cost is tens of bytes. The operative limits are CDN request pricing and `SETTINGS_MAX_CONCURRENT_STREAMS` (commonly around 100), which bound sensible page sizes. On HTTP/3, per-entity streams recover independently from packet loss; on HTTP/2 over TCP, transport head-of-line blocking erases that advantage.
 - **Latency staging.** Refs-then-entities is two stages. Origins SHOULD emit `103 Early Hints` on refs responses with `Link: rel=preload` entries for the entities the plan marks critical-path (the same planner priority that orders the stream, Section 9.1), bounded by the connection's `SETTINGS_MAX_CONCURRENT_STREAMS` so the hint never advertises more parallel fetches than the client can open; how many within that bound is deployment-configured. This lets clients open entity streams before the refs body completes.
 
+> **Reference implementation status.** The current `wireform-lattice` origin fully buffers refs responses and does not emit `103 Early Hints`. Resource mode remains available without the preload hint. The `103` rule above is for origins that implement streaming staging.
+
 **Origin coalescing is mandatory for conformance** (Section 6.9). Without it, resource mode reintroduces N+1 at the transport layer and bypasses the plan algebra; with it, the origin's execution is identical regardless of how requests arrived.
 
 Server push is deliberately unused. The protocol never depends on it, and its removal from major clients is why decomposition is client-driven.
@@ -983,7 +1001,7 @@ GET /.well-known/lattice
   "dictionary": { "current": "/schema/dict/kQ3f0aZw", "algorithm": "deflate-raw/9" },
   "budgets":   { "maxCanonicalBytes": 65536, "maxDepth": 12, "maxRoots": 8, "maxRounds": 8,
                  "maxRoundFanout": 10000, "maxSurrogateKeys": 256, "maxBatchItems": 500,
-                 "coalesceWindowMs": 5 },
+                 "maxPageDefault": 100, "coalesceWindowMs": 5 },
   "idempotency": { "defaultRetention": "PT24H" }
 }
 ```
@@ -1063,10 +1081,12 @@ flowchart TD
 
 The `ctx` slice's variance is carried by two pieces:
 
-- **Claims payload**, in the URL: `vc={base64url(canonicalJson(claims))}`, containing only the claims from the schema's registry that this query's ctx slice depends on (the plan says which). It is canonically serialized so that equal claim sets are equal bytes. The payload is part of the cache key because it is part of the URL: no `Vary` support is needed, no custom-header preflight for browsers is needed, and caches too limited for `Vary` still behave correctly.
+- **Claims payload**, in the URL: `vc={base64url(canonicalJson(claims))}`. For cache efficiency it should contain only the registered claims that this query's ctx slice depends on (the plan says which). The reference origin admits a payload carrying additional registered claims when it covers the required set; the wider payload is safe because its proof covers its bytes, but it widens the cache key and reduces sharing. It is canonically serialized so that equal claim sets are equal bytes. The payload is part of the cache key because it is part of the URL: no `Vary` support is needed, no custom-header preflight for browsers is needed, and caches too limited for `Vary` still behave correctly.
 - **Proof**, in a header: `X-Vc-Auth: {exp}.{sig}`, a signature by the auth service over (payload, exp). Headers outside the cache key do not fragment it, so token rotation and expiry renewal never disturb cached entries; only a change in the claims themselves produces a new cache key.
 
 Origins MUST verify the proof on every request they serve; caches never verify anything. An origin MUST reject a `ctx` request with `401 lattice:proof-expired` when the `vc` parameter is absent, its payload does not decode to a canonical claims object, the `X-Vc-Auth` proof is missing, malformed, or fails signature verification, the proof is expired, or the presented claims do not cover every claim the slice depends on. A `priv` request lacking the deployment's `Authorization` credential is rejected the same way. None of these open an entity stream. A cache hit is therefore a response that some principal with an identical claims payload legitimately received while holding a valid proof.
+
+> **Reference implementation status.** A conforming origin that serves `ctx` must configure a proof verifier. In the current `wireform-lattice` reference implementation, the optional verifier configuration is intended for development use: when absent, `verifyVc` decodes a claims payload without validating a proof. It must not be used to serve shared-cacheable `ctx` data in a deployment.
 
 Requirements carried over from earlier drafts, restated against the split:
 
@@ -1074,13 +1094,13 @@ Requirements carried over from earlier drafts, restated against the split:
 - Claim revocation takes effect at proof expiry. Deployments needing faster revocation shorten proof lifetime or purge principal-correlated surrogate keys. They MUST NOT add per-principal claims to the payload, which silently degrades shared caching to per-user partitioning.
 - The `priv` slice authenticates with the deployment's ordinary `Authorization` mechanism and is `Cache-Control: private`.
 
-For non-browser clients that prefer header transport, `X-Visibility-Context: {payload}` with `Vary: X-Visibility-Context` is a conforming alternate binding; the URL binding is primary.
+For non-browser clients that prefer header transport, `X-Visibility-Context: {payload}` with `Vary: X-Visibility-Context` is a conforming alternate binding; the URL binding is primary. The reference origin and `lattice-ts` SDK implement only the URL binding, so the header binding is a conforming option not exercised by the current reference implementation.
 
 ### 8.3 Audiences: facets, relationship-backed claims, and the membership/body split
 
 The `ctx` payload is best understood not as "the principal's attributes" but as an **audience address**: the identity of the population a cached response may be shared with. Three consequences extend the model well past attribute-based tenancy.
 
-**Facets.** A request presents exactly the claims its plan requires (the facet), not the principal's totality, and payload/proof pairs are minted per facet. A user in five teams presents `{team: 7}` when reading team 7's documents, and shares team 7's cache partition with every other member. Cache cardinality is the number of audiences, not the number of principals.
+**Facets.** The cache-optimal request presents exactly the claims its plan requires (the facet), not the principal's totality, and payload/proof pairs may be minted per facet. An SDK should narrow to that facet. A superset payload is admitted when it covers the required claims, remains sound because the proof covers the presented bytes, and merely reduces cache sharing.
 
 **Relationship-backed minting.** Claims are typed and may be entity-valued (`team: TeamId`, `folder: FolderId`, `followerOf: UserId`). For these, the mint is a relationship check, `check(principal, relation, object)` in the Zanzibar sense, performed by the auth service at proof-minting time. This moves graph-shaped authorization out of the per-request, per-entity hot path and into mint frequency, with the proof TTL as the revocation window. The trade is explicit and per-claim. Entity-side predicate clauses (`team == .teamId`) continue to be enforced at the origin during execution, so a cached response remains valid for exactly the audiences that could have produced it.
 
@@ -1107,7 +1127,7 @@ Responses are newline-delimited JSON records over chunked transfer (or the ident
 {"kind":"end","complete":true,"etag":"m:9ac2"}
 ```
 
-Record kinds carried in an entity stream: `manifest`, `entity`, `patch`, `tombstone`, `elided`, `unchanged`, `checkpoint`, `error`, `invalidated`, `end`. (`patch` and `checkpoint` appear only on deferred responses, Section 9.5; `plan` is the sole record of a `slice=plan` response, Section 9.2; `reauth` appears only on live subscriptions, Section 12.) The set is open: clients MUST tolerate an unrecognized `kind` by keeping it verbatim and ignoring it (Section 9.4.1). Parameterized fields are keyed by their canonical argument form. Records emitted by a federating gateway additionally carry `src` (Section 18.4).
+Record kinds carried in an entity stream: `manifest`, `entity`, `patch`, `tombstone`, `elided`, `unchanged`, `checkpoint`, `error`, `invalidated`, `end`. (`patch` and `checkpoint` appear only on deferred responses, Section 9.5; `plan` is the sole record of a `slice=plan` response, Section 9.2; `reauth` appears only on live subscriptions, Section 12.) The set is open: clients MUST tolerate an unrecognized `kind` by keeping it verbatim and ignoring it. Parameterized fields are keyed by their canonical argument form. Records emitted by a federating gateway additionally carry `src` (Section 18.4).
 
 Consequences of normalization:
 
@@ -1131,6 +1151,8 @@ Multiple roots share one manifest, one etag, and one set of surrogate keys, sinc
 Root membership lists deliberately carry **no cursor envelope**. Unlike an edge occurrence's `$page` value, the manifest's ref arrays are plain, and resumption cursors for a paginated `list` root are *derived* from the boundary item's keyset columns per Section 3.2 (which is why the compiler warns when a query paginates without selecting them). `root` gives result order per root name (the stream itself is unordered beyond planner priority) and appears in the slice that owns the root per Section 8.1; membership never appears in a slice below its path level. The snapshot token travels as the `Lattice-Snapshot` response header rather than in the manifest, so revalidation refreshes it (Section 10.2).
 
 When an origin streams a deferred response (Section 9.5), the deferred entities' `(id, ver)` pairs are not yet known when the manifest is emitted. Such an origin MUST omit `etag` from the manifest record and carry the authoritative manifest etag only on the `end` record; a buffered origin (which knows the full fact set up front) MAY carry it in both, identically. A client takes the response validator from `end`, falling back to the manifest's `etag` when present.
+
+> **Reference implementation status.** The buffered `wireform-lattice` reference origin always supplies manifest `etag`, and the reference Haskell decoder currently requires it. The TypeScript client treats the field as optional. A streaming origin that omits the manifest etag under Section 9.5 therefore requires a client that tolerates its absence.
 
 A `slice=plan` response consists of a single record:
 
@@ -1218,13 +1240,14 @@ There are three tiers, not two. `200` for a fully clean response. A whole-reques
 Whether a given response can actually *use* `207` depends on whether the origin knows about the degradation before the status line is sent. Streaming makes this a hard constraint rather than an implementation detail to paper over:
 
 - **Query responses.** Multi-round traversal means the common failure (a loader hiccup discovered partway through round 2) is discovered strictly after `200` has already gone out. There the status line cannot change, and `complete`/`error` records in the body remain the sole authoritative signal. An origin that knows about degradation *before* streaming starts (a circuit breaker already open on a dependency the plan will need) SHOULD send `207` instead. Because this is opportunistic rather than guaranteed, the in-body signal is always authoritative; the status code is a best-effort enhancement for infrastructure that watches only headers.
-- **Mutation responses, singular or batched.** Here the asymmetry runs the other way. The write commits inside its bracketed transaction (Section 11.4) *before* the output selection is rendered, so by the time the origin starts streaming the response, it typically already knows whether rendering will be clean. Mutation and batch responses SHOULD therefore use `207` whenever the response contains any scoped error record, and `200` only for a fully clean result. This holds for a single mutation with one failed output field exactly as for a batch with mixed item outcomes, decoupled from atomicity mode. `AllOrNothing` never produces partial results by construction and so never uses `207`; a `BestEffort` batch uses `207` for any mixed or all-failed outcome set, and plain `200` when every item happened to succeed. The rare case where an output selection's own rendering fails asynchronously after headers commit degrades gracefully to the query-side fallback: keep the already-sent status, and signal in-body.
+- **Mutation responses, singular or batched.** Here the asymmetry runs the other way. The write commits inside its bracketed transaction (Section 11.4) *before* the output selection is rendered, so by the time the origin starts streaming the response, it typically already knows whether rendering will be clean. Mutation and batch responses SHOULD therefore use `207` whenever the response contains any scoped error record, and `200` only for a fully clean result. This holds for a single mutation with one failed output field exactly as for a batch with mixed item outcomes, decoupled from atomicity mode. `AllOrNothing` never produces partial results by construction: it either commits every item (`200`) or aborts wholesale. In the reference origin, a wholesale abort is nevertheless served as `207 Multi-Status`, with one unscoped `error` record naming the first failure and no entity records. A caller distinguishes that case by its empty result set and unscoped error. A `BestEffort` batch uses `207` for any mixed or all-failed outcome set, and plain `200` when every item happened to succeed. The rare case where an output selection's own rendering fails asynchronously after headers commit degrades gracefully to the query-side fallback: keep the already-sent status, and signal in-body.
 - **Envelope-level rejections** (a batch rejected outright for size, an idempotency key conflict, a failed guard before any effect was attempted) are unaffected by any of this and remain ordinary whole-request `4xx`/`5xx` responses, since nothing was processed to report per-item on.
 - **Resource-mode point fetches** (Section 6.8) need none of this. Each is already a single-resource request with its own ordinary status code, since multi-status exists specifically for "one response describing several outcomes," a problem resource-mode's transport-level granularity doesn't have.
 
 For infrastructure that inspects headers but not bodies, a `Lattice-Outcome: degraded` signal SHOULD accompany any response that contains an `error` record; a response with no `error` record either omits the field or carries `Lattice-Outcome: ok`, and consumers MUST treat absence as `ok`. An origin that buffers the response (and so knows the outcome before the status line) MAY emit it as a response header; a streaming origin emits it as a trailer. Trailer support is inconsistent enough across HTTP/1.1 intermediaries that this is a convenience, never the mechanism a client is permitted to depend on in place of the body.
 
 ### 9.5 Deferred delivery
+> **Reference implementation status.** This is a specified transport extension, not a capability of the current `wireform-lattice` origin. Its query AST and parser do not accept `@defer`; the server fully materializes each response and emits neither `checkpoint` nor `patch` records. The rules below define the extension for an implementation that adds it; clients targeting the reference origin MUST NOT send `@defer`.
 
 A `@defer` on a query field (Section 4.2, Section 4.8 rule 4) splits a response into **delivery phases**. A response whose query carries no `@defer` is one phase, byte-shaped exactly as the rest of this section describes. A response whose query carries any `@defer` has a **critical phase** followed by a **deferred phase**. The split is a static property of the canonical text, fixed per query identity, so it adds no runtime variance to the cache key.
 
@@ -1280,7 +1303,7 @@ ETag: "e41"
 
 supports `If-None-Match` per RFC 9110 and returns `304` when current. Point fetches take a schema fragment or an ad hoc field mask (Section 6.7); both are canonical, stable cache keys.
 
-**Manifest etags.** A query response's `ETag` is the manifest etag, and it is **weak**: `ETag: W/"m:9ac2"`. It hashes the plan id, variable bindings, claims payload where applicable, and the sorted `(id, ver)` vector of every entity in the response, including tombstones and elisions. Weakness is deliberate: record emission order is planner priority and MAY vary between executions, so equal etags promise semantically identical responses (identical fact sets), not identical bytes. Since byte ranges are already rejected over entity streams (Section 10.3), nothing is lost.
+**Manifest etags.** A query response's `ETag` is the manifest etag, and it is **weak**: `ETag: W/"m:9ac2"`. It hashes the plan id, variable bindings, claims payload where applicable, the sorted `(id, ver)` vector of every entity in the response including tombstones and elisions, and, when the response touches `on read` derived fields (Section 3.7), the sorted derived-value witness. The witness makes a changed aggregate invalidate the etag even when the entity-version vector is unchanged. A response with no derived fields carries an empty witness. Weakness is deliberate: record emission order is planner priority and MAY vary between executions, so equal etags promise semantically identical responses (identical fact sets), not identical bytes. Since byte ranges are already rejected over entity streams (Section 10.3), nothing is lost.
 
 When the response is streamed with deferred delivery (Section 9.5), this same etag is carried on the `end` record instead of the manifest, since the full `(id, ver)` vector is known only after the deferred phase; its input and meaning are unchanged, and `304` revalidation still compares it against the whole fact set.
 
@@ -1368,7 +1391,7 @@ stateDiagram-v2
 
 The organic query working set is highly repetitive (the empirical fact that motivated persisted queries) and quickly earns full tenure; one-off adversarial queries occupy shared cache slots for seconds. Tenure state is advisory and losable.
 
-A root or the `schema` line may declare `cache no-tenure` (Section 10.9) to exempt its queries from this ramp, serving them at full policy TTL from first sight. It is advisory and aimed at query sets an origin already trusts: under open admission (Section 14.3) an origin MAY ignore it, since honoring it on an open root would let an adversary skip the ramp by minting novel queries there; under signed admission, where only the author's own queries compile, novel-query pollution is already precluded and the exemption is safe.
+A root or the `schema` line may declare `cache no-tenure` (Section 10.9) to exempt its queries from this ramp, serving them at full policy TTL from first sight. This exemption belongs to the unimplemented declared-cache-policy surface described by the Section 10.9 status note. It is advisory and aimed at query sets an origin already trusts: under open admission (Section 14.3) an origin MAY ignore it, since honoring it on an open root would let an adversary skip the ramp by minting novel queries there; under signed admission, where only the author's own queries compile, novel-query pollution is already precluded and the exemption is safe.
 
 ### 10.8 Error response caching
 
@@ -1379,11 +1402,14 @@ Every error response carries explicit cache directives; heuristic cacheability i
 | `lattice:unknown-query` | `no-store` (Section 6.1) |
 | `lattice:compile-rejected` | `public, s-maxage=300` (deterministic per canonical text; negative caching intended) |
 | `lattice:compile-budget` | `no-store` (timeout is not deterministic) |
+| `lattice:fragment-shadow` | `public, s-maxage=300` (deterministic per canonical text; negative caching intended, as `compile-rejected`) |
 | `lattice:cursor-retired` | `public, s-maxage=60` |
 | `lattice:plan-superseded` | `no-store` (answers differ across a mixed fleet mid-deploy) |
 | auth failures (`401`/`403`) | `no-store` |
 
 ### 10.9 Declared cache policy
+> **Reference implementation status.** Declared cache policy is a specified schema-surface extension, not a capability of the current `wireform-lattice` origin. Its IDL grammar does not accept `cache`, its schema model has no `CachePolicy`, and the origin derives directives from the slice and tenure ramp alone. The rules below define the extension for an implementation that adds it.
+
 
 The per-slice `Cache-Control` of Section 10.1 is a *default*, not a fixed law. A schema author declares, on any site, a **cache policy** that deviates from it, for the cases where the derived behavior is wrong: a public field that is nonetheless volatile, a cheap type that should not sit in shared caches, a reference entity that changes so rarely it may be cached far longer, or data that must be revalidated on every use. Like visibility (Section 8.1), cache policy is a declared, static property of the schema and the query, never a runtime toggle: it is part of the canonical IDL (Section 7.1), so the schema hash covers it, and it is a pertinent declaration (Section 7.3), so changing it moves the `planId` of every query it touches and old-policy cache entries are superseded by re-keying (Section 13.3) rather than served stale.
 
@@ -1513,7 +1539,7 @@ Earlier drafts implied a uniform exactly-once story. That claim is only implemen
 
 - `Transactional`: the effect and the dedupe record commit together, so acceptance and effect coincide, and a replay returns the exact stored response. This is end-to-end exactly-once, available because the effect boundary is the transaction boundary.
 - `NaturallyIdempotent`: no key is required, because retries are safe by construction. The compiler requires the written justification, because self-certified idempotency is the classic last words of retry bugs.
-- `Workflow`: acceptance transactionally creates an **Operation** entity and enqueues the work (outbox pattern). The response is `202` with `Location: /e/Operation/{id}` and an entity stream containing the Operation in state `pending`. Everything downstream (retries against external systems, compensation, eventual completion) is the workflow engine's responsibility, and the protocol does not pretend otherwise. Lattice guarantees that the workflow *starts* at most once per key, and gives its progress a first-class, cacheable, subscribable surface.
+- `Workflow`: acceptance transactionally creates an **Operation** entity and enqueues the work (outbox pattern). **Reference implementation status:** this specified Workflow acceptance path is not implemented by the current `wireform-lattice` reference server. Its `MutationOutcome` has no Workflow variant and it emits no `202` or pending-Operation response.
 
 **Key material.** Clients SHOULD derive keys from durable business intent (a transfer id, an order id) rather than fresh randomness, where such intent exists. A random UUID held only in process memory does not survive the client crash that the key exists to handle.
 
@@ -1523,7 +1549,7 @@ Clients and infrastructure MAY retry mutation POSTs on timeout or connection los
 
 ### 11.3 Mutation responses are entity streams; Operations are entities
 
-A `Workflow` mutation's Operation is an ordinary entity (`Operation:{id}`, with fields `status`, `startedAt`, a `result` ref, and `error`). Its progress needs no new machinery. A client can poll `GET /e/Operation/{id}` with `If-None-Match`, or subscribe to a live query over it. Completion is a write like any other: the finishing step writes the Operation and the domain entities through write-scoped transactions (Section 11.4) that feed the same outbox. So invalidation, the feed, and read-your-writes via snapshot tokens all apply to workflow completions with no special cases.
+For an implementation of the specified Workflow path, a Workflow mutation's Operation is an ordinary entity (`Operation:{id}`, with fields `status`, `startedAt`, a `result` ref, and `error`). The current reference server does not yet produce this entity; see Section 11.2.
 
 A mutation response uses the same wire format as queries:
 
@@ -1642,7 +1668,9 @@ Bound mutation responses are the same entity streams as Section 11.3, so read-yo
 
 A mutation MAY declare a `batch` policy. The policy admits an array invocation that applies the same declared mutation (the same `guard`, `writes`, `effectClass`, and `invalidates`) to many inputs in one request. Nothing about per-item semantics changes. Only the invocation and response structure generalize from one item to many.
 
-**Invocation.** For a `Named` binding, the request body's top-level JSON type selects cardinality. An object is the singular call (unchanged). An array is a batch call, each element `{"key": <opaque>?, "input": <Input>}`. This is unambiguous, since every `InputType` is a schema-declared record and a record always serializes as an object (Section 3.5.2). A bare array can therefore never be a valid singular body. An empty array is a well-formed zero-item batch: it commits nothing, emits a manifest with an empty item set, and responds `200` with `end.complete: true`. Item `key`s, where supplied, MUST be unique within a single batch invocation; a request with duplicate item keys is rejected `400 lattice:batch-duplicate-key` before any item executes, because per-item response correlation and per-item dedupe both key on it.
+**Invocation.** For a `Named` binding, the request body's top-level JSON type selects cardinality. An object is the singular call (unchanged). An array is a batch call. For a Named binding, each element may use the envelope form `{"key": <opaque>?, "input": <Input>}` or the inline form `{"key": <opaque>?, <Input fields>}`. The reference parser reads the envelope form only when `input` is the sole non-`key` member and the input type has no field named `input`; otherwise it reads members inline. Bound-verb batch forms use their specific spellings below.
+
+Item `key`s, where supplied, MUST be unique within a single batch invocation; a request with duplicate item keys is rejected `400 lattice:batch-duplicate-key` before any item executes, because per-item response correlation and per-item dedupe both key on it. **Reference implementation status:** the current `wireform-lattice` reference server does not yet enforce this rule and accepts duplicate item keys. The rule and its Section 15 error entry remain the specified behavior for implementations that add the check.
 
 For a `Bound` (verb) mutation, batch uses a distinct collection-level URL, declared alongside the singular binding:
 
@@ -1665,7 +1693,7 @@ mutation markRead(notification: NotificationId, read: Bool) -> Notification
 
 ```ndjson
 {"kind":"manifest","mutation":"cancelOrder","batch":{"atomicity":"best-effort","count":3},
- "root":{"items":["ord_a","ord_b","ord_c"]},"etag":"m:c9f1"}
+ "root":{"result":["Order:501","Order:503"]},"etag":"m:c9f1"}
 {"kind":"entity","id":"Order:501","ver":"g10","fields":{"status":"cancelled"},"item":"ord_a"}
 {"kind":"error","scope":{"$tag":"Item","item":"ord_b"},"error":{"$tag":"AlreadyFilled"},"retryable":false}
 {"kind":"entity","id":"Order:503","ver":"h02","fields":{"status":"cancelled"},"item":"ord_c"}
@@ -1674,11 +1702,15 @@ mutation markRead(notification: NotificationId, read: Bool) -> Notification
 {"kind":"end","complete":true}
 ```
 
+Per-item correlation is carried by each record's `item` tag, not by the manifest root. Manifest root values are refs; a successful empty batch therefore has `"root":{"result":[]}`.
+
 A per-item `error` record in a batch response is a **terminal outcome for that item**, not stream damage. "Already filled" is a legitimate, final answer for `ord_b`, confirmed by the 9.4.3 commit test: `ord_b` produced only an error, so it did not cancel, while `ord_a` and `ord_c` each produced an `entity` record, so they did.
 
 `end.complete` is `true` because the origin reached a verdict for every item (Section 9.4.4). The mixed outcome is what makes the status `207` rather than `200` (Section 9.4.6). `complete` would only drop to `false` on actual truncation, crash, or timeout before every item was attempted. In that case the client retries the batch, and items already given a verdict dedupe away via their item keys. A batch where every item happens to succeed returns this same body form under a plain `200`.
 
-For `AllOrNothing`, there are no per-item records. Either every item's entities and invalidations appear together under one commit and one snapshot token, or nothing committed and the response is a single unscoped, fatal `error` per Section 9.4's existing rule, since nothing partial exists to report.
+A per-item protocol failure, including `lattice:write-scope`, is reported with `Item` scope in a batch, so sibling item verdicts still reach the client. The Section 15 `lattice:write-scope` 500 applies to a singular mutation or an AllOrNothing rollback.
+
+For `AllOrNothing`, there are no per-item records. Either every item's entities and invalidations appear together under one commit and one snapshot token, or nothing committed and the response is a single unscoped, fatal `error`. In the current reference origin, the rollback case is `207`, carrying that unscoped error and no `entity` or `invalidated` records.
 
 **Write sets and invalidation, per mode.** `AllOrNothing` unions `writes(item)` across all items into one bracket and one outbox row with one snapshot token, exactly as a single large mutation would. `BestEffort` brackets and commits each item independently, so each successful item produces its own outbox row and its own snapshot token. The aggregate `invalidated` keys the response reports are the union across items that actually committed, tagged per item as shown above.
 
@@ -1699,7 +1731,7 @@ Accept: text/event-stream
 
 The origin registers the manifest's surrogate key set against the connection. When the invalidation relay (Section 11.5) publishes an intersecting key, the origin re-executes the plan (single-flighted per (query hash, slice, variables, claims payload): concurrent triggers coalesce into one execution whose output fans out to every matching subscriber) and pushes a delta stream: a fresh manifest first when the root map changed (an edge occurrence's page growing rides in its re-emitted owner record; only root membership re-emits the manifest), then changed `entity` records and `tombstone`s, then the `end` record with the new etag. Changed means the record's rendered canonical bytes differ from the previous emission, a strict superset of `(id, ver)` movement, since a page or derived value can change inside an owner whose own `ver` held still. The registered key set is replaced by the new manifest's. Records are identical to the pull wire format, so the client store does not distinguish push from pull.
 
-The SSE framing is pinned. Each NDJSON record rides one event as a single `data:` line (records are single-line JSON by construction); no `event:` field is used. Delta events carry `id: {outbox cursor}` of the triggering invalidation batch; initial-snapshot events carry no id. A reconnecting client sends `Last-Event-ID` per the SSE processing model; an origin MAY use it to skip work, but the conforming baseline answer to any reconnect is a fresh initial snapshot. The id exists so smarter deltas remain possible, not so correctness depends on them. Comment lines (`: ping`) are sent after each idle period with no dispatched traffic, to keep intermediaries from idling the connection out; they are semantically empty. The idle period is deployment-configured (reference default 15 seconds); a period of zero disables the ping loop, and an interval in which real traffic was dispatched skips its ping.
+The SSE framing is pinned. Each NDJSON record rides one event as a single `data:` line (records are single-line JSON by construction); no `event:` field is used. The stream opens with one `: lattice live` comment line, which flushes the response head before the initial snapshot and is semantically empty like `: ping`. Delta events carry `id: {outbox cursor}` of the triggering invalidation batch; initial-snapshot events carry no id. A reconnecting client sends `Last-Event-ID` per the SSE processing model; an origin MAY use it to skip work, but the conforming baseline answer to any reconnect is a fresh initial snapshot. The id exists so smarter deltas remain possible, not so correctness depends on them. Comment lines (`: ping`) are sent after each idle period with no dispatched traffic, to keep intermediaries from idling the connection out; they are semantically empty. The idle period is deployment-configured (reference default 15 seconds); a period of zero disables the ping loop, and an interval in which real traffic was dispatched skips its ping.
 
 A subscription's authorization is its proof (Section 8.2), and a long-lived connection MUST NOT outlive it. At proof expiry the origin sends `{"kind":"reauth"}` and terminates the stream after a deployment-configured grace period (reference default 10 seconds), unless the client supplies a fresh proof by reconnecting with updated credentials. A grace period of zero terminates the stream immediately after the `reauth` record is queued. In-connection credential upgrade is out of scope; a fresh proof is always presented on a new connection. Without this rule, a subscription minted under since-revoked claims would keep receiving gated data indefinitely.
 
@@ -1711,7 +1743,7 @@ Boundary rules that pull-path machinery does not carry over: the SSE response it
 
 Live queries bypass shared caches by nature. Deployments SHOULD terminate them on a separate tier so subscription fanout cannot degrade the cacheable read path.
 
-Deferral (Section 9.5) composes with subscriptions unchanged: the initial snapshot streams its critical phase, a `checkpoint`, then its deferred phase, and each delta re-emits changed records in whichever phase they belong to (a delta touching only deferred facts pushes them after a `checkpoint`, exactly as the snapshot did). Over SSE the `checkpoint` is one more `data:` event, and the origin flushes the dispatch at it.
+As with the base extension (Section 9.5, Reference implementation status), live deferral is specified but not implemented by the current `wireform-lattice` origin, which emits no `checkpoint` records over subscriptions. For an implementation that adds it, deferral (Section 9.5) composes with subscriptions unchanged: the initial snapshot streams its critical phase, a `checkpoint`, then its deferred phase, and each delta re-emits changed records in whichever phase they belong to (a delta touching only deferred facts pushes them after a `checkpoint`, exactly as the snapshot did). Over SSE the `checkpoint` is one more `data:` event, and the origin flushes the dispatch at it.
 
 ---
 
@@ -1763,8 +1795,8 @@ Compilation on memo miss is the only request path whose cost scales with attacke
 
 - decompressed canonical text size cap (default 64 KiB);
 - root count (`maxRoots`), fragment count, per-fragment field count, traversal-graph depth caps; `@depth` expansion and interface alternative fan-out count fully, and `@defer` selections count fully as well (deferral stages when work is delivered, not how much of it a request does, Section 9.5);
-- plan budgets: max batching rounds, max per-round fan-out (computed from each collection's `max`, whether bounded or paginated, and, for round 0, the sum across all roots' page sizes), max distinct loaders, max surrogate keys before coarsening;
-- compile timeout with `503 lattice:compile-budget`.
+- plan budgets: max batching rounds, max per-round fan-out (computed from each collection's `max`, whether bounded or paginated, and, for round 0, the sum across all roots' page sizes), max surrogate keys before coarsening;
+- compile timeout with `503 lattice:compile-budget`. **Reference implementation status:** the current `wireform-lattice` reference origin implements no compile timer and never emits this code. It is reserved for deployments that add a timeout; structural budget rejections from the reference origin are `400 lattice:compile-rejected`.
 
 Rejections for structural reasons are deterministic per canonical text, so a rejection is itself memoizable (negative caching, Section 10.8). Admission denials (Section 14.3) are the carve-out: they depend on a request header, not the text, so a `403 lattice:admission-denied` is `no-store` and never memoized: the same text arriving correctly signed must compile. CI can enforce budgets by issuing the app's query set against a staging origin, or entirely offline against the published IDL and budgets, and failing on any rejection. No registry synchronization is involved.
 
@@ -1837,7 +1869,7 @@ The two mechanisms share the `lattice:` code namespace but apply at different gr
 Mid-stream failures use the `error` record (Section 9.4), since the status line has already been sent.
 
 **Native-HTTP conformance.** The protocol reuses standard mechanisms rather than inventing parallel ones, and states where it deliberately does not:
-- Custom response headers (`Surrogate-Key`, `Lattice-Plan`, `Lattice-Snapshot`, `Lattice-Outcome`) are RFC 8941 Structured Field Values, so generic intermediaries parse them without bespoke grammars: `Surrogate-Key` is an sf-list of tokens, `Lattice-Outcome` an sf-token, the rest sf-strings.
+- Custom response headers (`Surrogate-Key`, `Lattice-Plan`, `Lattice-Snapshot`, `Lattice-Outcome`) are RFC 8941 Structured Field Values, so generic intermediaries parse them without bespoke grammars: `Surrogate-Key` is an sf-list of tokens; `Lattice-Outcome` and `Lattice-Plan` are sf-tokens; and `Lattice-Snapshot` and `Lattice-Snapshot-Floor` are sf-dictionaries whose bare domain keys map to quoted token strings.
 - `429`, `503`, and `409 lattice:key-in-flight` MUST carry `Retry-After`; any `5xx` the origin classifies as retryable SHOULD carry it. Problem-details bodies MAY additionally carry a machine-readable budget hint, but `Retry-After` is the authoritative signal a generic client honors.
 - The refs-only projection is a URL parameter (`project=refs`, Section 6.8), not a `Prefer: return=minimal` header. This is deliberate: `Prefer` would force `Vary: Prefer` and split the shared cache entry, defeating the point. Lattice uses native semantics up to the exact line where they would fragment cache identity, and puts the distinction in the URL past that line. Claims are carried in the URL rather than a `Vary`-ed header for the same reason (Section 8.2).
 - After a `QUERY` or `POST` introduction (Section 6.3, 6.4), the response carries `Content-Location: /q/{hash}?p={planId}&slice=...`, the canonical cacheable GET the client should use thereafter, so the introduction round trip teaches the client its steady-state URL through a standard header.
@@ -1897,7 +1929,7 @@ Content-Type: application/x-lattice-idl
 <candidate IDL>
 ```
 
-returning a structured report; nonempty breaks fail the pipeline unless each carries an approved override annotation in the IDL (`@break(approved: "LEDGER-1234")`, attached to the changed declaration in the candidate). A removal has no declaration left to annotate, so the override attaches to the nearest surviving enclosure: the entity or interface for a removed field or relationship, the surviving field, root, or mutation for a removed argument or a changed default, and the `schema` declaration for a removed top-level declaration. An omitted `mode` parameter means `client-backward`, non-transitive: the default gate is the one protecting deployed clients. The HTTP status describes the check request, not the verdict: a well-formed candidate that was checked returns `200` with the report (whose `pass` field carries the verdict); only an unparseable candidate or unknown mode is a `4xx`. CI gates read the body, not the status line.
+returning a structured report; nonempty breaks fail the pipeline unless each carries an approved override annotation in the IDL (`@break(approved: "LEDGER-1234")`, attached to the changed declaration in the candidate). A removal has no declaration left to annotate, so the override attaches to the nearest surviving enclosure: the entity or interface for a removed field or relationship, the surviving field, root, or mutation for a removed argument or a changed default, and the `schema` declaration for a removed top-level declaration. An omitted `mode` parameter means `client-backward`, non-transitive: the default gate is the one protecting deployed clients. The HTTP status describes the check request, not the verdict: a well-formed candidate that was checked returns `200` with the report (whose `pass` field carries the verdict); only an unparseable candidate (400), an unknown `mode` or unparseable `window` (400), or a candidate not sent as `application/x-lattice-idl` (415) is a `4xx`; a candidate that was checked is always `200` regardless of verdict. CI gates read the body, not the status line.
 
 ### 17.4 Corpus-aware checking
 
@@ -1972,13 +2004,19 @@ Composition conflicts (two owners for one type, one field declared by two upstre
 
 The gateway's published IDL is the deterministic fusion of the upstream IDLs, content-addressed like any schema. Plan identity composes the same way it is defined: a fused query's pertinent declarations are drawn from whichever upstreams own them, so an upstream deployment disturbs exactly the fused plans whose pertinent declarations it changed, with no fused-wide churn. (Earlier drafts derived a fused epoch from the vector of upstream epochs, which made any upstream bump churn the entire fused surface. Per-query plan identity dissolves that problem rather than tuning it.)
 
-A gateway's grace period for a superseded fused plan is bounded by its ability to keep serving the constituent subplans. That is a local capability check against each upstream, not a coordinated window. Fusion itself runs through the Section 17 checker: an upstream deploy is checked not only against its own corpus but against the fused corpus, before the gateway adopts it.
+A gateway's grace period for a superseded fused plan is bounded by its ability to keep serving the constituent subplans. That is a local capability check against each upstream, not a coordinated window. Fusion itself may run through the Section 17 checker: an upstream deploy can be checked not only against its own corpus but against the fused corpus before the gateway adopts it.
+
+> **Reference implementation status.** The reference `wireform-lattice` gateway validates fusion conflicts at construction through `fuseModules` but does not run the Section 17 compatibility checker against a fused corpus before adopting an upstream. Deployments perform that specified adoption gate separately in CI.
 
 ### 18.3 Query planning across upstreams
 
 The gateway compiles a fused query into per-upstream subplans. Each subplan **is itself a Lattice query** in the upstream's schema, canonicalized, content-addressed, and issued as a hash-form GET with the standard ladder for introduction. This is the central payoff of content addressing at this layer: the gateway-to-upstream hop is ordinary cacheable HTTP, so shared caches may sit between gateway and upstream and behave correctly. A GraphQL federation gateway's bespoke subgraph POSTs forfeit that hop entirely. A fused deployment can run CDN, gateway, CDN, upstream, and every layer keeps RFC 9111 semantics.
 
-Cross-upstream joins use the `nodes` root (Section 14.4). Gateways authenticate to upstreams as service principals that satisfy the relevant `nodes` policies. An upstream that only *extends* a foreign type still has to serve `nodes` fetches for it, and an extension cannot declare `fetch by` (that is the owner's authority), so a standalone extension upstream serves a schema containing a fetchable *stub skeleton* of the foreign type (key fields plus its own extension members) alongside publishing its extend-form module IDL for fusion; the two documents describe the same truth at two granularities, one for serving, one for composition. Gateway execution is the same round structure as local planning, lifted one level: each round collects, across the whole fused plan, the full key set needed from each upstream, and issues one `nodes` query per upstream per round. Set-in map-out loaders at the upstream then batch internally as usual. N+1 across service boundaries is inexpressible for the same reason it is locally: there is no per-entity call in the plan algebra.
+Cross-upstream joins use the `nodes` root (Section 14.4). Gateways authenticate to upstreams as service principals that satisfy the relevant `nodes` policies. An upstream that only *extends* a foreign type still has to serve `nodes` fetches for it, and an extension cannot declare `fetch by` (that is the owner's authority), so a standalone extension upstream serves a schema containing a fetchable *stub skeleton* of the foreign type (key fields plus its own extension members) alongside publishing its extend-form module IDL for fusion; the two documents describe the same truth at two granularities, one for serving, one for composition.
+
+The stub's `fetch by` and `nodes` policies are the extension upstream's own declaration, typically a service-principal gate (Section 14.4). They authorize gateway `nodes` fetches for the extension members and grant no authority over owner fields.
+
+Gateway execution is the same round structure as local planning, lifted one level: each round collects, across the whole fused plan, the full key set needed from each upstream, and issues one `nodes` query per upstream per round. Set-in map-out loaders at the upstream then batch internally as usual. N+1 across service boundaries is inexpressible for the same reason it is locally: there is no per-entity call in the plan algebra.
 
 Root pagination composes through cursor derivability rather than forwarding: the manifest's root arrays are plain refs (Section 9.2), so a gateway cannot relay an upstream's cursor envelope and does not need to; it MUST select the keyset columns of any paginated root or edge in its subqueries, so both it and its clients can mint resumption cursors from boundary items exactly as Section 3.2 prescribes.
 
@@ -2003,6 +2041,8 @@ flowchart TD
 ### 18.4 Wire composition
 
 Because responses are normalized entity streams, the gateway performs no tree stitching. It forwards upstream records as they arrive, tagged with `src`, interleaved by its own plan priorities, and synthesizes a single fused manifest. Scoped errors forward with their scopes intact, so one upstream's partial failure degrades exactly that upstream's entities. Deferral, partial loading, and the client store all work unchanged. A client cannot tell federated from monolithic by the record stream, only by the snapshot header's domain namespaces (Section 13.1):
+
+> **Reference implementation status.** The reference `wireform-lattice` gateway is record-stream transparent for materialized buffered responses only. Live SSE responses are unsplit and omit `src`; parameterized computed fields on federated types elide; interface-targeted edges and roots across upstreams are unsupported and report `lattice:internal`; and deferred delivery is unavailable because the reference origin does not implement Section 9.5. These are reference-gateway limitations, not protocol constraints.
 
 Explicit `@defer` (Section 9.5) composes here without new machinery: a fused query's deferred selections are deferred in the corresponding upstream subplans, each subplan's deferred records forward in the fused response's deferred phase tagged with `src`, and the gateway emits its own `checkpoint` once every upstream has delivered its critical phase. `patch` records forward like any other, since a fused entity is still keyed by identity.
 
@@ -2034,7 +2074,7 @@ A mutation belongs to exactly one upstream and the gateway routes it whole, forw
 
 ### 18.8 Authorization across upstreams
 
-The fused claim registry is the union of upstream registries (Section 18.1 conflicts aside). The gateway verifies the inbound proof once, then re-mints per-upstream payload/proof pairs containing only the claims each upstream's registry declares. Each re-minted proof MUST use the same proof construction as a directly issued visibility proof (Section 8.3) and MUST be signed with a key whose trust the upstream established out of band (the gateway registers as a service principal, Section 18.3); an upstream MUST reject a re-minted proof signed by an unregistered key with `401 lattice:proof-expired`. Key distribution and rotation are a deployment concern outside protocol scope. Narrowing a payload preserves its coarseness, so upstream-side cache sharing on the `vc` parameter is at least as effective as at the gateway. A caller whose verified claims cannot cover an upstream subplan's required claims gets that subtree skipped, exactly as if the gate had evaluated false; the gateway never manufactures authority it was not presented, and a missing claim is a policy outcome, not a `401`. Upstreams keep sole authority over their field, edge, root, and `nodes` policies; the gateway computes the fused partition compositionally from them via the path join, which is well-defined because every policy has exactly one owner.
+The fused claim registry is the union of upstream registries (Section 18.1 conflicts aside). The gateway verifies the inbound proof once, then re-mints per-upstream payload/proof pairs containing only the claims each upstream's registry declares. Each re-minted proof MUST use the same proof construction as a directly issued visibility proof (Section 8.2) and MUST be signed with a key whose trust the upstream established out of band (the gateway registers as a service principal, Section 18.3); an upstream MUST reject a re-minted proof signed by an unregistered key with `401 lattice:proof-expired`. Key distribution and rotation are a deployment concern outside protocol scope. Narrowing a payload preserves its coarseness, so upstream-side cache sharing on the `vc` parameter is at least as effective as at the gateway. A caller whose verified claims cannot cover an upstream subplan's required claims gets that subtree skipped, exactly as if the gate had evaluated false; the gateway never manufactures authority it was not presented, and a missing claim is a policy outcome, not a `401`. Upstreams keep sole authority over their field, edge, root, and `nodes` policies; the gateway computes the fused partition compositionally from them via the path join, which is well-defined because every policy has exactly one owner.
 
 ---
 
@@ -2045,6 +2085,8 @@ Lattice deployments SHOULD emit OpenTelemetry signals following this section's c
 ### 19.1 Context propagation
 
 W3C Trace Context (`traceparent`, `tracestate`) propagates on every request: client to origin, gateway to upstream, resource-mode point fetches, and mutation POSTs. Two rules beyond the standard:
+
+> **Reference implementation status.** The reference `wireform-lattice` origin parses inbound `traceparent` and therefore propagates trace and span identifiers, but does not yet parse `tracestate` into the remote context. `tracestate` propagation remains required by this section for an implementation that adds a W3C propagator.
 
 - **The outbox carries context.** Each outbox row stores the span context of its committing transaction. Relay work (CDN purges, live-query re-execution, `Maintained` derivation recomputation, feed publication) creates spans that **link** to the originating mutation's span rather than parenting under it, since the work occurs outside the request lifetime. `Workflow` mutations store the initiating context on the Operation entity, and each workflow step links to it.
 
@@ -2125,6 +2167,8 @@ This chapter is non-normative, but the protocol was designed assuming these tool
 
 Canonicalization, hashing, partition, planning, and compatibility diffing are deterministic functions and MUST agree bit-for-bit across every SDK, editor plugin, and origin (a normative requirement of Sections 5 and 6); otherwise content addressing quietly fragments. This chapter, otherwise non-normative, describes the tooling that makes that agreement inspectable and testable. The intended mechanism is a single reference implementation shipped as a CLI, plus a test-vector corpus in the specification repository that every independent implementation runs in CI:
 
+> **Reference implementation status.** The deterministic capabilities of the current `wireform-lattice` reference implementation ship today as library APIs: `Lattice.Canonical.compileText`, `Lattice.Hash.queryHash` and `schemaHash`, `Lattice.Plan.planQuery` and `explainJson`, and `Lattice.Compat.diffSchemas`. The editor services ship in `@wireform/lattice/explorer`. A standalone `lattice` CLI, an LSP server, and a specification-repository test-vector corpus are design intent and are not yet shipped.
+
 ```
 lattice canon  <query.lq>                      -- canonical text
 lattice hash   <query.lq>                      -- query hash
@@ -2141,7 +2185,8 @@ An IDL and query-language LSP falls out of the same codebase and makes the SELEC
 `GET /q/{hash}/explain` (and `lattice plan` offline) returns the compiled plan as data:
 
 - per plan element: its path, the policy join derivation (`feed@root:Claims{org} ⊔ title:Public = Claims{org}`), and the resulting slice, which is the exact answer to "why is this field not publicly cached";
-- per plan element: its cache-policy meet (`feed@root:s-maxage=30s ⊓ price:no-cache ⊓ signedUrl:no-store = no-store`) and the resulting response `Cache-Control`, the dual of the visibility join above and the exact answer to "why is this response not cacheable" (Section 10.9);
+- per plan element: its cache-policy meet and the resulting response `Cache-Control`, for an implementation that adds the Section 10.9 declared-cache-policy extension;
+  The current `wireform-lattice` `explainJson` omits this element because it does not implement declared cache policy.
 - rounds: which loaders batch together at each depth, with the fan-out bound per round;
 - surrogate keys with the collection and grouping key that produced each;
 - per entity type: the requested projection (Section 3.1) the plan hands its loaders, as a field-name array (`"*"` where a computed field forces whole rows) — the exact answer to "which columns does this query make my storage read";
@@ -2164,6 +2209,8 @@ data UserByline = UserByline
 ```
 
 The client store is typed as a heterogeneous map keyed by (entity type, key), where each entry carries the union of fragments the store has observed and per-fragment projection functions. In TypeScript, each fragment is an exact interface and the store narrows by discriminated `__type`. Schema fragments generate once and are imported by every query's generated module. Parameterized fragments generate functions of their parameters where the target language supports it, and monomorphic instantiations where it does not. Interface edges generate sum types over the declared alternatives plus a ref-only case for unlisted implementors, which makes the Section 4.5 placeholder path a compiler-enforced branch rather than a forgotten one.
+
+> **Reference implementation status.** The reference `wireform-lattice` implementation ships Haskell code generation through `Lattice.TH.latticeTypes`. TypeScript and Rust code generation described here are design intent and are not yet shipped.
 
 ### 20.4 Development mode
 

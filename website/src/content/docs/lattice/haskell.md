@@ -254,13 +254,13 @@ cabal run example-lattice
 ```
 
 The walkthrough below assumes the demo's default address,
-`http://localhost:8080`. The executable prints its address on startup.
+`http://localhost:8917`. The executable prints its address on startup.
 
 **Discovery** (§7.1). One small, cacheable document names the endpoints,
 budgets, and the current content-addressed schema:
 
 ```bash
-curl -s http://localhost:8080/.well-known/lattice
+curl -s http://localhost:8917/.well-known/lattice
 ```
 
 ```json
@@ -269,8 +269,10 @@ curl -s http://localhost:8080/.well-known/lattice
   "schema":    { "current": "/schema/sQ81xZ0v" },
   "admission": "open",
   "queryMediaType": "application/x-lattice-query",
-  "methods":   { "introduce": ["POST"] },
-  "budgets":   { "maxDepth": 12, "maxRoots": 8, "maxRounds": 8 }
+  "methods":   { "introduce": ["QUERY", "POST"] },
+  "dictionary": { "current": "/schema/dict/...", "algorithm": "deflate-raw/9" },
+  "budgets":   { "maxCanonicalBytes": 65536, "maxDepth": 12, "maxRoots": 8, "maxRounds": 8, "maxRoundFanout": 10000, "maxSurrogateKeys": 256, "maxBatchItems": 500, "maxPageDefault": 100, "coalesceWindowMs": 5 },
+  "idempotency": { "defaultRetention": "PT24H" }
 }
 ```
 
@@ -278,7 +280,7 @@ curl -s http://localhost:8080/.well-known/lattice
 memoizes it, and grants the steady-state GET URL via `Location`:
 
 ```bash
-curl -si 'http://localhost:8080/q?intent=introduce' \
+curl -si 'http://localhost:8917/q?intent=introduce' \
   -H 'Content-Type: application/x-lattice-query' \
   --data 'query Hero { hero { name friends(first: 10) { name } } }'
 ```
@@ -305,7 +307,7 @@ and an `end` record that holds the weak manifest etag.
 a stable cache key on any RFC 9111 cache:
 
 ```bash
-curl -s 'http://localhost:8080/q/8f2c41a9…?p=pl_9dK2…&slice=pub'
+curl -s 'http://localhost:8917/q/8f2c41a9…?p=pl_9dK2…&slice=pub'
 ```
 
 `GET /q/{hash}/source` and `GET /q/{hash}/explain` (§7.2) return the canonical
@@ -315,8 +317,8 @@ text and the compiled plan for any memoized hash.
 any selection); pinning a `ver` makes the response immutable:
 
 ```bash
-curl -s 'http://localhost:8080/e/Human/1000?f=appearsIn,name'
-curl -si 'http://localhost:8080/e/Human/1000?ver=e41&f=name'   # Cache-Control: …, immutable
+curl -s 'http://localhost:8917/e/Human/1000?f=appearsIn,name'
+curl -si 'http://localhost:8917/e/Human/1000?ver=e41&f=name'   # Cache-Control: …, immutable
 ```
 
 **Mutation with an idempotency key** (§11). Mutations are named,
@@ -325,7 +327,7 @@ entity stream that holds post-mutation state (read-your-writes with zero
 follow-up requests) and an `invalidated` record that mirrors the purge set:
 
 ```bash
-curl -s http://localhost:8080/m/createReview \
+curl -s http://localhost:8917/m/createReview \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: order-2041-review' \
   -d '{"episode":"Jedi","stars":5,"commentary":"Great!"}'

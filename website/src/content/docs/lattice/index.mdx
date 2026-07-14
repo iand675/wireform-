@@ -219,6 +219,7 @@ entities and collection ranges it may modify.
 
 ```lattice
 mutation publishPost(post: PostId) returns Post {
+  allow when  caller.role in [Editor, Admin]
   writes      Post(post), feed(Post.orgId), bookmarks(Post.authorId)
   invalidates writes
   effect      natural "set-to-state"
@@ -368,6 +369,7 @@ haddock, so nothing here is missing by accident:
 
 | What | Note |
 |---|---|
+| Declared cache policy (`cache` clause, Sections 3.4 and 10.9) | not implemented: the reference origin emits per-slice `Cache-Control` defaults, but does not parse, model, or apply schema-declared cache overrides |
 | In-process fused emission | one merged record per entity, `ver` = owner's; the gateway emits the true per-module records with `src` |
 | TS client and federation | the TS store merges src-less records only; federated responses are Haskell-client territory for now |
 | §17.5 traffic-threshold gate | the checker gates on sunset + corpus weights; a traffic threshold is deployment configuration |

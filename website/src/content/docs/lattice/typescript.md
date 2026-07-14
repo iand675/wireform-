@@ -24,8 +24,7 @@ consistent-cut test (`max floors <= min tokens` per domain over the
 `Lattice-Snapshot-Floor`/`Lattice-Snapshot` headers) is one function call.
 
 :::note
-The library is landing alongside this page; API names below follow its
-public surface and the page will firm up with it.
+APIs on this page track `@wireform/lattice` 0.1.0.
 :::
 
 ## Queries

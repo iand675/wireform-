@@ -178,13 +178,7 @@ clock.
 
 ## Read-your-writes
 
-A mutation response carries the token at which its effects became visible. Any
-later read whose token is at or above that one reflects the change. The reference
-client remembers your latest write token and holds subsequent reads to it, so
-saving something and then missing it on reload cannot happen through the cache.
-This rides token comparison, not cache timing, so it holds while a purge is still
-propagating. (Spec: [§13.2 guarantee 4](./spec/#_13-consistency-model),
-[§11.6](./spec/#_11-mutations).)
+The protocol turns this into a comparison rather than a timeout (Section 11.6): a client should carry `Cache-Control: no-cache` on a query it just invalidated until it observes a response whose `Lattice-Snapshot` is at or above the mutation's. The reference SDKs apply a mutation's `entity` and `tombstone` records directly to the local store, and mark cached results whose surrogate keys intersect the mutation's `invalidated` record as stale. The next affected read revalidates through the shared cache with `no-cache`; the token comparison is the guarantee checked by `LatticeInvalidation.tla`, not yet an automatic until-satisfied loop in either SDK.
 
 ## Snapshot domains
 
@@ -247,12 +241,15 @@ computes the rest.
    -- Postgres: the current WAL position
    beSnapshot = pg "SELECT pg_current_wal_lsn()"   -- "0/5A3F1B00"
 
-   -- The reference in-memory backend bumps a counter on the first read after a write
-   snapshotToken db = atomically $ do
-     whenM (readTVar (dbDirty db)) $ do
+   -- The reference in-memory backend bumps a counter on the first read after a write.
+   -- This is pure STM; beSnapshot wraps snapshotToken in atomically.
+   snapshotToken db = do
+     dirty <- readTVar (dbDirty db)
+     when dirty $ do
        modifyTVar' (dbSnapshotCounter db) (+ 1)
        writeTVar (dbDirty db) False
-     ("mem:" <>) . tshow <$> readTVar (dbSnapshotCounter db)
+     n <- readTVar (dbSnapshotCounter db)
+     pure ("mem:" <> tshow n)
    ```
 
    The token is opaque text; it only needs to compare. An LSN, a commit counter,
