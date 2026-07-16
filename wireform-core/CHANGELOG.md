@@ -1,5 +1,11 @@
 # Changelog for wireform-core
 
+
+## 0.2.0.1 -- 2026-07-16
+
+* Make `Wireform.Transport.Send` ring-capacity tests portable across
+  operating-system page sizes.
+
 ## 0.2.0.0 -- 2026-07-16
 
 * `Wireform.Base64` -- RFC 4648 §4 base64 encode / decode.  SSSE3
