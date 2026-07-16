@@ -82,36 +82,40 @@ spec = describe "SendTransport" $ do
       readChunks bytes `shouldBe` patternBytes 100
 
     it "sends exactly ringSize bytes" $ do
-      (bytes, _) <- withTestTransport 4096 $ \t -> do
-        let sz = sendRingSize t
+      sz <- ringSizeAt 4096
+      (bytes, _) <- withTestTransport 4096 $ \t ->
         sendBuilderDirect t (patternBuilder sz)
-      readChunks bytes `shouldBe` patternBytes 4096
+      readChunks bytes `shouldBe` patternBytes sz
 
     it "sends ringSize - 1 bytes" $ do
-      (bytes, _) <- withTestTransport 4096 $ \t -> do
-        let sz = sendRingSize t - 1
-        sendBuilderDirect t (patternBuilder sz)
-      readChunks bytes `shouldBe` patternBytes 4095
+      sz <- ringSizeAt 4096
+      (bytes, _) <- withTestTransport 4096 $ \t ->
+        sendBuilderDirect t (patternBuilder (sz - 1))
+      readChunks bytes `shouldBe` patternBytes (sz - 1)
 
     it "sends ringSize + 1 bytes (forces overflow)" $ do
+      sz <- ringSizeAt 16384
       (bytes, _) <- withTestTransport 16384 $ \t ->
-        sendBuilderDirect t (patternBuilder 16385)
-      readChunks bytes `shouldBe` patternBytes 16385
+        sendBuilderDirect t (patternBuilder (sz + 1))
+      readChunks bytes `shouldBe` patternBytes (sz + 1)
 
     it "sends 2x ringSize bytes" $ do
-      let n = 8192
+      sz <- ringSizeAt 4096
+      let n = sz * 2
       (bytes, _) <- withTestTransport 4096 $ \t ->
         sendBuilderDirect t (patternBuilder n)
       readChunks bytes `shouldBe` patternBytes n
 
     it "sends 5x ringSize bytes" $ do
-      let n = 20480
+      sz <- ringSizeAt 4096
+      let n = sz * 5
       (bytes, _) <- withTestTransport 4096 $ \t ->
         sendBuilderDirect t (patternBuilder n)
       readChunks bytes `shouldBe` patternBytes n
 
     it "sends 10x ringSize bytes" $ do
-      let n = 40960
+      sz <- ringSizeAt 4096
+      let n = sz * 10
       (bytes, _) <- withTestTransport 4096 $ \t ->
         sendBuilderDirect t (patternBuilder n)
       readChunks bytes `shouldBe` patternBytes n
@@ -198,10 +202,10 @@ spec = describe "SendTransport" $ do
       readChunks bytes `shouldBe` BS.singleton 0xAB
 
     it "sends exactly ringSize bytes" $ do
-      (bytes, _) <- withTestTransport 4096 $ \t -> do
-        let sz = sendRingSize t
+      sz <- ringSizeAt 4096
+      (bytes, _) <- withTestTransport 4096 $ \t ->
         sendByteString t (patternBytes sz)
-      readChunks bytes `shouldBe` patternBytes 4096
+      readChunks bytes `shouldBe` patternBytes sz
 
     it "sendByteStringMany coalesces" $ do
       let bss = [patternBytes 100, patternBytes 200, patternBytes 50]
@@ -215,8 +219,8 @@ spec = describe "SendTransport" $ do
   -- ----------------------------------------------------------------
   describe "sendByteString limits" $ do
     it "throws SendReservationTooLarge for BS > ringSize" $ do
-      let payload = patternBytes 5000
       threw <- withMagicRing 4096 $ \ring -> do
+        let payload = patternBytes (ringSize ring + 1)
         headRef' <- newIORef (0 :: Word64)
         tailRef' <- newIORef (0 :: Word64)
         let t' =
@@ -297,18 +301,19 @@ spec = describe "SendTransport" $ do
       readIORef pubs `shouldReturn` 1
 
     it "corked payload exactly ring size" $ do
-      (bytes, _) <- withTestTransport 4096 $ \t -> do
-        let sz = sendRingSize t
+      sz <- ringSizeAt 4096
+      (bytes, _) <- withTestTransport 4096 $ \t ->
         withSendCork t $ \corked ->
           sendBuilderDirect corked (patternBuilder sz)
-      readChunks bytes `shouldBe` patternBytes 4096
+      readChunks bytes `shouldBe` patternBytes sz
 
   -- ----------------------------------------------------------------
   -- withSendCork: backpressure
   -- ----------------------------------------------------------------
   describe "withSendCork backpressure" $ do
     it "builder payload 2x ring" $ do
-      let n = 8192
+      sz <- ringSizeAt 4096
+      let n = sz * 2
       (bytes, pubs) <- withTestTransport 4096 $ \t ->
         withSendCork t $ \corked ->
           sendBuilderDirect corked (patternBuilder n)
@@ -316,21 +321,24 @@ spec = describe "SendTransport" $ do
       readIORef pubs >>= (`shouldSatisfy` (> 1))
 
     it "builder payload 5x ring" $ do
-      let n = 20480
+      sz <- ringSizeAt 4096
+      let n = sz * 5
       (bytes, _) <- withTestTransport 4096 $ \t ->
         withSendCork t $ \corked ->
           sendBuilderDirect corked (patternBuilder n)
       readChunks bytes `shouldBe` patternBytes n
 
     it "builder payload 10x ring" $ do
-      let n = 40960
+      sz <- ringSizeAt 4096
+      let n = sz * 10
       (bytes, _) <- withTestTransport 4096 $ \t ->
         withSendCork t $ \corked ->
           sendBuilderDirect corked (patternBuilder n)
       readChunks bytes `shouldBe` patternBytes n
 
     it "byteString insert > ring inside cork" $ do
-      let payload = patternBytes 15000
+      sz <- ringSizeAt 4096
+      let payload = patternBytes (sz + 1)
       (bytes, pubs) <- withTestTransport 4096 $ \t ->
         withSendCork t $ \corked ->
           sendBuilderDirect corked (byteString payload)
@@ -338,31 +346,30 @@ spec = describe "SendTransport" $ do
       readIORef pubs >>= (`shouldSatisfy` (> 1))
 
     it "many small sends exceeding ring" $ do
+      sz <- ringSizeAt 4096
       let chunk = patternBytes 500
-          numChunks = 30 :: Int
+          numChunks = sz `quot` BS.length chunk + 1
       (bytes, _) <- withTestTransport 4096 $ \t ->
         withSendCork t $ \corked ->
           mapM_ (\_ -> sendByteString corked chunk) [1 .. numChunks]
       readChunks bytes `shouldBe` BS.concat (replicate numChunks chunk)
 
     it "many small builders exceeding ring" $ do
-      let numBuilders = 200 :: Int
+      sz <- ringSizeAt 4096
+      let numBuilders = sz `quot` 4 + 1
       (bytes, _) <- withTestTransport 4096 $ \t ->
         withSendCork t $ \corked ->
           mapM_
-            ( \i ->
-                sendBuilderDirect
-                  corked
-                  (word32BE (fromIntegral i))
-            )
+            (sendBuilderDirect corked . word32BE . fromIntegral)
             [0 .. numBuilders - 1]
       let expected =
             toStrictByteString $
-              mconcat (fmap (\i -> word32BE (fromIntegral i)) [0 .. numBuilders - 1 :: Int])
+              mconcat (fmap (word32BE . fromIntegral) [0 .. numBuilders - 1 :: Int])
       readChunks bytes `shouldBe` expected
 
     it "interleaved builder + BS exceeding ring" $ do
-      let n = 20 :: Int
+      sz <- ringSizeAt 4096
+      let n = sz `quot` 204 + 1
       (bytes, _) <- withTestTransport 4096 $ \t ->
         withSendCork t $ \corked ->
           mapM_
@@ -408,7 +415,7 @@ spec = describe "SendTransport" $ do
       (bytes, _) <- withTestTransport 65536 $ \t -> do
         withSendCork t $ \c ->
           sendByteString c (patternBytes 50)
-        mapM_ (\i -> sendByteString t (BS.singleton (fromIntegral i))) [0 .. 9 :: Int]
+        mapM_ (sendByteString t . BS.singleton . fromIntegral) [0 .. 9 :: Int]
       readChunks bytes
         `shouldBe` BS.append (patternBytes 50) (BS.pack [0 .. 9])
 
@@ -454,6 +461,10 @@ spec = describe "SendTransport" $ do
 ------------------------------------------------------------------------
 -- Test infrastructure
 ------------------------------------------------------------------------
+
+ringSizeAt :: Int -> IO Int
+ringSizeAt requested = withMagicRing requested (pure . ringSize)
+
 
 withTestTransport
   :: Int
