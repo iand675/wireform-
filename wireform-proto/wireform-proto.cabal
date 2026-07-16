@@ -1,6 +1,6 @@
 cabal-version: 3.0
 name: wireform-proto
-version: 0.1.0.0
+version: 0.2.0.0
 synopsis: Protocol Buffers (proto2/proto3) with IDL parser, code generation, JSON mapping
 description:
   A high-performance Protocol Buffers implementation for Haskell.
@@ -172,7 +172,7 @@ library
     Proto.Internal.Maybe
   build-depends:
     base >= 4.16 && < 5,
-    wireform-core == 0.1.*,
+    wireform-core == 0.2.*,
     wireform-derive == 0.2.*,
     bytestring >= 0.11 && < 0.13,
     containers >= 0.6 && < 0.9,

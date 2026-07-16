@@ -1,5 +1,22 @@
 # Changelog for wireform-proto
 
+
+## 0.2.0.0 -- 2026-07-16
+
+Breaking release from 0.1.0.0.
+
+* Rename generated well-known-type modules to match their canonical
+  `google.protobuf` package paths (for example,
+  `Proto.Google.Protobuf.Timestamp`).
+* Replace the legacy public wire codec surface with `Proto.Encode` and
+  `Proto.Decode`, and add collecting decode diagnostics in
+  `Proto.Decode.Collect`.
+* Add `Proto.JSONSchema`, a draft-2020-12 / OpenAPI 3.1 schema generator
+  aligned with the proto3 JSON mapping.
+* Update `loadProto`, code generation, well-known types, dynamic messages,
+  extensions, text format, compatibility, and tests to the current
+  wireform-derive and wireform-core APIs.
+
 ## 0.1.0.0 -- 2026
 
 Initial release.

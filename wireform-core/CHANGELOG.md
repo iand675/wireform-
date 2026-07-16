@@ -1,6 +1,6 @@
 # Changelog for wireform-core
 
-## Unreleased
+## 0.2.0.0 -- 2026-07-16
 
 * `Wireform.Base64` -- RFC 4648 §4 base64 encode / decode.  SSSE3
   (via simde) inner loop for the encoder (12 input bytes -> 16
