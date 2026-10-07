@@ -2,6 +2,7 @@ module Test.Arrow (arrowTests) where
 
 import Arrow.Column
 import Arrow.File
+import Arrow.FlatBufferIPC (materializeRecordBatchFB)
 import Arrow.IPC
 import Arrow.Types
 import Arrow.Write
@@ -292,7 +293,7 @@ edgeCases =
             Left _ -> pure ()
             Right _ -> expectationFailure "expected error on empty input"
       , it "DictionaryBatch roundtrip" $ do
-          let msg = DictionaryBatch
+          let msg = DictionaryBatch 3 True emptyBatchDef
           decodeIPCMessage (encodeIPCMessage msg) `shouldBe` Right msg
       , it "Field with empty name" $ do
           let msg =
@@ -322,13 +323,13 @@ wireFormatTests =
     "Wire format"
     $ sequence_
       [ it "Starts with continuation 0xFFFFFFFF" $ do
-          let bs = encodeIPCMessage DictionaryBatch
+          let bs = encodeIPCMessage (DictionaryBatch 0 False emptyBatchDef)
           BS.index bs 0 `shouldBe` 0xFF
           BS.index bs 1 `shouldBe` 0xFF
           BS.index bs 2 `shouldBe` 0xFF
           BS.index bs 3 `shouldBe` 0xFF
       , it "Metadata is 8-byte aligned" $ do
-          let bs = encodeIPCMessage DictionaryBatch
+          let bs = encodeIPCMessage (DictionaryBatch 0 False emptyBatchDef)
               metaLen =
                 fromIntegral (BS.index bs 4)
                   + fromIntegral (BS.index bs 5) * 256
@@ -602,15 +603,19 @@ writeRoundtrips =
                   }
               vals = VP.fromList [1, 2, 3, 4, 5] :: VP.Vector Int32
               cols = V.singleton (ColInt32 vals)
-              batchBs = buildRecordBatch schema cols
-          case readIPCMessage batchBs 0 of
+              streamBs = writeArrowStream schema (V.singleton cols)
+          case readIPCMessage streamBs 0 of
             Left e -> expectationFailure e
-            Right (msg, body, _) -> case msg of
-              RecordBatch rb ->
-                case materializeRecordBatch schema rb body of
-                  Left e2 -> expectationFailure e2
-                  Right result -> V.head result `shouldBe` ColInt32 vals
-              _ -> expectationFailure "Expected RecordBatch message"
+            Right (SchemaMessage s, _, next) -> do
+              s `shouldBe` schema
+              case readIPCMessage streamBs next of
+                Left e -> expectationFailure e
+                Right (RecordBatch rb, body, _) ->
+                  case materializeRecordBatchFB schema rb body of
+                    Left e2 -> expectationFailure e2
+                    Right result -> V.head result `shouldBe` ColInt32 vals
+                Right _ -> expectationFailure "Expected RecordBatch message"
+            Right _ -> expectationFailure "Expected Schema message"
       , it "Arrow stream round-trip" $ do
           let schema =
                 Schema
@@ -635,7 +640,7 @@ writeRoundtrips =
               asSchema as `shouldBe` schema
               V.length (asBatches as) `shouldBe` 1
               let (rb, body) = V.head (asBatches as)
-              case materializeRecordBatch schema rb body of
+              case materializeRecordBatchFB schema rb body of
                 Left e2 -> expectationFailure e2
                 Right result -> do
                   result V.! 0 `shouldBe` ColInt32 (VP.fromList [10, 20, 30])
@@ -670,3 +675,7 @@ writeRoundtrips =
 
 leI32 :: Int32 -> BS.ByteString
 leI32 = BL.toStrict . B.toLazyByteString . B.int32LE
+
+
+emptyBatchDef :: RecordBatchDef
+emptyBatchDef = RecordBatchDef 0 V.empty V.empty V.empty Nothing

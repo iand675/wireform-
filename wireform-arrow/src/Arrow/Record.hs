@@ -471,9 +471,14 @@ timestampD =
     (expectCol "ColTimestampMaybe" $ \case ColTimestampMaybe v -> Right v; o -> expectErr "ColTimestampMaybe" o)
 
 
--- Internal helpers shared by every primitive decoder.
+{- | Internal helper shared by every primitive decoder. Dictionary-encoded
+columns are expanded first ('AC.expandDictionary'), so a primitive
+decoder reads a dictionary column of its value type directly, and its
+nullable variant reads a 'ColDictionaryMaybe' (null index rows become
+'Nothing').
+-}
 expectCol :: String -> (ColumnArray -> Either String b) -> ColumnArray -> Either String b
-expectCol _ k = k
+expectCol _ k col = AC.expandDictionary col >>= k
 
 
 expectErr :: String -> ColumnArray -> Either String a

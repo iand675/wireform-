@@ -106,6 +106,24 @@ jobs:
           cabal test wireform-dst-net:http1-explore --test-show-details=streaming
           cabal test wireform-dst-net:websocket-explore --test-show-details=streaming
           cabal test wireform-state-machine:wireform-state-machine-test --test-show-details=streaming
+          cabal test wireform-arrow:wireform-arrow-test --test-show-details=streaming
+          cabal test wireform-arrow:wireform-arrow-derive-test --test-show-details=streaming
+
+      - name: Install pyarrow for Arrow interop
+        # ubuntu-latest's system python is PEP 668 externally managed,
+        # so install into a throwaway venv instead of --user.
+        run: |
+          python3 -m venv "$RUNNER_TEMP/pyarrow-venv"
+          "$RUNNER_TEMP/pyarrow-venv/bin/pip" install pyarrow
+
+      - name: Run Arrow pyarrow interop suite
+        # Both directions: wireform-arrow writes and pyarrow validates,
+        # pyarrow writes and wireform-arrow decodes. REQUIRE makes a
+        # missing pyarrow a failure instead of a skip.
+        env:
+          WIREFORM_ARROW_PYTHON: ${{ runner.temp }}/pyarrow-venv/bin/python
+          WIREFORM_ARROW_REQUIRE_PYARROW: '1'
+        run: cabal test wireform-arrow:wireform-arrow-pyarrow-interop --test-show-details=streaming
 
   hlint:
     name: HLint

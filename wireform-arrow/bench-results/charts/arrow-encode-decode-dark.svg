@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 400" width="720" height="400" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif" font-size="12">
+  <rect x="0" y="0" width="720" height="400" fill="#0d1117"/>
+  <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#e6edf3">wireform-arrow IPC stream encode + decode (100k rows)</text>
+  <text x="360" y="44" text-anchor="middle" font-size="11" fill="#7d8590">lower is better · µs · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5</text>
+  <g stroke="#30363d" stroke-width="1">
+    <line x1="80" y1="320" x2="700" y2="320"/>
+    <line x1="80" y1="60" x2="80" y2="320"/>
+  </g>
+  <g>
+    <g/>
+    <text x="72" y="324" text-anchor="end" font-size="10" fill="#7d8590">0</text>
+    <line x1="80" y1="255" x2="700" y2="255" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
+    <text x="72" y="259" text-anchor="end" font-size="10" fill="#7d8590">12500</text>
+    <line x1="80" y1="190" x2="700" y2="190" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
+    <text x="72" y="194" text-anchor="end" font-size="10" fill="#7d8590">25000</text>
+    <line x1="80" y1="125" x2="700" y2="125" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
+    <text x="72" y="129" text-anchor="end" font-size="10" fill="#7d8590">37500</text>
+    <line x1="80" y1="60" x2="700" y2="60" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
+    <text x="72" y="64" text-anchor="end" font-size="10" fill="#7d8590">50000</text>
+  </g>
+  <g>
+    <rect x="86.9" y="311.8" width="25.6" height="8.2" rx="2" fill="#58a6ff"/>
+    <rect x="114.4" y="319.2" width="25.6" height="0.8" rx="2" fill="#ff7b72"/>
+    <rect x="155.8" y="311.1" width="25.6" height="8.9" rx="2" fill="#58a6ff"/>
+    <rect x="183.3" y="319.0" width="25.6" height="1.0" rx="2" fill="#ff7b72"/>
+    <rect x="224.7" y="304.4" width="25.6" height="15.6" rx="2" fill="#58a6ff"/>
+    <rect x="252.2" y="289.0" width="25.6" height="31.0" rx="2" fill="#ff7b72"/>
+    <rect x="293.6" y="257.5" width="25.6" height="62.5" rx="2" fill="#58a6ff"/>
+    <rect x="321.1" y="284.9" width="25.6" height="35.1" rx="2" fill="#ff7b72"/>
+    <rect x="362.4" y="239.8" width="25.6" height="80.2" rx="2" fill="#58a6ff"/>
+    <rect x="390" y="275.0" width="25.6" height="45.0" rx="2" fill="#ff7b72"/>
+    <rect x="431.3" y="121.1" width="25.6" height="198.9" rx="2" fill="#58a6ff"/>
+    <rect x="458.9" y="164.0" width="25.6" height="156.0" rx="2" fill="#ff7b72"/>
+    <rect x="500.2" y="240.2" width="25.6" height="79.8" rx="2" fill="#58a6ff"/>
+    <rect x="527.8" y="313.7" width="25.6" height="6.3" rx="2" fill="#ff7b72"/>
+    <rect x="569.1" y="300.2" width="25.6" height="19.8" rx="2" fill="#58a6ff"/>
+    <rect x="596.7" y="314.1" width="25.6" height="5.9" rx="2" fill="#ff7b72"/>
+    <rect x="638" y="311.5" width="25.6" height="8.5" rx="2" fill="#58a6ff"/>
+    <rect x="665.6" y="318.6" width="25.6" height="1.4" rx="2" fill="#ff7b72"/>
+  </g>
+  <g>
+    <text x="99.7" y="307.8" text-anchor="middle" font-size="10" fill="#e6edf3">1571</text>
+    <text x="127.2" y="315.2" text-anchor="middle" font-size="10" fill="#e6edf3">153</text>
+    <text x="168.6" y="307.1" text-anchor="middle" font-size="10" fill="#e6edf3">1707</text>
+    <text x="196.1" y="315.0" text-anchor="middle" font-size="10" fill="#e6edf3">189</text>
+    <text x="237.4" y="300.4" text-anchor="middle" font-size="10" fill="#e6edf3">3007</text>
+    <text x="265" y="285.0" text-anchor="middle" font-size="10" fill="#e6edf3">5963</text>
+    <text x="306.3" y="253.5" text-anchor="middle" font-size="10" fill="#e6edf3">12022</text>
+    <text x="333.9" y="280.9" text-anchor="middle" font-size="10" fill="#e6edf3">6756</text>
+    <text x="375.2" y="235.8" text-anchor="middle" font-size="10" fill="#e6edf3">15433</text>
+    <text x="402.8" y="271.0" text-anchor="middle" font-size="10" fill="#e6edf3">8658</text>
+    <text x="444.1" y="117.1" text-anchor="middle" font-size="10" fill="#e6edf3">38249</text>
+    <text x="471.7" y="160.0" text-anchor="middle" font-size="10" fill="#e6edf3">29993</text>
+    <text x="513" y="236.2" text-anchor="middle" font-size="10" fill="#e6edf3">15348</text>
+    <text x="540.6" y="309.7" text-anchor="middle" font-size="10" fill="#e6edf3">1206</text>
+    <text x="581.9" y="296.2" text-anchor="middle" font-size="10" fill="#e6edf3">3810</text>
+    <text x="609.4" y="310.1" text-anchor="middle" font-size="10" fill="#e6edf3">1133</text>
+    <text x="650.8" y="307.5" text-anchor="middle" font-size="10" fill="#e6edf3">1631</text>
+    <text x="678.3" y="314.6" text-anchor="middle" font-size="10" fill="#e6edf3">273</text>
+  </g>
+  <g>
+    <text x="114.4" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">int64</text>
+    <text x="183.3" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">double</text>
+    <text x="252.2" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">nullable int64</text>
+    <text x="321.1" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">utf8</text>
+    <text x="390" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">nullable utf8</text>
+    <text x="458.9" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">mixed 6-col</text>
+    <text x="527.8" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">list&lt;int32&gt;</text>
+    <text x="596.7" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">struct&lt;int32,double,bool&gt;</text>
+    <text x="665.6" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">dictionary&lt;utf8&gt;</text>
+  </g>
+  <g>
+    <g transform="translate(292, 382)">
+      <rect x="0" y="-9" width="12" height="12" rx="2" fill="#58a6ff"/>
+      <text x="18" y="1" font-size="11" fill="#e6edf3">encode</text>
+    </g>
+    <g transform="translate(368, 382)">
+      <rect x="0" y="-9" width="12" height="12" rx="2" fill="#ff7b72"/>
+      <text x="18" y="1" font-size="11" fill="#e6edf3">decode</text>
+    </g>
+  </g>
+</svg>

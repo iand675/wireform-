@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 400" width="720" height="400" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif" font-size="12">
+  <rect x="0" y="0" width="720" height="400" fill="#0d1117"/>
+  <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#e6edf3">wireform-arrow entry points, mixed 6-column table (100k rows)</text>
+  <text x="360" y="44" text-anchor="middle" font-size="11" fill="#7d8590">lower is better · µs · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5</text>
+  <g stroke="#30363d" stroke-width="1">
+    <line x1="80" y1="320" x2="700" y2="320"/>
+    <line x1="80" y1="60" x2="80" y2="320"/>
+  </g>
+  <g>
+    <g/>
+    <text x="72" y="324" text-anchor="end" font-size="10" fill="#7d8590">0</text>
+    <line x1="80" y1="255" x2="700" y2="255" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
+    <text x="72" y="259" text-anchor="end" font-size="10" fill="#7d8590">25000</text>
+    <line x1="80" y1="190" x2="700" y2="190" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
+    <text x="72" y="194" text-anchor="end" font-size="10" fill="#7d8590">50000</text>
+    <line x1="80" y1="125" x2="700" y2="125" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
+    <text x="72" y="129" text-anchor="end" font-size="10" fill="#7d8590">75000</text>
+    <line x1="80" y1="60" x2="700" y2="60" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
+    <text x="72" y="64" text-anchor="end" font-size="10" fill="#7d8590">100000</text>
+  </g>
+  <g>
+    <rect x="87.8" y="223.4" width="60" height="96.6" rx="2" fill="#58a6ff"/>
+    <rect x="165.2" y="221.8" width="60" height="98.2" rx="2" fill="#58a6ff"/>
+    <rect x="242.8" y="247.7" width="60" height="72.3" rx="2" fill="#58a6ff"/>
+    <rect x="320.2" y="224.7" width="60" height="95.3" rx="2" fill="#58a6ff"/>
+    <rect x="397.8" y="246.7" width="60" height="73.3" rx="2" fill="#58a6ff"/>
+    <rect x="475.2" y="244.4" width="60" height="75.6" rx="2" fill="#58a6ff"/>
+    <rect x="552.8" y="195.1" width="60" height="124.9" rx="2" fill="#58a6ff"/>
+    <rect x="630.2" y="160.6" width="60" height="159.4" rx="2" fill="#58a6ff"/>
+  </g>
+  <g>
+    <text x="117.8" y="219.4" text-anchor="middle" font-size="10" fill="#e6edf3">37139</text>
+    <text x="195.2" y="217.8" text-anchor="middle" font-size="10" fill="#e6edf3">37771</text>
+    <text x="272.8" y="243.7" text-anchor="middle" font-size="10" fill="#e6edf3">27818</text>
+    <text x="350.2" y="220.7" text-anchor="middle" font-size="10" fill="#e6edf3">36653</text>
+    <text x="427.8" y="242.7" text-anchor="middle" font-size="10" fill="#e6edf3">28210</text>
+    <text x="505.2" y="240.4" text-anchor="middle" font-size="10" fill="#e6edf3">29074</text>
+    <text x="582.8" y="191.1" text-anchor="middle" font-size="10" fill="#e6edf3">48048</text>
+    <text x="660.2" y="156.6" text-anchor="middle" font-size="10" fill="#e6edf3">61321</text>
+  </g>
+  <g>
+    <text x="118.8" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">stream encode (Arrow.Stream)</text>
+    <text x="196.2" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">stream encode (Arrow.Write)</text>
+    <text x="273.8" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">stream decode (Arrow.Stream)</text>
+    <text x="351.2" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">file encode (Arrow.Stream)</text>
+    <text x="428.8" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">file decode (Arrow.Stream)</text>
+    <text x="506.2" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">file read (Arrow.File)</text>
+    <text x="583.8" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">typed encode (Arrow.Record)</text>
+    <text x="661.2" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">typed decode (Arrow.Record)</text>
+  </g>
+  <g>
+    <g transform="translate(312.5, 382)">
+      <rect x="0" y="-9" width="12" height="12" rx="2" fill="#58a6ff"/>
+      <text x="18" y="1" font-size="11" fill="#e6edf3">mixed 6-col</text>
+    </g>
+  </g>
+</svg>

@@ -142,9 +142,11 @@ data Field = Field
   , fieldType :: !ArrowType
   , fieldChildren :: !(Vector Field)
   , fieldDictionary :: !(Maybe DictionaryEncoding)
-  {- ^ When non-'Nothing', this field's @fieldType@ refers to the
-  /index/ type and the actual values live in a separate
-  'DictionaryBatch' message keyed by 'deId'.
+  {- ^ When non-'Nothing', the column is dictionary-encoded: the
+  record batch carries indices of type 'deIndexType', while
+  @fieldType@ / @fieldChildren@ describe the dictionary /values/,
+  which live in separate 'DictionaryBatch' messages keyed by 'deId'
+  (as in the Arrow spec).
   -}
   , fieldMetadata :: !(Vector (Text, Text))
   {- ^ Arrow per-field @custom_metadata@ (Schema.fbs field 6).
@@ -264,9 +266,13 @@ data BodyCompressionCodec
   deriving anyclass (NFData)
 
 
+{- | One Arrow IPC message header: the schema, a dictionary batch
+(dictionary id, is-delta flag, the batch holding the dictionary
+values), or a record batch. Bodies travel separately.
+-}
 data Message
   = SchemaMessage !Schema
-  | DictionaryBatch
+  | DictionaryBatch !Int64 !Bool !RecordBatchDef
   | RecordBatch !RecordBatchDef
   deriving stock (Show, Eq, Generic)
   deriving anyclass (NFData)

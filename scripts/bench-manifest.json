@@ -17,6 +17,15 @@
   "rawDir": "dist-stats/bench-raw",
   "benches": [
     {
+      "target": "wireform-arrow:bench:wireform-arrow-bench",
+      "raw": "arrow",
+      "summaries": [
+        { "path": "wireform-arrow/bench-results/summary/arrow-encode-decode.json", "map": [] },
+        { "path": "wireform-arrow/bench-results/summary/arrow-encode-decode-small.json", "map": [] },
+        { "path": "wireform-arrow/bench-results/summary/arrow-api-paths.json", "map": [] }
+      ]
+    },
+    {
       "target": "wireform-avro:bench:wireform-avro-bench",
       "raw": "avro",
       "summaries": [

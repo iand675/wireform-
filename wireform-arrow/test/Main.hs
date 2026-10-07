@@ -22,7 +22,6 @@ module Main (main) where
 import Arrow.Column (
   ColumnArray (..),
   columnLength,
-  materializeRecordBatch,
   validateMapKeysSorted,
  )
 import Arrow.File (asBatches, asSchema, readArrowStream)
@@ -36,6 +35,7 @@ import Arrow.FlatBufferIPC (
   decodeTensorFrame,
   encodeSparseTensorFrame,
   encodeTensorFrame,
+  materializeRecordBatchFB,
  )
 import Arrow.Record qualified as AR
 import Arrow.Stream (
@@ -64,6 +64,8 @@ import Data.Text qualified as T
 import Data.Vector qualified as V
 import Data.Vector.Primitive qualified as VP
 import Data.Word (Word16, Word32, Word64, Word8)
+import Test.Arrow.Malformed qualified as Malformed
+import Test.Arrow.Props qualified as Props
 import System.Exit (exitFailure)
 
 
@@ -415,6 +417,13 @@ main = do
   -- writer produces).
   pyarrowGoldenRoundTrip
 
+  -- Hedgehog property suites: generated round-trips and
+  -- malformed-input robustness. Each returns False on failure.
+  propsOk <- Props.tests
+  malformedOk <- Malformed.tests
+  unless (propsOk && malformedOk) $
+    failTest "FAIL: wireform-arrow property suites"
+
   putStrLn "All wireform-arrow round-trip tests passed."
 
 
@@ -569,7 +578,7 @@ flatBufRoundTrip = do
   let dictField =
         Field
           "d"
-          True
+          False
           AUtf8
           V.empty
           (Just (DictionaryEncoding 0 (AInt 32 True) False))
@@ -736,7 +745,9 @@ goldenCheck name expected = do
 
 -- Dictionary-encoded batches need a bespoke matcher because
 -- 'ColDictionary' carries both the indices vector and the
--- resolved values vector; we compare them piecewise.
+-- resolved values vector; we compare them piecewise. pyarrow
+-- fields are nullable, so the column decodes as
+-- 'ColDictionaryMaybe' (here without null rows).
 goldenDictCheck
   :: FilePath -> [Int32] -> ColumnArray -> IO ()
 goldenDictCheck name expectedIndices expectedValues = do
@@ -745,8 +756,8 @@ goldenDictCheck name expectedIndices expectedValues = do
     Left e -> failTest $ "golden " <> name <> ": decode: " <> e
     Right (_sch, batches) -> case batches of
       [b] | V.length b == 1 -> case V.head b of
-        ColDictionary _ idx vals
-          | VP.toList idx == expectedIndices
+        ColDictionaryMaybe _ idx vals
+          | V.toList idx == map Just expectedIndices
           , vals == expectedValues ->
               putStrLn $ "OK: pyarrow golden " <> name
           | otherwise ->
@@ -754,11 +765,11 @@ goldenDictCheck name expectedIndices expectedValues = do
                 "golden "
                   <> name
                   <> " dict mismatch:\n idx="
-                  <> show (VP.toList idx)
+                  <> show (V.toList idx)
                   <> " vals="
                   <> show vals
         other ->
-          failTest $ "golden " <> name <> " expected ColDictionary, got " <> show other
+          failTest $ "golden " <> name <> " expected ColDictionaryMaybe, got " <> show other
       _ -> failTest $ "golden " <> name <> " expected 1 batch with 1 column"
 
 
@@ -902,7 +913,7 @@ dictReplacementRoundTrip = do
           ( V.singleton
               ( Field
                   "d"
-                  True
+                  False
                   AUtf8
                   V.empty
                   (Just (DictionaryEncoding 0 (AInt 32 True) False))
@@ -1451,7 +1462,7 @@ roundTripNested label field col = do
         (label ++ ": batch count == 1")
         (V.length (asBatches as) == 1)
       let (rb, body) = V.unsafeIndex (asBatches as) 0
-      case materializeRecordBatch (asSchema as) rb body of
+      case materializeRecordBatchFB (asSchema as) rb body of
         Left e -> failTest (label ++ ": materialize: " ++ e)
         Right cols -> do
           expect (label ++ ": column count == 1") (V.length cols == 1)
@@ -1501,7 +1512,7 @@ roundTripPrim label col = do
         (label ++ ": batch count == 1")
         (V.length (asBatches as) == 1)
       let (rb, body) = V.unsafeIndex (asBatches as) 0
-      case materializeRecordBatch (asSchema as) rb body of
+      case materializeRecordBatchFB (asSchema as) rb body of
         Left e -> failTest (label ++ ": materialize: " ++ e)
         Right cols -> do
           expect (label ++ ": column count == 1") (V.length cols == 1)

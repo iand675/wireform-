@@ -1,0 +1,34 @@
+{
+  "id": "arrow-api-paths",
+  "title": "wireform-arrow entry points, mixed 6-column table (100k rows)",
+  "unit": "Micros",
+  "higherIsBetter": false,
+  "groups": [
+    "stream encode (Arrow.Stream)",
+    "stream encode (Arrow.Write)",
+    "stream decode (Arrow.Stream)",
+    "file encode (Arrow.Stream)",
+    "file decode (Arrow.Stream)",
+    "file read (Arrow.File)",
+    "typed encode (Arrow.Record)",
+    "typed decode (Arrow.Record)"
+  ],
+  "series": [
+    {
+      "name": "mixed 6-col",
+      "values": [
+        37138.56,
+        37770.67,
+        27817.63,
+        36653.05,
+        28210.41,
+        29074.03,
+        48048.36,
+        61320.7
+      ]
+    }
+  ],
+  "baseline": "mixed 6-col",
+  "capturedAt": "2026-10-07T23:32:59Z",
+  "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
+}

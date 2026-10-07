@@ -1,0 +1,50 @@
+{
+  "id": "arrow-encode-decode-small",
+  "title": "wireform-arrow IPC stream encode + decode (100-row batch)",
+  "unit": "Micros",
+  "higherIsBetter": false,
+  "groups": [
+    "int64",
+    "double",
+    "nullable int64",
+    "utf8",
+    "nullable utf8",
+    "mixed 6-col",
+    "list<int32>",
+    "struct<int32,double,bool>",
+    "dictionary<utf8>"
+  ],
+  "series": [
+    {
+      "name": "encode (100 rows)",
+      "values": [
+        4.06,
+        4.17,
+        5.16,
+        5.85,
+        7.12,
+        19.3,
+        6.6,
+        8.9,
+        7.86
+      ]
+    },
+    {
+      "name": "decode (100 rows)",
+      "values": [
+        0.76,
+        0.79,
+        1.9,
+        3.93,
+        4.13,
+        11.56,
+        2.11,
+        2.14,
+        1.94
+      ]
+    }
+  ],
+  "baseline": "encode (100 rows)",
+  "capturedAt": "2026-10-07T23:32:59Z",
+  "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
+}

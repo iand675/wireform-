@@ -25,7 +25,6 @@ cabal build wireform-arrow wireform-parquet wireform-orc wireform-columnar \
             wireform-parquet:wireform-parquet-reverse-probe \
             wireform-orc:wireform-orc-interop-probe \
             wireform-orc:wireform-orc-reverse-probe \
-            wireform-arrow:wireform-arrow-pyarrow-probe \
             wireform-iceberg:wireform-iceberg-interop-probe \
             wireform-delta:wireform-delta-interop-probe \
             wireform-hudi:wireform-hudi-interop-probe \
@@ -56,8 +55,9 @@ run "ORC forward (pyarrow)" \
   python3 wireform-orc/scripts/orc_interop.py
 run "ORC reverse (read pyarrow output)" \
   python3 wireform-orc/scripts/orc_reverse_interop.py
-run "Arrow IPC (pyarrow)" \
-  python3 wireform-arrow/scripts/pyarrow_interop.py
+run "Arrow IPC (pyarrow, both directions)" \
+  env WIREFORM_ARROW_REQUIRE_PYARROW=1 \
+  cabal test wireform-arrow:wireform-arrow-pyarrow-interop --enable-tests --test-show-details=direct
 run "Iceberg metadata (pyiceberg + fastavro)" \
   python3 wireform-iceberg/scripts/iceberg_interop.py
 run "Delta log (deltalake)" \
@@ -76,15 +76,15 @@ if command -v cargo >/dev/null 2>&1; then
   TMPAR=$(mktemp -d -t wf-arrow.XXXX)
   trap "rm -rf $TMPPQ $TMPAR" EXIT
   cabal run wireform-parquet:wireform-parquet-interop-probe -- "$TMPPQ" > /dev/null
-  cabal run wireform-arrow:wireform-arrow-pyarrow-probe   -- "$TMPAR" > /dev/null
+  cabal run wireform-arrow:test:wireform-arrow-pyarrow-interop --enable-tests -- --write "$TMPAR" > /dev/null
 
   run "Rust arrow-rs (Parquet)" \
     "$ROOT/interop/arrow-rs/target/release/read_parquet" "$TMPPQ"
 
   # arrow-rs >= 58 supports ListView/LargeListView through the
-  # IPC reader, so we now expect every file (including
-  # 'ours_listview.arrows') to round-trip cleanly. If something
-  # regresses, the run helper will surface it as a real failure.
+  # IPC reader, so we expect every file of the interop case matrix
+  # (including 'list_view_int32.plain.arrows') to read cleanly. If
+  # something regresses, the run helper will surface it as a real failure.
   run "Rust arrow-rs (Arrow IPC)" \
     "$ROOT/interop/arrow-rs/target/release/read_arrow_ipc" "$TMPAR"
 else

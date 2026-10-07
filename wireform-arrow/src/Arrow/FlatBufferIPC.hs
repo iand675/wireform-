@@ -79,6 +79,10 @@ module Arrow.FlatBufferIPC
   , encodeSparseTensorFrame
   , decodeSparseTensorFrame
   , writeArrowStreamFBWithDicts
+    -- * Single-message frames
+  , encodeMessageFrame
+  , decodeMessageFrame
+  , readFrameHeader
   ) where
 
 import Data.Bits ((.&.), (.|.), complement, shiftL)
@@ -88,13 +92,14 @@ import qualified Wireform.Builder as B
 import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int16, Int32, Int64)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as V
 import Data.Word (Word8)
 import System.IO.Unsafe (unsafePerformIO)
 
-import Arrow.Column (ColumnArray (..), columnLength, materializeRecordBatch)
+import Arrow.Column (ColumnArray (..), columnLength, isNullableColumn, materializeRecordBatch)
 import Arrow.Types
-import qualified Arrow.Write as W
+import qualified Arrow.Write.Columns as W
 import FlatBuffers.Builder
   ( Builder
   , Field' (..)
@@ -126,13 +131,14 @@ import FlatBuffers.Reader
   , peekI32
   , peekI64
   , peekU8
-  , peekU16
   , peekU32
   , readString
+  , readStringSlice
   , readVectorInt64
   , readVectorOfOffsets
   , readVectorOfStructs
   , resolveTable
+  , vectorLength
   )
 
 #ifdef HAVE_ZSTD
@@ -152,6 +158,27 @@ import qualified Control.Exception as Exc
 when' :: Bool -> Either String () -> Either String ()
 when' True  e = e
 when' False _ = Right ()
+
+-- | Slice @len@ bytes at @off@ out of @bs@, where both come off the
+-- wire: negative or out-of-range values are a 'Left', never a
+-- silently clamped slice.
+sliceWire :: String -> Int64 -> Int64 -> ByteString -> Either String ByteString
+sliceWire what off len bs
+  | off < 0 || len < 0 || len > n || off > n - len =
+      Left
+        ( "Arrow.FlatBufferIPC: "
+            ++ what
+            ++ " [offset "
+            ++ show off
+            ++ ", length "
+            ++ show len
+            ++ "] lies outside the "
+            ++ show n
+            ++ " available bytes"
+        )
+  | otherwise = Right $! BS.take (fromIntegral len) (BS.drop (fromIntegral off) bs)
+  where
+    n = fromIntegral (BS.length bs) :: Int64
 
 -- ============================================================
 -- Arrow-specific: Type tables
@@ -479,7 +506,13 @@ buildRecordBatchMessage rb bodyLen = unsafePerformIO $ do
 -- }
 -- @
 buildDictionaryBatchMessage :: DictBatch -> ByteString
-buildDictionaryBatchMessage (DictBatch did isDelta rb body) = unsafePerformIO $ do
+buildDictionaryBatchMessage (DictBatch did isDelta rb body) =
+  buildDictionaryBatchMessageLen did isDelta rb (fromIntegral (BS.length body))
+
+
+-- | 'buildDictionaryBatchMessage' given the body length instead of the body.
+buildDictionaryBatchMessageLen :: Int64 -> Bool -> RecordBatchDef -> Int64 -> ByteString
+buildDictionaryBatchMessageLen did isDelta rb bodyLen = unsafePerformIO $ do
   b <- newBuilder
   rbUOff  <- writeRecordBatch b rb
   dbUOff  <- writeTable b
@@ -491,11 +524,11 @@ buildDictionaryBatchMessage (DictBatch did isDelta rb body) = unsafePerformIO $ 
     [ Just (scalar 2 (\bb -> prependI16 bb metadataVersionV5))
     , Just (scalar 1 (\bb -> prependU8 bb 2))   -- header type: DictionaryBatch
     , Just (voff dbUOff)
-    , Just (scalar 8 (\bb -> prependI64 bb (fromIntegral (BS.length body))))
+    , Just (scalar 8 (\bb -> prependI64 bb bodyLen))
     , Nothing
     ]
   finish b msgUOff
-{-# NOINLINE buildDictionaryBatchMessage #-}
+{-# NOINLINE buildDictionaryBatchMessageLen #-}
 
 metadataVersionV5 :: Int16
 metadataVersionV5 = 4
@@ -799,11 +832,11 @@ decodeSparseTensorFrame bs = do
       lo <- peekI64 meta p
       ln <- peekI64 meta (p + 8)
       Right (lo, ln)
-  let !iSlice = BS.take (fromIntegral idxLen) (BS.drop (fromIntegral idxOffset) rest1)
-      !vSlice = BS.take (fromIntegral valLen) (BS.drop (fromIntegral valOffset) rest1)
-      !bodyLen = fromIntegral valOffset + fromIntegral valLen :: Int
-      !bodyPad = alignUp bodyLen 8
-      rest2   = BS.drop bodyPad rest1
+  iSlice <- sliceWire "sparse tensor indices buffer" idxOffset idxLen rest1
+  vSlice <- sliceWire "sparse tensor data buffer" valOffset valLen rest1
+  -- Both slices were range-checked above, so this sum cannot overflow.
+  let !bodyLen = fromIntegral valOffset + fromIntegral valLen :: Int
+      rest2   = BS.drop (alignUp bodyLen 8) rest1
   Right ( SparseTensor
             { sparseTensorType       = arrowTy
             , sparseTensorShape      = shape
@@ -835,11 +868,16 @@ decodeTensorFrame bs = do
   (mlen, meta, rest1) <- readFrameHeader bs
   when' (mlen <= 0) $ Left "decodeTensorFrame: unexpected EOS"
   (t, bodyLen) <- decodeTensorMessage meta
-  let !nBody    = fromIntegral bodyLen :: Int
-      !nBodyPad = alignUp nBody 8
-      body      = BS.take nBody rest1
-      rest2     = BS.drop nBodyPad rest1
+  (body, rest2) <- takeFrameBody "tensor body" bodyLen rest1
   Right (t { tensorBody = body }, rest2)
+
+-- | Split a frame's @bodyLen@-byte body (a wire value) off the bytes
+-- that follow its metadata, also dropping the body's padding to the
+-- next 8-byte boundary.
+takeFrameBody :: String -> Int64 -> ByteString -> Either String (ByteString, ByteString)
+takeFrameBody what bodyLen rest = do
+  body <- sliceWire what 0 bodyLen rest
+  Right (body, BS.drop (alignUp (BS.length body) 8) rest)
 
 -- | Parse a @TensorDim@ table at the given position.
 readTensorDim :: ByteString -> Int -> Either String TensorDim
@@ -940,12 +978,17 @@ buildRecordBatchBytes = buildRecordBatchBytesWith Nothing
 -- in the returned 'RecordBatchDef' point into the /compressed/
 -- body. The corresponding 'rbBodyCompression' field is populated
 -- so readers can dispatch decompression.
+--
+-- A codec that was not compiled in (see 'bodyCompressionAvailable';
+-- the @zstd@ / @lz4@ cabal flags) is ignored: the batch is written
+-- uncompressed with 'rbBodyCompression' = 'Nothing', so the output
+-- is always a valid Arrow batch.
 buildRecordBatchBytesWith
   :: Maybe BodyCompressionCodec
   -> Schema
   -> V.Vector ColumnArray
   -> (RecordBatchDef, ByteString)
-buildRecordBatchBytesWith mCodec sch cols =
+buildRecordBatchBytesWith mCodec0 sch cols =
   let !acc = W.encodeColumns (arrowFields sch) cols W.emptyBuildAcc
       !rawNodes = V.fromList (reverse (W.baNodes acc))
       !rawBufs  = V.fromList (reverse (W.baBufs acc))
@@ -953,20 +996,12 @@ buildRecordBatchBytesWith mCodec sch cols =
       !(!nodes, !bufs0) = normaliseBuffers (arrowFields sch) cols rawNodes rawBufs rawVar
       !rawBody = BL.toStrict (B.toLazyByteString (W.baBody acc))
       !numRows = if V.null cols then 0 else columnLength (V.head cols)
+      !mCodec = case mCodec0 of
+        Just codec | bodyCompressionAvailable codec -> Just codec
+        _ -> Nothing
       !(!bufs, !body) = case mCodec of
         Nothing    -> (bufs0, rawBody)
-        Just codec ->
-          -- compressBody may fail at runtime when a codec is
-          -- requested that wasn't compiled in (e.g. BodyZstd
-          -- without -fzstd). The historical signature returned
-          -- ByteString unconditionally and called 'error' on
-          -- the codec branch, which is a hard crash. Keep the
-          -- 'error' behaviour for back-compat (existing callers
-          -- check the codec / flag combination before calling
-          -- this helper), but the lower-level
-          -- 'compressBufferEnvelopeEither' below now exposes a
-          -- proper Either-shaped path for new callers.
-          compressBody codec bufs0 rawBody
+        Just codec -> compressBody codec bufs0 rawBody
       !rb = RecordBatchDef
               { rbLength  = fromIntegral numRows
               , rbNodes   = nodes
@@ -1035,18 +1070,50 @@ encodeBodyLen n = BL.toStrict $ B.toLazyByteString $
   B.int64LE n
 
 -- | Decompress one buffer envelope per the @BUFFER@ method.
+--
+-- The 8-byte uncompressed length is a wire claim. It must be @-1@
+-- (stored uncompressed) or a size the payload could actually expand
+-- to (see 'maxCompressionRatio'), and the decompressed bytes must
+-- match it exactly; a lying header can never size an allocation.
 decompressBufferEnvelope
   :: BodyCompressionCodec -> ByteString -> Either String ByteString
 decompressBufferEnvelope codec env
   | BS.null env = Right env
   | BS.length env < 8 =
       Left "Arrow.FlatBufferIPC: buffer envelope shorter than 8 bytes"
-  | otherwise =
-      let !rawLen = decodeBodyLen env
-          !payload = BS.drop 8 env
-      in  if rawLen < 0
-            then Right payload   -- spec escape: stored uncompressed
-            else decompressBuffer codec rawLen payload
+  | rawLen == -1 = Right payload   -- spec escape: stored uncompressed
+  | rawLen < 0 =
+      Left ("Arrow.FlatBufferIPC: negative uncompressed buffer length " ++ show rawLen)
+  | rawLen > fromIntegral (BS.length payload) * maxCompressionRatio =
+      Left
+        ( "Arrow.FlatBufferIPC: buffer claims "
+            ++ show rawLen
+            ++ " uncompressed bytes from a "
+            ++ show (BS.length payload)
+            ++ "-byte payload"
+        )
+  | otherwise = do
+      out <- decompressBuffer codec (fromIntegral rawLen) payload
+      if BS.length out /= fromIntegral rawLen
+        then
+          Left
+            ( "Arrow.FlatBufferIPC: buffer decompressed to "
+                ++ show (BS.length out)
+                ++ " bytes, header says "
+                ++ show rawLen
+            )
+        else Right out
+  where
+    -- Lazy on purpose: only forced once the guards above have checked
+    -- that the envelope holds the 8-byte length.
+    rawLen = decodeBodyLen env
+    payload = BS.drop 8 env
+
+-- | No LZ4 frame or ZSTD frame expands by more than this factor (a
+-- ZSTD RLE block turns 4 bytes into at most 128 KiB; LZ4 tops out
+-- near 255x), so a larger claimed size is a lie, not data.
+maxCompressionRatio :: Int64
+maxCompressionRatio = 32768
 
 decodeBodyLen :: ByteString -> Int64
 decodeBodyLen bs =
@@ -1120,33 +1187,47 @@ bodyCompressionAvailable = \case
   LZ4Frame -> False
 #endif
 
+-- | Decompress a payload that must expand to exactly @rawLen@ bytes
+-- ('decompressBufferEnvelope' has already bounded @rawLen@). Neither
+-- backend may allocate more than @rawLen + 1@ output bytes.
 decompressBuffer
-  :: BodyCompressionCodec -> Int64 -> ByteString -> Either String ByteString
+  :: BodyCompressionCodec -> Int -> ByteString -> Either String ByteString
 decompressBuffer codec rawLen comp = case codec of
 #ifdef HAVE_ZSTD
   BodyZstd ->
-    case Zstd.decompress comp of
-      Zstd.Decompress out -> Right out
-      Zstd.Skip           -> Left "Arrow.FlatBufferIPC: ZSTD decompress: skipped frame"
-      Zstd.Error msg      -> Left ("Arrow.FlatBufferIPC: ZSTD decompress: " ++ msg)
+    -- Zstd.decompress sizes its output from the frame header, so the
+    -- header must agree with the (bounded) envelope length first.
+    case Zstd.decompressedSize comp of
+      Just n | n == rawLen ->
+        case Zstd.decompress comp of
+          Zstd.Decompress out -> Right out
+          Zstd.Skip           -> Left "Arrow.FlatBufferIPC: ZSTD decompress: skipped frame"
+          Zstd.Error msg      -> Left ("Arrow.FlatBufferIPC: ZSTD decompress: " ++ msg)
+      other ->
+        Left
+          ( "Arrow.FlatBufferIPC: ZSTD frame content size "
+              ++ show other
+              ++ " does not match the buffer's uncompressed length "
+              ++ show rawLen
+          )
 #else
   BodyZstd -> Left "Arrow.FlatBufferIPC: ZSTD body compression requires building wireform-arrow with -fzstd"
 #endif
 #ifdef HAVE_LZ4
   LZ4Frame ->
-    -- lz4-hs's decompress throws on malformed input; catch it
-    -- to match the Either-shaped contract the ZSTD path has.
+    -- lz4-hs's decompress is lazy and throws on malformed input;
+    -- take at most one byte past the expected size (so an overlong
+    -- frame is detected without being fully inflated) and catch the
+    -- exception to keep the Either-shaped contract.
     case unsafePerformIO $
            Exc.try @Exc.SomeException
              (Exc.evaluate
-                (BL.toStrict (Lz4.decompress (BL.fromStrict comp)))) of
+                (BL.toStrict (BL.take (fromIntegral rawLen + 1) (Lz4.decompress (BL.fromStrict comp))))) of
       Right out -> Right out
       Left e    -> Left ("Arrow.FlatBufferIPC: LZ4_FRAME decompress: " ++ show e)
 #else
   LZ4Frame -> Left "Arrow.FlatBufferIPC: LZ4 body compression requires building wireform-arrow with -flz4"
 #endif
-  where
-    _ = rawLen   -- reserved for future use (validation against spec)
 
 -- | Decode a body that was written with body compression. Walks
 -- each buffer in the supplied list (with offsets pointing into
@@ -1161,13 +1242,11 @@ decompressBody
   -> Either String (V.Vector Buffer, ByteString)
 decompressBody codec bufs body0 = do
   payloads <- V.mapM
-    (\buf ->
-        let !off = fromIntegral (bufOffset buf) :: Int
-            !len = fromIntegral (bufLength buf) :: Int
-            !env = BS.take len (BS.drop off body0)
-        in  decompressBufferEnvelope codec env)
+    (\buf -> do
+        env <- sliceWire "compressed buffer" (bufOffset buf) (bufLength buf) body0
+        decompressBufferEnvelope codec env)
     bufs
-  let step (!off, !revBufs, !revChunks) decoded =
+  let step (!off, !accBufs, !accChunks) decoded =
         let !len    = BS.length decoded
             !padded = alignUp len 8
             !pad    = padded - len
@@ -1175,8 +1254,8 @@ decompressBody codec bufs body0 = do
                              , bufLength = fromIntegral len
                              }
         in  ( off + padded
-            , newBuf : revBufs
-            , (decoded <> BS.replicate pad 0) : revChunks
+            , newBuf : accBufs
+            , (decoded <> BS.replicate pad 0) : accChunks
             )
       (_, revBufs, revChunks) =
         V.foldl' step (0 :: Int, [], []) payloads
@@ -1281,13 +1360,15 @@ injectColumn col bufs bIdx0 varCounts vIdx0 = case col of
   ColBinaryView {}      -> goView bIdx0
   ColBinaryViewMaybe {} -> goView bIdx0
 
-  ColDictionary _ _ _ ->
-      let (vBuf, bIdx1) = takeValidity (isNullable col) bufs bIdx0
-          indices       = bufs V.! bIdx1
-      in  (bIdx1 + 1 - bIdx0, 0, [vBuf, indices])
+  ColDictionary {} -> dictIndices
+  ColDictionaryMaybe {} -> dictIndices
 
   _ -> (0, 0, [])
   where
+    dictIndices =
+      let (vBuf, bIdx1) = takeValidity (isNullable col) bufs bIdx0
+          indices       = bufs V.! bIdx1
+      in  (bIdx1 + 1 - bIdx0, 0, [vBuf, indices])
     goStruct nullable children bIdx vIdx =
       let (vBuf, bIdx1) = takeValidity nullable bufs bIdx
           (cc, cv, cb) = goSiblings children bIdx1 vIdx
@@ -1368,6 +1449,10 @@ isFlatPrim = \case
   ColTime32Maybe {} -> True; ColTime64Maybe {} -> True
   ColTimestampMaybe {} -> True; ColDurationMaybe {} -> True
   ColFixedSizeBinaryMaybe {} -> True
+  ColDecimal128Maybe {} -> True; ColDecimal256Maybe {} -> True
+  ColIntervalYearMonthMaybe {} -> True
+  ColIntervalDayTimeMaybe {} -> True
+  ColIntervalMonthDayNanoMaybe {} -> True
   _ -> False
 
 isVarLen :: ColumnArray -> Bool
@@ -1379,27 +1464,7 @@ isVarLen = \case
   _ -> False
 
 isNullable :: ColumnArray -> Bool
-isNullable = \case
-  ColInt8Maybe {} -> True; ColInt16Maybe {} -> True
-  ColInt32Maybe {} -> True; ColInt64Maybe {} -> True
-  ColUInt8Maybe {} -> True; ColUInt16Maybe {} -> True
-  ColUInt32Maybe {} -> True; ColUInt64Maybe {} -> True
-  ColFloat16Maybe {} -> True
-  ColFloatMaybe {} -> True; ColDoubleMaybe {} -> True
-  ColBoolMaybe {} -> True
-  ColUtf8Maybe {} -> True; ColBinaryMaybe {} -> True
-  ColLargeUtf8Maybe {} -> True; ColLargeBinaryMaybe {} -> True
-  ColFixedSizeBinaryMaybe {} -> True
-  ColDate32Maybe {} -> True; ColDate64Maybe {} -> True
-  ColTime32Maybe {} -> True; ColTime64Maybe {} -> True
-  ColTimestampMaybe {} -> True; ColDurationMaybe {} -> True
-  ColStructMaybe {} -> True
-  ColListMaybe {} -> True; ColLargeListMaybe {} -> True
-  ColFixedSizeListMaybe {} -> True
-  ColMapMaybe {} -> True
-  ColListViewMaybe {} -> True; ColLargeListViewMaybe {} -> True
-  ColUtf8ViewMaybe {} -> True; ColBinaryViewMaybe {} -> True
-  _ -> False
+isNullable = isNullableColumn
 
 -- ============================================================
 -- Inverse: spec-format → simplified-format
@@ -1408,200 +1473,142 @@ isNullable = \case
 -- | Strip the empty validity slots that the spec mandates at every
 -- layout position from a 'RecordBatchDef' produced by an
 -- arrow-cpp / arrow-rs / pyarrow writer (or our own
--- 'normaliseBuffers'). Returns a @(rb', body')@ pair whose buffer
--- list matches what 'Arrow.Write.encodeColumns' would have
--- emitted for the same schema, so the existing
--- 'Arrow.Column.materializeRecordBatch' can consume it directly.
+-- 'normaliseBuffers'). The returned batch's buffer list matches
+-- what 'Arrow.Write.encodeColumns' would have emitted for the same
+-- schema, so 'Arrow.Column.materializeRecordBatch' can consume it
+-- directly.
 --
--- The body bytes are unchanged — we only rewrite the buffer
--- /index/ list.  A spec-format empty-validity slot has
+-- The body bytes are unchanged; only the buffer /index/ list is
+-- rewritten. A spec-format empty-validity slot has
 -- @offset == 0 && length == 0@ and points nowhere, so dropping it
 -- doesn't disturb the body offsets the surviving buffers carry.
+--
+-- The buffer list comes off the wire: a batch with fewer buffers
+-- (or variadic counts) than the schema's layout needs is a 'Left'.
 denormaliseBuffers
-  :: Schema -> RecordBatchDef -> RecordBatchDef
-denormaliseBuffers sch rb =
-  let !inputBufs = rbBuffers rb
-      !varCounts = rbVariadicBufferCounts rb
-      (_, _, !revOut) = V.foldl' step (0 :: Int, 0 :: Int, []) (arrowFields sch)
-      step (!bIdx, !vIdx, acc) f =
-        let (!consumed, !varConsumed, !emitted) =
-              stripField f inputBufs bIdx varCounts vIdx
-        in  (bIdx + consumed, vIdx + varConsumed, reverse emitted ++ acc)
-  in  rb { rbBuffers = V.fromList (reverse revOut) }
-
--- | Walk one schema field and decide which spec-format buffers to
--- keep. Returns @(#source buffers consumed, #variadic-count
--- entries consumed, simplified-format output buffers in
--- encoder-emission order)@. Empty validity slots (zero length) on
--- non-nullable fields are dropped.
-stripField
-  :: Field -> V.Vector Buffer -> Int -> V.Vector Int64 -> Int
-  -> (Int, Int, [Buffer])
-stripField f bufs bIdx0 varCounts vIdx0
-  -- Dictionary-encoded fields carry the index column on the wire,
-  -- not the value column. Treat them like a flat int field of the
-  -- index width (validity + data layout = 2 buffers).
-  | Just _ <- fieldDictionary f =
-      let (vBuf, bIdx1) = (bufs V.! bIdx0, bIdx0 + 1)
-          dataBuf       = bufs V.! bIdx1
-          out = if fieldNullable f then [vBuf, dataBuf] else [dataBuf]
-      in  (2, 0, out)
-  | otherwise = case fieldType f of
-  AInt _ _           -> flatPrim
-  ABool              -> flatPrim
-  AFloatingPoint _   -> flatPrim
-  AFixedSizeBinary _ -> flatPrim
-  ADate _            -> flatPrim
-  ATime _ _          -> flatPrim
-  ATimestamp _ _     -> flatPrim
-  ADuration _        -> flatPrim
-  ADecimal _ _       -> flatPrim
-  ADecimal256 _ _    -> flatPrim
-  AInterval _        -> flatPrim
-
-  AUtf8       -> varLen
-  ABinary     -> varLen
-  ALargeUtf8  -> varLen
-  ALargeBinary -> varLen
-
-  AStruct ->
-    let (vBuf, bIdx1) = (bufs V.! bIdx0, bIdx0 + 1)
-        outV = if fieldNullable f then [vBuf] else []
-        (cc, cv, cb) = stripChildren (V.toList (fieldChildren f)) bufs bIdx1 varCounts vIdx0
-    in  (1 + cc, cv, outV ++ cb)
-
-  AList ->
-    let (vBuf, bIdx1) = (bufs V.! bIdx0, bIdx0 + 1)
-        offsetsBuf = bufs V.! bIdx1
-        outV = if fieldNullable f then [vBuf, offsetsBuf] else [offsetsBuf]
-        (cc, cv, cb) = stripField (V.head (fieldChildren f)) bufs (bIdx1 + 1) varCounts vIdx0
-    in  (2 + cc, cv, outV ++ cb)
-
-  ALargeList ->
-    let (vBuf, bIdx1) = (bufs V.! bIdx0, bIdx0 + 1)
-        offsetsBuf = bufs V.! bIdx1
-        outV = if fieldNullable f then [vBuf, offsetsBuf] else [offsetsBuf]
-        (cc, cv, cb) = stripField (V.head (fieldChildren f)) bufs (bIdx1 + 1) varCounts vIdx0
-    in  (2 + cc, cv, outV ++ cb)
-
-  AFixedSizeList _ ->
-    let (vBuf, bIdx1) = (bufs V.! bIdx0, bIdx0 + 1)
-        outV = if fieldNullable f then [vBuf] else []
-        (cc, cv, cb) = stripField (V.head (fieldChildren f)) bufs bIdx1 varCounts vIdx0
-    in  (1 + cc, cv, outV ++ cb)
-
-  AMap _ ->
-    -- Spec layout: [validity, offsets, struct-validity (empty),
-    -- key bufs..., value bufs...]. Simplified writer emits
-    -- [validity?, offsets, key bufs..., value bufs...] (no struct
-    -- buffer; the simplified reader doesn't expect one).
-    let (vBuf, bIdx1) = (bufs V.! bIdx0, bIdx0 + 1)
-        offsetsBuf = bufs V.! bIdx1
-        bIdx2 = bIdx1 + 1 + 1
-        outV = if fieldNullable f then [vBuf, offsetsBuf] else [offsetsBuf]
-    in  case V.toList (fieldChildren f) of
-          [structField] ->
-            case V.toList (fieldChildren structField) of
-              [keyField, valField] ->
-                let (ck, ckv, kb) = stripField keyField bufs bIdx2 varCounts vIdx0
-                    (cv, cvv, vb) = stripField valField bufs (bIdx2 + ck) varCounts (vIdx0 + ckv)
-                in  ( bIdx2 - bIdx0 + ck + cv
-                    , ckv + cvv
-                    , outV ++ kb ++ vb
-                    )
-              _ -> bail
-          _ -> bail
-
-  AUnion mode _ ->
-    case mode of
-      Dense ->
-        let typeIds = bufs V.! bIdx0
-            offsets = bufs V.! (bIdx0 + 1)
-            (cc, cv, cb) = stripChildren (V.toList (fieldChildren f)) bufs (bIdx0 + 2) varCounts vIdx0
-        in  (2 + cc, cv, typeIds : offsets : cb)
-      Sparse ->
-        let typeIds = bufs V.! bIdx0
-            (cc, cv, cb) = stripChildren (V.toList (fieldChildren f)) bufs (bIdx0 + 1) varCounts vIdx0
-        in  (1 + cc, cv, typeIds : cb)
-
-  ARunEndEncoded ->
-    case V.toList (fieldChildren f) of
-      [reField, valField] ->
-        let (cre, crev, bre) = stripField reField  bufs bIdx0 varCounts vIdx0
-            (cv,  cvv,  bv)  = stripField valField bufs (bIdx0 + cre) varCounts (vIdx0 + crev)
-        in  (cre + cv, crev + cvv, bre ++ bv)
-      _ -> bail
-
-  AListView ->
-    let (vBuf, bIdx1) = (bufs V.! bIdx0, bIdx0 + 1)
-        offsetsBuf = bufs V.! bIdx1
-        sizesBuf   = bufs V.! (bIdx1 + 1)
-        outV = if fieldNullable f
-                 then [vBuf, offsetsBuf, sizesBuf]
-                 else [offsetsBuf, sizesBuf]
-        (cc, cv, cb) = stripField (V.head (fieldChildren f)) bufs (bIdx1 + 2) varCounts vIdx0
-    in  (3 + cc, cv, outV ++ cb)
-  ALargeListView ->
-    let (vBuf, bIdx1) = (bufs V.! bIdx0, bIdx0 + 1)
-        offsetsBuf = bufs V.! bIdx1
-        sizesBuf   = bufs V.! (bIdx1 + 1)
-        outV = if fieldNullable f
-                 then [vBuf, offsetsBuf, sizesBuf]
-                 else [offsetsBuf, sizesBuf]
-        (cc, cv, cb) = stripField (V.head (fieldChildren f)) bufs (bIdx1 + 2) varCounts vIdx0
-    in  (3 + cc, cv, outV ++ cb)
-
-  AUtf8View       -> viewLayout
-  ABinaryView     -> viewLayout
-
-  ANull           -> (0, 0, [])
-  _               -> bail
+  :: Schema -> RecordBatchDef -> Either String RecordBatchDef
+denormaliseBuffers sch rb = do
+  (_, _, revOut) <- stripFields (V.toList (arrowFields sch)) (0, 0, [])
+  Right rb { rbBuffers = V.fromList (reverse revOut) }
   where
-    bail = (V.length bufs - bIdx0, V.length varCounts - vIdx0, V.toList (V.drop bIdx0 bufs))
-    flatPrim =
-      let (vBuf, bIdx1) = (bufs V.! bIdx0, bIdx0 + 1)
-          dataBuf       = bufs V.! bIdx1
-          out = if fieldNullable f then [vBuf, dataBuf] else [dataBuf]
-      in  (2, 0, out)
-    varLen =
-      let (vBuf, bIdx1) = (bufs V.! bIdx0, bIdx0 + 1)
-          offsetsBuf    = bufs V.! bIdx1
-          dataBuf       = bufs V.! (bIdx1 + 1)
-          out = if fieldNullable f
-                  then [vBuf, offsetsBuf, dataBuf]
-                  else [offsetsBuf, dataBuf]
-      in  (3, 0, out)
-    viewLayout =
-      -- Spec: [validity, view, ...variadic]. Variadic count comes
-      -- from rbVariadicBufferCounts at the per-view-column slot.
-      let (vBuf, bIdx1) = (bufs V.! bIdx0, bIdx0 + 1)
-          viewBuf       = bufs V.! bIdx1
-          !varCount = case varCounts V.!? vIdx0 of
-            Just c  -> fromIntegral c :: Int
-            Nothing -> 0
-          variadics =
-            [ bufs V.! (bIdx1 + 1 + i) | i <- [0 .. varCount - 1] ]
-          outV = if fieldNullable f
-                   then [vBuf, viewBuf] ++ variadics
-                   else [viewBuf] ++ variadics
-      in  (2 + varCount, 1, outV)
+    !bufs = rbBuffers rb
+    !varCounts = rbVariadicBufferCounts rb
 
-stripChildren
-  :: [Field] -> V.Vector Buffer -> Int -> V.Vector Int64 -> Int
-  -> (Int, Int, [Buffer])
-stripChildren []     _    _    _         _    = (0, 0, [])
-stripChildren (c:cs) bufs bIdx varCounts vIdx =
-  let (cc, cv, cb) = stripField c bufs bIdx varCounts vIdx
-      (rc, rv, rb) = stripChildren cs bufs (bIdx + cc) varCounts (vIdx + cv)
-  in  (cc + rc, cv + rv, cb ++ rb)
+    stripFields :: [Field] -> StripState -> Either String StripState
+    stripFields fs st = foldl (\acc f -> acc >>= stripField f) (Right st) fs
 
--- | Convenience: parse + materialise.  Pyarrow / arrow-cpp output
--- → a 'V.Vector ColumnArray' per batch in one call.
+    at :: Int -> Either String Buffer
+    at i = case bufs V.!? i of
+      Just b -> Right b
+      Nothing ->
+        Left
+          ( "Arrow.FlatBufferIPC: record batch has "
+              ++ show (V.length bufs)
+              ++ " buffers, schema layout needs buffer #"
+              ++ show i
+          )
+
+    -- Keep the validity slot only for nullable fields.
+    keepValidity f (bi, vi, acc) = do
+      v <- at bi
+      Right (bi + 1, vi, if fieldNullable f then v : acc else acc)
+
+    -- Copy the next @n@ buffers through unchanged.
+    keep :: Int -> StripState -> Either String StripState
+    keep n st0 = go n st0
+      where
+        go 0 st = Right st
+        go k (bi, vi, acc) = do
+          b <- at bi
+          go (k - 1) (bi + 1, vi, b : acc)
+
+    skip n (bi, vi, acc) = at (bi + n - 1) >> Right (bi + n, vi, acc)
+
+    onlyChild what f = case V.toList (fieldChildren f) of
+      [c] -> Right c
+      _ -> Left ("Arrow.FlatBufferIPC: " ++ what ++ " field must have exactly one child")
+
+    stripField :: Field -> StripState -> Either String StripState
+    stripField f st
+      -- Dictionary-encoded fields carry the index column on the wire,
+      -- not the value column: a flat int layout (validity + data).
+      | Just _ <- fieldDictionary f = keepValidity f st >>= keep 1
+      | otherwise = case fieldType f of
+          ANull -> Right st
+          AInt _ _ -> flatPrim
+          ABool -> flatPrim
+          AFloatingPoint _ -> flatPrim
+          AFixedSizeBinary _ -> flatPrim
+          ADate _ -> flatPrim
+          ATime _ _ -> flatPrim
+          ATimestamp _ _ -> flatPrim
+          ADuration _ -> flatPrim
+          ADecimal _ _ -> flatPrim
+          ADecimal256 _ _ -> flatPrim
+          AInterval _ -> flatPrim
+          AUtf8 -> varLen
+          ABinary -> varLen
+          ALargeUtf8 -> varLen
+          ALargeBinary -> varLen
+          AStruct -> keepValidity f st >>= stripFields (V.toList (fieldChildren f))
+          AList -> listLike "list"
+          ALargeList -> listLike "large list"
+          AFixedSizeList _ -> do
+            c <- onlyChild "fixed-size list" f
+            keepValidity f st >>= stripField c
+          AMap _ ->
+            -- Spec layout: [validity, offsets, entries-struct validity,
+            -- key bufs..., value bufs...]. The simplified layout has no
+            -- entries-struct buffer.
+            case V.toList (fieldChildren f) of
+              [entries] -> case V.toList (fieldChildren entries) of
+                [keyField, valField] ->
+                  keepValidity f st >>= keep 1 >>= skip 1 >>= stripField keyField >>= stripField valField
+                _ -> Left "Arrow.FlatBufferIPC: map entries must be a struct of (key, value)"
+              _ -> Left "Arrow.FlatBufferIPC: map field must have exactly one child"
+          AUnion Dense _ -> keep 2 st >>= stripFields (V.toList (fieldChildren f))
+          AUnion Sparse _ -> keep 1 st >>= stripFields (V.toList (fieldChildren f))
+          ARunEndEncoded -> case V.toList (fieldChildren f) of
+            [reField, valField] -> stripField reField st >>= stripField valField
+            _ -> Left "Arrow.FlatBufferIPC: run-end encoded field must have two children"
+          AListView -> listViewLike "list-view"
+          ALargeListView -> listViewLike "large list-view"
+          AUtf8View -> viewLayout
+          ABinaryView -> viewLayout
+      where
+        flatPrim = keepValidity f st >>= keep 1
+        varLen = keepValidity f st >>= keep 2
+        listLike what = do
+          c <- onlyChild what f
+          keepValidity f st >>= keep 1 >>= stripField c
+        listViewLike what = do
+          c <- onlyChild what f
+          keepValidity f st >>= keep 2 >>= stripField c
+        -- Spec: [validity, views, ...variadic data buffers]; the
+        -- variadic count is this view column's entry in
+        -- rbVariadicBufferCounts (preorder over view columns).
+        viewLayout = do
+          st1@(bi, vi, _) <- keepValidity f st
+          varCount <- case varCounts V.!? vi of
+            Just c
+              | c >= 0 && c < fromIntegral (V.length bufs - bi) -> Right (fromIntegral c)
+              | otherwise -> Left ("Arrow.FlatBufferIPC: invalid variadic buffer count " ++ show c)
+            Nothing -> Left "Arrow.FlatBufferIPC: view column has no variadicBufferCounts entry"
+          (bi', _, acc') <- keep (1 + varCount) st1
+          Right (bi', vi + 1, acc')
+
+
+-- | @(next source buffer, next variadic-count entry, kept buffers reversed)@.
+type StripState = (Int, Int, [Buffer])
+
+-- | Convenience: parse + materialise. Pyarrow / arrow-cpp output
+-- becomes a 'V.Vector ColumnArray' per batch in one call.
 materializeRecordBatchFB
   :: Schema -> RecordBatchDef -> ByteString
   -> Either String (V.Vector ColumnArray)
-materializeRecordBatchFB sch rb body =
-  materializeRecordBatch sch (denormaliseBuffers sch rb) body
+materializeRecordBatchFB sch rb body = do
+  rb' <- denormaliseBuffers sch rb
+  materializeRecordBatch sch rb' body
 
 -- | Zero-length validity buffer used for fields whose validity
 -- doesn't appear in the source 'Buffer' vector — namely:
@@ -1793,18 +1800,11 @@ readSchemaTable bs schPos = do
         0 -> Right Little
         1 -> Right Big
         _ -> Left ("Arrow.FlatBufferIPC: unknown endianness " ++ show v)
-  fieldsVec <- case slot 1 of
-    Nothing -> Right V.empty
-    Just p  -> do
-      vecPos <- followUOffset bs p
-      readVectorOfOffsets bs vecPos
-  fields <- V.mapM (readField bs) fieldsVec
-  customMd <- case slot 2 of
-    Nothing -> Right V.empty
-    Just p  -> do
-      vecPos <- followUOffset bs p
-      kvPositions <- readVectorOfOffsets bs vecPos
-      V.mapM (readKeyValue bs) kvPositions
+  (fieldsVec, budget0) <- case slot 1 of
+    Nothing -> Right (V.empty, schemaBudget bs)
+    Just p  -> readChargedOffsets bs (schemaBudget bs) p
+  (fields, budget1) <- readFields bs 0 budget0 fieldsVec
+  (customMd, _) <- readKeyValues bs budget1 (slot 2)
   Right Schema
     { arrowFields     = fields
     , arrowEndianness = endian
@@ -1812,15 +1812,86 @@ readSchemaTable bs schPos = do
     , arrowFeatures   = V.empty  -- features round-trip on the wire is parsed by callers via getFeaturesIfPresent
     }
 
--- | Decode one @Field@ table.
-readField :: ByteString -> Pos -> Either String Field
-readField bs fldPos = do
+-- | Nesting limit for decoded schemas (arrow-cpp's IPC reader uses
+-- the same bound).
+maxSchemaDepth :: Int
+maxSchemaDepth = 64
+
+-- | FlatBuffers offsets may alias, so a few hundred bytes can
+-- describe an exponentially large DAG of fields or reuse one long
+-- string for every name. Every decoded field, string and type id is
+-- charged against this budget; an honest (unaliased) buffer spends
+-- at most its own length.
+schemaBudget :: ByteString -> Int
+schemaBudget bs = 4 * BS.length bs + 4096
+
+-- | Charge @cost@ against the remaining schema budget.
+charge :: Int -> Int -> Either String Int
+charge cost budget
+  | cost > budget =
+      Left "Arrow.FlatBufferIPC: schema decodes to more fields and strings than its metadata holds (aliased offsets)"
+  | otherwise = Right (budget - cost)
+
+-- | Decode the string at the uoffset in @fieldPos@, charging its length first.
+readChargedString :: ByteString -> Int -> Pos -> Either String (T.Text, Int)
+readChargedString bs budget fieldPos = do
+  strPos <- followUOffset bs fieldPos
+  raw <- readStringSlice bs strPos
+  budget' <- charge (4 + BS.length raw) budget
+  case TE.decodeUtf8' raw of
+    Left _ -> Left "Arrow.FlatBufferIPC: invalid UTF-8 in schema string"
+    Right t -> Right (t, budget')
+
+-- | Read the @[offset]@ vector at the uoffset in @fieldPos@, charging
+-- four units per element before the position vector is allocated.
+readChargedOffsets :: ByteString -> Int -> Pos -> Either String (V.Vector Pos, Int)
+readChargedOffsets bs budget fieldPos = do
+  vecPos <- followUOffset bs fieldPos
+  n <- vectorLength bs vecPos
+  budget' <- charge (4 * n) budget
+  ps <- readVectorOfOffsets bs vecPos
+  Right (ps, budget')
+
+-- | 'readType' with its variable-size parts (union type ids, the
+-- timestamp zone string) charged before they are decoded.
+readTypeCharged :: ByteString -> Int -> Int -> Maybe Pos -> Either String (ArrowType, Int)
+readTypeCharged bs budget tag mpos = do
+  cost <- case (tag, mpos) of
+    (10, Just p) -> slotCost p (\vp -> (\s -> 4 + BS.length s) <$> readStringSlice bs vp)
+    (14, Just p) -> slotCost p (\vp -> (* 4) <$> vectorLength bs vp)
+    _ -> Right 0
+  budget' <- charge cost budget
+  ty <- readType bs tag mpos
+  Right (ty, budget')
+  where
+    -- Both variable parts live behind slot 1 of their type table.
+    slotCost p measure = do
+      s <- resolveTable bs p
+      case s 1 of
+        Nothing -> Right 0
+        Just fp -> followUOffset bs fp >>= measure
+
+readFields :: ByteString -> Int -> Int -> V.Vector Pos -> Either String (V.Vector Field, Int)
+readFields bs depth budget0 ps = go 0 budget0 []
+  where
+    !n = V.length ps
+    go !i !budget acc
+      | i >= n = Right (V.fromListN n (reverse acc), budget)
+      | otherwise = do
+          (f, budget') <- readField bs depth budget (V.unsafeIndex ps i)
+          go (i + 1) budget' (f : acc)
+
+-- | Decode one @Field@ table (and its children), returning the
+-- remaining schema budget.
+readField :: ByteString -> Int -> Int -> Pos -> Either String (Field, Int)
+readField bs depth budget0 fldPos = do
+  when' (depth >= maxSchemaDepth) $
+    Left ("Arrow.FlatBufferIPC: schema nests deeper than " ++ show maxSchemaDepth ++ " levels")
+  budget1 <- charge 8 budget0
   slot <- resolveTable bs fldPos
-  name <- case slot 0 of
-    Nothing -> Right ""
-    Just p  -> do
-      strPos <- followUOffset bs p
-      readString bs strPos
+  (name, budget2) <- case slot 0 of
+    Nothing -> Right ("", budget1)
+    Just p  -> readChargedString bs budget1 p
   nullable <- case slot 1 of
     Nothing -> Right False
     Just p  -> do
@@ -1829,36 +1900,46 @@ readField bs fldPos = do
   tyTag <- case slot 2 of
     Nothing -> Right 0
     Just p  -> peekU8 bs p
-  ty <- case slot 3 of
-    Nothing  -> readType bs (fromIntegral tyTag) Nothing
+  (ty, budget3) <- case slot 3 of
+    Nothing  -> readTypeCharged bs budget2 (fromIntegral tyTag) Nothing
     Just p   -> do
       tyPos <- followUOffset bs p
-      readType bs (fromIntegral tyTag) (Just tyPos)
-  children <- case slot 5 of
-    Nothing -> Right V.empty
-    Just p  -> do
-      vecPos <- followUOffset bs p
-      childPositions <- readVectorOfOffsets bs vecPos
-      V.mapM (readField bs) childPositions
+      readTypeCharged bs budget2 (fromIntegral tyTag) (Just tyPos)
   dictionary <- case slot 4 of
     Nothing -> Right Nothing
     Just p  -> do
       dePos <- followUOffset bs p
       Just <$> readDictionaryEncodingTable bs dePos
-  customMd <- case slot 6 of
-    Nothing -> Right V.empty
+  (customMd, budget4) <- readKeyValues bs budget3 (slot 6)
+  (children, budget5) <- case slot 5 of
+    Nothing -> Right (V.empty, budget4)
     Just p  -> do
-      vecPos <- followUOffset bs p
-      kvPositions <- readVectorOfOffsets bs vecPos
-      V.mapM (readKeyValue bs) kvPositions
-  Right Field
-    { fieldName     = name
-    , fieldNullable = nullable
-    , fieldType     = ty
-    , fieldChildren = children
-    , fieldDictionary = dictionary
-    , fieldMetadata = customMd
-    }
+      (childPositions, budget4') <- readChargedOffsets bs budget4 p
+      readFields bs (depth + 1) budget4' childPositions
+  Right
+    ( Field
+        { fieldName     = name
+        , fieldNullable = nullable
+        , fieldType     = ty
+        , fieldChildren = children
+        , fieldDictionary = dictionary
+        , fieldMetadata = customMd
+        }
+    , budget5
+    )
+
+-- | Decode an optional @[KeyValue]@ vector slot, charging each entry.
+readKeyValues :: ByteString -> Int -> Maybe Pos -> Either String (V.Vector (T.Text, T.Text), Int)
+readKeyValues _ budget Nothing = Right (V.empty, budget)
+readKeyValues bs budget00 (Just p) = do
+  (kvPositions, budget0) <- readChargedOffsets bs budget00 p
+  let !n = V.length kvPositions
+      go !i !budget acc
+        | i >= n = Right (V.fromListN n (reverse acc), budget)
+        | otherwise = do
+            (kv, budget') <- readKeyValue bs budget (V.unsafeIndex kvPositions i)
+            go (i + 1) budget' (kv : acc)
+  go 0 budget0 []
 
 -- | Decode one @KeyValue@ table (per @format/Schema.fbs@):
 --
@@ -1868,20 +1949,17 @@ readField bs fldPos = do
 --   value : string;   // 1
 -- }
 -- @
-readKeyValue :: ByteString -> Pos -> Either String (T.Text, T.Text)
-readKeyValue bs kvPos = do
+readKeyValue :: ByteString -> Int -> Pos -> Either String ((T.Text, T.Text), Int)
+readKeyValue bs budget0 kvPos = do
+  budget1 <- charge 8 budget0
   slot <- resolveTable bs kvPos
-  k <- case slot 0 of
-    Nothing -> Right ""
-    Just p  -> do
-      strPos <- followUOffset bs p
-      readString bs strPos
-  v <- case slot 1 of
-    Nothing -> Right ""
-    Just p  -> do
-      strPos <- followUOffset bs p
-      readString bs strPos
-  Right (k, v)
+  (k, budget2) <- case slot 0 of
+    Nothing -> Right ("", budget1)
+    Just p  -> readChargedString bs budget1 p
+  (v, budget3) <- case slot 1 of
+    Nothing -> Right ("", budget2)
+    Just p  -> readChargedString bs budget2 p
+  Right ((k, v), budget3)
 
 -- | Decode a 'DictionaryEncoding' table:
 --
@@ -1917,22 +1995,25 @@ readType :: ByteString -> Int -> Maybe Pos -> Either String ArrowType
 readType _  0 _ = Right ANull   -- "None" / Null
 readType _  1 _ = Right ANull
 readType bs 2 (Just p) = do
-  -- Int { bitWidth: i32, is_signed: bool }
+  -- Int { bitWidth: i32, is_signed: bool }. Schema.fbs gives
+  -- is_signed no explicit default, so an absent slot is the bool
+  -- default (false); pyarrow omits it for unsigned columns.
   s <- resolveTable bs p
   bits <- case s 0 of
     Nothing -> Right 32
     Just b  -> peekI32 bs b
   signed <- case s 1 of
-    Nothing -> Right True
+    Nothing -> Right False
     Just b  -> do
       v <- peekU8 bs b
       Right (v /= 0)
   Right (AInt (fromIntegral bits) signed)
 readType bs 3 (Just p) = do
-  -- FloatingPoint { precision: i16 }
+  -- FloatingPoint { precision: Precision }; an absent slot is the
+  -- enum's first value, HALF (pyarrow omits it for float16).
   s <- resolveTable bs p
   prec <- case s 0 of
-    Nothing -> Right 1
+    Nothing -> Right 0
     Just b  -> peekI16 bs b
   case prec of
     0 -> Right (AFloatingPoint Half)
@@ -1996,9 +2077,8 @@ readType bs 14 (Just p) = do
     Nothing -> Right V.empty
     Just b  -> do
       vecPos <- followUOffset bs b
-      n <- peekU32 bs vecPos
-      V.generateM (fromIntegral n) (\i ->
-        peekI32 bs (vecPos + 4 + 4 * i))
+      (_, elems) <- readVectorOfStructs bs vecPos 4
+      V.mapM (peekI32 bs) elems
   Right (AUnion mode ids)
 readType bs 15 (Just p) = do
   s <- resolveTable bs p
@@ -2067,8 +2147,7 @@ readRecordBatchTable bs rbPos = do
     Nothing -> Right V.empty
     Just b  -> do
       vecPos <- followUOffset bs b
-      n <- peekU32 bs vecPos
-      V.generateM (fromIntegral n) $ \i -> peekI64 bs (vecPos + 4 + 8 * i)
+      V.fromList <$> readVectorInt64 bs vecPos
   -- Slot 3 is BodyCompression (a table). When present we read
   -- the codec discriminator and translate to our enum.
   bodyComp <- case s 3 of
@@ -2236,26 +2315,18 @@ readArrowStreamFBInterleaved bs0 = do
               case ht of
                 3 -> do
                   (rb, bodyLen) <- decodeRecordBatchMessage meta
-                  let !nBody    = fromIntegral bodyLen :: Int
-                      !nBodyPad = alignUp8FB nBody
-                      body      = BS.take nBody rest1
-                      rest2     = BS.drop nBodyPad rest1
+                  (body, rest2) <- takeFrameBody "record batch body" bodyLen rest1
                   goFrames rest2 (SFBatch rb body : acc)
                 2 -> do
                   (did, isDelta, rb, bodyLen) <-
                     decodeDictionaryBatchMessage meta
-                  let !nBody    = fromIntegral bodyLen :: Int
-                      !nBodyPad = alignUp8FB nBody
-                      body      = BS.take nBody rest1
-                      rest2     = BS.drop nBodyPad rest1
-                      !db = DictBatch { dbId = did, dbIsDelta = isDelta
+                  (body, rest2) <- takeFrameBody "dictionary batch body" bodyLen rest1
+                  let !db = DictBatch { dbId = did, dbIsDelta = isDelta
                                       , dbData = rb, dbBody = body }
                   goFrames rest2 (SFDict db : acc)
                 _ ->
                   Left ("Arrow.FlatBufferIPC: unsupported message header_type "
                         ++ show ht)
-
-    alignUp8FB n = (n + 7) .&. complement (7 :: Int)
 
 -- | Like 'readArrowStreamFB' but also returns any 'DictBatch'
 -- frames encountered (in stream order). Most pyarrow / arrow-cpp
@@ -2265,49 +2336,11 @@ readArrowStreamFBWithDicts
   :: ByteString
   -> Either String (Schema, [DictBatch], [(RecordBatchDef, ByteString)])
 readArrowStreamFBWithDicts bs0 = do
-  (schema, after) <- consumeOne bs0 decodeSchemaMessage
-  go schema after [] []
-  where
-    consumeOne bs decodeFrame = do
-      (mlen, meta, rest) <- readFrameHeader bs
-      when' (mlen <= 0) $
-        Left "Arrow.FlatBufferIPC: unexpected EOS while reading schema"
-      decoded <- decodeFrame meta
-      Right (decoded, rest)
-
-    go sch bs dicts batches
-      | BS.length bs < 4 = Right (sch, reverse dicts, reverse batches)
-      | otherwise = do
-          (mlen, meta, rest1) <- readFrameHeader bs
-          if mlen == 0
-            then Right (sch, reverse dicts, reverse batches)
-            else do
-              -- Peek the message header_type without forcing a
-              -- specific decoder.
-              ht <- peekHeaderType meta
-              case ht of
-                3 -> do
-                  (rb, bodyLen) <- decodeRecordBatchMessage meta
-                  let !nBody    = fromIntegral bodyLen :: Int
-                      !nBodyPad = alignUp8FB nBody
-                      body      = BS.take nBody rest1
-                      rest2     = BS.drop nBodyPad rest1
-                  go sch rest2 dicts ((rb, body) : batches)
-                2 -> do
-                  (did, isDelta, rb, bodyLen) <-
-                    decodeDictionaryBatchMessage meta
-                  let !nBody    = fromIntegral bodyLen :: Int
-                      !nBodyPad = alignUp8FB nBody
-                      body      = BS.take nBody rest1
-                      rest2     = BS.drop nBodyPad rest1
-                      !db = DictBatch { dbId = did, dbIsDelta = isDelta
-                                      , dbData = rb, dbBody = body }
-                  go sch rest2 (db : dicts) batches
-                _ ->
-                  Left ("Arrow.FlatBufferIPC: unsupported message header_type "
-                        ++ show ht)
-
-    alignUp8FB n = (n + 7) .&. complement (7 :: Int)
+  (schema, frames) <- readArrowStreamFBInterleaved bs0
+  let split (SFDict db) (ds, bs) = (db : ds, bs)
+      split (SFBatch rb body) (ds, bs) = (ds, (rb, body) : bs)
+      (dicts, batches) = foldr split ([], []) frames
+  Right (schema, dicts, batches)
 
 -- | Look up the @header_type@ ubyte from a Message flatbuffer.
 peekHeaderType :: ByteString -> Either String Int
@@ -2317,6 +2350,38 @@ peekHeaderType meta = do
   case s 1 of
     Nothing -> Right 0
     Just b  -> fromIntegral <$> peekU8 meta b
+
+-- | Encapsulated frame (continuation marker, length, FlatBuffers
+-- @Message@ metadata, padding) for one 'Message'. The body is not
+-- included: the metadata's @bodyLength@ is the 8-aligned extent of
+-- the batch's buffers, and the caller appends that many body bytes.
+encodeMessageFrame :: Message -> ByteString
+encodeMessageFrame = \case
+  SchemaMessage sch -> encapsulateMessage (buildSchemaMessage sch) BS.empty
+  RecordBatch rb -> encapsulateMessage (buildRecordBatchMessage rb (bodyExtent rb)) BS.empty
+  DictionaryBatch did isDelta rb ->
+    encapsulateMessage (buildDictionaryBatchMessageLen did isDelta rb (bodyExtent rb)) BS.empty
+  where
+    bodyExtent rb =
+      let !end = V.foldl' (\m buf -> max m (bufOffset buf + bufLength buf)) 0 (rbBuffers rb)
+      in (end + 7) .&. complement 7
+
+-- | Parse one encapsulated frame (with or without the continuation
+-- marker) into its 'Message' and the @bodyLength@ it declares. The
+-- end-of-stream marker and unsupported header types are 'Left'.
+decodeMessageFrame :: ByteString -> Either String (Message, Int64)
+decodeMessageFrame bs = do
+  (mlen, meta, _) <- readFrameHeader bs
+  when' (mlen == 0) $
+    Left "Arrow.FlatBufferIPC: end-of-stream marker, not a message"
+  when' (BS.length meta < mlen) $
+    Left "Arrow.FlatBufferIPC: truncated message metadata"
+  ht <- peekHeaderType meta
+  case ht of
+    1 -> (\s -> (SchemaMessage s, 0)) <$> decodeSchemaMessage meta
+    2 -> (\(did, isDelta, rb, n) -> (DictionaryBatch did isDelta rb, n)) <$> decodeDictionaryBatchMessage meta
+    3 -> (\(rb, n) -> (RecordBatch rb, n)) <$> decodeRecordBatchMessage meta
+    _ -> Left ("Arrow.FlatBufferIPC: unsupported message header_type " ++ show ht)
 
 -- | Parse an Arrow IPC /file/ (per @format/File.fbs@), accepting
 -- either the legacy stream-shaped output of 'writeArrowFileFB' or
@@ -2365,20 +2430,26 @@ readFrameHeader bs = do
       when' (BS.length bs < 8) $
         Left "Arrow.FlatBufferIPC: truncated frame after continuation"
       mlen <- peekI32 bs 4
-      let !mlenI = fromIntegral mlen :: Int
-      when' (mlenI < 0) $
-        Left "Arrow.FlatBufferIPC: negative metadata length"
-      Right ( mlenI
-            , BS.take mlenI (BS.drop 8 bs)
-            , BS.drop (8 + mlenI) bs
-            )
+      metadataAt 8 (fromIntegral mlen)
     else
       -- Legacy: first 4 bytes are the metadata length itself.
       if first4 == 0
         then Right (0, BS.empty, BS.drop 4 bs)
-        else do
-          let !mlenI = fromIntegral first4 :: Int
+        else metadataAt 4 (fromIntegral first4)
+  where
+    metadataAt :: Int -> Int -> Either String (Int, ByteString, ByteString)
+    metadataAt start mlenI
+      | mlenI < 0 = Left "Arrow.FlatBufferIPC: negative metadata length"
+      | mlenI > BS.length bs - start =
+          Left
+            ( "Arrow.FlatBufferIPC: frame claims "
+                ++ show mlenI
+                ++ " metadata bytes, "
+                ++ show (BS.length bs - start)
+                ++ " remain"
+            )
+      | otherwise =
           Right ( mlenI
-                , BS.take mlenI (BS.drop 4 bs)
-                , BS.drop (4 + mlenI) bs
+                , BS.take mlenI (BS.drop start bs)
+                , BS.drop (start + mlenI) bs
                 )
