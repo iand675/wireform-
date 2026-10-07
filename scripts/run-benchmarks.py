@@ -63,7 +63,12 @@ def run(cmd: list[str], **kw) -> int:
 
 def cabal(args: list[str]) -> list[str]:
     # Prefer a nix dev shell when present (matches collect-stats.sh), else
-    # plain cabal on PATH.
+    # plain cabal on PATH. Already inside the dev shell (direnv or
+    # `nix develop`): run cabal directly. A nested `nix develop` re-evaluates
+    # the git flake, which ignores untracked files and rebuilds every
+    # workspace package through nix.
+    if os.environ.get("IN_NIX_SHELL"):
+        return ["cabal", *args]
     if os.path.exists(os.path.join(ROOT, "flake.nix")) and which("nix"):
         return ["nix", "develop", "--command", "cabal", *args]
     return ["cabal", *args]
