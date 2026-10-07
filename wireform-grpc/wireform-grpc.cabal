@@ -271,7 +271,7 @@ test-suite wireform-grpc-test-minimal
     , wireform-grpc
     , wireform-proto
     , bytestring >= 0.10.12 && < 0.13
-    , wireform-core == 0.1.*
+    , wireform-core == 0.2.*
     , hs-opentelemetry-api >= 0.2 && < 1.1
 
 Flag build-stress-test
