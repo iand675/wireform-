@@ -173,7 +173,7 @@ peekFixed
   -> Pos
   -> Either String a
 peekFixed !w name bs off
-  | off < 0 || off + w > BS.length bs = boundsErr name
+  | off < 0 || off > BS.length bs - w = boundsErr name
   | otherwise =
       let !val = unsafeDupablePerformIO (withBSPtr bs (\p -> peekByteOff p off))
       in Right val
@@ -307,20 +307,28 @@ traversal that doesn't need the materialised vector, use
 -}
 readVectorOfOffsets :: ByteString -> Pos -> Either String (V.Vector Pos)
 readVectorOfOffsets bs vecPos = do
-  n <- peekU32 bs vecPos
-  let elemPositions = V.generate (fromIntegral n) $ \i ->
-        let !ePos = vecPos + 4 + 4 * i
-        in case peekU32 bs ePos of
-             Left _ -> ePos
-             Right rel -> ePos + fromIntegral rel
-  Right elemPositions
+  n <- checkedVectorLength "readVectorOfOffsets" bs vecPos 4
+  V.generateM n $ \i -> followUOffset bs (vecPos + 4 + 4 * i)
 
 
 -- | Decode a vector of little-endian Int64 values.
 readVectorInt64 :: ByteString -> Pos -> Either String [Int64]
 readVectorInt64 bs vecPos = do
-  n <- peekU32 bs vecPos
-  goVec (fromIntegral n) (\i -> peekI64 bs (vecPos + 4 + 8 * i))
+  n <- checkedVectorLength "readVectorInt64" bs vecPos 8
+  goVec n (\i -> peekI64 bs (vecPos + 4 + 8 * i))
+
+
+{- | Element count of the vector at @vecPos@, checked so that all
+@count * stride@ payload bytes lie inside the buffer. Callers can
+then size allocations by the count without trusting the wire.
+-}
+checkedVectorLength :: String -> ByteString -> Pos -> Int -> Either String Int
+checkedVectorLength name bs vecPos stride = do
+  n <- fromIntegral <$> peekU32 bs vecPos
+  -- peekU32 succeeded, so 0 <= vecPos <= length - 4.
+  if n > (BS.length bs - vecPos - 4) `quot` max 1 stride
+    then Left ("FlatBuffers.Reader." <> name <> ": vector of " <> show n <> " elements overruns the buffer")
+    else Right n
 
 
 {- | Walk @0..n-1@ and accumulate results, short-circuiting on
@@ -340,7 +348,8 @@ goVec n f = go 0
 
 
 {- | Decode a vector of fixed-size inline structs. Returns
-@(elemCount, byte position of each element start)@.
+@(elemCount, byte position of each element start)@; every element
+lies inside the buffer.
 -}
 readVectorOfStructs
   :: ByteString
@@ -349,6 +358,6 @@ readVectorOfStructs
   -- ^ stride (per-struct size)
   -> Either String (Int, V.Vector Pos)
 readVectorOfStructs bs vecPos stride = do
-  n <- peekU32 bs vecPos
-  let elems = V.generate (fromIntegral n) (\i -> vecPos + 4 + i * stride)
-  Right (fromIntegral n, elems)
+  n <- checkedVectorLength "readVectorOfStructs" bs vecPos stride
+  let elems = V.generate n (\i -> vecPos + 4 + i * stride)
+  Right (n, elems)
