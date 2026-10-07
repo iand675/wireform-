@@ -945,16 +945,18 @@ int hs_proto_validate_arrow_buffers(
             (const simde__m128i *)(buf_pairs + i * 2));
         simde__m128i pair1 = simde_mm_loadu_si128(
             (const simde__m128i *)(buf_pairs + i * 2 + 2));
-        /* Check all 4 values are non-negative (high bit clear) */
+        /* Check all 4 values are non-negative: the sign bit of each
+         * int64 lives in byte 7 of its 8-byte lane (movemask bits 7, 15). */
         simde__m128i combined = simde_mm_or_si128(pair0, pair1);
-        if (simde_mm_movemask_epi8(combined) & 0x8888) return 0;
+        if (simde_mm_movemask_epi8(combined) & 0x8080) return 0;
 
         /* Scalar bounds + overlap checks */
         for (int j = 0; j < 2; j++) {
             int idx = i + j;
             int64_t off = buf_pairs[idx * 2];
             int64_t len = buf_pairs[idx * 2 + 1];
-            if (off + len > body_length) return 0;
+            /* off, len >= 0, so this cannot overflow (off + len could). */
+            if (len > body_length || off > body_length - len) return 0;
             if (off < prev_end && len > 0) return 0;
             int64_t end = off + len;
             if (end > prev_end) prev_end = end;
@@ -966,7 +968,7 @@ int hs_proto_validate_arrow_buffers(
         int64_t off = buf_pairs[i * 2];
         int64_t len = buf_pairs[i * 2 + 1];
         if (off < 0 || len < 0) return 0;
-        if (off + len > body_length) return 0;
+        if (len > body_length || off > body_length - len) return 0;
         if (off < prev_end && len > 0) return 0;
         int64_t end = off + len;
         if (end > prev_end) prev_end = end;
