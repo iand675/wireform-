@@ -55,7 +55,7 @@ On Debian / Ubuntu: `apt install liblz4-dev`. On macOS:
 | `Columnar.Predicate` | Shared pushdown vocabulary: `PValue`, `PColPredicate`, `Predicate`. Per-format evaluators (`Parquet.Statistics`, `ORC.Statistics`, Iceberg expression evaluator) all consume this. |
 | `Columnar.IO`        | mmap-aware file loader: `loadFile` (mmap above 64 KiB, eager below), `loadFileMmap`, `loadFileEager`. |
 | `Columnar.LZ4`       | LZ4 frame and block-format codec wrapper around the system `liblz4`. |
-| `Columnar.SIMD`      | SIMD-accelerated bit-unpacking, popcount, LSB-first packed-bool unpack (Arrow / Parquet validity bitmaps), 16-byte bulk `memcpy`. C kernel in `cbits/columnar_simd.c` using vendored simde for SSE2 / AVX2 / NEON portability. |
+| `Columnar.SIMD`      | SIMD-accelerated bit-unpacking, popcount, LSB-first packed-bool unpack (Arrow / Parquet validity bitmaps). C kernel in `cbits/columnar_simd.c` using vendored simde for SSE2 / AVX2 / NEON portability. |
 
 ## Pull-based iterators
 
@@ -116,15 +116,13 @@ the choice use `loadFileMmap` or `loadFileEager` directly.
 ## SIMD kernels
 
 `Columnar.SIMD` exposes the Haskell side of the C kernel in
-[`cbits/columnar_simd.c`](cbits/columnar_simd.c). Three kernels share
+[`cbits/columnar_simd.c`](cbits/columnar_simd.c). Two kernels share
 this code:
 
 - LSB-first bit-unpacking for Arrow validity bitmaps and Parquet
   bit-packed run-length encoding.
 - Popcount over Arrow validity bitmaps for null-counting and
   null-mask arithmetic.
-- 16-byte bulk `memcpy` for runs of values inside RLE / dictionary
-  pages.
 
 The kernel uses vendored simde headers (under `include/simde/`) so
 it compiles to SSE2 / AVX2 on x86 and NEON on aarch64 without any
@@ -152,6 +150,16 @@ kernels and against `Streaming` / `pipes` / `conduit` for the
 iterator surface are planned.
 
 > Numbers TBD: harness pending.
+
+## Improvement ideas
+
+- **SIMD bulk copy kernel.** Add a 16-byte-chunked SIMDe copy
+  (load/store `__m128i` with a scalar `memcpy` tail) to
+  `cbits/columnar_simd.c` for runs of values inside RLE / dictionary
+  pages. Should land together with a micro-benchmark showing a win
+  over libc `memcpy` on real Parquet / Arrow page bodies — and with
+  actual call sites, since an earlier version existed but was never
+  wired into any reader.
 
 ## License
 

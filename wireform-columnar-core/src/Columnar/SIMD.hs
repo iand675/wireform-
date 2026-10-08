@@ -8,7 +8,6 @@ bitmaps). Used by Parquet and Arrow column readers on hot paths.
 module Columnar.SIMD (
   bitmapPopCount,
   unpackBitsLsbUnsafe,
-  memcpyFast,
 ) where
 
 import Data.ByteString qualified as BS
@@ -30,10 +29,6 @@ foreign import ccall unsafe "hs_columnar_bitmap_popcount"
 
 foreign import ccall safe "hs_columnar_unpack_bits_lsb"
   c_unpack_bits_lsb :: Ptr Word8 -> Int32 -> Ptr Word8 -> IO ()
-
-
-foreign import ccall unsafe "hs_columnar_memcpy_fast"
-  c_memcpy_fast :: Ptr Word8 -> Ptr Word8 -> CInt -> IO ()
 
 
 -- | Count set bits in a byte range (entire bytes).
@@ -58,11 +53,3 @@ unpackBitsLsbUnsafe !n bs = unsafeDupablePerformIO $ do
       c_unpack_bits_lsb (castPtr src) (fromIntegral n) dst
   sv <- VS.unsafeFreeze mvs
   pure $! V.convert (VU.map (/= (0 :: Word8)) (VU.convert sv))
-
-
-{- | Bulk copy (SIMDe 16-byte chunks inside C). @dst@ must be at least @len@
-bytes; only @len@ bytes are written.
--}
-memcpyFast :: Ptr Word8 -> Ptr Word8 -> Int -> IO ()
-memcpyFast !dst !src !len =
-  c_memcpy_fast dst src (fromIntegral len)
