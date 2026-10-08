@@ -82,6 +82,8 @@ test-suite wireform-flatbuffers-derive-test
   hs-source-dirs: test
   main-is: Main.hs
   other-modules:
+    Test.FlatBuffers.Builder
+    Test.FlatBuffers.Builder.Reference
     Test.FlatBuffers.Derive
     Test.FlatBuffers.Derive.Types
     Test.FlatBuffers.Derive.Instances
@@ -94,6 +96,9 @@ test-suite wireform-flatbuffers-derive-test
     wireform-flatbuffers,
     wireform-derive,
     bytestring,
+    containers,
+    hedgehog,
+    sydtest-hedgehog,
     text,
     vector,
     sydtest

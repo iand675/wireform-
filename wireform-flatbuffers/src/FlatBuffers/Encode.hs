@@ -45,7 +45,13 @@ import FlatBuffers.Builder (
   prependU32,
   prependU64,
   prependU8,
-  scalar,
+  scalarI16,
+  scalarI32,
+  scalarI64,
+  scalarU16,
+  scalarU32,
+  scalarU64,
+  scalarU8,
   struct,
   voff,
   writeString,
@@ -123,17 +129,17 @@ structs are deferred to the 'Field'' writer.
 -}
 resolveSlot :: Builder -> F.Value -> IO Field'
 resolveSlot b val = case val of
-  F.VBool x -> pure (scalar 1 (\bb -> prependU8 bb (if x then 1 else 0)))
-  F.VInt8 x -> pure (scalar 1 (\bb -> prependU8 bb (fromIntegral x)))
-  F.VInt16 x -> pure (scalar 2 (\bb -> prependI16 bb x))
-  F.VInt32 x -> pure (scalar 4 (\bb -> prependI32 bb x))
-  F.VInt64 x -> pure (scalar 8 (\bb -> prependI64 bb x))
-  F.VWord8 x -> pure (scalar 1 (\bb -> prependU8 bb x))
-  F.VWord16 x -> pure (scalar 2 (\bb -> prependU16 bb x))
-  F.VWord32 x -> pure (scalar 4 (\bb -> prependU32 bb x))
-  F.VWord64 x -> pure (scalar 8 (\bb -> prependU64 bb x))
-  F.VFloat x -> pure (scalar 4 (\bb -> prependU32 bb (castFloatToWord32 x)))
-  F.VDouble x -> pure (scalar 8 (\bb -> prependU64 bb (castDoubleToWord64 x)))
+  F.VBool x -> pure (scalarU8 (if x then 1 else 0))
+  F.VInt8 x -> pure (scalarU8 (fromIntegral x))
+  F.VInt16 x -> pure (scalarI16 x)
+  F.VInt32 x -> pure (scalarI32 x)
+  F.VInt64 x -> pure (scalarI64 x)
+  F.VWord8 x -> pure (scalarU8 x)
+  F.VWord16 x -> pure (scalarU16 x)
+  F.VWord32 x -> pure (scalarU32 x)
+  F.VWord64 x -> pure (scalarU64 x)
+  F.VFloat x -> pure (scalarU32 (castFloatToWord32 x))
+  F.VDouble x -> pure (scalarU64 (castDoubleToWord64 x))
   F.VString t -> do
     !uoff <- writeString b t
     pure (voff uoff)
