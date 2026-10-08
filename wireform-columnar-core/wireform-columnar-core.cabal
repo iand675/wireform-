@@ -90,7 +90,7 @@ test-suite wireform-columnar-test
   main-is: Main.hs
   build-depends:
     base >= 4.16 && < 5,
-    wireform-columnar,
+    wireform-columnar-core,
     bytestring >= 0.11 && < 0.13,
     text >= 2.0 && < 2.2,
     vector >= 0.13 && < 0.14,
