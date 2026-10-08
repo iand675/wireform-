@@ -11,8 +11,15 @@
 //!   message sequence as `encodeArrowStream`.
 //! * decode: `StreamReader` over the bytes, collecting every batch, with the
 //!   reader's default validation on.
+//! * `decode + to_vec`: decode, then copy every column into owned Rust
+//!   values (`Vec<Option<T>>`, `String`, nested `Vec`s; dictionaries
+//!   expanded), the counterpart of `decode + toVector` in Bench.hs.
 //! * `decode skip_validation*`: the same read with validation off. Not mapped
 //!   into any summary; recorded for information only.
+//!
+//! arrow-rs has no lazy (chunked, aliasing) stream writer, so the Haskell
+//! `encode lazy` rows are compared against `encode` (`StreamWriter`) in the
+//! manifest.
 //!
 //! Inputs (record batches, encoded bytes, rows) are built before timing, so
 //! only the codec call is measured.
@@ -24,11 +31,11 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, DictionaryArray, Float64Array, Int32Array, Int64Array,
-    ListArray, RecordBatch, StringArray, StructArray,
+    Array, ArrayRef, AsArray, BooleanArray, DictionaryArray, Float64Array, Int32Array,
+    Int64Array, ListArray, RecordBatch, StringArray, StructArray,
 };
 use arrow::buffer::OffsetBuffer;
-use arrow::datatypes::{DataType, Field, Fields, Int32Type, Schema};
+use arrow::datatypes::{DataType, Field, Fields, Float64Type, Int32Type, Int64Type, Schema};
 use arrow::ipc::reader::{FileReader, StreamReader};
 use arrow::ipc::writer::{FileWriter, StreamWriter};
 use criterion::{criterion_group, criterion_main, Criterion};
@@ -233,6 +240,58 @@ fn decode_file(bytes: &[u8]) -> Vec<RecordBatch> {
         .expect("file decode")
 }
 
+/// A decoded column copied into owned Rust values, one variant per shape
+/// the workloads use (mirrors `Boxed` in Bench.hs).
+#[allow(dead_code)]
+enum Owned {
+    I32(Vec<Option<i32>>),
+    I64(Vec<Option<i64>>),
+    F64(Vec<Option<f64>>),
+    Str(Vec<Option<String>>),
+    Bool(Vec<Option<bool>>),
+    ListI32(Vec<Option<Vec<Option<i32>>>>),
+    Struct(Vec<Owned>),
+}
+
+fn to_owned_column(a: &dyn Array) -> Owned {
+    match a.data_type() {
+        DataType::Int32 => Owned::I32(a.as_primitive::<Int32Type>().iter().collect()),
+        DataType::Int64 => Owned::I64(a.as_primitive::<Int64Type>().iter().collect()),
+        DataType::Float64 => Owned::F64(a.as_primitive::<Float64Type>().iter().collect()),
+        DataType::Utf8 => Owned::Str(a.as_string::<i32>().iter().map(|s| s.map(str::to_owned)).collect()),
+        DataType::Boolean => Owned::Bool(a.as_boolean().iter().collect()),
+        DataType::List(_) => {
+            let l = a.as_list::<i32>();
+            Owned::ListI32(
+                l.iter()
+                    .map(|row| row.map(|r| r.as_primitive::<Int32Type>().iter().collect()))
+                    .collect(),
+            )
+        }
+        DataType::Struct(_) => {
+            Owned::Struct(a.as_struct().columns().iter().map(|c| to_owned_column(c.as_ref())).collect())
+        }
+        DataType::Dictionary(_, _) => {
+            let d = a.as_dictionary::<Int32Type>();
+            let vals = d.values().as_string::<i32>();
+            Owned::Str(
+                d.keys()
+                    .iter()
+                    .map(|k| k.map(|k| vals.value(k as usize).to_owned()))
+                    .collect(),
+            )
+        }
+        t => panic!("to_owned_column: unsupported {t}"),
+    }
+}
+
+fn decode_to_vec(bytes: &[u8]) -> Vec<Vec<Owned>> {
+    decode_stream(bytes)
+        .iter()
+        .map(|b| b.columns().iter().map(|c| to_owned_column(c.as_ref())).collect())
+        .collect()
+}
+
 /// Encode once and check the bytes decode back to the input, so the timed
 /// loop never measures an error path or a mismatched workload.
 fn checked_stream_bytes(w: &Workload) -> Vec<u8> {
@@ -254,6 +313,12 @@ fn codec_groups(c: &mut Criterion, suffix: &str, n: usize) {
     let mut g = c.benchmark_group(format!("decode{suffix}"));
     for (name, bytes) in &inputs {
         g.bench_function(*name, |b| b.iter(|| decode_stream(black_box(bytes))));
+    }
+    g.finish();
+
+    let mut g = c.benchmark_group(format!("decode + to_vec{suffix}"));
+    for (name, bytes) in &inputs {
+        g.bench_function(*name, |b| b.iter(|| decode_to_vec(black_box(bytes))));
     }
     g.finish();
 

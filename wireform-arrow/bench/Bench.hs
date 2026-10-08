@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TemplateHaskell #-}
 
@@ -5,28 +6,37 @@
 
 Three summaries consume these reports (see @scripts/bench-manifest.json@):
 
-* @arrow-encode-decode@: @encode/<workload>@ and @decode/<workload>@ at
-  100k rows through "Arrow.Stream".
-* @arrow-encode-decode-small@: the same workloads as a 100-row batch,
-  under the @encode (100 rows)@ and @decode (100 rows)@ groups.
+* @arrow-encode-decode@: per workload at 100k rows through "Arrow.Stream":
+  @encode/<workload>@ (one allocation for the whole stream),
+  @encode lazy/<workload>@ (lazy chunks aliasing the column buffers),
+  @decode/<workload>@ (zero-copy columns aliasing the input) and
+  @decode + toVector/<workload>@ (decode, then materialize every column
+  to boxed Haskell values, the metric the pre-redesign decoder reported).
+* @arrow-encode-decode-small@: the same four groups as a 100-row batch,
+  suffixed @ (100 rows)@.
 * @arrow-api-paths@: the mixed 6-column table at 100k rows through
   each public entry point (top-level benches named after the cell).
 
-Every input (column vectors, encoded bytes, records) is built in 'env'
-so only the codec call is timed. Decode results are forced with 'nf'.
+Every input (columns, encoded bytes, records) is built in 'env' with the
+column builders, so only the codec call is timed. Results are forced with
+'nf'. Run with a large nursery (the stanza bakes in @-A64m@): the decoders
+allocate little, but the materializing rows and the typed paths are
+dominated by minor GCs at the default 4 MB nursery.
 -}
 module Main (main) where
 
-import Arrow.Column (ColumnArray (..))
+import Arrow.Column
 import Arrow.File qualified as AF
 import Arrow.Record (Table, decodeTable, encodeTable)
 import Arrow.Record.TH (deriveTable)
 import Arrow.Stream (
-  decodeArrowStream,
   decodeArrowFile,
+  decodeArrowStream,
   defaultWriteOptions,
   encodeArrowFile,
+  encodeArrowFileLazy,
   encodeArrowStream,
+  encodeArrowStreamLazy,
  )
 import Arrow.Types (
   ArrowType (..),
@@ -40,12 +50,15 @@ import Arrow.Types (
  )
 import Arrow.Write qualified as AW
 import Control.DeepSeq (NFData)
+import Control.Monad.ST (ST, runST)
 import Criterion.Main
 import Data.ByteString (ByteString)
-import Data.Int (Int64)
+import Data.ByteString.Lazy qualified as BL
+import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import Data.Vector qualified as V
-import Data.Vector.Primitive qualified as VP
+import Data.Vector.Storable qualified as VS
+import Foreign.Storable (Storable)
 import GHC.Generics (Generic)
 
 
@@ -82,37 +95,51 @@ label :: Int -> Text
 label i = V.unsafeIndex labelPool (i `mod` V.length labelPool)
 
 
-int64Col :: Int -> ColumnArray
-int64Col n = ColInt64 (VP.generate n (\i -> fromIntegral i * 7919))
+-- | Every tenth row is null (roughly 10% nulls).
+nullRow :: Int -> Bool
+nullRow i = i `mod` 10 == 0
 
 
-doubleCol :: Int -> ColumnArray
-doubleCol n = ColDouble (VP.generate n (\i -> fromIntegral i * 1.25))
+loopN :: Int -> (Int -> ST s ()) -> ST s ()
+loopN n f = go 0
+ where
+  go !i
+    | i >= n = pure ()
+    | otherwise = f i >> go (i + 1)
 
 
--- | Roughly 10% nulls: every tenth row.
-nullableInt64Col :: Int -> ColumnArray
-nullableInt64Col n =
-  ColInt64Maybe
-    ( V.generate n $ \i ->
-        if i `mod` 10 == 0 then Nothing else Just (fromIntegral i)
-    )
+primCol :: Storable a => PrimType a -> Int -> (Int -> Maybe a) -> ColumnArray
+primCol ty n f = runST $ do
+  b <- newPrimBuilder ty n
+  loopN n (appendPrimMaybe b . f)
+  freezeBuilder b
 
 
-utf8Col :: Int -> ColumnArray
-utf8Col n = ColUtf8 (V.generate n label)
-
-
-nullableUtf8Col :: Int -> ColumnArray
-nullableUtf8Col n =
-  ColUtf8Maybe
-    ( V.generate n $ \i ->
-        if i `mod` 10 == 0 then Nothing else Just (label i)
-    )
+textCol :: Int -> (Int -> Maybe Text) -> ColumnArray
+textCol n f = runST $ do
+  b <- newUtf8Builder n
+  loopN n (appendTextMaybe b . f)
+  freezeBuilder b
 
 
 boolCol :: Int -> ColumnArray
-boolCol n = ColBool (V.generate n even)
+boolCol n = runST $ do
+  b <- newBoolBuilder n
+  loopN n (appendBool b . even)
+  freezeBuilder b
+
+
+int64Col, doubleCol, nullableInt64Col, utf8Col, nullableUtf8Col :: Int -> ColumnArray
+int64Col n = primCol PInt64 n (\i -> Just (fromIntegral i * 7919))
+doubleCol n = primCol PDouble n (\i -> Just (fromIntegral i * 1.25))
+nullableInt64Col n = primCol PInt64 n (\i -> if nullRow i then Nothing else Just (fromIntegral i))
+utf8Col n = textCol n (Just . label)
+nullableUtf8Col n = textCol n (\i -> if nullRow i then Nothing else Just (label i))
+
+
+-- | Setup-time construction failure is a harness bug; fail loudly.
+built :: String -> Either String a -> a
+built what = either (\e -> error (what <> ": " <> e)) id
 
 
 i64, f64, i32, utf8 :: ArrowType
@@ -137,6 +164,15 @@ workloads n =
   , listInt32 n
   , struct3 n
   , dictUtf8 n
+  ]
+
+
+-- | Workload names, known without building the data (criterion needs the
+-- names outside 'env').
+workloadNames :: [String]
+workloadNames =
+  [ "int64", "double", "nullable int64", "utf8", "nullable utf8"
+  , "mixed 6-col", "list<int32>", "struct<int32,double,bool>", "dictionary<utf8>"
   ]
 
 
@@ -175,9 +211,11 @@ listInt32 n =
   single
     "list<int32>"
     (defaultField "v" False AList (V.singleton (defaultLeafField "item" False i32)))
-    ( ColList
-        (VP.generate (n + 1) (\i -> fromIntegral (i * 4)))
-        (ColInt32 (VP.generate (n * 4) fromIntegral))
+    ( built "list<int32>" $
+        mkList
+          Nothing
+          (VS.generate (n + 1) (\i -> fromIntegral (i * 4)))
+          (primCol PInt32 (n * 4) (Just . fromIntegral))
     )
 
 
@@ -192,16 +230,17 @@ struct3 n =
           , defaultLeafField "c" False ABool
           ]
     )
-    ( ColStruct n $
-        V.fromList
-          [ ("a", ColInt32 (VP.generate n fromIntegral))
-          , ("b", doubleCol n)
-          , ("c", boolCol n)
-          ]
+    ( built "struct" $
+        mkStruct n Nothing $
+          V.fromList
+            [ ("a", primCol PInt32 n (Just . fromIntegral))
+            , ("b", doubleCol n)
+            , ("c", boolCol n)
+            ]
     )
 
 
--- | Sixteen distinct values, indices cycling over them.
+-- | Sixteen distinct values, int32 keys cycling over them.
 dictUtf8 :: Int -> Workload
 dictUtf8 n =
   single
@@ -210,11 +249,53 @@ dictUtf8 n =
         { fieldDictionary = Just (DictionaryEncoding 0 i32 False)
         }
     )
-    ( ColDictionary
-        0
-        (VP.generate n (\i -> fromIntegral (i `mod` V.length labelPool)))
-        (ColUtf8 labelPool)
+    ( built "dictionary<utf8>" $
+        mkDictionary
+          0
+          (primCol PInt32 n (\i -> Just (fromIntegral (i `mod` V.length labelPool))))
+          (fromTexts labelPool)
     )
+
+
+-- | A decoded column materialized to boxed Haskell values, one
+-- constructor per shape the workloads use.
+data Boxed
+  = BInt32 !(V.Vector (Maybe Int32))
+  | BInt64 !(V.Vector (Maybe Int64))
+  | BDouble !(V.Vector (Maybe Double))
+  | BText !(V.Vector (Maybe Text))
+  | BBool !(V.Vector (Maybe Bool))
+  | BListInt32 !(V.Vector (Maybe (V.Vector (Maybe Int32))))
+  | BStruct !(V.Vector Boxed)
+  deriving stock (Generic)
+  deriving anyclass (NFData)
+
+
+-- | The "toVector" half of the decode + toVector rows.
+toBoxed :: ColumnArray -> Either String Boxed
+toBoxed c
+  | Just p <- asPrim PInt64 c = Right (BInt64 (toMaybeVector p))
+  | Just p <- asPrim PInt32 c = Right (BInt32 (toMaybeVector p))
+  | Just p <- asPrim PDouble c = Right (BDouble (toMaybeVector p))
+  | Just _ <- asUtf8 c = BText <$> toTextVector c
+  | Just _ <- asBool c = BBool <$> toBoolVector c
+toBoxed c = case c of
+  ColList _ _ child
+    | Just _ <- asPrim PInt32 child -> BListInt32 <$> toListVector int32s c
+  -- The workloads build struct children exactly as long as the struct.
+  ColStruct _ _ fs -> BStruct <$> traverse (toBoxed . snd) fs
+  -- String dictionaries convert their values once; the rows share them.
+  ColDictionary _ _ vals | Just _ <- asUtf8 vals -> BText <$> toTextVector c
+  ColDictionary {} -> expandDictionary c >>= toBoxed
+  _ -> Left ("toBoxed: unsupported column " <> columnTag c)
+ where
+  int32s ch = maybe (Left ("toBoxed: list child " <> columnTag ch)) (Right . toMaybeVector) (asPrim PInt32 ch)
+
+
+decodeToVector :: ByteString -> Either String [V.Vector Boxed]
+decodeToVector bs = do
+  (_, batches) <- decodeArrowStream bs
+  traverse (traverse toBoxed) batches
 
 
 -- | Derived record matching 'mixedSchema' column for column.
@@ -243,9 +324,9 @@ trades n =
     Trade
       { tradeId = fromIntegral i * 7919
       , tradePrice = fromIntegral i * 1.25
-      , tradeQty = if i `mod` 10 == 0 then Nothing else Just (fromIntegral i)
+      , tradeQty = if nullRow i then Nothing else Just (fromIntegral i)
       , tradeSymbol = label i
-      , tradeNote = if i `mod` 10 == 0 then Nothing else Just (label i)
+      , tradeNote = if nullRow i then Nothing else Just (label i)
       , tradeSettled = even i
       }
 
@@ -263,9 +344,14 @@ typedEncode ts =
    in encodeArrowStream defaultWriteOptions sch [cols]
 
 
--- | Encoding fails only on a schema mismatch; the workloads are built to match.
 encodeW :: Workload -> Either String ByteString
 encodeW w = encodeArrowStream defaultWriteOptions (wlSchema w) [wlBatch w]
+
+
+-- | 'nf' on a lazy 'BL.ByteString' forces the chunk spine, which is the
+-- whole cost of the lazy encoder (the chunks alias the column buffers).
+encodeLazyW :: Workload -> Either String BL.ByteString
+encodeLazyW w = encodeArrowStreamLazy defaultWriteOptions (wlSchema w) [wlBatch w]
 
 
 -- | Fail fast at setup time rather than timing an error path.
@@ -273,32 +359,53 @@ checked :: String -> Either String a -> IO a
 checked what = either (\e -> fail (what <> ": " <> e)) pure
 
 
+-- | Build the workload in 'env' and check it encodes.
+workloadEnv :: Int -> String -> IO Workload
+workloadEnv n name = case filter ((== name) . wlName) (workloads n) of
+  [w] -> checked name (encodeW w) >> pure w
+  _ -> fail ("unknown workload " <> name)
+
+
+-- | Encoded bytes of the workload, checked to decode and materialize.
+decodeEnv :: Int -> String -> IO ByteString
+decodeEnv n name = do
+  w <- workloadEnv n name
+  bs <- checked name (encodeW w)
+  _ <- checked name (decodeToVector bs)
+  pure bs
+
+
 codecGroups :: String -> Int -> [Benchmark]
 codecGroups suffix n =
-  [ bgroup ("encode" <> suffix) (map encodeBench (workloads n))
-  , bgroup ("decode" <> suffix) (map decodeBench (workloads n))
+  [ bgroup ("encode" <> suffix) (map (encodeBench encodeW) workloadNames)
+  , bgroup ("encode lazy" <> suffix) (map (encodeBench encodeLazyW) workloadNames)
+  , bgroup ("decode" <> suffix) (map (decodeBench decodeArrowStream) workloadNames)
+  , bgroup ("decode + toVector" <> suffix) (map (decodeBench decodeToVector) workloadNames)
   ]
  where
-  encodeBench w = env (checked (wlName w) (encodeW w) >> pure w) $ \w' -> bench (wlName w) $ nf encodeW w'
-  decodeBench w = env (decodeInput w) $ \bs -> bench (wlName w) $ nf decodeArrowStream bs
-  decodeInput w = do
-    bs <- checked (wlName w) (encodeW w)
-    _ <- checked (wlName w) (decodeArrowStream bs)
-    pure bs
+  encodeBench :: NFData b => (Workload -> b) -> String -> Benchmark
+  encodeBench f name = env (workloadEnv n name) $ \w -> bench name $ nf f w
+  decodeBench :: NFData b => (ByteString -> b) -> String -> Benchmark
+  decodeBench f name = env (decodeEnv n name) $ \bs -> bench name $ nf f bs
 
 
 apiPaths :: [Benchmark]
 apiPaths =
-  [ env (pure (mixed bigRows)) $ \w ->
+  [ env mixedEnv $ \w ->
       bench "stream encode (Arrow.Stream)" $ nf encodeW w
-  , env (pure (mixed bigRows)) $ \w ->
+  , env mixedEnv $ \w ->
+      bench "stream encode lazy (Arrow.Stream)" $ nf encodeLazyW w
+  , env mixedEnv $ \w ->
       bench "stream encode (Arrow.Write)" $
         nf (AW.writeArrowStream (wlSchema w)) (V.singleton (wlBatch w))
   , env (checked "stream decode" (encodeW (mixed bigRows))) $ \bs ->
       bench "stream decode (Arrow.Stream)" $ nf decodeArrowStream bs
-  , env (pure (mixed bigRows)) $ \w ->
+  , env mixedEnv $ \w ->
       bench "file encode (Arrow.Stream)" $
         nf (encodeArrowFile defaultWriteOptions (wlSchema w)) [wlBatch w]
+  , env mixedEnv $ \w ->
+      bench "file encode lazy (Arrow.Stream)" $
+        nf (encodeArrowFileLazy defaultWriteOptions (wlSchema w)) [wlBatch w]
   , env specFileBytes $ \bs ->
       bench "file decode (Arrow.Stream)" $ nf decodeArrowFile bs
   , env specFileBytes $ \bs ->
@@ -310,8 +417,9 @@ apiPaths =
       bench "typed decode (Arrow.Record)" $ nf typedDecode bs
   ]
  where
+  mixedEnv = workloadEnv bigRows "mixed 6-col"
   specFileBytes = do
-    let w = mixed bigRows
+    w <- mixedEnv
     bs <- checked "file encode" (encodeArrowFile defaultWriteOptions (wlSchema w) [wlBatch w])
     _ <- checked "file decode" (decodeArrowFile bs)
     pure bs

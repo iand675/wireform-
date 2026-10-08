@@ -32,12 +32,19 @@
         {
           "path": "wireform-arrow/bench-results/summary/arrow-encode-decode.json",
           "series": ["wireform-arrow"],
-          "map": ["wireform-arrow|encode *=encode/*", "wireform-arrow|decode *=decode/*"]
+          "map": [
+            "wireform-arrow|encode lazy *=encode lazy/*",
+            "wireform-arrow|decode + toVector *=decode + toVector/*",
+            "wireform-arrow|encode *=encode/*",
+            "wireform-arrow|decode *=decode/*"
+          ]
         },
         {
           "path": "wireform-arrow/bench-results/summary/arrow-encode-decode-small.json",
           "series": ["wireform-arrow"],
           "map": [
+            "wireform-arrow|encode lazy *=encode lazy (100 rows)/*",
+            "wireform-arrow|decode + toVector *=decode + toVector (100 rows)/*",
             "wireform-arrow|encode *=encode (100 rows)/*",
             "wireform-arrow|decode *=decode (100 rows)/*"
           ]
@@ -59,21 +66,33 @@
         {
           "path": "wireform-arrow/bench-results/summary/arrow-encode-decode.json",
           "series": ["arrow-rs"],
-          "map": ["arrow-rs|encode *=encode/*", "arrow-rs|decode *=decode/*"]
+          "map": [
+            "arrow-rs|encode lazy *=encode/*",
+            "arrow-rs|decode + toVector *=decode + to_vec/*",
+            "arrow-rs|encode *=encode/*",
+            "arrow-rs|decode *=decode/*"
+          ]
         },
         {
           "path": "wireform-arrow/bench-results/summary/arrow-encode-decode-small.json",
           "series": ["arrow-rs"],
-          "map": ["arrow-rs|encode *=encode (100 rows)/*", "arrow-rs|decode *=decode (100 rows)/*"]
+          "map": [
+            "arrow-rs|encode lazy *=encode (100 rows)/*",
+            "arrow-rs|decode + toVector *=decode + to_vec (100 rows)/*",
+            "arrow-rs|encode *=encode (100 rows)/*",
+            "arrow-rs|decode *=decode (100 rows)/*"
+          ]
         },
         {
           "path": "wireform-arrow/bench-results/summary/arrow-api-paths.json",
           "series": ["arrow-rs"],
           "map": [
             "arrow-rs|stream encode (Arrow.Stream)=stream encode (StreamWriter)",
+            "arrow-rs|stream encode lazy (Arrow.Stream)=stream encode (StreamWriter)",
             "arrow-rs|stream encode (Arrow.Write)=stream encode (StreamWriter)",
             "arrow-rs|stream decode (Arrow.Stream)=stream decode (StreamReader)",
             "arrow-rs|file encode (Arrow.Stream)=file encode (FileWriter)",
+            "arrow-rs|file encode lazy (Arrow.Stream)=file encode (FileWriter)",
             "arrow-rs|file decode (Arrow.Stream)=file decode (FileReader)",
             "arrow-rs|file read (Arrow.File)=file decode (FileReader)",
             "arrow-rs|typed encode (Arrow.Record)=typed encode (row structs)",

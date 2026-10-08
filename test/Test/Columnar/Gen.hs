@@ -35,7 +35,7 @@ import Data.ByteString qualified as BS
 import Data.Int (Int16, Int32, Int64)
 import Data.Text qualified as T
 import Data.Vector qualified as V
-import Data.Vector.Primitive qualified as VP
+import Data.Vector.Storable qualified as VS
 import Data.Word (Word8)
 import Hedgehog (Gen)
 import Hedgehog.Gen qualified as Gen
@@ -97,45 +97,45 @@ the plan. Nullable variants include nulls at ~30% density.
 columnPlanToColumnArray :: Int -> ColumnPlan -> Gen AC.ColumnArray
 columnPlanToColumnArray nRows cp = case cp of
   PlanInt32 _ False ->
-    AC.ColInt32 . VP.fromList <$> rows genInt32
+    AC.primColumn AC.PInt32 . VS.fromList <$> rows genInt32
   PlanInt32 _ True ->
-    AC.ColInt32Maybe . V.fromList <$> rows (genMaybe genInt32)
+    AC.fromMaybes AC.PInt32 . V.fromList <$> rows (genMaybe genInt32)
   PlanInt64 _ False ->
-    AC.ColInt64 . VP.fromList <$> rows genInt64
+    AC.primColumn AC.PInt64 . VS.fromList <$> rows genInt64
   PlanInt64 _ True ->
-    AC.ColInt64Maybe . V.fromList <$> rows (genMaybe genInt64)
+    AC.fromMaybes AC.PInt64 . V.fromList <$> rows (genMaybe genInt64)
   PlanInt16 _ False ->
-    AC.ColInt16 . VP.fromList <$> rows genInt16
+    AC.primColumn AC.PInt16 . VS.fromList <$> rows genInt16
   PlanInt16 _ True ->
-    AC.ColInt16Maybe . V.fromList <$> rows (genMaybe genInt16)
+    AC.fromMaybes AC.PInt16 . V.fromList <$> rows (genMaybe genInt16)
   PlanBool _ False ->
-    AC.ColBool . V.fromList <$> rows Gen.bool
+    AC.fromBools . V.fromList <$> rows Gen.bool
   PlanBool _ True ->
-    AC.ColBoolMaybe . V.fromList <$> rows (genMaybe Gen.bool)
+    AC.fromMaybeBools . V.fromList <$> rows (genMaybe Gen.bool)
   PlanFloat _ False ->
-    AC.ColFloat . VP.fromList <$> rows genFloat
+    AC.primColumn AC.PFloat . VS.fromList <$> rows genFloat
   PlanFloat _ True ->
-    AC.ColFloatMaybe . V.fromList <$> rows (genMaybe genFloat)
+    AC.fromMaybes AC.PFloat . V.fromList <$> rows (genMaybe genFloat)
   PlanDouble _ False ->
-    AC.ColDouble . VP.fromList <$> rows genDouble
+    AC.primColumn AC.PDouble . VS.fromList <$> rows genDouble
   PlanDouble _ True ->
-    AC.ColDoubleMaybe . V.fromList <$> rows (genMaybe genDouble)
+    AC.fromMaybes AC.PDouble . V.fromList <$> rows (genMaybe genDouble)
   PlanUtf8 _ False ->
-    AC.ColUtf8 . V.fromList <$> rows genText
+    AC.fromTexts . V.fromList <$> rows genText
   PlanUtf8 _ True ->
-    AC.ColUtf8Maybe . V.fromList <$> rows (genMaybe genText)
+    AC.fromMaybeTexts . V.fromList <$> rows (genMaybe genText)
   PlanBinary _ False ->
-    AC.ColBinary . V.fromList <$> rows genBytes
+    AC.fromByteStrings . V.fromList <$> rows genBytes
   PlanBinary _ True ->
-    AC.ColBinaryMaybe . V.fromList <$> rows (genMaybe genBytes)
+    AC.fromMaybeByteStrings . V.fromList <$> rows (genMaybe genBytes)
   PlanDate32 _ False ->
-    AC.ColDate32 . VP.fromList <$> rows genDays
+    AC.primColumn AC.PDate32 . VS.fromList <$> rows genDays
   PlanDate32 _ True ->
-    AC.ColDate32Maybe . V.fromList <$> rows (genMaybe genDays)
+    AC.fromMaybes AC.PDate32 . V.fromList <$> rows (genMaybe genDays)
   PlanTimestamp _ False ->
-    AC.ColTimestamp . VP.fromList <$> rows genMicros
+    AC.primColumn AC.PTimestamp . VS.fromList <$> rows genMicros
   PlanTimestamp _ True ->
-    AC.ColTimestampMaybe . V.fromList <$> rows (genMaybe genMicros)
+    AC.fromMaybes AC.PTimestamp . V.fromList <$> rows (genMaybe genMicros)
   where
     rows g = Gen.list (Range.singleton nRows) g
 
@@ -282,7 +282,7 @@ Why this list:
   * Timestamp(microsecond): INT64 + LogicalType on Parquet,
     TKTimestamp on ORC.
 
-/Non-null/ only — the Parquet Arrow-bridge currently drops
+/Non-null/ only, the Parquet Arrow-bridge currently drops
 nulls on write. Nullable variants are exercised by the
 per-format generators below.
 -}
@@ -334,7 +334,7 @@ genArrowOnly = do
 
 
 {- | Shapes the Parquet bridge supports today (flat primitives
-plus temporals, required + nullable — nullable columns now
+plus temporals, required + nullable, nullable columns now
 route through 'Parquet.HighLevel.encodeParquetMixed' + the
 @*Optional@ reader dispatch so nulls round-trip through
 definition-level streams).

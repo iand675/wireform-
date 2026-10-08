@@ -63,6 +63,51 @@
   fixing a null NEON dispatch that segfaulted any >1 KiB hash on aarch64
   whenever the nix global unit was selected.
 
+* **`wireform-arrow` columns are Arrow buffers (breaking).** `ColumnArray`
+  now holds Arrow's own layout: storable vectors for fixed-width values
+  and offsets, LSB-first bitmaps for validity and booleans, `ByteString`
+  regions for variable-length data, and per-value nullability (`Maybe
+  Validity`, `Nothing` = no nulls). Decoding aliases the input (zero copy;
+  offsets, UTF-8 and dictionary keys validated by C kernels in
+  `wireform-columnar-core`), and `copyColumn` detaches a column from its
+  input. Encoding lays a stream or file out in one allocation;
+  `encodeArrowStreamLazy` / `encodeArrowFileLazy` return chunks that alias
+  the column buffers. Breaking changes: every `*Maybe` constructor and the
+  boxed constructors are gone (patterns only match; build with
+  `primColumn`, `from*`, the new `Arrow.Column.Builder` builders or the
+  validating `mk*`; read with `asPrim`/`primAt`, `asUtf8`/`textAt`,
+  `bytesAt`, `boolAt`, `listRange`, `dictKeyAt`); one `ColPrim` over a
+  `PrimType` tag replaces the per-type fixed-width constructors (with a
+  pattern per type kept for matching); dictionary keys are an integer
+  column at the wire width carrying the row validity; `Eq` is logical
+  (layout, slices and null slot contents do not matter);
+  `isNullableColumn` is removed (`nullCount c > 0`); `RecordBatchDef`
+  holds storable vectors; `ColRunEndEncoded` carries a logical offset and
+  length (O(log runs) slicing). New modules: `Arrow.Column.Buffer`,
+  `Arrow.Column.Internal`, `Arrow.Column.Builder`, `Arrow.Read.Columns`,
+  `Arrow.FlatBufferIPC.{Common,Read,Write}`. Migration table in
+  `wireform-arrow/README.md`. The bench gains `encode lazy` and
+  `decode + toVector` (decode then box every value, the old metric) rows
+  with arrow-rs counterparts, and runs with `-with-rtsopts=-A64m`.
+  Boxed conversions: `toTextVector` copies a utf8 column once and slices
+  every row from the copy, `toTextVector` / `toBytesVector` accept
+  dictionaries (values converted once, rows share them), and the new
+  `toListVector` converts list children once and slices each row.
+
+* **`Parquet.Arrow` / `ORC.Arrow` follow the new columns.** Decoding
+  writes straight into Arrow buffers (fixed-width values copied once,
+  ORC strings alias the stripe's DATA stream, ORC floats alias it when
+  aligned) instead of going through boxed `Maybe` vectors; encoding reads
+  through the typed accessors. Nullability now comes from the column's
+  validity and the schema: `Parquet.Arrow.columnArrayToParquetColumn`
+  takes the `Field` and maps nullable fields to optional columns, and
+  `arrowToParquetMixed` rejects a column with nulls under a required
+  field. Sliced inputs (offsets not starting at zero, struct children
+  longer than the struct) encode correctly. ORC binary columns now write
+  their raw bytes (invalid UTF-8 used to be re-encoded), a PRESENT stream
+  is emitted only when the column has nulls, and maps nested in structs
+  get the right column ids.
+
 ## 0.1.0.0 -- 2026
 
 Initial release of the `wireform` umbrella package and its per-format

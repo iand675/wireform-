@@ -1,33 +1,25 @@
-{- | Apache Arrow IPC column encoders plus whole-stream and whole-file
-writers. Both writers emit the standard Arrow IPC format (FlatBuffers
-metadata, encapsulated messages, spec footer for files) that pyarrow,
-arrow-cpp and arrow-rs read, using 'Arrow.Stream.defaultWriteOptions'
-(no body compression, one dictionary batch per dictionary id). Use
-"Arrow.Stream" directly for compression or dictionary-replacement
-options.
+{- | Apache Arrow IPC whole-stream and whole-file writers. Both emit
+the standard Arrow IPC format (FlatBuffers metadata, encapsulated
+messages, spec footer for files) that pyarrow, arrow-cpp and arrow-rs
+read, using 'Arrow.Stream.defaultWriteOptions' (no body compression,
+one dictionary batch per dictionary id). Use "Arrow.Stream" directly
+for compression, dictionary-replacement options, or the lazy
+(zero-copy body) writers.
 -}
 module Arrow.Write (
-  encodePlainInt32Column,
-  encodePlainInt64Column,
-  encodePlainFloat,
-  encodePlainDouble,
-  encodePlainBool,
-  encodePlainUtf8,
-  encodeNullBitmap,
   writeArrowStream,
   writeArrowFile,
 
-  -- * Column-tree encoding (see "Arrow.FlatBufferIPC")
+  -- * Record batch layout (see "Arrow.FlatBufferIPC")
   validateColumns,
-  encodeColumns,
-  emptyBuildAcc,
-  BuildAcc (..),
+  BatchPlan (..),
+  planBatch,
 ) where
 
 import Arrow.Column (ColumnArray)
 import Arrow.Stream (defaultWriteOptions, encodeArrowFile, encodeArrowStream)
 import Arrow.Types (Schema)
-import Arrow.Write.Columns
+import Arrow.Write.Columns (BatchPlan (..), planBatch, validateColumns)
 import Data.ByteString (ByteString)
 import Data.Vector qualified as V
 

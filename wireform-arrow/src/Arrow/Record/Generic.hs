@@ -88,8 +88,6 @@ import Arrow.Record (
   int8E,
   nullable,
   nullableD,
-  structD,
-  structE,
   utf8D,
   utf8E,
   word16D,
@@ -104,6 +102,7 @@ import Arrow.Record (
 import Data.ByteString (ByteString)
 import Data.Functor.Contravariant (Contravariant (contramap))
 import Data.Int (Int16, Int32, Int64, Int8)
+import Data.Kind (Type)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Word (Word16, Word32, Word64, Word8)
@@ -251,10 +250,12 @@ GHC considers the final record field type.
 -}
 instance {-# OVERLAPPING #-} HasEncoder a => HasEncoder (Maybe a) where
   hasEncoder = nullable hasEncoder
+  {-# INLINE hasEncoder #-}
 
 
 instance {-# OVERLAPPING #-} HasDecoder a => HasDecoder (Maybe a) where
   hasDecoder = nullableD hasDecoder
+  {-# INLINE hasDecoder #-}
 
 
 -- ============================================================
@@ -283,6 +284,7 @@ genericTable =
     { tableEncode = genericRowEncoder @r
     , tableDecode = genericRowDecoder @r
     }
+{-# INLINE genericTable #-}
 
 
 genericRowEncoder
@@ -291,6 +293,7 @@ genericRowEncoder
   => RowEncoder r
 genericRowEncoder =
   contramap from (gRowEncoder :: RowEncoder (Rep r ()))
+{-# INLINE genericRowEncoder #-}
 
 
 genericRowDecoder
@@ -299,36 +302,41 @@ genericRowDecoder
   => RowDecoder r
 genericRowDecoder =
   to <$> (gRowDecoder :: RowDecoder (Rep r ()))
+{-# INLINE genericRowDecoder #-}
 
 
 -- ============================================================
 -- Generic Rep walkers
 -- ============================================================
 
-class GRowEncoder (f :: * -> *) where
+class GRowEncoder (f :: Type -> Type) where
   gRowEncoder :: RowEncoder (f p)
 
 
-class GRowDecoder (f :: * -> *) where
+class GRowDecoder (f :: Type -> Type) where
   gRowDecoder :: RowDecoder (f p)
 
 
 -- Datatype wrapper: transparent.
 instance GRowEncoder f => GRowEncoder (M1 D m f) where
   gRowEncoder = unM1 `contramap` gRowEncoder
+  {-# INLINE gRowEncoder #-}
 
 
 instance GRowDecoder f => GRowDecoder (M1 D m f) where
   gRowDecoder = M1 <$> gRowDecoder
+  {-# INLINE gRowDecoder #-}
 
 
 -- Constructor wrapper: transparent.
 instance GRowEncoder f => GRowEncoder (M1 C m f) where
   gRowEncoder = unM1 `contramap` gRowEncoder
+  {-# INLINE gRowEncoder #-}
 
 
 instance GRowDecoder f => GRowDecoder (M1 C m f) where
   gRowDecoder = M1 <$> gRowDecoder
+  {-# INLINE gRowDecoder #-}
 
 
 -- Product: concatenate via RowEncoder's Semigroup.
@@ -336,10 +344,12 @@ instance (GRowEncoder f, GRowEncoder g) => GRowEncoder (f :*: g) where
   gRowEncoder =
     ((\(l :*: _) -> l) `contramap` gRowEncoder)
       <> ((\(_ :*: r) -> r) `contramap` gRowEncoder)
+  {-# INLINE gRowEncoder #-}
 
 
 instance (GRowDecoder f, GRowDecoder g) => GRowDecoder (f :*: g) where
   gRowDecoder = (:*:) <$> gRowDecoder <*> gRowDecoder
+  {-# INLINE gRowDecoder #-}
 
 
 -- Record selector: pull the selector name via 'Selector' and
@@ -349,9 +359,11 @@ instance (Selector s, HasEncoder a) => GRowEncoder (S1 s (Rec0 a)) where
     let selectorName = T.pack (selName (undefined :: S1 s (Rec0 a) p))
     in (unK1 . unM1)
          `contramap` fieldE selectorName id (hasEncoder :: Encoder a)
+  {-# INLINE gRowEncoder #-}
 
 
 instance (Selector s, HasDecoder a) => GRowDecoder (S1 s (Rec0 a)) where
   gRowDecoder =
     let selectorName = T.pack (selName (undefined :: S1 s (Rec0 a) p))
     in (M1 . K1) <$> columnD selectorName (hasDecoder :: Decoder a)
+  {-# INLINE gRowDecoder #-}

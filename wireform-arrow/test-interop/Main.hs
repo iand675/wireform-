@@ -1,5 +1,7 @@
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 {- | Bidirectional pyarrow interop suite for wireform-arrow.
 
@@ -27,7 +29,76 @@ needed), for other readers such as @interop/arrow-rs@.
 -}
 module Main (main) where
 
-import Arrow.Column (ColumnArray (..), expandDictionary)
+import Arrow.Column (
+  ChildRange (..),
+  Validity,
+  ColumnArray,
+  Float16 (..),
+  IntervalDayTime (..),
+  IntervalMonthDayNano (..),
+  PrimType (..),
+  asPrim,
+  columnLength,
+  decimal128FromInteger,
+  decimal128ToInteger,
+  decimal256FromInteger,
+  decimal256ToInteger,
+  dictKeyAt,
+  expandDictionary,
+  fromBools,
+  fromByteStrings,
+  fromMaybeBinaryView,
+  fromMaybeBools,
+  fromMaybeByteStrings,
+  fromMaybeFixedSizeBinary,
+  fromMaybeLargeByteStrings,
+  fromMaybeLargeTexts,
+  fromMaybeTexts,
+  fromMaybeUtf8View,
+  fromMaybes,
+  fromTexts,
+  isValidAt,
+  listRange,
+  mkDenseUnion,
+  mkDictionary,
+  mkFixedSizeList,
+  mkLargeList,
+  mkLargeListView,
+  mkList,
+  mkListView,
+  mkMap,
+  mkRunEndEncoded,
+  mkSparseUnion,
+  mkStruct,
+  primColumn,
+  toBoolVector,
+  toBytesVector,
+  toMaybeVector,
+  toTextVector,
+  validityFromBools,
+  withPrim,
+  pattern ColBinary,
+  pattern ColBinaryView,
+  pattern ColBool,
+  pattern ColDenseUnion,
+  pattern ColDictionary,
+  pattern ColFixedSizeBinary,
+  pattern ColFixedSizeList,
+  pattern ColLargeBinary,
+  pattern ColLargeList,
+  pattern ColLargeListView,
+  pattern ColLargeUtf8,
+  pattern ColList,
+  pattern ColListView,
+  pattern ColMap,
+  pattern ColNull,
+  pattern ColPrim,
+  pattern ColRunEndEncoded,
+  pattern ColSparseUnion,
+  pattern ColStruct,
+  pattern ColUtf8,
+  pattern ColUtf8View,
+ )
 import Arrow.Stream (
   DictHandling (..),
   WriteOptions (..),
@@ -53,10 +124,9 @@ import Arrow.Types (
 import Control.DeepSeq (force)
 import Control.Exception (SomeException, evaluate, try)
 import Control.Monad (forM, forM_, unless, when)
-import Data.Bits (shiftL, shiftR, testBit, (.&.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
-import Data.Int (Int16, Int32, Int64, Int8)
+import Data.Int (Int32, Int64, Int8)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.List (sortOn, stripPrefix)
 import Data.Either (partitionEithers)
@@ -65,8 +135,7 @@ import Data.Maybe (catMaybes, fromMaybe, isJust, mapMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Vector qualified as V
-import Data.Vector.Primitive qualified as VP
-import Data.Word (Word16, Word32, Word64, Word8)
+import Data.Vector.Storable qualified as VS
 import GHC.Float (float2Double)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Environment (getArgs, lookupEnv)
@@ -109,6 +178,11 @@ simple :: String -> Field -> [ColumnArray] -> Case
 simple n f cols = Case n (schemaOf [f]) (map V.singleton cols) False False
 
 
+-- | Unwrap a checked fixture constructor.
+ok :: Either String ColumnArray -> ColumnArray
+ok = either (error . ("bad fixture: " ++)) id
+
+
 {- | A non-nullable case @name@ (nulls dropped from the first batch) and a
 nullable case @name_nullable@ (first batch with nulls, second batch with
 none, so pyarrow omits the validity bitmap there).
@@ -128,105 +202,86 @@ pair n ty kids plain nullable b1 b2 =
   ]
 
 
-primPair
-  :: VP.Prim a
-  => String
-  -> ArrowType
-  -> (VP.Vector a -> ColumnArray)
-  -> (V.Vector (Maybe a) -> ColumnArray)
-  -> [Maybe a]
-  -> [a]
-  -> [Case]
-primPair n ty plain nullable = pair n ty [] (plain . VP.fromList) (nullable . V.fromList)
+-- | 'pair' for a fixed-width element type.
+primPair :: String -> ArrowType -> PrimType a -> [Maybe a] -> [a] -> [Case]
+primPair n ty p = withPrim p (pair n ty [] (primColumn p . VS.fromList) (fromMaybes p . V.fromList))
 
 
-boxedPair
-  :: String
-  -> ArrowType
-  -> (V.Vector a -> ColumnArray)
-  -> (V.Vector (Maybe a) -> ColumnArray)
-  -> [Maybe a]
-  -> [a]
-  -> [Case]
+-- | 'pair' for a column built from a boxed vector of rows.
+boxedPair :: String -> ArrowType -> (V.Vector a -> ColumnArray) -> (V.Vector (Maybe a) -> ColumnArray) -> [Maybe a] -> [a] -> [Case]
 boxedPair n ty plain nullable = pair n ty [] (plain . V.fromList) (nullable . V.fromList)
 
 
--- | @w@-byte little-endian two's-complement encoding of a decimal's unscaled value.
-decimalBytes :: Int -> Integer -> ByteString
-decimalBytes w x =
-  let u = x `mod` (1 `shiftL` (8 * w))
-  in BS.pack (map (\i -> fromIntegral ((u `shiftR` (8 * i)) .&. 0xff)) [0 .. w - 1])
+-- | 'boxedPair' for constructors that only take optional rows.
+maybePair :: String -> ArrowType -> (V.Vector (Maybe a) -> ColumnArray) -> [Maybe a] -> [a] -> [Case]
+maybePair n ty nullable = boxedPair n ty (nullable . V.map Just) nullable
 
 
 i32, i16, i64 :: [Int32] -> ColumnArray
-i32 = ColInt32 . VP.fromList
-i16 = ColInt16 . VP.fromList . map fromIntegral
-i64 = ColInt64 . VP.fromList . map fromIntegral
+i32 = primColumn PInt32 . VS.fromList
+i16 = primColumn PInt16 . VS.fromList . map fromIntegral
+i64 = primColumn PInt64 . VS.fromList . map fromIntegral
 
 
 i32m :: [Maybe Int32] -> ColumnArray
-i32m = ColInt32Maybe . V.fromList
+i32m = fromMaybes PInt32 . V.fromList
 
 
 utf8m :: [Maybe Text] -> ColumnArray
-utf8m = ColUtf8Maybe . V.fromList
+utf8m = fromMaybeTexts . V.fromList
+
+
+-- | Validity from per-row flags (True = valid).
+valid :: [Bool] -> Maybe Validity
+valid = validityFromBools . V.fromList
 
 
 cases :: [Case]
 cases =
   concat
-    [ primPair "int8" (AInt 8 True) ColInt8 ColInt8Maybe [Just 0, Just 1, Nothing, Just (-1), Just 127, Just (-128)] [42, -42 :: Int8]
-    , primPair "int16" (AInt 16 True) ColInt16 ColInt16Maybe [Just 0, Just 1, Nothing, Just (-1), Just 32767, Just (-32768)] [1000, -1000 :: Int16]
-    , primPair "int32" (AInt 32 True) ColInt32 ColInt32Maybe [Just 0, Just 1, Nothing, Just (-1), Just maxBound, Just minBound] [7, -7 :: Int32]
-    , primPair "int64" (AInt 64 True) ColInt64 ColInt64Maybe [Just 0, Just 1, Nothing, Just (-1), Just maxBound, Just minBound] [123456789012, -5 :: Int64]
-    , primPair "uint8" (AInt 8 False) ColUInt8 ColUInt8Maybe [Just 0, Just 1, Nothing, Just maxBound] [128 :: Word8]
-    , primPair "uint16" (AInt 16 False) ColUInt16 ColUInt16Maybe [Just 0, Just 1, Nothing, Just maxBound] [256 :: Word16]
-    , primPair "uint32" (AInt 32 False) ColUInt32 ColUInt32Maybe [Just 0, Just 1, Nothing, Just maxBound] [65536 :: Word32]
-    , primPair "uint64" (AInt 64 False) ColUInt64 ColUInt64Maybe [Just 0, Just 1, Nothing, Just maxBound] [4294967296 :: Word64]
-    , primPair "float16" (AFloatingPoint Half) ColFloat16 ColFloat16Maybe [Just 0x0000, Just 0x3C00, Nothing, Just 0xC000, Just 0x7BFF, Just 0x7C00] [0x3800 :: Word16]
-    , primPair "float32" (AFloatingPoint Single) ColFloat ColFloatMaybe [Just 0, Just 1.5, Nothing, Just (-2.5), Just (1 / 0), Just 3.4028234663852886e38] [0.25 :: Float]
-    , primPair "float64" (AFloatingPoint DoublePrecision) ColDouble ColDoubleMaybe [Just 0, Just 1.5, Nothing, Just (-2.5), Just (-1 / 0), Just 1e300, Just 5e-324] [3.141592653589793 :: Double]
-    , boxedPair "bool" ABool ColBool ColBoolMaybe (map Just [True, False] ++ [Nothing] ++ map Just [True, True, False, False, True, False]) [False, True]
-    , boxedPair "utf8" AUtf8 ColUtf8 ColUtf8Maybe strs ["second batch"]
-    , boxedPair "large_utf8" ALargeUtf8 ColLargeUtf8 ColLargeUtf8Maybe strs ["second batch"]
-    , boxedPair "binary" ABinary ColBinary ColBinaryMaybe bins ["z"]
-    , boxedPair "large_binary" ALargeBinary ColLargeBinary ColLargeBinaryMaybe bins ["z"]
-    , boxedPair "fixed_size_binary4" (AFixedSizeBinary 4) (ColFixedSizeBinary 4) (ColFixedSizeBinaryMaybe 4) [Just "abcd", Just "\0\0\0\0", Nothing, Just "\xff\xfe\xfd\xfc"] ["wxyz"]
-    , boxedPair "utf8_view" AUtf8View ColUtf8View ColUtf8ViewMaybe views ["inline", "an out of line string value"]
-    , boxedPair "binary_view" ABinaryView ColBinaryView ColBinaryViewMaybe viewBytes ["inline", BS.replicate 13 0]
-    , primPair "date32" (ADate DateDay) ColDate32 ColDate32Maybe [Just 0, Just 18000, Nothing, Just (-1), Just 19000] [20000]
-    , primPair "date64" (ADate DateMillisecond) ColDate64 ColDate64Maybe [Just 0, Just 1555200000000, Nothing, Just (-86400000)] [86400000]
-    , primPair "time32_s" (ATime Second 32) ColTime32 ColTime32Maybe [Just 0, Just 3600, Nothing, Just 86399] [60]
-    , primPair "time32_ms" (ATime Millisecond 32) ColTime32 ColTime32Maybe [Just 0, Just 1000, Nothing, Just 86399999] [1]
-    , primPair "time64_us" (ATime Microsecond 64) ColTime64 ColTime64Maybe [Just 0, Just 12345000000, Nothing, Just 86399999999] [1]
-    , primPair "time64_ns" (ATime Nanosecond 64) ColTime64 ColTime64Maybe [Just 0, Just 1, Nothing, Just 86399999999999] [2]
+    [ primPair "int8" (AInt 8 True) PInt8 [Just 0, Just 1, Nothing, Just (-1), Just 127, Just (-128)] [42, -42]
+    , primPair "int16" (AInt 16 True) PInt16 [Just 0, Just 1, Nothing, Just (-1), Just 32767, Just (-32768)] [1000, -1000]
+    , primPair "int32" (AInt 32 True) PInt32 [Just 0, Just 1, Nothing, Just (-1), Just maxBound, Just minBound] [7, -7]
+    , primPair "int64" (AInt 64 True) PInt64 [Just 0, Just 1, Nothing, Just (-1), Just maxBound, Just minBound] [123456789012, -5]
+    , primPair "uint8" (AInt 8 False) PUInt8 [Just 0, Just 1, Nothing, Just maxBound] [128]
+    , primPair "uint16" (AInt 16 False) PUInt16 [Just 0, Just 1, Nothing, Just maxBound] [256]
+    , primPair "uint32" (AInt 32 False) PUInt32 [Just 0, Just 1, Nothing, Just maxBound] [65536]
+    , primPair "uint64" (AInt 64 False) PUInt64 [Just 0, Just 1, Nothing, Just maxBound] [4294967296]
+    , primPair "float16" (AFloatingPoint Half) PFloat16 (map (fmap Float16) [Just 0x0000, Just 0x3C00, Nothing, Just 0xC000, Just 0x7BFF, Just 0x7C00]) [Float16 0x3800]
+    , primPair "float32" (AFloatingPoint Single) PFloat [Just 0, Just 1.5, Nothing, Just (-2.5), Just (1 / 0), Just 3.4028234663852886e38] [0.25]
+    , primPair "float64" (AFloatingPoint DoublePrecision) PDouble [Just 0, Just 1.5, Nothing, Just (-2.5), Just (-1 / 0), Just 1e300, Just 5e-324] [3.141592653589793]
+    , boxedPair "bool" ABool fromBools fromMaybeBools (map Just [True, False] ++ [Nothing] ++ map Just [True, True, False, False, True, False]) [False, True]
+    , boxedPair "utf8" AUtf8 fromTexts fromMaybeTexts strs ["second batch"]
+    , maybePair "large_utf8" ALargeUtf8 fromMaybeLargeTexts strs ["second batch"]
+    , boxedPair "binary" ABinary fromByteStrings fromMaybeByteStrings bins ["z"]
+    , maybePair "large_binary" ALargeBinary fromMaybeLargeByteStrings bins ["z"]
+    , maybePair "fixed_size_binary4" (AFixedSizeBinary 4) (ok . fromMaybeFixedSizeBinary 4) [Just "abcd", Just "\0\0\0\0", Nothing, Just "\xff\xfe\xfd\xfc"] ["wxyz"]
+    , maybePair "utf8_view" AUtf8View fromMaybeUtf8View views ["inline", "an out of line string value"]
+    , maybePair "binary_view" ABinaryView fromMaybeBinaryView viewBytes ["inline", BS.replicate 13 0]
+    , primPair "date32" (ADate DateDay) PDate32 [Just 0, Just 18000, Nothing, Just (-1), Just 19000] [20000]
+    , primPair "date64" (ADate DateMillisecond) PDate64 [Just 0, Just 1555200000000, Nothing, Just (-86400000)] [86400000]
+    , primPair "time32_s" (ATime Second 32) PTime32 [Just 0, Just 3600, Nothing, Just 86399] [60]
+    , primPair "time32_ms" (ATime Millisecond 32) PTime32 [Just 0, Just 1000, Nothing, Just 86399999] [1]
+    , primPair "time64_us" (ATime Microsecond 64) PTime64 [Just 0, Just 12345000000, Nothing, Just 86399999999] [1]
+    , primPair "time64_ns" (ATime Nanosecond 64) PTime64 [Just 0, Just 1, Nothing, Just 86399999999999] [2]
     , concatMap timeUnitCases [(Second, "s"), (Millisecond, "ms"), (Microsecond, "us"), (Nanosecond, "ns")]
-    , primPair "timestamp_us_new_york" (ATimestamp Microsecond (Just "America/New_York")) ColTimestamp ColTimestampMaybe [Just 0, Just 1700000000000000, Nothing] [5]
-    , decimalPair "decimal128_18_2" (ADecimal 18 2) (ColDecimal128 18 2) (ColDecimal128Maybe 18 2) 16 [Just 0, Just 123, Nothing, Just (-123), Just 999999999999999999] [1]
-    , decimalPair "decimal128_38_10" (ADecimal 38 10) (ColDecimal128 38 10) (ColDecimal128Maybe 38 10) 16 [Just 123456789012345678901234567890, Nothing, Just (-1)] [10000000000]
-    , decimalPair "decimal256_76_5" (ADecimal256 76 5) (ColDecimal256 76 5) (ColDecimal256Maybe 76 5) 32 [Just 100000, Nothing, Just (-1234567890123456789012345678901234567890123456789012345)] [1]
-    , pair
+    , primPair "timestamp_us_new_york" (ATimestamp Microsecond (Just "America/New_York")) PTimestamp [Just 0, Just 1700000000000000, Nothing] [5]
+    , decimalPair "decimal128_18_2" (ADecimal 18 2) (PDecimal128 18 2) decimal128FromInteger [Just 0, Just 123, Nothing, Just (-123), Just 999999999999999999] [1]
+    , decimalPair "decimal128_38_10" (ADecimal 38 10) (PDecimal128 38 10) decimal128FromInteger [Just 123456789012345678901234567890, Nothing, Just (-1)] [10000000000]
+    , decimalPair "decimal256_76_5" (ADecimal256 76 5) (PDecimal256 76 5) decimal256FromInteger [Just 100000, Nothing, Just (-1234567890123456789012345678901234567890123456789012345)] [1]
+    , primPair
         "interval_month_day_nano"
         (AInterval MonthDayNano)
-        []
-        ( \xs ->
-            ColIntervalMonthDayNano
-              (VP.fromList (map (\(m, _, _) -> m) xs))
-              (VP.fromList (map (\(_, d, _) -> d) xs))
-              (VP.fromList (map (\(_, _, ns) -> ns) xs))
-        )
-        (ColIntervalMonthDayNanoMaybe . V.fromList)
-        [Just (1, 2, 3), Just (0, 0, 0), Nothing, Just (-1, -2, -3)]
-        [(12, 30, 1000000000)]
-    , primPair "interval_year_month" (AInterval YearMonth) ColIntervalYearMonth ColIntervalYearMonthMaybe [Just 0, Just 14, Nothing, Just (-3)] [5]
-    , pair
+        PIntervalMonthDayNano
+        [Just (IntervalMonthDayNano 1 2 3), Just (IntervalMonthDayNano 0 0 0), Nothing, Just (IntervalMonthDayNano (-1) (-2) (-3))]
+        [IntervalMonthDayNano 12 30 1000000000]
+    , primPair "interval_year_month" (AInterval YearMonth) PIntervalYearMonth [Just 0, Just 14, Nothing, Just (-3)] [5]
+    , primPair
         "interval_day_time"
         (AInterval DayTime)
-        []
-        (\xs -> ColIntervalDayTime (VP.fromList (map fst xs)) (VP.fromList (map snd xs)))
-        (ColIntervalDayTimeMaybe . V.fromList)
-        [Just (0, 0), Just (1, 1000), Nothing, Just (-1, -1)]
-        [(2, 2)]
+        PIntervalDayTime
+        [Just (IntervalDayTime 0 0), Just (IntervalDayTime 1 1000), Nothing, Just (IntervalDayTime (-1) (-1))]
+        [IntervalDayTime 2 2]
     , [simple "null" (field "x" True ANull []) [ColNull 4, ColNull 1]]
     , structCases
     , listCases
@@ -251,20 +306,13 @@ cases =
     viewBytes = [Just "", Just "short", Nothing, Just "exactly12byt", Just "thirteen byte", Just "this string is definitely longer than twelve bytes"]
     timeUnitCases (u, s) =
       concat
-        [ primPair ("timestamp_" ++ s) (ATimestamp u Nothing) ColTimestamp ColTimestampMaybe ts [42]
-        , primPair ("timestamp_" ++ s ++ "_utc") (ATimestamp u (Just "UTC")) ColTimestamp ColTimestampMaybe ts [42]
-        , primPair ("duration_" ++ s) (ADuration u) ColDuration ColDurationMaybe [Just 0, Just 60, Nothing, Just (-1)] [1]
+        [ primPair ("timestamp_" ++ s) (ATimestamp u Nothing) PTimestamp ts [42]
+        , primPair ("timestamp_" ++ s ++ "_utc") (ATimestamp u (Just "UTC")) PTimestamp ts [42]
+        , primPair ("duration_" ++ s) (ADuration u) PDuration [Just 0, Just 60, Nothing, Just (-1)] [1]
         ]
     ts = [Just 0, Just 1700000000, Nothing, Just (-1)]
-    decimalPair n ty plain nullable w b1 b2 =
-      pair
-        n
-        ty
-        []
-        (plain . V.fromList . map (decimalBytes w))
-        (nullable . V.fromList . map (fmap (decimalBytes w)))
-        b1
-        b2
+    decimalPair :: String -> ArrowType -> PrimType d -> (Integer -> d) -> [Maybe Integer] -> [Integer] -> [Case]
+    decimalPair n ty p conv b1 b2 = primPair n ty p (map (fmap conv) b1) (map conv b2)
 
 
 structCases :: [Case]
@@ -272,23 +320,26 @@ structCases =
   [ simple
       "struct"
       (field "x" False AStruct kids)
-      [ ColStruct 3 (V.fromList [("i", i32 [1, 2, 3]), ("s", utf8m [Just "a", Nothing, Just "c"])])
-      , ColStruct 1 (V.fromList [("i", i32 [4]), ("s", utf8m [Just "d"])])
+      [ ok (mkStruct 3 Nothing (V.fromList [("i", i32 [1, 2, 3]), ("s", utf8m [Just "a", Nothing, Just "c"])]))
+      , ok (mkStruct 1 Nothing (V.fromList [("i", i32 [4]), ("s", utf8m [Just "d"])]))
       ]
   , simple
       "struct_nullable"
       (field "x" True AStruct kids)
-      [ ColStructMaybe
-          (V.fromList [True, False, True, True])
-          (V.fromList [("i", i32 [1, 0, 2, 3]), ("s", utf8m [Just "a", Nothing, Nothing, Just "c"])])
-      , ColStructMaybe (V.fromList [True]) (V.fromList [("i", i32 [4]), ("s", utf8m [Just "d"])])
+      [ ok
+          ( mkStruct
+              4
+              (valid [True, False, True, True])
+              (V.fromList [("i", i32 [1, 0, 2, 3]), ("s", utf8m [Just "a", Nothing, Nothing, Just "c"])])
+          )
+      , ok (mkStruct 1 (valid [True]) (V.fromList [("i", i32 [4]), ("s", utf8m [Just "d"])]))
       ]
   , -- pa.struct([]): the row count is all a fieldless struct carries.
-    simple "struct_empty" (field "x" False AStruct []) [ColStruct 3 V.empty, ColStruct 1 V.empty]
+    simple "struct_empty" (field "x" False AStruct []) [ok (mkStruct 3 Nothing V.empty), ok (mkStruct 1 Nothing V.empty)]
   , simple
       "struct_empty_nullable"
       (field "x" True AStruct [])
-      [ColStructMaybe (bools [True, False, True, True]) V.empty, ColStructMaybe (bools [True]) V.empty]
+      [ok (mkStruct 4 (valid [True, False, True, True]) V.empty), ok (mkStruct 1 (valid [True]) V.empty)]
   ]
   where
     kids = [field "i" False (AInt 32 True) [], field "s" True AUtf8 []]
@@ -299,63 +350,65 @@ listCases =
   [ simple
       "list_int32"
       (field "x" False AList [item (AInt 32 True)])
-      [ ColList (VP.fromList [0, 2, 2, 5]) (i32m [Just 1, Just 2, Just 3, Nothing, Just 5])
-      , ColList (VP.fromList [0, 1, 3]) (i32m [Just 6, Just 7, Just 8])
+      [ ok (mkList Nothing (VS.fromList [0, 2, 2, 5]) (i32m [Just 1, Just 2, Just 3, Nothing, Just 5]))
+      , ok (mkList Nothing (VS.fromList [0, 1, 3]) (i32m [Just 6, Just 7, Just 8]))
       ]
   , simple
       "list_int32_nullable"
       (field "x" True AList [item (AInt 32 True)])
-      [ ColListMaybe (bools [True, False, True, True]) (VP.fromList [0, 2, 2, 2, 5]) (i32m [Just 1, Just 2, Just 3, Nothing, Just 5])
-      , ColListMaybe (bools [True, True]) (VP.fromList [0, 1, 3]) (i32m [Just 6, Just 7, Just 8])
+      [ ok (mkList (valid [True, False, True, True]) (VS.fromList [0, 2, 2, 2, 5]) (i32m [Just 1, Just 2, Just 3, Nothing, Just 5]))
+      , ok (mkList (valid [True, True]) (VS.fromList [0, 1, 3]) (i32m [Just 6, Just 7, Just 8]))
       ]
   , simple
       "large_list_utf8"
       (field "x" False ALargeList [item AUtf8])
-      [ ColLargeList (VP.fromList [0, 2, 2, 3]) (utf8m [Just "a", Just "b", Just "c"])
-      , ColLargeList (VP.fromList [0, 1]) (utf8m [Just "d"])
+      [ ok (mkLargeList Nothing (VS.fromList [0, 2, 2, 3]) (utf8m [Just "a", Just "b", Just "c"]))
+      , ok (mkLargeList Nothing (VS.fromList [0, 1]) (utf8m [Just "d"]))
       ]
   , simple
       "large_list_utf8_nullable"
       (field "x" True ALargeList [item AUtf8])
-      [ ColLargeListMaybe (bools [True, False, True, True]) (VP.fromList [0, 2, 2, 2, 3]) (utf8m [Just "a", Just "b", Just "c"])
-      , ColLargeListMaybe (bools [True]) (VP.fromList [0, 1]) (utf8m [Just "d"])
+      [ ok (mkLargeList (valid [True, False, True, True]) (VS.fromList [0, 2, 2, 2, 3]) (utf8m [Just "a", Just "b", Just "c"]))
+      , ok (mkLargeList (valid [True]) (VS.fromList [0, 1]) (utf8m [Just "d"]))
       ]
   , simple
       "fixed_size_list_int16_3"
       (field "x" False (AFixedSizeList 3) [item (AInt 16 True)])
-      [ ColFixedSizeList 3 2 (i16m [Just 1, Just 2, Just 3, Just 4, Nothing, Just 6])
-      , ColFixedSizeList 3 1 (i16m [Just 7, Just 8, Just 9])
+      [ ok (mkFixedSizeList 3 2 Nothing (i16m [Just 1, Just 2, Just 3, Just 4, Nothing, Just 6]))
+      , ok (mkFixedSizeList 3 1 Nothing (i16m [Just 7, Just 8, Just 9]))
       ]
   , simple
       "fixed_size_list_int16_3_nullable"
       (field "x" True (AFixedSizeList 3) [item (AInt 16 True)])
-      [ ColFixedSizeListMaybe 3 (bools [True, False, True]) (i16m [Just 1, Just 2, Just 3, Nothing, Nothing, Nothing, Just 4, Nothing, Just 6])
-      , ColFixedSizeListMaybe 3 (bools [True]) (i16m [Just 7, Just 8, Just 9])
+      [ ok (mkFixedSizeList 3 3 (valid [True, False, True]) (i16m [Just 1, Just 2, Just 3, Nothing, Nothing, Nothing, Just 4, Nothing, Just 6]))
+      , ok (mkFixedSizeList 3 1 (valid [True]) (i16m [Just 7, Just 8, Just 9]))
       ]
   , -- pa.list_(pa.int32(), 0): rows of zero elements over an empty child.
     simple
       "fixed_size_list_int32_0"
       (field "x" False (AFixedSizeList 0) [item (AInt 32 True)])
-      [ColFixedSizeList 0 3 (i32m []), ColFixedSizeList 0 2 (i32m [])]
+      [ok (mkFixedSizeList 0 3 Nothing (i32m [])), ok (mkFixedSizeList 0 2 Nothing (i32m []))]
   , simple
       "fixed_size_list_int32_0_nullable"
       (field "x" True (AFixedSizeList 0) [item (AInt 32 True)])
-      [ColFixedSizeListMaybe 0 (bools [True, False, True, True]) (i32m []), ColFixedSizeListMaybe 0 (bools [True, True]) (i32m [])]
+      [ ok (mkFixedSizeList 0 4 (valid [True, False, True, True]) (i32m []))
+      , ok (mkFixedSizeList 0 2 (valid [True, True]) (i32m []))
+      ]
   , simple
       "map_utf8_int32"
       (field "x" False (AMap False) [entries])
-      [ ColMap (VP.fromList [0, 2, 2, 3]) (ColUtf8 (V.fromList ["a", "b", "c"])) (i32m [Just 1, Nothing, Just 3])
-      , ColMap (VP.fromList [0, 1]) (ColUtf8 (V.fromList ["d"])) (i32m [Just 4])
+      [ ok (mkMap Nothing (VS.fromList [0, 2, 2, 3]) (fromTexts (V.fromList ["a", "b", "c"])) (i32m [Just 1, Nothing, Just 3]))
+      , ok (mkMap Nothing (VS.fromList [0, 1]) (fromTexts (V.fromList ["d"])) (i32m [Just 4]))
       ]
   , simple
       "map_utf8_int32_nullable"
       (field "x" True (AMap False) [entries])
-      [ ColMapMaybe (bools [True, False, True, True]) (VP.fromList [0, 2, 2, 2, 3]) (ColUtf8 (V.fromList ["a", "b", "c"])) (i32m [Just 1, Nothing, Just 3])
-      , ColMapMaybe (bools [True]) (VP.fromList [0, 1]) (ColUtf8 (V.fromList ["d"])) (i32m [Just 4])
+      [ ok (mkMap (valid [True, False, True, True]) (VS.fromList [0, 2, 2, 2, 3]) (fromTexts (V.fromList ["a", "b", "c"])) (i32m [Just 1, Nothing, Just 3]))
+      , ok (mkMap (valid [True]) (VS.fromList [0, 1]) (fromTexts (V.fromList ["d"])) (i32m [Just 4]))
       ]
   ]
   where
-    i16m = ColInt16Maybe . V.fromList
+    i16m = fromMaybes PInt16 . V.fromList
     entries =
       field "entries" False AStruct [field "key" False AUtf8 [], field "value" True (AInt 32 True) []]
 
@@ -364,35 +417,31 @@ item :: ArrowType -> Field
 item ty = field "item" True ty []
 
 
-bools :: [Bool] -> V.Vector Bool
-bools = V.fromList
-
-
 listViewCases :: [Case]
 listViewCases =
   [ simple
       "list_view_int32"
       (field "x" False AListView [item (AInt 32 True)])
-      [ ColListView (VP.fromList [4, 0, 1, 0]) (VP.fromList [2, 3, 0, 1]) child
-      , ColListView (VP.fromList [0]) (VP.fromList [1]) child2
+      [ ok (mkListView Nothing (VS.fromList [4, 0, 1, 0]) (VS.fromList [2, 3, 0, 1]) child)
+      , ok (mkListView Nothing (VS.fromList [0]) (VS.fromList [1]) child2)
       ]
   , simple
       "list_view_int32_nullable"
       (field "x" True AListView [item (AInt 32 True)])
-      [ ColListViewMaybe (bools [True, False, True, True, True]) (VP.fromList [4, 0, 1, 0, 2]) (VP.fromList [2, 0, 0, 1, 2]) child
-      , ColListViewMaybe (bools [True]) (VP.fromList [0]) (VP.fromList [1]) child2
+      [ ok (mkListView (valid [True, False, True, True, True]) (VS.fromList [4, 0, 1, 0, 2]) (VS.fromList [2, 0, 0, 1, 2]) child)
+      , ok (mkListView (valid [True]) (VS.fromList [0]) (VS.fromList [1]) child2)
       ]
   , simple
       "large_list_view_int32"
       (field "x" False ALargeListView [item (AInt 32 True)])
-      [ ColLargeListView (VP.fromList [4, 0, 1, 0]) (VP.fromList [2, 3, 0, 1]) child
-      , ColLargeListView (VP.fromList [0]) (VP.fromList [1]) child2
+      [ ok (mkLargeListView Nothing (VS.fromList [4, 0, 1, 0]) (VS.fromList [2, 3, 0, 1]) child)
+      , ok (mkLargeListView Nothing (VS.fromList [0]) (VS.fromList [1]) child2)
       ]
   , simple
       "large_list_view_int32_nullable"
       (field "x" True ALargeListView [item (AInt 32 True)])
-      [ ColLargeListViewMaybe (bools [True, False, True, True, True]) (VP.fromList [4, 0, 1, 0, 2]) (VP.fromList [2, 0, 0, 1, 2]) child
-      , ColLargeListViewMaybe (bools [True]) (VP.fromList [0]) (VP.fromList [1]) child2
+      [ ok (mkLargeListView (valid [True, False, True, True, True]) (VS.fromList [4, 0, 1, 0, 2]) (VS.fromList [2, 0, 0, 1, 2]) child)
+      , ok (mkLargeListView (valid [True]) (VS.fromList [0]) (VS.fromList [1]) child2)
       ]
   ]
   where
@@ -415,30 +464,39 @@ unionCases =
   where
     kids = [field "i" True (AInt 32 True) [], field "s" True AUtf8 []]
     ufield mode codes nullable = field "x" nullable (AUnion mode (V.fromList codes)) kids
-    tids = VP.fromList :: [Int8] -> VP.Vector Int8
+    tids = VS.fromList :: [Int8] -> VS.Vector Int8
     dense n codes nullable =
       simple
         n
         (ufield Dense codes nullable)
-        [ ColDenseUnion
-            (tids [0, 1, 0, 0, 1])
-            (VP.fromList [0, 0, 1, 2, 1])
-            (V.fromList [i32m [Just 1, Just 2, Nothing], utf8m [Just "a", Just "b"]])
-        , ColDenseUnion (tids [1]) (VP.fromList [0]) (V.fromList [i32m [], utf8m [Just "z"]])
+        [ ok
+            ( mkDenseUnion
+                (tids [0, 1, 0, 0, 1])
+                (VS.fromList [0, 0, 1, 2, 1])
+                (V.fromList [i32m [Just 1, Just 2, Nothing], utf8m [Just "a", Just "b"]])
+            )
+        , ok (mkDenseUnion (tids [1]) (VS.fromList [0]) (V.fromList [i32m [], utf8m [Just "z"]]))
         ]
     sparse n codes nullable =
       simple
         n
         (ufield Sparse codes nullable)
-        [ ColSparseUnion
-            (tids [0, 1, 0, 1])
-            (V.fromList [i32m [Just 1, Just 0, Nothing, Just 0], utf8m [Nothing, Just "a", Just "x", Just "b"]])
-        , ColSparseUnion (tids [1]) (V.fromList [i32m [Just 0], utf8m [Just "z"]])
+        [ ok
+            ( mkSparseUnion
+                (tids [0, 1, 0, 1])
+                (V.fromList [i32m [Just 1, Just 0, Nothing, Just 0], utf8m [Nothing, Just "a", Just "x", Just "b"]])
+            )
+        , ok (mkSparseUnion (tids [1]) (V.fromList [i32m [Just 0], utf8m [Just "z"]]))
         ]
 
 
 abc :: ColumnArray
-abc = ColUtf8 (V.fromList ["a", "b", "c"])
+abc = fromTexts (V.fromList ["a", "b", "c"])
+
+
+-- | A dictionary column over @vals@ with the given keys column (at the index type's wire width).
+dict :: Int64 -> ColumnArray -> ColumnArray -> ColumnArray
+dict did keys vals = ok (mkDictionary did keys vals)
 
 
 dictCases :: [Case]
@@ -446,52 +504,52 @@ dictCases =
   [ simple
       "dict_utf8"
       (dictField "x" False AUtf8 0 i32t)
-      [ColDictionary 0 (ix [0, 1, 0, 2, 1]) abc, ColDictionary 0 (ix [2, 2, 0]) abc]
+      [dict 0 (ix [0, 1, 0, 2, 1]) abc, dict 0 (ix [2, 2, 0]) abc]
   , simple
       "dict_utf8_nullable"
       (dictField "x" True AUtf8 0 i32t)
-      [ ColDictionaryMaybe 0 (V.fromList [Just 0, Nothing, Just 1, Just 2]) abc
-      , ColDictionaryMaybe 0 (V.fromList [Just 1, Just 0]) abc
+      [ dict 0 (i32m [Just 0, Nothing, Just 1, Just 2]) abc
+      , dict 0 (i32m [Just 1, Just 0]) abc
       ]
   , simple
       "dict_int8_index"
       (dictField "x" False AUtf8 0 (AInt 8 True))
-      [ColDictionary 0 (ix [1, 0, 1]) xy, ColDictionary 0 (ix [0]) xy]
+      [dict 0 (ix8 [1, 0, 1]) xy, dict 0 (ix8 [0]) xy]
   , simple
       "dict_int64_values"
       (dictField "x" False (AInt 64 True) 0 i32t)
-      [ColDictionary 0 (ix [1, 0, 1]) (i64 [100, 200]), ColDictionary 0 (ix [0]) (i64 [100, 200])]
-  , (simple "dict_replacement" (dictField "x" False AUtf8 0 i32t) [ColDictionary 0 (ix [0, 1, 1]) ab, ColDictionary 0 (ix [2, 0, 1]) xyz])
+      [dict 0 (ix [1, 0, 1]) (i64 [100, 200]), dict 0 (ix [0]) (i64 [100, 200])]
+  , (simple "dict_replacement" (dictField "x" False AUtf8 0 i32t) [dict 0 (ix [0, 1, 1]) ab, dict 0 (ix [2, 0, 1]) xyz])
       { caseStreamOnly = True
       , caseReplaceDicts = True
       }
-  , (simple "dict_delta" (dictField "x" False AUtf8 0 i32t) [ColDictionary 0 (ix [0, 1]) ab, ColDictionary 0 (ix [2, 0]) abc])
+  , (simple "dict_delta" (dictField "x" False AUtf8 0 i32t) [dict 0 (ix [0, 1]) ab, dict 0 (ix [2, 0]) abc])
       { caseStreamOnly = True
       , caseReplaceDicts = True
       }
   , simple
       "dict_in_struct"
       (field "x" False AStruct [dictField "d" True AUtf8 0 i32t])
-      [ ColStruct 3 (V.singleton ("d", ColDictionaryMaybe 0 (V.fromList [Just 2, Just 0, Just 1]) abc))
-      , ColStruct 1 (V.singleton ("d", ColDictionaryMaybe 0 (V.fromList [Just 1]) abc))
+      [ ok (mkStruct 3 Nothing (V.singleton ("d", dict 0 (i32m [Just 2, Just 0, Just 1]) abc)))
+      , ok (mkStruct 1 Nothing (V.singleton ("d", dict 0 (i32m [Just 1]) abc)))
       ]
   , -- Dictionaries nested in dictionary values. pyarrow numbers dictionary
     -- ids in schema pre-order, so the outer dictionary is 0 and the inner 1.
     simple
       "dict_struct_of_dict"
       (nestedDict "x" False AStruct (dictField "d" True AUtf8 1 (AInt 16 True)) (AInt 8 True))
-      [ColDictionary 0 (ix [2, 0, 1, 0]) (structOfDict [1, 0, 2] abc), ColDictionary 0 (ix [1]) (structOfDict [1, 0, 2] abc)]
+      [dict 0 (ix8 [2, 0, 1, 0]) (structOfDict [1, 0, 2] abc), dict 0 (ix8 [1]) (structOfDict [1, 0, 2] abc)]
   , simple
       "dict_list_of_dict"
       (nestedDict "x" True AList (dictField "item" True AUtf8 1 (AInt 8 True)) i32t)
-      [ ColDictionaryMaybe 0 (V.fromList [Just 1, Nothing, Just 0, Just 2]) listOfDict
-      , ColDictionaryMaybe 0 (V.fromList [Just 2]) listOfDict
+      [ dict 0 (i32m [Just 1, Nothing, Just 0, Just 2]) listOfDict
+      , dict 0 (i32m [Just 2]) listOfDict
       ]
   , -- The inner dictionary changes between batches, so both dictionaries are replaced.
     (simple
       "dict_nested_replacement"
       (nestedDict "x" False AStruct (dictField "d" True AUtf8 1 (AInt 16 True)) (AInt 8 True))
-      [ColDictionary 0 (ix [0, 1]) (structOfDict [0, 1] abc), ColDictionary 0 (ix [1, 0]) (structOfDict [0, 0] xy)])
+      [dict 0 (ix8 [0, 1]) (structOfDict [0, 1] abc), dict 0 (ix8 [1, 0]) (structOfDict [0, 0] xy)])
       { caseStreamOnly = True
       , caseReplaceDicts = True
       }
@@ -499,18 +557,20 @@ dictCases =
     simple
       "dict_all_null_empty"
       (dictField "x" True AUtf8 0 i32t)
-      [ColDictionaryMaybe 0 (V.replicate 3 Nothing) (ColUtf8 V.empty), ColDictionaryMaybe 0 (V.replicate 1 Nothing) (ColUtf8 V.empty)]
+      [dict 0 (i32m (replicate 3 Nothing)) (fromTexts V.empty), dict 0 (i32m [Nothing]) (fromTexts V.empty)]
   ]
   where
     i32t = AInt 32 True
-    ix = VP.fromList :: [Int32] -> VP.Vector Int32
-    xy = ColUtf8 (V.fromList ["x", "y"])
-    ab = ColUtf8 (V.fromList ["a", "b"])
-    xyz = ColUtf8 (V.fromList ["x", "y", "z"])
+    ix = primColumn PInt32 . VS.fromList
+    ix8 = primColumn PInt8 . VS.fromList
+    ix16 = primColumn PInt16 . VS.fromList
+    xy = fromTexts (V.fromList ["x", "y"])
+    ab = fromTexts (V.fromList ["a", "b"])
+    xyz = fromTexts (V.fromList ["x", "y", "z"])
     nestedDict n nullable container inner indexTy =
       Field n nullable container (V.singleton inner) (Just (DictionaryEncoding 0 indexTy False)) V.empty
-    structOfDict inner vals = ColStruct (length inner) (V.singleton ("d", ColDictionaryMaybe 1 (V.fromList (map Just inner)) vals))
-    listOfDict = ColList (VP.fromList [0, 2, 2, 3]) (ColDictionaryMaybe 1 (V.fromList [Just 0, Just 1, Just 1]) xy)
+    structOfDict inner vals = ok (mkStruct (length inner) Nothing (V.singleton ("d", dict 1 (ix16 inner) vals)))
+    listOfDict = ok (mkList Nothing (VS.fromList [0, 2, 2, 3]) (dict 1 (ix8 [0, 1, 1]) xy))
 
 
 reeCases :: [Case]
@@ -521,13 +581,13 @@ reeCases =
   , ree "ree_int64_float64" True (AInt 64 True) (AFloatingPoint DoublePrecision) [(i64 [2, 3], dblm [Just 1.5, Nothing]), (i64 [1], dblm [Just 2.5])]
   ]
   where
-    int64m = ColInt64Maybe . V.fromList
-    dblm = ColDoubleMaybe . V.fromList
+    int64m = fromMaybes PInt64 . V.fromList
+    dblm = fromMaybes PDouble . V.fromList
     ree n nullable reTy valTy batches =
       simple
         n
         (field "x" nullable ARunEndEncoded [field "run_ends" False reTy [], field "values" True valTy []])
-        (map (uncurry ColRunEndEncoded) batches)
+        (map (ok . uncurry mkRunEndEncoded) batches)
 
 
 metadataCase :: Case
@@ -577,11 +637,11 @@ mixedCases =
       V.fromList
         [ i64 i
         , utf8m s
-        , ColBoolMaybe (V.fromList b)
-        , ColListMaybe (bools lv) (VP.fromList lo) (i32m lc)
-        , ColStructMaybe (bools sv) (V.singleton ("f", ColDoubleMaybe (V.fromList sf)))
-        , ColDictionaryMaybe 0 (V.fromList d) abc
-        , ColUtf8ViewMaybe (V.fromList v)
+        , fromMaybeBools (V.fromList b)
+        , ok (mkList (valid lv) (VS.fromList lo) (i32m lc))
+        , ok (mkStruct (length sv) (valid sv) (V.singleton ("f", fromMaybes PDouble (V.fromList sf))))
+        , dict 0 (i32m d) abc
+        , fromMaybeUtf8View (V.fromList v)
         ]
     m1 =
       mk
@@ -626,24 +686,8 @@ data LV
 type Rows = V.Vector LV
 
 
-ints :: (VP.Prim a, Integral a) => VP.Vector a -> Rows
-ints = V.fromList . map (LInt . toInteger) . VP.toList
-
-
-mints :: Integral a => V.Vector (Maybe a) -> Rows
-mints = V.map (maybe LNull (LInt . toInteger))
-
-
 opt :: (a -> LV) -> V.Vector (Maybe a) -> Rows
 opt f = V.map (maybe LNull f)
-
-
--- | Signed value of a little-endian two's-complement byte string.
-signedLE :: ByteString -> Integer
-signedLE bs =
-  let u = BS.foldr (\b acc -> acc * 256 + toInteger b) 0 bs
-      n = BS.length bs
-  in if n > 0 && testBit (BS.last bs) 7 then u - (1 `shiftL` (8 * n)) else u
 
 
 childField :: Field -> Int -> Either String Field
@@ -662,112 +706,69 @@ at :: Rows -> Int -> Either String LV
 at rs i = maybe (Left ("index " ++ show i ++ " outside child of length " ++ show (V.length rs))) Right (rs V.!? i)
 
 
-validAt :: Maybe (V.Vector Bool) -> Int -> Bool
-validAt mv i = maybe True (\v -> fromMaybe False (v V.!? i)) mv
-
-
--- | Rows of an offsets-based list column.
-offsetLists :: Maybe (V.Vector Bool) -> [Int] -> Rows -> Either String Rows
-offsetLists valid offs cr = do
-  let spans = zip offs (drop 1 offs)
-  case valid of
-    Just v | V.length v /= length spans -> Left "validity length differs from offsets length - 1"
-    _ -> Right ()
-  V.fromList
-    <$> traverse
-      (\(i, (o, e)) -> if validAt valid i then LList <$> sliceRows cr o (e - o) else Right LNull)
-      (zip [0 ..] spans)
-
-
-viewLists :: Maybe (V.Vector Bool) -> [Int] -> [Int] -> Rows -> Either String Rows
-viewLists valid offs sizes cr =
-  V.fromList
-    <$> traverse
-      (\(i, (o, s)) -> if validAt valid i then LList <$> sliceRows cr o s else Right LNull)
-      (zip [0 ..] (zip offs sizes))
+-- | Rows of a fixed-width column, read through its typed view.
+primRows :: PrimType a -> ColumnArray -> Either String Rows
+primRows p col = case p of
+  PInt8 -> go (LInt . toInteger)
+  PInt16 -> go (LInt . toInteger)
+  PInt32 -> go (LInt . toInteger)
+  PInt64 -> go (LInt . toInteger)
+  PUInt8 -> go (LInt . toInteger)
+  PUInt16 -> go (LInt . toInteger)
+  PUInt32 -> go (LInt . toInteger)
+  PUInt64 -> go (LInt . toInteger)
+  PFloat16 -> go (\(Float16 w) -> LInt (toInteger w))
+  PFloat -> go (LDouble . float2Double)
+  PDouble -> go LDouble
+  PDate32 -> go (LInt . toInteger)
+  PDate64 -> go (LInt . toInteger)
+  PTime32 -> go (LInt . toInteger)
+  PTime64 -> go (LInt . toInteger)
+  PTimestamp -> go (LInt . toInteger)
+  PDuration -> go (LInt . toInteger)
+  PIntervalYearMonth -> go (LInt . toInteger)
+  PIntervalDayTime -> go (\(IntervalDayTime d m) -> LList [LInt (toInteger d), LInt (toInteger m)])
+  PIntervalMonthDayNano -> go (\(IntervalMonthDayNano m d n) -> LList [LInt (toInteger m), LInt (toInteger d), LInt (toInteger n)])
+  PDecimal128 _ _ -> go (LInt . decimal128ToInteger)
+  PDecimal256 _ _ -> go (LInt . decimal256ToInteger)
+  where
+    go conv = withPrim p (maybe (Left ("asPrim failed on " ++ show col)) (Right . opt conv . toMaybeVector) (asPrim p col))
 
 
 rowsOf :: Field -> ColumnArray -> Either String Rows
 rowsOf f col = case col of
-  ColInt8 v -> Right (ints v)
-  ColInt16 v -> Right (ints v)
-  ColInt32 v -> Right (ints v)
-  ColInt64 v -> Right (ints v)
-  ColUInt8 v -> Right (ints v)
-  ColUInt16 v -> Right (ints v)
-  ColUInt32 v -> Right (ints v)
-  ColUInt64 v -> Right (ints v)
-  ColFloat16 v -> Right (ints v)
-  ColFloat v -> Right (V.fromList (map (LDouble . float2Double) (VP.toList v)))
-  ColDouble v -> Right (V.fromList (map LDouble (VP.toList v)))
-  ColBool v -> Right (V.map LBool v)
-  ColUtf8 v -> Right (V.map LText v)
-  ColBinary v -> Right (V.map LBytes v)
-  ColLargeUtf8 v -> Right (V.map LText v)
-  ColLargeBinary v -> Right (V.map LBytes v)
-  ColFixedSizeBinary _ v -> Right (V.map LBytes v)
-  ColDate32 v -> Right (ints v)
-  ColDate64 v -> Right (ints v)
-  ColTime32 v -> Right (ints v)
-  ColTime64 v -> Right (ints v)
-  ColTimestamp v -> Right (ints v)
-  ColDuration v -> Right (ints v)
-  ColDecimal128 _ _ v -> Right (V.map (LInt . signedLE) v)
-  ColDecimal256 _ _ v -> Right (V.map (LInt . signedLE) v)
-  ColIntervalYearMonth v -> Right (ints v)
-  ColIntervalDayTime ds ms -> Right (V.fromList (zipWith dayTime (VP.toList ds) (VP.toList ms)))
-  ColIntervalMonthDayNano ms ds ns ->
-    Right (V.fromList (zipWith3 (\m d n -> monthDayNano (m, d, n)) (VP.toList ms) (VP.toList ds) (VP.toList ns)))
-  ColInt8Maybe v -> Right (mints v)
-  ColInt16Maybe v -> Right (mints v)
-  ColInt32Maybe v -> Right (mints v)
-  ColInt64Maybe v -> Right (mints v)
-  ColUInt8Maybe v -> Right (mints v)
-  ColUInt16Maybe v -> Right (mints v)
-  ColUInt32Maybe v -> Right (mints v)
-  ColUInt64Maybe v -> Right (mints v)
-  ColFloat16Maybe v -> Right (mints v)
-  ColFloatMaybe v -> Right (opt (LDouble . float2Double) v)
-  ColDoubleMaybe v -> Right (opt LDouble v)
-  ColBoolMaybe v -> Right (opt LBool v)
-  ColUtf8Maybe v -> Right (opt LText v)
-  ColBinaryMaybe v -> Right (opt LBytes v)
-  ColLargeUtf8Maybe v -> Right (opt LText v)
-  ColLargeBinaryMaybe v -> Right (opt LBytes v)
-  ColFixedSizeBinaryMaybe _ v -> Right (opt LBytes v)
-  ColDate32Maybe v -> Right (mints v)
-  ColDate64Maybe v -> Right (mints v)
-  ColTime32Maybe v -> Right (mints v)
-  ColTime64Maybe v -> Right (mints v)
-  ColTimestampMaybe v -> Right (mints v)
-  ColDurationMaybe v -> Right (mints v)
-  ColDecimal128Maybe _ _ v -> Right (opt (LInt . signedLE) v)
-  ColDecimal256Maybe _ _ v -> Right (opt (LInt . signedLE) v)
-  ColIntervalYearMonthMaybe v -> Right (mints v)
-  ColIntervalDayTimeMaybe v -> Right (opt (uncurry dayTime) v)
-  ColIntervalMonthDayNanoMaybe v -> Right (opt monthDayNano v)
-  ColStruct n cs -> structRows Nothing n cs
-  ColStructMaybe valid cs -> structRows (Just valid) (V.length valid) cs
-  ColList offs c -> do
-    cr <- childRows 0 c
-    offsetLists Nothing (map fromIntegral (VP.toList offs)) cr
-  ColListMaybe valid offs c -> do
-    cr <- childRows 0 c
-    offsetLists (Just valid) (map fromIntegral (VP.toList offs)) cr
-  ColLargeList offs c -> do
-    cr <- childRows 0 c
-    offsetLists Nothing (map fromIntegral (VP.toList offs)) cr
-  ColLargeListMaybe valid offs c -> do
-    cr <- childRows 0 c
-    offsetLists (Just valid) (map fromIntegral (VP.toList offs)) cr
-  ColFixedSizeList w n c -> do
-    cr <- childRows 0 c
-    fixedLists Nothing w n cr
-  ColFixedSizeListMaybe w valid c -> do
-    cr <- childRows 0 c
-    fixedLists (Just valid) w (V.length valid) cr
-  ColMap offs ks vs -> mapRows Nothing offs ks vs
-  ColMapMaybe valid offs ks vs -> mapRows (Just valid) offs ks vs
+  ColNull n -> Right (V.replicate n LNull)
+  ColPrim p _ _ -> primRows p col
+  ColBool {} -> opt LBool <$> toBoolVector col
+  ColUtf8 {} -> texts
+  ColLargeUtf8 {} -> texts
+  ColUtf8View {} -> texts
+  ColBinary {} -> bytes
+  ColLargeBinary {} -> bytes
+  ColFixedSizeBinary {} -> bytes
+  ColBinaryView {} -> bytes
+  ColStruct n v cs -> do
+    crs <- V.imapM (\i (nm, c) -> (,) nm <$> childRows i c) cs
+    V.generateM n $ \j ->
+      if isValidAt v j
+        then LStruct . V.toList <$> traverse (\(nm, rs) -> (,) nm <$> at rs j) crs
+        else Right LNull
+  ColList _ _ c -> lists c
+  ColLargeList _ _ c -> lists c
+  ColListView _ _ _ c -> lists c
+  ColLargeListView _ _ _ c -> lists c
+  ColFixedSizeList _ _ _ c -> lists c
+  ColMap _ _ ks vs -> do
+    entries <- childField f 0
+    kf <- childField entries 0
+    vf <- childField entries 1
+    kr <- rowsOf kf ks
+    vr <- rowsOf vf vs
+    unless (V.length kr == V.length vr) (Left "map keys and values differ in length")
+    perRow $ \(ChildRange s l) -> do
+      kl <- sliceRows kr s l
+      vl <- sliceRows vr s l
+      Right (LMap (zip kl vl))
   ColDenseUnion tids offs cs -> do
     crs <- V.imapM childRows cs
     V.fromList
@@ -776,7 +777,7 @@ rowsOf f col = case col of
             rs <- maybe (Left ("union child index " ++ show t ++ " out of range")) Right (crs V.!? fromIntegral t)
             LUnion (typeCode t) <$> at rs (fromIntegral o)
         )
-        (zip (VP.toList tids) (VP.toList offs))
+        (zip (VS.toList tids) (VS.toList offs))
   ColSparseUnion tids cs -> do
     crs <- V.imapM childRows cs
     V.fromList
@@ -785,14 +786,11 @@ rowsOf f col = case col of
             rs <- maybe (Left ("union child index " ++ show t ++ " out of range")) Right (crs V.!? fromIntegral t)
             LUnion (typeCode t) <$> at rs i
         )
-        (zip [0 ..] (VP.toList tids))
-  ColDictionary _ idx vals -> do
+        (zip [0 ..] (VS.toList tids))
+  ColDictionary _ _ vals -> do
     vr <- rowsOf (f {fieldDictionary = Nothing}) vals
-    V.fromList <$> traverse (at vr . fromIntegral) (VP.toList idx)
-  ColDictionaryMaybe _ idx vals -> do
-    vr <- rowsOf (f {fieldDictionary = Nothing}) vals
-    V.fromList <$> traverse (maybe (Right LNull) (at vr . fromIntegral)) (V.toList idx)
-  ColRunEndEncoded ends vals -> do
+    V.generateM (columnLength col) (maybe (Right LNull) (at vr) . dictKeyAt col)
+  ColRunEndEncoded off len ends vals -> do
     er <- childRows 0 ends
     vr <- childRows 1 vals
     endsI <- traverse (\case LInt e -> Right (fromInteger e); other -> Left ("non-integer run end " ++ show other)) (V.toList er)
@@ -803,52 +801,23 @@ rowsOf f col = case col of
               v <- at vr k
               rest <- expand e es (k + 1)
               Right (replicate (e - prev) v ++ rest)
-    V.fromList <$> expand (0 :: Int) endsI 0
-  ColListView offs sizes c -> do
-    cr <- childRows 0 c
-    viewLists Nothing (map fromIntegral (VP.toList offs)) (map fromIntegral (VP.toList sizes)) cr
-  ColListViewMaybe valid offs sizes c -> do
-    cr <- childRows 0 c
-    viewLists (Just valid) (map fromIntegral (VP.toList offs)) (map fromIntegral (VP.toList sizes)) cr
-  ColLargeListView offs sizes c -> do
-    cr <- childRows 0 c
-    viewLists Nothing (map fromIntegral (VP.toList offs)) (map fromIntegral (VP.toList sizes)) cr
-  ColLargeListViewMaybe valid offs sizes c -> do
-    cr <- childRows 0 c
-    viewLists (Just valid) (map fromIntegral (VP.toList offs)) (map fromIntegral (VP.toList sizes)) cr
-  ColUtf8View v -> Right (V.map LText v)
-  ColUtf8ViewMaybe v -> Right (opt LText v)
-  ColBinaryView v -> Right (V.map LBytes v)
-  ColBinaryViewMaybe v -> Right (opt LBytes v)
-  ColNull n -> Right (V.replicate n LNull)
+    full <- V.fromList <$> expand (0 :: Int) endsI 0
+    V.fromList <$> sliceRows full off len
   where
+    texts = opt LText <$> toTextVector col
+    bytes = opt LBytes <$> toBytesVector col
     childRows i c = do
       cf <- childField f i
       rowsOf cf c
-    dayTime d m = LList [LInt (toInteger d), LInt (toInteger m)]
-    monthDayNano (m, d, n) = LList [LInt (toInteger m), LInt (toInteger d), LInt (toInteger n)]
+    -- One row per list slot; 'listRange' answers Nothing for a null row.
+    perRow row = V.generateM (columnLength col) (maybe (Right LNull) row . listRange col)
+    lists c = do
+      cr <- childRows 0 c
+      perRow (\(ChildRange s l) -> LList <$> sliceRows cr s l)
     typeCode :: Int8 -> Int32
     typeCode t = case fieldType f of
       AUnion _ codes | not (V.null codes) -> fromMaybe (-1) (codes V.!? fromIntegral t)
       _ -> fromIntegral t
-    structRows valid n cs = do
-      crs <- V.imapM (\i (nm, c) -> (,) nm <$> childRows i c) cs
-      V.generateM n $ \j ->
-        if validAt valid j
-          then LStruct . V.toList <$> traverse (\(nm, rs) -> (,) nm <$> at rs j) crs
-          else Right LNull
-    fixedLists valid w n cr =
-      V.generateM n $ \i ->
-        if validAt valid i then LList <$> sliceRows cr (i * w) w else Right LNull
-    mapRows valid offs ks vs = do
-      entries <- childField f 0
-      kf <- childField entries 0
-      vf <- childField entries 1
-      kr <- rowsOf kf ks
-      vr <- rowsOf vf vs
-      unless (V.length kr == V.length vr) (Left "map keys and values differ in length")
-      lists <- offsetLists valid (map fromIntegral (VP.toList offs)) (V.zipWith (\k v -> LList [k, v]) kr vr)
-      Right (V.map (\case LList kvs -> LMap (map (\case LList [k, v] -> (k, v); other -> (other, LNull)) kvs); other -> other) lists)
 
 
 -- | Schemas compare equal up to the order of custom-metadata pairs.
@@ -1072,8 +1041,8 @@ findScript = do
   where
     firstExisting [] = pure Nothing
     firstExisting (p : ps) = do
-      ok <- doesFileExist p
-      if ok then pure (Just p) else firstExisting ps
+      exists <- doesFileExist p
+      if exists then pure (Just p) else firstExisting ps
 
 
 main :: IO ()

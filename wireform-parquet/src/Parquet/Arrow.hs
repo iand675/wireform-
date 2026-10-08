@@ -1,5 +1,6 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 {- | Arrow ↔ Parquet column-data bridge.
 
@@ -63,22 +64,32 @@ module Parquet.Arrow (
 import Arrow.Column qualified as AC
 import Arrow.Types qualified as AT
 import Columnar.Stream qualified as IS
+import Control.Monad.ST (runST)
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
 import Data.Int (Int32, Int64)
 import Data.Map.Strict qualified as Map
+import Data.Primitive.ByteArray (copyByteArrayToAddr)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.Encoding.Error qualified as TE
 import Data.Vector qualified as V
+import Data.Vector.Mutable qualified as VM
 import Data.Vector.Primitive qualified as VP
+import Data.Vector.Primitive.Mutable qualified as VPM
+import Data.Vector.Storable qualified as VS
+import Data.Vector.Storable.Mutable qualified as VSM
 import Data.Word (Word16, Word32, Word64, Word8)
+import Foreign.Ptr (castPtr)
+import Foreign.Storable (Storable, sizeOf)
 import Parquet.Nested qualified as PN
 import Parquet.PageIndex qualified as PI
 import Parquet.Predicate qualified as Pred
 import Parquet.Read qualified as PR
 import Parquet.Types qualified as P
 import Parquet.Write qualified as PW
+import System.IO.Unsafe (unsafeDupablePerformIO)
 
 
 -- ============================================================
@@ -141,66 +152,67 @@ arrowToParquetMixed sch batches = do
           }
   schemaElems <- V.mapM arrowFieldToSchemaElement leafFields
   let !pSchema = V.cons rootElem schemaElems
-  rgData <- mapM (V.mapM columnArrayToParquetColumn) batches
+  rgData <- mapM (V.zipWithM columnArrayToParquetColumn leafFields) batches
   Right (pSchema, rgData)
 
 
 {- | Dispatch a single Arrow column onto the 'PW.ParquetColumn'
-sum. Nullable variants map to 'PW.PCOptional'; required ones
-reuse 'columnArrayToColumnData' and wrap the result in
-'PW.PCRequired'.
+sum, driven by the schema field: a nullable field maps to
+'PW.PCOptional' (definition levels carry the nulls), a required
+field reuses 'columnArrayToColumnData' and wraps the result in
+'PW.PCRequired'. A column holding nulls under a required field is
+a 'Left': the Parquet schema element would claim every value is
+present.
 -}
 columnArrayToParquetColumn
-  :: AC.ColumnArray -> Either String PW.ParquetColumn
-columnArrayToParquetColumn col = case col of
-  AC.ColInt32Maybe v ->
-    Right $ PW.PCOptional (PW.OptInt32 v)
-  AC.ColInt64Maybe v ->
-    Right $ PW.PCOptional (PW.OptInt64 v)
-  AC.ColFloatMaybe v ->
-    Right $ PW.PCOptional (PW.OptFloat v)
-  AC.ColDoubleMaybe v ->
-    Right $ PW.PCOptional (PW.OptDouble v)
-  AC.ColBoolMaybe v ->
-    Right $ PW.PCOptional (PW.OptBool v)
-  AC.ColUtf8Maybe v ->
-    Right $ PW.PCOptional (PW.OptByteArray (V.map (fmap TE.encodeUtf8) v))
-  AC.ColBinaryMaybe v ->
-    Right $ PW.PCOptional (PW.OptByteArray v)
-  AC.ColLargeUtf8Maybe v ->
-    Right $ PW.PCOptional (PW.OptByteArray (V.map (fmap TE.encodeUtf8) v))
-  AC.ColLargeBinaryMaybe v ->
-    Right $ PW.PCOptional (PW.OptByteArray v)
-  -- Int8 / Int16 / UInt* nullable: widen to Int32 while
-  -- preserving Nothing positions.
-  AC.ColInt8Maybe v ->
-    Right $ PW.PCOptional (PW.OptInt32 (V.map (fmap fromIntegral) v))
-  AC.ColInt16Maybe v ->
-    Right $ PW.PCOptional (PW.OptInt32 (V.map (fmap fromIntegral) v))
-  AC.ColUInt8Maybe v ->
-    Right $ PW.PCOptional (PW.OptInt32 (V.map (fmap (fromIntegral :: Word8 -> Int32)) v))
-  AC.ColUInt16Maybe v ->
-    Right $ PW.PCOptional (PW.OptInt32 (V.map (fmap (fromIntegral :: Word16 -> Int32)) v))
-  AC.ColUInt32Maybe v ->
-    Right $ PW.PCOptional (PW.OptInt32 (V.map (fmap (fromIntegral :: Word32 -> Int32)) v))
-  AC.ColUInt64Maybe v ->
-    Right $ PW.PCOptional (PW.OptInt64 (V.map (fmap (fromIntegral :: Word64 -> Int64)) v))
-  -- Temporal nullable: widen payload to matching INT32 / INT64.
-  AC.ColDate32Maybe v ->
-    Right $ PW.PCOptional (PW.OptInt32 v)
-  AC.ColDate64Maybe v ->
-    Right $ PW.PCOptional (PW.OptInt64 v)
-  AC.ColTime32Maybe v ->
-    Right $ PW.PCOptional (PW.OptInt32 v)
-  AC.ColTime64Maybe v ->
-    Right $ PW.PCOptional (PW.OptInt64 v)
-  AC.ColTimestampMaybe v ->
-    Right $ PW.PCOptional (PW.OptInt64 v)
-  AC.ColDurationMaybe v ->
-    Right $ PW.PCOptional (PW.OptInt64 v)
-  -- Required columns: just delegate.
-  _ ->
-    PW.PCRequired <$> columnArrayToColumnData col
+  :: AT.Field -> AC.ColumnArray -> Either String PW.ParquetColumn
+columnArrayToParquetColumn fld col
+  | not (AT.fieldNullable fld) =
+      if AC.nullCount col > 0
+        then
+          Left $
+            "Parquet.Arrow: column "
+              <> show (AT.fieldName fld)
+              <> " has "
+              <> show (AC.nullCount col)
+              <> " nulls but its field is not nullable"
+        else PW.PCRequired <$> columnArrayToColumnData col
+  | otherwise = PW.PCOptional <$> columnArrayToOptionalColumn col
+
+
+{- | Lower one Arrow column to Parquet's nullable column shape.
+Narrow and unsigned integers widen to INT32 / INT64 as in
+'columnArrayToColumnData'; temporal columns use their integer
+payload. Parquet's optional writer takes boxed @Maybe@ vectors, so
+this is one boxing pass per column.
+-}
+columnArrayToOptionalColumn
+  :: AC.ColumnArray -> Either String PW.OptionalColumn
+columnArrayToOptionalColumn = \case
+  AC.ColInt8 mv xs -> Right $ PW.OptInt32 (maybeVector fromIntegral mv xs)
+  AC.ColInt16 mv xs -> Right $ PW.OptInt32 (maybeVector fromIntegral mv xs)
+  AC.ColInt32 mv xs -> Right $ PW.OptInt32 (maybeVector id mv xs)
+  AC.ColInt64 mv xs -> Right $ PW.OptInt64 (maybeVector id mv xs)
+  AC.ColUInt8 mv xs -> Right $ PW.OptInt32 (maybeVector (fromIntegral :: Word8 -> Int32) mv xs)
+  AC.ColUInt16 mv xs -> Right $ PW.OptInt32 (maybeVector (fromIntegral :: Word16 -> Int32) mv xs)
+  AC.ColUInt32 mv xs -> Right $ PW.OptInt32 (maybeVector (fromIntegral :: Word32 -> Int32) mv xs)
+  AC.ColUInt64 mv xs -> Right $ PW.OptInt64 (maybeVector (fromIntegral :: Word64 -> Int64) mv xs)
+  AC.ColFloat mv xs -> Right $ PW.OptFloat (maybeVector id mv xs)
+  AC.ColDouble mv xs -> Right $ PW.OptDouble (maybeVector id mv xs)
+  AC.ColDate32 mv xs -> Right $ PW.OptInt32 (maybeVector id mv xs)
+  AC.ColDate64 mv xs -> Right $ PW.OptInt64 (maybeVector id mv xs)
+  AC.ColTime32 mv xs -> Right $ PW.OptInt32 (maybeVector id mv xs)
+  AC.ColTime64 mv xs -> Right $ PW.OptInt64 (maybeVector id mv xs)
+  AC.ColTimestamp mv xs -> Right $ PW.OptInt64 (maybeVector id mv xs)
+  AC.ColDuration mv xs -> Right $ PW.OptInt64 (maybeVector id mv xs)
+  col
+    | Just ba <- AC.asBool col ->
+        Right $ PW.OptBool (V.generate (AC.columnLength col) (AC.boolArrayAt ba))
+    | Just ba <- AC.asBinary col ->
+        Right $ PW.OptByteArray (V.generate (AC.bytesArrayLength ba) (AC.unsafeBytesAt ba))
+    | Just ba <- AC.asLargeBinary col ->
+        Right $ PW.OptByteArray (V.generate (AC.bytesArrayLength ba) (AC.unsafeBytesAt ba))
+    | otherwise -> Left (noFlatEquivalent col)
 
 
 {- | Project the (potentially-nested) Arrow field tree to a flat
@@ -285,71 +297,100 @@ arrowFieldToSchemaElement f = do
       }
 
 
-{- | Lower one Arrow column to Parquet's 'ColumnData'. Nullable
-variants are flattened to the present-only values vector with
-nulls dropped — Parquet's 'ColumnData' is the non-nullable
-shape; the 'Parquet.Write.OptionalColumn' path handles nullable
-variants but the high-level API doesn't currently route through
-it. Future work: return an @Either ColumnData OptionalColumn@
-so callers can select the right Parquet writer.
+{- | Lower one Arrow column to Parquet's required 'ColumnData'.
+Nulls are dropped: the result holds the present values only (the
+shape Parquet's required writer takes). Use
+'columnArrayToParquetColumn' to keep the nulls through definition
+levels.
 -}
 columnArrayToColumnData
   :: AC.ColumnArray -> Either String PW.ColumnData
 columnArrayToColumnData = \case
-  AC.ColInt8 v -> Right $ PW.ColInt32 (VP.map fromIntegral v)
-  AC.ColInt16 v -> Right $ PW.ColInt32 (VP.map fromIntegral v)
-  AC.ColInt32 v -> Right $ PW.ColInt32 v
-  AC.ColInt64 v -> Right $ PW.ColInt64 v
-  AC.ColUInt8 v -> Right $ PW.ColInt32 (VP.map (fromIntegral :: Word8 -> Int32) v)
-  AC.ColUInt16 v -> Right $ PW.ColInt32 (VP.map (fromIntegral :: Word16 -> Int32) v)
-  AC.ColUInt32 v -> Right $ PW.ColInt32 (VP.map (fromIntegral :: Word32 -> Int32) v)
-  AC.ColUInt64 v -> Right $ PW.ColInt64 (VP.map (fromIntegral :: Word64 -> Int64) v)
-  AC.ColFloat v -> Right $ PW.ColFloat v
-  AC.ColDouble v -> Right $ PW.ColDouble v
-  AC.ColBool v -> Right $ PW.ColBool v
-  AC.ColUtf8 v -> Right $ PW.ColByteArray (V.map TE.encodeUtf8 v)
-  AC.ColLargeUtf8 v -> Right $ PW.ColByteArray (V.map TE.encodeUtf8 v)
-  AC.ColBinary v -> Right $ PW.ColByteArray v
-  AC.ColLargeBinary v -> Right $ PW.ColByteArray v
+  AC.ColInt8 mv xs -> Right $ PW.ColInt32 (presentPrim fromIntegral mv xs)
+  AC.ColInt16 mv xs -> Right $ PW.ColInt32 (presentPrim fromIntegral mv xs)
+  AC.ColInt32 mv xs -> Right $ PW.ColInt32 (presentPrim id mv xs)
+  AC.ColInt64 mv xs -> Right $ PW.ColInt64 (presentPrim id mv xs)
+  AC.ColUInt8 mv xs -> Right $ PW.ColInt32 (presentPrim (fromIntegral :: Word8 -> Int32) mv xs)
+  AC.ColUInt16 mv xs -> Right $ PW.ColInt32 (presentPrim (fromIntegral :: Word16 -> Int32) mv xs)
+  AC.ColUInt32 mv xs -> Right $ PW.ColInt32 (presentPrim (fromIntegral :: Word32 -> Int32) mv xs)
+  AC.ColUInt64 mv xs -> Right $ PW.ColInt64 (presentPrim (fromIntegral :: Word64 -> Int64) mv xs)
+  AC.ColFloat mv xs -> Right $ PW.ColFloat (presentPrim id mv xs)
+  AC.ColDouble mv xs -> Right $ PW.ColDouble (presentPrim id mv xs)
   -- Temporal types: lower to the natural Parquet physical type
   -- the schema element declared (Int32 for Date32 / Time32, Int64
   -- for Date64 / Time64 / Timestamp / Duration).
-  AC.ColDate32 v -> Right $ PW.ColInt32 v
-  AC.ColDate64 v -> Right $ PW.ColInt64 v
-  AC.ColTime32 v -> Right $ PW.ColInt32 v
-  AC.ColTime64 v -> Right $ PW.ColInt64 v
-  AC.ColTimestamp v -> Right $ PW.ColInt64 v
-  AC.ColDuration v -> Right $ PW.ColInt64 v
-  -- Nullable: drop nulls, emit only the present values. The
-  -- writer's high-level path treats every column as
-  -- (Required+ColumnData); proper Optional support requires a
-  -- distinct OptionalColumn lowering that the writer's nested
-  -- Parquet.Write.encodeOptionalColumnPage path consumes. We
-  -- preserve the nullability in the schema (Repetition=Optional)
-  -- but drop the nulls here for now; round-trip will recover the
-  -- present values with no NULL slots.
-  AC.ColInt8Maybe v -> Right $ PW.ColInt32 (VP.fromList [fromIntegral i | Just i <- V.toList v])
-  AC.ColInt16Maybe v -> Right $ PW.ColInt32 (VP.fromList [fromIntegral i | Just i <- V.toList v])
-  AC.ColInt32Maybe v -> Right $ PW.ColInt32 (VP.fromList [i | Just i <- V.toList v])
-  AC.ColInt64Maybe v -> Right $ PW.ColInt64 (VP.fromList [i | Just i <- V.toList v])
-  AC.ColUInt8Maybe v -> Right $ PW.ColInt32 (VP.fromList [fromIntegral i | Just i <- V.toList v])
-  AC.ColUInt16Maybe v -> Right $ PW.ColInt32 (VP.fromList [fromIntegral i | Just i <- V.toList v])
-  AC.ColUInt32Maybe v -> Right $ PW.ColInt32 (VP.fromList [fromIntegral i | Just i <- V.toList v])
-  AC.ColUInt64Maybe v -> Right $ PW.ColInt64 (VP.fromList [fromIntegral i | Just i <- V.toList v])
-  AC.ColFloatMaybe v -> Right $ PW.ColFloat (VP.fromList [f | Just f <- V.toList v])
-  AC.ColDoubleMaybe v -> Right $ PW.ColDouble (VP.fromList [d | Just d <- V.toList v])
-  AC.ColBoolMaybe v -> Right $ PW.ColBool (V.fromList [b | Just b <- V.toList v])
-  AC.ColUtf8Maybe v -> Right $ PW.ColByteArray (V.fromList [TE.encodeUtf8 t | Just t <- V.toList v])
-  AC.ColLargeUtf8Maybe v -> Right $ PW.ColByteArray (V.fromList [TE.encodeUtf8 t | Just t <- V.toList v])
-  AC.ColBinaryMaybe v -> Right $ PW.ColByteArray (V.fromList [b | Just b <- V.toList v])
-  AC.ColLargeBinaryMaybe v -> Right $ PW.ColByteArray (V.fromList [b | Just b <- V.toList v])
-  other ->
-    Left $
-      "Parquet.Arrow: Arrow column shape "
-        <> show other
-        <> " has no flat Parquet equivalent (nested types "
-        <> "go through Parquet.Nested, dictionary columns "
-        <> "should pre-resolve to their values column)"
+  AC.ColDate32 mv xs -> Right $ PW.ColInt32 (presentPrim id mv xs)
+  AC.ColDate64 mv xs -> Right $ PW.ColInt64 (presentPrim id mv xs)
+  AC.ColTime32 mv xs -> Right $ PW.ColInt32 (presentPrim id mv xs)
+  AC.ColTime64 mv xs -> Right $ PW.ColInt64 (presentPrim id mv xs)
+  AC.ColTimestamp mv xs -> Right $ PW.ColInt64 (presentPrim id mv xs)
+  AC.ColDuration mv xs -> Right $ PW.ColInt64 (presentPrim id mv xs)
+  col
+    | Just ba <- AC.asBool col ->
+        Right $ PW.ColBool (presentBoxed (AC.columnLength col) (AC.nullCount col) (AC.boolArrayAt ba))
+    | Just ba <- AC.asBinary col ->
+        Right $ PW.ColByteArray (presentBoxed (AC.bytesArrayLength ba) (AC.nullCount col) (AC.unsafeBytesAt ba))
+    | Just ba <- AC.asLargeBinary col ->
+        Right $ PW.ColByteArray (presentBoxed (AC.bytesArrayLength ba) (AC.nullCount col) (AC.unsafeBytesAt ba))
+    | otherwise -> Left (noFlatEquivalent col)
+
+
+noFlatEquivalent :: AC.ColumnArray -> String
+noFlatEquivalent col =
+  "Parquet.Arrow: Arrow column shape "
+    <> AC.columnTag col
+    <> " has no flat Parquet equivalent (nested types "
+    <> "go through Parquet.Nested, dictionary columns "
+    <> "should pre-resolve to their values column)"
+
+
+{- | Present values of a fixed-width column, cast to the Parquet
+physical type, in one pass (one compaction pass when the column
+has nulls).
+-}
+presentPrim
+  :: (Storable a, VP.Prim b)
+  => (a -> b) -> Maybe AC.Validity -> VS.Vector a -> VP.Vector b
+presentPrim f mv xs = case mv of
+  Nothing -> VP.generate n (\i -> f (VS.unsafeIndex xs i))
+  Just v -> runST $ do
+    out <- VPM.unsafeNew (n - AC.validityNullCount v)
+    let go !i !j
+          | i >= n = pure ()
+          | otherwise = case AC.unsafePrimAt pa i of
+              Just x -> VPM.unsafeWrite out j (f x) *> go (i + 1) (j + 1)
+              Nothing -> go (i + 1) j
+    go 0 0
+    VP.unsafeFreeze out
+  where
+    !n = VS.length xs
+    !pa = AC.PrimArray mv xs
+{-# INLINE presentPrim #-}
+
+
+{- | Present values of a boxed-row view (bool, bytes): @n@ rows,
+@nulls@ of them null, read through @at@.
+-}
+presentBoxed :: Int -> Int -> (Int -> Maybe a) -> V.Vector a
+presentBoxed n nulls at = runST $ do
+  out <- VM.unsafeNew (n - nulls)
+  let go !i !j
+        | i >= n = pure ()
+        | otherwise = case at i of
+            Just x -> VM.unsafeWrite out j x *> go (i + 1) (j + 1)
+            Nothing -> go (i + 1) j
+  go 0 0
+  V.unsafeFreeze out
+{-# INLINE presentBoxed #-}
+
+
+-- | Boxed @Maybe@ rows of a fixed-width column (Parquet's optional writer input).
+maybeVector
+  :: Storable a => (a -> b) -> Maybe AC.Validity -> VS.Vector a -> V.Vector (Maybe b)
+maybeVector f mv xs =
+  let !pa = AC.PrimArray mv xs
+  in V.generate (VS.length xs) (\i -> f <$> AC.unsafePrimAt pa i)
+{-# INLINE maybeVector #-}
 
 
 -- ============================================================
@@ -563,20 +604,18 @@ coercion table is deliberately narrow: numeric widening
 -}
 coerceColumn :: AT.ArrowType -> AC.ColumnArray -> Either String AC.ColumnArray
 coerceColumn target col = case (target, col) of
-  (AT.AInt 64 True, AC.ColInt32 v) ->
-    Right $ AC.ColInt64 (VP.map (fromIntegral :: Int32 -> Int64) v)
-  (AT.AInt 64 False, AC.ColInt32 v) ->
-    Right $ AC.ColUInt64 (VP.map (fromIntegral :: Int32 -> Word64) v)
-  (AT.AFloatingPoint AT.DoublePrecision, AC.ColFloat v) ->
-    Right $ AC.ColDouble (VP.map (realToFrac :: Float -> Double) v)
-  _ -> Left ("coerceColumn: " ++ show target ++ " <- " ++ show col)
+  (AT.AInt 64 True, AC.ColInt32 mv xs) ->
+    AC.mkPrim AC.PInt64 mv (VS.map (fromIntegral :: Int32 -> Int64) xs)
+  (AT.AInt 64 False, AC.ColInt32 mv xs) ->
+    AC.mkPrim AC.PUInt64 mv (VS.map (fromIntegral :: Int32 -> Word64) xs)
+  (AT.AFloatingPoint AT.DoublePrecision, AC.ColFloat mv xs) ->
+    AC.mkPrim AC.PDouble mv (VS.map (realToFrac :: Float -> Double) xs)
+  _ -> Left ("coerceColumn: " ++ show target ++ " <- " ++ AC.columnTag col)
 
 
 {- | Read one column chunk and project it into a 'ColumnArray'.
 Dispatches on the Arrow target type + nullability; falls back
-to a clean 'Left' for shapes the bridge doesn't yet cover
-(nullable strings need definition-level decoding which is the
-caller's job today via 'Parquet.Read.readPlain*OptionalColumnChunk').
+to a clean 'Left' for shapes the bridge doesn't yet cover.
 -}
 readParquetColumn
   :: PR.ParquetFile
@@ -588,118 +627,188 @@ readParquetColumn
   -> Either String AC.ColumnArray
 readParquetColumn pf rgIdx colIdx fld = do
   chunk <- PR.columnChunkSlice pf rgIdx colIdx
-  let !codec = chunkCodec pf rgIdx colIdx
-      !nullable = AT.fieldNullable fld
-  -- Use the generic per-page dispatchers throughout: they handle
-  -- every encoding the spec defines for the matching physical
-  -- type (PLAIN, dictionary, DELTA_*, BYTE_STREAM_SPLIT) and
-  -- both DATA_PAGE and DATA_PAGE_V2.
-  case AT.fieldType fld of
-    -- Non-nullable primitives.
-    AT.AInt 32 True
-      | not nullable ->
-          AC.ColInt32 <$> PR.readGenericInt32ColumnChunk codec chunk
-    AT.AInt 64 True
-      | not nullable ->
-          AC.ColInt64 <$> PR.readGenericInt64ColumnChunk codec chunk
-    AT.AFloatingPoint AT.Single
-      | not nullable ->
-          AC.ColFloat <$> PR.readGenericFloatColumnChunk codec chunk
-    AT.AFloatingPoint AT.DoublePrecision
-      | not nullable ->
-          AC.ColDouble <$> PR.readGenericDoubleColumnChunk codec chunk
-    AT.ABool
-      | not nullable ->
-          AC.ColBool <$> PR.readGenericBoolColumnChunk codec chunk
-    AT.AUtf8 | not nullable -> do
-      bs <- PR.readGenericByteArrayColumnChunk codec chunk
-      Right $ AC.ColUtf8 (V.map decodeUtf8Lossy bs)
-    AT.ABinary
-      | not nullable ->
-          AC.ColBinary <$> PR.readGenericByteArrayColumnChunk codec chunk
-    -- Temporal non-nullable: read the underlying int stream and
-    -- cast to the Arrow column flavour.
-    AT.ADate AT.DateDay
-      | not nullable ->
-          AC.ColDate32 <$> PR.readGenericInt32ColumnChunk codec chunk
-    AT.ADate AT.DateMillisecond
-      | not nullable ->
-          AC.ColDate64 <$> PR.readGenericInt64ColumnChunk codec chunk
-    AT.ATime _ 32
-      | not nullable ->
-          AC.ColTime32 <$> PR.readGenericInt32ColumnChunk codec chunk
-    AT.ATime _ 64
-      | not nullable ->
-          AC.ColTime64 <$> PR.readGenericInt64ColumnChunk codec chunk
-    AT.ATimestamp _ _
-      | not nullable ->
-          AC.ColTimestamp <$> PR.readGenericInt64ColumnChunk codec chunk
-    AT.ADuration _
-      | not nullable ->
-          AC.ColDuration <$> PR.readGenericInt64ColumnChunk codec chunk
-    -- INT96 (legacy 12-byte timestamp) and FIXED_LEN_BYTE_ARRAY
-    -- (UUIDs / float16 / decimal128 in fixed form). Both are
-    -- exposed via 'ColFixedSizeBinary'; the bridge currently
-    -- only handles the required-page case (PLAIN encoding).
-    AT.AFixedSizeBinary 12
-      | not nullable ->
-          AC.ColFixedSizeBinary 12 <$> PR.readPlainInt96ColumnChunk codec chunk
-    AT.AFixedSizeBinary n
-      | not nullable ->
-          AC.ColFixedSizeBinary n
-            <$> PR.readPlainFixedLenByteArrayColumnChunk n codec chunk
-    -- Nullable primitives + temporals. The @*Optional@ readers
-    -- take (max_repetition_level, max_definition_level); for a
-    -- flat optional primitive these are (0, 1) — our bridge
-    -- doesn't currently emit nested-optional columns through
-    -- this path, so we hardcode the flat-optional pair.
-    AT.AInt 32 True
-      | nullable ->
-          AC.ColInt32Maybe <$> PR.readGenericInt32OptionalColumnChunk codec 0 1 chunk
-    AT.AInt 64 True
-      | nullable ->
-          AC.ColInt64Maybe <$> PR.readGenericInt64OptionalColumnChunk codec 0 1 chunk
-    AT.AFloatingPoint AT.Single
-      | nullable ->
-          AC.ColFloatMaybe <$> PR.readGenericFloatOptionalColumnChunk codec 0 1 chunk
-    AT.AFloatingPoint AT.DoublePrecision
-      | nullable ->
-          AC.ColDoubleMaybe <$> PR.readGenericDoubleOptionalColumnChunk codec 0 1 chunk
-    AT.ABool
-      | nullable ->
-          AC.ColBoolMaybe <$> PR.readGenericBoolOptionalColumnChunk codec 0 1 chunk
-    AT.AUtf8 | nullable -> do
-      bs <- PR.readGenericByteArrayOptionalColumnChunk codec 0 1 chunk
-      Right $ AC.ColUtf8Maybe (V.map (fmap decodeUtf8Lossy) bs)
-    AT.ABinary
-      | nullable ->
-          AC.ColBinaryMaybe <$> PR.readGenericByteArrayOptionalColumnChunk codec 0 1 chunk
-    AT.ADate AT.DateDay
-      | nullable ->
-          AC.ColDate32Maybe <$> PR.readGenericInt32OptionalColumnChunk codec 0 1 chunk
-    AT.ADate AT.DateMillisecond
-      | nullable ->
-          AC.ColDate64Maybe <$> PR.readGenericInt64OptionalColumnChunk codec 0 1 chunk
-    AT.ATime _ 32
-      | nullable ->
-          AC.ColTime32Maybe <$> PR.readGenericInt32OptionalColumnChunk codec 0 1 chunk
-    AT.ATime _ 64
-      | nullable ->
-          AC.ColTime64Maybe <$> PR.readGenericInt64OptionalColumnChunk codec 0 1 chunk
-    AT.ATimestamp _ _
-      | nullable ->
-          AC.ColTimestampMaybe <$> PR.readGenericInt64OptionalColumnChunk codec 0 1 chunk
-    AT.ADuration _
-      | nullable ->
-          AC.ColDurationMaybe <$> PR.readGenericInt64OptionalColumnChunk codec 0 1 chunk
-    other ->
-      Left $
-        "Parquet.Arrow: column type "
-          <> show other
-          <> " (nullable="
-          <> show nullable
-          <> ") not yet supported by the read bridge; use the "
-          <> "specialised readers in Parquet.Read"
+  liftColumn (ChunkSource (chunkCodec pf rgIdx colIdx) chunk) fld
+
+
+{- | Where a column's values come from: a whole column chunk, or
+the pages of one selected by a page-index keep mask. Both go
+through the generic per-page dispatchers, which handle every
+encoding the spec defines for the physical type (PLAIN,
+dictionary, DELTA_*, BYTE_STREAM_SPLIT) and both DATA_PAGE and
+DATA_PAGE_V2.
+-}
+data Source
+  = ChunkSource P.Compression ByteString
+  | PagesSource P.Compression ByteString (V.Vector P.PageLocation) (V.Vector Bool)
+
+
+{- | Decode a flat column from a 'Source' at the Arrow target
+type. Required fields read the dense value stream; nullable
+fields read the definition-level form. The optional readers
+take (max_repetition_level, max_definition_level); for a flat
+optional primitive these are (0, 1).
+
+Fixed-width values are copied once from the decoder's primitive
+vector into a pinned Arrow buffer; nullable values go through
+'AC.fromMaybes' (one pass, validity built alongside). Byte arrays
+are copied once into the offsets/data buffers.
+-}
+liftColumn :: Source -> AT.Field -> Either String AC.ColumnArray
+liftColumn src fld = case AT.fieldType fld of
+  AT.AInt 32 True -> int32 AC.PInt32
+  AT.AInt 64 True -> int64 AC.PInt64
+  AT.AFloatingPoint AT.Single
+    | nullable -> AC.fromMaybes AC.PFloat <$> optFloat src
+    | otherwise -> AC.primColumn AC.PFloat . primToStorable <$> reqFloat src
+  AT.AFloatingPoint AT.DoublePrecision
+    | nullable -> AC.fromMaybes AC.PDouble <$> optDouble src
+    | otherwise -> AC.primColumn AC.PDouble . primToStorable <$> reqDouble src
+  AT.ABool
+    | nullable -> AC.fromMaybeBools <$> optBool src
+    | otherwise -> AC.fromBools <$> reqBool src
+  AT.AUtf8
+    | nullable -> utf8FromBinary . AC.fromMaybeByteStrings =<< optBytes src
+    | otherwise -> utf8FromBinary . AC.fromByteStrings =<< reqBytes src
+  AT.ABinary
+    | nullable -> AC.fromMaybeByteStrings <$> optBytes src
+    | otherwise -> AC.fromByteStrings <$> reqBytes src
+  -- Temporal: read the underlying int stream and tag it with the
+  -- Arrow column flavour.
+  AT.ADate AT.DateDay -> int32 AC.PDate32
+  AT.ADate AT.DateMillisecond -> int64 AC.PDate64
+  AT.ATime _ 32 -> int32 AC.PTime32
+  AT.ATime _ 64 -> int64 AC.PTime64
+  AT.ATimestamp _ _ -> int64 AC.PTimestamp
+  AT.ADuration _ -> int64 AC.PDuration
+  -- INT96 (legacy 12-byte timestamp) and FIXED_LEN_BYTE_ARRAY
+  -- (UUIDs / float16 / decimal128 in fixed form). Both are
+  -- exposed via 'ColFixedSizeBinary'; the bridge handles the
+  -- required, whole-chunk PLAIN case.
+  AT.AFixedSizeBinary w
+    | not nullable
+    , ChunkSource codec chunk <- src ->
+        fixedSizeBinary w
+          =<< if w == 12
+            then PR.readPlainInt96ColumnChunk codec chunk
+            else PR.readPlainFixedLenByteArrayColumnChunk w codec chunk
+  other ->
+    Left $
+      "Parquet.Arrow: column type "
+        <> show other
+        <> " (nullable="
+        <> show nullable
+        <> ") not yet supported by the read bridge; use the "
+        <> "specialised readers in Parquet.Read"
+  where
+    !nullable = AT.fieldNullable fld
+    int32 :: AC.PrimType Int32 -> Either String AC.ColumnArray
+    int32 t
+      | nullable = AC.fromMaybes t <$> optInt32 src
+      | otherwise = AC.primColumn t . primToStorable <$> reqInt32 src
+    int64 :: AC.PrimType Int64 -> Either String AC.ColumnArray
+    int64 t
+      | nullable = AC.fromMaybes t <$> optInt64 src
+      | otherwise = AC.primColumn t . primToStorable <$> reqInt64 src
+
+
+reqInt32 :: Source -> Either String (VP.Vector Int32)
+reqInt32 (ChunkSource c bs) = PR.readGenericInt32ColumnChunk c bs
+reqInt32 (PagesSource c f l k) = PR.readGenericInt32SelectedPages c f l k
+
+
+reqInt64 :: Source -> Either String (VP.Vector Int64)
+reqInt64 (ChunkSource c bs) = PR.readGenericInt64ColumnChunk c bs
+reqInt64 (PagesSource c f l k) = PR.readGenericInt64SelectedPages c f l k
+
+
+reqFloat :: Source -> Either String (VP.Vector Float)
+reqFloat (ChunkSource c bs) = PR.readGenericFloatColumnChunk c bs
+reqFloat (PagesSource c f l k) = PR.readGenericFloatSelectedPages c f l k
+
+
+reqDouble :: Source -> Either String (VP.Vector Double)
+reqDouble (ChunkSource c bs) = PR.readGenericDoubleColumnChunk c bs
+reqDouble (PagesSource c f l k) = PR.readGenericDoubleSelectedPages c f l k
+
+
+reqBool :: Source -> Either String (V.Vector Bool)
+reqBool (ChunkSource c bs) = PR.readGenericBoolColumnChunk c bs
+reqBool (PagesSource c f l k) = PR.readGenericBoolSelectedPages c f l k
+
+
+reqBytes :: Source -> Either String (V.Vector ByteString)
+reqBytes (ChunkSource c bs) = PR.readGenericByteArrayColumnChunk c bs
+reqBytes (PagesSource c f l k) = PR.readGenericByteArraySelectedPages c f l k
+
+
+optInt32 :: Source -> Either String (V.Vector (Maybe Int32))
+optInt32 (ChunkSource c bs) = PR.readGenericInt32OptionalColumnChunk c 0 1 bs
+optInt32 (PagesSource c f l k) = PR.readGenericInt32OptionalSelectedPages c 0 1 f l k
+
+
+optInt64 :: Source -> Either String (V.Vector (Maybe Int64))
+optInt64 (ChunkSource c bs) = PR.readGenericInt64OptionalColumnChunk c 0 1 bs
+optInt64 (PagesSource c f l k) = PR.readGenericInt64OptionalSelectedPages c 0 1 f l k
+
+
+optFloat :: Source -> Either String (V.Vector (Maybe Float))
+optFloat (ChunkSource c bs) = PR.readGenericFloatOptionalColumnChunk c 0 1 bs
+optFloat (PagesSource c f l k) = PR.readGenericFloatOptionalSelectedPages c 0 1 f l k
+
+
+optDouble :: Source -> Either String (V.Vector (Maybe Double))
+optDouble (ChunkSource c bs) = PR.readGenericDoubleOptionalColumnChunk c 0 1 bs
+optDouble (PagesSource c f l k) = PR.readGenericDoubleOptionalSelectedPages c 0 1 f l k
+
+
+optBool :: Source -> Either String (V.Vector (Maybe Bool))
+optBool (ChunkSource c bs) = PR.readGenericBoolOptionalColumnChunk c 0 1 bs
+optBool (PagesSource c f l k) = PR.readGenericBoolOptionalSelectedPages c 0 1 f l k
+
+
+optBytes :: Source -> Either String (V.Vector (Maybe ByteString))
+optBytes (ChunkSource c bs) = PR.readGenericByteArrayOptionalColumnChunk c 0 1 bs
+optBytes (PagesSource c f l k) = PR.readGenericByteArrayOptionalSelectedPages c 0 1 f l k
+
+
+{- | Copy a decoder's primitive vector into a pinned Arrow value
+buffer with one @memcpy@.
+-}
+primToStorable :: forall a. Storable a => VP.Vector a -> VS.Vector a
+primToStorable (VP.Vector off n ba) = unsafeDupablePerformIO $ do
+  mv <- VSM.unsafeNew n
+  let !sz = sizeOf (undefined :: a)
+  VSM.unsafeWith mv $ \p -> copyByteArrayToAddr (castPtr p) ba (off * sz) (n * sz)
+  VS.unsafeFreeze mv
+
+
+{- | Retag a binary column built from Parquet BYTE_ARRAY values as
+utf8. The C kernel validates the data in one pass; a column with
+invalid UTF-8 (which an Arrow utf8 column cannot hold) is decoded
+lossily instead, replacing bad sequences with U+FFFD, so one bad
+value does not fail the whole batch.
+-}
+utf8FromBinary :: AC.ColumnArray -> Either String AC.ColumnArray
+utf8FromBinary col = case col of
+  AC.ColBinary mv offs dat
+    | Right utf8 <- AC.mkUtf8 mv offs dat -> Right utf8
+  _
+    | Just ba <- AC.asBinary col ->
+        Right $
+          AC.fromMaybeTexts
+            (V.generate (AC.bytesArrayLength ba) (fmap decodeUtf8Lossy . AC.unsafeBytesAt ba))
+    | otherwise -> Left ("Parquet.Arrow: expected a binary column, got " <> AC.columnTag col)
+
+
+-- | One fixed-size-binary column from equal-width values (one copy).
+fixedSizeBinary :: Int -> V.Vector ByteString -> Either String AC.ColumnArray
+fixedSizeBinary w vals
+  | BS.length dat /= w * rows =
+      Left ("Parquet.Arrow: fixed-size binary values are not all " <> show w <> " bytes")
+  | otherwise = AC.mkFixedSizeBinary w rows Nothing dat
+  where
+    !rows = V.length vals
+    !dat = BS.concat (V.toList vals)
 
 
 {- | Look up the column's 'Compression' codec from the footer.
@@ -838,83 +947,66 @@ arrowFieldToNestedSchema f = do
 {- | Lower an Arrow 'AC.ColumnArray' to a row-major vector of
 'PN.NestedRow' entries. Handles struct, list, and flat
 primitives; the row count matches the column's logical length.
+Null rows (of any supported shape) become 'PN.NRNull'.
 -}
 columnArrayToNestedRows
   :: AC.ColumnArray -> Either String (V.Vector PN.NestedRow)
 columnArrayToNestedRows col = case col of
-  AC.ColInt32 v ->
-    Right
-      ( V.generate
-          (VP.length v)
-          (\i -> PN.NRLeaf (PN.LvInt32 (VP.unsafeIndex v i)))
-      )
-  AC.ColInt64 v ->
-    Right
-      ( V.generate
-          (VP.length v)
-          (\i -> PN.NRLeaf (PN.LvInt64 (VP.unsafeIndex v i)))
-      )
-  AC.ColFloat v ->
-    Right
-      ( V.generate
-          (VP.length v)
-          (\i -> PN.NRLeaf (PN.LvFloat (VP.unsafeIndex v i)))
-      )
-  AC.ColDouble v ->
-    Right
-      ( V.generate
-          (VP.length v)
-          (\i -> PN.NRLeaf (PN.LvDouble (VP.unsafeIndex v i)))
-      )
-  AC.ColBool v -> Right (V.map (PN.NRLeaf . PN.LvBool) v)
-  AC.ColUtf8 v -> Right (V.map (PN.NRLeaf . PN.LvString) v)
-  AC.ColBinary v -> Right (V.map (PN.NRLeaf . PN.LvBinary) v)
-  AC.ColLargeUtf8 v -> Right (V.map (PN.NRLeaf . PN.LvString) v)
-  AC.ColLargeBinary v -> Right (V.map (PN.NRLeaf . PN.LvBinary) v)
-  -- Nullable primitives: NRNull for Nothing, NRLeaf for Just.
-  AC.ColInt32Maybe v -> Right (V.map (maybe PN.NRNull (PN.NRLeaf . PN.LvInt32)) v)
-  AC.ColInt64Maybe v -> Right (V.map (maybe PN.NRNull (PN.NRLeaf . PN.LvInt64)) v)
-  AC.ColFloatMaybe v -> Right (V.map (maybe PN.NRNull (PN.NRLeaf . PN.LvFloat)) v)
-  AC.ColDoubleMaybe v -> Right (V.map (maybe PN.NRNull (PN.NRLeaf . PN.LvDouble)) v)
-  AC.ColBoolMaybe v -> Right (V.map (maybe PN.NRNull (PN.NRLeaf . PN.LvBool)) v)
-  AC.ColUtf8Maybe v -> Right (V.map (maybe PN.NRNull (PN.NRLeaf . PN.LvString)) v)
-  AC.ColBinaryMaybe v -> Right (V.map (maybe PN.NRNull (PN.NRLeaf . PN.LvBinary)) v)
+  AC.ColInt32 mv xs -> Right (primRows PN.LvInt32 mv xs)
+  AC.ColInt64 mv xs -> Right (primRows PN.LvInt64 mv xs)
+  AC.ColFloat mv xs -> Right (primRows PN.LvFloat mv xs)
+  AC.ColDouble mv xs -> Right (primRows PN.LvDouble mv xs)
   -- Struct: each row is an NRStruct of field values indexed in
-  -- declared order. Every child must yield the struct's row count.
-  AC.ColStruct n childCols -> do
-    childRows <- V.mapM (columnArrayToNestedRows . snd) childCols
-    when' (V.any ((/= n) . V.length) childRows) $
-      Left "Parquet.Arrow: struct children have mismatched row counts"
-    Right $
-      V.generate
-        n
-        (\i -> PN.NRStruct (V.map (V.! i) childRows))
-
-  -- List: offsets[i..i+1] delimit the slice of the child column
-  -- belonging to row i.
-  AC.ColList offs child -> do
-    childRows <- columnArrayToNestedRows child
-    let !n = max 0 (VP.length offs - 1)
-    Right $ V.generate n $ \i ->
-      let !start = fromIntegral (VP.unsafeIndex offs i) :: Int
-          !end = fromIntegral (VP.unsafeIndex offs (i + 1)) :: Int
-      in PN.NRList (V.slice start (end - start) childRows)
-  AC.ColLargeList offs child -> do
-    childRows <- columnArrayToNestedRows child
-    let !n = max 0 (VP.length offs - 1)
-    Right $ V.generate n $ \i ->
-      let !start = fromIntegral (VP.unsafeIndex offs i) :: Int
-          !end = fromIntegral (VP.unsafeIndex offs (i + 1)) :: Int
-      in PN.NRList (V.slice start (end - start) childRows)
-  other ->
-    Left $
-      "Parquet.Arrow.columnArrayToNestedRows: "
-        ++ show other
-        ++ " not yet supported (nullable-list, map, union, "
-        ++ "dictionary, view, REE, interval)"
+  -- declared order (children may hold more rows than the struct).
+  AC.ColStruct n mv childCols -> do
+    childRows <- V.mapM (columnArrayToNestedRows . AC.sliceColumnArray 0 n . snd) childCols
+    if V.any ((< n) . V.length) childRows
+      then Left "Parquet.Arrow: struct children have fewer rows than the struct"
+      else Right $ V.generate n $ \i ->
+        if AC.isValidAt mv i
+          then PN.NRStruct (V.map (`V.unsafeIndex` i) childRows)
+          else PN.NRNull
+  -- List: the row's child range selects its slice of the child
+  -- rows (offsets need not start at zero).
+  AC.ColList _ _ child -> listRows child
+  AC.ColLargeList _ _ child -> listRows child
+  _
+    | Just ba <- AC.asBool col ->
+        Right (V.generate (AC.columnLength col) (leafRow PN.LvBool . AC.boolArrayAt ba))
+    | Just ua <- AC.asUtf8 col -> Right (textRows ua)
+    | Just ua <- AC.asLargeUtf8 col -> Right (textRows ua)
+    | Just ba <- AC.asBinary col -> Right (bytesRows ba)
+    | Just ba <- AC.asLargeBinary col -> Right (bytesRows ba)
+    | otherwise ->
+        Left $
+          "Parquet.Arrow.columnArrayToNestedRows: "
+            ++ AC.columnTag col
+            ++ " not yet supported (map, union, "
+            ++ "dictionary, view, REE, interval)"
   where
-    when' True e = e
-    when' False _ = Right ()
+    listRows child = do
+      childRows <- columnArrayToNestedRows child
+      Right $ V.generate (AC.columnLength col) $ \i ->
+        case AC.listRange col i of
+          Just (AC.ChildRange start len) -> PN.NRList (V.slice start len childRows)
+          Nothing -> PN.NRNull
+    textRows ua =
+      let AC.Utf8Array ba = ua
+      in V.generate (AC.bytesArrayLength ba) (leafRow PN.LvString . AC.unsafeTextAt ua)
+    bytesRows ba = V.generate (AC.bytesArrayLength ba) (leafRow PN.LvBinary . AC.unsafeBytesAt ba)
+
+
+leafRow :: (a -> PN.LeafValue) -> Maybe a -> PN.NestedRow
+leafRow f = maybe PN.NRNull (PN.NRLeaf . f)
+{-# INLINE leafRow #-}
+
+
+primRows
+  :: Storable a => (a -> PN.LeafValue) -> Maybe AC.Validity -> VS.Vector a -> V.Vector PN.NestedRow
+primRows f mv xs =
+  let !pa = AC.PrimArray mv xs
+  in V.generate (VS.length xs) (leafRow f . AC.unsafePrimAt pa)
+{-# INLINE primRows #-}
 
 
 -- ============================================================
@@ -1150,13 +1242,8 @@ readParquetColumnWithPagePruning pf rgIdx colIdx fld predicate = do
           !keep = V.map (== Pred.PMaybeKeep) decisions
           !total = V.length keep
           !nKept = V.length (V.filter id keep)
-          !codec = chunkCodec pf rgIdx colIdx
-          !fileBs = PR.pfBytes pf
-          !locs = P.oiPageLocations oi
-      col <-
-        if AT.fieldNullable fld
-          then decodeSelectedOptionalColumn codec fileBs locs keep fld
-          else decodeSelectedColumn codec fileBs locs keep fld
+          !src = PagesSource (chunkCodec pf rgIdx colIdx) (PR.pfBytes pf) (P.oiPageLocations oi) keep
+      col <- liftColumn src fld
       Right (Just (nKept, total), col)
   where
     mapLeftShow :: Either e a -> Either String a
@@ -1181,180 +1268,6 @@ loadIndices pf rgIdx colIdx = do
         Just md -> Right (Just (oi, ci, P.cmType md))
         Nothing -> Right Nothing
     _ -> Right Nothing
-
-
-decodeSelectedColumn
-  :: P.Compression
-  -> ByteString
-  -> V.Vector P.PageLocation
-  -> V.Vector Bool
-  -> AT.Field
-  -> Either String AC.ColumnArray
-decodeSelectedColumn codec fileBs locs keep fld = case AT.fieldType fld of
-  AT.AInt 32 True -> AC.ColInt32 <$> PR.readGenericInt32SelectedPages codec fileBs locs keep
-  AT.AInt 64 True -> AC.ColInt64 <$> PR.readGenericInt64SelectedPages codec fileBs locs keep
-  AT.AFloatingPoint AT.Single ->
-    AC.ColFloat <$> PR.readGenericFloatSelectedPages codec fileBs locs keep
-  AT.AFloatingPoint AT.DoublePrecision ->
-    AC.ColDouble <$> PR.readGenericDoubleSelectedPages codec fileBs locs keep
-  AT.ABool -> AC.ColBool <$> PR.readGenericBoolSelectedPages codec fileBs locs keep
-  AT.AUtf8 -> do
-    bs <- PR.readGenericByteArraySelectedPages codec fileBs locs keep
-    Right $ AC.ColUtf8 (V.map decodeUtf8Lossy bs)
-  AT.ABinary -> AC.ColBinary <$> PR.readGenericByteArraySelectedPages codec fileBs locs keep
-  AT.ADate AT.DateDay ->
-    AC.ColDate32 <$> PR.readGenericInt32SelectedPages codec fileBs locs keep
-  AT.ADate AT.DateMillisecond ->
-    AC.ColDate64 <$> PR.readGenericInt64SelectedPages codec fileBs locs keep
-  AT.ATime _ 32 ->
-    AC.ColTime32 <$> PR.readGenericInt32SelectedPages codec fileBs locs keep
-  AT.ATime _ 64 ->
-    AC.ColTime64 <$> PR.readGenericInt64SelectedPages codec fileBs locs keep
-  AT.ATimestamp _ _ ->
-    AC.ColTimestamp <$> PR.readGenericInt64SelectedPages codec fileBs locs keep
-  AT.ADuration _ ->
-    AC.ColDuration <$> PR.readGenericInt64SelectedPages codec fileBs locs keep
-  other ->
-    Left $
-      "Parquet.Arrow: page-pruning bridge doesn't yet cover "
-        ++ show other
-
-
-{- | Page-pruning variant for nullable columns. Same shape as
-'decodeSelectedColumn' but routes through the
-@readGenericXxxOptionalSelectedPages@ family which carries
-per-page def-level streams.
--}
-decodeSelectedOptionalColumn
-  :: P.Compression
-  -> ByteString
-  -> V.Vector P.PageLocation
-  -> V.Vector Bool
-  -> AT.Field
-  -> Either String AC.ColumnArray
-decodeSelectedOptionalColumn codec fileBs locs keep fld = case AT.fieldType fld of
-  AT.AInt 32 True ->
-    AC.ColInt32Maybe
-      <$> PR.readGenericInt32OptionalSelectedPages
-        codec
-        0
-        1
-        fileBs
-        locs
-        keep
-  AT.AInt 64 True ->
-    AC.ColInt64Maybe
-      <$> PR.readGenericInt64OptionalSelectedPages
-        codec
-        0
-        1
-        fileBs
-        locs
-        keep
-  AT.AFloatingPoint AT.Single ->
-    AC.ColFloatMaybe
-      <$> PR.readGenericFloatOptionalSelectedPages
-        codec
-        0
-        1
-        fileBs
-        locs
-        keep
-  AT.AFloatingPoint AT.DoublePrecision ->
-    AC.ColDoubleMaybe
-      <$> PR.readGenericDoubleOptionalSelectedPages
-        codec
-        0
-        1
-        fileBs
-        locs
-        keep
-  AT.ABool ->
-    AC.ColBoolMaybe
-      <$> PR.readGenericBoolOptionalSelectedPages
-        codec
-        0
-        1
-        fileBs
-        locs
-        keep
-  AT.AUtf8 -> do
-    bs <-
-      PR.readGenericByteArrayOptionalSelectedPages
-        codec
-        0
-        1
-        fileBs
-        locs
-        keep
-    Right $ AC.ColUtf8Maybe (V.map (fmap decodeUtf8Lossy) bs)
-  AT.ABinary ->
-    AC.ColBinaryMaybe
-      <$> PR.readGenericByteArrayOptionalSelectedPages
-        codec
-        0
-        1
-        fileBs
-        locs
-        keep
-  AT.ADate AT.DateDay ->
-    AC.ColDate32Maybe
-      <$> PR.readGenericInt32OptionalSelectedPages
-        codec
-        0
-        1
-        fileBs
-        locs
-        keep
-  AT.ADate AT.DateMillisecond ->
-    AC.ColDate64Maybe
-      <$> PR.readGenericInt64OptionalSelectedPages
-        codec
-        0
-        1
-        fileBs
-        locs
-        keep
-  AT.ATime _ 32 ->
-    AC.ColTime32Maybe
-      <$> PR.readGenericInt32OptionalSelectedPages
-        codec
-        0
-        1
-        fileBs
-        locs
-        keep
-  AT.ATime _ 64 ->
-    AC.ColTime64Maybe
-      <$> PR.readGenericInt64OptionalSelectedPages
-        codec
-        0
-        1
-        fileBs
-        locs
-        keep
-  AT.ATimestamp _ _ ->
-    AC.ColTimestampMaybe
-      <$> PR.readGenericInt64OptionalSelectedPages
-        codec
-        0
-        1
-        fileBs
-        locs
-        keep
-  AT.ADuration _ ->
-    AC.ColDurationMaybe
-      <$> PR.readGenericInt64OptionalSelectedPages
-        codec
-        0
-        1
-        fileBs
-        locs
-        keep
-  other ->
-    Left $
-      "Parquet.Arrow: nullable page-pruning bridge doesn't yet cover "
-        ++ show other
 
 
 -- | Build a sub-schema by name. Preserves the order of @names@.

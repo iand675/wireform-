@@ -1,5 +1,7 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 {- | Hedgehog generators for Arrow schemas with matching column
 batches, plus a logical row model ('Value' / 'columnValues') that
@@ -11,11 +13,27 @@ Generated schemas cover every 'ArrowType' the codec supports, nullable
 and not, nested to depth 3, with dictionary-encoded fields over every
 index type whose value types may themselves be nested and contain
 dictionary-encoded fields. Structs may have no fields and fixed-size
-lists may have size 0. Generated column batches respect the
-reader/writer conventions: a nullable field gets the @*Maybe@
-constructor, unions and run-end-encoded fields have no validity, map
-keys are non-null, and a nullable dictionary column whose rows are all
-null may reference an empty dictionary.
+lists may have size 0.
+
+Columns are built through the public construction API only: the
+@from*@ conversions, the growable builders and the validating @mk*@
+constructors (with arbitrary bytes in null slots and around the
+referenced ranges). On top of that the generated physical layouts are
+deliberately untidy, so the writer's rebase and realign paths run:
+
+* columns are often a window of a longer column ('sliceColumnArray'),
+  so bitmaps start at non-zero bit offsets, offsets at non-zero bases,
+  run-end-encoded columns carry a logical offset and struct children
+  are longer than the struct;
+* var-length data carries junk (even invalid UTF-8) outside the
+  referenced range, struct, fixed-size-list and sparse-union children
+  carry extra rows, list offsets start past zero;
+* with 'layoutDenormalised', a nullable column without nulls sometimes
+  carries an all-valid validity bitmap with a zero null count.
+
+Unions and run-end-encoded fields have no validity, map keys are
+non-null, and a nullable dictionary column whose rows are all null may
+reference an empty dictionary.
 -}
 module Test.Arrow.Gen (
   -- * Schemas and tables
@@ -23,10 +41,15 @@ module Test.Arrow.Gen (
   genFieldType,
   genSchema,
   genColumnFor,
+  genColumnForWith,
   genBatchFor,
   genTable,
   genOrderableKeyField,
   genDictionaryField,
+  keyColumn,
+  Layout (..),
+  tidyLayout,
+  untidyLayout,
 
   -- * Logical row model
   Value (..),
@@ -34,12 +57,99 @@ module Test.Arrow.Gen (
   batchValues,
   compareKeyValues,
   hasDictionaries,
+  childColumns,
 ) where
 
-import Arrow.Column (ColumnArray (..), takeColumnArray)
+import Arrow.Column (
+  ColumnArray,
+  Decimal128 (..),
+  Decimal256 (..),
+  Float16 (..),
+  IntervalDayTime (..),
+  IntervalMonthDayNano (..),
+  PrimType (..),
+  SomePrimType (..),
+  appendBoolMaybe,
+  appendBytesMaybe,
+  appendPrimMaybe,
+  appendTextMaybe,
+  bitAt,
+  bitmapFromBools,
+  bitmapGenerate,
+  bitmapLength,
+  decimal128ToInteger,
+  decimal256ToInteger,
+  freezeBuilder,
+  fromBools,
+  fromByteStrings,
+  fromMaybeBinaryView,
+  fromMaybeBools,
+  fromMaybeByteStrings,
+  fromMaybeFixedSizeBinary,
+  fromMaybeLargeByteStrings,
+  fromMaybeLargeTexts,
+  fromMaybeTexts,
+  fromMaybeUtf8View,
+  fromMaybes,
+  fromTexts,
+  isValidAt,
+  mkBinary,
+  mkBool,
+  mkDenseUnion,
+  mkDictionary,
+  mkFixedSizeBinary,
+  mkFixedSizeList,
+  mkLargeBinary,
+  mkLargeList,
+  mkLargeListView,
+  mkLargeUtf8,
+  mkList,
+  mkListView,
+  mkMap,
+  mkPrim,
+  mkRunEndEncoded,
+  mkSparseUnion,
+  mkStruct,
+  mkUtf8,
+  newBinaryBuilder,
+  newBoolBuilder,
+  newLargeBinaryBuilder,
+  newLargeUtf8Builder,
+  newPrimBuilder,
+  newUtf8Builder,
+  primColumn,
+  primTypeFor,
+  sliceColumnArray,
+  takeColumnArray,
+  validityFromBools,
+  withPrim,
+  pattern ColBinary,
+  pattern ColBinaryView,
+  pattern ColBool,
+  pattern ColDenseUnion,
+  pattern ColDictionary,
+  pattern ColFixedSizeBinary,
+  pattern ColFixedSizeList,
+  pattern ColLargeBinary,
+  pattern ColLargeList,
+  pattern ColLargeListView,
+  pattern ColLargeUtf8,
+  pattern ColList,
+  pattern ColListView,
+  pattern ColMap,
+  pattern ColNull,
+  pattern ColPrim,
+  pattern ColRunEndEncoded,
+  pattern ColSparseUnion,
+  pattern ColStruct,
+  pattern ColUtf8,
+  pattern ColUtf8View,
+ )
+import Arrow.Column.Internal qualified as I
 import Arrow.Types
 import Control.Monad (forM, replicateM)
-import Data.Bits (shiftL, shiftR, testBit, (.&.), (.|.))
+import Control.Monad.ST (runST)
+import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Int (Int16, Int32, Int64, Int8)
@@ -48,8 +158,9 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Vector qualified as V
-import Data.Vector.Primitive qualified as VP
+import Data.Vector.Storable qualified as VS
 import Data.Word (Word16, Word32, Word64, Word8)
+import Foreign.Storable (Storable)
 import GHC.Float (castDoubleToWord64, castFloatToWord32, castWord32ToFloat, castWord64ToDouble)
 import Hedgehog (Gen)
 import Hedgehog.Gen qualified as Gen
@@ -69,8 +180,7 @@ genSchema = do
   n <- Gen.int (Range.linear 1 4)
   fs <- forM [0 .. n - 1] $ \i -> genField 3 (T.pack ("c" ++ show i))
   edge <- Gen.frequency [(2, pure []), (1, (: []) <$> genEdgeField (T.pack ("c" ++ show n)))]
-  endian <- pure Little
-  pure (numberDictionaries (Schema (V.fromList (fs ++ edge)) endian V.empty V.empty))
+  pure (numberDictionaries (Schema (V.fromList (fs ++ edge)) Little V.empty V.empty))
 
 
 {- | A struct with no fields, a fixed-size list of size 0, a dictionary
@@ -89,10 +199,14 @@ genEdgeField name = do
     , do
         inner <- genDictionaryField 0 "e"
         container <- Gen.element [AStruct, AList, ALargeList]
-        idx <- AInt <$> Gen.element [8, 16, 32, 64] <*> Gen.bool
+        idx <- genIndexType
         pure (Field name nullable container (V.singleton inner) (Just (DictionaryEncoding 0 idx False)) V.empty)
     , (\f -> f {fieldNullable = True}) <$> genDictionaryField 0 name
     ]
+
+
+genIndexType :: Gen ArrowType
+genIndexType = AInt <$> Gen.element [8, 16, 32, 64] <*> Gen.bool
 
 
 {- | Give every dictionary-encoded field a distinct dictionary id (in
@@ -251,7 +365,7 @@ genDictionaryField depth name = do
       [ (1, leaf name False <$> Gen.filter (/= ANull) genFieldType)
       , (if depth > 0 then 1 else 0, genNestedField depth name)
       ]
-  idx <- AInt <$> Gen.element [8, 16, 32, 64] <*> Gen.bool
+  idx <- genIndexType
   nullable <- Gen.bool
   ordered <- Gen.bool
   pure value {fieldNullable = nullable, fieldDictionary = Just (DictionaryEncoding 0 idx ordered)}
@@ -261,9 +375,29 @@ genDictionaryField depth name = do
 -- Columns
 -- ============================================================
 
+-- | How untidy generated physical layouts may be.
+data Layout = Layout
+  { layoutSlices :: !Bool
+  -- ^ build longer columns and slice a window out of them
+  , layoutDenormalised :: !Bool
+  -- ^ sometimes give a nullable column without nulls an all-valid validity
+  }
+  deriving stock (Show, Eq)
+
+
+-- | Every column is built exactly as long as it needs to be.
+tidyLayout :: Layout
+tidyLayout = Layout {layoutSlices = False, layoutDenormalised = False}
+
+
+-- | Windows of longer columns and denormalised validity.
+untidyLayout :: Layout
+untidyLayout = Layout {layoutSlices = True, layoutDenormalised = True}
+
+
 {- | One batch (0 to 4 of them) of 0 to 8 rows per table; every
 batch draws its own data, so dictionary columns carry different
-dictionaries in different batches.
+dictionaries in different batches. Layouts are 'untidyLayout'.
 -}
 genTable :: Gen (Schema, [V.Vector ColumnArray])
 genTable = do
@@ -273,160 +407,266 @@ genTable = do
   pure (sch, batches)
 
 
--- | A batch for the schema with 0 to 8 rows.
+-- | A batch for the schema with 0 to 8 rows ('untidyLayout').
 genBatchFor :: Schema -> Gen (V.Vector ColumnArray)
 genBatchFor sch = do
   rows <- Gen.frequency [(1, pure 0), (6, Gen.int (Range.linear 1 8))]
-  V.mapM (`genColumnFor` rows) (arrowFields sch)
+  V.mapM (\f -> genColumnForWith untidyLayout f rows) (arrowFields sch)
 
 
-{- | A column of exactly @n@ rows for the field. A nullable dictionary
-column is sometimes all null over an empty dictionary.
+{- | A column of exactly @n@ rows for the field, often a window of a
+longer column (but never with denormalised validity, so every core
+row operation's contract applies).
 -}
 genColumnFor :: Field -> Int -> Gen ColumnArray
-genColumnFor f n = case fieldDictionary f of
+genColumnFor = genColumnForWith untidyLayout {layoutDenormalised = False}
+
+
+-- | A column of exactly @n@ rows for the field under a layout policy.
+genColumnForWith :: Layout -> Field -> Int -> Gen ColumnArray
+genColumnForWith layout f n
+  | layoutSlices layout = do
+      pad <- Gen.frequency [(3, pure Nothing), (2, Just <$> ((,) <$> Gen.int (Range.linear 0 3) <*> Gen.int (Range.linear 0 3)))]
+      case pad of
+        Nothing -> buildColumn layout f n >>= denormalise
+        Just (pre, post) -> do
+          c <- buildColumn layout f (pre + n + post)
+          denormalise (sliceColumnArray pre n c)
+  | otherwise = buildColumn layout f n >>= denormalise
+  where
+    denormalise c
+      | layoutDenormalised layout && fieldNullable f = Gen.frequency [(5, pure c), (1, pure (allValidValidity c))]
+      | otherwise = pure c
+
+
+{- | Replace an absent validity of a flat column by an all-valid bitmap
+with null count 0 (raw construction: the public API never builds this).
+Other columns are returned unchanged.
+-}
+allValidValidity :: ColumnArray -> ColumnArray
+allValidValidity c = case c of
+  I.ColPrim t Nothing xs -> withPrim t (I.ColPrim t (allValid (VS.length xs)) xs)
+  I.ColBool Nothing bits -> I.ColBool (allValid (bitmapLength bits)) bits
+  I.ColUtf8 Nothing o d -> I.ColUtf8 (allValid (VS.length o - 1)) o d
+  I.ColBinary Nothing o d -> I.ColBinary (allValid (VS.length o - 1)) o d
+  I.ColLargeUtf8 Nothing o d -> I.ColLargeUtf8 (allValid (VS.length o - 1)) o d
+  I.ColLargeBinary Nothing o d -> I.ColLargeBinary (allValid (VS.length o - 1)) o d
+  I.ColFixedSizeBinary w n Nothing d -> I.ColFixedSizeBinary w n (allValid n) d
+  I.ColList Nothing o x -> I.ColList (allValid (VS.length o - 1)) o x
+  I.ColStruct n Nothing kids -> I.ColStruct n (allValid n) kids
+  _ -> c
+  where
+    allValid k = Just (I.Validity (bitmapGenerate k (const True)) 0)
+
+
+-- | Build a column of exactly @n@ rows (before any windowing by the caller).
+buildColumn :: Layout -> Field -> Int -> Gen ColumnArray
+buildColumn layout f n = case fieldDictionary f of
   Just de -> do
     emptyDict <- if fieldNullable f then Gen.frequency [(3, pure False), (1, pure True)] else pure False
     k <- if emptyDict then pure 0 else Gen.int (Range.linear 1 5)
     valuesNullable <- if fieldType f == ANull then pure False else Gen.bool
-    vals <- genColumnFor f {fieldDictionary = Nothing, fieldNullable = valuesNullable} k
-    if emptyDict
-      then pure (ColDictionaryMaybe (deId de) (V.replicate n Nothing) vals)
-      else do
-        ix <- replicateM n (Gen.int32 (Range.linear 0 (fromIntegral k - 1)))
-        if fieldNullable f
-          then do
-            mix <- forM ix $ \i -> Gen.frequency [(1, pure Nothing), (4, pure (Just i))]
-            pure (ColDictionaryMaybe (deId de) (V.fromList mix) vals)
-          else pure (ColDictionary (deId de) (VP.fromList ix) vals)
+    vals <- sub f {fieldDictionary = Nothing, fieldNullable = valuesNullable} k
+    keys <-
+      if emptyDict
+        then pure (V.replicate n Nothing)
+        else V.fromList <$> replicateM n (nullableRow (Gen.int (Range.linear 0 (k - 1))))
+    built (mkDictionary (deId de) (keyColumn (deIndexType de) keys) vals)
   Nothing -> case fieldType f of
     ANull -> pure (ColNull n)
-    AInt 8 True -> prim ColInt8 ColInt8Maybe genI8
-    AInt 16 True -> prim ColInt16 ColInt16Maybe genI16
-    AInt 32 True -> prim ColInt32 ColInt32Maybe genI32
-    AInt 64 True -> prim ColInt64 ColInt64Maybe genI64
-    AInt 8 False -> prim ColUInt8 ColUInt8Maybe genW8
-    AInt 16 False -> prim ColUInt16 ColUInt16Maybe genW16
-    AInt 32 False -> prim ColUInt32 ColUInt32Maybe genW32
-    AInt 64 False -> prim ColUInt64 ColUInt64Maybe genW64
-    AInt w _ -> error ("Test.Arrow.Gen: unsupported int width " ++ show w)
-    AFloatingPoint Half -> prim ColFloat16 ColFloat16Maybe genW16
-    AFloatingPoint Single -> prim ColFloat ColFloatMaybe genFloat
-    AFloatingPoint DoublePrecision -> prim ColDouble ColDoubleMaybe genDouble
-    ABinary -> boxed ColBinary ColBinaryMaybe genBytes
-    ALargeBinary -> boxed ColLargeBinary ColLargeBinaryMaybe genBytes
-    ABinaryView -> boxed ColBinaryView ColBinaryViewMaybe genViewBytes
-    AUtf8 -> boxed ColUtf8 ColUtf8Maybe genText
-    ALargeUtf8 -> boxed ColLargeUtf8 ColLargeUtf8Maybe genText
-    AUtf8View -> boxed ColUtf8View ColUtf8ViewMaybe genViewText
-    ABool -> boxed ColBool ColBoolMaybe Gen.bool
-    ADecimal p s -> boxed (ColDecimal128 p s) (ColDecimal128Maybe p s) (genFixed 16)
-    ADecimal256 p s -> boxed (ColDecimal256 p s) (ColDecimal256Maybe p s) (genFixed 32)
-    AFixedSizeBinary w -> boxed (ColFixedSizeBinary w) (ColFixedSizeBinaryMaybe w) (genFixed w)
-    ADate DateDay -> prim ColDate32 ColDate32Maybe genI32
-    ADate DateMillisecond -> prim ColDate64 ColDate64Maybe genI64
-    ATime u _
-      | u == Second || u == Millisecond -> prim ColTime32 ColTime32Maybe genI32
-      | otherwise -> prim ColTime64 ColTime64Maybe genI64
-    ATimestamp _ _ -> prim ColTimestamp ColTimestampMaybe genI64
-    ADuration _ -> prim ColDuration ColDurationMaybe genI64
-    AInterval YearMonth -> prim ColIntervalYearMonth ColIntervalYearMonthMaybe genI32
-    AInterval DayTime ->
-      if fieldNullable f
-        then ColIntervalDayTimeMaybe <$> maybes ((,) <$> genI32 <*> genI32)
-        else do
-          xs <- replicateM n ((,) <$> genI32 <*> genI32)
-          pure (ColIntervalDayTime (VP.fromList (map fst xs)) (VP.fromList (map snd xs)))
-    AInterval MonthDayNano ->
-      if fieldNullable f
-        then ColIntervalMonthDayNanoMaybe <$> maybes ((,,) <$> genI32 <*> genI32 <*> genI64)
-        else do
-          xs <- replicateM n ((,,) <$> genI32 <*> genI32 <*> genI64)
-          pure
-            ( ColIntervalMonthDayNano
-                (VP.fromList (map (\(m, _, _) -> m) xs))
-                (VP.fromList (map (\(_, d, _) -> d) xs))
-                (VP.fromList (map (\(_, _, ns) -> ns) xs))
-            )
+    AInt w _ | w `notElem` [8, 16, 32, 64] -> error ("Test.Arrow.Gen: unsupported int width " ++ show w)
+    ABinary -> varBytes mkBinary (Just fromByteStrings) fromMaybeByteStrings binaryViaBuilder genBytes
+    ALargeBinary -> varBytes mkLargeBinary Nothing fromMaybeLargeByteStrings largeBinaryViaBuilder genBytes
+    AUtf8 -> varText mkUtf8 (Just fromTexts) fromMaybeTexts utf8ViaBuilder
+    ALargeUtf8 -> varText mkLargeUtf8 Nothing fromMaybeLargeTexts largeUtf8ViaBuilder
+    ABinaryView -> fromMaybeBinaryView . V.fromList <$> replicateM n (nullableRow genViewBytes)
+    AUtf8View -> fromMaybeUtf8View . V.fromList <$> replicateM n (nullableRow genViewText)
+    ABool -> do
+      bools <- replicateM n Gen.bool
+      mvalid <- genValidityBools
+      method <- Gen.int (Range.linear 0 2)
+      let rows = rowsOf mvalid bools
+      case method of
+        0 -> pure (maybe (fromBools (V.fromList bools)) (const (fromMaybeBools (V.fromList rows))) mvalid)
+        1 -> pure $ runST $ do
+          b <- newBoolBuilder n
+          mapM_ (appendBoolMaybe b) rows
+          freezeBuilder b
+        _ -> built (mkBool (validityOf mvalid) (bitmapFromBools (V.fromList bools)))
+    AFixedSizeBinary w -> do
+      payloads <- replicateM n (genFixed w)
+      mvalid <- genValidityBools
+      useMk <- Gen.bool
+      if useMk
+        then do
+          junk <- genBytes
+          built (mkFixedSizeBinary w n (validityOf mvalid) (BS.concat payloads <> junk))
+        else built (fromMaybeFixedSizeBinary w (V.fromList (rowsOf mvalid payloads)))
     AStruct -> do
-      kids <- V.mapM (\c -> (,) (fieldName c) <$> genColumnFor c n) (fieldChildren f)
-      if fieldNullable f
-        then (\v -> ColStructMaybe v kids) <$> validity
-        else pure (ColStruct n kids)
+      extra <- genExtraRows
+      kids <- V.mapM (\c -> (,) (fieldName c) <$> sub c (n + extra)) (fieldChildren f)
+      mvalid <- genValidityBools
+      built (mkStruct n (validityOf mvalid) kids)
     AList -> do
       (offs, total) <- genOffsets
-      c <- genColumnFor (onlyChild f) total
-      withValidity (ColList (VP.fromList (map fromIntegral offs)) c) (\v -> ColListMaybe v (VP.fromList (map fromIntegral offs)) c)
+      c <- sub (onlyChild f) total
+      mvalid <- genValidityBools
+      built (mkList (validityOf mvalid) (VS.fromList (map fromIntegral offs)) c)
     ALargeList -> do
       (offs, total) <- genOffsets
-      c <- genColumnFor (onlyChild f) total
-      withValidity (ColLargeList (VP.fromList (map fromIntegral offs)) c) (\v -> ColLargeListMaybe v (VP.fromList (map fromIntegral offs)) c)
+      c <- sub (onlyChild f) total
+      mvalid <- genValidityBools
+      built (mkLargeList (validityOf mvalid) (VS.fromList (map fromIntegral offs)) c)
     AFixedSizeList w -> do
-      c <- genColumnFor (onlyChild f) (n * w)
-      withValidity (ColFixedSizeList w n c) (\v -> ColFixedSizeListMaybe w v c)
+      extra <- genExtraRows
+      c <- sub (onlyChild f) (n * w + extra)
+      mvalid <- genValidityBools
+      built (mkFixedSizeList w n (validityOf mvalid) c)
     AListView -> do
       (offs, sizes, c) <- genViews
-      withValidity
-        (ColListView (VP.fromList (map fromIntegral offs)) (VP.fromList (map fromIntegral sizes)) c)
-        (\v -> ColListViewMaybe v (VP.fromList (map fromIntegral offs)) (VP.fromList (map fromIntegral sizes)) c)
+      mvalid <- genValidityBools
+      built (mkListView (validityOf mvalid) (VS.fromList (map fromIntegral offs)) (VS.fromList (map fromIntegral sizes)) c)
     ALargeListView -> do
       (offs, sizes, c) <- genViews
-      withValidity
-        (ColLargeListView (VP.fromList (map fromIntegral offs)) (VP.fromList (map fromIntegral sizes)) c)
-        (\v -> ColLargeListViewMaybe v (VP.fromList (map fromIntegral offs)) (VP.fromList (map fromIntegral sizes)) c)
+      mvalid <- genValidityBools
+      built (mkLargeListView (validityOf mvalid) (VS.fromList (map fromIntegral offs)) (VS.fromList (map fromIntegral sizes)) c)
     AMap sorted -> do
       let entries = onlyChild f
           (kf, vf) = case V.toList (fieldChildren entries) of
             [a, b] -> (a, b)
             _ -> error "Test.Arrow.Gen: map entries must have key and value"
+      start <- Gen.frequency [(3, pure 0), (1, Gen.int (Range.linear 1 2))]
       lens <- replicateM n (Gen.int (Range.linear 0 3))
-      let offs = scanl (+) 0 lens
-          total = last offs
-      keys0 <- genColumnFor kf total
-      keys <- if sorted then pure (sortKeysWithin offs keys0) else pure keys0
-      vals <- genColumnFor vf total
-      let o = VP.fromList (map fromIntegral offs)
-      withValidity (ColMap o keys vals) (\v -> ColMapMaybe v o keys vals)
+      extra <- genExtraRows
+      let offs = scanl (+) start lens
+          total = last offs + extra
+      keys0 <- sub kf total
+      let keys = if sorted then sortKeysWithin offs keys0 else keys0
+      vals <- sub vf total
+      mvalid <- genValidityBools
+      built (mkMap (validityOf mvalid) (VS.fromList (map fromIntegral offs)) keys vals)
     AUnion mode _ -> do
       let kids = fieldChildren f
           k = V.length kids
       tids <- replicateM n (Gen.int (Range.linear 0 (k - 1)))
+      let types = VS.fromList (map fromIntegral tids)
       case mode of
         Sparse -> do
-          cs <- V.mapM (`genColumnFor` n) kids
-          pure (ColSparseUnion (VP.fromList (map fromIntegral tids)) cs)
+          extra <- genExtraRows
+          cs <- V.mapM (`sub` (n + extra)) kids
+          built (mkSparseUnion types cs)
         Dense -> do
           let counts = map (\c -> length (filter (== c) tids)) [0 .. k - 1]
           extras <- replicateM k (Gen.int (Range.linear 0 1))
-          cs <- V.imapM (\i c -> genColumnFor c (counts !! i + extras !! i)) kids
-          let offs = denseOffsets k tids
-          pure (ColDenseUnion (VP.fromList (map fromIntegral tids)) (VP.fromList offs) cs)
+          cs <- V.imapM (\i c -> sub c (counts !! i + extras !! i)) kids
+          built (mkDenseUnion types (VS.fromList (denseOffsets k tids)) cs)
     ARunEndEncoded -> case V.toList (fieldChildren f) of
       [ref, vf] -> do
         runs <- genRuns n
         let ends = drop 1 (scanl (+) 0 runs)
-        vals <- genColumnFor vf (length runs)
+        vals <- sub vf (length runs)
         let re = case fieldType ref of
-              AInt 16 _ -> ColInt16 (VP.fromList (map fromIntegral ends))
-              AInt 64 _ -> ColInt64 (VP.fromList (map fromIntegral ends))
-              _ -> ColInt32 (VP.fromList (map fromIntegral ends))
-        pure (ColRunEndEncoded re vals)
+              AInt 16 _ -> primColumn PInt16 (VS.fromList (map fromIntegral ends))
+              AInt 64 _ -> primColumn PInt64 (VS.fromList (map fromIntegral ends))
+              _ -> primColumn PInt32 (VS.fromList (map fromIntegral ends))
+        built (mkRunEndEncoded re vals)
       _ -> error "Test.Arrow.Gen: run-end-encoded field needs two children"
+    ty -> case primTypeFor ty of
+      Just (SomePrimType t) -> primCol t
+      Nothing -> error ("Test.Arrow.Gen: no generator for " ++ show ty)
   where
     nullable = fieldNullable f
-    maybes :: Gen a -> Gen (V.Vector (Maybe a))
-    maybes g = V.fromList <$> replicateM n (Gen.frequency [(1, pure Nothing), (3, Just <$> g)])
-    prim :: VP.Prim a => (VP.Vector a -> ColumnArray) -> (V.Vector (Maybe a) -> ColumnArray) -> Gen a -> Gen ColumnArray
-    prim con conM g
-      | nullable = conM <$> maybes g
-      | otherwise = con . VP.fromList <$> replicateM n g
-    boxed :: (V.Vector a -> ColumnArray) -> (V.Vector (Maybe a) -> ColumnArray) -> Gen a -> Gen ColumnArray
-    boxed con conM g
-      | nullable = conM <$> maybes g
-      | otherwise = con . V.fromList <$> replicateM n g
-    validity = V.fromList <$> replicateM n (Gen.frequency [(1, pure False), (3, pure True)])
-    withValidity nonNull mk = if nullable then mk <$> validity else pure nonNull
-    -- Offsets may start past zero (a slice of a larger child).
+    sub = genColumnForWith layout
+    built = either (\e -> error ("Test.Arrow.Gen: generated column rejected: " ++ e)) pure
+
+    -- Validity as bools (True = valid); nullable columns are sometimes null-free.
+    genValidityBools :: Gen (Maybe [Bool])
+    genValidityBools
+      | not nullable = pure Nothing
+      | otherwise =
+          Gen.frequency
+            [ (1, pure (Just (replicate n True)))
+            , (9, Just <$> replicateM n (Gen.frequency [(1, pure False), (2, pure True)]))
+            ]
+    validityOf = maybe Nothing (validityFromBools . V.fromList)
+    rowsOf :: Maybe [Bool] -> [a] -> [Maybe a]
+    rowsOf mvalid xs = maybe (map Just xs) (zipWith (\x ok -> if ok then Just x else Nothing) xs) mvalid
+    nullableRow :: Gen a -> Gen (Maybe a)
+    nullableRow g
+      | nullable = Gen.frequency [(1, pure Nothing), (2, Just <$> g)]
+      | otherwise = Just <$> g
+
+    -- Fixed width: fromMaybes, a builder, or mkPrim with arbitrary null slots.
+    primCol :: PrimType a -> Gen ColumnArray
+    primCol t = withPrim t $ do
+      xs <- replicateM n (genPrimValue t)
+      mvalid <- genValidityBools
+      method <- Gen.int (Range.linear 0 2)
+      let rows = rowsOf mvalid xs
+      case method of
+        0 -> pure (maybe (primColumn t (VS.fromList xs)) (const (fromMaybes t (V.fromList rows))) mvalid)
+        1 -> pure $ runST $ do
+          b <- newPrimBuilder t n
+          mapM_ (appendPrimMaybe b) rows
+          freezeBuilder b
+        _ -> built (mkPrim t (validityOf mvalid) (VS.fromList xs))
+
+    -- Var-length bytes: from*, a builder, or mk* over data with junk
+    -- (arbitrary bytes) before and after the referenced range.
+    varBytes ::
+      (Num o, Storable o) =>
+      (Maybe I.Validity -> VS.Vector o -> ByteString -> Either String ColumnArray) ->
+      Maybe (V.Vector ByteString -> ColumnArray) ->
+      (V.Vector (Maybe ByteString) -> ColumnArray) ->
+      ([Maybe ByteString] -> ColumnArray) ->
+      Gen ByteString ->
+      Gen ColumnArray
+    varBytes mk fromAll fromSome viaBuilder genPayload = do
+      payloads <- replicateM n genPayload
+      mvalid <- genValidityBools
+      method <- Gen.int (Range.linear 0 2)
+      let rows = rowsOf mvalid payloads
+      case method of
+        0 -> pure $ case (mvalid, fromAll) of
+          (Nothing, Just g) -> g (V.fromList payloads)
+          _ -> fromSome (V.fromList rows)
+        1 -> pure (viaBuilder rows)
+        _ -> do
+          prefix <- genJunk
+          suffix <- genJunk
+          let offs = scanl (+) (BS.length prefix) (map BS.length payloads)
+          built (mk (validityOf mvalid) (VS.fromList (map fromIntegral offs)) (BS.concat (prefix : payloads ++ [suffix])))
+    varText ::
+      (Num o, Storable o) =>
+      (Maybe I.Validity -> VS.Vector o -> ByteString -> Either String ColumnArray) ->
+      Maybe (V.Vector Text -> ColumnArray) ->
+      (V.Vector (Maybe Text) -> ColumnArray) ->
+      ([Maybe Text] -> ColumnArray) ->
+      Gen ColumnArray
+    varText mk fromAll fromSome viaBuilder = do
+      texts <- replicateM n genText
+      mvalid <- genValidityBools
+      method <- Gen.int (Range.linear 0 2)
+      let rows = rowsOf mvalid texts
+      case method of
+        0 -> pure $ case (mvalid, fromAll) of
+          (Nothing, Just g) -> g (V.fromList texts)
+          _ -> fromSome (V.fromList rows)
+        1 -> pure (viaBuilder rows)
+        _ -> do
+          prefix <- genTextJunk
+          suffix <- genTextJunk
+          let payloads = map TE.encodeUtf8 texts
+              offs = scanl (+) (BS.length prefix) (map BS.length payloads)
+          built (mk (validityOf mvalid) (VS.fromList (map fromIntegral offs)) (BS.concat (prefix : payloads ++ [suffix])))
+    genJunk = Gen.frequency [(2, pure BS.empty), (1, Gen.bytes (Range.linear 1 5))]
+    -- Outside the referenced range of UTF-8 data: valid text, so the
+    -- offsets next to it stay on character boundaries.
+    genTextJunk = Gen.frequency [(2, pure BS.empty), (1, TE.encodeUtf8 <$> Gen.text (Range.linear 1 3) Gen.unicode)]
+    genExtraRows = Gen.frequency [(3, pure 0), (1, Gen.int (Range.linear 1 2))]
+
+    -- Offsets may start past zero (a slice of a larger child), and the
+    -- child may extend past the last offset.
     genOffsets = do
       start <- Gen.int (Range.linear 0 2)
       lens <- replicateM n (Gen.int (Range.linear 0 3))
@@ -439,8 +679,71 @@ genColumnFor f n = case fieldDictionary f of
         o <- Gen.int (Range.linear 0 m)
         s <- Gen.int (Range.linear 0 (m - o))
         pure (o, s)
-      c <- genColumnFor (onlyChild f) m
+      c <- sub (onlyChild f) m
       pure (map fst rows, map snd rows, c)
+
+
+binaryViaBuilder, largeBinaryViaBuilder :: [Maybe ByteString] -> ColumnArray
+binaryViaBuilder rows = runST $ do
+  b <- newBinaryBuilder (length rows)
+  mapM_ (appendBytesMaybe b) rows
+  freezeBuilder b
+largeBinaryViaBuilder rows = runST $ do
+  b <- newLargeBinaryBuilder (length rows)
+  mapM_ (appendBytesMaybe b) rows
+  freezeBuilder b
+
+
+utf8ViaBuilder, largeUtf8ViaBuilder :: [Maybe Text] -> ColumnArray
+utf8ViaBuilder rows = runST $ do
+  b <- newUtf8Builder (length rows)
+  mapM_ (appendTextMaybe b) rows
+  freezeBuilder b
+largeUtf8ViaBuilder rows = runST $ do
+  b <- newLargeUtf8Builder (length rows)
+  mapM_ (appendTextMaybe b) rows
+  freezeBuilder b
+
+
+-- | Dictionary keys at the index type's wire width (null rows are 'Nothing').
+keyColumn :: ArrowType -> V.Vector (Maybe Int) -> ColumnArray
+keyColumn idx ks = case idx of
+  AInt 8 True -> fromMaybes PInt8 (V.map (fmap fromIntegral) ks)
+  AInt 16 True -> fromMaybes PInt16 (V.map (fmap fromIntegral) ks)
+  AInt 32 True -> fromMaybes PInt32 (V.map (fmap fromIntegral) ks)
+  AInt 64 True -> fromMaybes PInt64 (V.map (fmap fromIntegral) ks)
+  AInt 8 False -> fromMaybes PUInt8 (V.map (fmap fromIntegral) ks)
+  AInt 16 False -> fromMaybes PUInt16 (V.map (fmap fromIntegral) ks)
+  AInt 32 False -> fromMaybes PUInt32 (V.map (fmap fromIntegral) ks)
+  AInt 64 False -> fromMaybes PUInt64 (V.map (fmap fromIntegral) ks)
+  other -> error ("Test.Arrow.Gen: unsupported dictionary index type " ++ show other)
+
+
+-- | Values of every fixed-width element type, edge values included.
+genPrimValue :: PrimType a -> Gen a
+genPrimValue t = case t of
+  PInt8 -> genI8
+  PInt16 -> genI16
+  PInt32 -> genI32
+  PInt64 -> genI64
+  PUInt8 -> genW8
+  PUInt16 -> genW16
+  PUInt32 -> genW32
+  PUInt64 -> genW64
+  PFloat16 -> Float16 <$> genW16
+  PFloat -> genFloat
+  PDouble -> genDouble
+  PDate32 -> genI32
+  PDate64 -> genI64
+  PTime32 -> genI32
+  PTime64 -> genI64
+  PTimestamp -> genI64
+  PDuration -> genI64
+  PIntervalYearMonth -> genI32
+  PIntervalDayTime -> IntervalDayTime <$> genI32 <*> genI32
+  PIntervalMonthDayNano -> IntervalMonthDayNano <$> genI32 <*> genI32 <*> genI64
+  PDecimal128 _ _ -> Decimal128 <$> genW64 <*> genW64
+  PDecimal256 _ _ -> Decimal256 <$> genW64 <*> genW64 <*> genW64 <*> genW64
 
 
 onlyChild :: Field -> Field
@@ -470,15 +773,21 @@ genRuns n
       pure (r : rest)
 
 
--- | Reorder keys so each entry's keys are non-decreasing.
+{- | Reorder keys so each entry's keys are non-decreasing; rows before
+the first offset and after the last one stay where they are.
+-}
 sortKeysWithin :: [Int] -> ColumnArray -> ColumnArray
 sortKeysWithin offs keys =
   case columnValues keys of
     Left e -> error e
     Right vs ->
       let entries = zip offs (drop 1 offs)
-          perm = concatMap (\(s, e) -> sortBy (\i j -> compareKeyValues (vs V.! i) (vs V.! j)) [s .. e - 1]) entries
-      in either error id (takeColumnArray (VP.fromList perm) keys)
+          inEntries = concatMap (\(s, e) -> sortBy (\i j -> compareKeyValues (vs V.! i) (vs V.! j)) [s .. e - 1]) entries
+          (firstOff, lastOff) = case offs of
+            [] -> (0, 0)
+            (o : _) -> (o, last offs)
+          perm = [0 .. firstOff - 1] ++ inEntries ++ [lastOff .. V.length vs - 1]
+      in either error id (takeColumnArray (VS.fromList perm) keys)
 
 
 -- ============================================================
@@ -576,194 +885,186 @@ batchValues :: V.Vector ColumnArray -> Either String [[Value]]
 batchValues = traverse (fmap V.toList . columnValues) . V.toList
 
 
+-- | Direct children of a column, run ends and dictionary keys and values included.
+childColumns :: ColumnArray -> [ColumnArray]
+childColumns = \case
+  ColStruct _ _ cs -> map snd (V.toList cs)
+  ColList _ _ x -> [x]
+  ColLargeList _ _ x -> [x]
+  ColFixedSizeList _ _ _ x -> [x]
+  ColMap _ _ k v -> [k, v]
+  ColDenseUnion _ _ cs -> V.toList cs
+  ColSparseUnion _ cs -> V.toList cs
+  ColRunEndEncoded _ _ r v -> [r, v]
+  ColListView _ _ _ x -> [x]
+  ColLargeListView _ _ _ x -> [x]
+  ColDictionary _ k v -> [k, v]
+  _ -> []
+
+
 -- | Whether any column (at any depth) is dictionary-encoded.
 hasDictionaries :: ColumnArray -> Bool
 hasDictionaries = \case
   ColDictionary {} -> True
-  ColDictionaryMaybe {} -> True
-  ColStruct _ cs -> any (hasDictionaries . snd) cs
-  ColStructMaybe _ cs -> any (hasDictionaries . snd) cs
-  ColList _ c -> hasDictionaries c
-  ColListMaybe _ _ c -> hasDictionaries c
-  ColLargeList _ c -> hasDictionaries c
-  ColLargeListMaybe _ _ c -> hasDictionaries c
-  ColFixedSizeList _ _ c -> hasDictionaries c
-  ColFixedSizeListMaybe _ _ c -> hasDictionaries c
-  ColMap _ k v -> hasDictionaries k || hasDictionaries v
-  ColMapMaybe _ _ k v -> hasDictionaries k || hasDictionaries v
-  ColDenseUnion _ _ cs -> any hasDictionaries cs
-  ColSparseUnion _ cs -> any hasDictionaries cs
-  ColRunEndEncoded _ v -> hasDictionaries v
-  ColListView _ _ c -> hasDictionaries c
-  ColListViewMaybe _ _ _ c -> hasDictionaries c
-  ColLargeListView _ _ c -> hasDictionaries c
-  ColLargeListViewMaybe _ _ _ c -> hasDictionaries c
-  _ -> False
+  c -> any hasDictionaries (childColumns c)
 
 
--- | Logical rows of a column; any out-of-range reference is a 'Left'.
+{- | Logical rows of a column, read straight from its buffers (not
+through the accessors under test); any out-of-range reference or
+invalid UTF-8 inside a referenced range is a 'Left'.
+-}
 columnValues :: ColumnArray -> Either String (V.Vector Value)
 columnValues col = case col of
-  ColInt8 v -> ints v
-  ColInt16 v -> ints v
-  ColInt32 v -> ints v
-  ColInt64 v -> ints v
-  ColUInt8 v -> ints v
-  ColUInt16 v -> ints v
-  ColUInt32 v -> ints v
-  ColUInt64 v -> ints v
-  ColDate32 v -> ints v
-  ColDate64 v -> ints v
-  ColTime32 v -> ints v
-  ColTime64 v -> ints v
-  ColTimestamp v -> ints v
-  ColDuration v -> ints v
-  ColIntervalYearMonth v -> ints v
-  ColFloat16 v -> Right (V.map VF16 (V.convert v))
-  ColFloat v -> Right (V.map (VF32 . castFloatToWord32) (V.convert v))
-  ColDouble v -> Right (V.map (VF64 . castDoubleToWord64) (V.convert v))
-  ColBool v -> Right (V.map VBool v)
-  ColUtf8 v -> Right (V.map VText v)
-  ColLargeUtf8 v -> Right (V.map VText v)
-  ColUtf8View v -> Right (V.map VText v)
-  ColBinary v -> Right (V.map VBytes v)
-  ColLargeBinary v -> Right (V.map VBytes v)
-  ColBinaryView v -> Right (V.map VBytes v)
-  ColFixedSizeBinary _ v -> Right (V.map VBytes v)
-  ColDecimal128 _ _ v -> Right (V.map decimal v)
-  ColDecimal256 _ _ v -> Right (V.map decimal v)
-  ColIntervalDayTime ds ms -> Right (V.zipWith VPair (V.convert ds) (V.convert ms))
-  ColIntervalMonthDayNano ms ds ns -> Right (V.zipWith3 VTriple (V.convert ms) (V.convert ds) (V.convert ns))
-  ColInt8Maybe v -> mInts v
-  ColInt16Maybe v -> mInts v
-  ColInt32Maybe v -> mInts v
-  ColInt64Maybe v -> mInts v
-  ColUInt8Maybe v -> mInts v
-  ColUInt16Maybe v -> mInts v
-  ColUInt32Maybe v -> mInts v
-  ColUInt64Maybe v -> mInts v
-  ColDate32Maybe v -> mInts v
-  ColDate64Maybe v -> mInts v
-  ColTime32Maybe v -> mInts v
-  ColTime64Maybe v -> mInts v
-  ColTimestampMaybe v -> mInts v
-  ColDurationMaybe v -> mInts v
-  ColIntervalYearMonthMaybe v -> mInts v
-  ColFloat16Maybe v -> m VF16 v
-  ColFloatMaybe v -> m (VF32 . castFloatToWord32) v
-  ColDoubleMaybe v -> m (VF64 . castDoubleToWord64) v
-  ColBoolMaybe v -> m VBool v
-  ColUtf8Maybe v -> m VText v
-  ColLargeUtf8Maybe v -> m VText v
-  ColUtf8ViewMaybe v -> m VText v
-  ColBinaryMaybe v -> m VBytes v
-  ColLargeBinaryMaybe v -> m VBytes v
-  ColBinaryViewMaybe v -> m VBytes v
-  ColFixedSizeBinaryMaybe _ v -> m VBytes v
-  ColDecimal128Maybe _ _ v -> m decimal v
-  ColDecimal256Maybe _ _ v -> m decimal v
-  ColIntervalDayTimeMaybe v -> m (uncurry VPair) v
-  ColIntervalMonthDayNanoMaybe v -> m (\(a, b, c) -> VTriple a b c) v
   ColNull n -> Right (V.replicate n VNull)
-  ColStruct n cs -> do
+  ColPrim t v xs -> withPrim t (Right (V.generate (VS.length xs) (\i -> if isValidAt v i then primValue t (xs VS.! i) else VNull)))
+  ColBool v bits -> Right (V.generate (bitmapLength bits) (\i -> if isValidAt v i then VBool (bitAt bits i) else VNull))
+  ColUtf8 v o d -> varRows utf8 v o d
+  ColLargeUtf8 v o d -> varRows utf8 v o d
+  ColBinary v o d -> varRows (Right . VBytes) v o d
+  ColLargeBinary v o d -> varRows (Right . VBytes) v o d
+  ColFixedSizeBinary w n v d ->
+    V.generateM n $ \i ->
+      if isValidAt v i then VBytes <$> cut "fixed-size binary row" d (i * w) w else Right VNull
+  ColUtf8View v views bufs -> viewValues utf8 v views bufs
+  ColBinaryView v views bufs -> viewValues (Right . VBytes) v views bufs
+  ColStruct n v cs -> do
     kids <- V.mapM (traverse columnValues) cs
-    V.generateM n $ \i -> VStruct . V.toList <$> V.mapM (\(nm, vs) -> (,) nm <$> at "struct child row" vs i) kids
-  ColStructMaybe valid cs -> do
-    kids <- V.mapM (traverse columnValues) cs
-    masked valid (\i -> VStruct (V.toList (V.map (\(nm, vs) -> (nm, vs V.! i)) kids)))
-  ColList o c -> listRows Nothing (VP.map fromIntegral o) c
-  ColListMaybe valid o c -> listRows (Just valid) (VP.map fromIntegral o) c
-  ColLargeList o c -> listRows Nothing (VP.map fromIntegral o) c
-  ColLargeListMaybe valid o c -> listRows (Just valid) (VP.map fromIntegral o) c
-  ColFixedSizeList w n c -> fixedRows Nothing n w c
-  ColFixedSizeListMaybe w valid c -> fixedRows (Just valid) (V.length valid) w c
-  ColMap o k v -> mapRows Nothing o k v
-  ColMapMaybe valid o k v -> mapRows (Just valid) o k v
-  ColListView o s c -> viewRows Nothing (VP.map fromIntegral o) (VP.map fromIntegral s) c
-  ColListViewMaybe valid o s c -> viewRows (Just valid) (VP.map fromIntegral o) (VP.map fromIntegral s) c
-  ColLargeListView o s c -> viewRows Nothing (VP.map fromIntegral o) (VP.map fromIntegral s) c
-  ColLargeListViewMaybe valid o s c -> viewRows (Just valid) (VP.map fromIntegral o) (VP.map fromIntegral s) c
+    V.generateM n $ \i ->
+      if isValidAt v i
+        then VStruct . V.toList <$> V.mapM (\(nm, vs) -> (,) nm <$> at "struct child row" vs i) kids
+        else Right VNull
+  ColList v o c -> listRows v (ints o) c
+  ColLargeList v o c -> listRows v (ints o) c
+  ColListView v o s c -> viewRows v (ints o) (ints s) c
+  ColLargeListView v o s c -> viewRows v (ints o) (ints s) c
+  ColFixedSizeList w n v c -> do
+    vs <- columnValues c
+    V.generateM n $ \i -> if isValidAt v i then VList <$> slice vs (i * w) w else Right VNull
+  ColMap v o k x -> do
+    ks <- columnValues k
+    xs <- columnValues x
+    let offs = ints o
+    V.generateM (max 0 (VS.length o - 1)) $ \i -> do
+      let s = offs V.! i
+          e = offs V.! (i + 1)
+      if isValidAt v i
+        then do
+          kk <- slice ks s (e - s)
+          vv <- slice xs s (e - s)
+          Right (VMap (zip kk vv))
+        else Right VNull
   ColDenseUnion ts offs cs -> do
     kids <- V.mapM columnValues cs
-    V.generateM (VP.length ts) $ \i -> do
-      let t = VP.unsafeIndex ts i
+    V.generateM (VS.length ts) $ \i -> do
+      let t = ts VS.! i
       kid <- at "dense union child" kids (fromIntegral t)
-      VUnion t <$> at "dense union offset" kid (fromIntegral (VP.unsafeIndex offs i))
+      VUnion t <$> at "dense union offset" kid (fromIntegral (offs VS.! i))
   ColSparseUnion ts cs -> do
     kids <- V.mapM columnValues cs
-    V.generateM (VP.length ts) $ \i -> do
-      let t = VP.unsafeIndex ts i
+    V.generateM (VS.length ts) $ \i -> do
+      let t = ts VS.! i
       kid <- at "sparse union child" kids (fromIntegral t)
       VUnion t <$> at "sparse union row" kid i
-  ColDictionary _ ix vals -> do
+  ColDictionary _ keys vals -> do
+    ks <- columnValues keys
     vs <- columnValues vals
-    V.mapM (at "dictionary index" vs . fromIntegral) (V.convert ix)
-  ColDictionaryMaybe _ ix vals -> do
-    vs <- columnValues vals
-    V.mapM (maybe (Right VNull) (at "dictionary index" vs . fromIntegral)) ix
-  ColRunEndEncoded re vals -> do
+    V.mapM
+      ( \case
+          VNull -> Right VNull
+          VInt k -> at "dictionary key" vs (fromIntegral k)
+          other -> Left ("Test.Arrow.Gen: dictionary key " ++ show other)
+      )
+      ks
+  ColRunEndEncoded off len re vals -> do
     ends <- columnValues re
     vs <- columnValues vals
-    let endInts = map (\case VInt e -> fromIntegral e; _ -> 0 :: Int) (V.toList ends)
-        runs = zip endInts (0 : endInts)
-    rows <- forM (zip [0 ..] runs) $ \(r, (e, s)) -> do
-      x <- at "run value" vs r
-      Right (replicate (e - s) x)
-    Right (V.fromList (concat rows))
+    endInts <- traverse (\case VInt e -> Right (fromIntegral e :: Int); other -> Left ("Test.Arrow.Gen: run end " ++ show other)) ends
+    V.generateM len $ \i -> case V.findIndex (> off + i) endInts of
+      Nothing -> Left "Test.Arrow.Gen: row past the last run end"
+      Just r -> at "run value" vs r
   where
-    ints :: (VP.Prim a, Integral a) => VP.Vector a -> Either String (V.Vector Value)
-    ints v = Right (V.map (VInt . toInteger) (V.convert v))
-    mInts :: Integral a => V.Vector (Maybe a) -> Either String (V.Vector Value)
-    mInts = m (VInt . toInteger)
-    m :: (a -> Value) -> V.Vector (Maybe a) -> Either String (V.Vector Value)
-    m f v = Right (V.map (maybe VNull f) v)
-    masked valid row = Right (V.imap (\i ok -> if ok then row i else VNull) valid)
-    listRows mvalid offs c = do
-      vs <- columnValues c
-      let n = max 0 (VP.length offs - 1)
-      V.generateM n $ \i ->
-        if maybe True (V.! i) mvalid
-          then VList <$> slice vs (VP.unsafeIndex offs i) (VP.unsafeIndex offs (i + 1) - VP.unsafeIndex offs i)
-          else Right VNull
-    viewRows mvalid offs sizes c = do
-      vs <- columnValues c
-      V.generateM (VP.length offs) $ \i ->
-        if maybe True (V.! i) mvalid
-          then VList <$> slice vs (VP.unsafeIndex offs i) (VP.unsafeIndex sizes i)
-          else Right VNull
-    fixedRows mvalid n w c = do
-      vs <- columnValues c
-      V.generateM n $ \i ->
-        if maybe True (V.! i) mvalid
-          then VList <$> slice vs (i * w) w
-          else Right VNull
-    mapRows mvalid offs k v = do
-      ks <- columnValues k
-      vs <- columnValues v
-      let n = max 0 (VP.length offs - 1)
-      V.generateM n $ \i -> do
-        let s = fromIntegral (VP.unsafeIndex offs i)
-            e = fromIntegral (VP.unsafeIndex offs (i + 1))
-        if maybe True (V.! i) mvalid
+    utf8 bs = either (const (Left "Test.Arrow.Gen: invalid UTF-8 in a referenced range")) (Right . VText) (TE.decodeUtf8' bs)
+    ints :: (Storable o, Integral o) => VS.Vector o -> V.Vector Int
+    ints = V.map fromIntegral . V.convert
+    varRows :: (Storable o, Integral o) => (ByteString -> Either String Value) -> Maybe I.Validity -> VS.Vector o -> ByteString -> Either String (V.Vector Value)
+    varRows decode v o d =
+      let offs = ints o
+      in V.generateM (max 0 (V.length offs - 1)) $ \i ->
+           if isValidAt v i
+             then cut "var-length row" d (offs V.! i) (offs V.! (i + 1) - offs V.! i) >>= decode
+             else Right VNull
+    viewValues decode v views bufs =
+      V.generateM (BS.length views `quot` 16) $ \i ->
+        if isValidAt v i
           then do
-            kk <- slice ks s (e - s)
-            vv <- slice vs s (e - s)
-            Right (VMap (zip kk vv))
+            let base = 16 * i
+                len = le32 views base
+            bytes <-
+              if len <= 12
+                then cut "inline view" views (base + 4) len
+                else do
+                  buf <- at "view buffer" bufs (le32 views (base + 8))
+                  cut "view data" buf (le32 views (base + 12)) len
+            decode bytes
+          else Right VNull
+    listRows v offs c = do
+      vs <- columnValues c
+      V.generateM (max 0 (V.length offs - 1)) $ \i ->
+        if isValidAt v i
+          then VList <$> slice vs (offs V.! i) (offs V.! (i + 1) - offs V.! i)
+          else Right VNull
+    viewRows v offs sizes c = do
+      vs <- columnValues c
+      V.generateM (V.length offs) $ \i ->
+        if isValidAt v i
+          then VList <$> slice vs (offs V.! i) (sizes V.! i)
           else Right VNull
     slice :: V.Vector Value -> Int -> Int -> Either String [Value]
     slice vs s l
-      | s < 0 || l < 0 || s + l > V.length vs = Left ("Test.Arrow.Gen: slice out of range " ++ show (s, l, V.length vs))
+      | s < 0 || l < 0 || s + l > V.length vs = Left ("Test.Arrow.Gen: slice out of range " ++ show s ++ "+" ++ show l ++ " of " ++ show (V.length vs))
       | otherwise = Right (V.toList (V.slice s l vs))
+    cut :: String -> ByteString -> Int -> Int -> Either String ByteString
+    cut what bs s l
+      | s < 0 || l < 0 || s + l > BS.length bs = Left ("Test.Arrow.Gen: " ++ what ++ " out of range")
+      | otherwise = Right (BS.take l (BS.drop s bs))
     at :: String -> V.Vector a -> Int -> Either String a
     at what vs i = maybe (Left ("Test.Arrow.Gen: " ++ what ++ " out of range")) Right (vs V.!? i)
 
 
--- | Little-endian two's-complement bytes as an integer.
-decimal :: ByteString -> Value
-decimal bs =
-  let unsigned = BS.foldr (\b acc -> acc `shiftL` 8 .|. toInteger b) 0 bs
-      bits = 8 * BS.length bs
-  in VDecimal (if bits > 0 && testBit unsigned (bits - 1) then unsigned - (1 `shiftL` bits) else unsigned)
+-- | Little-endian signed 32-bit integer at a byte offset (0 past the end).
+le32 :: ByteString -> Int -> Int
+le32 bs o
+  | o < 0 || o + 4 > BS.length bs = 0
+  | otherwise =
+      let w = foldr (\k acc -> acc `shiftL` 8 .|. fromIntegral (BS.index bs (o + k))) (0 :: Word32) [0 .. 3]
+      in fromIntegral (fromIntegral w :: Int32)
+
+
+-- | The logical value of one fixed-width element.
+primValue :: PrimType a -> a -> Value
+primValue t x = case t of
+  PInt8 -> VInt (toInteger x)
+  PInt16 -> VInt (toInteger x)
+  PInt32 -> VInt (toInteger x)
+  PInt64 -> VInt (toInteger x)
+  PUInt8 -> VInt (toInteger x)
+  PUInt16 -> VInt (toInteger x)
+  PUInt32 -> VInt (toInteger x)
+  PUInt64 -> VInt (toInteger x)
+  PDate32 -> VInt (toInteger x)
+  PDate64 -> VInt (toInteger x)
+  PTime32 -> VInt (toInteger x)
+  PTime64 -> VInt (toInteger x)
+  PTimestamp -> VInt (toInteger x)
+  PDuration -> VInt (toInteger x)
+  PIntervalYearMonth -> VInt (toInteger x)
+  PFloat16 -> let Float16 w = x in VF16 w
+  PFloat -> VF32 (castFloatToWord32 x)
+  PDouble -> VF64 (castDoubleToWord64 x)
+  PIntervalDayTime -> let IntervalDayTime d m = x in VPair d m
+  PIntervalMonthDayNano -> let IntervalMonthDayNano m d ns = x in VTriple m d ns
+  PDecimal128 _ _ -> VDecimal (decimal128ToInteger x)
+  PDecimal256 _ _ -> VDecimal (decimal256ToInteger x)
 
 
 {- | The map-key order of 'Arrow.Column.validateMapKeysSorted', on

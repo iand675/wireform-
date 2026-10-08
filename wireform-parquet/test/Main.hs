@@ -15,6 +15,7 @@ import System.Exit (ExitCode (..), exitFailure)
 import qualified System.Process as Proc
 
 import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Storable as VS
 import Data.Int (Int32, Int64)
 
 import qualified Crypto.Random as RNG
@@ -1358,9 +1359,9 @@ arrowParquetProjection = do
         , AT.arrowFeatures = V.empty
         }
       !batch = V.fromList
-        [ AC.ColInt32 (VP.fromList [10, 20, 30 :: Int32])
-        , AC.ColInt32 (VP.fromList [40, 50, 60 :: Int32])
-        , AC.ColUtf8  (V.fromList ["alpha", "beta", "gamma"])
+        [ AC.primColumn AC.PInt32 (VS.fromList [10, 20, 30 :: Int32])
+        , AC.primColumn AC.PInt32 (VS.fromList [40, 50, 60 :: Int32])
+        , AC.fromTexts (V.fromList ["alpha", "beta", "gamma"])
         ]
   case PArrow.arrowToParquet fullSchema [batch] of
     Left  e -> failTest $ "projection arrowToParquet: " ++ e
@@ -1387,8 +1388,8 @@ arrowParquetProjection = do
             Left  e    -> failTest $ "parquetRowGroupToArrow: " ++ show e
             Right cols -> do
               let !expected = V.fromList
-                    [ AC.ColUtf8  (V.fromList ["alpha", "beta", "gamma"])
-                    , AC.ColInt32 (VP.fromList [10, 20, 30 :: Int32])
+                    [ AC.fromTexts (V.fromList ["alpha", "beta", "gamma"])
+                    , AC.primColumn AC.PInt32 (VS.fromList [10, 20, 30 :: Int32])
                     ]
               if cols == expected
                 then putStrLn "OK: Parquet projection + reorder (c, a <- a, b, c)"
@@ -1419,7 +1420,7 @@ arrowParquetProjection = do
           case PArrow.parquetRowGroupToArrow widen pf 0 of
             Left e -> failTest $ "projection coercion: " ++ show e
             Right cols ->
-              if cols == V.singleton (AC.ColInt64 (VP.fromList [10, 20, 30 :: Int64]))
+              if cols == V.singleton (AC.primColumn AC.PInt64 (VS.fromList [10, 20, 30 :: Int64]))
                 then putStrLn "OK: Parquet projection coerces Int32 -> Int64"
                 else failTest $ "coercion mismatch: " ++ show (V.toList cols)
 
@@ -1436,9 +1437,9 @@ arrowParquetNestedBridge = do
            ])
         Nothing
         V.empty
-      structCol = AC.ColStruct 3 (V.fromList
-        [ ("x",    AC.ColInt32 (VP.fromList [1, 2, 3 :: Int32]))
-        , ("name", AC.ColUtf8  (V.fromList ["a", "b", "c"]))
+      structCol = either error id $ AC.mkStruct 3 Nothing (V.fromList
+        [ ("x",    AC.primColumn AC.PInt32 (VS.fromList [1, 2, 3 :: Int32]))
+        , ("name", AC.fromTexts (V.fromList ["a", "b", "c"]))
         ])
   case PArrow.arrowFieldToNestedSchema structField of
     Left  e   -> failTest $ "arrowFieldToNestedSchema: " ++ e
@@ -1466,8 +1467,8 @@ arrowParquetBridge = do
         , AT.arrowFeatures = V.empty
         }
       !batch = V.fromList
-        [ AC.ColInt32 (VP.fromList ([10, 20, 30] :: [Int32]))
-        , AC.ColUtf8  (V.fromList ["alpha", "beta", "gamma"])
+        [ AC.primColumn AC.PInt32 (VS.fromList ([10, 20, 30] :: [Int32]))
+        , AC.fromTexts (V.fromList ["alpha", "beta", "gamma"])
         ]
   case PArrow.arrowToParquet arrowSchema [batch] of
     Left  e  -> failTest $ "arrowToParquet: " ++ e
@@ -1525,8 +1526,8 @@ arrowParquetBridge = do
         , AT.arrowFeatures = V.empty
         }
       !tempBatch = V.fromList
-        [ AC.ColDate32    (VP.fromList ([19000, 19001, 19002] :: [Int32]))
-        , AC.ColTimestamp (VP.fromList ([1700000000000000, 1700001000000000, 1700002000000000] :: [Int64]))
+        [ AC.primColumn AC.PDate32    (VS.fromList ([19000, 19001, 19002] :: [Int32]))
+        , AC.primColumn AC.PTimestamp (VS.fromList ([1700000000000000, 1700001000000000, 1700002000000000] :: [Int64]))
         ]
   case PArrow.arrowToParquet tempSchema [tempBatch] of
     Left  e -> failTest $ "temporal arrowToParquet: " ++ e

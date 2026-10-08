@@ -1,2154 +1,1528 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+-- The Eq, Show and NFData instances of 'ColumnArray' (defined in
+-- "Arrow.Column.Internal") live here because they are written with
+-- the accessors and row model of this module.
+{-# OPTIONS_GHC -Wno-orphans #-}
 
-{- | Materialize Apache Arrow IPC record batch bodies into Haskell-friendly columns.
+{- | Arrow columns as Arrow buffers.
 
-Supports flat and nested schemas. Nullable columns use a validity bitmap
-(LSB of each byte first) plus values; decoded as @V.Vector (Maybe a)@.
+A 'ColumnArray' holds Arrow-native buffers: storable vectors for
+fixed-width values and offsets, LSB-first bitmaps for validity and
+booleans, and 'ByteString' regions for variable-length data. A column
+decoded from IPC aliases the input bytes (zero copy) and keeps them
+alive; 'copyColumn' detaches a column (for example a small slice of a
+large input) by copying only the bytes it references.
+
+Nullability is per value, not per type: every array with a validity
+slot carries @Maybe Validity@, 'Nothing' meaning no nulls (a validity
+whose null count is 0 is normalised to 'Nothing').
+
+Construction is checked. The patterns exported here only match; build
+columns with the builders ("Arrow.Column.Builder", re-exported), the
+@from*@ conversions, or the validating @mk*@ constructors. The raw
+constructors live in "Arrow.Column.Internal". Every column that user
+code can build therefore satisfies the invariants listed there, which
+is what lets the @*At@ accessors read without re-validating.
+
+'Eq' is logical and O(n): two columns are equal when they have the
+same type, the same length, the same validity per row, and equal
+values in valid rows. Null slots, bit offsets, offset bases and
+dictionary layouts do not matter; floating point compares bit
+patterns. 'Show' prints logical rows.
 -}
 module Arrow.Column (
-  ColumnArray (..),
-  materializeFlatRecordBatch,
-  materializeRecordBatch,
+  -- * Columns
+  ColumnArray,
+  pattern ColNull,
+  pattern ColPrim,
+  pattern ColInt8,
+  pattern ColInt16,
+  pattern ColInt32,
+  pattern ColInt64,
+  pattern ColUInt8,
+  pattern ColUInt16,
+  pattern ColUInt32,
+  pattern ColUInt64,
+  pattern ColFloat16,
+  pattern ColFloat,
+  pattern ColDouble,
+  pattern ColDate32,
+  pattern ColDate64,
+  pattern ColTime32,
+  pattern ColTime64,
+  pattern ColTimestamp,
+  pattern ColDuration,
+  pattern ColIntervalYearMonth,
+  pattern ColIntervalDayTime,
+  pattern ColIntervalMonthDayNano,
+  pattern ColDecimal128,
+  pattern ColDecimal256,
+  pattern ColBool,
+  pattern ColUtf8,
+  pattern ColBinary,
+  pattern ColLargeUtf8,
+  pattern ColLargeBinary,
+  pattern ColFixedSizeBinary,
+  pattern ColUtf8View,
+  pattern ColBinaryView,
+  pattern ColStruct,
+  pattern ColList,
+  pattern ColLargeList,
+  pattern ColListView,
+  pattern ColLargeListView,
+  pattern ColFixedSizeList,
+  pattern ColMap,
+  pattern ColDenseUnion,
+  pattern ColSparseUnion,
+  pattern ColDictionary,
+  pattern ColRunEndEncoded,
+
+  -- * Element tags
+  PrimType (..),
+  withPrim,
+  primWidth,
+  SomePrimType (..),
+  primTypeFor,
+  Offset,
+
+  -- * Buffers
+  Bitmap,
+  bitmapBytes,
+  bitmapOffset,
+  bitmapLength,
+  mkBitmap,
+  emptyBitmap,
+  bitAt,
+  bitmapSetCount,
+  bitmapGenerate,
+  bitmapFromBools,
+  bitmapToBools,
+  Validity,
+  validityBits,
+  validityNullCount,
+  mkValidity,
+  validityGenerate,
+  validityFromBools,
+  isValidAt,
+  Float16 (..),
+  float16ToDouble,
+  IntervalDayTime (..),
+  IntervalMonthDayNano (..),
+  Decimal128 (..),
+  decimal128ToInteger,
+  decimal128FromInteger,
+  Decimal256 (..),
+  decimal256ToInteger,
+  decimal256FromInteger,
+
+  -- * Shape
   columnLength,
-  countFieldNodesFlat,
-  countBuffersFlat,
-  resolveDictionaryColumn,
-  placeholderColumn,
+  nullCount,
+  validity,
+  columnTag,
+  hasValiditySlot,
+
+  -- * Typed views (O(1); index functions INLINE)
+  PrimArray (..),
+  asPrim,
+  primArrayLength,
+  primAt,
+  unsafePrimAt,
+  primValueAt,
+  unsafePrimValueAt,
+  BytesArray (..),
+  Utf8Array (..),
+  asUtf8,
+  asLargeUtf8,
+  asBinary,
+  asLargeBinary,
+  bytesArrayLength,
+  bytesAt,
+  unsafeBytesAt,
+  textAt,
+  unsafeTextAt,
+  BoolArray (..),
+  asBool,
+  boolArrayAt,
+  boolAt,
+  anyBytesAt,
+  anyTextAt,
+  ChildRange (..),
+  listRange,
+  dictKeyAt,
+
+  -- * Conversions (cost in the name)
+  toStorable,
+  toMaybeVector,
+  toTextVector,
+  toBytesVector,
+  toBoolVector,
+  toListVector,
+  copyColumn,
+
+  -- * Construction
+  primColumn,
+  primColumnV,
+  mkPrim,
+  fromMaybes,
+  fromBools,
+  fromMaybeBools,
+  fromTexts,
+  fromMaybeTexts,
+  fromMaybeLargeTexts,
+  fromByteStrings,
+  fromMaybeByteStrings,
+  fromMaybeLargeByteStrings,
+  fromMaybeFixedSizeBinary,
+  fromMaybeUtf8View,
+  fromMaybeBinaryView,
+  mkBool,
+  mkUtf8,
+  mkBinary,
+  mkLargeUtf8,
+  mkLargeBinary,
+  mkFixedSizeBinary,
+  mkUtf8View,
+  mkBinaryView,
+  mkStruct,
+  mkList,
+  mkLargeList,
+  mkListView,
+  mkLargeListView,
+  mkFixedSizeList,
+  mkMap,
+  mkDenseUnion,
+  mkSparseUnion,
+  mkDictionary,
+  mkRunEndEncoded,
   emptyColumnFor,
-  expandDictionary,
+  placeholderColumn,
   fillerColumn,
 
-  -- * Row slicing, concatenation and gathering
+  -- * Builders
+  module Arrow.Column.Builder,
+
+  -- * Row operations
   sliceColumnArray,
   concatColumnArray,
   concatColumnArrays,
   takeColumnArray,
+  rebaseRunEnds,
+
+  -- * Dictionaries
+  expandDictionary,
+  resolveDictionaryColumn,
 
   -- * Nullability
-  isNullableColumn,
-  toNullableColumn,
   maskValidity,
+  toNullableColumn,
 
   -- * Map invariants
   validateMapKeysSorted,
-
-  -- * Buffer bounds
-  validateRecordBatchBuffers,
 ) where
 
-import Arrow.Types (
-  ArrowType (..),
-  Buffer (..),
-  DateUnit (..),
-  DictionaryEncoding (..),
-  Endianness (..),
-  Field (..),
-  FieldNode (..),
-  IntervalUnit (..),
-  Precision (..),
-  RecordBatchDef (..),
-  Schema (..),
-  TimeUnit (..),
-  UnionMode (..),
- )
-import Columnar.SIMD (unpackBitsLsbUnsafe)
-import Control.DeepSeq (NFData)
-import Data.Bits (shiftL, shiftR, (.&.), (.|.))
+import Arrow.Column.Builder
+import Arrow.Column.Internal (ColumnArray)
+import Arrow.Column.Internal hiding (ColumnArray (..))
+import Arrow.Column.Internal qualified as I
+import Arrow.Types (ArrowType (..), DictionaryEncoding (..), Field (..), UnionMode (..))
+import Columnar.SIMD qualified as K
+import Control.DeepSeq (NFData (..))
+import Control.Monad (forM_, when)
+import Control.Monad.ST (stToIO)
+import Data.Bits (unsafeShiftR)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.ByteString.Internal qualified as BSI
 import Data.ByteString.Unsafe qualified as BSU
 import Data.Int (Int16, Int32, Int64, Int8)
-import Data.Maybe (fromMaybe, isJust, isNothing)
+import Data.List (intersperse)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Text.Encoding qualified as TE
+import Data.Text.Array qualified as TA
+import Data.Text.Foreign qualified as TF
+import Data.Text.Internal qualified as TI
+import Data.Type.Equality ((:~:) (..))
 import Data.Vector qualified as V
-import Data.Vector.Primitive qualified as VP
+import Data.Vector.Mutable qualified as VM
+import Data.Vector.Storable qualified as VS
+import Data.Vector.Storable.Mutable qualified as VSM
 import Data.Word (Word16, Word32, Word64, Word8)
-import GHC.Float (castWord32ToFloat, castWord64ToDouble)
-import Foreign.Marshal.Array (allocaArray)
-import Foreign.Storable (pokeElemOff)
-import GHC.Generics (Generic)
-import System.IO.Unsafe (unsafePerformIO)
-import Wireform.FFI (validateArrowBuffers)
-
-
-{- | Validate that all buffer offset/length pairs in a 'RecordBatchDef' are
-non-negative, within the given body length, and non-overlapping.
-Uses SIMD-accelerated pairwise checks.
--}
-validateRecordBatchBuffers :: RecordBatchDef -> Int64 -> Bool
-validateRecordBatchBuffers rb bodyLen = unsafePerformIO $ do
-  let !bufs = rbBuffers rb
-      !n = V.length bufs
-  if n == 0
-    then pure True
-    else allocaArray (n * 2) $ \ptr -> do
-      V.iforM_ bufs $ \i buf -> do
-        pokeElemOff ptr (i * 2) (bufOffset buf)
-        pokeElemOff ptr (i * 2 + 1) (bufLength buf)
-      pure $! validateArrowBuffers ptr n bodyLen
-{-# INLINE validateRecordBatchBuffers #-}
-
-
-{- | Materialized values for one column.
-Nullable columns use @Col*Maybe@ with per-row 'Maybe'.
--}
-data ColumnArray
-  = ColInt8 !(VP.Vector Int8)
-  | ColInt16 !(VP.Vector Int16)
-  | ColInt32 !(VP.Vector Int32)
-  | ColInt64 !(VP.Vector Int64)
-  | ColUInt8 !(VP.Vector Word8)
-  | ColUInt16 !(VP.Vector Word16)
-  | ColUInt32 !(VP.Vector Word32)
-  | ColUInt64 !(VP.Vector Word64)
-  | ColFloat16 !(VP.Vector Word16)
-  | ColFloat !(VP.Vector Float)
-  | ColDouble !(VP.Vector Double)
-  | ColBool !(V.Vector Bool)
-  | ColUtf8 !(V.Vector Text)
-  | ColBinary !(V.Vector ByteString)
-  | ColLargeUtf8 !(V.Vector Text)
-  | ColLargeBinary !(V.Vector ByteString)
-  | ColFixedSizeBinary !Int !(V.Vector ByteString)
-  | ColDate32 !(VP.Vector Int32)
-  | ColDate64 !(VP.Vector Int64)
-  | ColTime32 !(VP.Vector Int32)
-  | ColTime64 !(VP.Vector Int64)
-  | ColTimestamp !(VP.Vector Int64)
-  | ColDuration !(VP.Vector Int64)
-  | ColDecimal128 !Int !Int !(V.Vector ByteString)
-  | ColDecimal256 !Int !Int !(V.Vector ByteString)
-  | -- | Arrow @INTERVAL(YEAR_MONTH)@: 32-bit months (i32 per row).
-    ColIntervalYearMonth !(VP.Vector Int32)
-  | {- | Arrow @INTERVAL(DAY_TIME)@: (days :: i32, ms :: i32) per row,
-    stored as an 8-byte pair in element order.
-    -}
-    ColIntervalDayTime !(VP.Vector Int32) !(VP.Vector Int32)
-  | {- | Arrow @INTERVAL(MONTH_DAY_NANO)@: (months :: i32, days :: i32,
-    nanos :: i64) per row, stored as a 16-byte triple.
-    -}
-    ColIntervalMonthDayNano !(VP.Vector Int32) !(VP.Vector Int32) !(VP.Vector Int64)
-  | ColInt8Maybe !(V.Vector (Maybe Int8))
-  | ColInt16Maybe !(V.Vector (Maybe Int16))
-  | ColInt32Maybe !(V.Vector (Maybe Int32))
-  | ColInt64Maybe !(V.Vector (Maybe Int64))
-  | ColUInt8Maybe !(V.Vector (Maybe Word8))
-  | ColUInt16Maybe !(V.Vector (Maybe Word16))
-  | ColUInt32Maybe !(V.Vector (Maybe Word32))
-  | ColUInt64Maybe !(V.Vector (Maybe Word64))
-  | ColFloat16Maybe !(V.Vector (Maybe Word16))
-  | ColFloatMaybe !(V.Vector (Maybe Float))
-  | ColDoubleMaybe !(V.Vector (Maybe Double))
-  | ColBoolMaybe !(V.Vector (Maybe Bool))
-  | ColUtf8Maybe !(V.Vector (Maybe Text))
-  | ColBinaryMaybe !(V.Vector (Maybe ByteString))
-  | ColLargeUtf8Maybe !(V.Vector (Maybe Text))
-  | ColLargeBinaryMaybe !(V.Vector (Maybe ByteString))
-  | ColFixedSizeBinaryMaybe !Int !(V.Vector (Maybe ByteString))
-  | ColDate32Maybe !(V.Vector (Maybe Int32))
-  | ColDate64Maybe !(V.Vector (Maybe Int64))
-  | ColTime32Maybe !(V.Vector (Maybe Int32))
-  | ColTime64Maybe !(V.Vector (Maybe Int64))
-  | ColTimestampMaybe !(V.Vector (Maybe Int64))
-  | ColDurationMaybe !(V.Vector (Maybe Int64))
-  | -- | Nullable 'ColDecimal128': each present row is the 16-byte little-endian two's-complement value.
-    ColDecimal128Maybe !Int !Int !(V.Vector (Maybe ByteString))
-  | -- | Nullable 'ColDecimal256': each present row is the 32-byte little-endian two's-complement value.
-    ColDecimal256Maybe !Int !Int !(V.Vector (Maybe ByteString))
-  | -- | Nullable 'ColIntervalYearMonth'.
-    ColIntervalYearMonthMaybe !(V.Vector (Maybe Int32))
-  | -- | Nullable 'ColIntervalDayTime': @(days, milliseconds)@ per present row.
-    ColIntervalDayTimeMaybe !(V.Vector (Maybe (Int32, Int32)))
-  | -- | Nullable 'ColIntervalMonthDayNano': @(months, days, nanoseconds)@ per present row.
-    ColIntervalMonthDayNanoMaybe !(V.Vector (Maybe (Int32, Int32, Int64)))
-  | {- | Struct: row count, then the named children in field order. The
-    row count is explicit so a struct with no fields keeps its length.
-    Every child has exactly that many rows: the reader slices longer
-    children to the parent's length, and the writers reject a column
-    whose children disagree with the count.
-    -}
-    ColStruct !Int !(V.Vector (Text, ColumnArray))
-  | -- | Nullable struct: one validity flag per row (the row count), then the children (each with that many rows).
-    ColStructMaybe !(V.Vector Bool) !(V.Vector (Text, ColumnArray))
-  | ColList !(VP.Vector Int32) !ColumnArray
-  | ColListMaybe !(V.Vector Bool) !(VP.Vector Int32) !ColumnArray
-  | {- | Arrow \"LargeList\": semantics identical to 'ColList' but with
-    64-bit offsets. Used when the child array has more than
-    2^31 elements.
-    -}
-    ColLargeList !(VP.Vector Int64) !ColumnArray
-  | ColLargeListMaybe !(V.Vector Bool) !(VP.Vector Int64) !ColumnArray
-  | {- | Fixed-size list: list size @w@, row count @n@, then the child,
-    which holds exactly @n * w@ elements (row @i@ is child elements
-    @[i * w, (i + 1) * w)@). The row count is explicit so
-    @fixed_size_list\<T, 0\>@ keeps its length. The reader slices a
-    longer child to @n * w@; the writers reject a column whose child
-    disagrees with @n * w@.
-    -}
-    ColFixedSizeList !Int !Int !ColumnArray
-  | -- | Nullable fixed-size list: list size, one validity flag per row, then the child (@rows * size@ elements).
-    ColFixedSizeListMaybe !Int !(V.Vector Bool) !ColumnArray
-  | ColMap !(VP.Vector Int32) !ColumnArray !ColumnArray
-  | ColMapMaybe !(V.Vector Bool) !(VP.Vector Int32) !ColumnArray !ColumnArray
-  | {- | Dense union. The first vector holds one /child index/ per row
-    (an index into the children vector, not the raw wire type id):
-    the reader maps the schema's @AUnion _ typeIds@ onto child
-    positions and the writer maps them back, so the column is
-    self-describing without its 'Field'. The second vector is the
-    per-row offset into the selected child.
-    -}
-    ColDenseUnion !(VP.Vector Int8) !(VP.Vector Int32) !(V.Vector ColumnArray)
-  | {- | Sparse union. Per-row child indices (see 'ColDenseUnion'); every
-    child has the same length as the union.
-    -}
-    ColSparseUnion !(VP.Vector Int8) !(V.Vector ColumnArray)
-  | {- | Dictionary-encoded column with non-nullable indices: dictionary
-    id, one index per row into the values column, values column. The
-    reader leaves a typed empty placeholder in the values slot until
-    'resolveDictionaryColumn' fills it from the stream's dictionary
-    batches. Indices are stored as 'Int32' whatever the wire index type
-    (any signed or unsigned 8/16/32/64-bit integer); a wire index that
-    does not fit, or a negative one, is rejected by the reader.
-    -}
-    ColDictionary !Int64 !(VP.Vector Int32) !ColumnArray
-  | {- | Dictionary-encoded column whose field is nullable: a 'Nothing'
-    index is a null row (the index validity bitmap), independent of
-    any nulls inside the values column. The writer emits the validity
-    bitmap from the 'Nothing' positions; the reader produces this
-    constructor whenever the dictionary field is nullable.
-    -}
-    ColDictionaryMaybe !Int64 !(V.Vector (Maybe Int32)) !ColumnArray
-  | {- | Run-End Encoded column (Arrow spec >= 1.3). The first child
-    holds the run-end indices (int16/32/64, ascending, the
-    @i@-th element being the EXCLUSIVE end index of run @i@); the
-    second holds the actual values (any type, may be nullable).
-    The parent has /no/ buffers and /no/ validity bitmap of its
-    own — nulls live in the values child.
-    -}
-    ColRunEndEncoded !ColumnArray !ColumnArray
-  | {- | ListView (Arrow spec >= 1.4). Like 'ColList' but with a
-    separate sizes buffer; offsets and sizes are independent
-    32-bit arrays (so list elements may overlap or be in any
-    order in the child storage).
-    -}
-    ColListView !(VP.Vector Int32) !(VP.Vector Int32) !ColumnArray
-  | ColListViewMaybe !(V.Vector Bool) !(VP.Vector Int32) !(VP.Vector Int32) !ColumnArray
-  | -- | LargeListView: 64-bit offsets and sizes.
-    ColLargeListView !(VP.Vector Int64) !(VP.Vector Int64) !ColumnArray
-  | ColLargeListViewMaybe !(V.Vector Bool) !(VP.Vector Int64) !(VP.Vector Int64) !ColumnArray
-  | {- | Utf8View (Arrow spec >= 1.4). Each row is a 16-byte view
-    struct: a 4-byte length followed by either an inlined
-    payload (length <= 12) or a (4-byte prefix + 4-byte buffer
-    index + 4-byte buffer offset) reference into one of the
-    variadic data buffers. The materialized form here is the
-    decoded UTF-8 strings; the inlined-vs-out-of-line layout
-    is the writer's concern.
-    -}
-    ColUtf8View !(V.Vector Text)
-  | ColUtf8ViewMaybe !(V.Vector (Maybe Text))
-  | {- | BinaryView: same layout as 'ColUtf8View' but no UTF-8
-    validation; raw bytes.
-    -}
-    ColBinaryView !(V.Vector ByteString)
-  | ColBinaryViewMaybe !(V.Vector (Maybe ByteString))
-  | {- | Arrow NULL (@ANull@) column: the spec assigns no
-    buffers and no validity bitmap, just a length where every
-    row is null. Useful for placeholder columns and for the
-    pyarrow-emits-AN-empty-column edge case in test fixtures.
-    -}
-    ColNull !Int
-  deriving stock (Show, Eq, Generic)
-  deriving anyclass (NFData)
-
-
--- | One field node per top-level field (flat schema).
-countFieldNodesFlat :: V.Vector Field -> Int
-countFieldNodesFlat fs = V.length fs
-
-
--- | Buffer count for one flat field (validity bitmap first when nullable).
-buffersPerField :: Field -> Either String Int
-buffersPerField f
-  | not (V.null (fieldChildren f)) = Left "Arrow.Column: nested fieldChildren not supported in flat mode"
-  | otherwise = do
-      nData <- case fieldType f of
-        ANull -> Right (-1) -- ANull has no buffers at all (no validity, no data).
-        AInt {} -> Right 1
-        ABool -> Right 1
-        AFloatingPoint _ -> Right 1
-        AUtf8 -> Right 2
-        ABinary -> Right 2
-        ALargeUtf8 -> Right 2
-        ALargeBinary -> Right 2
-        AFixedSizeBinary _ -> Right 1
-        ADate _ -> Right 1
-        ATime _ _ -> Right 1
-        ATimestamp _ _ -> Right 1
-        ADuration _ -> Right 1
-        ADecimal _ _ -> Right 1
-        ADecimal256 _ _ -> Right 1
-        AInterval _ -> Right 1
-        ty -> Left $ "Arrow.Column: unsupported flat type: " ++ show ty
-      -- ANull contributes 0 buffers regardless of nullability.
-      case fieldType f of
-        ANull -> Right 0
-        _ -> Right $ (if fieldNullable f then 1 else 0) + nData
-
-
--- | Total IPC body buffers required for a flat schema.
-countBuffersFlat :: V.Vector Field -> Either String Int
-countBuffersFlat fs = sum <$> V.mapM buffersPerField fs
-
-
--- | Decode every top-level field in a flat schema from the IPC message body.
-materializeFlatRecordBatch :: Schema -> RecordBatchDef -> ByteString -> Either String (V.Vector ColumnArray)
-materializeFlatRecordBatch schema rb body = do
-  let fields = arrowFields schema
-  nBufsSum <- countBuffersFlat fields
-  let nNodes = countFieldNodesFlat fields
-  if V.length (rbNodes rb) /= nNodes
-    then
-      Left $
-        "Arrow.Column: field node count mismatch (expected "
-          ++ show nNodes
-          ++ ", got "
-          ++ show (V.length (rbNodes rb))
-          ++ ")"
-    else
-      if V.length (rbBuffers rb) /= nBufsSum
-        then
-          Left $
-            "Arrow.Column: buffer count mismatch (expected "
-              ++ show nBufsSum
-              ++ ", got "
-              ++ show (V.length (rbBuffers rb))
-              ++ ")"
-        else do
-          let bodyLen = fromIntegral (BS.length body) :: Int64
-          if not (validateRecordBatchBuffers rb bodyLen)
-            then Left "Arrow.Column: invalid buffer bounds in RecordBatchDef"
-            else do
-              _ <- planNodes fields rb
-              materializeFields (arrowEndianness schema) fields rb body 0 0
-
-
-materializeFields :: Endianness -> V.Vector Field -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (V.Vector ColumnArray)
-materializeFields endian fields rb body !nodeIdx !bufIdx
-  | V.null fields = Right V.empty
-  | otherwise = do
-      (c, n1, b1) <- materializeOne endian (V.head fields) rb body nodeIdx bufIdx
-      rest <- materializeFields endian (V.tail fields) rb body n1 b1
-      Right (V.cons c rest)
-
-
-materializeOne :: Endianness -> Field -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-materializeOne endian f rb body !nodeIdx !bufIdx = do
-  len <- nodeLenAt rb nodeIdx
-  case fieldType f of
-    -- ANull has no buffers and no validity bitmap (per spec): the
-    -- field node's length is the only state. Same shape regardless
-    -- of fieldNullable.
-    ANull -> Right (ColNull len, nodeIdx + 1, bufIdx)
-    AFixedSizeBinary n
-      | n < 0 -> Left ("Arrow.Column: negative fixed-size binary width " ++ show n)
-    _ ->
-         if fieldNullable f
-           then case fieldType f of
-             AInt 8 True -> readInt8ColumnMaybe endian len rb body bufIdx nodeIdx
-             AInt 8 False -> readUInt8ColumnMaybe len rb body bufIdx nodeIdx
-             AInt 16 True -> readInt16ColumnMaybe endian len rb body bufIdx nodeIdx
-             AInt 16 False -> readUInt16ColumnMaybe endian len rb body bufIdx nodeIdx
-             AInt 32 True -> readInt32ColumnMaybe endian len rb body bufIdx nodeIdx
-             AInt 32 False -> readUInt32ColumnMaybe endian len rb body bufIdx nodeIdx
-             AInt 64 True -> readInt64ColumnMaybe endian len rb body bufIdx nodeIdx
-             AInt 64 False -> readUInt64ColumnMaybe endian len rb body bufIdx nodeIdx
-             ABool -> readBoolColumnMaybe len rb body bufIdx nodeIdx
-             AFloatingPoint Half -> readFloat16ColumnMaybe endian len rb body bufIdx nodeIdx
-             AFloatingPoint Single -> readFloatColumnMaybe endian len rb body bufIdx nodeIdx
-             AFloatingPoint DoublePrecision -> readDoubleColumnMaybe endian len rb body bufIdx nodeIdx
-             AUtf8 -> readUtf8ColumnMaybe endian len rb body bufIdx nodeIdx
-             ABinary -> readBinaryColumnMaybe endian len rb body bufIdx nodeIdx
-             ALargeUtf8 -> readLargeUtf8ColumnMaybe endian len rb body bufIdx nodeIdx
-             ALargeBinary -> readLargeBinaryColumnMaybe endian len rb body bufIdx nodeIdx
-             AFixedSizeBinary n -> readFixedSizeBinaryColumnMaybe n len rb body bufIdx nodeIdx
-             ADate DateDay -> readDate32ColumnMaybe endian len rb body bufIdx nodeIdx
-             ADate DateMillisecond -> readDate64ColumnMaybe endian len rb body bufIdx nodeIdx
-             ATime Second _ -> readTime32ColumnMaybe endian len rb body bufIdx nodeIdx
-             ATime Millisecond _ -> readTime32ColumnMaybe endian len rb body bufIdx nodeIdx
-             ATime Microsecond _ -> readTime64ColumnMaybe endian len rb body bufIdx nodeIdx
-             ATime Nanosecond _ -> readTime64ColumnMaybe endian len rb body bufIdx nodeIdx
-             ATimestamp _ _ -> readTimestampColumnMaybe endian len rb body bufIdx nodeIdx
-             ADuration _ -> readDurationColumnMaybe endian len rb body bufIdx nodeIdx
-             ADecimal p s -> readDecimal128ColumnMaybe p s len rb body bufIdx nodeIdx
-             ADecimal256 p s -> readDecimal256ColumnMaybe p s len rb body bufIdx nodeIdx
-             ty -> Left $ "Arrow.Column: unsupported nullable type: " ++ show ty
-           else case fieldType f of
-             AInt 8 True -> readInt8Column endian len rb body bufIdx nodeIdx
-             AInt 8 False -> readUInt8Column len rb body bufIdx nodeIdx
-             AInt 16 True -> readInt16Column endian len rb body bufIdx nodeIdx
-             AInt 16 False -> readUInt16Column endian len rb body bufIdx nodeIdx
-             AInt 32 True -> readInt32Column endian len rb body bufIdx nodeIdx
-             AInt 32 False -> readUInt32Column endian len rb body bufIdx nodeIdx
-             AInt 64 True -> readInt64Column endian len rb body bufIdx nodeIdx
-             AInt 64 False -> readUInt64Column endian len rb body bufIdx nodeIdx
-             ABool -> readBoolColumn len rb body bufIdx nodeIdx
-             AFloatingPoint Half -> readFloat16Column endian len rb body bufIdx nodeIdx
-             AFloatingPoint Single -> readFloatColumn endian len rb body bufIdx nodeIdx
-             AFloatingPoint DoublePrecision -> readDoubleColumn endian len rb body bufIdx nodeIdx
-             AUtf8 -> readUtf8Column endian len rb body bufIdx nodeIdx
-             ABinary -> readBinaryColumn endian len rb body bufIdx nodeIdx
-             ALargeUtf8 -> readLargeUtf8Column endian len rb body bufIdx nodeIdx
-             ALargeBinary -> readLargeBinaryColumn endian len rb body bufIdx nodeIdx
-             AFixedSizeBinary n -> readFixedSizeBinaryColumn n len rb body bufIdx nodeIdx
-             ADate DateDay -> readDate32Column endian len rb body bufIdx nodeIdx
-             ADate DateMillisecond -> readDate64Column endian len rb body bufIdx nodeIdx
-             ATime Second _ -> readTime32Column endian len rb body bufIdx nodeIdx
-             ATime Millisecond _ -> readTime32Column endian len rb body bufIdx nodeIdx
-             ATime Microsecond _ -> readTime64Column endian len rb body bufIdx nodeIdx
-             ATime Nanosecond _ -> readTime64Column endian len rb body bufIdx nodeIdx
-             ATimestamp _ _ -> readTimestampColumn endian len rb body bufIdx nodeIdx
-             ADuration _ -> readDurationColumn endian len rb body bufIdx nodeIdx
-             ADecimal p s -> readDecimal128Column p s len rb body bufIdx nodeIdx
-             ADecimal256 p s -> readDecimal256Column p s len rb body bufIdx nodeIdx
-             ty -> Left $ "Arrow.Column: unsupported type: " ++ show ty
-
-
--- * Non-nullable column readers
-
-
-readInt8Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readInt8Column _endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBufAt rb body bufIdx
-  col <- readInts8 len valsBs
-  Right (ColInt8 col, nodeIdx + 1, bufIdx + 1)
-
-
-readInt16Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readInt16Column endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBufAt rb body bufIdx
-  col <- readInts16 endian len valsBs
-  Right (ColInt16 col, nodeIdx + 1, bufIdx + 1)
-
-
-readInt32Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readInt32Column endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBufAt rb body bufIdx
-  col <- readInts32 endian len valsBs
-  Right (ColInt32 col, nodeIdx + 1, bufIdx + 1)
-
-
-readInt64Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readInt64Column endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBufAt rb body bufIdx
-  col <- readInts64 endian len valsBs
-  Right (ColInt64 col, nodeIdx + 1, bufIdx + 1)
-
-
-readUInt8Column :: Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readUInt8Column len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBufAt rb body bufIdx
-  if BS.length valsBs < len
-    then Left "Arrow.Column: uint8 buffer too small"
-    else Right (ColUInt8 (VP.generate len $ \i -> BSU.unsafeIndex valsBs i), nodeIdx + 1, bufIdx + 1)
-
-
-readUInt16Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readUInt16Column endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBufAt rb body bufIdx
-  if BS.length valsBs < len * 2
-    then Left "Arrow.Column: uint16 buffer too small"
-    else Right (ColUInt16 (VP.generate len $ \i -> readWord16 endian valsBs (i * 2)), nodeIdx + 1, bufIdx + 1)
-
-
-readUInt32Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readUInt32Column endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBufAt rb body bufIdx
-  if BS.length valsBs < len * 4
-    then Left "Arrow.Column: uint32 buffer too small"
-    else Right (ColUInt32 (VP.generate len $ \i -> readWord32 endian valsBs (i * 4)), nodeIdx + 1, bufIdx + 1)
-
-
-readUInt64Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readUInt64Column endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBufAt rb body bufIdx
-  if BS.length valsBs < len * 8
-    then Left "Arrow.Column: uint64 buffer too small"
-    else Right (ColUInt64 (VP.generate len $ \i -> readWord64 endian valsBs (i * 8)), nodeIdx + 1, bufIdx + 1)
-
-
-readFloat16Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readFloat16Column endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBufAt rb body bufIdx
-  if BS.length valsBs < len * 2
-    then Left "Arrow.Column: float16 buffer too small"
-    else Right (ColFloat16 (VP.generate len $ \i -> readWord16 endian valsBs (i * 2)), nodeIdx + 1, bufIdx + 1)
-
-
-readBoolColumn :: Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readBoolColumn len rb body !bufIdx !nodeIdx = do
-  dataBs <- sliceBufAt rb body bufIdx
-  bs <- unpackBits len dataBs
-  Right (ColBool bs, nodeIdx + 1, bufIdx + 1)
-
-
-readFloatColumn :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readFloatColumn endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBufAt rb body bufIdx
-  if BS.length valsBs < len * 4
-    then Left "Arrow.Column: float buffer too small"
-    else Right (ColFloat (VP.generate len $ \i -> castWord32ToFloat (readWord32 endian valsBs (i * 4))), nodeIdx + 1, bufIdx + 1)
-
-
-readDoubleColumn :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readDoubleColumn endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBufAt rb body bufIdx
-  if BS.length valsBs < len * 8
-    then Left "Arrow.Column: double buffer too small"
-    else Right (ColDouble (VP.generate len $ \i -> castWord64ToDouble (readWord64 endian valsBs (i * 8))), nodeIdx + 1, bufIdx + 1)
-
-
-{- | Offsets at @bufIdx@ (@len + 1@ entries of @offWidth@ bytes; may be
-empty when @len == 0@) and data at @bufIdx + 1@. Returns a row
-reader that range-checks @[offsets[i], offsets[i + 1])@ against the
-data buffer before slicing it.
--}
-varLengthRows
-  :: String
-  -> Int
-  -> (ByteString -> Int -> Int)
-  -> Int
-  -> RecordBatchDef
-  -> ByteString
-  -> Int
-  -> Either String (Int -> Either String ByteString)
-varLengthRows what offWidth offAt len rb body !bufIdx = do
-  offBs <- sliceBufAt rb body bufIdx
-  datBs <- sliceBufAt rb body (bufIdx + 1)
-  if len > 0 && BS.length offBs < (len + 1) * offWidth
-    then Left ("Arrow.Column: " ++ what ++ " offsets buffer too small")
-    else Right $ \i ->
-      let !start = offAt offBs i
-          !end = offAt offBs (i + 1)
-      in if start < 0 || end < start || end > BS.length datBs
-           then Left ("Arrow.Column: invalid " ++ what ++ " slice at row " ++ show i)
-           else Right $! BSU.unsafeTake (end - start) (BSU.unsafeDrop start datBs)
-
-
-readUtf8Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readUtf8Column endian len rb body !bufIdx !nodeIdx = do
-  row <- varLengthRows "UTF-8" 4 (offset32At endian) len rb body bufIdx
-  strs <- V.generateM len (\i -> row i >>= utf8Row "UTF-8")
-  Right (ColUtf8 strs, nodeIdx + 1, bufIdx + 2)
-
-
-readBinaryColumn :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readBinaryColumn endian len rb body !bufIdx !nodeIdx = do
-  row <- varLengthRows "binary" 4 (offset32At endian) len rb body bufIdx
-  bins <- V.generateM len row
-  Right (ColBinary bins, nodeIdx + 1, bufIdx + 2)
-
-
-readLargeUtf8Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readLargeUtf8Column endian len rb body !bufIdx !nodeIdx = do
-  row <- varLengthRows "large UTF-8" 8 (offset64At endian) len rb body bufIdx
-  strs <- V.generateM len (\i -> row i >>= utf8Row "large UTF-8")
-  Right (ColLargeUtf8 strs, nodeIdx + 1, bufIdx + 2)
-
-
-readLargeBinaryColumn :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readLargeBinaryColumn endian len rb body !bufIdx !nodeIdx = do
-  row <- varLengthRows "large binary" 8 (offset64At endian) len rb body bufIdx
-  bins <- V.generateM len row
-  Right (ColLargeBinary bins, nodeIdx + 1, bufIdx + 2)
-
-
-readFixedSizeBinaryColumn :: Int -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readFixedSizeBinaryColumn byteWidth len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBufAt rb body bufIdx
-  if BS.length valsBs < len * byteWidth
-    then Left "Arrow.Column: fixed-size binary buffer too small"
-    else
-      Right
-        ( ColFixedSizeBinary
-            byteWidth
-            ( V.generate len $ \i ->
-                BS.take byteWidth (BS.drop (i * byteWidth) valsBs)
-            )
-        , nodeIdx + 1
-        , bufIdx + 1
-        )
-
-
-readDate32Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readDate32Column endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBufAt rb body bufIdx
-  if BS.length valsBs < len * 4
-    then Left "Arrow.Column: date32 buffer too small"
-    else
-      Right
-        ( ColDate32
-            ( VP.generate len $ \i ->
-                fromIntegral (readWord32 endian valsBs (i * 4)) :: Int32
-            )
-        , nodeIdx + 1
-        , bufIdx + 1
-        )
-
-
-readDate64Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readDate64Column endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBufAt rb body bufIdx
-  if BS.length valsBs < len * 8
-    then Left "Arrow.Column: date64 buffer too small"
-    else
-      Right
-        ( ColDate64
-            ( VP.generate len $ \i ->
-                fromIntegral (readWord64 endian valsBs (i * 8)) :: Int64
-            )
-        , nodeIdx + 1
-        , bufIdx + 1
-        )
-
-
-readTime32Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readTime32Column endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBufAt rb body bufIdx
-  if BS.length valsBs < len * 4
-    then Left "Arrow.Column: time32 buffer too small"
-    else
-      Right
-        ( ColTime32
-            ( VP.generate len $ \i ->
-                fromIntegral (readWord32 endian valsBs (i * 4)) :: Int32
-            )
-        , nodeIdx + 1
-        , bufIdx + 1
-        )
-
-
-readTime64Column :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readTime64Column endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBufAt rb body bufIdx
-  if BS.length valsBs < len * 8
-    then Left "Arrow.Column: time64 buffer too small"
-    else
-      Right
-        ( ColTime64
-            ( VP.generate len $ \i ->
-                fromIntegral (readWord64 endian valsBs (i * 8)) :: Int64
-            )
-        , nodeIdx + 1
-        , bufIdx + 1
-        )
-
-
-readTimestampColumn :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readTimestampColumn endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBufAt rb body bufIdx
-  if BS.length valsBs < len * 8
-    then Left "Arrow.Column: timestamp buffer too small"
-    else
-      Right
-        ( ColTimestamp
-            ( VP.generate len $ \i ->
-                fromIntegral (readWord64 endian valsBs (i * 8)) :: Int64
-            )
-        , nodeIdx + 1
-        , bufIdx + 1
-        )
-
-
-readDurationColumn :: Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readDurationColumn endian len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBufAt rb body bufIdx
-  if BS.length valsBs < len * 8
-    then Left "Arrow.Column: duration buffer too small"
-    else
-      Right
-        ( ColDuration
-            ( VP.generate len $ \i ->
-                fromIntegral (readWord64 endian valsBs (i * 8)) :: Int64
-            )
-        , nodeIdx + 1
-        , bufIdx + 1
-        )
-
-
-readDecimal128Column :: Int -> Int -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readDecimal128Column precision scale len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBufAt rb body bufIdx
-  if BS.length valsBs < len * 16
-    then Left "Arrow.Column: decimal128 buffer too small"
-    else
-      Right
-        ( ColDecimal128
-            precision
-            scale
-            ( V.generate len $ \i ->
-                BS.take 16 (BS.drop (i * 16) valsBs)
-            )
-        , nodeIdx + 1
-        , bufIdx + 1
-        )
-
-
-readDecimal256Column :: Int -> Int -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readDecimal256Column precision scale len rb body !bufIdx !nodeIdx = do
-  valsBs <- sliceBufAt rb body bufIdx
-  if BS.length valsBs < len * 32
-    then Left "Arrow.Column: decimal256 buffer too small"
-    else
-      Right
-        ( ColDecimal256
-            precision
-            scale
-            ( V.generate len $ \i ->
-                BS.take 32 (BS.drop (i * 32) valsBs)
-            )
-        , nodeIdx + 1
-        , bufIdx + 1
-        )
-
-
--- * Nullable column readers (validity bitmap + values)
-
-
-{- | Validity bitmap at @bufIdx@ plus a values buffer at @bufIdx + 1@
-holding @width@ bytes per row. The values buffer is size-checked
-before the bitmap is expanded, so a wire length the body cannot back
-never reaches an allocation. @get valsBs i@ reads row @i@ and may
-assume @valsBs@ holds at least @len * width@ bytes.
--}
-readNullable
-  :: String
-  -> Int
-  -> Int
-  -> RecordBatchDef
-  -> ByteString
-  -> Int
-  -> (ByteString -> Int -> a)
-  -> Either String (V.Vector (Maybe a))
-readNullable what width len rb body !bufIdx get = do
-  validBs <- sliceBufAt rb body bufIdx
-  valsBs <- sliceBufAt rb body (bufIdx + 1)
-  if BS.length valsBs < len * width
-    then Left ("Arrow.Column: " ++ what ++ " values buffer too small")
-    else do
-      validFlags <- unpackValidity len validBs
-      Right $! V.generate len $ \i ->
-        if V.unsafeIndex validFlags i then Just (get valsBs i) else Nothing
-{-# INLINE readNullable #-}
-
-
-type NullableReader = Endianness -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-
-
--- | Build a fixed-width nullable reader from a row decoder.
-fixedNullable :: String -> Int -> (V.Vector (Maybe a) -> ColumnArray) -> (Endianness -> ByteString -> Int -> a) -> NullableReader
-fixedNullable what width con get endian len rb body !bufIdx !nodeIdx = do
-  xs <- readNullable what width len rb body bufIdx (get endian)
-  Right (con xs, nodeIdx + 1, bufIdx + 2)
-{-# INLINE fixedNullable #-}
-
-
-readInt8ColumnMaybe :: NullableReader
-readInt8ColumnMaybe =
-  fixedNullable "int8" 1 ColInt8Maybe $ \_ bs i -> fromIntegral (BSU.unsafeIndex bs i) :: Int8
-
-
-readInt16ColumnMaybe :: NullableReader
-readInt16ColumnMaybe =
-  fixedNullable "int16" 2 ColInt16Maybe $ \e bs i -> fromIntegral (readWord16 e bs (i * 2))
-
-
-readInt32ColumnMaybe :: NullableReader
-readInt32ColumnMaybe =
-  fixedNullable "int32" 4 ColInt32Maybe $ \e bs i -> int32FromWord (readWord32 e bs (i * 4))
-
-
-readInt64ColumnMaybe :: NullableReader
-readInt64ColumnMaybe =
-  fixedNullable "int64" 8 ColInt64Maybe $ \e bs i -> int64FromWord (readWord64 e bs (i * 8))
-
-
-readUInt8ColumnMaybe :: Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readUInt8ColumnMaybe =
-  fixedNullable "uint8" 1 ColUInt8Maybe (\_ bs i -> BSU.unsafeIndex bs i) Little
-
-
-readUInt16ColumnMaybe :: NullableReader
-readUInt16ColumnMaybe =
-  fixedNullable "uint16" 2 ColUInt16Maybe $ \e bs i -> readWord16 e bs (i * 2)
-
-
-readUInt32ColumnMaybe :: NullableReader
-readUInt32ColumnMaybe =
-  fixedNullable "uint32" 4 ColUInt32Maybe $ \e bs i -> readWord32 e bs (i * 4)
-
-
-readUInt64ColumnMaybe :: NullableReader
-readUInt64ColumnMaybe =
-  fixedNullable "uint64" 8 ColUInt64Maybe $ \e bs i -> readWord64 e bs (i * 8)
-
-
-readFloat16ColumnMaybe :: NullableReader
-readFloat16ColumnMaybe =
-  fixedNullable "float16" 2 ColFloat16Maybe $ \e bs i -> readWord16 e bs (i * 2)
-
-
-readBoolColumnMaybe :: Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readBoolColumnMaybe len rb body !bufIdx !nodeIdx = do
-  validBs <- sliceBufAt rb body bufIdx
-  dataBs <- sliceBufAt rb body (bufIdx + 1)
-  valFlags <- unpackBits len dataBs
-  validFlags <- unpackValidity len validBs
-  let !xs = V.zipWith (\ok v -> if ok then Just v else Nothing) validFlags valFlags
-  Right (ColBoolMaybe xs, nodeIdx + 1, bufIdx + 2)
-
-
-readFloatColumnMaybe :: NullableReader
-readFloatColumnMaybe =
-  fixedNullable "float" 4 ColFloatMaybe $ \e bs i -> castWord32ToFloat (readWord32 e bs (i * 4))
-
-
-readDoubleColumnMaybe :: NullableReader
-readDoubleColumnMaybe =
-  fixedNullable "double" 8 ColDoubleMaybe $ \e bs i -> castWord64ToDouble (readWord64 e bs (i * 8))
-
-
-{- | Validity at @bufIdx@, then the 'varLengthRows' layout (offsets,
-data) at @bufIdx + 1@. Only non-null rows are sliced; @conv@ turns a
-slice into a row value.
--}
-readVarNullable
-  :: String
-  -> Int
-  -> (ByteString -> Int -> Int)
-  -> (ByteString -> Either String a)
-  -> Int
-  -> RecordBatchDef
-  -> ByteString
-  -> Int
-  -> Either String (V.Vector (Maybe a))
-readVarNullable what offWidth offAt conv len rb body !bufIdx = do
-  validBs <- sliceBufAt rb body bufIdx
-  row <- varLengthRows what offWidth offAt len rb body (bufIdx + 1)
-  validFlags <- unpackValidity len validBs
-  V.generateM len $ \i ->
-    if V.unsafeIndex validFlags i then Just <$> (row i >>= conv) else Right Nothing
-
-
-offset32At :: Endianness -> ByteString -> Int -> Int
-offset32At endian bs i = fromIntegral (int32FromWord (readWord32 endian bs (i * 4)))
-{-# INLINE offset32At #-}
-
-
--- | 64-bit offsets above 'maxBound :: Int' wrap negative; callers reject them via their @start < 0@ checks.
-offset64At :: Endianness -> ByteString -> Int -> Int
-offset64At endian bs i = fromIntegral (readWord64 endian bs (i * 8))
-{-# INLINE offset64At #-}
-
-
-utf8Row :: String -> ByteString -> Either String Text
-utf8Row what bs = case TE.decodeUtf8' bs of
-  Right t -> Right t
-  Left _ -> Left ("Arrow.Column: invalid " ++ what ++ " bytes")
-
-
-readUtf8ColumnMaybe :: NullableReader
-readUtf8ColumnMaybe endian len rb body !bufIdx !nodeIdx = do
-  xs <- readVarNullable "UTF-8" 4 (offset32At endian) (utf8Row "UTF-8") len rb body bufIdx
-  Right (ColUtf8Maybe xs, nodeIdx + 1, bufIdx + 3)
-
-
-readBinaryColumnMaybe :: NullableReader
-readBinaryColumnMaybe endian len rb body !bufIdx !nodeIdx = do
-  xs <- readVarNullable "binary" 4 (offset32At endian) Right len rb body bufIdx
-  Right (ColBinaryMaybe xs, nodeIdx + 1, bufIdx + 3)
-
-
-readLargeUtf8ColumnMaybe :: NullableReader
-readLargeUtf8ColumnMaybe endian len rb body !bufIdx !nodeIdx = do
-  xs <- readVarNullable "large UTF-8" 8 (offset64At endian) (utf8Row "large UTF-8") len rb body bufIdx
-  Right (ColLargeUtf8Maybe xs, nodeIdx + 1, bufIdx + 3)
-
-
-readLargeBinaryColumnMaybe :: NullableReader
-readLargeBinaryColumnMaybe endian len rb body !bufIdx !nodeIdx = do
-  xs <- readVarNullable "large binary" 8 (offset64At endian) Right len rb body bufIdx
-  Right (ColLargeBinaryMaybe xs, nodeIdx + 1, bufIdx + 3)
-
-
-readFixedSizeBinaryColumnMaybe :: Int -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readFixedSizeBinaryColumnMaybe byteWidth len rb body !bufIdx !nodeIdx = do
-  xs <- readNullable "fixed-size binary" byteWidth len rb body bufIdx $ \bs i ->
-    BSU.unsafeTake byteWidth (BSU.unsafeDrop (i * byteWidth) bs)
-  Right (ColFixedSizeBinaryMaybe byteWidth xs, nodeIdx + 1, bufIdx + 2)
-
-
-readDate32ColumnMaybe :: NullableReader
-readDate32ColumnMaybe =
-  fixedNullable "date32" 4 ColDate32Maybe $ \e bs i -> int32FromWord (readWord32 e bs (i * 4))
-
-
-readDate64ColumnMaybe :: NullableReader
-readDate64ColumnMaybe =
-  fixedNullable "date64" 8 ColDate64Maybe $ \e bs i -> int64FromWord (readWord64 e bs (i * 8))
-
-
-readTime32ColumnMaybe :: NullableReader
-readTime32ColumnMaybe =
-  fixedNullable "time32" 4 ColTime32Maybe $ \e bs i -> int32FromWord (readWord32 e bs (i * 4))
-
-
-readTime64ColumnMaybe :: NullableReader
-readTime64ColumnMaybe =
-  fixedNullable "time64" 8 ColTime64Maybe $ \e bs i -> int64FromWord (readWord64 e bs (i * 8))
-
-
-readTimestampColumnMaybe :: NullableReader
-readTimestampColumnMaybe =
-  fixedNullable "timestamp" 8 ColTimestampMaybe $ \e bs i -> int64FromWord (readWord64 e bs (i * 8))
-
-
-readDurationColumnMaybe :: NullableReader
-readDurationColumnMaybe =
-  fixedNullable "duration" 8 ColDurationMaybe $ \e bs i -> int64FromWord (readWord64 e bs (i * 8))
-
-
-readDecimal128ColumnMaybe :: Int -> Int -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readDecimal128ColumnMaybe precision scale len rb body !bufIdx !nodeIdx = do
-  vals <- readNullable "decimal128" 16 len rb body bufIdx (fixedBytesAt 16)
-  Right (ColDecimal128Maybe precision scale vals, nodeIdx + 1, bufIdx + 2)
-
-
-readDecimal256ColumnMaybe :: Int -> Int -> Int -> RecordBatchDef -> ByteString -> Int -> Int -> Either String (ColumnArray, Int, Int)
-readDecimal256ColumnMaybe precision scale len rb body !bufIdx !nodeIdx = do
-  vals <- readNullable "decimal256" 32 len rb body bufIdx (fixedBytesAt 32)
-  Right (ColDecimal256Maybe precision scale vals, nodeIdx + 1, bufIdx + 2)
-
-
--- | Row @i@ of a buffer holding @width@ bytes per row (caller checked the size).
-fixedBytesAt :: Int -> ByteString -> Int -> ByteString
-fixedBytesAt width valsBs i = BSU.unsafeTake width (BSU.unsafeDrop (i * width) valsBs)
-
-
--- * Low-level primitives
-
-
-{- | Checked lookup of the @i@-th body buffer descriptor. Record batch
-headers come off the wire, so a schema/batch mismatch or a corrupt
-header must surface as 'Left', never as an out-of-bounds read.
--}
-bufAt :: RecordBatchDef -> Int -> Either String Buffer
-bufAt rb i = case rbBuffers rb V.!? i of
-  Just b -> Right b
-  Nothing ->
-    Left $
-      "Arrow.Column: record batch has "
-        ++ show (V.length (rbBuffers rb))
-        ++ " buffers, schema needs buffer #"
-        ++ show i
-{-# INLINE bufAt #-}
-
-
--- | Checked lookup of the @i@-th field node; see 'bufAt'.
-nodeAt :: RecordBatchDef -> Int -> Either String FieldNode
-nodeAt rb i = case rbNodes rb V.!? i of
-  Just n -> Right n
-  Nothing ->
-    Left $
-      "Arrow.Column: record batch has "
-        ++ show (V.length (rbNodes rb))
-        ++ " field nodes, schema needs node #"
-        ++ show i
-{-# INLINE nodeAt #-}
-
-
--- | Slice a buffer descriptor out of the body; offsets are wire values.
-sliceBuffer :: ByteString -> Buffer -> Either String ByteString
-sliceBuffer body buf =
-  let !o = fromIntegral (bufOffset buf) :: Int
-      !l = fromIntegral (bufLength buf) :: Int
-      !n = BS.length body
-  in -- Compare against @n - l@ rather than @o + l@ so huge wire values
-     -- cannot overflow past the check.
-     if o < 0 || l < 0 || l > n || o > n - l
-       then Left "Arrow.Column: buffer slice out of range"
-       else Right $! BSU.unsafeTake l (BSU.unsafeDrop o body)
-
-
--- | 'bufAt' followed by 'sliceBuffer'.
-sliceBufAt :: RecordBatchDef -> ByteString -> Int -> Either String ByteString
-sliceBufAt rb body i = bufAt rb i >>= sliceBuffer body
-{-# INLINE sliceBufAt #-}
-
-
-{- | Upper bound on any array length taken from a field node. Far above
-any batch that fits in memory, and small enough that @len * 32@ and
-@(len + 1) * 8@ (the largest per-row byte counts the readers compute)
-cannot overflow 'Int'.
--}
-maxArrayLength :: Int
-maxArrayLength = 1 `shiftL` 40
-
-
-{- | Checked length of the @i@-th field node. Wire lengths are 'Int64';
-negative or absurd values are rejected here so every reader can trust
-@0 <= len <= 'maxArrayLength'@ when sizing buffers.
--}
-nodeLenAt :: RecordBatchDef -> Int -> Either String Int
-nodeLenAt rb i = do
-  node <- nodeAt rb i
-  let !l = fnLength node
-  if l < 0 || l > fromIntegral maxArrayLength
-    then Left ("Arrow.Column: field node #" ++ show i ++ " has invalid length " ++ show l)
-    else Right (fromIntegral l)
-{-# INLINE nodeLenAt #-}
-
-
-{- | Decode a validity bitmap. Per spec an empty buffer means "all
-valid" (producers may omit the bitmap when @null_count == 0@);
-otherwise it must hold at least @ceil(n / 8)@ bytes.
--}
-unpackValidity :: Int -> ByteString -> Either String (V.Vector Bool)
-unpackValidity n bs
-  | BS.null bs = Right $! V.replicate n True
-  | otherwise = unpackBits n bs
-
-
--- | Decode a packed LSB-first bit buffer holding exactly @n@ bits of data.
-unpackBits :: Int -> ByteString -> Either String (V.Vector Bool)
-unpackBits n bs
-  | BS.length bs < (n + 7) `quot` 8 =
-      Left
-        ( "Arrow.Column: bitmap has "
-            ++ show (BS.length bs)
-            ++ " bytes, "
-            ++ show n
-            ++ " rows need "
-            ++ show ((n + 7) `quot` 8)
-        )
-  | otherwise = Right $! unpackBitsLsbUnsafe n bs
-
-
-readInts8 :: Int -> ByteString -> Either String (VP.Vector Int8)
-readInts8 len bs
-  | BS.length bs < len = Left "Arrow.Column: int8 buffer too small"
-  | otherwise =
-      Right $
-        VP.generate len $ \i ->
-          fromIntegral (BSU.unsafeIndex bs i) :: Int8
-
-
-readInts16 :: Endianness -> Int -> ByteString -> Either String (VP.Vector Int16)
-readInts16 endian len bs
-  | BS.length bs < len * 2 = Left "Arrow.Column: int16 buffer too small"
-  | otherwise =
-      Right $
-        VP.generate len $ \i ->
-          let v = readWord16 endian bs (i * 2)
-          in fromIntegral v
-
-
-readInts32 :: Endianness -> Int -> ByteString -> Either String (VP.Vector Int32)
-readInts32 endian len bs
-  | BS.length bs < len * 4 = Left "Arrow.Column: int32 buffer too small"
-  | otherwise =
-      Right $
-        VP.generate len $ \i ->
-          let v = readWord32 endian bs (i * 4)
-          in int32FromWord v
-
-
-readInts64 :: Endianness -> Int -> ByteString -> Either String (VP.Vector Int64)
-readInts64 endian len bs
-  | BS.length bs < len * 8 = Left "Arrow.Column: int64 buffer too small"
-  | otherwise =
-      Right $
-        VP.generate len $ \i ->
-          let v = readWord64 endian bs (i * 8)
-          in int64FromWord v
-
-
-int32FromWord :: Word32 -> Int32
-int32FromWord w = fromIntegral w
-
-
-int64FromWord :: Word64 -> Int64
-int64FromWord w = fromIntegral w
-
-
-readWord16 :: Endianness -> ByteString -> Int -> Word16
-readWord16 Little = readLE16
-readWord16 Big = readBE16
-
-
-readWord32 :: Endianness -> ByteString -> Int -> Word32
-readWord32 Little = readLE32
-readWord32 Big = readBE32
-
-
-readWord64 :: Endianness -> ByteString -> Int -> Word64
-readWord64 Little = readLE64
-readWord64 Big = readBE64
-
-
-readLE16 :: ByteString -> Int -> Word16
-readLE16 bs off =
-  let b0 = fromIntegral (BSU.unsafeIndex bs off) :: Word16
-      b1 = fromIntegral (BSU.unsafeIndex bs (off + 1)) :: Word16
-  in b0 .|. (b1 `shiftL` 8)
-
-
-readBE16 :: ByteString -> Int -> Word16
-readBE16 bs off =
-  let b0 = fromIntegral (BSU.unsafeIndex bs off) :: Word16
-      b1 = fromIntegral (BSU.unsafeIndex bs (off + 1)) :: Word16
-  in (b0 `shiftL` 8) .|. b1
-
-
-readLE32 :: ByteString -> Int -> Word32
-readLE32 bs off =
-  let b0 = fromIntegral (BSU.unsafeIndex bs off) :: Word32
-      b1 = fromIntegral (BSU.unsafeIndex bs (off + 1)) :: Word32
-      b2 = fromIntegral (BSU.unsafeIndex bs (off + 2)) :: Word32
-      b3 = fromIntegral (BSU.unsafeIndex bs (off + 3)) :: Word32
-  in b0 .|. (b1 `shiftL` 8) .|. (b2 `shiftL` 16) .|. (b3 `shiftL` 24)
-
-
-readBE32 :: ByteString -> Int -> Word32
-readBE32 bs off =
-  let b0 = fromIntegral (BSU.unsafeIndex bs off) :: Word32
-      b1 = fromIntegral (BSU.unsafeIndex bs (off + 1)) :: Word32
-      b2 = fromIntegral (BSU.unsafeIndex bs (off + 2)) :: Word32
-      b3 = fromIntegral (BSU.unsafeIndex bs (off + 3)) :: Word32
-  in (b0 `shiftL` 24) .|. (b1 `shiftL` 16) .|. (b2 `shiftL` 8) .|. b3
-
-
-readLE64 :: ByteString -> Int -> Word64
-readLE64 bs off =
-  let rd i = fromIntegral (BSU.unsafeIndex bs (off + i)) :: Word64
-  in rd 0
-       .|. (rd 1 `shiftL` 8)
-       .|. (rd 2 `shiftL` 16)
-       .|. (rd 3 `shiftL` 24)
-       .|. (rd 4 `shiftL` 32)
-       .|. (rd 5 `shiftL` 40)
-       .|. (rd 6 `shiftL` 48)
-       .|. (rd 7 `shiftL` 56)
-
-
-readBE64 :: ByteString -> Int -> Word64
-readBE64 bs off =
-  let rd i = fromIntegral (BSU.unsafeIndex bs (off + i)) :: Word64
-  in (rd 0 `shiftL` 56)
-       .|. (rd 1 `shiftL` 48)
-       .|. (rd 2 `shiftL` 40)
-       .|. (rd 3 `shiftL` 32)
-       .|. (rd 4 `shiftL` 24)
-       .|. (rd 5 `shiftL` 16)
-       .|. (rd 6 `shiftL` 8)
-       .|. rd 7
-
-
--- | Row count for a column array.
+import Foreign.ForeignPtr (castForeignPtr)
+import GHC.ForeignPtr (unsafeWithForeignPtr)
+import Foreign.Marshal.Utils (copyBytes, fillBytes)
+import Foreign.Ptr (Ptr, castPtr, plusPtr)
+import Foreign.Storable (Storable (..))
+import System.IO.Unsafe (unsafeDupablePerformIO)
+
+
+-- ============================================================
+-- Patterns
+-- ============================================================
+
+-- | An Arrow NULL column of the given length (no buffers; every row null).
+pattern ColNull :: Int -> ColumnArray
+pattern ColNull n = I.ColNull n
+
+
+-- | Any fixed-width column, with its element tag.
+pattern ColPrim :: () => forall a. PrimType a -> Maybe Validity -> VS.Vector a -> ColumnArray
+pattern ColPrim t v xs <- I.ColPrim t v xs
+
+
+pattern ColInt8 :: Maybe Validity -> VS.Vector Int8 -> ColumnArray
+pattern ColInt8 v xs <- I.ColPrim PInt8 v xs
+
+
+pattern ColInt16 :: Maybe Validity -> VS.Vector Int16 -> ColumnArray
+pattern ColInt16 v xs <- I.ColPrim PInt16 v xs
+
+
+pattern ColInt32 :: Maybe Validity -> VS.Vector Int32 -> ColumnArray
+pattern ColInt32 v xs <- I.ColPrim PInt32 v xs
+
+
+pattern ColInt64 :: Maybe Validity -> VS.Vector Int64 -> ColumnArray
+pattern ColInt64 v xs <- I.ColPrim PInt64 v xs
+
+
+pattern ColUInt8 :: Maybe Validity -> VS.Vector Word8 -> ColumnArray
+pattern ColUInt8 v xs <- I.ColPrim PUInt8 v xs
+
+
+pattern ColUInt16 :: Maybe Validity -> VS.Vector Word16 -> ColumnArray
+pattern ColUInt16 v xs <- I.ColPrim PUInt16 v xs
+
+
+pattern ColUInt32 :: Maybe Validity -> VS.Vector Word32 -> ColumnArray
+pattern ColUInt32 v xs <- I.ColPrim PUInt32 v xs
+
+
+pattern ColUInt64 :: Maybe Validity -> VS.Vector Word64 -> ColumnArray
+pattern ColUInt64 v xs <- I.ColPrim PUInt64 v xs
+
+
+pattern ColFloat16 :: Maybe Validity -> VS.Vector Float16 -> ColumnArray
+pattern ColFloat16 v xs <- I.ColPrim PFloat16 v xs
+
+
+pattern ColFloat :: Maybe Validity -> VS.Vector Float -> ColumnArray
+pattern ColFloat v xs <- I.ColPrim PFloat v xs
+
+
+pattern ColDouble :: Maybe Validity -> VS.Vector Double -> ColumnArray
+pattern ColDouble v xs <- I.ColPrim PDouble v xs
+
+
+pattern ColDate32 :: Maybe Validity -> VS.Vector Int32 -> ColumnArray
+pattern ColDate32 v xs <- I.ColPrim PDate32 v xs
+
+
+pattern ColDate64 :: Maybe Validity -> VS.Vector Int64 -> ColumnArray
+pattern ColDate64 v xs <- I.ColPrim PDate64 v xs
+
+
+pattern ColTime32 :: Maybe Validity -> VS.Vector Int32 -> ColumnArray
+pattern ColTime32 v xs <- I.ColPrim PTime32 v xs
+
+
+pattern ColTime64 :: Maybe Validity -> VS.Vector Int64 -> ColumnArray
+pattern ColTime64 v xs <- I.ColPrim PTime64 v xs
+
+
+pattern ColTimestamp :: Maybe Validity -> VS.Vector Int64 -> ColumnArray
+pattern ColTimestamp v xs <- I.ColPrim PTimestamp v xs
+
+
+pattern ColDuration :: Maybe Validity -> VS.Vector Int64 -> ColumnArray
+pattern ColDuration v xs <- I.ColPrim PDuration v xs
+
+
+pattern ColIntervalYearMonth :: Maybe Validity -> VS.Vector Int32 -> ColumnArray
+pattern ColIntervalYearMonth v xs <- I.ColPrim PIntervalYearMonth v xs
+
+
+pattern ColIntervalDayTime :: Maybe Validity -> VS.Vector IntervalDayTime -> ColumnArray
+pattern ColIntervalDayTime v xs <- I.ColPrim PIntervalDayTime v xs
+
+
+pattern ColIntervalMonthDayNano :: Maybe Validity -> VS.Vector IntervalMonthDayNano -> ColumnArray
+pattern ColIntervalMonthDayNano v xs <- I.ColPrim PIntervalMonthDayNano v xs
+
+
+-- | Precision, scale, validity, values.
+pattern ColDecimal128 :: Int -> Int -> Maybe Validity -> VS.Vector Decimal128 -> ColumnArray
+pattern ColDecimal128 p s v xs <- I.ColPrim (PDecimal128 p s) v xs
+
+
+pattern ColDecimal256 :: Int -> Int -> Maybe Validity -> VS.Vector Decimal256 -> ColumnArray
+pattern ColDecimal256 p s v xs <- I.ColPrim (PDecimal256 p s) v xs
+
+
+-- | Validity, values bitmap.
+pattern ColBool :: Maybe Validity -> Bitmap -> ColumnArray
+pattern ColBool v b <- I.ColBool v b
+
+
+-- | Validity, offsets (rows + 1, need not start at 0), UTF-8 data.
+pattern ColUtf8 :: Maybe Validity -> VS.Vector Int32 -> ByteString -> ColumnArray
+pattern ColUtf8 v o d <- I.ColUtf8 v o d
+
+
+pattern ColBinary :: Maybe Validity -> VS.Vector Int32 -> ByteString -> ColumnArray
+pattern ColBinary v o d <- I.ColBinary v o d
+
+
+pattern ColLargeUtf8 :: Maybe Validity -> VS.Vector Int64 -> ByteString -> ColumnArray
+pattern ColLargeUtf8 v o d <- I.ColLargeUtf8 v o d
+
+
+pattern ColLargeBinary :: Maybe Validity -> VS.Vector Int64 -> ByteString -> ColumnArray
+pattern ColLargeBinary v o d <- I.ColLargeBinary v o d
+
+
+-- | Width, rows, validity, data (row @i@ is bytes @[i * width, (i + 1) * width)@).
+pattern ColFixedSizeBinary :: Int -> Int -> Maybe Validity -> ByteString -> ColumnArray
+pattern ColFixedSizeBinary w n v d <- I.ColFixedSizeBinary w n v d
+
+
+-- | Validity, 16-byte views, variadic data buffers.
+pattern ColUtf8View :: Maybe Validity -> ByteString -> V.Vector ByteString -> ColumnArray
+pattern ColUtf8View v views bufs <- I.ColUtf8View v views bufs
+
+
+pattern ColBinaryView :: Maybe Validity -> ByteString -> V.Vector ByteString -> ColumnArray
+pattern ColBinaryView v views bufs <- I.ColBinaryView v views bufs
+
+
+-- | Rows, validity, named children (each has at least rows rows).
+pattern ColStruct :: Int -> Maybe Validity -> V.Vector (Text, ColumnArray) -> ColumnArray
+pattern ColStruct n v cs <- I.ColStruct n v cs
+
+
+pattern ColList :: Maybe Validity -> VS.Vector Int32 -> ColumnArray -> ColumnArray
+pattern ColList v o c <- I.ColList v o c
+
+
+pattern ColLargeList :: Maybe Validity -> VS.Vector Int64 -> ColumnArray -> ColumnArray
+pattern ColLargeList v o c <- I.ColLargeList v o c
+
+
+-- | Validity, offsets, sizes, child.
+pattern ColListView :: Maybe Validity -> VS.Vector Int32 -> VS.Vector Int32 -> ColumnArray -> ColumnArray
+pattern ColListView v o s c <- I.ColListView v o s c
+
+
+pattern ColLargeListView :: Maybe Validity -> VS.Vector Int64 -> VS.Vector Int64 -> ColumnArray -> ColumnArray
+pattern ColLargeListView v o s c <- I.ColLargeListView v o s c
+
+
+-- | List size, rows, validity, child.
+pattern ColFixedSizeList :: Int -> Int -> Maybe Validity -> ColumnArray -> ColumnArray
+pattern ColFixedSizeList w n v c <- I.ColFixedSizeList w n v c
+
+
+-- | Validity, offsets, keys, values.
+pattern ColMap :: Maybe Validity -> VS.Vector Int32 -> ColumnArray -> ColumnArray -> ColumnArray
+pattern ColMap v o k x <- I.ColMap v o k x
+
+
+-- | Child index per row (not the schema type id), offset per row, children.
+pattern ColDenseUnion :: VS.Vector Int8 -> VS.Vector Int32 -> V.Vector ColumnArray -> ColumnArray
+pattern ColDenseUnion t o cs <- I.ColDenseUnion t o cs
+
+
+pattern ColSparseUnion :: VS.Vector Int8 -> V.Vector ColumnArray -> ColumnArray
+pattern ColSparseUnion t cs <- I.ColSparseUnion t cs
+
+
+-- | Dictionary id, indices (an integer column at wire width, carrying the row validity), values.
+pattern ColDictionary :: Int64 -> ColumnArray -> ColumnArray -> ColumnArray
+pattern ColDictionary did ix vals <- I.ColDictionary did ix vals
+
+
+-- | Logical offset, logical length, run ends, values.
+pattern ColRunEndEncoded :: Int -> Int -> ColumnArray -> ColumnArray -> ColumnArray
+pattern ColRunEndEncoded off len re vals <- I.ColRunEndEncoded off len re vals
+
+
+{-# COMPLETE
+  ColNull
+  , ColPrim
+  , ColBool
+  , ColUtf8
+  , ColBinary
+  , ColLargeUtf8
+  , ColLargeBinary
+  , ColFixedSizeBinary
+  , ColUtf8View
+  , ColBinaryView
+  , ColStruct
+  , ColList
+  , ColLargeList
+  , ColListView
+  , ColLargeListView
+  , ColFixedSizeList
+  , ColMap
+  , ColDenseUnion
+  , ColSparseUnion
+  , ColDictionary
+  , ColRunEndEncoded
+  #-}
+
+
+{-# COMPLETE
+  ColNull
+  , ColInt8
+  , ColInt16
+  , ColInt32
+  , ColInt64
+  , ColUInt8
+  , ColUInt16
+  , ColUInt32
+  , ColUInt64
+  , ColFloat16
+  , ColFloat
+  , ColDouble
+  , ColDate32
+  , ColDate64
+  , ColTime32
+  , ColTime64
+  , ColTimestamp
+  , ColDuration
+  , ColIntervalYearMonth
+  , ColIntervalDayTime
+  , ColIntervalMonthDayNano
+  , ColDecimal128
+  , ColDecimal256
+  , ColBool
+  , ColUtf8
+  , ColBinary
+  , ColLargeUtf8
+  , ColLargeBinary
+  , ColFixedSizeBinary
+  , ColUtf8View
+  , ColBinaryView
+  , ColStruct
+  , ColList
+  , ColLargeList
+  , ColListView
+  , ColLargeListView
+  , ColFixedSizeList
+  , ColMap
+  , ColDenseUnion
+  , ColSparseUnion
+  , ColDictionary
+  , ColRunEndEncoded
+  #-}
+
+
+-- ============================================================
+-- Shape
+-- ============================================================
+
+-- | Row count. O(1).
 columnLength :: ColumnArray -> Int
 columnLength = \case
-  ColInt8 v -> VP.length v
-  ColInt16 v -> VP.length v
-  ColInt32 v -> VP.length v
-  ColInt64 v -> VP.length v
-  ColUInt8 v -> VP.length v
-  ColUInt16 v -> VP.length v
-  ColUInt32 v -> VP.length v
-  ColUInt64 v -> VP.length v
-  ColFloat16 v -> VP.length v
-  ColFloat v -> VP.length v
-  ColDouble v -> VP.length v
-  ColBool v -> V.length v
-  ColUtf8 v -> V.length v
-  ColBinary v -> V.length v
-  ColLargeUtf8 v -> V.length v
-  ColLargeBinary v -> V.length v
-  ColFixedSizeBinary _ v -> V.length v
-  ColDate32 v -> VP.length v
-  ColDate64 v -> VP.length v
-  ColTime32 v -> VP.length v
-  ColTime64 v -> VP.length v
-  ColTimestamp v -> VP.length v
-  ColDuration v -> VP.length v
-  ColDecimal128 _ _ v -> V.length v
-  ColDecimal256 _ _ v -> V.length v
-  ColInt8Maybe v -> V.length v
-  ColInt16Maybe v -> V.length v
-  ColInt32Maybe v -> V.length v
-  ColInt64Maybe v -> V.length v
-  ColUInt8Maybe v -> V.length v
-  ColUInt16Maybe v -> V.length v
-  ColUInt32Maybe v -> V.length v
-  ColUInt64Maybe v -> V.length v
-  ColFloat16Maybe v -> V.length v
-  ColFloatMaybe v -> V.length v
-  ColDoubleMaybe v -> V.length v
-  ColBoolMaybe v -> V.length v
-  ColUtf8Maybe v -> V.length v
-  ColBinaryMaybe v -> V.length v
-  ColLargeUtf8Maybe v -> V.length v
-  ColLargeBinaryMaybe v -> V.length v
-  ColFixedSizeBinaryMaybe _ v -> V.length v
-  ColDate32Maybe v -> V.length v
-  ColDate64Maybe v -> V.length v
-  ColTime32Maybe v -> V.length v
-  ColTime64Maybe v -> V.length v
-  ColTimestampMaybe v -> V.length v
-  ColDurationMaybe v -> V.length v
-  ColDecimal128Maybe _ _ v -> V.length v
-  ColDecimal256Maybe _ _ v -> V.length v
-  ColIntervalYearMonthMaybe v -> V.length v
-  ColIntervalDayTimeMaybe v -> V.length v
-  ColIntervalMonthDayNanoMaybe v -> V.length v
-  ColStruct n _ -> n
-  ColStructMaybe v _ -> V.length v
-  ColList offsets _ -> max 0 (VP.length offsets - 1)
-  ColListMaybe v _ _ -> V.length v
-  ColLargeList offsets _ -> max 0 (VP.length offsets - 1)
-  ColLargeListMaybe v _ _ -> V.length v
-  ColIntervalYearMonth v -> VP.length v
-  ColIntervalDayTime d _ -> VP.length d
-  ColIntervalMonthDayNano m _ _ -> VP.length m
-  ColFixedSizeList _ n _ -> n
-  ColFixedSizeListMaybe _ v _ -> V.length v
-  ColMap offsets _ _ -> max 0 (VP.length offsets - 1)
-  ColMapMaybe v _ _ _ -> V.length v
-  ColDenseUnion typeIds _ _ -> VP.length typeIds
-  ColSparseUnion typeIds _ -> VP.length typeIds
-  ColDictionary _ indices _ -> VP.length indices
-  ColDictionaryMaybe _ indices _ -> V.length indices
-  ColRunEndEncoded runEnds _ ->
-    -- The logical length is the LAST run-end value (exclusive).
-    case runEnds of
-      ColInt16 v -> if VP.null v then 0 else fromIntegral (VP.last v)
-      ColInt32 v -> if VP.null v then 0 else fromIntegral (VP.last v)
-      ColInt64 v -> if VP.null v then 0 else fromIntegral (VP.last v)
-      _ -> 0
-  ColListView offsets _ _ -> VP.length offsets
-  ColListViewMaybe v _ _ _ -> V.length v
-  ColLargeListView offsets _ _ -> VP.length offsets
-  ColLargeListViewMaybe v _ _ _ -> V.length v
-  ColUtf8View v -> V.length v
-  ColUtf8ViewMaybe v -> V.length v
-  ColBinaryView v -> V.length v
-  ColBinaryViewMaybe v -> V.length v
-  ColNull n -> n
+  I.ColNull n -> n
+  I.ColPrim t _ xs -> withPrim t (VS.length xs)
+  I.ColBool _ b -> bitmapLength b
+  I.ColUtf8 _ o _ -> offsetRows o
+  I.ColBinary _ o _ -> offsetRows o
+  I.ColLargeUtf8 _ o _ -> offsetRows o
+  I.ColLargeBinary _ o _ -> offsetRows o
+  I.ColFixedSizeBinary _ n _ _ -> n
+  I.ColUtf8View _ views _ -> BS.length views `quot` 16
+  I.ColBinaryView _ views _ -> BS.length views `quot` 16
+  I.ColStruct n _ _ -> n
+  I.ColList _ o _ -> offsetRows o
+  I.ColLargeList _ o _ -> offsetRows o
+  I.ColListView _ o _ _ -> VS.length o
+  I.ColLargeListView _ o _ _ -> VS.length o
+  I.ColFixedSizeList _ n _ _ -> n
+  I.ColMap _ o _ _ -> offsetRows o
+  I.ColDenseUnion t _ _ -> VS.length t
+  I.ColSparseUnion t _ -> VS.length t
+  I.ColDictionary _ ix _ -> columnLength ix
+  I.ColRunEndEncoded _ n _ _ -> n
 
 
-{- | Materialize a record batch with support for nested types.
-Walks the schema tree in preorder DFS, consuming field nodes and buffers.
+offsetRows :: Storable o => VS.Vector o -> Int
+offsetRows o = max 0 (VS.length o - 1)
+{-# INLINE offsetRows #-}
 
-Every wire-derived count, length, offset and index is checked before
-it is used, so a corrupt or hostile batch yields 'Left', never an
-out-of-bounds read or an allocation the body cannot back.
+
+{- | Null rows of the array itself, O(1). A 'ColNull' is all null;
+unions and run-end-encoded columns have no validity of their own (0).
 -}
-materializeRecordBatch :: Schema -> RecordBatchDef -> ByteString -> Either String (V.Vector ColumnArray)
-materializeRecordBatch schema rb body = do
-  let bodyLen = fromIntegral (BS.length body) :: Int64
-  if not (validateRecordBatchBuffers rb bodyLen)
-    then Left "Arrow.Column: invalid buffer bounds in RecordBatchDef"
-    else do
-      views <- planNodes (arrowFields schema) rb
-      let !ctx = Ctx (arrowEndianness schema) views rb body
-      (cols, _, _) <- materializeFieldsN ctx (arrowFields schema) 0 0
-      Right cols
+nullCount :: ColumnArray -> Int
+nullCount = \case
+  I.ColNull n -> n
+  c -> maybe 0 validityNullCount (validity c)
 
 
--- | Read-only state shared by the nested materializers.
-data Ctx = Ctx
-  { ctxEndian :: !Endianness
-  , ctxViews :: !(VP.Vector Int)
-  -- ^ Per field node (preorder): the variadic data-buffer count of a
-  -- view column, @-1@ for every other node.
-  , ctxRb :: !RecordBatchDef
-  , ctxBody :: !ByteString
-  }
+-- | The array's own validity ('Nothing' when it has no nulls or no validity slot).
+validity :: ColumnArray -> Maybe Validity
+validity = \case
+  I.ColNull _ -> Nothing
+  I.ColPrim _ v _ -> v
+  I.ColBool v _ -> v
+  I.ColUtf8 v _ _ -> v
+  I.ColBinary v _ _ -> v
+  I.ColLargeUtf8 v _ _ -> v
+  I.ColLargeBinary v _ _ -> v
+  I.ColFixedSizeBinary _ _ v _ -> v
+  I.ColUtf8View v _ _ -> v
+  I.ColBinaryView v _ _ -> v
+  I.ColStruct _ v _ -> v
+  I.ColList v _ _ -> v
+  I.ColLargeList v _ _ -> v
+  I.ColListView v _ _ _ -> v
+  I.ColLargeListView v _ _ _ -> v
+  I.ColFixedSizeList _ _ v _ -> v
+  I.ColMap v _ _ _ -> v
+  I.ColDenseUnion {} -> Nothing
+  I.ColSparseUnion {} -> Nothing
+  I.ColDictionary _ ix _ -> validity ix
+  I.ColRunEndEncoded {} -> Nothing
 
 
-{- | Rows a batch may materialize without any body bytes backing them
-(see 'planNodes'). Generous for real data, small enough that a hostile
-length cannot turn a few header bytes into gigabytes of vectors.
--}
-maxUnbackedRows :: Int
-maxUnbackedRows = 1 `shiftL` 20
-
-
-{- | Walk the schema in node order before materializing anything:
-
-* every field node the schema needs must exist and carry a valid
-  length ('nodeLenAt');
-* every view column must have its entry in @rbVariadicBufferCounts@,
-  and that count must fit in the buffer list;
-* the rows of arrays whose length no buffer pays for (nullable
-  structs or fixed-size lists over null-typed or run-end-encoded
-  children, zero-width fixed-size binary) are summed and capped by
-  'maxUnbackedRows'. Every other array's length is checked against
-  the size of one of its own buffers by its reader.
-
-Returns the per-node variadic-count table used by 'materializeViewCol'.
--}
-planNodes :: V.Vector Field -> RecordBatchDef -> Either String (VP.Vector Int)
-planNodes topFields rb = do
-  (!nodes, _, !unbacked, acc) <- goFields topFields (0, 0, 0, [])
-  if unbacked > maxUnbackedRows
-    then
-      Left
-        ( "Arrow.Column: record batch claims "
-            ++ show unbacked
-            ++ " rows with no buffer backing them (limit "
-            ++ show maxUnbackedRows
-            ++ ")"
-        )
-    else Right $! VP.fromListN nodes (reverse acc)
-  where
-    !nBufs = V.length (rbBuffers rb)
-
-    goFields :: V.Vector Field -> (Int, Int, Int, [Int]) -> Either String (Int, Int, Int, [Int])
-    goFields fs st = V.foldM' goField st fs
-
-    goField (!ni, !vi, !ub, acc) f = do
-      len <- nodeLenAt rb ni
-      let !ub' = if allocatesUnbacked f then ub + len else ub
-      if ub' > maxUnbackedRows
-        then Right (ni + 1, vi, ub', acc)
-        else case fieldDictionary f of
-          -- The wire payload of a dictionary-encoded field is a single
-          -- index array: one node, no children.
-          Just _ -> Right (ni + 1, vi, ub', (-1) : acc)
-          Nothing -> do
-            (vc, vi') <- case fieldType f of
-              AUtf8View -> viewCount vi
-              ABinaryView -> viewCount vi
-              _ -> Right (-1, vi)
-            goFields (fieldChildren f) (ni + 1, vi', ub', vc : acc)
-
-    viewCount vi = case rbVariadicBufferCounts rb V.!? vi of
-      Nothing -> Left "Arrow.Column: view column has no variadicBufferCounts entry"
-      Just c
-        | c < 0 || c > fromIntegral nBufs ->
-            Left ("Arrow.Column: invalid variadic buffer count " ++ show c)
-        | otherwise -> Right (fromIntegral c, vi + 1)
-
-
--- | Does materializing this field allocate rows that no buffer backs?
-allocatesUnbacked :: Field -> Bool
-allocatesUnbacked f
-  | Just _ <- fieldDictionary f = False
-  | otherwise = case fieldType f of
-      AStruct -> fieldNullable f && not (lengthBacked f)
-      AFixedSizeList _ -> fieldNullable f && not (lengthBacked f)
-      AFixedSizeBinary 0 -> True
-      _ -> False
-
-
-{- | Is the length of an array of this field paid for by bytes in some
-buffer of the array or its descendants? Null arrays have no buffers,
-and a run-end-encoded array's logical length can be any value its last
-run end names, so neither backs a parent's validity bitmap.
--}
-lengthBacked :: Field -> Bool
-lengthBacked f
-  | Just _ <- fieldDictionary f = True
-  | otherwise = case fieldType f of
-      ANull -> False
-      ARunEndEncoded -> False
-      AStruct -> V.any lengthBacked (fieldChildren f)
-      AFixedSizeList n -> n > 0 && V.any lengthBacked (fieldChildren f)
-      AFixedSizeBinary w -> w > 0
-      _ -> True
-
-
-materializeFieldsN :: Ctx -> V.Vector Field -> Int -> Int -> Either String (V.Vector ColumnArray, Int, Int)
-materializeFieldsN ctx fields !nodeIdx0 !bufIdx0 = go 0 nodeIdx0 bufIdx0 []
-  where
-    go !i !ni !bi acc
-      | i >= V.length fields = Right (V.fromListN i (reverse acc), ni, bi)
-      | otherwise = do
-          (col, ni', bi') <- materializeNode ctx (V.unsafeIndex fields i) ni bi
-          go (i + 1) ni' bi' (col : acc)
-
-
-materializeNode :: Ctx -> Field -> Int -> Int -> Either String (ColumnArray, Int, Int)
-materializeNode ctx f !nodeIdx !bufIdx =
-  case fieldDictionary f of
-    -- Dictionary-encoded column: the on-wire payload is the index
-    -- column (type given by 'deIndexType'); the values are
-    -- supplied separately via a 'DictBatch'. We materialise the
-    -- indices here and stash a placeholder value column; resolving
-    -- against a real dictionary is the caller's job (typically via
-    -- 'resolveDictionaryColumn').
-    Just (DictionaryEncoding did indexTy _) ->
-      materializeDictIndices endian did indexTy f rb body nodeIdx bufIdx
-    Nothing -> case fieldType f of
-      AStruct -> materializeStruct ctx f nodeIdx bufIdx
-      AList -> materializeListCol ctx False f nodeIdx bufIdx
-      ALargeList -> materializeListCol ctx True f nodeIdx bufIdx
-      AMap _ -> materializeMapCol ctx f nodeIdx bufIdx
-      AUnion mode ids -> materializeUnionCol ctx mode ids f nodeIdx bufIdx
-      AFixedSizeList n -> materializeFixedSizeListCol ctx n f nodeIdx bufIdx
-      AInterval u -> materializeIntervalCol endian u f rb body nodeIdx bufIdx
-      ARunEndEncoded -> materializeRunEndEncodedCol ctx f nodeIdx bufIdx
-      AListView -> materializeListViewCol ctx False f nodeIdx bufIdx
-      ALargeListView -> materializeListViewCol ctx True f nodeIdx bufIdx
-      AUtf8View -> materializeViewCol ctx True f nodeIdx bufIdx
-      ABinaryView -> materializeViewCol ctx False f nodeIdx bufIdx
-      _ -> materializeOne endian f rb body nodeIdx bufIdx
-  where
-    !endian = ctxEndian ctx
-    !rb = ctxRb ctx
-    !body = ctxBody ctx
-
-
-{- | Materialize the /indices/ portion of a dictionary-encoded
-column. The values referenced by these indices live in a
-separate 'DictionaryBatch' message keyed by @did@; combine via
-'resolveDictionaryColumn' once both parts are in hand.
-
-Any signed or unsigned 8/16/32/64-bit index type is accepted. A
-nullable field yields 'ColDictionaryMaybe' (null index rows are
-'Nothing'); a non-nullable one yields 'ColDictionary'. Negative
-indices and indices above @maxBound :: Int32@ are rejected.
--}
-materializeDictIndices
-  :: Endianness
-  -> Int64
-  -> ArrowType
-  -> Field
-  -> RecordBatchDef
-  -> ByteString
-  -> Int
-  -> Int
-  -> Either String (ColumnArray, Int, Int)
-materializeDictIndices endian did indexTy f rb body !nodeIdx !bufIdx = do
-  case indexTy of
-    AInt w _ | w == 8 || w == 16 || w == 32 || w == 64 -> Right ()
-    _ -> Left ("Arrow.Column: dictionary index type must be an 8/16/32/64-bit integer, got " ++ show indexTy)
-  let !indexField =
-        f
-          { fieldType = indexTy
-          , fieldDictionary = Nothing
-          , fieldChildren = V.empty
-          }
-  (idxCol, !ni', !bi') <- materializeOne endian indexField rb body nodeIdx bufIdx
-  placeholder <- placeholderColumn f
-  col <-
-    if fieldNullable f
-      then (\ix -> ColDictionaryMaybe did ix placeholder) <$> toNullableInt32Indices idxCol
-      else (\ix -> ColDictionary did ix placeholder) <$> toInt32Indices idxCol
-  Right (col, ni', bi')
-
-
-{- | Convert a non-nullable integer column of any width and
-signedness into the @VP.Vector Int32@ used by 'ColDictionary'.
--}
-toInt32Indices :: ColumnArray -> Either String (VP.Vector Int32)
-toInt32Indices = \case
-  ColInt8 v -> checked (VP.all (>= 0) v) (VP.map fromIntegral v)
-  ColInt16 v -> checked (VP.all (>= 0) v) (VP.map fromIntegral v)
-  ColInt32 v -> checked (VP.all (>= 0) v) v
-  ColInt64 v -> checked (VP.all (\x -> x >= 0 && x <= int32Max) v) (VP.map fromIntegral v)
-  ColUInt8 v -> Right (VP.map fromIntegral v)
-  ColUInt16 v -> Right (VP.map fromIntegral v)
-  ColUInt32 v -> checked (VP.all (<= fromIntegral int32Max) v) (VP.map fromIntegral v)
-  ColUInt64 v -> checked (VP.all (<= fromIntegral int32Max) v) (VP.map fromIntegral v)
-  c -> Left ("Arrow.Column: dictionary index column must be a non-nullable integer column, got " ++ columnTag c)
-  where
-    checked ok ix = if ok then Right ix else Left dictIndexRangeError
-
-
--- | Nullable counterpart of 'toInt32Indices', for 'ColDictionaryMaybe'.
-toNullableInt32Indices :: ColumnArray -> Either String (V.Vector (Maybe Int32))
-toNullableInt32Indices = \case
-  ColInt8Maybe v -> checked (>= 0) v
-  ColInt16Maybe v -> checked (>= 0) v
-  ColInt32Maybe v -> checked (>= 0) v
-  ColInt64Maybe v -> checked (\x -> x >= 0 && x <= int32Max) v
-  ColUInt8Maybe v -> checked (const True) v
-  ColUInt16Maybe v -> checked (const True) v
-  ColUInt32Maybe v -> checked (<= fromIntegral int32Max) v
-  ColUInt64Maybe v -> checked (<= fromIntegral int32Max) v
-  c -> Left ("Arrow.Column: dictionary index column must be a nullable integer column, got " ++ columnTag c)
-  where
-    checked :: Integral a => (a -> Bool) -> V.Vector (Maybe a) -> Either String (V.Vector (Maybe Int32))
-    checked ok v =
-      if V.all (maybe True ok) v
-        then Right (V.map (fmap fromIntegral) v)
-        else Left dictIndexRangeError
-
-
-int32Max :: Int64
-int32Max = fromIntegral (maxBound :: Int32)
-
-
-dictIndexRangeError :: String
-dictIndexRangeError = "Arrow.Column: dictionary index is negative or does not fit in Int32"
-
-
--- | Constructor name of a column, for error messages.
+-- | The constructor name (@ColInt64@, @ColUtf8@, ...), for messages.
 columnTag :: ColumnArray -> String
-columnTag = takeWhile (/= ' ') . show
+columnTag = \case
+  I.ColNull _ -> "ColNull"
+  I.ColPrim t _ _ -> "Col" ++ primTypeName t
+  I.ColBool {} -> "ColBool"
+  I.ColUtf8 {} -> "ColUtf8"
+  I.ColBinary {} -> "ColBinary"
+  I.ColLargeUtf8 {} -> "ColLargeUtf8"
+  I.ColLargeBinary {} -> "ColLargeBinary"
+  I.ColFixedSizeBinary {} -> "ColFixedSizeBinary"
+  I.ColUtf8View {} -> "ColUtf8View"
+  I.ColBinaryView {} -> "ColBinaryView"
+  I.ColStruct {} -> "ColStruct"
+  I.ColList {} -> "ColList"
+  I.ColLargeList {} -> "ColLargeList"
+  I.ColListView {} -> "ColListView"
+  I.ColLargeListView {} -> "ColLargeListView"
+  I.ColFixedSizeList {} -> "ColFixedSizeList"
+  I.ColMap {} -> "ColMap"
+  I.ColDenseUnion {} -> "ColDenseUnion"
+  I.ColSparseUnion {} -> "ColSparseUnion"
+  I.ColDictionary {} -> "ColDictionary"
+  I.ColRunEndEncoded {} -> "ColRunEndEncoded"
 
 
-{- | Replace the placeholder values column inside every
-'ColDictionary' / 'ColDictionaryMaybe' (at any nesting depth) with
-the dictionary registered for its id.
-
-Fails when a column references a dictionary id the lookup does not
-know (unless the column has no non-null index, in which case the
-typed placeholder is kept) and when any non-null index is outside
-the dictionary. The values the lookup returns are used as they are:
-dictionaries nested inside dictionary values must already be resolved
-in them ("Arrow.Stream" resolves each dictionary batch against the
-dictionaries in force when it arrives).
+{- | Whether the array has a validity bitmap slot (everything except
+'ColNull', unions and run-end-encoded columns).
 -}
-resolveDictionaryColumn
-  :: (Int64 -> Maybe ColumnArray)
-  -- ^ dictionary-id to values column
-  -> ColumnArray
-  -> Either String ColumnArray
-resolveDictionaryColumn lookupVals = go
+hasValiditySlot :: ColumnArray -> Bool
+hasValiditySlot = \case
+  I.ColNull _ -> False
+  I.ColDenseUnion {} -> False
+  I.ColSparseUnion {} -> False
+  I.ColRunEndEncoded {} -> False
+  _ -> True
+
+
+-- ============================================================
+-- Typed views
+-- ============================================================
+
+-- | A fixed-width column's validity and values.
+data PrimArray a = PrimArray !(Maybe Validity) !(VS.Vector a)
+
+
+-- | O(1). 'Nothing' unless the column has this tag (decimal precision and scale are not compared).
+asPrim :: PrimType a -> ColumnArray -> Maybe (PrimArray a)
+asPrim t = \case
+  I.ColPrim t' v xs | Just Refl <- samePrimTag t t' -> Just (PrimArray v xs)
+  _ -> Nothing
+{-# INLINE asPrim #-}
+
+
+primArrayLength :: Storable a => PrimArray a -> Int
+primArrayLength (PrimArray _ xs) = VS.length xs
+{-# INLINE primArrayLength #-}
+
+
+-- | Row @i@: 'Nothing' when null or out of range. A bit test and a load.
+primAt :: Storable a => PrimArray a -> Int -> Maybe a
+primAt (PrimArray v xs) i
+  | i < 0 || i >= VS.length xs = Nothing
+  | unsafeIsValidAt v i = Just $! VS.unsafeIndex xs i
+  | otherwise = Nothing
+{-# INLINE primAt #-}
+
+
+-- | 'primAt' without the range check.
+unsafePrimAt :: Storable a => PrimArray a -> Int -> Maybe a
+unsafePrimAt (PrimArray v xs) i
+  | unsafeIsValidAt v i = Just $! VS.unsafeIndex xs i
+  | otherwise = Nothing
+{-# INLINE unsafePrimAt #-}
+
+
+-- | The value slot of row @i@, ignoring validity (arrow-rs @value()@); errors out of range.
+primValueAt :: Storable a => PrimArray a -> Int -> a
+primValueAt (PrimArray _ xs) i = xs VS.! i
+{-# INLINE primValueAt #-}
+
+
+unsafePrimValueAt :: Storable a => PrimArray a -> Int -> a
+unsafePrimValueAt (PrimArray _ xs) i = VS.unsafeIndex xs i
+{-# INLINE unsafePrimValueAt #-}
+
+
+-- | O(1) alias of the values; null slots hold unspecified values.
+toStorable :: PrimArray a -> VS.Vector a
+toStorable (PrimArray _ xs) = xs
+
+
+-- | O(n), boxes every row.
+toMaybeVector :: Storable a => PrimArray a -> V.Vector (Maybe a)
+toMaybeVector arr = generateStrict (primArrayLength arr) (unsafePrimAt arr)
+{-# INLINE toMaybeVector #-}
+
+
+-- | A var-length column's validity, offsets and data.
+data BytesArray o = BytesArray !(Maybe Validity) !(VS.Vector o) !ByteString
+
+
+{- | A utf8 column: its data is valid UTF-8 at every row boundary, so
+'textAt' copies without re-validating. Only 'asUtf8' and
+'asLargeUtf8' produce one.
+-}
+newtype Utf8Array o = Utf8Array (BytesArray o)
+
+
+asUtf8 :: ColumnArray -> Maybe (Utf8Array Int32)
+asUtf8 = \case
+  I.ColUtf8 v o d -> Just (Utf8Array (BytesArray v o d))
+  _ -> Nothing
+{-# INLINE asUtf8 #-}
+
+
+asLargeUtf8 :: ColumnArray -> Maybe (Utf8Array Int64)
+asLargeUtf8 = \case
+  I.ColLargeUtf8 v o d -> Just (Utf8Array (BytesArray v o d))
+  _ -> Nothing
+{-# INLINE asLargeUtf8 #-}
+
+
+-- | Binary columns, and utf8 columns viewed as bytes.
+asBinary :: ColumnArray -> Maybe (BytesArray Int32)
+asBinary = \case
+  I.ColBinary v o d -> Just (BytesArray v o d)
+  I.ColUtf8 v o d -> Just (BytesArray v o d)
+  _ -> Nothing
+{-# INLINE asBinary #-}
+
+
+asLargeBinary :: ColumnArray -> Maybe (BytesArray Int64)
+asLargeBinary = \case
+  I.ColLargeBinary v o d -> Just (BytesArray v o d)
+  I.ColLargeUtf8 v o d -> Just (BytesArray v o d)
+  _ -> Nothing
+{-# INLINE asLargeBinary #-}
+
+
+bytesArrayLength :: Storable o => BytesArray o -> Int
+bytesArrayLength (BytesArray _ o _) = offsetRows o
+{-# INLINE bytesArrayLength #-}
+
+
+-- | Row @i@ as a zero-copy slice; 'Nothing' when null or out of range.
+bytesAt :: (Storable o, Integral o) => BytesArray o -> Int -> Maybe ByteString
+bytesAt arr@(BytesArray _ o _) i
+  | i < 0 || i >= VS.length o - 1 = Nothing
+  | otherwise = unsafeBytesAt arr i
+{-# INLINE bytesAt #-}
+
+
+unsafeBytesAt :: (Storable o, Integral o) => BytesArray o -> Int -> Maybe ByteString
+unsafeBytesAt (BytesArray v o d) i
+  | unsafeIsValidAt v i =
+      let !s = fromIntegral (VS.unsafeIndex o i)
+          !e = fromIntegral (VS.unsafeIndex o (i + 1))
+      in Just (BSU.unsafeTake (e - s) (BSU.unsafeDrop s d))
+  | otherwise = Nothing
+{-# INLINE unsafeBytesAt #-}
+
+
+-- | Row @i@ copied into a fresh 'Text' (one copy, no re-validation).
+textAt :: (Storable o, Integral o) => Utf8Array o -> Int -> Maybe Text
+textAt (Utf8Array arr) i = utf8ToText <$> bytesAt arr i
+{-# INLINE textAt #-}
+
+
+unsafeTextAt :: (Storable o, Integral o) => Utf8Array o -> Int -> Maybe Text
+unsafeTextAt (Utf8Array arr) i = utf8ToText <$> unsafeBytesAt arr i
+{-# INLINE unsafeTextAt #-}
+
+
+-- | Copy bytes known to be valid UTF-8 into a 'Text'.
+utf8ToText :: ByteString -> Text
+utf8ToText bs
+  | BS.null bs = T.empty
+  | otherwise = unsafeDupablePerformIO $ withBytesPtr bs $ \p -> TF.fromPtr p (fromIntegral (BS.length bs))
+
+
+data BoolArray = BoolArray !(Maybe Validity) !Bitmap
+
+
+asBool :: ColumnArray -> Maybe BoolArray
+asBool = \case
+  I.ColBool v b -> Just (BoolArray v b)
+  _ -> Nothing
+{-# INLINE asBool #-}
+
+
+boolArrayAt :: BoolArray -> Int -> Maybe Bool
+boolArrayAt (BoolArray v b) i
+  | i < 0 || i >= bitmapLength b = Nothing
+  | unsafeIsValidAt v i = if unsafeBitAt b i then justTrue else justFalse
+  | otherwise = Nothing
+{-# INLINE boolArrayAt #-}
+
+
+boolAt :: ColumnArray -> Int -> Maybe Bool
+boolAt c i = asBool c >>= \arr -> boolArrayAt arr i
+{-# INLINE boolAt #-}
+
+
+{- | Row @i@ of any byte-like column (utf8, binary, their large and
+view variants, fixed-size binary) as a zero-copy slice.
+-}
+anyBytesAt :: ColumnArray -> Int -> Maybe ByteString
+anyBytesAt c i
+  | i < 0 || i >= columnLength c || not (unsafeIsValidAt (validity c) i) = Nothing
+  | otherwise = case c of
+      I.ColUtf8 _ o d -> Just $! varSlice o d i
+      I.ColBinary _ o d -> Just $! varSlice o d i
+      I.ColLargeUtf8 _ o d -> Just $! varSlice o d i
+      I.ColLargeBinary _ o d -> Just $! varSlice o d i
+      I.ColUtf8View _ views bufs -> Just $! viewAt views bufs i
+      I.ColBinaryView _ views bufs -> Just $! viewAt views bufs i
+      I.ColFixedSizeBinary w _ _ d -> Just $! BSU.unsafeTake w (BSU.unsafeDrop (i * w) d)
+      _ -> Nothing
+
+
+-- | Row @i@ of a utf8, large utf8 or utf8 view column, copied into a 'Text'.
+anyTextAt :: ColumnArray -> Int -> Maybe Text
+anyTextAt c i = case c of
+  I.ColUtf8 {} -> textOf (anyBytesAt c i)
+  I.ColLargeUtf8 {} -> textOf (anyBytesAt c i)
+  I.ColUtf8View {} -> textOf (anyBytesAt c i)
+  _ -> Nothing
   where
-    go col = case col of
-      ColDictionary did indices placeholder ->
-        ColDictionary did indices
-          <$> resolve did placeholder (VP.null indices) (\n -> VP.all (inRange n) indices)
-      ColDictionaryMaybe did indices placeholder ->
-        ColDictionaryMaybe did indices
-          <$> resolve did placeholder (V.all isNothing indices) (\n -> V.all (maybe True (inRange n)) indices)
-      ColStruct n cs -> ColStruct n <$> V.mapM (traverse go) cs
-      ColStructMaybe v cs -> ColStructMaybe v <$> V.mapM (traverse go) cs
-      ColList offs c -> ColList offs <$> go c
-      ColListMaybe v offs c -> ColListMaybe v offs <$> go c
-      ColLargeList offs c -> ColLargeList offs <$> go c
-      ColLargeListMaybe v offs c -> ColLargeListMaybe v offs <$> go c
-      ColFixedSizeList w n c -> ColFixedSizeList w n <$> go c
-      ColFixedSizeListMaybe n v c -> ColFixedSizeListMaybe n v <$> go c
-      ColMap offs k v -> ColMap offs <$> go k <*> go v
-      ColMapMaybe vs offs k v -> ColMapMaybe vs offs <$> go k <*> go v
-      ColDenseUnion ts offs cs -> ColDenseUnion ts offs <$> V.mapM go cs
-      ColSparseUnion ts cs -> ColSparseUnion ts <$> V.mapM go cs
-      ColRunEndEncoded re vs -> ColRunEndEncoded re <$> go vs
-      ColListView offs sz c -> ColListView offs sz <$> go c
-      ColListViewMaybe v offs sz c -> ColListViewMaybe v offs sz <$> go c
-      ColLargeListView offs sz c -> ColLargeListView offs sz <$> go c
-      ColLargeListViewMaybe v offs sz c -> ColLargeListViewMaybe v offs sz <$> go c
-      _ -> Right col
-
-    inRange :: Int -> Int32 -> Bool
-    inRange n i = i >= 0 && fromIntegral i < n
-
-    resolve did placeholder noIndices allIn = case lookupVals did of
-      Nothing
-        | noIndices -> Right placeholder
-        | otherwise -> Left ("Arrow.Column: no dictionary batch for dictionary id " ++ show did)
-      Just vals
-        | allIn (columnLength vals) -> Right vals
-        | otherwise ->
-            Left
-              ( "Arrow.Column: dictionary index out of range for dictionary id "
-                  ++ show did
-                  ++ " ("
-                  ++ show (columnLength vals)
-                  ++ " values)"
-              )
+    textOf = \case
+      Just bs -> Just $! utf8ToText bs
+      Nothing -> Nothing
 
 
-{- | A typed, empty values column for a dictionary field, used until
-'resolveDictionaryColumn' substitutes the real dictionary. The field's
-value type and children determine the shape; nullability of the
-values is not known before the dictionary batch arrives, so the
-top-level placeholder is non-nullable.
+-- | Shared closures for boxed bool rows, so materializing bools allocates nothing per row.
+justTrue, justFalse :: Maybe Bool
+justTrue = Just True
+justFalse = Just False
+{-# NOINLINE justTrue #-}
+{-# NOINLINE justFalse #-}
+
+
+varSlice :: (Storable o, Integral o) => VS.Vector o -> ByteString -> Int -> ByteString
+varSlice o d i =
+  let !s = fromIntegral (VS.unsafeIndex o i)
+      !e = fromIntegral (VS.unsafeIndex o (i + 1))
+  in BSU.unsafeTake (e - s) (BSU.unsafeDrop s d)
+{-# INLINE varSlice #-}
+
+
+-- | Little-endian int32 at byte @k@ (no alignment needed).
+le32 :: ByteString -> Int -> Int
+le32 bs k =
+  let b j = fromIntegral (BSU.unsafeIndex bs (k + j)) :: Word32
+      !w = b 0 + b 1 * 0x100 + b 2 * 0x10000 + b 3 * 0x1000000
+  in fromIntegral (fromIntegral w :: Int32)
+{-# INLINE le32 #-}
+
+
+-- | The bytes of view @i@ (the views are valid).
+viewAt :: ByteString -> V.Vector ByteString -> Int -> ByteString
+viewAt views bufs i =
+  let !base = i * 16
+      !len = le32 views base
+  in if len <= 12
+       then BSU.unsafeTake len (BSU.unsafeDrop (base + 4) views)
+       else
+         let !bi = le32 views (base + 8)
+             !off = le32 views (base + 12)
+         in BSU.unsafeTake len (BSU.unsafeDrop off (V.unsafeIndex bufs bi))
+
+
+{- | The child range of row @i@ of a list, large list, list view, map
+or fixed-size list column; 'Nothing' when the row is null, out of
+range, or the column is not list-like.
 -}
-placeholderColumn :: Field -> Either String ColumnArray
-placeholderColumn f = emptyColumnFor f {fieldNullable = False, fieldDictionary = Nothing}
+listRange :: ColumnArray -> Int -> Maybe ChildRange
+listRange c i
+  | i < 0 || i >= columnLength c || not (unsafeIsValidAt (validity c) i) = Nothing
+  | otherwise = case c of
+      I.ColList _ o _ -> Just (offsetRange o i)
+      I.ColLargeList _ o _ -> Just (offsetRange o i)
+      I.ColMap _ o _ _ -> Just (offsetRange o i)
+      I.ColListView _ o s _ -> Just (ChildRange (fromIntegral (VS.unsafeIndex o i)) (fromIntegral (VS.unsafeIndex s i)))
+      I.ColLargeListView _ o s _ -> Just (ChildRange (fromIntegral (VS.unsafeIndex o i)) (fromIntegral (VS.unsafeIndex s i)))
+      I.ColFixedSizeList w _ _ _ -> Just (ChildRange (i * w) w)
+      _ -> Nothing
 
 
-{- | The zero-row column of a field's type, honouring the field's
-nullability and any dictionary encoding (recursively for children).
+offsetRange :: (Storable o, Integral o) => VS.Vector o -> Int -> ChildRange
+offsetRange o i =
+  let !s = fromIntegral (VS.unsafeIndex o i)
+  in ChildRange s (fromIntegral (VS.unsafeIndex o (i + 1)) - s)
+{-# INLINE offsetRange #-}
+
+
+-- | The dictionary key of row @i@ of a dictionary column ('Nothing' when null or out of range).
+dictKeyAt :: ColumnArray -> Int -> Maybe Int
+dictKeyAt c i = case c of
+  I.ColDictionary _ ix _ | i >= 0 && i < columnLength ix && unsafeIsValidAt (validity ix) i -> Just (keyAt ix i)
+  _ -> Nothing
+
+
+-- | Key @i@ of an integer column (validity ignored); 0 for a non-integer column.
+keyAt :: ColumnArray -> Int -> Int
+keyAt c i = case c of
+  I.ColPrim t _ xs | Just IntegralPrim <- integralPrim t -> fromIntegral (VS.unsafeIndex xs i)
+  _ -> 0
+{-# INLINE keyAt #-}
+
+
+-- ============================================================
+-- Conversions
+-- ============================================================
+
+{- | O(n): utf8, large utf8 and utf8 view columns, and dictionaries whose
+values are one of those.
+
+Utf8 and large utf8: the bytes the column references are copied once
+into a fresh array and every row is a 'Text' slice of it (no per-row
+copy, no re-validation). The rows share that array, so keeping any one
+of them keeps the whole column's text alive ('T.copy' detaches a row).
+Utf8 views copy each row on its own. Dictionaries convert their values
+once and the rows share the resulting 'Text's (and their 'Just' boxes).
+-}
+toTextVector :: ColumnArray -> Either String (V.Vector (Maybe Text))
+toTextVector c = case c of
+  I.ColUtf8 v o d -> Right (textSlices v o d)
+  I.ColLargeUtf8 v o d -> Right (textSlices v o d)
+  I.ColUtf8View v views bufs -> Right (generateStrict (columnLength c) (\i -> if unsafeIsValidAt v i then Just $! utf8ToText (viewAt views bufs i) else Nothing))
+  I.ColDictionary _ keys vals -> toTextVector vals >>= gatherDictionary "Arrow.Column.toTextVector" keys
+  _ -> Left ("Arrow.Column.toTextVector: not a utf8 column: " ++ columnTag c)
+
+
+-- | Every row of a utf8 column as a slice of one fresh copy of the referenced bytes.
+textSlices :: (Storable o, Integral o) => Maybe Validity -> VS.Vector o -> ByteString -> V.Vector (Maybe Text)
+textSlices v o d
+  | VS.length o < 2 = V.empty
+  | otherwise =
+      let !n = offsetRows o
+          !base = fromIntegral (VS.unsafeIndex o 0) :: Int
+          !total = fromIntegral (VS.unsafeIndex o n) - base
+          !arr = copyToTextArray d base total
+          row i =
+            let !s = fromIntegral (VS.unsafeIndex o i)
+                !e = fromIntegral (VS.unsafeIndex o (i + 1))
+            in if e == s then T.empty else TI.Text arr (s - base) (e - s)
+      in generateStrict n (\i -> if unsafeIsValidAt v i then Just $! row i else Nothing)
+{-# INLINE textSlices #-}
+
+
+-- | @len@ bytes of @bs@ from byte @off@, copied into a fresh text array.
+copyToTextArray :: ByteString -> Int -> Int -> TA.Array
+copyToTextArray bs off len
+  | len <= 0 = TA.empty
+  | otherwise = unsafeDupablePerformIO $ withBytesPtr bs $ \p -> stToIO $ do
+      ma <- TA.new len
+      TA.copyFromPointer ma 0 (p `plusPtr` off) len
+      TA.unsafeFreeze ma
+
+
+{- | O(n): every byte-like column (zero-copy slices of the column's
+buffers), and dictionaries whose values are byte-like (the values are
+converted once and the rows share them).
+-}
+toBytesVector :: ColumnArray -> Either String (V.Vector (Maybe ByteString))
+toBytesVector c = case c of
+  I.ColUtf8 v o d -> Right (varSlices v o d)
+  I.ColBinary v o d -> Right (varSlices v o d)
+  I.ColLargeUtf8 v o d -> Right (varSlices v o d)
+  I.ColLargeBinary v o d -> Right (varSlices v o d)
+  I.ColUtf8View v views bufs -> Right (rows v (viewAt views bufs))
+  I.ColBinaryView v views bufs -> Right (rows v (viewAt views bufs))
+  I.ColFixedSizeBinary w _ v d -> Right (rows v (\i -> BSU.unsafeTake w (BSU.unsafeDrop (i * w) d)))
+  I.ColDictionary _ keys vals -> toBytesVector vals >>= gatherDictionary "Arrow.Column.toBytesVector" keys
+  _ -> Left ("Arrow.Column.toBytesVector: not a byte column: " ++ columnTag c)
+  where
+    rows :: Maybe Validity -> (Int -> ByteString) -> V.Vector (Maybe ByteString)
+    rows v at = generateStrict (columnLength c) (\i -> if unsafeIsValidAt v i then Just $! at i else Nothing)
+    {-# INLINE rows #-}
+    varSlices :: (Storable o, Integral o) => Maybe Validity -> VS.Vector o -> ByteString -> V.Vector (Maybe ByteString)
+    varSlices v o d = rows v (varSlice o d)
+    {-# INLINE varSlices #-}
+
+
+-- | O(n), boxes every row (the two 'Just' boxes are shared).
+toBoolVector :: ColumnArray -> Either String (V.Vector (Maybe Bool))
+toBoolVector c = case c of
+  I.ColBool v b -> Right (generateStrict (bitmapLength b) (\i -> if unsafeIsValidAt v i then (if unsafeBitAt b i then justTrue else justFalse) else Nothing))
+  _ -> Left ("Arrow.Column.toBoolVector: not a bool column: " ++ columnTag c)
+
+
+{- | O(n) plus the child conversion: list, large list, list view and
+fixed-size list columns. The child rows the lists reference are
+converted once with the given function, and every list row is a slice
+of that vector (the rows share it); null rows are 'Nothing'. The
+function must return one element per child row it is given.
+-}
+toListVector :: forall a. (ColumnArray -> Either String (V.Vector a)) -> ColumnArray -> Either String (V.Vector (Maybe (V.Vector a)))
+toListVector conv c = case c of
+  I.ColList v o child -> offsets v o child
+  I.ColLargeList v o child -> offsets v o child
+  I.ColListView v o z child -> views v o z child
+  I.ColLargeListView v o z child -> views v o z child
+  I.ColFixedSizeList w n v child -> do
+    kids <- convert (sliceColumnArray 0 (n * w) child) (n * w)
+    Right (rows n v (\i -> V.unsafeSlice (i * w) w kids))
+  _ -> Left ("Arrow.Column.toListVector: not a list column: " ++ columnTag c)
+  where
+    convert ch len = do
+      kids <- conv ch
+      if V.length kids == len
+        then Right kids
+        else Left ("Arrow.Column.toListVector: the child conversion returned " ++ show (V.length kids) ++ " rows for " ++ show len)
+    rows :: Int -> Maybe Validity -> (Int -> V.Vector a) -> V.Vector (Maybe (V.Vector a))
+    rows n v at = generateStrict n (\i -> if unsafeIsValidAt v i then Just $! at i else Nothing)
+    {-# INLINE rows #-}
+    offsets :: (Storable o, Integral o) => Maybe Validity -> VS.Vector o -> ColumnArray -> Either String (V.Vector (Maybe (V.Vector a)))
+    offsets v o child
+      | VS.length o < 2 = Right V.empty
+      | otherwise = do
+          let !n = offsetRows o
+              !base = fromIntegral (VS.unsafeIndex o 0)
+              !len = fromIntegral (VS.unsafeIndex o n) - base
+          kids <- convert (sliceColumnArray base len child) len
+          Right $ rows n v $ \i ->
+            let !s = fromIntegral (VS.unsafeIndex o i)
+            in V.unsafeSlice (s - base) (fromIntegral (VS.unsafeIndex o (i + 1)) - s) kids
+    {-# INLINE offsets #-}
+    views :: (Storable o, Integral o) => Maybe Validity -> VS.Vector o -> VS.Vector o -> ColumnArray -> Either String (V.Vector (Maybe (V.Vector a)))
+    views v o z child = do
+      kids <- convert child (columnLength child)
+      Right (rows (VS.length o) v (\i -> V.unsafeSlice (fromIntegral (VS.unsafeIndex o i)) (fromIntegral (VS.unsafeIndex z i)) kids))
+    {-# INLINE views #-}
+
+
+{- | Rows of a dictionary column from its converted values: row @i@ is
+the value its key selects (shared, not copied), 'Nothing' where the key
+is null. Every valid key is checked against the values first.
+-}
+gatherDictionary :: forall a. String -> ColumnArray -> V.Vector (Maybe a) -> Either String (V.Vector (Maybe a))
+gatherDictionary what keys vals = do
+  validateKeys what keys (V.length vals)
+  case keys of
+    I.ColPrim t kv xs -> case t of
+      PInt8 -> Right (go kv xs)
+      PInt16 -> Right (go kv xs)
+      PInt32 -> Right (go kv xs)
+      PInt64 -> Right (go kv xs)
+      PUInt8 -> Right (go kv xs)
+      PUInt16 -> Right (go kv xs)
+      PUInt32 -> Right (go kv xs)
+      PUInt64 -> Right (go kv xs)
+      _ -> notInt
+    _ -> notInt
+  where
+    notInt = Left (what ++ ": dictionary indices must be an integer column")
+    go :: (Storable k, Integral k) => Maybe Validity -> VS.Vector k -> V.Vector (Maybe a)
+    go kv xs = generateStrict (VS.length xs) $ \i ->
+      if unsafeIsValidAt kv i then V.unsafeIndex vals (fromIntegral (VS.unsafeIndex xs i)) else Nothing
+    {-# INLINE go #-}
+
+
+{- | 'V.generate' that forces each element to WHNF as it is written. The
+boxed conversions go through it so their results hold no thunks: a lazy
+element would allocate a thunk per row and keep the column (and the
+decoded input buffer it aliases) alive until every row is forced.
+
+The loop writes two elements per iteration. On AArch64, GHC 9.8 compiles
+'writeArray#' to a store-release ('stlr') plus the card mark, and a loop
+whose body is one fresh allocation followed by one such write runs about
+3.5x slower on Apple cores than the same work unrolled by two (measured:
+100k boxed @Maybe Int64@, 0.80 ms against 0.23 ms; a C loop with the same
+store sequence shows the same cliff). Unrolling further gains nothing.
+-}
+generateStrict :: Int -> (Int -> a) -> V.Vector a
+generateStrict n f = V.create $ do
+  mv <- VM.unsafeNew n
+  let go !i
+        | i + 1 < n = do
+            VM.unsafeWrite mv i $! f i
+            VM.unsafeWrite mv (i + 1) $! f (i + 1)
+            go (i + 2)
+        | i < n = do
+            VM.unsafeWrite mv i $! f i
+            pure mv
+        | otherwise = pure mv
+  go 0
+{-# INLINE generateStrict #-}
+
+
+-- ============================================================
+-- Construction
+-- ============================================================
+
+-- | O(1): a fixed-width column without nulls.
+primColumn :: PrimType a -> VS.Vector a -> ColumnArray
+primColumn t xs = I.ColPrim t Nothing xs
+
+
+-- | O(1) length check plus a popcount: values with a validity bitmap (bit set = valid).
+primColumnV :: PrimType a -> Bitmap -> VS.Vector a -> Either String ColumnArray
+primColumnV t b xs = withPrim t $ do
+  _ <- mkBitmap (bitmapBytes b) (bitmapOffset b) (bitmapLength b)
+  if bitmapLength b /= VS.length xs
+    then Left "Arrow.Column.primColumnV: bitmap length differs from the number of values"
+    else Right (I.ColPrim t (mkValidity b) xs)
+
+
+-- | A fixed-width column with an optional validity (checked and normalised).
+mkPrim :: PrimType a -> Maybe Validity -> VS.Vector a -> Either String ColumnArray
+mkPrim t v xs = withPrim t $ I.ColPrim t <$> checkValidity "Arrow.Column.mkPrim" (VS.length xs) v <*> pure xs
+
+
+-- | O(n), one pass: 'Nothing' rows become nulls (their slots hold zero bytes).
+fromMaybes :: PrimType a -> V.Vector (Maybe a) -> ColumnArray
+fromMaybes t vals = withPrim t $
+  let !n = V.length vals
+      !w = primWidth t
+      bytes = createAligned (n * w) $ \p -> do
+        fillBytes p 0 (n * w)
+        forM_ [0 .. n - 1] $ \i -> case V.unsafeIndex vals i of
+          Just x -> pokeElemOff (castPtr p) i x
+          Nothing -> pure ()
+  in I.ColPrim t (validityGenerate n (\i -> isJustAt vals i)) (unsafeBytesToStorable bytes)
+
+
+isJustAt :: V.Vector (Maybe a) -> Int -> Bool
+isJustAt v i = case V.unsafeIndex v i of
+  Just _ -> True
+  Nothing -> False
+{-# INLINE isJustAt #-}
+
+
+fromBools :: V.Vector Bool -> ColumnArray
+fromBools v = I.ColBool Nothing (bitmapFromBools v)
+
+
+fromMaybeBools :: V.Vector (Maybe Bool) -> ColumnArray
+fromMaybeBools v =
+  I.ColBool
+    (validityGenerate (V.length v) (isJustAt v))
+    (bitmapGenerate (V.length v) (\i -> V.unsafeIndex v i == Just True))
+
+
+-- | Utf8 column, two passes (lengths, then one copy per row). Errors past 2^31 - 1 bytes.
+fromTexts :: V.Vector Text -> ColumnArray
+fromTexts = fromMaybeTexts . V.map Just
+
+
+fromMaybeTexts :: V.Vector (Maybe Text) -> ColumnArray
+fromMaybeTexts = varFromMaybes I.ColUtf8 TF.lengthWord8 TF.unsafeCopyToPtr
+
+
+fromMaybeLargeTexts :: V.Vector (Maybe Text) -> ColumnArray
+fromMaybeLargeTexts = varFromMaybes I.ColLargeUtf8 TF.lengthWord8 TF.unsafeCopyToPtr
+
+
+fromByteStrings :: V.Vector ByteString -> ColumnArray
+fromByteStrings = fromMaybeByteStrings . V.map Just
+
+
+fromMaybeByteStrings :: V.Vector (Maybe ByteString) -> ColumnArray
+fromMaybeByteStrings = varFromMaybes I.ColBinary BS.length copyBS
+
+
+fromMaybeLargeByteStrings :: V.Vector (Maybe ByteString) -> ColumnArray
+fromMaybeLargeByteStrings = varFromMaybes I.ColLargeBinary BS.length copyBS
+
+
+copyBS :: ByteString -> Ptr Word8 -> IO ()
+copyBS bs dst = withBytesPtr bs $ \src -> copyBytes dst src (BS.length bs)
+
+
+varFromMaybes
+  :: forall o x
+   . Offset o
+  => (Maybe Validity -> VS.Vector o -> ByteString -> ColumnArray)
+  -> (x -> Int)
+  -> (x -> Ptr Word8 -> IO ())
+  -> V.Vector (Maybe x)
+  -> ColumnArray
+varFromMaybes mk len copy vals
+  | toInteger total > toInteger (maxBound :: o) =
+      errorWithoutStackTrace "Arrow.Column: var-length data exceeds the 32-bit offset range (use the large variant)"
+  | otherwise = mk (validityGenerate n (isJustAt vals)) offs dat
+  where
+    !n = V.length vals
+    rowLen i = maybe 0 len (V.unsafeIndex vals i)
+    offs :: VS.Vector o
+    offs = VS.scanl' (\acc i -> acc + fromIntegral (rowLen i)) 0 (VS.enumFromN 0 n :: VS.Vector Int)
+    !total = fromIntegral (VS.last offs) :: Int
+    dat = createAligned total $ \p ->
+      forM_ [0 .. n - 1] $ \i -> case V.unsafeIndex vals i of
+        Just x -> copy x (p `plusPtr` fromIntegral (VS.unsafeIndex offs i))
+        Nothing -> pure ()
+
+
+-- | Fixed-size binary rows; every present row must have the given width.
+fromMaybeFixedSizeBinary :: Int -> V.Vector (Maybe ByteString) -> Either String ColumnArray
+fromMaybeFixedSizeBinary w vals
+  | w < 0 = Left "Arrow.Column.fromMaybeFixedSizeBinary: negative width"
+  | V.any (maybe False ((/= w) . BS.length)) vals =
+      Left ("Arrow.Column.fromMaybeFixedSizeBinary: a row is not " ++ show w ++ " bytes")
+  | otherwise =
+      let !n = V.length vals
+          dat = createAligned (n * w) $ \p -> do
+            fillBytes p 0 (n * w)
+            forM_ [0 .. n - 1] $ \i -> forM_ (V.unsafeIndex vals i) $ \bs -> copyBS bs (p `plusPtr` (i * w))
+      in Right (I.ColFixedSizeBinary w n (validityGenerate n (isJustAt vals)) dat)
+
+
+-- | Utf8 view column: short strings inline, long ones in one data buffer.
+fromMaybeUtf8View :: V.Vector (Maybe Text) -> ColumnArray
+fromMaybeUtf8View vals = buildViews I.ColUtf8View (V.map (fmap textBytes) vals)
+  where
+    textBytes t = createAligned (TF.lengthWord8 t) (TF.unsafeCopyToPtr t)
+
+
+fromMaybeBinaryView :: V.Vector (Maybe ByteString) -> ColumnArray
+fromMaybeBinaryView = buildViews I.ColBinaryView
+
+
+buildViews :: (Maybe Validity -> ByteString -> V.Vector ByteString -> ColumnArray) -> V.Vector (Maybe ByteString) -> ColumnArray
+buildViews mk vals
+  | outOfLine > fromIntegral (maxBound :: Int32) =
+      errorWithoutStackTrace "Arrow.Column: view data exceeds 2^31 - 1 bytes"
+  | otherwise = mk (validityGenerate n (isJustAt vals)) views (if outOfLine == 0 then V.empty else V.singleton dat)
+  where
+    !n = V.length vals
+    long = maybe 0 (\b -> if BS.length b > 12 then BS.length b else 0)
+    !outOfLine = V.sum (V.map long vals)
+    dat = createAligned outOfLine $ \p ->
+      V.foldM'_ (\off mb -> case mb of
+        Just b | BS.length b > 12 -> copyBS b (p `plusPtr` off) >> pure (off + BS.length b)
+        _ -> pure off) 0 vals
+    views = createAligned (n * 16) $ \p -> do
+      fillBytes p 0 (n * 16)
+      V.ifoldM'_ (\off i mb -> case mb of
+        Nothing -> pure off
+        Just b -> do
+          let !base = p `plusPtr` (i * 16)
+              !len = BS.length b
+          pokeByteOff base 0 (fromIntegral len :: Int32)
+          if len <= 12
+            then copyBS b (base `plusPtr` 4) >> pure off
+            else do
+              copyBS (BS.take 4 b) (base `plusPtr` 4)
+              pokeByteOff base 8 (0 :: Int32)
+              pokeByteOff base 12 (fromIntegral off :: Int32)
+              pure (off + len)) 0 vals
+
+
+mkBool :: Maybe Validity -> Bitmap -> Either String ColumnArray
+mkBool v b = do
+  _ <- mkBitmap (bitmapBytes b) (bitmapOffset b) (bitmapLength b)
+  v' <- checkValidity "Arrow.Column.mkBool" (bitmapLength b) v
+  Right (I.ColBool v' b)
+
+
+mkVar :: Offset o => String -> Bool -> (Maybe Validity -> VS.Vector o -> ByteString -> ColumnArray) -> Maybe Validity -> VS.Vector o -> ByteString -> Either String ColumnArray
+mkVar what utf8 mk v offs dat = do
+  validateOffsets what (BS.length dat) offs
+  when utf8 (validateUtf8 what offs dat)
+  v' <- checkValidity what (offsetRows offs) v
+  Right (mk v' offs dat)
+
+
+-- | Validates offsets, UTF-8 and character boundaries (C kernels).
+mkUtf8 :: Maybe Validity -> VS.Vector Int32 -> ByteString -> Either String ColumnArray
+mkUtf8 = mkVar "Arrow.Column.mkUtf8" True I.ColUtf8
+
+
+mkBinary :: Maybe Validity -> VS.Vector Int32 -> ByteString -> Either String ColumnArray
+mkBinary = mkVar "Arrow.Column.mkBinary" False I.ColBinary
+
+
+mkLargeUtf8 :: Maybe Validity -> VS.Vector Int64 -> ByteString -> Either String ColumnArray
+mkLargeUtf8 = mkVar "Arrow.Column.mkLargeUtf8" True I.ColLargeUtf8
+
+
+mkLargeBinary :: Maybe Validity -> VS.Vector Int64 -> ByteString -> Either String ColumnArray
+mkLargeBinary = mkVar "Arrow.Column.mkLargeBinary" False I.ColLargeBinary
+
+
+-- | Width, rows, validity, data.
+mkFixedSizeBinary :: Int -> Int -> Maybe Validity -> ByteString -> Either String ColumnArray
+mkFixedSizeBinary w n v dat
+  | w < 0 || n < 0 = Left "Arrow.Column.mkFixedSizeBinary: negative width or row count"
+  | toInteger (BS.length dat) < toInteger w * toInteger n = Left "Arrow.Column.mkFixedSizeBinary: data shorter than width * rows"
+  | otherwise = (\v' -> I.ColFixedSizeBinary w n v' dat) <$> checkValidity "Arrow.Column.mkFixedSizeBinary" n v
+
+
+mkViews :: String -> Bool -> (Maybe Validity -> ByteString -> V.Vector ByteString -> ColumnArray) -> Maybe Validity -> ByteString -> V.Vector ByteString -> Either String ColumnArray
+mkViews what utf8 mk v views bufs
+  | BS.length views `rem` 16 /= 0 = Left (what ++ ": views buffer is not a multiple of 16 bytes")
+  | otherwise = do
+      let !rows = BS.length views `quot` 16
+      v' <- checkValidity what rows v
+      validateViews what utf8 rows v' views bufs
+      Right (mk v' views bufs)
+
+
+mkUtf8View :: Maybe Validity -> ByteString -> V.Vector ByteString -> Either String ColumnArray
+mkUtf8View = mkViews "Arrow.Column.mkUtf8View" True I.ColUtf8View
+
+
+mkBinaryView :: Maybe Validity -> ByteString -> V.Vector ByteString -> Either String ColumnArray
+mkBinaryView = mkViews "Arrow.Column.mkBinaryView" False I.ColBinaryView
+
+
+-- | Rows, validity, children (each with at least rows rows).
+mkStruct :: Int -> Maybe Validity -> V.Vector (Text, ColumnArray) -> Either String ColumnArray
+mkStruct n v cs
+  | n < 0 = Left "Arrow.Column.mkStruct: negative row count"
+  | V.any ((< n) . columnLength . snd) cs = Left "Arrow.Column.mkStruct: a child has fewer rows than the struct"
+  | otherwise = (\v' -> I.ColStruct n v' cs) <$> checkValidity "Arrow.Column.mkStruct" n v
+
+
+mkListLike :: Offset o => String -> (Maybe Validity -> VS.Vector o -> ColumnArray -> ColumnArray) -> Maybe Validity -> VS.Vector o -> ColumnArray -> Either String ColumnArray
+mkListLike what mk v offs child = do
+  validateOffsets what (columnLength child) offs
+  v' <- checkValidity what (offsetRows offs) v
+  Right (mk v' offs child)
+
+
+mkList :: Maybe Validity -> VS.Vector Int32 -> ColumnArray -> Either String ColumnArray
+mkList = mkListLike "Arrow.Column.mkList" I.ColList
+
+
+mkLargeList :: Maybe Validity -> VS.Vector Int64 -> ColumnArray -> Either String ColumnArray
+mkLargeList = mkListLike "Arrow.Column.mkLargeList" I.ColLargeList
+
+
+-- | Validity, offsets, sizes, child.
+mkListView :: Maybe Validity -> VS.Vector Int32 -> VS.Vector Int32 -> ColumnArray -> Either String ColumnArray
+mkListView v o s c = do
+  v' <- checkValidity "Arrow.Column.mkListView" (VS.length o) v
+  validateListView "Arrow.Column.mkListView" v' o s (columnLength c)
+  Right (I.ColListView v' o s c)
+
+
+mkLargeListView :: Maybe Validity -> VS.Vector Int64 -> VS.Vector Int64 -> ColumnArray -> Either String ColumnArray
+mkLargeListView v o s c = do
+  v' <- checkValidity "Arrow.Column.mkLargeListView" (VS.length o) v
+  validateListView "Arrow.Column.mkLargeListView" v' o s (columnLength c)
+  Right (I.ColLargeListView v' o s c)
+
+
+-- | List size, rows, validity, child (at least rows * size rows).
+mkFixedSizeList :: Int -> Int -> Maybe Validity -> ColumnArray -> Either String ColumnArray
+mkFixedSizeList w n v c
+  | w < 0 || n < 0 = Left "Arrow.Column.mkFixedSizeList: negative size or row count"
+  | toInteger (columnLength c) < toInteger w * toInteger n = Left "Arrow.Column.mkFixedSizeList: child shorter than rows * size"
+  | otherwise = (\v' -> I.ColFixedSizeList w n v' c) <$> checkValidity "Arrow.Column.mkFixedSizeList" n v
+
+
+-- | Validity, offsets, keys, values (offsets checked against both children).
+mkMap :: Maybe Validity -> VS.Vector Int32 -> ColumnArray -> ColumnArray -> Either String ColumnArray
+mkMap v offs k x = do
+  validateOffsets "Arrow.Column.mkMap" (min (columnLength k) (columnLength x)) offs
+  v' <- checkValidity "Arrow.Column.mkMap" (offsetRows offs) v
+  Right (I.ColMap v' offs k x)
+
+
+-- | Child index per row, offset per row, children.
+mkDenseUnion :: VS.Vector Int8 -> VS.Vector Int32 -> V.Vector ColumnArray -> Either String ColumnArray
+mkDenseUnion t o cs = do
+  validateDenseUnion "Arrow.Column.mkDenseUnion" t o (VS.fromList (map (fromIntegral . columnLength) (V.toList cs)))
+  Right (I.ColDenseUnion t o cs)
+
+
+-- | Child index per row, children (each with at least as many rows as the union).
+mkSparseUnion :: VS.Vector Int8 -> V.Vector ColumnArray -> Either String ColumnArray
+mkSparseUnion t cs
+  | V.any ((< VS.length t) . columnLength) cs = Left "Arrow.Column.mkSparseUnion: a child has fewer rows than the union"
+  | otherwise = do
+      validateSparseUnionTypes "Arrow.Column.mkSparseUnion" t (V.length cs)
+      Right (I.ColSparseUnion t cs)
+
+
+-- | Dictionary id, indices (an integer column), values. Checks every valid key (C kernel).
+mkDictionary :: Int64 -> ColumnArray -> ColumnArray -> Either String ColumnArray
+mkDictionary did ix vals = do
+  validateKeys "Arrow.Column.mkDictionary" ix (columnLength vals)
+  Right (I.ColDictionary did ix vals)
+
+
+{- | Run ends (an int16, int32 or int64 column, positive and strictly
+increasing) and values (one row per run). The logical length is the
+last run end.
+-}
+mkRunEndEncoded :: ColumnArray -> ColumnArray -> Either String ColumnArray
+mkRunEndEncoded re vals = do
+  validateRunEnds "Arrow.Column.mkRunEndEncoded" re 0
+  let !runs = columnLength re
+      !len = if runs == 0 then 0 else keyAt re (runs - 1)
+  if columnLength vals < runs
+    then Left "Arrow.Column.mkRunEndEncoded: fewer values than runs"
+    else Right (I.ColRunEndEncoded 0 len re vals)
+
+
+emptyPrim :: PrimType a -> ColumnArray
+emptyPrim t = withPrim t (I.ColPrim t Nothing VS.empty)
+
+
+offsets0 :: Storable o => Num o => VS.Vector o
+offsets0 = VS.singleton 0
+
+
+{- | The zero-row column of a field's type, recursively for children,
+with dictionary encoding (indices of the declared index type and a
+'placeholderColumn' as values).
 -}
 emptyColumnFor :: Field -> Either String ColumnArray
 emptyColumnFor f = case fieldDictionary f of
   Just de -> do
     vals <- placeholderColumn f
-    Right $
-      if fieldNullable f
-        then ColDictionaryMaybe (deId de) V.empty vals
-        else ColDictionary (deId de) VP.empty vals
+    ix <- case primTypeFor (deIndexType de) of
+      Just (SomePrimType t) | Just IntegralPrim <- integralPrim t -> Right (emptyPrim t)
+      _ -> Left ("Arrow.Column: dictionary index type must be an integer type, got " ++ show (deIndexType de))
+    Right (I.ColDictionary (deId de) ix vals)
   Nothing -> case fieldType f of
-    ANull -> Right (ColNull 0)
-    AInt 8 True -> pick (ColInt8 VP.empty) (ColInt8Maybe V.empty)
-    AInt 16 True -> pick (ColInt16 VP.empty) (ColInt16Maybe V.empty)
-    AInt 32 True -> pick (ColInt32 VP.empty) (ColInt32Maybe V.empty)
-    AInt 64 True -> pick (ColInt64 VP.empty) (ColInt64Maybe V.empty)
-    AInt 8 False -> pick (ColUInt8 VP.empty) (ColUInt8Maybe V.empty)
-    AInt 16 False -> pick (ColUInt16 VP.empty) (ColUInt16Maybe V.empty)
-    AInt 32 False -> pick (ColUInt32 VP.empty) (ColUInt32Maybe V.empty)
-    AInt 64 False -> pick (ColUInt64 VP.empty) (ColUInt64Maybe V.empty)
-    AInt w _ -> Left ("Arrow.Column: unsupported integer bit width " ++ show w)
-    AFloatingPoint Half -> pick (ColFloat16 VP.empty) (ColFloat16Maybe V.empty)
-    AFloatingPoint Single -> pick (ColFloat VP.empty) (ColFloatMaybe V.empty)
-    AFloatingPoint DoublePrecision -> pick (ColDouble VP.empty) (ColDoubleMaybe V.empty)
-    ABinary -> pick (ColBinary V.empty) (ColBinaryMaybe V.empty)
-    AUtf8 -> pick (ColUtf8 V.empty) (ColUtf8Maybe V.empty)
-    ABool -> pick (ColBool V.empty) (ColBoolMaybe V.empty)
-    ADecimal p s -> pick (ColDecimal128 p s V.empty) (ColDecimal128Maybe p s V.empty)
-    ADecimal256 p s -> pick (ColDecimal256 p s V.empty) (ColDecimal256Maybe p s V.empty)
-    ADate DateDay -> pick (ColDate32 VP.empty) (ColDate32Maybe V.empty)
-    ADate DateMillisecond -> pick (ColDate64 VP.empty) (ColDate64Maybe V.empty)
-    ATime u _
-      | u == Second || u == Millisecond -> pick (ColTime32 VP.empty) (ColTime32Maybe V.empty)
-      | otherwise -> pick (ColTime64 VP.empty) (ColTime64Maybe V.empty)
-    ATimestamp _ _ -> pick (ColTimestamp VP.empty) (ColTimestampMaybe V.empty)
-    ADuration _ -> pick (ColDuration VP.empty) (ColDurationMaybe V.empty)
-    AInterval YearMonth -> pick (ColIntervalYearMonth VP.empty) (ColIntervalYearMonthMaybe V.empty)
-    AInterval DayTime -> pick (ColIntervalDayTime VP.empty VP.empty) (ColIntervalDayTimeMaybe V.empty)
-    AInterval MonthDayNano ->
-      pick (ColIntervalMonthDayNano VP.empty VP.empty VP.empty) (ColIntervalMonthDayNanoMaybe V.empty)
-    AFixedSizeBinary w -> pick (ColFixedSizeBinary w V.empty) (ColFixedSizeBinaryMaybe w V.empty)
-    ALargeBinary -> pick (ColLargeBinary V.empty) (ColLargeBinaryMaybe V.empty)
-    ALargeUtf8 -> pick (ColLargeUtf8 V.empty) (ColLargeUtf8Maybe V.empty)
-    AUtf8View -> pick (ColUtf8View V.empty) (ColUtf8ViewMaybe V.empty)
-    ABinaryView -> pick (ColBinaryView V.empty) (ColBinaryViewMaybe V.empty)
-    AStruct -> do
-      cs <- V.mapM (\c -> (,) (fieldName c) <$> emptyColumnFor c) (fieldChildren f)
-      pick (ColStruct 0 cs) (ColStructMaybe V.empty cs)
-    AList -> do
-      c <- onlyChild
-      pick (ColList zero32 c) (ColListMaybe V.empty zero32 c)
-    ALargeList -> do
-      c <- onlyChild
-      pick (ColLargeList zero64 c) (ColLargeListMaybe V.empty zero64 c)
-    AFixedSizeList n -> do
-      c <- onlyChild
-      pick (ColFixedSizeList n 0 c) (ColFixedSizeListMaybe n V.empty c)
-    AListView -> do
-      c <- onlyChild
-      pick (ColListView VP.empty VP.empty c) (ColListViewMaybe V.empty VP.empty VP.empty c)
-    ALargeListView -> do
-      c <- onlyChild
-      pick (ColLargeListView VP.empty VP.empty c) (ColLargeListViewMaybe V.empty VP.empty VP.empty c)
+    ANull -> Right (I.ColNull 0)
+    AInt w _
+      | Just (SomePrimType t) <- primTypeFor (fieldType f) -> Right (emptyPrim t)
+      | otherwise -> Left ("Arrow.Column: unsupported integer bit width " ++ show w)
+    ty | Just (SomePrimType t) <- primTypeFor ty -> Right (emptyPrim t)
+    ABool -> Right (I.ColBool Nothing emptyBitmap)
+    AUtf8 -> Right (I.ColUtf8 Nothing offsets0 BS.empty)
+    ABinary -> Right (I.ColBinary Nothing offsets0 BS.empty)
+    ALargeUtf8 -> Right (I.ColLargeUtf8 Nothing offsets0 BS.empty)
+    ALargeBinary -> Right (I.ColLargeBinary Nothing offsets0 BS.empty)
+    AFixedSizeBinary w -> Right (I.ColFixedSizeBinary w 0 Nothing BS.empty)
+    AUtf8View -> Right (I.ColUtf8View Nothing BS.empty V.empty)
+    ABinaryView -> Right (I.ColBinaryView Nothing BS.empty V.empty)
+    AStruct -> I.ColStruct 0 Nothing <$> V.mapM (\c -> (,) (fieldName c) <$> emptyColumnFor c) (fieldChildren f)
+    AList -> I.ColList Nothing offsets0 <$> onlyChild
+    ALargeList -> I.ColLargeList Nothing offsets0 <$> onlyChild
+    AListView -> I.ColListView Nothing VS.empty VS.empty <$> onlyChild
+    ALargeListView -> I.ColLargeListView Nothing VS.empty VS.empty <$> onlyChild
+    AFixedSizeList n -> I.ColFixedSizeList n 0 Nothing <$> onlyChild
     AMap _ -> case V.toList (fieldChildren f) of
-      [entries] | [kf, vf] <- V.toList (fieldChildren entries) -> do
-        k <- emptyColumnFor kf
-        v <- emptyColumnFor vf
-        pick (ColMap zero32 k v) (ColMapMaybe V.empty zero32 k v)
+      [entries] | [kf, vf] <- V.toList (fieldChildren entries) -> I.ColMap Nothing offsets0 <$> emptyColumnFor kf <*> emptyColumnFor vf
       _ -> Left "Arrow.Column: map field must have one entries struct child with key and value"
-    AUnion Dense _ -> ColDenseUnion VP.empty VP.empty <$> V.mapM emptyColumnFor (fieldChildren f)
-    AUnion Sparse _ -> ColSparseUnion VP.empty <$> V.mapM emptyColumnFor (fieldChildren f)
+    AUnion Dense _ -> I.ColDenseUnion VS.empty VS.empty <$> V.mapM emptyColumnFor (fieldChildren f)
+    AUnion Sparse _ -> I.ColSparseUnion VS.empty <$> V.mapM emptyColumnFor (fieldChildren f)
     ARunEndEncoded -> case V.toList (fieldChildren f) of
-      [ref, vf] -> ColRunEndEncoded <$> emptyColumnFor ref {fieldNullable = False} <*> emptyColumnFor vf
+      [ref, vf] -> I.ColRunEndEncoded 0 0 <$> emptyColumnFor ref {fieldNullable = False} <*> emptyColumnFor vf
       _ -> Left "Arrow.Column: RunEndEncoded field must have exactly two children (run_ends, values)"
+    ty -> Left ("Arrow.Column: no column for type " ++ show ty)
   where
-    pick nonNull nullable = Right (if fieldNullable f then nullable else nonNull)
-    zero32 = VP.singleton 0
-    zero64 = VP.singleton 0
     onlyChild = case V.toList (fieldChildren f) of
       [c] -> emptyColumnFor c
       _ -> Left ("Arrow.Column: " ++ show (fieldType f) ++ " field must have exactly one child")
 
 
-{- | The raw validity bitmap slot of a nullable field (and the next
-buffer index). Callers expand it with 'unpackValidity' only after the
-array's length has been checked against a buffer that backs it.
+{- | The empty values column of a dictionary field, held by an
+unresolved dictionary column until 'resolveDictionaryColumn'.
 -}
-validitySlot :: Ctx -> Field -> Int -> Either String (Maybe ByteString, Int)
-validitySlot ctx f !bufIdx
-  | fieldNullable f = do
-      bs <- sliceBufAt (ctxRb ctx) (ctxBody ctx) bufIdx
-      Right (Just bs, bufIdx + 1)
-  | otherwise = Right (Nothing, bufIdx)
-{-# INLINE validitySlot #-}
+placeholderColumn :: Field -> Either String ColumnArray
+placeholderColumn f = emptyColumnFor f {fieldNullable = False, fieldDictionary = Nothing}
 
 
-singleChild :: String -> Field -> Either String Field
-singleChild what f = case V.toList (fieldChildren f) of
-  [c] -> Right c
-  cs -> Left ("Arrow.Column: " ++ what ++ " field must have exactly one child, has " ++ show (length cs))
+zeroBytes :: Int -> ByteString
+zeroBytes n = createAligned n (\p -> fillBytes p 0 n)
 
 
-{- | Read @len + 1@ list offsets (@width@ is 4 or 8 bytes). A
-zero-length array may omit the offsets buffer entirely.
+zeroStorable :: forall a. Storable a => Int -> VS.Vector a
+zeroStorable n = unsafeBytesToStorable (zeroBytes (n * sizeOf (undefined :: a)))
+
+
+{- | @n@ rows with the shape of the given column (same tag, widths,
+decimal parameters, child shapes and dictionary id), every row valid
+and zero or empty: lists are empty, unions select their first child,
+a run-end-encoded column is one run, a 'ColNull' stays null. Used
+where a column needs a row count but its rows carry no meaning (the
+children under null struct rows, the expansion of null rows over an
+empty dictionary).
 -}
-readListOffsets
-  :: VP.Prim a
-  => String -> Int -> (ByteString -> Int -> a) -> a -> Int -> ByteString -> Either String (VP.Vector a)
-readListOffsets what width get zero len bs
-  | len == 0 && BS.null bs = Right (VP.singleton zero)
-  | BS.length bs < (len + 1) * width =
-      Left ("Arrow.Column: " ++ what ++ " offsets buffer too small")
-  | otherwise = Right $! VP.generate (len + 1) (\i -> get bs (i * width))
-
-
-{- | List offsets must start at or above zero, never decrease, and end
-within the child array. One pass, no allocation.
--}
-checkListOffsets :: (VP.Prim a, Integral a) => String -> Int -> VP.Vector a -> Either String ()
-checkListOffsets what childLen offs
-  | n == 0 = Right ()
-  | VP.unsafeHead offs < 0 = Left ("Arrow.Column: " ++ what ++ " offsets start below zero")
-  | toInteger (VP.unsafeLast offs) > toInteger childLen =
-      Left
-        ( "Arrow.Column: "
-            ++ what
-            ++ " offsets end at "
-            ++ show (toInteger (VP.unsafeLast offs))
-            ++ " but the child has "
-            ++ show childLen
-            ++ " rows"
-        )
-  | otherwise = go 1
+fillerColumn :: Int -> ColumnArray -> ColumnArray
+fillerColumn n0 col = case col of
+  I.ColNull _ -> I.ColNull n
+  I.ColPrim t _ _ -> withPrim t (I.ColPrim t Nothing (zeroStorable n))
+  I.ColBool _ _ -> I.ColBool Nothing (Bitmap (zeroBytes ((n + 7) `unsafeShiftR` 3)) 0 n)
+  I.ColUtf8 {} -> I.ColUtf8 Nothing (zeroStorable (n + 1)) BS.empty
+  I.ColBinary {} -> I.ColBinary Nothing (zeroStorable (n + 1)) BS.empty
+  I.ColLargeUtf8 {} -> I.ColLargeUtf8 Nothing (zeroStorable (n + 1)) BS.empty
+  I.ColLargeBinary {} -> I.ColLargeBinary Nothing (zeroStorable (n + 1)) BS.empty
+  I.ColFixedSizeBinary w _ _ _ -> I.ColFixedSizeBinary w n Nothing (zeroBytes (n * w))
+  I.ColUtf8View {} -> I.ColUtf8View Nothing (zeroBytes (n * 16)) V.empty
+  I.ColBinaryView {} -> I.ColBinaryView Nothing (zeroBytes (n * 16)) V.empty
+  I.ColStruct _ _ cs -> I.ColStruct n Nothing (V.map (fmap (fillerColumn n)) cs)
+  I.ColList _ _ c -> I.ColList Nothing (zeroStorable (n + 1)) (empty c)
+  I.ColLargeList _ _ c -> I.ColLargeList Nothing (zeroStorable (n + 1)) (empty c)
+  I.ColListView _ _ _ c -> I.ColListView Nothing (zeroStorable n) (zeroStorable n) (empty c)
+  I.ColLargeListView _ _ _ c -> I.ColLargeListView Nothing (zeroStorable n) (zeroStorable n) (empty c)
+  I.ColFixedSizeList w _ _ c -> I.ColFixedSizeList w n Nothing (fillerColumn (n * w) c)
+  I.ColMap _ _ k x -> I.ColMap Nothing (zeroStorable (n + 1)) (empty k) (empty x)
+  I.ColDenseUnion _ _ cs
+    | n == 0 || V.null cs -> I.ColDenseUnion VS.empty VS.empty (V.map empty cs)
+    | otherwise -> I.ColDenseUnion (zeroStorable n) (zeroStorable n) (V.imap (\i c -> if i == 0 then fillerColumn 1 c else empty c) cs)
+  I.ColSparseUnion _ cs -> I.ColSparseUnion (zeroStorable n) (V.map (fillerColumn n) cs)
+  I.ColDictionary did ix vals
+    | n == 0 -> I.ColDictionary did (fillerColumn 0 ix) vals
+    | columnLength vals == 0 -> I.ColDictionary did (fillerColumn n ix) (fillerColumn 1 vals)
+    | otherwise -> I.ColDictionary did (fillerColumn n ix) vals
+  I.ColRunEndEncoded _ _ re vals
+    | n == 0 -> I.ColRunEndEncoded 0 0 (fillerColumn 0 re) (empty vals)
+    | otherwise -> I.ColRunEndEncoded 0 n (singleRunEnd re n) (fillerColumn 1 vals)
   where
-    !n = VP.length offs
-    go !i
-      | i >= n = Right ()
-      | VP.unsafeIndex offs i < VP.unsafeIndex offs (i - 1) =
-          Left ("Arrow.Column: " ++ what ++ " offsets decrease at row " ++ show (i - 1))
-      | otherwise = go (i + 1)
+    !n = max 0 n0
+    empty = sliceColumnArray 0 0
 
 
--- | Every child of a struct-like parent must cover the parent's rows.
-checkChildLengths :: String -> Int -> V.Vector ColumnArray -> Either String ()
-checkChildLengths what len cols = case V.findIndex (\c -> columnLength c < len) cols of
-  Nothing -> Right ()
-  Just k ->
-    Left
-      ( "Arrow.Column: "
-          ++ what
-          ++ " child #"
-          ++ show k
-          ++ " has "
-          ++ show (columnLength (V.unsafeIndex cols k))
-          ++ " rows, parent has "
-          ++ show len
-      )
-
-
-materializeStruct :: Ctx -> Field -> Int -> Int -> Either String (ColumnArray, Int, Int)
-materializeStruct ctx f !nodeIdx !bufIdx = do
-  len <- nodeLenAt (ctxRb ctx) nodeIdx
-  (validBs, !bufIdx1) <- validitySlot ctx f bufIdx
-  (childCols, !nodeIdx2, !bufIdx2) <- materializeFieldsN ctx (fieldChildren f) (nodeIdx + 1) bufIdx1
-  checkChildLengths "struct" len childCols
-  validity <- traverse (unpackValidity len) validBs
-  let namedChildren = V.zipWith (\child col -> (fieldName child, sliceColumnArray 0 len col)) (fieldChildren f) childCols
-  case validity of
-    Nothing -> Right (ColStruct len namedChildren, nodeIdx2, bufIdx2)
-    Just vs -> Right (ColStructMaybe vs namedChildren, nodeIdx2, bufIdx2)
-
-
--- | List (32-bit offsets) or LargeList (64-bit offsets).
-materializeListCol :: Ctx -> Bool -> Field -> Int -> Int -> Either String (ColumnArray, Int, Int)
-materializeListCol ctx large f !nodeIdx !bufIdx = do
-  let !rb = ctxRb ctx
-      !endian = ctxEndian ctx
-      !what = if large then "large list" else "list"
-  len <- nodeLenAt rb nodeIdx
-  (validBs, !bufIdx1) <- validitySlot ctx f bufIdx
-  offBs <- sliceBufAt rb (ctxBody ctx) bufIdx1
-  childField <- singleChild what f
-  if large
-    then do
-      offsets <- readListOffsets what 8 (\bs o -> int64FromWord (readWord64 endian bs o)) 0 len offBs
-      validity <- traverse (unpackValidity len) validBs
-      (childCol, !nodeIdx2, !bufIdx2) <- materializeNode ctx childField (nodeIdx + 1) (bufIdx1 + 1)
-      checkListOffsets what (columnLength childCol) offsets
-      Right (maybe (ColLargeList offsets childCol) (\vs -> ColLargeListMaybe vs offsets childCol) validity, nodeIdx2, bufIdx2)
-    else do
-      offsets <- readListOffsets what 4 (\bs o -> int32FromWord (readWord32 endian bs o)) 0 len offBs
-      validity <- traverse (unpackValidity len) validBs
-      (childCol, !nodeIdx2, !bufIdx2) <- materializeNode ctx childField (nodeIdx + 1) (bufIdx1 + 1)
-      checkListOffsets what (columnLength childCol) offsets
-      Right (maybe (ColList offsets childCol) (\vs -> ColListMaybe vs offsets childCol) validity, nodeIdx2, bufIdx2)
-
-
-materializeMapCol :: Ctx -> Field -> Int -> Int -> Either String (ColumnArray, Int, Int)
-materializeMapCol ctx f !nodeIdx !bufIdx = do
-  let !rb = ctxRb ctx
-      !endian = ctxEndian ctx
-  len <- nodeLenAt rb nodeIdx
-  (validBs, !bufIdx1) <- validitySlot ctx f bufIdx
-  offBs <- sliceBufAt rb (ctxBody ctx) bufIdx1
-  offsets <- readListOffsets "map" 4 (\bs o -> int32FromWord (readWord32 endian bs o)) 0 len offBs
-  validity <- traverse (unpackValidity len) validBs
-  structField <- singleChild "map" f
-  (structCol, !nodeIdx2, !bufIdx2) <- materializeNode ctx structField (nodeIdx + 1) (bufIdx1 + 1)
-  case structCol of
-    ColStruct _ children
-      | V.length children == 2 -> do
-          let keyCol = snd (V.unsafeIndex children 0)
-              valCol = snd (V.unsafeIndex children 1)
-          checkListOffsets "map" (min (columnLength keyCol) (columnLength valCol)) offsets
-          case validity of
-            Nothing -> Right (ColMap offsets keyCol valCol, nodeIdx2, bufIdx2)
-            Just vs -> Right (ColMapMaybe vs offsets keyCol valCol, nodeIdx2, bufIdx2)
-    _ -> Left "Arrow.Column: map child must be a non-nullable struct of exactly (key, value)"
-
-
-{- | Union columns carry no validity bitmap. The wire type ids are
-mapped to child positions through the field's declared @typeIds@
-(positional when absent), so the materialized type-id vector holds
-child indices; unknown ids are rejected. Dense offsets must index
-inside the selected child; sparse children must cover every row.
--}
-materializeUnionCol :: Ctx -> UnionMode -> V.Vector Int32 -> Field -> Int -> Int -> Either String (ColumnArray, Int, Int)
-materializeUnionCol ctx mode declaredIds f !nodeIdx !bufIdx = do
-  let !rb = ctxRb ctx
-      !body = ctxBody ctx
-      !nChildren = V.length (fieldChildren f)
-  len <- nodeLenAt rb nodeIdx
-  childOf <- unionChildTable nChildren declaredIds
-  typeIdsBs <- sliceBufAt rb body bufIdx
-  if BS.length typeIdsBs < len
-    then Left "Arrow.Column: union type_ids buffer too small"
-    else Right ()
-  let wireId i = fromIntegral (BSU.unsafeIndex typeIdsBs i) :: Int8
-  case firstRow len (\i -> childFor childOf (wireId i) < 0) of
-    Just i -> Left ("Arrow.Column: union row " ++ show i ++ " has undeclared type id " ++ show (wireId i))
-    Nothing -> Right ()
-  let !typeIds = VP.generate len (\i -> fromIntegral (childFor childOf (wireId i)) :: Int8)
-  case mode of
-    Dense -> do
-      offsetsBs <- sliceBufAt rb body (bufIdx + 1)
-      if BS.length offsetsBs < len * 4
-        then Left "Arrow.Column: dense union offsets buffer too small"
-        else Right ()
-      let !offsets = VP.generate len $ \i -> int32FromWord (readWord32 (ctxEndian ctx) offsetsBs (i * 4))
-      (children, !nodeIdx2, !bufIdx2) <- materializeFieldsN ctx (fieldChildren f) (nodeIdx + 1) (bufIdx + 2)
-      let !childLens = VP.generate nChildren (\k -> columnLength (V.unsafeIndex children k))
-          badRow i =
-            let !off = VP.unsafeIndex offsets i
-            in off < 0 || fromIntegral off >= VP.unsafeIndex childLens (fromIntegral (VP.unsafeIndex typeIds i))
-      case firstRow len badRow of
-        Just i -> Left ("Arrow.Column: dense union row " ++ show i ++ " has out-of-range child offset " ++ show (VP.unsafeIndex offsets i))
-        Nothing -> Right (ColDenseUnion typeIds offsets children, nodeIdx2, bufIdx2)
-    Sparse -> do
-      (children, !nodeIdx2, !bufIdx2) <- materializeFieldsN ctx (fieldChildren f) (nodeIdx + 1) (bufIdx + 1)
-      checkChildLengths "sparse union" len children
-      Right (ColSparseUnion typeIds children, nodeIdx2, bufIdx2)
-
-
--- | First row in @[0, n)@ satisfying the predicate; a plain loop, no allocation.
-firstRow :: Int -> (Int -> Bool) -> Maybe Int
-firstRow n p = go 0
-  where
-    go !i
-      | i >= n = Nothing
-      | p i = Just i
-      | otherwise = go (i + 1)
-{-# INLINE firstRow #-}
-
-
-{- | Map from wire type id (0..127) to child position, @-1@ when the id
-is not declared. Empty @declaredIds@ means child @k@ has id @k@.
--}
-unionChildTable :: Int -> V.Vector Int32 -> Either String (VP.Vector Int)
-unionChildTable nChildren declaredIds
-  | nChildren > 128 = Left ("Arrow.Column: union has " ++ show nChildren ++ " children, at most 128 allowed")
-  | V.null declaredIds = Right $! VP.generate 128 (\t -> if t < nChildren then t else -1)
-  | V.length declaredIds /= nChildren =
-      Left
-        ( "Arrow.Column: union declares "
-            ++ show (V.length declaredIds)
-            ++ " type ids for "
-            ++ show nChildren
-            ++ " children"
-        )
-  | V.any (\t -> t < 0 || t > 127) declaredIds = Left "Arrow.Column: union type ids must be in 0..127"
-  | otherwise =
-      let table = VP.accum (\_ k -> k) (VP.replicate 128 (-1)) (V.toList (V.imap (\k t -> (fromIntegral t, k)) declaredIds))
-      in if VP.length (VP.filter (>= 0) table) /= nChildren
-           then Left "Arrow.Column: union declares a type id twice"
-           else Right table
-
-
-childFor :: VP.Vector Int -> Int8 -> Int
-childFor table t
-  | t < 0 = -1
-  | otherwise = VP.unsafeIndex table (fromIntegral t)
-{-# INLINE childFor #-}
-
-
-materializeFixedSizeListCol :: Ctx -> Int -> Field -> Int -> Int -> Either String (ColumnArray, Int, Int)
-materializeFixedSizeListCol ctx listSize f !nodeIdx !bufIdx = do
-  len <- nodeLenAt (ctxRb ctx) nodeIdx
-  if listSize < 0 || (listSize > 0 && len > maxArrayLength `quot` listSize)
-    then Left ("Arrow.Column: fixed-size list of size " ++ show listSize ++ " cannot have " ++ show len ++ " rows")
-    else Right ()
-  (validBs, !bufIdx1) <- validitySlot ctx f bufIdx
-  childField <- singleChild "fixed-size list" f
-  (childCol, !nodeIdx2, !bufIdx2) <- materializeNode ctx childField (nodeIdx + 1) bufIdx1
-  if columnLength childCol < len * listSize
-    then
-      Left
-        ( "Arrow.Column: fixed-size list child has "
-            ++ show (columnLength childCol)
-            ++ " rows, needs "
-            ++ show (len * listSize)
-        )
-    else Right ()
-  validity <- traverse (unpackValidity len) validBs
-  let !child = sliceColumnArray 0 (len * listSize) childCol
-  case validity of
-    Nothing -> Right (ColFixedSizeList listSize len child, nodeIdx2, bufIdx2)
-    Just vs -> Right (ColFixedSizeListMaybe listSize vs child, nodeIdx2, bufIdx2)
-
-
-{- | Read one INTERVAL field. Interval columns are flat (one field
-node, validity + data buffers) but the data layout depends on the
-unit:
-
-  YearMonth     : 4 bytes per row, one i32 (months).
-  DayTime       : 8 bytes per row, pair of i32 (days, millis).
-  MonthDayNano  : 16 bytes per row, (i32 months, i32 days, i64 nanos).
--}
-materializeIntervalCol
-  :: Endianness
-  -> IntervalUnit
-  -> Field
-  -> RecordBatchDef
-  -> ByteString
-  -> Int
-  -> Int
-  -> Either String (ColumnArray, Int, Int)
-materializeIntervalCol endian unit f rb body !nodeIdx !bufIdx = do
-  len <- nodeLenAt rb nodeIdx
-  let !nodeIdx1 = nodeIdx + 1
-      months w bs i = int32FromWord (readWord32 endian bs (i * w))
-      dayTime bs i = (int32FromWord (readWord32 endian bs (i * 8)), int32FromWord (readWord32 endian bs (i * 8 + 4)))
-      mdn bs i =
-        ( int32FromWord (readWord32 endian bs (i * 16))
-        , int32FromWord (readWord32 endian bs (i * 16 + 4))
-        , int64FromWord (readWord64 endian bs (i * 16 + 8))
-        )
-  if fieldNullable f
-    then do
-      col <- case unit of
-        YearMonth -> ColIntervalYearMonthMaybe <$> readNullable "interval YEAR_MONTH" 4 len rb body bufIdx (months 4)
-        DayTime -> ColIntervalDayTimeMaybe <$> readNullable "interval DAY_TIME" 8 len rb body bufIdx dayTime
-        MonthDayNano -> ColIntervalMonthDayNanoMaybe <$> readNullable "interval MONTH_DAY_NANO" 16 len rb body bufIdx mdn
-      Right (col, nodeIdx1, bufIdx + 2)
-    else do
-      dataBs <- sliceBufAt rb body bufIdx
-      let width = case unit of
-            YearMonth -> 4
-            DayTime -> 8
-            MonthDayNano -> 16
-      if BS.length dataBs < len * width
-        then Left ("Arrow.Column: interval " ++ show unit ++ " buffer too small")
-        else do
-          let col = case unit of
-                YearMonth -> ColIntervalYearMonth (VP.generate len (months 4 dataBs))
-                DayTime ->
-                  ColIntervalDayTime
-                    (VP.generate len (fst . dayTime dataBs))
-                    (VP.generate len (snd . dayTime dataBs))
-                MonthDayNano ->
-                  ColIntervalMonthDayNano
-                    (VP.generate len (\i -> let (m, _, _) = mdn dataBs i in m))
-                    (VP.generate len (\i -> let (_, d, _) = mdn dataBs i in d))
-                    (VP.generate len (\i -> let (_, _, n) = mdn dataBs i in n))
-          Right (col, nodeIdx1, bufIdx + 1)
+-- | A one-element run-end column of the same tag holding @n@.
+singleRunEnd :: ColumnArray -> Int -> ColumnArray
+singleRunEnd re n = case re of
+  I.ColPrim t _ _ | Just IntegralPrim <- integralPrim t -> I.ColPrim t Nothing (VS.singleton (fromIntegral n))
+  _ -> re
 
 
 -- ============================================================
--- Post-V5 columns: RunEndEncoded, ListView/LargeListView,
--- Utf8View / BinaryView.
+-- Slicing
 -- ============================================================
 
-{- | RunEndEncoded: parent has zero buffers (no validity, no data),
-exactly two children: @run_ends@ (Int16/32/64) and @values@ (any
-type, may be nullable). Run ends must be non-null, strictly
-increasing and positive, the last must reach the parent's length,
-and there must be a value for every run.
--}
-materializeRunEndEncodedCol :: Ctx -> Field -> Int -> Int -> Either String (ColumnArray, Int, Int)
-materializeRunEndEncodedCol ctx f !nodeIdx !bufIdx = do
-  len <- nodeLenAt (ctxRb ctx) nodeIdx
-  case V.toList (fieldChildren f) of
-    [runEndsField, valuesField] -> do
-      (runEndsCol, !nodeIdx2, !bufIdx1) <- materializeNode ctx runEndsField (nodeIdx + 1) bufIdx
-      (valuesCol, !nodeIdx3, !bufIdx2) <- materializeNode ctx valuesField nodeIdx2 bufIdx1
-      nRuns <- case runEndsCol of
-        ColInt16 v -> checkRunEnds len v
-        ColInt32 v -> checkRunEnds len v
-        ColInt64 v -> checkRunEnds len v
-        _ -> Left "Arrow.Column: run_ends must be a non-nullable int16, int32 or int64 array"
-      if columnLength valuesCol < nRuns
-        then
-          Left
-            ( "Arrow.Column: run-end encoded array has "
-                ++ show nRuns
-                ++ " runs but "
-                ++ show (columnLength valuesCol)
-                ++ " values"
-            )
-        else Right (ColRunEndEncoded runEndsCol valuesCol, nodeIdx3, bufIdx2)
-    _ ->
-      Left "Arrow.Column: RunEndEncoded must have exactly two children (run_ends, values)"
-
-
--- | Validate run ends against the logical length; returns the run count.
-checkRunEnds :: (VP.Prim a, Integral a) => Int -> VP.Vector a -> Either String Int
-checkRunEnds len ends
-  | n == 0 =
-      if len == 0 then Right 0 else Left "Arrow.Column: run-end encoded array has rows but no runs"
-  | VP.unsafeHead ends <= 0 = Left "Arrow.Column: run ends must be positive"
-  | toInteger (VP.unsafeLast ends) < toInteger len =
-      Left "Arrow.Column: last run end is below the array length"
-  | otherwise = case firstRow (n - 1) (\i -> VP.unsafeIndex ends (i + 1) <= VP.unsafeIndex ends i) of
-      Just i -> Left ("Arrow.Column: run ends not strictly increasing at run " ++ show (i + 1))
-      Nothing -> Right n
-  where
-    !n = VP.length ends
-
-
-{- | ListView / LargeListView. Buffers (in order): validity (when
-nullable), offsets, sizes. The child elements may overlap or
-appear in any order; every row's @[offset, offset + size)@ must lie
-within the child array.
--}
-materializeListViewCol :: Ctx -> Bool -> Field -> Int -> Int -> Either String (ColumnArray, Int, Int)
-materializeListViewCol ctx large f !nodeIdx !bufIdx = do
-  let !rb = ctxRb ctx
-      !body = ctxBody ctx
-      !endian = ctxEndian ctx
-  len <- nodeLenAt rb nodeIdx
-  (validBs, !bufIdx1) <- validitySlot ctx f bufIdx
-  offBs <- sliceBufAt rb body bufIdx1
-  sizBs <- sliceBufAt rb body (bufIdx1 + 1)
-  let !w = if large then 8 else 4
-      !need = len * w
-  if BS.length offBs < need || BS.length sizBs < need
-    then Left "Arrow.Column: list-view offsets or sizes buffer too small"
-    else Right ()
-  validity <- traverse (unpackValidity len) validBs
-  childField <- singleChild "list-view" f
-  (childCol, !nodeIdx2, !bufIdx2) <- materializeNode ctx childField (nodeIdx + 1) (bufIdx1 + 2)
-  let !childLen = columnLength childCol
-      check :: (VP.Prim a, Integral a) => VP.Vector a -> VP.Vector a -> Either String ()
-      check offs sizs = case firstRow len (\i -> outOfRange (VP.unsafeIndex offs i) (VP.unsafeIndex sizs i)) of
-        Just i -> Left ("Arrow.Column: list-view row " ++ show i ++ " points outside its child")
-        Nothing -> Right ()
-      outOfRange :: Integral a => a -> a -> Bool
-      outOfRange o0 s0 =
-        let !o = fromIntegral o0 :: Int
-            !s = fromIntegral s0 :: Int
-        in o < 0 || s < 0 || o > childLen || s > childLen - o
-  if large
-    then do
-      let offs = VP.generate len $ \i -> int64FromWord (readWord64 endian offBs (i * 8))
-          sizs = VP.generate len $ \i -> int64FromWord (readWord64 endian sizBs (i * 8))
-      check offs sizs
-      Right $! case validity of
-        Nothing -> (ColLargeListView offs sizs childCol, nodeIdx2, bufIdx2)
-        Just vs -> (ColLargeListViewMaybe vs offs sizs childCol, nodeIdx2, bufIdx2)
-    else do
-      let offs = VP.generate len $ \i -> int32FromWord (readWord32 endian offBs (i * 4))
-          sizs = VP.generate len $ \i -> int32FromWord (readWord32 endian sizBs (i * 4))
-      check offs sizs
-      Right $! case validity of
-        Nothing -> (ColListView offs sizs childCol, nodeIdx2, bufIdx2)
-        Just vs -> (ColListViewMaybe vs offs sizs childCol, nodeIdx2, bufIdx2)
-
-
-{- | Utf8View / BinaryView. Buffers: validity (optional), view
-(n × 16 bytes), then the column's variadic data buffers; their count
-is this column's entry in 'rbVariadicBufferCounts' (preorder over
-view columns, resolved by 'planNodes').
-
-Each 16-byte view is laid out:
-
-@
-  length         : i32 (little-endian)
-  if length <= 12:
-    inlined bytes (length bytes), zero-padded to 12 total
-  else:
-    prefix       : 4 bytes (first 4 of the string)
-    buffer_index : i32
-    buffer_offset: i32
-@
-
-Null rows are not resolved; every valid row's reference is checked
-against the referenced data buffer.
--}
-materializeViewCol :: Ctx -> Bool -> Field -> Int -> Int -> Either String (ColumnArray, Int, Int)
-materializeViewCol ctx utf8 f !nodeIdx !bufIdx = do
-  let !rb = ctxRb ctx
-      !body = ctxBody ctx
-  len <- nodeLenAt rb nodeIdx
-  varCount <- case ctxViews ctx VP.!? nodeIdx of
-    Just c | c >= 0 -> Right c
-    _ -> Left "Arrow.Column: view column has no variadic buffer count"
-  (validBs, !bufIdx1) <- validitySlot ctx f bufIdx
-  viewBs <- sliceBufAt rb body bufIdx1
-  if BS.length viewBs < len * 16
-    then Left "Arrow.Column: view buffer too small"
-    else Right ()
-  validity <- traverse (unpackValidity len) validBs
-  dataBufs <- V.generateM varCount (\i -> sliceBufAt rb body (bufIdx1 + 1 + i))
-  let !bufIdx2 = bufIdx1 + 1 + varCount
-      row :: Int -> Either String ByteString
-      row = resolveView viewBs dataBufs
-      utf8Row' i = row i >>= utf8Row "Utf8View"
-      isValid i = maybe True (`V.unsafeIndex` i) validity
-      maybeRow :: (Int -> Either String a) -> Int -> Either String (Maybe a)
-      maybeRow get i = if isValid i then Just <$> get i else Right Nothing
-  result <- case (utf8, validity) of
-    (True, Nothing) -> ColUtf8View <$> V.generateM len utf8Row'
-    (True, Just _) -> ColUtf8ViewMaybe <$> V.generateM len (maybeRow utf8Row')
-    (False, Nothing) -> ColBinaryView <$> V.generateM len row
-    (False, Just _) -> ColBinaryViewMaybe <$> V.generateM len (maybeRow row)
-  Right (result, nodeIdx + 1, bufIdx2)
-
-
--- | Bytes of view @i@; the caller guarantees @viewBs@ holds @16 * (i + 1)@ bytes.
-resolveView :: ByteString -> V.Vector ByteString -> Int -> Either String ByteString
-resolveView viewBs dataBufs i =
-  let !off = i * 16
-      !len = fromIntegral (readLE32 viewBs off) :: Int
-  in if len <= 12
-       then Right $! BSU.unsafeTake len (BSU.unsafeDrop (off + 4) viewBs)
-       else do
-         let !bufIdx = fromIntegral (readLE32 viewBs (off + 8)) :: Int
-             !bufOff = fromIntegral (readLE32 viewBs (off + 12)) :: Int
-         case dataBufs V.!? bufIdx of
-           Nothing -> Left "Arrow.Column: view references unknown data buffer index"
-           Just db ->
-             if bufOff > BS.length db - len
-               then Left "Arrow.Column: view payload out of range"
-               else Right $! BSU.unsafeTake len (BSU.unsafeDrop bufOff db)
-
-
--- ============================================================
--- Row slicing
--- ============================================================
-
-{- | Take @len@ rows starting at @start@ from a 'ColumnArray'.
-
-Total over every constructor; the result always has exactly
-@len@ rows (after clamping). Flat columns slice their vectors
-without copying. Offset-based columns (lists, maps, list views)
-slice the offsets and keep the child intact, so the offsets of a
-slice need not start at zero. Struct and sparse-union children are
-sliced in step; a dense union slices its type ids and offsets;
-fixed-size lists slice the child by @size * row@; a dictionary
-slices its indices; a run-end-encoded column keeps only the runs
-overlapping the window and clips their ends.
-
-@start@ + @len@ are clamped to the column's logical length;
-a negative @start@ becomes @0@; a @len@ that runs past the
-end is truncated.
+{- | Rows @[start, start + len)@, clamped to the column (a negative
+start becomes 0, a length past the end is truncated). O(1) for flat
+and offset columns (bit offsets move, offsets are not rebased, the
+child is kept), O(fields) for structs and sparse unions (children are
+sliced lazily), O(log runs) for run-end-encoded columns. Slicing a
+validity recounts its nulls with a popcount.
 -}
 sliceColumnArray :: Int -> Int -> ColumnArray -> ColumnArray
 sliceColumnArray !start0 !len0 col =
@@ -2160,1015 +1534,735 @@ sliceColumnArray !start0 !len0 col =
        else sliceRows start len col
 
 
--- | Clamped 'VP.slice'.
-pslice :: VP.Prim a => Int -> Int -> VP.Vector a -> VP.Vector a
-pslice s l v =
-  let !s' = min (VP.length v) (max 0 s)
-  in VP.slice s' (max 0 (min l (VP.length v - s'))) v
-
-
--- | Clamped 'V.slice'.
-bslice :: Int -> Int -> V.Vector a -> V.Vector a
-bslice s l v =
-  let !s' = min (V.length v) (max 0 s)
-  in V.slice s' (max 0 (min l (V.length v - s'))) v
-
-
 -- | Slice rows @[s, s + l)@; the caller has clamped the window.
 sliceRows :: Int -> Int -> ColumnArray -> ColumnArray
 sliceRows !s !l = \case
-  ColInt8 v -> ColInt8 (pslice s l v)
-  ColInt16 v -> ColInt16 (pslice s l v)
-  ColInt32 v -> ColInt32 (pslice s l v)
-  ColInt64 v -> ColInt64 (pslice s l v)
-  ColUInt8 v -> ColUInt8 (pslice s l v)
-  ColUInt16 v -> ColUInt16 (pslice s l v)
-  ColUInt32 v -> ColUInt32 (pslice s l v)
-  ColUInt64 v -> ColUInt64 (pslice s l v)
-  ColFloat16 v -> ColFloat16 (pslice s l v)
-  ColFloat v -> ColFloat (pslice s l v)
-  ColDouble v -> ColDouble (pslice s l v)
-  ColBool v -> ColBool (bslice s l v)
-  ColUtf8 v -> ColUtf8 (bslice s l v)
-  ColBinary v -> ColBinary (bslice s l v)
-  ColLargeUtf8 v -> ColLargeUtf8 (bslice s l v)
-  ColLargeBinary v -> ColLargeBinary (bslice s l v)
-  ColFixedSizeBinary w v -> ColFixedSizeBinary w (bslice s l v)
-  ColDate32 v -> ColDate32 (pslice s l v)
-  ColDate64 v -> ColDate64 (pslice s l v)
-  ColTime32 v -> ColTime32 (pslice s l v)
-  ColTime64 v -> ColTime64 (pslice s l v)
-  ColTimestamp v -> ColTimestamp (pslice s l v)
-  ColDuration v -> ColDuration (pslice s l v)
-  ColDecimal128 p sc v -> ColDecimal128 p sc (bslice s l v)
-  ColDecimal256 p sc v -> ColDecimal256 p sc (bslice s l v)
-  ColIntervalYearMonth v -> ColIntervalYearMonth (pslice s l v)
-  ColIntervalDayTime d m -> ColIntervalDayTime (pslice s l d) (pslice s l m)
-  ColIntervalMonthDayNano m d ns -> ColIntervalMonthDayNano (pslice s l m) (pslice s l d) (pslice s l ns)
-  ColInt8Maybe v -> ColInt8Maybe (bslice s l v)
-  ColInt16Maybe v -> ColInt16Maybe (bslice s l v)
-  ColInt32Maybe v -> ColInt32Maybe (bslice s l v)
-  ColInt64Maybe v -> ColInt64Maybe (bslice s l v)
-  ColUInt8Maybe v -> ColUInt8Maybe (bslice s l v)
-  ColUInt16Maybe v -> ColUInt16Maybe (bslice s l v)
-  ColUInt32Maybe v -> ColUInt32Maybe (bslice s l v)
-  ColUInt64Maybe v -> ColUInt64Maybe (bslice s l v)
-  ColFloat16Maybe v -> ColFloat16Maybe (bslice s l v)
-  ColFloatMaybe v -> ColFloatMaybe (bslice s l v)
-  ColDoubleMaybe v -> ColDoubleMaybe (bslice s l v)
-  ColBoolMaybe v -> ColBoolMaybe (bslice s l v)
-  ColUtf8Maybe v -> ColUtf8Maybe (bslice s l v)
-  ColBinaryMaybe v -> ColBinaryMaybe (bslice s l v)
-  ColLargeUtf8Maybe v -> ColLargeUtf8Maybe (bslice s l v)
-  ColLargeBinaryMaybe v -> ColLargeBinaryMaybe (bslice s l v)
-  ColFixedSizeBinaryMaybe w v -> ColFixedSizeBinaryMaybe w (bslice s l v)
-  ColDate32Maybe v -> ColDate32Maybe (bslice s l v)
-  ColDate64Maybe v -> ColDate64Maybe (bslice s l v)
-  ColTime32Maybe v -> ColTime32Maybe (bslice s l v)
-  ColTime64Maybe v -> ColTime64Maybe (bslice s l v)
-  ColTimestampMaybe v -> ColTimestampMaybe (bslice s l v)
-  ColDurationMaybe v -> ColDurationMaybe (bslice s l v)
-  ColDecimal128Maybe p sc v -> ColDecimal128Maybe p sc (bslice s l v)
-  ColDecimal256Maybe p sc v -> ColDecimal256Maybe p sc (bslice s l v)
-  ColIntervalYearMonthMaybe v -> ColIntervalYearMonthMaybe (bslice s l v)
-  ColIntervalDayTimeMaybe v -> ColIntervalDayTimeMaybe (bslice s l v)
-  ColIntervalMonthDayNanoMaybe v -> ColIntervalMonthDayNanoMaybe (bslice s l v)
-  ColUtf8View v -> ColUtf8View (bslice s l v)
-  ColUtf8ViewMaybe v -> ColUtf8ViewMaybe (bslice s l v)
-  ColBinaryView v -> ColBinaryView (bslice s l v)
-  ColBinaryViewMaybe v -> ColBinaryViewMaybe (bslice s l v)
-  ColNull _ -> ColNull l
-  ColStruct _ cs -> ColStruct l (V.map (fmap (sliceColumnArray s l)) cs)
-  ColStructMaybe valid cs -> ColStructMaybe (bslice s l valid) (V.map (fmap (sliceColumnArray s l)) cs)
-  ColList offs c -> ColList (pslice s (l + 1) offs) c
-  ColListMaybe valid offs c -> ColListMaybe (bslice s l valid) (pslice s (l + 1) offs) c
-  ColLargeList offs c -> ColLargeList (pslice s (l + 1) offs) c
-  ColLargeListMaybe valid offs c -> ColLargeListMaybe (bslice s l valid) (pslice s (l + 1) offs) c
-  ColFixedSizeList w _ c -> ColFixedSizeList w l (sliceColumnArray (s * w) (l * w) c)
-  ColFixedSizeListMaybe w valid c ->
-    ColFixedSizeListMaybe w (bslice s l valid) (sliceColumnArray (s * w) (l * w) c)
-  ColMap offs ks vs -> ColMap (pslice s (l + 1) offs) ks vs
-  ColMapMaybe valid offs ks vs -> ColMapMaybe (bslice s l valid) (pslice s (l + 1) offs) ks vs
-  ColDenseUnion ts offs cs -> ColDenseUnion (pslice s l ts) (pslice s l offs) cs
-  ColSparseUnion ts cs -> ColSparseUnion (pslice s l ts) (V.map (sliceColumnArray s l) cs)
-  ColDictionary did ix vals -> ColDictionary did (pslice s l ix) vals
-  ColDictionaryMaybe did ix vals -> ColDictionaryMaybe did (bslice s l ix) vals
-  ColRunEndEncoded re vals -> sliceRunEnds s l re vals
-  ColListView offs sz c -> ColListView (pslice s l offs) (pslice s l sz) c
-  ColListViewMaybe valid offs sz c -> ColListViewMaybe (bslice s l valid) (pslice s l offs) (pslice s l sz) c
-  ColLargeListView offs sz c -> ColLargeListView (pslice s l offs) (pslice s l sz) c
-  ColLargeListViewMaybe valid offs sz c ->
-    ColLargeListViewMaybe (bslice s l valid) (pslice s l offs) (pslice s l sz) c
-
-
-{- | Slice a run-end-encoded column: keep the runs that overlap
-@[s, s + l)@, rebase their ends to the window and clip the last one.
-A column whose run ends are not an int16/32/64 column has logical
-length zero (see 'columnLength'), so 'sliceColumnArray' never slices
-it; it is returned unchanged here.
--}
-sliceRunEnds :: Int -> Int -> ColumnArray -> ColumnArray -> ColumnArray
-sliceRunEnds !s !l re vals = case re of
-  ColInt16 v -> go ColInt16 v
-  ColInt32 v -> go ColInt32 v
-  ColInt64 v -> go ColInt64 v
-  _ -> ColRunEndEncoded re vals
+  I.ColNull _ -> I.ColNull l
+  I.ColPrim t v xs -> withPrim t (I.ColPrim t (sv v) (VS.slice s l xs))
+  I.ColBool v b -> I.ColBool (sv v) (sliceBitmap s l b)
+  I.ColUtf8 v o d -> I.ColUtf8 (sv v) (VS.slice s (l + 1) o) d
+  I.ColBinary v o d -> I.ColBinary (sv v) (VS.slice s (l + 1) o) d
+  I.ColLargeUtf8 v o d -> I.ColLargeUtf8 (sv v) (VS.slice s (l + 1) o) d
+  I.ColLargeBinary v o d -> I.ColLargeBinary (sv v) (VS.slice s (l + 1) o) d
+  I.ColFixedSizeBinary w _ v d -> I.ColFixedSizeBinary w l (sv v) (BSU.unsafeDrop (s * w) d)
+  I.ColUtf8View v views bufs -> I.ColUtf8View (sv v) (sliceViews views) bufs
+  I.ColBinaryView v views bufs -> I.ColBinaryView (sv v) (sliceViews views) bufs
+  I.ColStruct _ v cs -> I.ColStruct l (sv v) (V.map (fmap (sliceColumnArray s l)) cs)
+  I.ColList v o c -> I.ColList (sv v) (VS.slice s (l + 1) o) c
+  I.ColLargeList v o c -> I.ColLargeList (sv v) (VS.slice s (l + 1) o) c
+  I.ColListView v o z c -> I.ColListView (sv v) (VS.slice s l o) (VS.slice s l z) c
+  I.ColLargeListView v o z c -> I.ColLargeListView (sv v) (VS.slice s l o) (VS.slice s l z) c
+  I.ColFixedSizeList w _ v c -> I.ColFixedSizeList w l (sv v) (sliceColumnArray (s * w) (l * w) c)
+  I.ColMap v o k x -> I.ColMap (sv v) (VS.slice s (l + 1) o) k x
+  I.ColDenseUnion t o cs -> I.ColDenseUnion (VS.slice s l t) (VS.slice s l o) cs
+  I.ColSparseUnion t cs -> I.ColSparseUnion (VS.slice s l t) (V.map (sliceColumnArray s l) cs)
+  I.ColDictionary did ix vals -> I.ColDictionary did (sliceColumnArray s l ix) vals
+  I.ColRunEndEncoded off _ re vals
+    | l == 0 -> I.ColRunEndEncoded 0 0 (sliceColumnArray 0 0 re) (sliceColumnArray 0 0 vals)
+    | otherwise ->
+        let !lo = off + s
+            !i = physicalRun re lo
+            !j = physicalRun re (lo + l - 1)
+            !k = j - i + 1
+        in I.ColRunEndEncoded lo l (sliceColumnArray i k re) (sliceColumnArray i k vals)
   where
-    go :: (Integral a, VP.Prim a) => (VP.Vector a -> ColumnArray) -> VP.Vector a -> ColumnArray
-    go con v
-      | l == 0 = ColRunEndEncoded (con VP.empty) (sliceColumnArray 0 0 vals)
+    sv = sliceValidity s l
+    sliceViews = BSU.unsafeTake (l * 16) . BSU.unsafeDrop (s * 16)
+
+
+{- | Index of the run holding logical position @p@ (already offset):
+the first run whose end is greater than @p@. Binary search.
+-}
+physicalRun :: ColumnArray -> Int -> Int
+physicalRun re p = go 0 (columnLength re)
+  where
+    go !lo !hi
+      | lo >= hi = lo
       | otherwise =
-          let !e = s + l
-              !i = fromMaybe (VP.length v) (VP.findIndex (\x -> fromIntegral x > s) v)
-              !j = fromMaybe (VP.length v - 1) (VP.findIndex (\x -> fromIntegral x >= e) v)
-              !k = max 0 (j - i + 1)
-              ends = VP.map (\x -> fromIntegral (min (fromIntegral x) e - s)) (pslice i k v)
-          in ColRunEndEncoded (con ends) (sliceColumnArray i k vals)
+          let !mid = (lo + hi) `unsafeShiftR` 1
+          in if keyAt re mid > p then go lo mid else go (mid + 1) hi
+
+
+-- ============================================================
+-- Detaching
+-- ============================================================
+
+{- | A copy that references only fresh memory: each buffer's logical
+range is copied (offsets rebased to 0, bitmaps to bit offset 0), so
+the result no longer keeps the decoded input alive. O(referenced bytes).
+-}
+copyColumn :: ColumnArray -> ColumnArray
+copyColumn = \case
+  I.ColNull n -> I.ColNull n
+  I.ColPrim t v xs -> withPrim t (I.ColPrim t (copyValidity v) (copyStorable xs))
+  I.ColBool v b -> I.ColBool (copyValidity v) (copyBitmap b)
+  I.ColUtf8 v o d -> copyVar I.ColUtf8 v o d
+  I.ColBinary v o d -> copyVar I.ColBinary v o d
+  I.ColLargeUtf8 v o d -> copyVar I.ColLargeUtf8 v o d
+  I.ColLargeBinary v o d -> copyVar I.ColLargeBinary v o d
+  I.ColFixedSizeBinary w n v d -> I.ColFixedSizeBinary w n (copyValidity v) (freshBytes (BSU.unsafeTake (w * n) d))
+  I.ColUtf8View v views bufs -> I.ColUtf8View (copyValidity v) (freshBytes views) (V.map freshBytes bufs)
+  I.ColBinaryView v views bufs -> I.ColBinaryView (copyValidity v) (freshBytes views) (V.map freshBytes bufs)
+  I.ColStruct n v cs -> I.ColStruct n (copyValidity v) (forceElems (V.map (\(nm, c) -> let !c' = copyColumn (sliceColumnArray 0 n c) in (nm, c')) cs))
+  I.ColList v o c -> copyList I.ColList v o c
+  I.ColLargeList v o c -> copyList I.ColLargeList v o c
+  I.ColListView v o z c -> I.ColListView (copyValidity v) (copyStorable o) (copyStorable z) (copyColumn c)
+  I.ColLargeListView v o z c -> I.ColLargeListView (copyValidity v) (copyStorable o) (copyStorable z) (copyColumn c)
+  I.ColFixedSizeList w n v c -> I.ColFixedSizeList w n (copyValidity v) (copyColumn (sliceColumnArray 0 (w * n) c))
+  I.ColMap v o k x ->
+    let !(o', r) = rebaseToZero o
+    in I.ColMap (copyValidity v) o' (copyColumn (sliceRange r k)) (copyColumn (sliceRange r x))
+  I.ColDenseUnion t o cs -> I.ColDenseUnion (copyStorable t) (copyStorable o) (forceElems (V.map copyColumn cs))
+  I.ColSparseUnion t cs -> I.ColSparseUnion (copyStorable t) (forceElems (V.map (copyColumn . sliceColumnArray 0 (VS.length t)) cs))
+  I.ColDictionary did ix vals -> I.ColDictionary did (copyColumn ix) (copyColumn vals)
+  I.ColRunEndEncoded off n re vals -> I.ColRunEndEncoded off n (copyColumn re) (copyColumn (sliceColumnArray 0 (columnLength re) vals))
+  where
+    copyVar :: Offset o => (Maybe Validity -> VS.Vector o -> ByteString -> ColumnArray) -> Maybe Validity -> VS.Vector o -> ByteString -> ColumnArray
+    copyVar mk v o d =
+      let !(o', ChildRange s l) = rebaseToZero o
+      in mk (copyValidity v) o' (freshBytes (BSU.unsafeTake l (BSU.unsafeDrop s d)))
+    copyList :: Offset o => (Maybe Validity -> VS.Vector o -> ColumnArray -> ColumnArray) -> Maybe Validity -> VS.Vector o -> ColumnArray -> ColumnArray
+    copyList mk v o c =
+      let !(o', r) = rebaseToZero o
+      in mk (copyValidity v) o' (copyColumn (sliceRange r c))
+
+
+sliceRange :: ChildRange -> ColumnArray -> ColumnArray
+sliceRange (ChildRange s l) = sliceColumnArray s l
+
+
+freshBytes :: ByteString -> ByteString
+freshBytes bs = createAligned (BS.length bs) (copyBS bs)
 
 
 -- ============================================================
 -- Concatenation
 -- ============================================================
 
-{- | Append the rows of the second column to the first.
-
-Total over every constructor. Both columns must have the same
-shape: the same constructor (a non-nullable column is promoted to
-its nullable variant when the other side is nullable), the same
-decimal precision and scale, fixed-size widths, struct field
-names, and union arity. Offset-based columns are re-based so the
-result's offsets start at zero and its children hold exactly the
-referenced elements; dense-union offsets and list-view offsets of
-the second column are shifted past the first column's children;
-dictionary columns with different value columns concatenate their
-values and shift the second column's indices. Offsets that would
-overflow their integer width are rejected.
--}
+-- | @concatColumnArrays [a, b]@.
 concatColumnArray :: ColumnArray -> ColumnArray -> Either String ColumnArray
-concatColumnArray a b = case (a, b) of
-  (ColInt8 x, ColInt8 y) -> Right (ColInt8 (x VP.++ y))
-  (ColInt16 x, ColInt16 y) -> Right (ColInt16 (x VP.++ y))
-  (ColInt32 x, ColInt32 y) -> Right (ColInt32 (x VP.++ y))
-  (ColInt64 x, ColInt64 y) -> Right (ColInt64 (x VP.++ y))
-  (ColUInt8 x, ColUInt8 y) -> Right (ColUInt8 (x VP.++ y))
-  (ColUInt16 x, ColUInt16 y) -> Right (ColUInt16 (x VP.++ y))
-  (ColUInt32 x, ColUInt32 y) -> Right (ColUInt32 (x VP.++ y))
-  (ColUInt64 x, ColUInt64 y) -> Right (ColUInt64 (x VP.++ y))
-  (ColFloat16 x, ColFloat16 y) -> Right (ColFloat16 (x VP.++ y))
-  (ColFloat x, ColFloat y) -> Right (ColFloat (x VP.++ y))
-  (ColDouble x, ColDouble y) -> Right (ColDouble (x VP.++ y))
-  (ColBool x, ColBool y) -> Right (ColBool (x V.++ y))
-  (ColUtf8 x, ColUtf8 y) -> Right (ColUtf8 (x V.++ y))
-  (ColBinary x, ColBinary y) -> Right (ColBinary (x V.++ y))
-  (ColLargeUtf8 x, ColLargeUtf8 y) -> Right (ColLargeUtf8 (x V.++ y))
-  (ColLargeBinary x, ColLargeBinary y) -> Right (ColLargeBinary (x V.++ y))
-  (ColFixedSizeBinary w x, ColFixedSizeBinary w' y) | w == w' -> Right (ColFixedSizeBinary w (x V.++ y))
-  (ColDate32 x, ColDate32 y) -> Right (ColDate32 (x VP.++ y))
-  (ColDate64 x, ColDate64 y) -> Right (ColDate64 (x VP.++ y))
-  (ColTime32 x, ColTime32 y) -> Right (ColTime32 (x VP.++ y))
-  (ColTime64 x, ColTime64 y) -> Right (ColTime64 (x VP.++ y))
-  (ColTimestamp x, ColTimestamp y) -> Right (ColTimestamp (x VP.++ y))
-  (ColDuration x, ColDuration y) -> Right (ColDuration (x VP.++ y))
-  (ColDecimal128 p s x, ColDecimal128 p' s' y) | p == p' && s == s' -> Right (ColDecimal128 p s (x V.++ y))
-  (ColDecimal256 p s x, ColDecimal256 p' s' y) | p == p' && s == s' -> Right (ColDecimal256 p s (x V.++ y))
-  (ColIntervalYearMonth x, ColIntervalYearMonth y) -> Right (ColIntervalYearMonth (x VP.++ y))
-  (ColIntervalDayTime d m, ColIntervalDayTime d' m') -> Right (ColIntervalDayTime (d VP.++ d') (m VP.++ m'))
-  (ColIntervalMonthDayNano m d ns, ColIntervalMonthDayNano m' d' ns') ->
-    Right (ColIntervalMonthDayNano (m VP.++ m') (d VP.++ d') (ns VP.++ ns'))
-  (ColInt8Maybe x, ColInt8Maybe y) -> Right (ColInt8Maybe (x V.++ y))
-  (ColInt16Maybe x, ColInt16Maybe y) -> Right (ColInt16Maybe (x V.++ y))
-  (ColInt32Maybe x, ColInt32Maybe y) -> Right (ColInt32Maybe (x V.++ y))
-  (ColInt64Maybe x, ColInt64Maybe y) -> Right (ColInt64Maybe (x V.++ y))
-  (ColUInt8Maybe x, ColUInt8Maybe y) -> Right (ColUInt8Maybe (x V.++ y))
-  (ColUInt16Maybe x, ColUInt16Maybe y) -> Right (ColUInt16Maybe (x V.++ y))
-  (ColUInt32Maybe x, ColUInt32Maybe y) -> Right (ColUInt32Maybe (x V.++ y))
-  (ColUInt64Maybe x, ColUInt64Maybe y) -> Right (ColUInt64Maybe (x V.++ y))
-  (ColFloat16Maybe x, ColFloat16Maybe y) -> Right (ColFloat16Maybe (x V.++ y))
-  (ColFloatMaybe x, ColFloatMaybe y) -> Right (ColFloatMaybe (x V.++ y))
-  (ColDoubleMaybe x, ColDoubleMaybe y) -> Right (ColDoubleMaybe (x V.++ y))
-  (ColBoolMaybe x, ColBoolMaybe y) -> Right (ColBoolMaybe (x V.++ y))
-  (ColUtf8Maybe x, ColUtf8Maybe y) -> Right (ColUtf8Maybe (x V.++ y))
-  (ColBinaryMaybe x, ColBinaryMaybe y) -> Right (ColBinaryMaybe (x V.++ y))
-  (ColLargeUtf8Maybe x, ColLargeUtf8Maybe y) -> Right (ColLargeUtf8Maybe (x V.++ y))
-  (ColLargeBinaryMaybe x, ColLargeBinaryMaybe y) -> Right (ColLargeBinaryMaybe (x V.++ y))
-  (ColFixedSizeBinaryMaybe w x, ColFixedSizeBinaryMaybe w' y) | w == w' -> Right (ColFixedSizeBinaryMaybe w (x V.++ y))
-  (ColDate32Maybe x, ColDate32Maybe y) -> Right (ColDate32Maybe (x V.++ y))
-  (ColDate64Maybe x, ColDate64Maybe y) -> Right (ColDate64Maybe (x V.++ y))
-  (ColTime32Maybe x, ColTime32Maybe y) -> Right (ColTime32Maybe (x V.++ y))
-  (ColTime64Maybe x, ColTime64Maybe y) -> Right (ColTime64Maybe (x V.++ y))
-  (ColTimestampMaybe x, ColTimestampMaybe y) -> Right (ColTimestampMaybe (x V.++ y))
-  (ColDurationMaybe x, ColDurationMaybe y) -> Right (ColDurationMaybe (x V.++ y))
-  (ColDecimal128Maybe p s x, ColDecimal128Maybe p' s' y) | p == p' && s == s' -> Right (ColDecimal128Maybe p s (x V.++ y))
-  (ColDecimal256Maybe p s x, ColDecimal256Maybe p' s' y) | p == p' && s == s' -> Right (ColDecimal256Maybe p s (x V.++ y))
-  (ColIntervalYearMonthMaybe x, ColIntervalYearMonthMaybe y) -> Right (ColIntervalYearMonthMaybe (x V.++ y))
-  (ColIntervalDayTimeMaybe x, ColIntervalDayTimeMaybe y) -> Right (ColIntervalDayTimeMaybe (x V.++ y))
-  (ColIntervalMonthDayNanoMaybe x, ColIntervalMonthDayNanoMaybe y) -> Right (ColIntervalMonthDayNanoMaybe (x V.++ y))
-  (ColUtf8View x, ColUtf8View y) -> Right (ColUtf8View (x V.++ y))
-  (ColUtf8ViewMaybe x, ColUtf8ViewMaybe y) -> Right (ColUtf8ViewMaybe (x V.++ y))
-  (ColBinaryView x, ColBinaryView y) -> Right (ColBinaryView (x V.++ y))
-  (ColBinaryViewMaybe x, ColBinaryViewMaybe y) -> Right (ColBinaryViewMaybe (x V.++ y))
-  (ColNull x, ColNull y) -> Right (ColNull (x + y))
-  (ColStruct nx x, ColStruct ny y) -> ColStruct (nx + ny) <$> concatStructChildren nx x ny y
-  (ColStructMaybe vx x, ColStructMaybe vy y) ->
-    ColStructMaybe (vx V.++ vy) <$> concatStructChildren (V.length vx) x (V.length vy) y
-  (ColList ox cx, ColList oy cy) -> do
-    (o, cs) <- concatOffsetChildren int32Max ox [cx] oy [cy]
-    one (ColList o) cs
-  (ColListMaybe vx ox cx, ColListMaybe vy oy cy) -> do
-    (o, cs) <- concatOffsetChildren int32Max ox [cx] oy [cy]
-    one (ColListMaybe (vx V.++ vy) o) cs
-  (ColLargeList ox cx, ColLargeList oy cy) -> do
-    (o, cs) <- concatOffsetChildren maxBound ox [cx] oy [cy]
-    one (ColLargeList o) cs
-  (ColLargeListMaybe vx ox cx, ColLargeListMaybe vy oy cy) -> do
-    (o, cs) <- concatOffsetChildren maxBound ox [cx] oy [cy]
-    one (ColLargeListMaybe (vx V.++ vy) o) cs
-  (ColMap ox kx vx, ColMap oy ky vy) -> do
-    (o, cs) <- concatOffsetChildren int32Max ox [kx, vx] oy [ky, vy]
-    two (ColMap o) cs
-  (ColMapMaybe nx ox kx vx, ColMapMaybe ny oy ky vy) -> do
-    (o, cs) <- concatOffsetChildren int32Max ox [kx, vx] oy [ky, vy]
-    two (ColMapMaybe (nx V.++ ny) o) cs
-  (ColFixedSizeList w nx x, ColFixedSizeList w' ny y)
-    | w == w' -> ColFixedSizeList w (nx + ny) <$> concatFixedChildren w nx x ny y
-  (ColFixedSizeListMaybe w vx x, ColFixedSizeListMaybe w' vy y)
-    | w == w' -> ColFixedSizeListMaybe w (vx V.++ vy) <$> concatFixedChildren w (V.length vx) x (V.length vy) y
-  (ColDenseUnion tx ox cx, ColDenseUnion ty oy cy)
-    | V.length cx == V.length cy -> do
-        let !k = V.length cx
-            shifts = V.map columnLength cx
-        if VP.all (\t -> t >= 0 && fromIntegral t < k) ty
-          then Right ()
-          else Left "Arrow.Column.concatColumnArray: dense union type id out of range"
-        children <- V.zipWithM concatColumnArray cx cy
-        if V.all (\c -> fromIntegral (columnLength c) <= int32Max) children
-          then Right ()
-          else Left "Arrow.Column.concatColumnArray: dense union child exceeds Int32 offsets"
-        let oy' = VP.zipWith (\t o -> o + fromIntegral (V.unsafeIndex shifts (fromIntegral t))) ty oy
-        Right (ColDenseUnion (tx VP.++ ty) (ox VP.++ oy') children)
-  (ColSparseUnion tx cx, ColSparseUnion ty cy)
-    | V.length cx == V.length cy ->
-        ColSparseUnion (tx VP.++ ty)
-          <$> V.zipWithM
-            (\x y -> concatColumnArray (sliceColumnArray 0 (VP.length tx) x) (sliceColumnArray 0 (VP.length ty) y))
-            cx
-            cy
-  (ColDictionary did ix vx, ColDictionary _ iy vy)
-    | vx == vy -> Right (ColDictionary did (ix VP.++ iy) vx)
-    | otherwise -> do
-        vals <- concatDictValues vx vy
-        let !k = fromIntegral (columnLength vx)
-        Right (ColDictionary did (ix VP.++ VP.map (+ k) iy) vals)
-  (ColDictionaryMaybe did ix vx, ColDictionaryMaybe _ iy vy)
-    | vx == vy -> Right (ColDictionaryMaybe did (ix V.++ iy) vx)
-    | otherwise -> do
-        vals <- concatDictValues vx vy
-        let !k = fromIntegral (columnLength vx)
-        Right (ColDictionaryMaybe did (ix V.++ V.map (fmap (+ k)) iy) vals)
-  (ColRunEndEncoded rx vx, ColRunEndEncoded ry vy) -> do
-    re <- concatRunEnds (columnLength a) rx ry
-    vs <- concatColumnArray (sliceColumnArray 0 (runCount rx) vx) (sliceColumnArray 0 (runCount ry) vy)
-    Right (ColRunEndEncoded re vs)
-  (ColListView ox sx cx, ColListView oy sy cy) -> do
-    (oy', c) <- concatViewChildren int32Max cx oy cy
-    Right (ColListView (ox VP.++ oy') (sx VP.++ sy) c)
-  (ColListViewMaybe vx ox sx cx, ColListViewMaybe vy oy sy cy) -> do
-    (oy', c) <- concatViewChildren int32Max cx oy cy
-    Right (ColListViewMaybe (vx V.++ vy) (ox VP.++ oy') (sx VP.++ sy) c)
-  (ColLargeListView ox sx cx, ColLargeListView oy sy cy) -> do
-    (oy', c) <- concatViewChildren maxBound cx oy cy
-    Right (ColLargeListView (ox VP.++ oy') (sx VP.++ sy) c)
-  (ColLargeListViewMaybe vx ox sx cx, ColLargeListViewMaybe vy oy sy cy) -> do
-    (oy', c) <- concatViewChildren maxBound cx oy cy
-    Right (ColLargeListViewMaybe (vx V.++ vy) (ox VP.++ oy') (sx VP.++ sy) c)
-  _
-    | isNullableColumn a /= isNullableColumn b -> do
-        a' <- toNullableColumn a
-        b' <- toNullableColumn b
-        if isNullableColumn a' && isNullableColumn b'
-          then concatColumnArray a' b'
-          else mismatch
-    | otherwise -> mismatch
-  where
-    mismatch =
-      Left ("Arrow.Column.concatColumnArray: incompatible columns " ++ columnTag a ++ " and " ++ columnTag b)
-    one k = \case
-      [c] -> Right (k c)
-      _ -> Left "Arrow.Column.concatColumnArray: internal child count mismatch"
-    two k = \case
-      [c1, c2] -> Right (k c1 c2)
-      _ -> Left "Arrow.Column.concatColumnArray: internal child count mismatch"
-    concatDictValues vx vy = do
-      vals <- concatColumnArray vx vy
-      if fromIntegral (columnLength vals) <= int32Max
-        then Right vals
-        else Left "Arrow.Column.concatColumnArray: dictionary exceeds Int32 indices"
-    runCount = \case
-      ColInt16 v -> VP.length v
-      ColInt32 v -> VP.length v
-      ColInt64 v -> VP.length v
-      _ -> 0
+concatColumnArray a b = concatColumnArrays [a, b]
 
 
--- | Concatenate struct children, each side cut to its parent's row count.
-concatStructChildren :: Int -> V.Vector (Text, ColumnArray) -> Int -> V.Vector (Text, ColumnArray) -> Either String (V.Vector (Text, ColumnArray))
-concatStructChildren na xs nb ys
-  | V.map fst xs /= V.map fst ys = Left "Arrow.Column.concatColumnArray: struct field names differ"
-  | otherwise =
-      V.zipWithM (\(nm, x) (_, y) -> (,) nm <$> concatColumnArray (sliceColumnArray 0 na x) (sliceColumnArray 0 nb y)) xs ys
-
-
-concatFixedChildren :: Int -> Int -> ColumnArray -> Int -> ColumnArray -> Either String ColumnArray
-concatFixedChildren w na x nb y =
-  concatColumnArray (sliceColumnArray 0 (na * w) x) (sliceColumnArray 0 (nb * w) y)
-
-
-{- | Concatenate offset-addressed children (list / large list / map):
-each side is re-based so its offsets start at zero and its children
-hold exactly the referenced range, then the second side's offsets
-are shifted by the first side's element count.
+{- | Append columns of the same type (same tag, decimal parameters,
+widths, struct field names, union arity, dictionary index type and
+run-end type). Per buffer: one allocation of the summed size, a
+memcpy per input, bit copies for bitmaps at any bit offset, and one
+rebase pass per input for offsets. Var-length data and list children
+keep only the referenced ranges. Dictionaries with identical values
+(same buffers or logically equal) concatenate their keys; otherwise
+the values are concatenated and later keys shifted, which must fit
+the key width. Offsets that overflow their width are rejected.
 -}
-concatOffsetChildren
-  :: (Integral o, VP.Prim o)
-  => Int64
-  -> VP.Vector o
-  -> [ColumnArray]
-  -> VP.Vector o
-  -> [ColumnArray]
-  -> Either String (VP.Vector o, [ColumnArray])
-concatOffsetChildren maxOff ox cx oy cy = do
-  (ox', cx') <- rebaseOffsets ox cx
-  (oy', cy') <- rebaseOffsets oy cy
-  let !na = VP.last ox'
-  if toInteger na + toInteger (VP.last oy') > toInteger maxOff
-    then Left "Arrow.Column.concatColumnArray: offsets overflow"
-    else do
-      cs <- sequence (zipWith concatColumnArray cx' cy')
-      Right (ox' VP.++ VP.map (+ na) (VP.drop 1 oy'), cs)
-
-
--- | Shift offsets to start at zero and cut the children to the referenced range.
-rebaseOffsets :: (Integral o, VP.Prim o) => VP.Vector o -> [ColumnArray] -> Either String (VP.Vector o, [ColumnArray])
-rebaseOffsets offs cs
-  | VP.null offs = Right (VP.singleton 0, map (sliceColumnArray 0 0) cs)
-  | otherwise =
-      let !o0 = VP.head offs
-          !oN = VP.last offs
-          !s = fromIntegral o0 :: Int
-          !l = fromIntegral (oN - o0) :: Int
-          decreasing = any (\i -> VP.unsafeIndex offs i > VP.unsafeIndex offs (i + 1)) [0 .. VP.length offs - 2]
-      in if o0 < 0 || l < 0 || not (all (\c -> s + l <= columnLength c) cs) || decreasing
-           then Left "Arrow.Column.concatColumnArray: offsets are not a valid non-decreasing range of the child"
-           else Right (VP.map (subtract o0) offs, map (sliceColumnArray s l) cs)
-
-
--- | List-view concatenation: the child is appended and the second side's offsets shift past the first child.
-concatViewChildren :: (Integral o, VP.Prim o) => Int64 -> ColumnArray -> VP.Vector o -> ColumnArray -> Either String (VP.Vector o, ColumnArray)
-concatViewChildren maxOff cx oy cy = do
-  c <- concatColumnArray cx cy
-  if fromIntegral (columnLength c) > maxOff
-    then Left "Arrow.Column.concatColumnArray: list-view offsets overflow"
-    else
-      let !k = fromIntegral (columnLength cx)
-      in Right (VP.map (+ k) oy, c)
-
-
-concatRunEnds :: Int -> ColumnArray -> ColumnArray -> Either String ColumnArray
-concatRunEnds shift rx ry = case (rx, ry) of
-  (ColInt16 x, ColInt16 y) -> ColInt16 <$> go (fromIntegral (maxBound :: Int16)) x y
-  (ColInt32 x, ColInt32 y) -> ColInt32 <$> go int32Max x y
-  (ColInt64 x, ColInt64 y) -> ColInt64 <$> go maxBound x y
-  _ -> Left ("Arrow.Column.concatColumnArray: run ends must be matching int16/32/64 columns, got " ++ columnTag rx ++ " and " ++ columnTag ry)
-  where
-    go :: (Integral a, VP.Prim a) => Int64 -> VP.Vector a -> VP.Vector a -> Either String (VP.Vector a)
-    go maxEnd x y
-      | not (VP.null y) && toInteger (VP.last y) + toInteger shift > toInteger maxEnd =
-          Left "Arrow.Column.concatColumnArray: run end overflows its integer width"
-      | otherwise = Right (x VP.++ VP.map (+ fromIntegral shift) y)
-
-
--- | Balanced concatenation of a non-empty list of columns.
 concatColumnArrays :: [ColumnArray] -> Either String ColumnArray
 concatColumnArrays = \case
   [] -> Left "Arrow.Column.concatColumnArrays: no columns"
   [c] -> Right c
-  cs -> do
-    let (l, r) = splitAt (length cs `div` 2) cs
-    x <- concatColumnArrays l
-    y <- concatColumnArrays r
-    concatColumnArray x y
-
-
--- ============================================================
--- Nullability helpers
--- ============================================================
-
--- | Whether the column carries per-row nulls (a @*Maybe@ constructor or 'ColNull').
-isNullableColumn :: ColumnArray -> Bool
-isNullableColumn = \case
-  ColInt8Maybe {} -> True
-  ColInt16Maybe {} -> True
-  ColInt32Maybe {} -> True
-  ColInt64Maybe {} -> True
-  ColUInt8Maybe {} -> True
-  ColUInt16Maybe {} -> True
-  ColUInt32Maybe {} -> True
-  ColUInt64Maybe {} -> True
-  ColFloat16Maybe {} -> True
-  ColFloatMaybe {} -> True
-  ColDoubleMaybe {} -> True
-  ColBoolMaybe {} -> True
-  ColUtf8Maybe {} -> True
-  ColBinaryMaybe {} -> True
-  ColLargeUtf8Maybe {} -> True
-  ColLargeBinaryMaybe {} -> True
-  ColFixedSizeBinaryMaybe {} -> True
-  ColDate32Maybe {} -> True
-  ColDate64Maybe {} -> True
-  ColTime32Maybe {} -> True
-  ColTime64Maybe {} -> True
-  ColTimestampMaybe {} -> True
-  ColDurationMaybe {} -> True
-  ColDecimal128Maybe {} -> True
-  ColDecimal256Maybe {} -> True
-  ColIntervalYearMonthMaybe {} -> True
-  ColIntervalDayTimeMaybe {} -> True
-  ColIntervalMonthDayNanoMaybe {} -> True
-  ColStructMaybe {} -> True
-  ColListMaybe {} -> True
-  ColLargeListMaybe {} -> True
-  ColFixedSizeListMaybe {} -> True
-  ColMapMaybe {} -> True
-  ColDictionaryMaybe {} -> True
-  ColListViewMaybe {} -> True
-  ColLargeListViewMaybe {} -> True
-  ColUtf8ViewMaybe {} -> True
-  ColBinaryViewMaybe {} -> True
-  ColNull {} -> True
-  ColInt8 {} -> False
-  ColInt16 {} -> False
-  ColInt32 {} -> False
-  ColInt64 {} -> False
-  ColUInt8 {} -> False
-  ColUInt16 {} -> False
-  ColUInt32 {} -> False
-  ColUInt64 {} -> False
-  ColFloat16 {} -> False
-  ColFloat {} -> False
-  ColDouble {} -> False
-  ColBool {} -> False
-  ColUtf8 {} -> False
-  ColBinary {} -> False
-  ColLargeUtf8 {} -> False
-  ColLargeBinary {} -> False
-  ColFixedSizeBinary {} -> False
-  ColDate32 {} -> False
-  ColDate64 {} -> False
-  ColTime32 {} -> False
-  ColTime64 {} -> False
-  ColTimestamp {} -> False
-  ColDuration {} -> False
-  ColDecimal128 {} -> False
-  ColDecimal256 {} -> False
-  ColIntervalYearMonth {} -> False
-  ColIntervalDayTime {} -> False
-  ColIntervalMonthDayNano {} -> False
-  ColStruct {} -> False
-  ColList {} -> False
-  ColLargeList {} -> False
-  ColFixedSizeList {} -> False
-  ColMap {} -> False
-  ColDenseUnion {} -> False
-  ColSparseUnion {} -> False
-  ColDictionary {} -> False
-  ColRunEndEncoded {} -> False
-  ColListView {} -> False
-  ColLargeListView {} -> False
-  ColUtf8View {} -> False
-  ColBinaryView {} -> False
-
-
-{- | The nullable variant of a column with every row valid. Nullable
-columns are returned unchanged. Unions and run-end-encoded columns
-have no validity bitmap of their own, so they are rejected.
--}
-toNullableColumn :: ColumnArray -> Either String ColumnArray
-toNullableColumn col = case col of
-  ColInt8 v -> Right (ColInt8Maybe (justs v))
-  ColInt16 v -> Right (ColInt16Maybe (justs v))
-  ColInt32 v -> Right (ColInt32Maybe (justs v))
-  ColInt64 v -> Right (ColInt64Maybe (justs v))
-  ColUInt8 v -> Right (ColUInt8Maybe (justs v))
-  ColUInt16 v -> Right (ColUInt16Maybe (justs v))
-  ColUInt32 v -> Right (ColUInt32Maybe (justs v))
-  ColUInt64 v -> Right (ColUInt64Maybe (justs v))
-  ColFloat16 v -> Right (ColFloat16Maybe (justs v))
-  ColFloat v -> Right (ColFloatMaybe (justs v))
-  ColDouble v -> Right (ColDoubleMaybe (justs v))
-  ColBool v -> Right (ColBoolMaybe (V.map Just v))
-  ColUtf8 v -> Right (ColUtf8Maybe (V.map Just v))
-  ColBinary v -> Right (ColBinaryMaybe (V.map Just v))
-  ColLargeUtf8 v -> Right (ColLargeUtf8Maybe (V.map Just v))
-  ColLargeBinary v -> Right (ColLargeBinaryMaybe (V.map Just v))
-  ColFixedSizeBinary w v -> Right (ColFixedSizeBinaryMaybe w (V.map Just v))
-  ColDate32 v -> Right (ColDate32Maybe (justs v))
-  ColDate64 v -> Right (ColDate64Maybe (justs v))
-  ColTime32 v -> Right (ColTime32Maybe (justs v))
-  ColTime64 v -> Right (ColTime64Maybe (justs v))
-  ColTimestamp v -> Right (ColTimestampMaybe (justs v))
-  ColDuration v -> Right (ColDurationMaybe (justs v))
-  ColDecimal128 p s v -> Right (ColDecimal128Maybe p s (V.map Just v))
-  ColDecimal256 p s v -> Right (ColDecimal256Maybe p s (V.map Just v))
-  ColIntervalYearMonth v -> Right (ColIntervalYearMonthMaybe (justs v))
-  ColIntervalDayTime d m -> Right (ColIntervalDayTimeMaybe (V.zipWith (\x y -> Just (x, y)) (V.convert d) (V.convert m)))
-  ColIntervalMonthDayNano m d ns ->
-    Right (ColIntervalMonthDayNanoMaybe (V.zipWith3 (\x y z -> Just (x, y, z)) (V.convert m) (V.convert d) (V.convert ns)))
-  ColUtf8View v -> Right (ColUtf8ViewMaybe (V.map Just v))
-  ColBinaryView v -> Right (ColBinaryViewMaybe (V.map Just v))
-  ColStruct _ cs -> Right (ColStructMaybe allValid cs)
-  ColList o c -> Right (ColListMaybe allValid o c)
-  ColLargeList o c -> Right (ColLargeListMaybe allValid o c)
-  ColFixedSizeList w _ c -> Right (ColFixedSizeListMaybe w allValid c)
-  ColMap o k v -> Right (ColMapMaybe allValid o k v)
-  ColDictionary did ix v -> Right (ColDictionaryMaybe did (justs ix) v)
-  ColListView o s c -> Right (ColListViewMaybe allValid o s c)
-  ColLargeListView o s c -> Right (ColLargeListViewMaybe allValid o s c)
-  ColDenseUnion {} -> noValidity
-  ColSparseUnion {} -> noValidity
-  ColRunEndEncoded {} -> noValidity
-  _ -> Right col
+  cols@(c0 : _) -> case c0 of
+    I.ColNull _ -> I.ColNull . sum <$> traverse (\case I.ColNull n -> Right n; c -> mismatch c) cols
+    I.ColPrim t _ _ -> withPrim t $ do
+      parts <- traverse (primPart t) cols
+      Right (I.ColPrim t (concatValidity (map (\(v, xs) -> (VS.length xs, v)) parts)) (concatStorable (map snd parts)))
+    I.ColBool {} -> do
+      parts <- traverse (\case I.ColBool v b -> Right (v, b); c -> mismatch c) cols
+      Right (I.ColBool (concatValidity (map (\(v, b) -> (bitmapLength b, v)) parts)) (concatBitmaps (map snd parts)))
+    I.ColUtf8 {} -> traverse (\case I.ColUtf8 v o d -> Right (v, o, d); c -> mismatch c) cols >>= concatVar I.ColUtf8
+    I.ColBinary {} -> traverse (\case I.ColBinary v o d -> Right (v, o, d); c -> mismatch c) cols >>= concatVar I.ColBinary
+    I.ColLargeUtf8 {} -> traverse (\case I.ColLargeUtf8 v o d -> Right (v, o, d); c -> mismatch c) cols >>= concatVar I.ColLargeUtf8
+    I.ColLargeBinary {} -> traverse (\case I.ColLargeBinary v o d -> Right (v, o, d); c -> mismatch c) cols >>= concatVar I.ColLargeBinary
+    I.ColFixedSizeBinary w _ _ _ -> do
+      parts <- traverse (\case I.ColFixedSizeBinary w' n v d | w' == w -> Right (n, v, d); c -> mismatch c) cols
+      Right $
+        I.ColFixedSizeBinary
+          w
+          (sum (map fst3 parts))
+          (concatValidity (map (\(n, v, _) -> (n, v)) parts))
+          (concatBytes (map (\(n, _, d) -> BSU.unsafeTake (n * w) d) parts))
+    I.ColUtf8View {} -> traverse (\case I.ColUtf8View v vs bs -> Right (v, vs, bs); c -> mismatch c) cols >>= concatViews I.ColUtf8View
+    I.ColBinaryView {} -> traverse (\case I.ColBinaryView v vs bs -> Right (v, vs, bs); c -> mismatch c) cols >>= concatViews I.ColBinaryView
+    I.ColStruct _ _ cs0 -> do
+      parts <- traverse (\case I.ColStruct n v cs | V.map fst cs == V.map fst cs0 -> Right (n, v, cs); c -> mismatch c) cols
+      children <-
+        V.generateM (V.length cs0) $ \j ->
+          (,) (fst (V.unsafeIndex cs0 j))
+            <$> concatColumnArrays (map (\(n, _, cs) -> sliceColumnArray 0 n (snd (V.unsafeIndex cs j))) parts)
+      Right (I.ColStruct (sum (map fst3 parts)) (concatValidity (map (\(n, v, _) -> (n, v)) parts)) children)
+    I.ColList {} -> traverse (\case I.ColList v o c -> Right (v, o, c); c -> mismatch c) cols >>= concatLists I.ColList
+    I.ColLargeList {} -> traverse (\case I.ColLargeList v o c -> Right (v, o, c); c -> mismatch c) cols >>= concatLists I.ColLargeList
+    I.ColListView {} -> traverse (\case I.ColListView v o z c -> Right (v, o, z, c); c -> mismatch c) cols >>= concatListViews I.ColListView
+    I.ColLargeListView {} -> traverse (\case I.ColLargeListView v o z c -> Right (v, o, z, c); c -> mismatch c) cols >>= concatListViews I.ColLargeListView
+    I.ColFixedSizeList w _ _ _ -> do
+      parts <- traverse (\case I.ColFixedSizeList w' n v c | w' == w -> Right (n, v, c); c -> mismatch c) cols
+      child <- concatColumnArrays (map (\(n, _, c) -> sliceColumnArray 0 (n * w) c) parts)
+      Right (I.ColFixedSizeList w (sum (map fst3 parts)) (concatValidity (map (\(n, v, _) -> (n, v)) parts)) child)
+    I.ColMap {} -> do
+      parts <- traverse (\case I.ColMap v o k x -> Right (v, o, k, x); c -> mismatch c) cols
+      (offs, ranges) <- concatOffsets (map (\(_, o, _, _) -> o) parts)
+      keys <- concatColumnArrays (zipWith (\r (_, _, k, _) -> sliceRange r k) ranges parts)
+      vals <- concatColumnArrays (zipWith (\r (_, _, _, x) -> sliceRange r x) ranges parts)
+      Right (I.ColMap (concatValidity (map (\(v, o, _, _) -> (offsetRows o, v)) parts)) offs keys vals)
+    I.ColDenseUnion _ _ cs0 -> do
+      parts <- traverse (\case I.ColDenseUnion t o cs | V.length cs == V.length cs0 -> Right (t, o, cs); c -> mismatch c) cols
+      let !k = V.length cs0
+      children <- V.generateM k $ \j -> concatColumnArrays (map (\(_, _, cs) -> V.unsafeIndex cs j) parts)
+      when (V.any (\c -> columnLength c > fromIntegral (maxBound :: Int32)) children) $
+        Left "Arrow.Column.concatColumnArrays: dense union child exceeds 32-bit offsets"
+      let bases = scanl (\acc (_, _, cs) -> zipWith (+) acc (map columnLength (V.toList cs))) (replicate k 0) parts
+          shifted =
+            zipWith
+              ( \base (t, o, _) ->
+                  let !bv = VS.fromList (map fromIntegral base) :: VS.Vector Int32
+                  in VS.zipWith (\ti oi -> oi + VS.unsafeIndex bv (fromIntegral ti)) t o
+              )
+              bases
+              parts
+      Right (I.ColDenseUnion (concatStorable (map fst3 parts)) (concatStorable shifted) children)
+    I.ColSparseUnion _ cs0 -> do
+      parts <- traverse (\case I.ColSparseUnion t cs | V.length cs == V.length cs0 -> Right (t, cs); c -> mismatch c) cols
+      children <-
+        V.generateM (V.length cs0) $ \j ->
+          concatColumnArrays (map (\(t, cs) -> sliceColumnArray 0 (VS.length t) (V.unsafeIndex cs j)) parts)
+      Right (I.ColSparseUnion (concatStorable (map fst parts)) children)
+    I.ColDictionary did ix0 vals0 -> do
+      parts <- traverse (\case I.ColDictionary _ ix vals | sameShape ix ix0 -> Right (ix, vals); c -> mismatch c) cols
+      if all (\(_, vals) -> identical vals vals0 || vals == vals0) parts
+        then (\ix -> I.ColDictionary did ix vals0) <$> concatColumnArrays (map fst parts)
+        else do
+          vals <- concatColumnArrays (map snd parts)
+          let bases = scanl (+) 0 (map (columnLength . snd) parts)
+          shifted <- sequence (zipWith (\base (ix, _) -> shiftKeys base ix) bases parts)
+          ix <- concatColumnArrays shifted
+          Right (I.ColDictionary did ix vals)
+    I.ColRunEndEncoded _ _ re0 _ -> do
+      parts <- traverse (\case I.ColRunEndEncoded off n re vals | sameShape re re0 -> Right (off, n, re, vals); c -> mismatch c) cols
+      concatRuns re0 parts
   where
-    justs :: VP.Prim a => VP.Vector a -> V.Vector (Maybe a)
-    justs = V.map Just . V.convert
-    allValid = V.replicate (columnLength col) True
-    noValidity = Left ("Arrow.Column: " ++ columnTag col ++ " has no validity bitmap and cannot be made nullable")
+    mismatch :: ColumnArray -> Either String b
+    mismatch c = Left ("Arrow.Column.concatColumnArrays: incompatible columns " ++ columnTag c ++ " and the first column")
 
 
-{- | Null out the rows whose flag is 'False' in a nullable column (rows
-already null stay null).
+fst3 :: (a, b, c) -> a
+fst3 (a, _, _) = a
+
+
+primPart :: PrimType a -> ColumnArray -> Either String (Maybe Validity, VS.Vector a)
+primPart t = \case
+  I.ColPrim t' v xs | samePrimType t t', Just Refl <- samePrimTag t t' -> Right (v, xs)
+  c -> Left ("Arrow.Column.concatColumnArrays: incompatible columns " ++ columnTag c ++ " and Col" ++ primTypeName t)
+
+
+-- | One aligned allocation holding the bytes in order.
+concatBytes :: [ByteString] -> ByteString
+concatBytes bss =
+  createAligned (sum (map BS.length bss)) $ \dst ->
+    let go !_ [] = pure ()
+        go !off (b : rest) = copyBS b (dst `plusPtr` off) >> go (off + BS.length b) rest
+    in go 0 bss
+
+
+concatStorable :: Storable a => [VS.Vector a] -> VS.Vector a
+concatStorable = unsafeBytesToStorable . concatBytes . map storableToBytes
+
+
+{- | Offsets of consecutive list-like pieces as one offsets vector
+starting at 0 (one rebase pass per piece), and each piece's child range.
 -}
-maskValidity :: V.Vector Bool -> ColumnArray -> Either String ColumnArray
-maskValidity valid col = case col of
-  ColInt8Maybe v -> Right (ColInt8Maybe (m v))
-  ColInt16Maybe v -> Right (ColInt16Maybe (m v))
-  ColInt32Maybe v -> Right (ColInt32Maybe (m v))
-  ColInt64Maybe v -> Right (ColInt64Maybe (m v))
-  ColUInt8Maybe v -> Right (ColUInt8Maybe (m v))
-  ColUInt16Maybe v -> Right (ColUInt16Maybe (m v))
-  ColUInt32Maybe v -> Right (ColUInt32Maybe (m v))
-  ColUInt64Maybe v -> Right (ColUInt64Maybe (m v))
-  ColFloat16Maybe v -> Right (ColFloat16Maybe (m v))
-  ColFloatMaybe v -> Right (ColFloatMaybe (m v))
-  ColDoubleMaybe v -> Right (ColDoubleMaybe (m v))
-  ColBoolMaybe v -> Right (ColBoolMaybe (m v))
-  ColUtf8Maybe v -> Right (ColUtf8Maybe (m v))
-  ColBinaryMaybe v -> Right (ColBinaryMaybe (m v))
-  ColLargeUtf8Maybe v -> Right (ColLargeUtf8Maybe (m v))
-  ColLargeBinaryMaybe v -> Right (ColLargeBinaryMaybe (m v))
-  ColFixedSizeBinaryMaybe w v -> Right (ColFixedSizeBinaryMaybe w (m v))
-  ColDate32Maybe v -> Right (ColDate32Maybe (m v))
-  ColDate64Maybe v -> Right (ColDate64Maybe (m v))
-  ColTime32Maybe v -> Right (ColTime32Maybe (m v))
-  ColTime64Maybe v -> Right (ColTime64Maybe (m v))
-  ColTimestampMaybe v -> Right (ColTimestampMaybe (m v))
-  ColDurationMaybe v -> Right (ColDurationMaybe (m v))
-  ColDecimal128Maybe p s v -> Right (ColDecimal128Maybe p s (m v))
-  ColDecimal256Maybe p s v -> Right (ColDecimal256Maybe p s (m v))
-  ColIntervalYearMonthMaybe v -> Right (ColIntervalYearMonthMaybe (m v))
-  ColIntervalDayTimeMaybe v -> Right (ColIntervalDayTimeMaybe (m v))
-  ColIntervalMonthDayNanoMaybe v -> Right (ColIntervalMonthDayNanoMaybe (m v))
-  ColUtf8ViewMaybe v -> Right (ColUtf8ViewMaybe (m v))
-  ColBinaryViewMaybe v -> Right (ColBinaryViewMaybe (m v))
-  ColDictionaryMaybe did v vals -> Right (ColDictionaryMaybe did (m v) vals)
-  ColStructMaybe v cs -> Right (ColStructMaybe (b v) cs)
-  ColListMaybe v o c -> Right (ColListMaybe (b v) o c)
-  ColLargeListMaybe v o c -> Right (ColLargeListMaybe (b v) o c)
-  ColFixedSizeListMaybe w v c -> Right (ColFixedSizeListMaybe w (b v) c)
-  ColMapMaybe v o k vs -> Right (ColMapMaybe (b v) o k vs)
-  ColListViewMaybe v o s c -> Right (ColListViewMaybe (b v) o s c)
-  ColLargeListViewMaybe v o s c -> Right (ColLargeListViewMaybe (b v) o s c)
-  ColNull _ -> Right col
-  _ -> Left ("Arrow.Column: cannot mask nulls into non-nullable column " ++ columnTag col)
+concatOffsets :: forall o. Offset o => [VS.Vector o] -> Either String (VS.Vector o, [ChildRange])
+concatOffsets offss
+  | toInteger total > toInteger (maxBound :: o) = Left "Arrow.Column.concatColumnArrays: offsets overflow their width"
+  | otherwise = Right (unsafeBytesToStorable bytes, ranges)
   where
-    m :: V.Vector (Maybe a) -> V.Vector (Maybe a)
-    m = V.zipWith (\ok x -> if ok then x else Nothing) valid
-    b = V.zipWith (&&) valid
+    ranges = map (\o -> ChildRange (fromIntegral (VS.unsafeHead o)) (fromIntegral (VS.unsafeLast o - VS.unsafeHead o))) offss
+    !total = sum (map childLength ranges)
+    !rows = sum (map offsetRows offss)
+    !w = sizeOf (0 :: o)
+    bytes = createAligned ((rows + 1) * w) $ \dst -> do
+      pokeElemOff (castPtr dst) 0 (0 :: o)
+      let go !_ !_ [] = pure ()
+          go !pos !base (o : rest) = do
+            let !m = offsetRows o
+                !o0 = VS.unsafeHead o
+            VS.unsafeWith o $ \src ->
+              cRebaseOffsets (castPtr (dst `plusPtr` ((pos + 1) * w)) :: Ptr o) (src `plusPtr` w) m (fromIntegral base - fromIntegral o0)
+            go (pos + m) (base + fromIntegral (VS.unsafeLast o - o0) :: Int) rest
+      go 0 0 offss
 
 
--- ============================================================
--- Gather / dictionary expansion
--- ============================================================
+concatVar :: Offset o => (Maybe Validity -> VS.Vector o -> ByteString -> ColumnArray) -> [(Maybe Validity, VS.Vector o, ByteString)] -> Either String ColumnArray
+concatVar mk parts = do
+  (offs, ranges) <- concatOffsets (map (\(_, o, _) -> o) parts)
+  let dat = concatBytes (zipWith (\(ChildRange s l) (_, _, d) -> BSU.unsafeTake l (BSU.unsafeDrop s d)) ranges parts)
+  Right (mk (concatValidity (map (\(v, o, _) -> (offsetRows o, v)) parts)) offs dat)
 
-{- | Gather rows by index (repeats allowed). Any index outside the
-column is a 'Left'. Flat columns and the index-carrying parts of
-structs, unions, dictionaries and list views are permuted directly;
-other nested columns are rebuilt from runs of consecutive indices
-with 'concatColumnArray'.
--}
-takeColumnArray :: VP.Vector Int -> ColumnArray -> Either String ColumnArray
-takeColumnArray ix col
-  | VP.any (\i -> i < 0 || i >= n) ix =
-      Left ("Arrow.Column.takeColumnArray: index out of range for a column of " ++ show n ++ " rows")
+
+concatLists :: Offset o => (Maybe Validity -> VS.Vector o -> ColumnArray -> ColumnArray) -> [(Maybe Validity, VS.Vector o, ColumnArray)] -> Either String ColumnArray
+concatLists mk parts = do
+  (offs, ranges) <- concatOffsets (map (\(_, o, _) -> o) parts)
+  child <- concatColumnArrays (zipWith (\r (_, _, c) -> sliceRange r c) ranges parts)
+  Right (mk (concatValidity (map (\(v, o, _) -> (offsetRows o, v)) parts)) offs child)
+
+
+concatListViews
+  :: forall o
+   . Offset o
+  => (Maybe Validity -> VS.Vector o -> VS.Vector o -> ColumnArray -> ColumnArray)
+  -> [(Maybe Validity, VS.Vector o, VS.Vector o, ColumnArray)]
+  -> Either String ColumnArray
+concatListViews mk parts = do
+  child <- concatColumnArrays (map (\(_, _, _, c) -> c) parts)
+  when (toInteger (columnLength child) > toInteger (maxBound :: o)) $
+    Left "Arrow.Column.concatColumnArrays: list-view child exceeds the offset width"
+  let bases = scanl (+) 0 (map (\(_, _, _, c) -> columnLength c) parts)
+      shifted = zipWith (\base (_, o, _, _) -> VS.map (+ fromIntegral base) o) bases parts
+  Right $
+    mk
+      (concatValidity (map (\(v, o, _, _) -> (VS.length o, v)) parts))
+      (concatStorable shifted)
+      (concatStorable (map (\(_, _, z, _) -> z) parts))
+      child
+
+
+-- | Views of later pieces point past the variadic buffers of earlier pieces.
+concatViews :: (Maybe Validity -> ByteString -> V.Vector ByteString -> ColumnArray) -> [(Maybe Validity, ByteString, V.Vector ByteString)] -> Either String ColumnArray
+concatViews mk parts =
+  let bases = scanl (+) 0 (map (\(_, _, bs) -> V.length bs) parts)
+      rows = map (\(_, vs, _) -> BS.length vs `quot` 16) parts
+      views = createAligned (16 * sum rows) $ \dst ->
+        let go !_ [] = pure ()
+            go !pos ((base, (_, vs, _)) : rest) = do
+              let !m = BS.length vs `quot` 16
+              copyBS (BSU.unsafeTake (m * 16) vs) (dst `plusPtr` (pos * 16))
+              when (base /= 0) $ forM_ [0 .. m - 1] $ \i -> do
+                let !p = dst `plusPtr` ((pos + i) * 16)
+                len <- peekByteOff p 0 :: IO Int32
+                when (len > 12) $ do
+                  bi <- peekByteOff p 8 :: IO Int32
+                  pokeByteOff p 8 (bi + fromIntegral base)
+              go (pos + m) rest
+        in go 0 (zip bases parts)
+  in Right (mk (concatValidity (zip rows (map (\(v, _, _) -> v) parts))) views (V.concat (map (\(_, _, bs) -> bs) parts)))
+
+
+-- | Add @base@ to every valid key (null slots become 0); 'Left' if a key would overflow its width.
+shiftKeys :: Int -> ColumnArray -> Either String ColumnArray
+shiftKeys base col
+  | base == 0 = Right col
   | otherwise = case col of
-      ColInt8 v -> Right (ColInt8 (pb v))
-      ColInt16 v -> Right (ColInt16 (pb v))
-      ColInt32 v -> Right (ColInt32 (pb v))
-      ColInt64 v -> Right (ColInt64 (pb v))
-      ColUInt8 v -> Right (ColUInt8 (pb v))
-      ColUInt16 v -> Right (ColUInt16 (pb v))
-      ColUInt32 v -> Right (ColUInt32 (pb v))
-      ColUInt64 v -> Right (ColUInt64 (pb v))
-      ColFloat16 v -> Right (ColFloat16 (pb v))
-      ColFloat v -> Right (ColFloat (pb v))
-      ColDouble v -> Right (ColDouble (pb v))
-      ColBool v -> Right (ColBool (bb v))
-      ColUtf8 v -> Right (ColUtf8 (bb v))
-      ColBinary v -> Right (ColBinary (bb v))
-      ColLargeUtf8 v -> Right (ColLargeUtf8 (bb v))
-      ColLargeBinary v -> Right (ColLargeBinary (bb v))
-      ColFixedSizeBinary w v -> Right (ColFixedSizeBinary w (bb v))
-      ColDate32 v -> Right (ColDate32 (pb v))
-      ColDate64 v -> Right (ColDate64 (pb v))
-      ColTime32 v -> Right (ColTime32 (pb v))
-      ColTime64 v -> Right (ColTime64 (pb v))
-      ColTimestamp v -> Right (ColTimestamp (pb v))
-      ColDuration v -> Right (ColDuration (pb v))
-      ColDecimal128 p s v -> Right (ColDecimal128 p s (bb v))
-      ColDecimal256 p s v -> Right (ColDecimal256 p s (bb v))
-      ColIntervalYearMonth v -> Right (ColIntervalYearMonth (pb v))
-      ColIntervalDayTime d m -> Right (ColIntervalDayTime (pb d) (pb m))
-      ColIntervalMonthDayNano m d ns -> Right (ColIntervalMonthDayNano (pb m) (pb d) (pb ns))
-      ColInt8Maybe v -> Right (ColInt8Maybe (bb v))
-      ColInt16Maybe v -> Right (ColInt16Maybe (bb v))
-      ColInt32Maybe v -> Right (ColInt32Maybe (bb v))
-      ColInt64Maybe v -> Right (ColInt64Maybe (bb v))
-      ColUInt8Maybe v -> Right (ColUInt8Maybe (bb v))
-      ColUInt16Maybe v -> Right (ColUInt16Maybe (bb v))
-      ColUInt32Maybe v -> Right (ColUInt32Maybe (bb v))
-      ColUInt64Maybe v -> Right (ColUInt64Maybe (bb v))
-      ColFloat16Maybe v -> Right (ColFloat16Maybe (bb v))
-      ColFloatMaybe v -> Right (ColFloatMaybe (bb v))
-      ColDoubleMaybe v -> Right (ColDoubleMaybe (bb v))
-      ColBoolMaybe v -> Right (ColBoolMaybe (bb v))
-      ColUtf8Maybe v -> Right (ColUtf8Maybe (bb v))
-      ColBinaryMaybe v -> Right (ColBinaryMaybe (bb v))
-      ColLargeUtf8Maybe v -> Right (ColLargeUtf8Maybe (bb v))
-      ColLargeBinaryMaybe v -> Right (ColLargeBinaryMaybe (bb v))
-      ColFixedSizeBinaryMaybe w v -> Right (ColFixedSizeBinaryMaybe w (bb v))
-      ColDate32Maybe v -> Right (ColDate32Maybe (bb v))
-      ColDate64Maybe v -> Right (ColDate64Maybe (bb v))
-      ColTime32Maybe v -> Right (ColTime32Maybe (bb v))
-      ColTime64Maybe v -> Right (ColTime64Maybe (bb v))
-      ColTimestampMaybe v -> Right (ColTimestampMaybe (bb v))
-      ColDurationMaybe v -> Right (ColDurationMaybe (bb v))
-      ColDecimal128Maybe p s v -> Right (ColDecimal128Maybe p s (bb v))
-      ColDecimal256Maybe p s v -> Right (ColDecimal256Maybe p s (bb v))
-      ColIntervalYearMonthMaybe v -> Right (ColIntervalYearMonthMaybe (bb v))
-      ColIntervalDayTimeMaybe v -> Right (ColIntervalDayTimeMaybe (bb v))
-      ColIntervalMonthDayNanoMaybe v -> Right (ColIntervalMonthDayNanoMaybe (bb v))
-      ColUtf8View v -> Right (ColUtf8View (bb v))
-      ColUtf8ViewMaybe v -> Right (ColUtf8ViewMaybe (bb v))
-      ColBinaryView v -> Right (ColBinaryView (bb v))
-      ColBinaryViewMaybe v -> Right (ColBinaryViewMaybe (bb v))
-      ColNull _ -> Right (ColNull (VP.length ix))
-      ColDictionary did v vals -> Right (ColDictionary did (pb v) vals)
-      ColDictionaryMaybe did v vals -> Right (ColDictionaryMaybe did (bb v) vals)
-      ColStruct _ cs -> ColStruct (VP.length ix) <$> V.mapM (traverse (takeColumnArray ix)) cs
-      ColStructMaybe v cs -> ColStructMaybe (bb v) <$> V.mapM (traverse (takeColumnArray ix)) cs
-      ColDenseUnion ts offs cs -> Right (ColDenseUnion (pb ts) (pb offs) cs)
-      ColSparseUnion ts cs -> ColSparseUnion (pb ts) <$> V.mapM (takeColumnArray ix) cs
-      ColListView o s c -> Right (ColListView (pb o) (pb s) c)
-      ColListViewMaybe v o s c -> Right (ColListViewMaybe (bb v) (pb o) (pb s) c)
-      ColLargeListView o s c -> Right (ColLargeListView (pb o) (pb s) c)
-      ColLargeListViewMaybe v o s c -> Right (ColLargeListViewMaybe (bb v) (pb o) (pb s) c)
-      ColList {} -> viaRuns
-      ColListMaybe {} -> viaRuns
-      ColLargeList {} -> viaRuns
-      ColLargeListMaybe {} -> viaRuns
-      ColFixedSizeList {} -> viaRuns
-      ColFixedSizeListMaybe {} -> viaRuns
-      ColMap {} -> viaRuns
-      ColMapMaybe {} -> viaRuns
-      ColRunEndEncoded {} -> viaRuns
+      I.ColPrim t v xs | Just IntegralPrim <- integralPrim t ->
+        let ok i x = not (unsafeIsValidAt v i) || toInteger x + toInteger base <= toInteger (maxBound `asTypeOf` x)
+        in if VS.and (VS.imap ok xs)
+             then Right (I.ColPrim t v (VS.imap (\i x -> if unsafeIsValidAt v i then x + fromIntegral base else 0) xs))
+             else Left "Arrow.Column.concatColumnArrays: combined dictionary does not fit the key width"
+      _ -> Left "Arrow.Column.concatColumnArrays: dictionary indices must be an integer column"
+
+
+-- | Run ends of a run-end column as a list of Ints.
+runEndList :: ColumnArray -> [Int]
+runEndList re = map (keyAt re) [0 .. columnLength re - 1]
+
+
+{- | The IPC layout of a run-end-encoded column: logical offset 0 and
+run ends rebased so the last one is exactly the length (one pass over
+the runs in the window). Any other column is returned unchanged.
+-}
+rebaseRunEnds :: ColumnArray -> Either String ColumnArray
+rebaseRunEnds col = case col of
+  I.ColRunEndEncoded off n re vals
+    | off == 0 && (if runs == 0 then n == 0 else keyAt re (runs - 1) == n) && columnLength vals == runs -> Right col
+    | otherwise -> concatRuns re [(off, n, re, vals)]
+    where
+      !runs = columnLength re
+  _ -> Right col
+
+
+{- | Concatenate run-end-encoded pieces: each piece's runs are cut to
+its logical window, rebased, and shifted past the earlier pieces.
+-}
+concatRuns :: ColumnArray -> [(Int, Int, ColumnArray, ColumnArray)] -> Either String ColumnArray
+concatRuns re0 parts = case re0 of
+  I.ColPrim t _ _ | Just IntegralPrim <- integralPrim t -> do
+    let windows =
+          map
+            ( \(off, n, re, vals) ->
+                if n == 0
+                  then ([], sliceColumnArray 0 0 vals)
+                  else
+                    let !i = physicalRun re off
+                        !j = physicalRun re (off + n - 1)
+                        cut = map (\e -> min e (off + n) - off) (take (j - i + 1) (drop i (runEndList re)))
+                    in (cut, sliceColumnArray i (j - i + 1) vals)
+            )
+            parts
+        lens = map (\(_, n, _, _) -> n) parts
+        bases = scanl (+) 0 lens
+        ends = concat (zipWith (\b (es, _) -> map (+ b) es) bases windows)
+        !total = sum lens
+    when (toInteger total > toInteger (maxBound `asTypeOf` VS.head (vecOf t re0))) $
+      Left "Arrow.Column.concatColumnArrays: run end overflows its integer width"
+    vals <- concatColumnArrays (map snd windows)
+    Right (I.ColRunEndEncoded 0 total (I.ColPrim t Nothing (VS.fromList (map fromIntegral ends))) vals)
+  _ -> Left "Arrow.Column.concatColumnArrays: run ends must be an integer column"
+  where
+    vecOf :: PrimType a -> ColumnArray -> VS.Vector a
+    vecOf t c = case c of
+      I.ColPrim t' _ xs | Just Refl <- samePrimTag t t' -> xs
+      _ -> withPrim t VS.empty
+
+
+-- ============================================================
+-- Gathering
+-- ============================================================
+
+{- | Rows by index (repeats allowed); any index outside the column is
+a 'Left'. Fixed-width buffers and bitmaps go through C gather
+kernels; var-length columns take two passes (offsets, then bytes);
+lists gather their child ranges; dictionaries, dense unions and list
+views gather only their own buffers and share the rest.
+-}
+takeColumnArray :: VS.Vector Int -> ColumnArray -> Either String ColumnArray
+takeColumnArray ix col
+  | VS.any (\i -> i < 0 || i >= n) ix =
+      Left ("Arrow.Column.takeColumnArray: index out of range for a column of " ++ show n ++ " rows")
+  | otherwise = takeRows ix col
   where
     !n = columnLength col
-    pb :: VP.Prim a => VP.Vector a -> VP.Vector a
-    pb v = VP.backpermute v ix
-    bb :: V.Vector a -> V.Vector a
-    bb v = V.backpermute v (V.convert ix)
-    viaRuns
-      | VP.null ix = Right (sliceColumnArray 0 0 col)
-      | otherwise = concatColumnArrays (map (\(s, l) -> sliceColumnArray s l col) (indexRuns ix))
 
 
--- | Split an index vector into maximal runs of consecutive indices, as @(start, length)@.
-indexRuns :: VP.Vector Int -> [(Int, Int)]
-indexRuns = VP.foldr step []
+-- | 'takeColumnArray' after the range check.
+takeRows :: VS.Vector Int -> ColumnArray -> Either String ColumnArray
+takeRows ix col = case col of
+  I.ColNull _ -> Right (I.ColNull k)
+  I.ColPrim t v xs -> withPrim t (Right (I.ColPrim t (tv v) (gatherStorable ix xs)))
+  I.ColBool v b -> Right (I.ColBool (tv v) (fst (takeBitmap ix b)))
+  I.ColUtf8 v o d -> (\(o', d') -> I.ColUtf8 (tv v) o' d') <$> takeVar ix o d
+  I.ColBinary v o d -> (\(o', d') -> I.ColBinary (tv v) o' d') <$> takeVar ix o d
+  I.ColLargeUtf8 v o d -> (\(o', d') -> I.ColLargeUtf8 (tv v) o' d') <$> takeVar ix o d
+  I.ColLargeBinary v o d -> (\(o', d') -> I.ColLargeBinary (tv v) o' d') <$> takeVar ix o d
+  I.ColFixedSizeBinary w _ v d -> Right (I.ColFixedSizeBinary w k (tv v) (gatherBytes w ix d))
+  I.ColUtf8View v views bufs -> Right (I.ColUtf8View (tv v) (gatherBytes 16 ix views) bufs)
+  I.ColBinaryView v views bufs -> Right (I.ColBinaryView (tv v) (gatherBytes 16 ix views) bufs)
+  I.ColStruct _ v cs -> I.ColStruct k (tv v) <$> V.mapM (traverse (takeRows ix)) cs
+  I.ColList v o c -> takeList I.ColList v o c
+  I.ColLargeList v o c -> takeList I.ColLargeList v o c
+  I.ColListView v o z c -> Right (I.ColListView (tv v) (gatherStorable ix o) (gatherStorable ix z) c)
+  I.ColLargeListView v o z c -> Right (I.ColLargeListView (tv v) (gatherStorable ix o) (gatherStorable ix z) c)
+  I.ColFixedSizeList w _ v c ->
+    I.ColFixedSizeList w k (tv v) <$> takeRows (VS.generate (k * w) (\j -> VS.unsafeIndex ix (j `quot` w) * w + j `rem` w)) c
+  I.ColMap v o keys vals -> do
+    (o', childIx) <- takeOffsetRanges ix o
+    I.ColMap (tv v) o' <$> takeRows childIx keys <*> takeRows childIx vals
+  I.ColDenseUnion t o cs -> Right (I.ColDenseUnion (gatherStorable ix t) (gatherStorable ix o) cs)
+  I.ColSparseUnion t cs -> I.ColSparseUnion (gatherStorable ix t) <$> V.mapM (takeRows ix) cs
+  I.ColDictionary did keys vals -> (\keys' -> I.ColDictionary did keys' vals) <$> takeRows ix keys
+  I.ColRunEndEncoded off _ re vals -> takeRuns ix off re vals
   where
-    step i ((s, l) : rest) | i + 1 == s = (i, l + 1) : rest
-    step i acc = (i, 1) : acc
+    !k = VS.length ix
+    tv = takeValidity ix
+    takeList :: Offset o => (Maybe Validity -> VS.Vector o -> ColumnArray -> ColumnArray) -> Maybe Validity -> VS.Vector o -> ColumnArray -> Either String ColumnArray
+    takeList mk v o c = do
+      (o', childIx) <- takeOffsetRanges ix o
+      mk (tv v) o' <$> takeRows childIx c
 
 
-{- | Replace a dictionary-encoded column by the values its indices
-select ('ColDictionary' becomes a column of the value type,
-'ColDictionaryMaybe' its nullable variant with the null-index rows
-null). Any other column is returned unchanged. The dictionary must
-already be resolved (see 'resolveDictionaryColumn'). A nullable
+gatherStorable :: forall a. Storable a => VS.Vector Int -> VS.Vector a -> VS.Vector a
+gatherStorable ix xs = unsafeBytesToStorable (gatherBytes (sizeOf (undefined :: a)) ix (storableToBytes xs))
+
+
+-- | Gather @w@-byte elements by index into one fresh buffer.
+gatherBytes :: Int -> VS.Vector Int -> ByteString -> ByteString
+gatherBytes w ix src =
+  createAligned (n * w) $ \dst -> withBytesPtr src $ \ps -> VS.unsafeWith ix $ \pix -> case w of
+    1 -> K.gather1 dst ps pix n
+    2 -> K.gather2 dst ps pix n
+    4 -> K.gather4 dst ps pix n
+    8 -> K.gather8 dst ps pix n
+    16 -> K.gather16 dst ps pix n
+    _ -> forM_ [0 .. n - 1] $ \j -> copyBytes (dst `plusPtr` (j * w)) (ps `plusPtr` (VS.unsafeIndex ix j * w)) w
+  where
+    !n = VS.length ix
+
+
+takeVar :: forall o. Offset o => VS.Vector Int -> VS.Vector o -> ByteString -> Either String (VS.Vector o, ByteString)
+takeVar ix offs dat = unsafeDupablePerformIO $ do
+  let !n = VS.length ix
+  ofp <- mallocAligned ((n + 1) * sizeOf (0 :: o))
+  total <- unsafeWithForeignPtr ofp $ \po -> VS.unsafeWith offs $ \ps -> VS.unsafeWith ix $ \pix ->
+    cTakeOffsets (castPtr po) ps pix n
+  if total < 0
+    then pure (Left "Arrow.Column.takeColumnArray: gathered data exceeds the offset width")
+    else do
+      let bytes = createAligned total $ \dst -> withBytesPtr dat $ \pd -> VS.unsafeWith offs $ \ps -> VS.unsafeWith ix $ \pix ->
+            cTakeBytes dst ps pd pix n
+      pure (Right (VS.unsafeFromForeignPtr0 (castForeignPtr ofp) (n + 1), bytes))
+
+
+-- | New offsets (from 0) for the selected rows, and the child indices they cover.
+takeOffsetRanges :: forall o. Offset o => VS.Vector Int -> VS.Vector o -> Either String (VS.Vector o, VS.Vector Int)
+takeOffsetRanges ix offs = unsafeDupablePerformIO $ do
+  let !n = VS.length ix
+  ofp <- mallocAligned ((n + 1) * sizeOf (0 :: o))
+  total <- unsafeWithForeignPtr ofp $ \po -> VS.unsafeWith offs $ \ps -> VS.unsafeWith ix $ \pix ->
+    cTakeOffsets (castPtr po) ps pix n
+  if total < 0
+    then pure (Left "Arrow.Column.takeColumnArray: gathered child exceeds the offset width")
+    else do
+      let childIx = VS.create $ do
+            mv <- VSM.unsafeNew total
+            let go !j !pos
+                  | j >= n = pure ()
+                  | otherwise = do
+                      let !r = VS.unsafeIndex ix j
+                          !s = fromIntegral (VS.unsafeIndex offs r) :: Int
+                          !e = fromIntegral (VS.unsafeIndex offs (r + 1)) :: Int
+                      forM_ [0 .. e - s - 1] $ \q -> VSM.unsafeWrite mv (pos + q) (s + q)
+                      go (j + 1) (pos + e - s)
+            go 0 0
+            pure mv
+      pure (Right (VS.unsafeFromForeignPtr0 (castForeignPtr ofp) (n + 1), childIx))
+
+
+-- | Gather a run-end-encoded column: one run per change of physical run.
+takeRuns :: VS.Vector Int -> Int -> ColumnArray -> ColumnArray -> Either String ColumnArray
+takeRuns ix off re vals = case re of
+  I.ColPrim t _ xs | Just IntegralPrim <- integralPrim t -> do
+    let phys = map (\i -> physicalRun re (off + i)) (VS.toList ix)
+        grouped = groupRuns phys
+        ends = scanl1 (+) (map snd grouped)
+        !k = VS.length ix
+    when (toInteger k > toInteger (maxBound `asTypeOf` VS.head xs)) $
+      Left "Arrow.Column.takeColumnArray: run end overflows its integer width"
+    vals' <- takeRows (VS.fromList (map fst grouped)) vals
+    Right (I.ColRunEndEncoded 0 k (I.ColPrim t Nothing (VS.fromList (map fromIntegral ends))) vals')
+  _ -> Left "Arrow.Column.takeColumnArray: run ends must be an integer column"
+  where
+    groupRuns :: [Int] -> [(Int, Int)]
+    groupRuns = foldr step []
+    step p ((q, c) : rest) | p == q = (q, c + 1) : rest
+    step p acc = (p, 1) : acc
+
+
+-- ============================================================
+-- Dictionaries
+-- ============================================================
+
+{- | Replace a dictionary column by the values its keys select, with
+the key validity applied; any other column is returned unchanged. A
 column whose rows are all null may reference an empty dictionary; it
-expands to an all-null column of the value type (built with
-'fillerColumn').
+expands to all-null rows of the value type.
 -}
 expandDictionary :: ColumnArray -> Either String ColumnArray
 expandDictionary = \case
-  ColDictionary _ ix vals -> takeColumnArray (VP.map fromIntegral ix) vals
-  ColDictionaryMaybe _ ix vals -> do
-    let !rows = V.length ix
-        !valid = V.map isJust ix
-        !fill = maybe 0 fromIntegral (V.foldr (\x acc -> maybe acc Just x) Nothing ix)
+  I.ColDictionary _ keys vals -> do
+    let !n = columnLength keys
+        !kv = validity keys
     dense <-
       if columnLength vals == 0
         then
-          if V.any isJust ix
-            then Left "Arrow.Column.expandDictionary: dictionary index out of range for an empty dictionary"
-            else Right (fillerColumn rows vals)
-        else takeColumnArray (V.convert (V.map (maybe fill fromIntegral) ix)) vals
-    nullable <- toNullableColumn dense
-    maskValidity valid nullable
+          if nullCount keys == n
+            then Right (fillerColumn n vals)
+            else Left "Arrow.Column.expandDictionary: dictionary key out of range for an empty dictionary"
+        else takeColumnArray (VS.generate n (\i -> if unsafeIsValidAt kv i then keyAt keys i else 0)) vals
+    maskValidity kv dense
   col -> Right col
 
 
-{- | @n@ rows with the shape of the given column (same constructor,
-widths, decimal parameters, child shapes and dictionary ids): every
-nullable slot is null, every other slot holds a zero or empty value,
-lists are empty, unions select their first child and a run-end-encoded
-column is one run. Useful wherever a column must have a row count but
-its rows carry no meaning, such as the children under null struct
-rows or the expansion of null rows over an empty dictionary.
+{- | Replace the values of every dictionary column (at any depth) with
+the dictionary registered for its id, checking every valid key against
+it (C kernel). A column with no valid key keeps its placeholder when
+the id is unknown; otherwise an unknown id is a 'Left'. Values the
+lookup returns are used as they are (dictionaries nested in them must
+already be resolved).
 -}
-fillerColumn :: Int -> ColumnArray -> ColumnArray
-fillerColumn !n0 col = case col of
-  ColInt8 _ -> ColInt8 (zeros 0)
-  ColInt16 _ -> ColInt16 (zeros 0)
-  ColInt32 _ -> ColInt32 (zeros 0)
-  ColInt64 _ -> ColInt64 (zeros 0)
-  ColUInt8 _ -> ColUInt8 (zeros 0)
-  ColUInt16 _ -> ColUInt16 (zeros 0)
-  ColUInt32 _ -> ColUInt32 (zeros 0)
-  ColUInt64 _ -> ColUInt64 (zeros 0)
-  ColFloat16 _ -> ColFloat16 (zeros 0)
-  ColFloat _ -> ColFloat (zeros 0)
-  ColDouble _ -> ColDouble (zeros 0)
-  ColBool _ -> ColBool (V.replicate n False)
-  ColUtf8 _ -> ColUtf8 (V.replicate n T.empty)
-  ColBinary _ -> ColBinary (V.replicate n BS.empty)
-  ColLargeUtf8 _ -> ColLargeUtf8 (V.replicate n T.empty)
-  ColLargeBinary _ -> ColLargeBinary (V.replicate n BS.empty)
-  ColFixedSizeBinary w _ -> ColFixedSizeBinary w (V.replicate n (BS.replicate w 0))
-  ColDate32 _ -> ColDate32 (zeros 0)
-  ColDate64 _ -> ColDate64 (zeros 0)
-  ColTime32 _ -> ColTime32 (zeros 0)
-  ColTime64 _ -> ColTime64 (zeros 0)
-  ColTimestamp _ -> ColTimestamp (zeros 0)
-  ColDuration _ -> ColDuration (zeros 0)
-  ColDecimal128 p s _ -> ColDecimal128 p s (V.replicate n (BS.replicate 16 0))
-  ColDecimal256 p s _ -> ColDecimal256 p s (V.replicate n (BS.replicate 32 0))
-  ColIntervalYearMonth _ -> ColIntervalYearMonth (zeros 0)
-  ColIntervalDayTime _ _ -> ColIntervalDayTime (zeros 0) (zeros 0)
-  ColIntervalMonthDayNano _ _ _ -> ColIntervalMonthDayNano (zeros 0) (zeros 0) (zeros 0)
-  ColInt8Maybe _ -> ColInt8Maybe nulls
-  ColInt16Maybe _ -> ColInt16Maybe nulls
-  ColInt32Maybe _ -> ColInt32Maybe nulls
-  ColInt64Maybe _ -> ColInt64Maybe nulls
-  ColUInt8Maybe _ -> ColUInt8Maybe nulls
-  ColUInt16Maybe _ -> ColUInt16Maybe nulls
-  ColUInt32Maybe _ -> ColUInt32Maybe nulls
-  ColUInt64Maybe _ -> ColUInt64Maybe nulls
-  ColFloat16Maybe _ -> ColFloat16Maybe nulls
-  ColFloatMaybe _ -> ColFloatMaybe nulls
-  ColDoubleMaybe _ -> ColDoubleMaybe nulls
-  ColBoolMaybe _ -> ColBoolMaybe nulls
-  ColUtf8Maybe _ -> ColUtf8Maybe nulls
-  ColBinaryMaybe _ -> ColBinaryMaybe nulls
-  ColLargeUtf8Maybe _ -> ColLargeUtf8Maybe nulls
-  ColLargeBinaryMaybe _ -> ColLargeBinaryMaybe nulls
-  ColFixedSizeBinaryMaybe w _ -> ColFixedSizeBinaryMaybe w nulls
-  ColDate32Maybe _ -> ColDate32Maybe nulls
-  ColDate64Maybe _ -> ColDate64Maybe nulls
-  ColTime32Maybe _ -> ColTime32Maybe nulls
-  ColTime64Maybe _ -> ColTime64Maybe nulls
-  ColTimestampMaybe _ -> ColTimestampMaybe nulls
-  ColDurationMaybe _ -> ColDurationMaybe nulls
-  ColDecimal128Maybe p s _ -> ColDecimal128Maybe p s nulls
-  ColDecimal256Maybe p s _ -> ColDecimal256Maybe p s nulls
-  ColIntervalYearMonthMaybe _ -> ColIntervalYearMonthMaybe nulls
-  ColIntervalDayTimeMaybe _ -> ColIntervalDayTimeMaybe nulls
-  ColIntervalMonthDayNanoMaybe _ -> ColIntervalMonthDayNanoMaybe nulls
-  ColUtf8View _ -> ColUtf8View (V.replicate n T.empty)
-  ColUtf8ViewMaybe _ -> ColUtf8ViewMaybe nulls
-  ColBinaryView _ -> ColBinaryView (V.replicate n BS.empty)
-  ColBinaryViewMaybe _ -> ColBinaryViewMaybe nulls
-  ColNull _ -> ColNull n
-  ColStruct _ cs -> ColStruct n (V.map (fmap (fillerColumn n)) cs)
-  ColStructMaybe _ cs -> ColStructMaybe invalid (V.map (fmap (fillerColumn n)) cs)
-  ColList _ c -> ColList (zeros1 0) (empty c)
-  ColListMaybe _ _ c -> ColListMaybe invalid (zeros1 0) (empty c)
-  ColLargeList _ c -> ColLargeList (zeros1 0) (empty c)
-  ColLargeListMaybe _ _ c -> ColLargeListMaybe invalid (zeros1 0) (empty c)
-  ColFixedSizeList w _ c -> ColFixedSizeList w n (fillerColumn (n * w) c)
-  ColFixedSizeListMaybe w _ c -> ColFixedSizeListMaybe w invalid (fillerColumn (n * w) c)
-  ColMap _ k v -> ColMap (zeros1 0) (empty k) (empty v)
-  ColMapMaybe _ _ k v -> ColMapMaybe invalid (zeros1 0) (empty k) (empty v)
-  ColDenseUnion _ _ cs
-    | n == 0 || V.null cs -> ColDenseUnion (zeros 0) (zeros 0) (V.map empty cs)
-    | otherwise -> ColDenseUnion (zeros 0) (zeros 0) (V.imap (\i c -> if i == 0 then fillerColumn 1 c else empty c) cs)
-  ColSparseUnion _ cs -> ColSparseUnion (zeros 0) (V.map (fillerColumn n) cs)
-  ColDictionary did _ vals
-    | n == 0 -> ColDictionary did VP.empty vals
-    | columnLength vals == 0 -> ColDictionary did (zeros 0) (fillerColumn 1 vals)
-    | otherwise -> ColDictionary did (zeros 0) vals
-  ColDictionaryMaybe did _ vals -> ColDictionaryMaybe did nulls vals
-  ColRunEndEncoded re vals -> case re of
-    ColInt16 _ -> oneRun ColInt16 vals
-    ColInt32 _ -> oneRun ColInt32 vals
-    ColInt64 _ -> oneRun ColInt64 vals
-    _ -> col
-  ColListView _ _ c -> ColListView (zeros 0) (zeros 0) (empty c)
-  ColListViewMaybe _ _ _ c -> ColListViewMaybe invalid (zeros 0) (zeros 0) (empty c)
-  ColLargeListView _ _ c -> ColLargeListView (zeros 0) (zeros 0) (empty c)
-  ColLargeListViewMaybe _ _ _ c -> ColLargeListViewMaybe invalid (zeros 0) (zeros 0) (empty c)
+resolveDictionaryColumn :: (Int64 -> Maybe ColumnArray) -> ColumnArray -> Either String ColumnArray
+resolveDictionaryColumn lookupVals = go
   where
-    !n = max 0 n0
-    zeros :: VP.Prim a => a -> VP.Vector a
-    zeros = VP.replicate n
-    zeros1 :: VP.Prim a => a -> VP.Vector a
-    zeros1 = VP.replicate (n + 1)
-    nulls :: V.Vector (Maybe a)
-    nulls = V.replicate n Nothing
-    invalid = V.replicate n False
-    empty = sliceColumnArray 0 0
-    oneRun :: (Num a, VP.Prim a) => (VP.Vector a -> ColumnArray) -> ColumnArray -> ColumnArray
-    oneRun con vals
-      | n == 0 = ColRunEndEncoded (con VP.empty) (empty vals)
-      | otherwise = ColRunEndEncoded (con (VP.singleton (fromIntegral n))) (fillerColumn 1 vals)
+    go col = case col of
+      I.ColDictionary did keys _ -> case lookupVals did of
+        Nothing
+          | nullCount keys == columnLength keys -> Right col
+          | otherwise -> Left ("Arrow.Column: no dictionary batch for dictionary id " ++ show did)
+        Just vals -> do
+          validateKeys ("Arrow.Column: dictionary id " ++ show did) keys (columnLength vals)
+          Right (I.ColDictionary did keys vals)
+      I.ColStruct n v cs -> I.ColStruct n v <$> V.mapM (traverse go) cs
+      I.ColList v o c -> I.ColList v o <$> go c
+      I.ColLargeList v o c -> I.ColLargeList v o <$> go c
+      I.ColListView v o z c -> I.ColListView v o z <$> go c
+      I.ColLargeListView v o z c -> I.ColLargeListView v o z <$> go c
+      I.ColFixedSizeList w n v c -> I.ColFixedSizeList w n v <$> go c
+      I.ColMap v o k x -> I.ColMap v o <$> go k <*> go x
+      I.ColDenseUnion t o cs -> I.ColDenseUnion t o <$> V.mapM go cs
+      I.ColSparseUnion t cs -> I.ColSparseUnion t <$> V.mapM go cs
+      I.ColRunEndEncoded off n re vals -> I.ColRunEndEncoded off n re <$> go vals
+      _ -> Right col
+
+
+-- ============================================================
+-- Nullability
+-- ============================================================
+
+{- | Null out the rows whose mask bit is clear (rows already null stay
+null). The mask must have the column's length. Columns without a
+validity slot (unions, run-end-encoded) accept only 'Nothing'; a
+'ColNull' is unchanged.
+-}
+maskValidity :: Maybe Validity -> ColumnArray -> Either String ColumnArray
+maskValidity Nothing col = Right col
+maskValidity m@(Just mv) col
+  | bitmapLength (validityBits mv) /= columnLength col =
+      Left "Arrow.Column.maskValidity: mask length differs from the column length"
+  | otherwise = case col of
+      I.ColNull _ -> Right col
+      I.ColPrim t v xs -> Right (I.ColPrim t (a v) xs)
+      I.ColBool v b -> Right (I.ColBool (a v) b)
+      I.ColUtf8 v o d -> Right (I.ColUtf8 (a v) o d)
+      I.ColBinary v o d -> Right (I.ColBinary (a v) o d)
+      I.ColLargeUtf8 v o d -> Right (I.ColLargeUtf8 (a v) o d)
+      I.ColLargeBinary v o d -> Right (I.ColLargeBinary (a v) o d)
+      I.ColFixedSizeBinary w n v d -> Right (I.ColFixedSizeBinary w n (a v) d)
+      I.ColUtf8View v views bufs -> Right (I.ColUtf8View (a v) views bufs)
+      I.ColBinaryView v views bufs -> Right (I.ColBinaryView (a v) views bufs)
+      I.ColStruct n v cs -> Right (I.ColStruct n (a v) cs)
+      I.ColList v o c -> Right (I.ColList (a v) o c)
+      I.ColLargeList v o c -> Right (I.ColLargeList (a v) o c)
+      I.ColListView v o z c -> Right (I.ColListView (a v) o z c)
+      I.ColLargeListView v o z c -> Right (I.ColLargeListView (a v) o z c)
+      I.ColFixedSizeList w n v c -> Right (I.ColFixedSizeList w n (a v) c)
+      I.ColMap v o k x -> Right (I.ColMap (a v) o k x)
+      I.ColDictionary did keys vals -> (\keys' -> I.ColDictionary did keys' vals) <$> maskValidity m keys
+      I.ColDenseUnion {} -> noSlot
+      I.ColSparseUnion {} -> noSlot
+      I.ColRunEndEncoded {} -> noSlot
+  where
+    a = andValidity m
+    noSlot = Left ("Arrow.Column.maskValidity: " ++ columnTag col ++ " has no validity bitmap")
+
+
+{- | Every column with a validity slot can hold nulls, so this is the
+identity on those (and on 'ColNull'); unions and run-end-encoded
+columns are rejected because they have no validity of their own.
+-}
+toNullableColumn :: ColumnArray -> Either String ColumnArray
+toNullableColumn col = case col of
+  I.ColDenseUnion {} -> noSlot
+  I.ColSparseUnion {} -> noSlot
+  I.ColRunEndEncoded {} -> noSlot
+  _ -> Right col
+  where
+    noSlot = Left ("Arrow.Column: " ++ columnTag col ++ " has no validity bitmap and cannot be made nullable")
 
 
 -- ============================================================
 -- Map invariants
 -- ============================================================
 
-{- | Check that a 'ColMap' / 'ColMapMaybe' column satisfies the
-@keysSorted@ promise of its 'AMap' field: within every non-null
-entry the keys are non-decreasing.
+{- | Check that a 'ColMap' column satisfies the @keysSorted@ promise of
+its 'AMap' field: within every non-null entry the keys are non-null
+and non-decreasing.
 
-Offsets are bounds-checked (non-decreasing, inside the key column)
-and map keys must not be null. Keys are compared by value:
-integers, dates, times, timestamps and durations numerically;
-floating point (including half floats) numerically with @-0 == 0@
-and every NaN equal to every other NaN and greater than any number;
-booleans with @False < True@; strings by code point; binary
-(including fixed-size and views) as unsigned bytes; decimals as
-signed two's-complement integers; dictionary-encoded keys by their
-resolved values. Interval, nested, union, run-end-encoded and null
-key columns have no defined order and are rejected with 'Left', as
-is any column that is not a map.
+Keys compare by value: integers, dates, times, timestamps and
+durations numerically; floating point (half floats included)
+numerically with @-0 == 0@ and every NaN equal to every other NaN
+and greater than any number; booleans with @False < True@; strings by
+code point; binary (fixed-size and views included) as unsigned bytes;
+decimals as signed integers; dictionary keys by their resolved
+values. Interval, nested, union, run-end-encoded and null key columns
+have no order and are rejected, as is any column that is not a map.
 -}
 validateMapKeysSorted :: ColumnArray -> Either String ()
 validateMapKeysSorted = \case
-  ColMap offs keys _ -> checkMapKeys (const True) offs keys
-  ColMapMaybe valid offs keys _ -> checkMapKeys (\i -> fromMaybe False (valid V.!? i)) offs keys
+  I.ColMap v offs keys _ -> do
+    (cmp, isNull) <- keyOrder keys
+    let !nk = columnLength keys
+        !nEntries = offsetRows offs
+        entry !i
+          | i >= nEntries = Right ()
+          | otherwise = do
+              let !s = fromIntegral (VS.unsafeIndex offs i) :: Int
+                  !e = fromIntegral (VS.unsafeIndex offs (i + 1)) :: Int
+              if s < 0 || e < s || e > nk
+                then Left ("Arrow.Column.validateMapKeysSorted: entry " ++ show i ++ " has offsets outside the key column")
+                else
+                  if unsafeIsValidAt v i
+                    then keysIn i s e s >> entry (i + 1)
+                    else entry (i + 1)
+        keysIn i s e !j
+          | j >= e = Right ()
+          | isNull j = Left ("Arrow.Column.validateMapKeysSorted: entry " ++ show i ++ " has a null key")
+          | j > s && cmp (j - 1) j == GT =
+              Left ("Arrow.Column.validateMapKeysSorted: entry " ++ show i ++ " key " ++ show (j - s) ++ " is smaller than the key before it")
+          | otherwise = keysIn i s e (j + 1)
+    entry 0
   c -> Left ("Arrow.Column.validateMapKeysSorted: expected a map column, got " ++ columnTag c)
 
 
-checkMapKeys :: (Int -> Bool) -> VP.Vector Int32 -> ColumnArray -> Either String ()
-checkMapKeys entryValid offs keys = do
-  (cmp, isNull) <- keyOrder keys
-  let !nk = columnLength keys
-      !nEntries = max 0 (VP.length offs - 1)
-      entry !i
-        | i >= nEntries = Right ()
-        | otherwise = do
-            let !s = fromIntegral (VP.unsafeIndex offs i) :: Int
-                !e = fromIntegral (VP.unsafeIndex offs (i + 1)) :: Int
-            if s < 0 || e < s || e > nk
-              then Left ("Arrow.Column.validateMapKeysSorted: entry " ++ show i ++ " has offsets outside the key column")
-              else
-                if entryValid i
-                  then keysIn i s e s >> entry (i + 1)
-                  else entry (i + 1)
-      keysIn i s e !j
-        | j >= e = Right ()
-        | isNull j = Left ("Arrow.Column.validateMapKeysSorted: entry " ++ show i ++ " has a null key")
-        | j > s && cmp (j - 1) j == GT =
-            Left
-              ( "Arrow.Column.validateMapKeysSorted: entry "
-                  ++ show i
-                  ++ " key "
-                  ++ show (j - s)
-                  ++ " is smaller than the key before it"
-              )
-        | otherwise = keysIn i s e (j + 1)
-  entry 0
-
-
-{- | Row comparator and null test for an orderable map-key column
-(see 'validateMapKeysSorted' for the order).
--}
+-- | Row comparator and null test for an orderable key column.
 keyOrder :: ColumnArray -> Either String (Int -> Int -> Ordering, Int -> Bool)
 keyOrder col = case col of
-  ColInt8 v -> prim v
-  ColInt16 v -> prim v
-  ColInt32 v -> prim v
-  ColInt64 v -> prim v
-  ColUInt8 v -> prim v
-  ColUInt16 v -> prim v
-  ColUInt32 v -> prim v
-  ColUInt64 v -> prim v
-  ColDate32 v -> prim v
-  ColDate64 v -> prim v
-  ColTime32 v -> prim v
-  ColTime64 v -> prim v
-  ColTimestamp v -> prim v
-  ColDuration v -> prim v
-  ColFloat16 v -> nonNull (\i j -> compareFloating (halfToDouble (VP.unsafeIndex v i)) (halfToDouble (VP.unsafeIndex v j)))
-  ColFloat v -> nonNull (\i j -> compareFloating (VP.unsafeIndex v i) (VP.unsafeIndex v j))
-  ColDouble v -> nonNull (\i j -> compareFloating (VP.unsafeIndex v i) (VP.unsafeIndex v j))
-  ColBool v -> boxed v
-  ColUtf8 v -> boxed v
-  ColLargeUtf8 v -> boxed v
-  ColUtf8View v -> boxed v
-  ColBinary v -> boxed v
-  ColLargeBinary v -> boxed v
-  ColBinaryView v -> boxed v
-  ColFixedSizeBinary _ v -> boxed v
-  ColDecimal128 _ _ v -> nonNull (\i j -> compareTwosComplementLE (V.unsafeIndex v i) (V.unsafeIndex v j))
-  ColDecimal256 _ _ v -> nonNull (\i j -> compareTwosComplementLE (V.unsafeIndex v i) (V.unsafeIndex v j))
-  ColInt8Maybe v -> maybes compare v
-  ColInt16Maybe v -> maybes compare v
-  ColInt32Maybe v -> maybes compare v
-  ColInt64Maybe v -> maybes compare v
-  ColUInt8Maybe v -> maybes compare v
-  ColUInt16Maybe v -> maybes compare v
-  ColUInt32Maybe v -> maybes compare v
-  ColUInt64Maybe v -> maybes compare v
-  ColDate32Maybe v -> maybes compare v
-  ColDate64Maybe v -> maybes compare v
-  ColTime32Maybe v -> maybes compare v
-  ColTime64Maybe v -> maybes compare v
-  ColTimestampMaybe v -> maybes compare v
-  ColDurationMaybe v -> maybes compare v
-  ColFloat16Maybe v -> maybes (\x y -> compareFloating (halfToDouble x) (halfToDouble y)) v
-  ColFloatMaybe v -> maybes compareFloating v
-  ColDoubleMaybe v -> maybes compareFloating v
-  ColBoolMaybe v -> maybes compare v
-  ColUtf8Maybe v -> maybes compare v
-  ColLargeUtf8Maybe v -> maybes compare v
-  ColUtf8ViewMaybe v -> maybes compare v
-  ColBinaryMaybe v -> maybes compare v
-  ColLargeBinaryMaybe v -> maybes compare v
-  ColBinaryViewMaybe v -> maybes compare v
-  ColFixedSizeBinaryMaybe _ v -> maybes compare v
-  ColDecimal128Maybe _ _ v -> maybes compareTwosComplementLE v
-  ColDecimal256Maybe _ _ v -> maybes compareTwosComplementLE v
-  ColDictionary _ ix vals -> do
+  I.ColPrim t v xs -> case t of
+    PInt8 -> ordered v xs
+    PInt16 -> ordered v xs
+    PInt32 -> ordered v xs
+    PInt64 -> ordered v xs
+    PUInt8 -> ordered v xs
+    PUInt16 -> ordered v xs
+    PUInt32 -> ordered v xs
+    PUInt64 -> ordered v xs
+    PDate32 -> ordered v xs
+    PDate64 -> ordered v xs
+    PTime32 -> ordered v xs
+    PTime64 -> ordered v xs
+    PTimestamp -> ordered v xs
+    PDuration -> ordered v xs
+    PDecimal128 _ _ -> ordered v xs
+    PDecimal256 _ _ -> ordered v xs
+    PFloat16 -> by v (\i j -> compareFloating (float16ToDouble (VS.unsafeIndex xs i)) (float16ToDouble (VS.unsafeIndex xs j)))
+    PFloat -> by v (\i j -> compareFloating (VS.unsafeIndex xs i) (VS.unsafeIndex xs j))
+    PDouble -> by v (\i j -> compareFloating (VS.unsafeIndex xs i) (VS.unsafeIndex xs j))
+    _ -> unordered
+  I.ColBool v b -> by v (\i j -> compare (unsafeBitAt b i) (unsafeBitAt b j))
+  I.ColUtf8 {} -> bytes
+  I.ColBinary {} -> bytes
+  I.ColLargeUtf8 {} -> bytes
+  I.ColLargeBinary {} -> bytes
+  I.ColUtf8View {} -> bytes
+  I.ColBinaryView {} -> bytes
+  I.ColFixedSizeBinary {} -> bytes
+  I.ColDictionary _ keys vals -> do
     (cmp, isNull) <- keyOrder vals
     let !nv = columnLength vals
-    if VP.all (\i -> i >= 0 && fromIntegral i < nv) ix
+        kv = validity keys
+    if all (\i -> not (unsafeIsValidAt kv i) || (keyAt keys i >= 0 && keyAt keys i < nv)) [0 .. columnLength keys - 1]
       then
         Right
-          ( \i j -> cmp (fromIntegral (VP.unsafeIndex ix i)) (fromIntegral (VP.unsafeIndex ix j))
-          , isNull . fromIntegral . VP.unsafeIndex ix
+          ( \i j -> cmp (keyAt keys i) (keyAt keys j)
+          , \i -> not (unsafeIsValidAt kv i) || isNull (keyAt keys i)
           )
-      else Left unresolvedDict
-  ColDictionaryMaybe _ ix vals -> do
-    (cmp, isNull) <- keyOrder vals
-    let !nv = columnLength vals
-        at i = maybe 0 fromIntegral (V.unsafeIndex ix i)
-    if V.all (maybe True (\i -> i >= 0 && fromIntegral i < nv)) ix
-      then Right (\i j -> cmp (at i) (at j), \i -> maybe True (isNull . fromIntegral) (V.unsafeIndex ix i))
-      else Left unresolvedDict
-  _ -> Left ("Arrow.Column.validateMapKeysSorted: map keys of type " ++ columnTag col ++ " have no defined order")
+      else Left "Arrow.Column.validateMapKeysSorted: dictionary key index outside its dictionary (is the dictionary resolved?)"
+  _ -> unordered
   where
-    unresolvedDict = "Arrow.Column.validateMapKeysSorted: dictionary key index outside its dictionary (is the dictionary resolved?)"
-    prim :: (VP.Prim a, Ord a) => VP.Vector a -> Either String (Int -> Int -> Ordering, Int -> Bool)
-    prim v = nonNull (\i j -> compare (VP.unsafeIndex v i) (VP.unsafeIndex v j))
-    boxed :: Ord a => V.Vector a -> Either String (Int -> Int -> Ordering, Int -> Bool)
-    boxed v = nonNull (\i j -> compare (V.unsafeIndex v i) (V.unsafeIndex v j))
-    nonNull cmp = Right (cmp, const False)
-    maybes :: (a -> a -> Ordering) -> V.Vector (Maybe a) -> Either String (Int -> Int -> Ordering, Int -> Bool)
-    maybes cmp v =
-      Right
-        ( \i j -> case (V.unsafeIndex v i, V.unsafeIndex v j) of
-            (Just x, Just y) -> cmp x y
-            (Nothing, Nothing) -> EQ
-            (Nothing, Just _) -> LT
-            (Just _, Nothing) -> GT
-        , isNothing . V.unsafeIndex v
-        )
+    unordered = Left ("Arrow.Column.validateMapKeysSorted: map keys of type " ++ columnTag col ++ " have no defined order")
+    v0 = validity col
+    by v cmp = Right (cmp, \i -> not (unsafeIsValidAt v i))
+    ordered :: (Storable a, Ord a) => Maybe Validity -> VS.Vector a -> Either String (Int -> Int -> Ordering, Int -> Bool)
+    ordered v xs = by v (\i j -> compare (VS.unsafeIndex xs i) (VS.unsafeIndex xs j))
+    bytes = by v0 (\i j -> compare (rowBytes col i) (rowBytes col j))
 
 
-{- | Total order on floating point used for map keys: numeric order,
-@-0 == 0@, all NaNs equal to each other and greater than every number.
--}
+-- | Bytes of row @i@ of a byte-like column, ignoring validity.
+rowBytes :: ColumnArray -> Int -> ByteString
+rowBytes c i = case c of
+  I.ColUtf8 _ o d -> varSlice o d i
+  I.ColBinary _ o d -> varSlice o d i
+  I.ColLargeUtf8 _ o d -> varSlice o d i
+  I.ColLargeBinary _ o d -> varSlice o d i
+  I.ColUtf8View _ views bufs -> viewAt views bufs i
+  I.ColBinaryView _ views bufs -> viewAt views bufs i
+  I.ColFixedSizeBinary w _ _ d -> BSU.unsafeTake w (BSU.unsafeDrop (i * w) d)
+  _ -> BS.empty
+
+
+-- | Numeric order with @-0 == 0@; NaNs equal to each other and above every number.
 compareFloating :: RealFloat a => a -> a -> Ordering
 compareFloating x y = case (isNaN x, isNaN y) of
   (True, True) -> EQ
@@ -3177,29 +2271,207 @@ compareFloating x y = case (isNaN x, isNaN y) of
   (False, False) -> compare x y
 
 
--- | IEEE 754 binary16 to 'Double'.
-halfToDouble :: Word16 -> Double
-halfToDouble w =
-  let !sign = if w .&. 0x8000 /= 0 then -1 else 1
-      !ex = fromIntegral ((w `shiftR` 10) .&. 0x1f) :: Int
-      !mant = fromIntegral (w .&. 0x3ff) :: Double
-  in case ex of
-       0 -> sign * mant * 2 ** (-24)
-       31 -> if mant == 0 then sign * (1 / 0) else 0 / 0
-       _ -> sign * (1 + mant / 1024) * 2 ^^ (ex - 15)
+-- ============================================================
+-- Eq, Show, NFData
+-- ============================================================
+
+instance NFData ColumnArray where
+  rnf = (`seq` ())
 
 
-{- | Compare two equal-width little-endian two's-complement integers
-(decimal payloads). Rows of different widths compare by width.
--}
-compareTwosComplementLE :: ByteString -> ByteString -> Ordering
-compareTwosComplementLE x y
-  | BS.length x /= BS.length y = compare (BS.length x) (BS.length y)
-  | BS.null x = EQ
-  | otherwise =
-      let !nx = BS.last x >= 0x80
-          !ny = BS.last y >= 0x80
-      in case (nx, ny) of
-           (True, False) -> LT
-           (False, True) -> GT
-           _ -> compare (BS.reverse x) (BS.reverse y)
+-- | Logical, O(n); see the module header.
+instance Eq ColumnArray where
+  a == b =
+    sameShape a b
+      && columnLength a == columnLength b
+      && (identical a b || rowsEqual a b)
+
+
+-- | Same type: tag, parameters, widths, field names, arity, recursively.
+sameShape :: ColumnArray -> ColumnArray -> Bool
+sameShape a b = case (a, b) of
+  (I.ColNull _, I.ColNull _) -> True
+  (I.ColPrim t _ _, I.ColPrim t' _ _) -> samePrimType t t'
+  (I.ColBool {}, I.ColBool {}) -> True
+  (I.ColUtf8 {}, I.ColUtf8 {}) -> True
+  (I.ColBinary {}, I.ColBinary {}) -> True
+  (I.ColLargeUtf8 {}, I.ColLargeUtf8 {}) -> True
+  (I.ColLargeBinary {}, I.ColLargeBinary {}) -> True
+  (I.ColFixedSizeBinary w _ _ _, I.ColFixedSizeBinary w' _ _ _) -> w == w'
+  (I.ColUtf8View {}, I.ColUtf8View {}) -> True
+  (I.ColBinaryView {}, I.ColBinaryView {}) -> True
+  (I.ColStruct _ _ cs, I.ColStruct _ _ cs') ->
+    V.length cs == V.length cs' && V.and (V.zipWith (\(n, x) (n', y) -> n == n' && sameShape x y) cs cs')
+  (I.ColList _ _ c, I.ColList _ _ c') -> sameShape c c'
+  (I.ColLargeList _ _ c, I.ColLargeList _ _ c') -> sameShape c c'
+  (I.ColListView _ _ _ c, I.ColListView _ _ _ c') -> sameShape c c'
+  (I.ColLargeListView _ _ _ c, I.ColLargeListView _ _ _ c') -> sameShape c c'
+  (I.ColFixedSizeList w _ _ c, I.ColFixedSizeList w' _ _ c') -> w == w' && sameShape c c'
+  (I.ColMap _ _ k x, I.ColMap _ _ k' x') -> sameShape k k' && sameShape x x'
+  (I.ColDenseUnion _ _ cs, I.ColDenseUnion _ _ cs') -> sameChildren cs cs'
+  (I.ColSparseUnion _ cs, I.ColSparseUnion _ cs') -> sameChildren cs cs'
+  (I.ColDictionary did k x, I.ColDictionary did' k' x') -> did == did' && sameShape k k' && sameShape x x'
+  (I.ColRunEndEncoded _ _ r x, I.ColRunEndEncoded _ _ r' x') -> sameShape r r' && sameShape x x'
+  _ -> False
+  where
+    sameChildren cs cs' = V.length cs == V.length cs' && V.and (V.zipWith sameShape cs cs')
+
+
+-- | Buffer identity of flat columns: same memory, same window.
+identical :: ColumnArray -> ColumnArray -> Bool
+identical a b = case (a, b) of
+  (I.ColPrim t v xs, I.ColPrim t' v' ys) ->
+    samePrimType t t' && sameV v v' && withPrim t (withPrim t' (sameBS (storableToBytes xs) (storableToBytes ys)))
+  (I.ColBool v x, I.ColBool v' y) -> sameV v v' && sameBitmap x y
+  (I.ColUtf8 v o d, I.ColUtf8 v' o' d') -> sameV v v' && sameBS (storableToBytes o) (storableToBytes o') && sameBS d d'
+  (I.ColBinary v o d, I.ColBinary v' o' d') -> sameV v v' && sameBS (storableToBytes o) (storableToBytes o') && sameBS d d'
+  (I.ColLargeUtf8 v o d, I.ColLargeUtf8 v' o' d') -> sameV v v' && sameBS (storableToBytes o) (storableToBytes o') && sameBS d d'
+  (I.ColLargeBinary v o d, I.ColLargeBinary v' o' d') -> sameV v v' && sameBS (storableToBytes o) (storableToBytes o') && sameBS d d'
+  _ -> False
+  where
+    sameBS (BSI.BS p l) (BSI.BS p' l') = p == p' && l == l'
+    sameBitmap (Bitmap x o l) (Bitmap y o' l') = sameBS x y && o == o' && l == l'
+    sameV Nothing Nothing = True
+    sameV (Just (Validity x _)) (Just (Validity y _)) = sameBitmap x y
+    sameV _ _ = False
+
+
+-- | Every row equal (shapes and lengths already agree).
+rowsEqual :: ColumnArray -> ColumnArray -> Bool
+rowsEqual a b = case (a, b) of
+  (I.ColPrim t Nothing xs, I.ColPrim t' Nothing ys) ->
+    withPrim t (withPrim t' (storableToBytes xs == storableToBytes ys))
+  _ -> all (\i -> rowEq a i b i) [0 .. columnLength a - 1]
+
+
+-- | Whether row @i@ is logically valid (unions and run-end columns defer to their child rows).
+rowValid :: ColumnArray -> Int -> Bool
+rowValid c i = case c of
+  I.ColNull _ -> False
+  -- A valid key that selects a null value is a null row (arrow-rs logical nulls).
+  I.ColDictionary _ k x ->
+    unsafeIsValidAt (validity k) i
+      && let !ki = keyAt k i in ki < 0 || ki >= columnLength x || rowValid x ki
+  _ -> unsafeIsValidAt (validity c) i
+
+
+-- | Row @i@ of @a@ equals row @j@ of @b@ (same shape).
+rowEq :: ColumnArray -> Int -> ColumnArray -> Int -> Bool
+rowEq a i b j =
+  let !va = rowValid a i
+      !vb = rowValid b j
+  in if va /= vb then False else not va || valueEq a i b j
+
+
+valueEq :: ColumnArray -> Int -> ColumnArray -> Int -> Bool
+valueEq a i b j = case (a, b) of
+  (I.ColPrim t _ xs, I.ColPrim t' _ ys) ->
+    let !w = primWidth t
+    in withPrim t (withPrim t' (slot w (storableToBytes xs) i == slot w (storableToBytes ys) j))
+  (I.ColBool _ x, I.ColBool _ y) -> unsafeBitAt x i == unsafeBitAt y j
+  (I.ColStruct _ _ cs, I.ColStruct _ _ cs') -> V.and (V.zipWith (\(_, x) (_, y) -> rowEq x i y j) cs cs')
+  (I.ColList _ o c, I.ColList _ o' c') -> rangesEq c (offsetRange o i) c' (offsetRange o' j)
+  (I.ColLargeList _ o c, I.ColLargeList _ o' c') -> rangesEq c (offsetRange o i) c' (offsetRange o' j)
+  (I.ColListView {}, I.ColListView {}) -> viaRanges
+  (I.ColLargeListView {}, I.ColLargeListView {}) -> viaRanges
+  (I.ColFixedSizeList w _ _ c, I.ColFixedSizeList _ _ _ c') -> rangesEq c (ChildRange (i * w) w) c' (ChildRange (j * w) w)
+  (I.ColMap _ o k x, I.ColMap _ o' k' x') ->
+    let r = offsetRange o i
+        r' = offsetRange o' j
+    in rangesEq k r k' r' && rangesEq x r x' r'
+  (I.ColDenseUnion t o cs, I.ColDenseUnion t' o' cs') ->
+    let !ci = fromIntegral (VS.unsafeIndex t i)
+    in ci == (fromIntegral (VS.unsafeIndex t' j) :: Int)
+         && rowEq (V.unsafeIndex cs ci) (fromIntegral (VS.unsafeIndex o i)) (V.unsafeIndex cs' ci) (fromIntegral (VS.unsafeIndex o' j))
+  (I.ColSparseUnion t cs, I.ColSparseUnion t' cs') ->
+    let !ci = fromIntegral (VS.unsafeIndex t i)
+    in ci == (fromIntegral (VS.unsafeIndex t' j) :: Int) && rowEq (V.unsafeIndex cs ci) i (V.unsafeIndex cs' ci) j
+  (I.ColDictionary _ k x, I.ColDictionary _ k' x') ->
+    let !ki = keyAt k i
+        !kj = keyAt k' j
+    in if ki >= 0 && ki < columnLength x && kj >= 0 && kj < columnLength x'
+         then rowEq x ki x' kj
+         else ki == kj
+  (I.ColRunEndEncoded off _ r x, I.ColRunEndEncoded off' _ r' x') ->
+    rowEq x (physicalRun r (off + i)) x' (physicalRun r' (off' + j))
+  _ -> rowBytes a i == rowBytes b j
+  where
+    slot w bs k = BSU.unsafeTake w (BSU.unsafeDrop (k * w) bs)
+    viaRanges = case (listRange a i, listRange b j) of
+      (Just r, Just r') -> rangesEq (listChild a) r (listChild b) r'
+      _ -> False
+
+
+listChild :: ColumnArray -> ColumnArray
+listChild = \case
+  I.ColListView _ _ _ c -> c
+  I.ColLargeListView _ _ _ c -> c
+  c -> c
+
+
+rangesEq :: ColumnArray -> ChildRange -> ColumnArray -> ChildRange -> Bool
+rangesEq c (ChildRange s l) c' (ChildRange s' l') =
+  l == l' && all (\q -> rowEq c (s + q) c' (s' + q)) [0 .. l - 1]
+
+
+-- | @Tag [row, row, ...]@ with nulls as @null@; parameters after the tag.
+instance Show ColumnArray where
+  showsPrec d c =
+    showParen (d > 10) $
+      showString (columnTag c) . params . showChar ' ' . showRows c
+    where
+      params = case c of
+        I.ColPrim (PDecimal128 p s) _ _ -> showChar ' ' . shows p . showChar ' ' . shows s
+        I.ColPrim (PDecimal256 p s) _ _ -> showChar ' ' . shows p . showChar ' ' . shows s
+        I.ColFixedSizeBinary w _ _ _ -> showChar ' ' . shows w
+        I.ColFixedSizeList w _ _ _ -> showChar ' ' . shows w
+        I.ColDictionary did _ _ -> showChar ' ' . shows did
+        _ -> id
+
+
+showRows :: ColumnArray -> ShowS
+showRows c = showChar '[' . foldr (.) id (intersperse (showChar ',') (map (showRowAt c) [0 .. columnLength c - 1])) . showChar ']'
+
+
+showRowAt :: ColumnArray -> Int -> ShowS
+showRowAt c i
+  | not (rowValid c i) = showString "null"
+  | otherwise = case c of
+      I.ColPrim t _ xs -> withPrim t (shows (VS.unsafeIndex xs i))
+      I.ColBool _ b -> shows (unsafeBitAt b i)
+      I.ColUtf8 {} -> shows (utf8ToText (rowBytes c i))
+      I.ColLargeUtf8 {} -> shows (utf8ToText (rowBytes c i))
+      I.ColUtf8View {} -> shows (utf8ToText (rowBytes c i))
+      I.ColStruct _ _ cs ->
+        showChar '{'
+          . foldr (.) id (intersperse (showString ", ") (map (\(n, x) -> showString (T.unpack n) . showString ": " . showRowAt x i) (V.toList cs)))
+          . showChar '}'
+      I.ColMap _ o k x ->
+        let ChildRange s l = offsetRange o i
+        in showChar '{'
+             . foldr (.) id (intersperse (showString ", ") (map (\q -> showRowAt k (s + q) . showString " => " . showRowAt x (s + q)) [0 .. l - 1]))
+             . showChar '}'
+      I.ColDenseUnion t o cs ->
+        let !ci = fromIntegral (VS.unsafeIndex t i)
+        in showChar '<' . shows ci . showString ": " . showRowAt (V.unsafeIndex cs ci) (fromIntegral (VS.unsafeIndex o i)) . showChar '>'
+      I.ColSparseUnion t cs ->
+        let !ci = fromIntegral (VS.unsafeIndex t i)
+        in showChar '<' . shows ci . showString ": " . showRowAt (V.unsafeIndex cs ci) i . showChar '>'
+      I.ColDictionary _ k x ->
+        let !ki = keyAt k i
+        in if ki >= 0 && ki < columnLength x then showRowAt x ki else showChar '#' . shows ki
+      I.ColRunEndEncoded off _ r x -> showRowAt x (physicalRun r (off + i))
+      _ -> case listRange c i of
+        Just (ChildRange s l) ->
+          let child = case c of
+                I.ColList _ _ x -> x
+                I.ColLargeList _ _ x -> x
+                I.ColFixedSizeList _ _ _ x -> x
+                x -> listChild x
+          in showChar '[' . foldr (.) id (intersperse (showChar ',') (map (\q -> showRowAt child (s + q)) [0 .. l - 1])) . showChar ']'
+        Nothing -> shows (rowBytes c i)
+
+
+-- | Evaluate every element of a boxed vector to WHNF.
+forceElems :: V.Vector a -> V.Vector a
+forceElems v = V.foldl' (flip seq) () v `seq` v

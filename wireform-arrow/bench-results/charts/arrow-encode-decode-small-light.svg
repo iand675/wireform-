@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 400" width="720" height="400" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif" font-size="12">
   <rect x="0" y="0" width="720" height="400" fill="#ffffff"/>
-  <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">wireform-arrow IPC stream encode + decode (100-row batch)</text>
-  <text x="360" y="44" text-anchor="middle" font-size="11" fill="#656d76">lower is better · µs · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5</text>
+  <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">wireform-arrow vs arrow-rs, IPC stream encode + decode (100-row batch)</text>
+  <text x="360" y="44" text-anchor="middle" font-size="11" fill="#656d76">lower is better · µs · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5; arrow-rs 58.2.0, rustc 1.98.1, criterion.rs 0.7.0</text>
   <g stroke="#d0d7de" stroke-width="1">
     <line x1="80" y1="320" x2="700" y2="320"/>
     <line x1="80" y1="60" x2="80" y2="320"/>
@@ -10,73 +10,208 @@
     <g/>
     <text x="72" y="324" text-anchor="end" font-size="10" fill="#656d76">0</text>
     <line x1="80" y1="255" x2="700" y2="255" stroke="#d0d7de" stroke-width="1" stroke-dasharray="2 3"/>
-    <text x="72" y="259" text-anchor="end" font-size="10" fill="#656d76">5.00</text>
+    <text x="72" y="259" text-anchor="end" font-size="10" fill="#656d76">2.50</text>
     <line x1="80" y1="190" x2="700" y2="190" stroke="#d0d7de" stroke-width="1" stroke-dasharray="2 3"/>
-    <text x="72" y="194" text-anchor="end" font-size="10" fill="#656d76">10.0</text>
+    <text x="72" y="194" text-anchor="end" font-size="10" fill="#656d76">5.00</text>
     <line x1="80" y1="125" x2="700" y2="125" stroke="#d0d7de" stroke-width="1" stroke-dasharray="2 3"/>
-    <text x="72" y="129" text-anchor="end" font-size="10" fill="#656d76">15.0</text>
+    <text x="72" y="129" text-anchor="end" font-size="10" fill="#656d76">7.50</text>
     <line x1="80" y1="60" x2="700" y2="60" stroke="#d0d7de" stroke-width="1" stroke-dasharray="2 3"/>
-    <text x="72" y="64" text-anchor="end" font-size="10" fill="#656d76">20.0</text>
+    <text x="72" y="64" text-anchor="end" font-size="10" fill="#656d76">10.0</text>
   </g>
   <g>
-    <rect x="86.9" y="267.2" width="25.6" height="52.8" rx="2" fill="#0969da"/>
-    <rect x="114.4" y="310.1" width="25.6" height="9.9" rx="2" fill="#cf222e"/>
-    <rect x="155.8" y="265.8" width="25.6" height="54.2" rx="2" fill="#0969da"/>
-    <rect x="183.3" y="309.7" width="25.6" height="10.3" rx="2" fill="#cf222e"/>
-    <rect x="224.7" y="252.9" width="25.6" height="67.1" rx="2" fill="#0969da"/>
-    <rect x="252.2" y="295.3" width="25.6" height="24.7" rx="2" fill="#cf222e"/>
-    <rect x="293.6" y="244.0" width="25.6" height="76.0" rx="2" fill="#0969da"/>
-    <rect x="321.1" y="268.9" width="25.6" height="51.1" rx="2" fill="#cf222e"/>
-    <rect x="362.4" y="227.4" width="25.6" height="92.6" rx="2" fill="#0969da"/>
-    <rect x="390" y="266.3" width="25.6" height="53.7" rx="2" fill="#cf222e"/>
-    <rect x="431.3" y="69.1" width="25.6" height="250.9" rx="2" fill="#0969da"/>
-    <rect x="458.9" y="169.7" width="25.6" height="150.3" rx="2" fill="#cf222e"/>
-    <rect x="500.2" y="234.2" width="25.6" height="85.8" rx="2" fill="#0969da"/>
-    <rect x="527.8" y="292.6" width="25.6" height="27.4" rx="2" fill="#cf222e"/>
-    <rect x="569.1" y="204.3" width="25.6" height="115.7" rx="2" fill="#0969da"/>
-    <rect x="596.7" y="292.2" width="25.6" height="27.8" rx="2" fill="#cf222e"/>
-    <rect x="638" y="217.8" width="25.6" height="102.2" rx="2" fill="#0969da"/>
-    <rect x="665.6" y="294.8" width="25.6" height="25.2" rx="2" fill="#cf222e"/>
+    <rect x="81.7" y="293.0" width="4.9" height="27.0" rx="2" fill="#0969da"/>
+    <rect x="88.6" y="302.6" width="4.9" height="17.4" rx="2" fill="#cf222e"/>
+    <rect x="98.9" y="293.5" width="4.9" height="26.5" rx="2" fill="#0969da"/>
+    <rect x="105.8" y="303.1" width="4.9" height="16.9" rx="2" fill="#cf222e"/>
+    <rect x="116.2" y="293.2" width="4.9" height="26.8" rx="2" fill="#0969da"/>
+    <rect x="123.1" y="302.8" width="4.9" height="17.2" rx="2" fill="#cf222e"/>
+    <rect x="133.4" y="291.4" width="4.9" height="28.6" rx="2" fill="#0969da"/>
+    <rect x="140.3" y="301.5" width="4.9" height="18.5" rx="2" fill="#cf222e"/>
+    <rect x="150.6" y="291.1" width="4.9" height="28.9" rx="2" fill="#0969da"/>
+    <rect x="157.5" y="302.6" width="4.9" height="17.4" rx="2" fill="#cf222e"/>
+    <rect x="167.8" y="250.8" width="4.9" height="69.2" rx="2" fill="#0969da"/>
+    <rect x="174.7" y="263.1" width="4.9" height="56.9" rx="2" fill="#cf222e"/>
+    <rect x="185.1" y="282.8" width="4.9" height="37.2" rx="2" fill="#0969da"/>
+    <rect x="191.9" y="294.3" width="4.9" height="25.7" rx="2" fill="#cf222e"/>
+    <rect x="202.3" y="267.7" width="4.9" height="52.3" rx="2" fill="#0969da"/>
+    <rect x="209.2" y="283.6" width="4.9" height="36.4" rx="2" fill="#cf222e"/>
+    <rect x="219.5" y="261.8" width="4.9" height="58.2" rx="2" fill="#0969da"/>
+    <rect x="226.4" y="290.9" width="4.9" height="29.1" rx="2" fill="#cf222e"/>
+    <rect x="236.7" y="293.0" width="4.9" height="27.0" rx="2" fill="#0969da"/>
+    <rect x="243.6" y="302.8" width="4.9" height="17.2" rx="2" fill="#cf222e"/>
+    <rect x="253.9" y="293.5" width="4.9" height="26.5" rx="2" fill="#0969da"/>
+    <rect x="260.8" y="303.6" width="4.9" height="16.4" rx="2" fill="#cf222e"/>
+    <rect x="271.2" y="293.2" width="4.9" height="26.8" rx="2" fill="#0969da"/>
+    <rect x="278.1" y="302.3" width="4.9" height="17.7" rx="2" fill="#cf222e"/>
+    <rect x="288.4" y="291.4" width="4.9" height="28.6" rx="2" fill="#0969da"/>
+    <rect x="295.3" y="300.8" width="4.9" height="19.2" rx="2" fill="#cf222e"/>
+    <rect x="305.6" y="291.1" width="4.9" height="28.9" rx="2" fill="#0969da"/>
+    <rect x="312.5" y="300.8" width="4.9" height="19.2" rx="2" fill="#cf222e"/>
+    <rect x="322.8" y="250.8" width="4.9" height="69.2" rx="2" fill="#0969da"/>
+    <rect x="329.7" y="262.5" width="4.9" height="57.5" rx="2" fill="#cf222e"/>
+    <rect x="340.1" y="282.8" width="4.9" height="37.2" rx="2" fill="#0969da"/>
+    <rect x="346.9" y="294.8" width="4.9" height="25.2" rx="2" fill="#cf222e"/>
+    <rect x="357.3" y="267.7" width="4.9" height="52.3" rx="2" fill="#0969da"/>
+    <rect x="364.2" y="283.3" width="4.9" height="36.7" rx="2" fill="#cf222e"/>
+    <rect x="374.5" y="261.8" width="4.9" height="58.2" rx="2" fill="#0969da"/>
+    <rect x="381.4" y="288.3" width="4.9" height="31.7" rx="2" fill="#cf222e"/>
+    <rect x="391.7" y="303.4" width="4.9" height="16.6" rx="2" fill="#0969da"/>
+    <rect x="398.6" y="303.4" width="4.9" height="16.6" rx="2" fill="#cf222e"/>
+    <rect x="408.9" y="303.9" width="4.9" height="16.1" rx="2" fill="#0969da"/>
+    <rect x="415.8" y="303.6" width="4.9" height="16.4" rx="2" fill="#cf222e"/>
+    <rect x="426.2" y="302.6" width="4.9" height="17.4" rx="2" fill="#0969da"/>
+    <rect x="433.1" y="302.6" width="4.9" height="17.4" rx="2" fill="#cf222e"/>
+    <rect x="443.4" y="300.2" width="4.9" height="19.8" rx="2" fill="#0969da"/>
+    <rect x="450.3" y="300.5" width="4.9" height="19.5" rx="2" fill="#cf222e"/>
+    <rect x="460.6" y="299.7" width="4.9" height="20.3" rx="2" fill="#0969da"/>
+    <rect x="467.5" y="299.7" width="4.9" height="20.3" rx="2" fill="#cf222e"/>
+    <rect x="477.8" y="261.5" width="4.9" height="58.5" rx="2" fill="#0969da"/>
+    <rect x="484.7" y="265.7" width="4.9" height="54.3" rx="2" fill="#cf222e"/>
+    <rect x="495.1" y="291.9" width="4.9" height="28.1" rx="2" fill="#0969da"/>
+    <rect x="501.9" y="293.7" width="4.9" height="26.3" rx="2" fill="#cf222e"/>
+    <rect x="512.3" y="285.7" width="4.9" height="34.3" rx="2" fill="#0969da"/>
+    <rect x="519.2" y="284.4" width="4.9" height="35.6" rx="2" fill="#cf222e"/>
+    <rect x="529.5" y="283.9" width="4.9" height="36.1" rx="2" fill="#0969da"/>
+    <rect x="536.4" y="290.1" width="4.9" height="29.9" rx="2" fill="#cf222e"/>
+    <rect x="546.7" y="300.5" width="4.9" height="19.5" rx="2" fill="#0969da"/>
+    <rect x="553.6" y="290.4" width="4.9" height="29.6" rx="2" fill="#cf222e"/>
+    <rect x="563.9" y="301.0" width="4.9" height="19.0" rx="2" fill="#0969da"/>
+    <rect x="570.8" y="289.8" width="4.9" height="30.2" rx="2" fill="#cf222e"/>
+    <rect x="581.2" y="298.9" width="4.9" height="21.1" rx="2" fill="#0969da"/>
+    <rect x="588.1" y="290.6" width="4.9" height="29.4" rx="2" fill="#cf222e"/>
+    <rect x="598.4" y="269.6" width="4.9" height="50.4" rx="2" fill="#0969da"/>
+    <rect x="605.3" y="283.1" width="4.9" height="36.9" rx="2" fill="#cf222e"/>
+    <rect x="615.6" y="269.3" width="4.9" height="50.7" rx="2" fill="#0969da"/>
+    <rect x="622.5" y="274.8" width="4.9" height="45.2" rx="2" fill="#cf222e"/>
+    <rect x="632.8" y="183.2" width="4.9" height="136.8" rx="2" fill="#0969da"/>
+    <rect x="639.7" y="176.7" width="4.9" height="143.3" rx="2" fill="#cf222e"/>
+    <rect x="650.1" y="195.5" width="4.9" height="124.5" rx="2" fill="#0969da"/>
+    <rect x="656.9" y="233.7" width="4.9" height="86.3" rx="2" fill="#cf222e"/>
+    <rect x="667.3" y="278.4" width="4.9" height="41.6" rx="2" fill="#0969da"/>
+    <rect x="674.2" y="249.5" width="4.9" height="70.5" rx="2" fill="#cf222e"/>
+    <rect x="684.5" y="242.8" width="4.9" height="77.2" rx="2" fill="#0969da"/>
+    <rect x="691.4" y="274.5" width="4.9" height="45.5" rx="2" fill="#cf222e"/>
   </g>
   <g>
-    <text x="99.7" y="263.2" text-anchor="middle" font-size="10" fill="#1f2328">4.06</text>
-    <text x="127.2" y="306.1" text-anchor="middle" font-size="10" fill="#1f2328">0.760</text>
-    <text x="168.6" y="261.8" text-anchor="middle" font-size="10" fill="#1f2328">4.17</text>
-    <text x="196.1" y="305.7" text-anchor="middle" font-size="10" fill="#1f2328">0.790</text>
-    <text x="237.4" y="248.9" text-anchor="middle" font-size="10" fill="#1f2328">5.16</text>
-    <text x="265" y="291.3" text-anchor="middle" font-size="10" fill="#1f2328">1.90</text>
-    <text x="306.3" y="240.0" text-anchor="middle" font-size="10" fill="#1f2328">5.85</text>
-    <text x="333.9" y="264.9" text-anchor="middle" font-size="10" fill="#1f2328">3.93</text>
-    <text x="375.2" y="223.4" text-anchor="middle" font-size="10" fill="#1f2328">7.12</text>
-    <text x="402.8" y="262.3" text-anchor="middle" font-size="10" fill="#1f2328">4.13</text>
-    <text x="444.1" y="65.1" text-anchor="middle" font-size="10" fill="#1f2328">19.3</text>
-    <text x="471.7" y="165.7" text-anchor="middle" font-size="10" fill="#1f2328">11.6</text>
-    <text x="513" y="230.2" text-anchor="middle" font-size="10" fill="#1f2328">6.60</text>
-    <text x="540.6" y="288.6" text-anchor="middle" font-size="10" fill="#1f2328">2.11</text>
-    <text x="581.9" y="200.3" text-anchor="middle" font-size="10" fill="#1f2328">8.90</text>
-    <text x="609.4" y="288.2" text-anchor="middle" font-size="10" fill="#1f2328">2.14</text>
-    <text x="650.8" y="213.8" text-anchor="middle" font-size="10" fill="#1f2328">7.86</text>
-    <text x="678.3" y="290.8" text-anchor="middle" font-size="10" fill="#1f2328">1.94</text>
+    <text x="84.2" y="289.0" text-anchor="middle" font-size="10" fill="#1f2328">1.04</text>
+    <text x="91.1" y="298.6" text-anchor="middle" font-size="10" fill="#1f2328">0.670</text>
+    <text x="101.4" y="289.5" text-anchor="middle" font-size="10" fill="#1f2328">1.02</text>
+    <text x="108.3" y="299.1" text-anchor="middle" font-size="10" fill="#1f2328">0.650</text>
+    <text x="118.6" y="289.2" text-anchor="middle" font-size="10" fill="#1f2328">1.03</text>
+    <text x="125.5" y="298.8" text-anchor="middle" font-size="10" fill="#1f2328">0.660</text>
+    <text x="135.8" y="287.4" text-anchor="middle" font-size="10" fill="#1f2328">1.10</text>
+    <text x="142.7" y="297.5" text-anchor="middle" font-size="10" fill="#1f2328">0.710</text>
+    <text x="153.1" y="287.1" text-anchor="middle" font-size="10" fill="#1f2328">1.11</text>
+    <text x="159.9" y="298.6" text-anchor="middle" font-size="10" fill="#1f2328">0.670</text>
+    <text x="170.3" y="246.8" text-anchor="middle" font-size="10" fill="#1f2328">2.66</text>
+    <text x="177.2" y="259.1" text-anchor="middle" font-size="10" fill="#1f2328">2.19</text>
+    <text x="187.5" y="278.8" text-anchor="middle" font-size="10" fill="#1f2328">1.43</text>
+    <text x="194.4" y="290.3" text-anchor="middle" font-size="10" fill="#1f2328">0.990</text>
+    <text x="204.7" y="263.7" text-anchor="middle" font-size="10" fill="#1f2328">2.01</text>
+    <text x="211.6" y="279.6" text-anchor="middle" font-size="10" fill="#1f2328">1.40</text>
+    <text x="221.9" y="257.8" text-anchor="middle" font-size="10" fill="#1f2328">2.24</text>
+    <text x="228.8" y="286.9" text-anchor="middle" font-size="10" fill="#1f2328">1.12</text>
+    <text x="239.2" y="289.0" text-anchor="middle" font-size="10" fill="#1f2328">1.04</text>
+    <text x="246.1" y="298.8" text-anchor="middle" font-size="10" fill="#1f2328">0.660</text>
+    <text x="256.4" y="289.5" text-anchor="middle" font-size="10" fill="#1f2328">1.02</text>
+    <text x="263.3" y="299.6" text-anchor="middle" font-size="10" fill="#1f2328">0.630</text>
+    <text x="273.6" y="289.2" text-anchor="middle" font-size="10" fill="#1f2328">1.03</text>
+    <text x="280.5" y="298.3" text-anchor="middle" font-size="10" fill="#1f2328">0.680</text>
+    <text x="290.8" y="287.4" text-anchor="middle" font-size="10" fill="#1f2328">1.10</text>
+    <text x="297.7" y="296.8" text-anchor="middle" font-size="10" fill="#1f2328">0.740</text>
+    <text x="308.1" y="287.1" text-anchor="middle" font-size="10" fill="#1f2328">1.11</text>
+    <text x="314.9" y="296.8" text-anchor="middle" font-size="10" fill="#1f2328">0.740</text>
+    <text x="325.3" y="246.8" text-anchor="middle" font-size="10" fill="#1f2328">2.66</text>
+    <text x="332.2" y="258.5" text-anchor="middle" font-size="10" fill="#1f2328">2.21</text>
+    <text x="342.5" y="278.8" text-anchor="middle" font-size="10" fill="#1f2328">1.43</text>
+    <text x="349.4" y="290.8" text-anchor="middle" font-size="10" fill="#1f2328">0.970</text>
+    <text x="359.7" y="263.7" text-anchor="middle" font-size="10" fill="#1f2328">2.01</text>
+    <text x="366.6" y="279.3" text-anchor="middle" font-size="10" fill="#1f2328">1.41</text>
+    <text x="376.9" y="257.8" text-anchor="middle" font-size="10" fill="#1f2328">2.24</text>
+    <text x="383.8" y="284.3" text-anchor="middle" font-size="10" fill="#1f2328">1.22</text>
+    <text x="394.2" y="299.4" text-anchor="middle" font-size="10" fill="#1f2328">0.640</text>
+    <text x="401.1" y="299.4" text-anchor="middle" font-size="10" fill="#1f2328">0.640</text>
+    <text x="411.4" y="299.9" text-anchor="middle" font-size="10" fill="#1f2328">0.620</text>
+    <text x="418.3" y="299.6" text-anchor="middle" font-size="10" fill="#1f2328">0.630</text>
+    <text x="428.6" y="298.6" text-anchor="middle" font-size="10" fill="#1f2328">0.670</text>
+    <text x="435.5" y="298.6" text-anchor="middle" font-size="10" fill="#1f2328">0.670</text>
+    <text x="445.8" y="296.2" text-anchor="middle" font-size="10" fill="#1f2328">0.760</text>
+    <text x="452.7" y="296.5" text-anchor="middle" font-size="10" fill="#1f2328">0.750</text>
+    <text x="463.1" y="295.7" text-anchor="middle" font-size="10" fill="#1f2328">0.780</text>
+    <text x="469.9" y="295.7" text-anchor="middle" font-size="10" fill="#1f2328">0.780</text>
+    <text x="480.3" y="257.5" text-anchor="middle" font-size="10" fill="#1f2328">2.25</text>
+    <text x="487.2" y="261.7" text-anchor="middle" font-size="10" fill="#1f2328">2.09</text>
+    <text x="497.5" y="287.9" text-anchor="middle" font-size="10" fill="#1f2328">1.08</text>
+    <text x="504.4" y="289.7" text-anchor="middle" font-size="10" fill="#1f2328">1.01</text>
+    <text x="514.7" y="281.7" text-anchor="middle" font-size="10" fill="#1f2328">1.32</text>
+    <text x="521.6" y="280.4" text-anchor="middle" font-size="10" fill="#1f2328">1.37</text>
+    <text x="531.9" y="279.9" text-anchor="middle" font-size="10" fill="#1f2328">1.39</text>
+    <text x="538.8" y="286.1" text-anchor="middle" font-size="10" fill="#1f2328">1.15</text>
+    <text x="549.2" y="296.5" text-anchor="middle" font-size="10" fill="#1f2328">0.750</text>
+    <text x="556.1" y="286.4" text-anchor="middle" font-size="10" fill="#1f2328">1.14</text>
+    <text x="566.4" y="297.0" text-anchor="middle" font-size="10" fill="#1f2328">0.730</text>
+    <text x="573.3" y="285.8" text-anchor="middle" font-size="10" fill="#1f2328">1.16</text>
+    <text x="583.6" y="294.9" text-anchor="middle" font-size="10" fill="#1f2328">0.810</text>
+    <text x="590.5" y="286.6" text-anchor="middle" font-size="10" fill="#1f2328">1.13</text>
+    <text x="600.8" y="265.6" text-anchor="middle" font-size="10" fill="#1f2328">1.94</text>
+    <text x="607.7" y="279.1" text-anchor="middle" font-size="10" fill="#1f2328">1.42</text>
+    <text x="618.1" y="265.3" text-anchor="middle" font-size="10" fill="#1f2328">1.95</text>
+    <text x="624.9" y="270.8" text-anchor="middle" font-size="10" fill="#1f2328">1.74</text>
+    <text x="635.3" y="179.2" text-anchor="middle" font-size="10" fill="#1f2328">5.26</text>
+    <text x="642.2" y="172.7" text-anchor="middle" font-size="10" fill="#1f2328">5.51</text>
+    <text x="652.5" y="191.5" text-anchor="middle" font-size="10" fill="#1f2328">4.79</text>
+    <text x="659.4" y="229.7" text-anchor="middle" font-size="10" fill="#1f2328">3.32</text>
+    <text x="669.7" y="274.4" text-anchor="middle" font-size="10" fill="#1f2328">1.60</text>
+    <text x="676.6" y="245.5" text-anchor="middle" font-size="10" fill="#1f2328">2.71</text>
+    <text x="686.9" y="238.8" text-anchor="middle" font-size="10" fill="#1f2328">2.97</text>
+    <text x="693.8" y="270.5" text-anchor="middle" font-size="10" fill="#1f2328">1.75</text>
   </g>
   <g>
-    <text x="114.4" y="338" text-anchor="middle" font-size="11" fill="#1f2328">int64</text>
-    <text x="183.3" y="338" text-anchor="middle" font-size="11" fill="#1f2328">double</text>
-    <text x="252.2" y="338" text-anchor="middle" font-size="11" fill="#1f2328">nullable int64</text>
-    <text x="321.1" y="338" text-anchor="middle" font-size="11" fill="#1f2328">utf8</text>
-    <text x="390" y="338" text-anchor="middle" font-size="11" fill="#1f2328">nullable utf8</text>
-    <text x="458.9" y="338" text-anchor="middle" font-size="11" fill="#1f2328">mixed 6-col</text>
-    <text x="527.8" y="338" text-anchor="middle" font-size="11" fill="#1f2328">list&lt;int32&gt;</text>
-    <text x="596.7" y="338" text-anchor="middle" font-size="11" fill="#1f2328">struct&lt;int32,double,bool&gt;</text>
-    <text x="665.6" y="338" text-anchor="middle" font-size="11" fill="#1f2328">dictionary&lt;utf8&gt;</text>
+    <text x="88.6" y="338" text-anchor="middle" font-size="11" fill="#1f2328">encode int64</text>
+    <text x="105.8" y="338" text-anchor="middle" font-size="11" fill="#1f2328">encode double</text>
+    <text x="123.1" y="338" text-anchor="middle" font-size="11" fill="#1f2328">encode nullable int64</text>
+    <text x="140.3" y="338" text-anchor="middle" font-size="11" fill="#1f2328">encode utf8</text>
+    <text x="157.5" y="338" text-anchor="middle" font-size="11" fill="#1f2328">encode nullable utf8</text>
+    <text x="174.7" y="338" text-anchor="middle" font-size="11" fill="#1f2328">encode mixed 6-col</text>
+    <text x="191.9" y="338" text-anchor="middle" font-size="11" fill="#1f2328">encode list&lt;int32&gt;</text>
+    <text x="209.2" y="338" text-anchor="middle" font-size="11" fill="#1f2328">encode struct&lt;int32,double,bool&gt;</text>
+    <text x="226.4" y="338" text-anchor="middle" font-size="11" fill="#1f2328">encode dictionary&lt;utf8&gt;</text>
+    <text x="243.6" y="338" text-anchor="middle" font-size="11" fill="#1f2328">encode lazy int64</text>
+    <text x="260.8" y="338" text-anchor="middle" font-size="11" fill="#1f2328">encode lazy double</text>
+    <text x="278.1" y="338" text-anchor="middle" font-size="11" fill="#1f2328">encode lazy nullable int64</text>
+    <text x="295.3" y="338" text-anchor="middle" font-size="11" fill="#1f2328">encode lazy utf8</text>
+    <text x="312.5" y="338" text-anchor="middle" font-size="11" fill="#1f2328">encode lazy nullable utf8</text>
+    <text x="329.7" y="338" text-anchor="middle" font-size="11" fill="#1f2328">encode lazy mixed 6-col</text>
+    <text x="346.9" y="338" text-anchor="middle" font-size="11" fill="#1f2328">encode lazy list&lt;int32&gt;</text>
+    <text x="364.2" y="338" text-anchor="middle" font-size="11" fill="#1f2328">encode lazy struct&lt;int32,double,bool&gt;</text>
+    <text x="381.4" y="338" text-anchor="middle" font-size="11" fill="#1f2328">encode lazy dictionary&lt;utf8&gt;</text>
+    <text x="398.6" y="338" text-anchor="middle" font-size="11" fill="#1f2328">decode int64</text>
+    <text x="415.8" y="338" text-anchor="middle" font-size="11" fill="#1f2328">decode double</text>
+    <text x="433.1" y="338" text-anchor="middle" font-size="11" fill="#1f2328">decode nullable int64</text>
+    <text x="450.3" y="338" text-anchor="middle" font-size="11" fill="#1f2328">decode utf8</text>
+    <text x="467.5" y="338" text-anchor="middle" font-size="11" fill="#1f2328">decode nullable utf8</text>
+    <text x="484.7" y="338" text-anchor="middle" font-size="11" fill="#1f2328">decode mixed 6-col</text>
+    <text x="501.9" y="338" text-anchor="middle" font-size="11" fill="#1f2328">decode list&lt;int32&gt;</text>
+    <text x="519.2" y="338" text-anchor="middle" font-size="11" fill="#1f2328">decode struct&lt;int32,double,bool&gt;</text>
+    <text x="536.4" y="338" text-anchor="middle" font-size="11" fill="#1f2328">decode dictionary&lt;utf8&gt;</text>
+    <text x="553.6" y="338" text-anchor="middle" font-size="11" fill="#1f2328">decode + toVector int64</text>
+    <text x="570.8" y="338" text-anchor="middle" font-size="11" fill="#1f2328">decode + toVector double</text>
+    <text x="588.1" y="338" text-anchor="middle" font-size="11" fill="#1f2328">decode + toVector nullable int64</text>
+    <text x="605.3" y="338" text-anchor="middle" font-size="11" fill="#1f2328">decode + toVector utf8</text>
+    <text x="622.5" y="338" text-anchor="middle" font-size="11" fill="#1f2328">decode + toVector nullable utf8</text>
+    <text x="639.7" y="338" text-anchor="middle" font-size="11" fill="#1f2328">decode + toVector mixed 6-col</text>
+    <text x="656.9" y="338" text-anchor="middle" font-size="11" fill="#1f2328">decode + toVector list&lt;int32&gt;</text>
+    <text x="674.2" y="338" text-anchor="middle" font-size="11" fill="#1f2328">decode + toVector struct&lt;int32,double,bool&gt;</text>
+    <text x="691.4" y="338" text-anchor="middle" font-size="11" fill="#1f2328">decode + toVector dictionary&lt;utf8&gt;</text>
   </g>
   <g>
-    <g transform="translate(215, 382)">
+    <g transform="translate(257, 382)">
       <rect x="0" y="-9" width="12" height="12" rx="2" fill="#0969da"/>
-      <text x="18" y="1" font-size="11" fill="#1f2328">encode (100 rows)</text>
+      <text x="18" y="1" font-size="11" fill="#1f2328">arrow-rs</text>
     </g>
-    <g transform="translate(368, 382)">
+    <g transform="translate(347, 382)">
       <rect x="0" y="-9" width="12" height="12" rx="2" fill="#cf222e"/>
-      <text x="18" y="1" font-size="11" fill="#1f2328">decode (100 rows)</text>
+      <text x="18" y="1" font-size="11" fill="#1f2328">wireform-arrow</text>
     </g>
   </g>
 </svg>

@@ -45,10 +45,17 @@ library
   hs-source-dirs: src
   exposed-modules:
     Arrow.Column
+    Arrow.Column.Buffer
+    Arrow.Column.Builder
+    Arrow.Column.Internal
     Arrow.Derive
     Arrow.File
     Arrow.FlatBufferIPC
+    Arrow.FlatBufferIPC.Common
+    Arrow.FlatBufferIPC.Read
+    Arrow.FlatBufferIPC.Write
     Arrow.IPC
+    Arrow.Read.Columns
     Arrow.Record
     Arrow.Record.Generic
     Arrow.Record.TH
@@ -87,6 +94,7 @@ test-suite wireform-arrow-test
   main-is: Main.hs
   hs-source-dirs: test
   other-modules:
+    Test.Arrow.Core
     Test.Arrow.Gen
     Test.Arrow.Malformed
     Test.Arrow.Props
@@ -129,7 +137,9 @@ benchmark wireform-arrow-bench
   type: exitcode-stdio-1.0
   hs-source-dirs: bench
   main-is: Bench.hs
-  ghc-options: -O2 -rtsopts
+  -- A 64 MB nursery: the materializing and typed rows are otherwise
+  -- dominated by minor GCs (see README, Performance).
+  ghc-options: -O2 -rtsopts "-with-rtsopts=-A64m"
   build-depends:
     base,
     wireform-arrow,

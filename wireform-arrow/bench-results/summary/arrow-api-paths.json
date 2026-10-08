@@ -5,9 +5,11 @@
   "higherIsBetter": false,
   "groups": [
     "stream encode (Arrow.Stream)",
+    "stream encode lazy (Arrow.Stream)",
     "stream encode (Arrow.Write)",
     "stream decode (Arrow.Stream)",
     "file encode (Arrow.Stream)",
+    "file encode lazy (Arrow.Stream)",
     "file decode (Arrow.Stream)",
     "file read (Arrow.File)",
     "typed encode (Arrow.Record)",
@@ -17,31 +19,35 @@
     {
       "name": "arrow-rs",
       "values": [
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0
+        460.58,
+        460.58,
+        460.58,
+        295.15,
+        461.94,
+        461.94,
+        293.47,
+        293.47,
+        1786.68,
+        3232.55
       ]
     },
     {
       "name": "wireform-arrow",
       "values": [
-        37138.56,
-        37770.67,
-        27817.63,
-        36653.05,
-        28210.41,
-        29074.03,
-        48048.36,
-        61320.7
+        64.44,
+        2.2,
+        65.64,
+        96.47,
+        67.0,
+        3.91,
+        108.52,
+        98.18,
+        2315.12,
+        3691.52
       ]
     }
   ],
   "baseline": "arrow-rs",
-  "capturedAt": "2026-10-07T23:32:59Z",
+  "capturedAt": "2026-10-08T20:55:53Z",
   "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5; arrow-rs 58.2.0, rustc 1.98.1, criterion.rs 0.7.0"
 }

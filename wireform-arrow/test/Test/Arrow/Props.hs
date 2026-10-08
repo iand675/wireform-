@@ -1,24 +1,61 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 {- | Generated round-trip and algebraic properties for wireform-arrow.
 
 Columns are compared through the logical row model of
-"Test.Arrow.Gen" ('columnValues'), so dictionary unification, offset
-rebasing and NaN bit patterns do not cause spurious mismatches while
-any change of meaning does.
+"Test.Arrow.Gen" ('columnValues') and through the logical 'Eq' of
+'ColumnArray', so dictionary unification, offset rebasing, slicing and
+NaN bit patterns do not cause spurious mismatches while any change of
+meaning does.
+
+Besides the round trips, these properties pin the representation's
+guarantees: decoded columns alias the input buffer (and stay correct
+when the input is misaligned), 'copyColumn' detaches from it, the
+writer's output is a fixed point of decode then encode, and the lazy
+encoders produce the strict encoders' bytes.
 -}
 module Test.Arrow.Props (tests) where
 
 import Arrow.Column (
-  ColumnArray (..),
+  ColumnArray,
+  PrimType (..),
+  bitmapOffset,
   columnLength,
+  columnTag,
   concatColumnArray,
+  copyColumn,
   expandDictionary,
-  isNullableColumn,
+  fromBools,
+  fromTexts,
+  hasValiditySlot,
+  mkDictionary,
+  mkFixedSizeList,
+  mkList,
+  mkStruct,
+  nullCount,
+  primColumn,
   sliceColumnArray,
   takeColumnArray,
   validateMapKeysSorted,
+  validity,
+  validityBits,
+  validityFromBools,
+  validityNullCount,
+  pattern ColDictionary,
+  pattern ColFixedSizeList,
+  pattern ColLargeList,
+  pattern ColLargeBinary,
+  pattern ColLargeUtf8,
+  pattern ColBinary,
+  pattern ColList,
+  pattern ColMap,
+  pattern ColNull,
+  pattern ColRunEndEncoded,
+  pattern ColStruct,
+  pattern ColUtf8,
  )
+import Arrow.Column.Internal qualified as I
 import Arrow.File (readArrowFileColumns)
 import Arrow.FlatBufferIPC (
   DictBatch (..),
@@ -40,7 +77,9 @@ import Arrow.Stream (
   decodeArrowStream,
   defaultWriteOptions,
   encodeArrowFile,
+  encodeArrowFileLazy,
   encodeArrowStream,
+  encodeArrowStreamLazy,
   openStreamReader,
   streamReaderProjected,
   streamReaderToList,
@@ -48,7 +87,11 @@ import Arrow.Stream (
 import Arrow.Types
 import Arrow.Write (writeArrowFile, writeArrowStream)
 import Control.Monad (forM_, replicateM)
+import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.ByteString.Internal qualified as BSI
+import Data.ByteString.Lazy qualified as BL
+import Data.ByteString.Unsafe qualified as BSU
 import Data.Either (isLeft, isRight)
 import Data.Int (Int64)
 import Data.List (elemIndex)
@@ -57,7 +100,10 @@ import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Vector qualified as V
-import Data.Vector.Primitive qualified as VP
+import Data.Vector.Storable qualified as VS
+import Foreign.ForeignPtr.Unsafe (unsafeForeignPtrToPtr)
+import Foreign.Marshal.Utils (copyBytes)
+import Foreign.Ptr (castPtr, minusPtr, plusPtr)
 import Hedgehog
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
@@ -93,6 +139,10 @@ tests =
       , ("emit-once rejects a combined dictionary its index type cannot address", prop_emitOnceIndexOverflow)
       , ("dictionary value columns that cannot be combined are rejected", prop_inconsistentDictionaryValues)
       , ("batches that do not fit the schema are rejected", prop_schemaMismatch)
+      , ("decoded columns alias an aligned input and are correct for a misaligned one", prop_zeroCopyDecode)
+      , ("copyColumn detaches a decoded column from the input", prop_copyColumnDetaches)
+      , ("decode then encode reproduces writer output byte for byte", prop_canonicalRoundTrip)
+      , ("lazy and strict encoders produce identical bytes", prop_lazyStrictIdentical)
       ]
 
 
@@ -100,105 +150,108 @@ tests =
 -- Helpers
 -- ============================================================
 
--- | Compare two tables by logical rows and top-level constructor.
+-- | Compare two tables by logical rows, logical 'Eq' and top-level tag.
 sameTable :: MonadTest m => [V.Vector ColumnArray] -> [V.Vector ColumnArray] -> m ()
 sameTable expected actual = do
   length actual === length expected
   forM_ (zip expected actual) $ \(e, a) -> do
     map tag (V.toList a) === map tag (V.toList e)
     evalEither (batchValues a) >>= \av -> evalEither (batchValues e) >>= \ev -> av === ev
+    V.toList a === V.toList e
 
 
 tag :: ColumnArray -> String
-tag = takeWhile (/= ' ') . show
+tag = columnTag
 
 
 values :: MonadTest m => ColumnArray -> m [Value]
 values c = V.toList <$> evalEither (columnValues c)
 
 
--- | Constructor names of a column and all its children (dictionary values included).
+-- | Fixture construction that cannot fail unless the test itself is wrong.
+fixture :: Either String ColumnArray -> ColumnArray
+fixture = either (error . ("Test.Arrow.Props: bad fixture: " ++)) id
+
+
+-- | Constructor names of a column and all its children (dictionary keys and values included).
 allTags :: ColumnArray -> [String]
-allTags c = tag c : concatMap allTags (children c)
+allTags c = tag c : concatMap allTags (childColumns c)
 
 
 -- | Whether any column in the tree (dictionary values included) satisfies the predicate.
 anyColumn :: (ColumnArray -> Bool) -> ColumnArray -> Bool
-anyColumn p c = p c || any (anyColumn p) (children c)
+anyColumn p c = p c || any (anyColumn p) (childColumns c)
 
 
--- | Direct children of a column, dictionary values included.
-children :: ColumnArray -> [ColumnArray]
-children = \case
-  ColStruct _ cs -> map snd (V.toList cs)
-  ColStructMaybe _ cs -> map snd (V.toList cs)
-  ColList _ x -> [x]
-  ColListMaybe _ _ x -> [x]
-  ColLargeList _ x -> [x]
-  ColLargeListMaybe _ _ x -> [x]
-  ColFixedSizeList _ _ x -> [x]
-  ColFixedSizeListMaybe _ _ x -> [x]
-  ColMap _ k v -> [k, v]
-  ColMapMaybe _ _ k v -> [k, v]
-  ColDenseUnion _ _ cs -> V.toList cs
-  ColSparseUnion _ cs -> V.toList cs
-  ColRunEndEncoded r v -> [r, v]
-  ColListView _ _ x -> [x]
-  ColListViewMaybe _ _ _ x -> [x]
-  ColLargeListView _ _ x -> [x]
-  ColLargeListViewMaybe _ _ _ x -> [x]
-  ColDictionary _ _ v -> [v]
-  ColDictionaryMaybe _ _ v -> [v]
-  _ -> []
-
-
-fieldlessStruct, sizeZeroList, nestedDictionary, emptyDictionary :: ColumnArray -> Bool
+fieldlessStruct, sizeZeroList, nestedDictionary, emptyDictionary, withNulls, offsetBase, bitOffset, denormalisedValidity, windowedRuns :: ColumnArray -> Bool
 fieldlessStruct = \case
-  ColStruct _ cs -> V.null cs
-  ColStructMaybe _ cs -> V.null cs
+  ColStruct _ _ cs -> V.null cs
   _ -> False
 sizeZeroList = \case
-  ColFixedSizeList 0 _ _ -> True
-  ColFixedSizeListMaybe 0 _ _ -> True
+  ColFixedSizeList 0 _ _ _ -> True
   _ -> False
 nestedDictionary = \case
   ColDictionary _ _ v -> hasDictionaries v
-  ColDictionaryMaybe _ _ v -> hasDictionaries v
   _ -> False
 emptyDictionary = \case
-  ColDictionaryMaybe _ ix v -> columnLength v == 0 && not (V.null ix)
+  ColDictionary _ keys v -> columnLength v == 0 && columnLength keys > 0
+  _ -> False
+withNulls c = nullCount c > 0
+-- Offsets that do not start at zero (a window of a longer column).
+offsetBase = \case
+  ColUtf8 _ o _ -> firstNonZero o
+  ColBinary _ o _ -> firstNonZero o
+  ColLargeUtf8 _ o _ -> firstNonZero o
+  ColLargeBinary _ o _ -> firstNonZero o
+  ColList _ o _ -> firstNonZero o
+  ColLargeList _ o _ -> firstNonZero o
+  ColMap _ o _ _ -> firstNonZero o
+  _ -> False
+  where
+    firstNonZero :: (VS.Storable o, Eq o, Num o) => VS.Vector o -> Bool
+    firstNonZero o = not (VS.null o) && VS.head o /= 0
+bitOffset c = maybe False ((/= 0) . bitmapOffset . validityBits) (validity c)
+denormalisedValidity c = maybe False ((== 0) . validityNullCount) (validity c)
+windowedRuns = \case
+  ColRunEndEncoded off _ _ _ -> off /= 0
   _ -> False
 
 
--- | Require the generator to reach the shapes the properties are about.
-coverShapes :: MonadTest m => [ColumnArray] -> m ()
-coverShapes cols = do
+{- | Require the generator to reach the shapes the properties are about.
+Nullability is a property of the field (a nullable field's column may
+happen to hold no nulls), so the nullable shapes are counted on the
+schema of a table with at least one batch; the physical shapes are
+counted on the columns.
+-}
+coverShapes :: MonadTest m => Schema -> [ColumnArray] -> m ()
+coverShapes sch cols = do
   let tags = concatMap allTags cols
       has t = t `elem` tags
+      some p = any (anyColumn p) cols
+      fields = concatMap fieldTree (V.toList (arrowFields sch))
+      fieldTree f = f : concatMap fieldTree (V.toList (fieldChildren f))
+      nullableField p = not (null cols) && any (\f -> fieldNullable f && p f) fields
+      plainType p f = isNothing (fieldDictionary f) && p (fieldType f)
   forM_
-    [ "ColDenseUnion"
-    , "ColSparseUnion"
-    , "ColRunEndEncoded"
-    , "ColListView"
-    , "ColLargeListViewMaybe"
-    , "ColMapMaybe"
-    , "ColFixedSizeList"
-    , "ColDictionary"
-    , "ColDictionaryMaybe"
-    , "ColDecimal128Maybe"
-    , "ColDecimal256Maybe"
-    , "ColInterval*Maybe"
-    , "ColUtf8View"
-    , "ColBinaryViewMaybe"
-    , "ColNull"
-    , "ColStructMaybe"
-    ]
-    (\t -> cover 1 (fromString t) (if t == "ColInterval*Maybe" then any has ["ColIntervalYearMonthMaybe", "ColIntervalDayTimeMaybe", "ColIntervalMonthDayNanoMaybe"] else has t))
-  cover 1 "struct with no fields" (any (anyColumn fieldlessStruct) cols)
-  cover 1 "fixed-size list of size 0" (any (anyColumn sizeZeroList) cols)
-  cover 1 "dictionary inside dictionary values" (any (anyColumn nestedDictionary) cols)
-  cover 1 "all-null rows over an empty dictionary" (any (anyColumn emptyDictionary) cols)
-
+    ["ColDenseUnion", "ColSparseUnion", "ColRunEndEncoded", "ColListView", "ColFixedSizeList", "ColDictionary", "ColUtf8View", "ColNull"]
+    (\t -> cover 1 (fromString t) (has t))
+  cover 1 "nullable large list view" (nullableField (plainType (== ALargeListView)))
+  cover 1 "nullable map" (nullableField (plainType (\case AMap _ -> True; _ -> False)))
+  cover 1 "nullable dictionary" (nullableField (\f -> fieldDictionary f /= Nothing))
+  cover 1 "nullable decimal128" (nullableField (plainType (\case ADecimal {} -> True; _ -> False)))
+  cover 1 "nullable decimal256" (nullableField (plainType (\case ADecimal256 {} -> True; _ -> False)))
+  cover 1 "nullable binary view" (nullableField (plainType (== ABinaryView)))
+  cover 1 "nullable struct" (nullableField (plainType (== AStruct)))
+  cover 1 "nullable interval" (nullableField (plainType (\case AInterval _ -> True; _ -> False)))
+  cover 1 "nulls in a column" (some withNulls)
+  cover 1 "struct with no fields" (some fieldlessStruct)
+  cover 1 "fixed-size list of size 0" (some sizeZeroList)
+  cover 1 "dictionary inside dictionary values" (some nestedDictionary)
+  cover 1 "all-null rows over an empty dictionary" (some emptyDictionary)
+  cover 1 "offsets with a non-zero base" (some offsetBase)
+  cover 1 "validity at a non-zero bit offset" (some bitOffset)
+  cover 1 "validity present with zero nulls" (some denormalisedValidity)
+  cover 1 "run-end-encoded window with a logical offset" (some windowedRuns)
 
 
 -- | A single generated column (any type, nested to depth 3) with its field.
@@ -210,14 +263,37 @@ genColumn = do
   pure (f, c)
 
 
+-- | Whether the bytes of @inner@ lie inside the memory of @outer@.
+regionWithin :: ByteString -> ByteString -> Bool
+regionWithin outer inner =
+  let (fo, lo) = BSI.toForeignPtr0 outer
+      (fi, li) = BSI.toForeignPtr0 inner
+      d = unsafeForeignPtrToPtr fi `minusPtr` unsafeForeignPtrToPtr fo
+  in d >= 0 && d + li <= lo
+
+
+-- | The bytes copied to a fresh 64-byte aligned buffer at byte offset @shift@.
+placedAt :: Int -> ByteString -> ByteString
+placedAt shift bs =
+  BS.drop shift $ I.createAligned (BS.length bs + shift) $ \p ->
+    BSU.unsafeUseAsCStringLen bs $ \(src, n) -> copyBytes (p `plusPtr` shift) (castPtr src) n
+
+
+-- | Every column of a table, children included.
+allColumns :: [V.Vector ColumnArray] -> [ColumnArray]
+allColumns = concatMap (concatMap tree . V.toList)
+  where
+    tree c = c : concatMap tree (childColumns c)
+
+
 -- ============================================================
 -- Round trips
 -- ============================================================
 
 prop_streamRoundTrip :: Property
-prop_streamRoundTrip = withTests 500 . property $ do
+prop_streamRoundTrip = withTests 1000 . property $ do
   (sch, batches) <- forAll genTable
-  coverShapes (concatMap V.toList batches)
+  coverShapes sch (concatMap V.toList batches)
   bytes <- evalEither (encodeArrowStream defaultWriteOptions sch batches)
   (_, got) <- evalEither (decodeArrowStream bytes)
   sameTable batches got
@@ -324,9 +400,12 @@ prop_sliceOfSlice = withTests 300 . property $ do
   l1 <- forAll (Gen.int (Range.linear 0 (n - s1)))
   s2 <- forAll (Gen.int (Range.linear 0 l1))
   l2 <- forAll (Gen.int (Range.linear 0 (l1 - s2)))
-  a <- values (sliceColumnArray s2 l2 (sliceColumnArray s1 l1 c))
-  b <- values (sliceColumnArray (s1 + s2) l2 c)
+  let twice = sliceColumnArray s2 l2 (sliceColumnArray s1 l1 c)
+      once = sliceColumnArray (s1 + s2) l2 c
+  a <- values twice
+  b <- values once
   a === b
+  twice === once
 
 
 prop_concatAdjacentSlices :: Property
@@ -339,6 +418,7 @@ prop_concatAdjacentSlices = withTests 500 . property $ do
   a <- values joined
   b <- values c
   a === b
+  joined === c
 
 
 prop_concatAppends :: Property
@@ -373,16 +453,17 @@ prop_take = withTests 300 . property $ do
   (_, c) <- forAll genColumn
   let n = columnLength c
   ix <- forAll (if n == 0 then pure [] else Gen.list (Range.linear 0 12) (Gen.int (Range.linear 0 (n - 1))))
-  taken <- evalEither (takeColumnArray (VP.fromList ix) c)
+  taken <- evalEither (takeColumnArray (VS.fromList ix) c)
   vs <- values c
   tvs <- values taken
   tvs === map (vs !!) ix
-  if n > 0 then pure () else assert (not (isRight (takeColumnArray (VP.singleton 0) c)))
+  if n > 0 then pure () else assert (not (isRight (takeColumnArray (VS.singleton 0) c)))
 
 
 {- | Expansion keeps every row's value; a nullable dictionary column
 whose rows are all null over an empty dictionary expands to an
-all-null column of the value type.
+all-null column of the value type. A dictionary's null rows stay null
+in the expansion (the expanded column can hold them).
 -}
 prop_expandDictionary :: Property
 prop_expandDictionary = withTests 300 . property $ do
@@ -397,7 +478,9 @@ prop_expandDictionary = withTests 300 . property $ do
   a === b
   assert (not (hasDictionaries e))
   case c of
-    ColDictionaryMaybe {} -> assert (isNullableColumn e)
+    ColDictionary _ keys _ -> do
+      assert (hasValiditySlot e || nullCount keys == 0)
+      assert (nullCount e >= nullCount keys)
     _ -> success
 
 
@@ -435,12 +518,10 @@ prop_mapKeysSorted = withTests 1000 . property $ do
   keys <- forAll (genColumnFor keyField total)
   mapValid <- forAll (Gen.list (Range.singleton (length lens)) (Gen.frequency [(1, pure False), (4, pure True)]))
   nullableMap <- forAll Gen.bool
-  let o = VP.fromList (map fromIntegral offs)
+  let o = VS.fromList (map fromIntegral offs)
       vals = ColNull total
-      col =
-        if nullableMap
-          then ColMapMaybe (V.fromList mapValid) o keys vals
-          else ColMap o keys vals
+      -- Raw construction: null keys are not something mkMap has to accept.
+      col = I.ColMap (if nullableMap then validityFromBools (V.fromList mapValid) else Nothing) o keys vals
       entryOn i = not nullableMap || (mapValid !! i)
   kvs <- values keys
   let entries = zip [0 ..] (zip offs (drop 1 offs))
@@ -473,12 +554,14 @@ prop_deltaDictionary = withTests 300 . property $ do
   part1 <- forAll (genColumnFor valuesField k1)
   part2 <- forAll (genColumnFor valuesField k2)
   n <- forAll (Gen.int (Range.linear 0 10))
-  ix <- forAll (replicateM n (Gen.int32 (Range.linear 0 (fromIntegral (k1 + k2) - 1))))
+  ix <- forAll (replicateM n (Gen.int (Range.linear 0 (k1 + k2 - 1))))
   let dict isDelta vals =
-        let (drb, dbody) = buildRecordBatchBytes valuesSchema (V.singleton vals)
+        let (drb, dbody) = layoutBatch valuesSchema (V.singleton vals)
             db = DictBatch {dbId = 7, dbIsDelta = isDelta, dbData = drb, dbBody = dbody}
         in encapsulateMessage (buildDictionaryBatchMessage db) dbody
-      (rb, body) = buildRecordBatchBytes sch (V.singleton (ColDictionary 7 (VP.fromList ix) part1))
+      -- Raw: the keys address values this batch does not carry yet.
+      keys = keyColumn idxTy (V.fromList (map Just ix))
+      (rb, body) = layoutBatch sch (V.singleton (I.ColDictionary 7 keys part1))
       bytes =
         BS.concat
           [ encapsulateMessage (buildSchemaMessage sch) BS.empty
@@ -494,12 +577,13 @@ prop_deltaDictionary = withTests 300 . property $ do
   case got of
     [cols] | [c] <- V.toList cols -> do
       gv <- values c
-      gv === map (\i -> allVals !! fromIntegral i) ix
+      gv === map (allVals !!) ix
     _ -> failure
 
 
 {- | A batch with no dictionary rows and no dictionary batch keeps a
-typed empty placeholder whose constructor matches the value type.
+typed empty placeholder whose constructor matches the value type, and
+empty keys at the index type's width.
 -}
 prop_dictionaryPlaceholder :: Property
 prop_dictionaryPlaceholder = withTests 200 . property $ do
@@ -509,17 +593,13 @@ prop_dictionaryPlaceholder = withTests 200 . property $ do
       sch = defaultSchema (V.singleton field)
   empty <- forAll (genColumnFor field 0)
   sample <- forAll (genColumnFor field {fieldDictionary = Nothing, fieldNullable = False} 0)
-  let bytes = writeArrowStreamFBWithDicts sch [] [buildRecordBatchBytes sch (V.singleton empty)]
+  let bytes = writeArrowStreamFBWithDicts sch [] [layoutBatch sch (V.singleton empty)]
   (_, got) <- evalEither (decodeArrowStream bytes)
   case got of
     [cols] | [c] <- V.toList cols -> case c of
-      ColDictionary _ ix vals -> do
-        assert (not nullable)
-        VP.length ix === 0
-        tag vals === tag sample
-      ColDictionaryMaybe _ ix vals -> do
-        assert nullable
-        V.length ix === 0
+      ColDictionary _ keys vals -> do
+        columnLength keys === 0
+        tag keys === "ColInt32"
         tag vals === tag sample
       other -> annotateShow other >> failure
     _ -> failure
@@ -537,9 +617,11 @@ prop_pyarrowFile = withTests 1 . property $ do
   bytes <- evalIO (BS.readFile "test/golden/pa_file.arrow")
   (sch, batches) <- evalEither (readArrowFileColumns bytes)
   map fieldName (V.toList (arrowFields sch)) === ["i", "s", "d", "n", "l"]
+  map fieldNullable (V.toList (arrowFields sch)) === replicate 5 True
   (_, viaStream) <- evalEither (decodeArrowFile bytes)
   map (map tag . V.toList) viaStream
-    === replicate 2 ["ColInt32Maybe", "ColUtf8Maybe", "ColDictionaryMaybe", "ColDecimal128Maybe", "ColListMaybe"]
+    === replicate 2 ["ColInt32", "ColUtf8", "ColDictionary", "ColDecimal128", "ColList"]
+  map (map nullCount . V.toList) viaStream === [[0, 1, 1, 1, 1], [0, 0, 0, 1, 0]]
   got <- evalEither (traverse batchValues (V.toList batches))
   got
     === [ [ [VInt 1, VInt 2, VInt 3]
@@ -583,13 +665,11 @@ prop_zeroWidthRowCount = withTests 200 . property $ do
               , Field "l" False AList (V.singleton (fieldless "item" False)) Nothing V.empty
               ]
           )
-      structCol = if structNullable then ColStructMaybe valid V.empty else ColStruct n V.empty
-      listCol =
-        if listNullable
-          then ColFixedSizeListMaybe 0 valid (ColInt32 VP.empty)
-          else ColFixedSizeList 0 n (ColInt32 VP.empty)
+      mask nullable = if nullable then validityFromBools valid else Nothing
+      structCol = fixture (mkStruct n (mask structNullable) V.empty)
+      listCol = fixture (mkFixedSizeList 0 n (mask listNullable) (primColumn PInt32 VS.empty))
       -- Every list row holds two fieldless structs.
-      nestedCol = ColList (VP.generate (n + 1) (fromIntegral . (* 2))) (ColStruct (2 * n) V.empty)
+      nestedCol = fixture (mkList Nothing (VS.generate (n + 1) (fromIntegral . (* 2))) (fixture (mkStruct (2 * n) Nothing V.empty)))
       batch = V.fromList [structCol, listCol, nestedCol]
   stream <- evalEither (encodeArrowStream defaultWriteOptions sch [batch])
   (_, got) <- evalEither (decodeArrowStream stream)
@@ -684,21 +764,23 @@ prop_nestedDictionaryDeltaReplace = withTests 200 . property $ do
   let e = Field "e" False AUtf8 V.empty (Just (DictionaryEncoding 2 (AInt 8 True) False)) V.empty
       o = Field "o" False AStruct (V.singleton e) (Just (DictionaryEncoding 1 (AInt 16 True) False)) V.empty
       sch = defaultSchema (V.singleton o)
-      ints = VP.fromList . map fromIntegral
-      innerPlaceholder = ColDictionary 2 VP.empty (ColUtf8 V.empty)
+      innerKeys = primColumn PInt8 . VS.fromList . map fromIntegral
+      outerKeys = primColumn PInt16 . VS.fromList . map fromIntegral
+      -- Raw: keys address dictionaries sent in separate batches.
+      innerPlaceholder = I.ColDictionary 2 (innerKeys []) (fromTexts V.empty)
       dictMsg schema did isDelta col =
-        let (drb, dbody) = buildRecordBatchBytes schema (V.singleton col)
+        let (drb, dbody) = layoutBatch schema (V.singleton col)
             db = DictBatch {dbId = did, dbIsDelta = isDelta, dbData = drb, dbBody = dbody}
         in encapsulateMessage (buildDictionaryBatchMessage db) dbody
-      inner isDelta ws = dictMsg (defaultSchema (V.singleton e {fieldDictionary = Nothing})) 2 isDelta (ColUtf8 (V.fromList ws))
+      inner isDelta ws = dictMsg (defaultSchema (V.singleton e {fieldDictionary = Nothing})) 2 isDelta (fromTexts (V.fromList ws))
       outer isDelta ix =
         dictMsg
           (defaultSchema (V.singleton o {fieldDictionary = Nothing}))
           1
           isDelta
-          (ColStruct (length ix) (V.singleton ("e", ColDictionary 2 (ints ix) (ColUtf8 V.empty))))
+          (I.ColStruct (length ix) Nothing (V.singleton ("e", I.ColDictionary 2 (innerKeys ix) (fromTexts V.empty))))
       batch ix =
-        let (rb, body) = buildRecordBatchBytes sch (V.singleton (ColDictionary 1 (ints ix) (ColStruct 0 (V.singleton ("e", innerPlaceholder)))))
+        let (rb, body) = layoutBatch sch (V.singleton (I.ColDictionary 1 (outerKeys ix) (I.ColStruct 0 Nothing (V.singleton ("e", innerPlaceholder)))))
         in encapsulateMessage (buildRecordBatchMessage rb (fromIntegral (BS.length body))) body
       bytes =
         BS.concat
@@ -743,7 +825,7 @@ prop_emitOnceIndexOverflow = withTests 100 . property $ do
   k2 <- forAll (Gen.int (Range.constant 1 120))
   let field = Field "d" False AUtf8 V.empty (Just (DictionaryEncoding 0 (AInt 8 True) False)) V.empty
       sch = defaultSchema (V.singleton field)
-      dictCol prefix k = ColDictionary 0 (VP.generate k fromIntegral) (ColUtf8 (V.generate k (\i -> prefix <> T.pack (show i))))
+      dictCol prefix k = fixture (mkDictionary 0 (primColumn PInt8 (VS.generate k fromIntegral)) (fromTexts (V.generate k (\i -> prefix <> T.pack (show i)))))
       batches = [V.singleton (dictCol "a" k1), V.singleton (dictCol "b" k2)]
       fits = k1 + k2 <= 128
   cover 20 "combined dictionary overflows int8" (not fits)
@@ -769,10 +851,10 @@ prop_inconsistentDictionaryValues = withTests 100 . property $ do
   let child = Field "x" False (AInt 32 True) V.empty Nothing V.empty
       field = Field "d" False AStruct (V.singleton child) (Just (DictionaryEncoding 0 (AInt 32 True) False)) V.empty
       sch = defaultSchema (V.singleton field)
-      ix k = VP.generate k fromIntegral
-      structBatch nm k = V.singleton (ColDictionary 0 (ix k) (ColStruct k (V.singleton (nm, ColInt32 (ix k)))))
+      ix k = primColumn PInt32 (VS.generate k fromIntegral)
+      structBatch nm k = V.singleton (fixture (mkDictionary 0 (ix k) (fixture (mkStruct k Nothing (V.singleton (nm, ix k))))))
       renamed = [structBatch "x" n1, structBatch "y" n2]
-      wrongType = [structBatch "x" n1, V.singleton (ColDictionary 0 (ix n2) (ColUtf8 (V.replicate n2 "v")))]
+      wrongType = [structBatch "x" n1, V.singleton (fixture (mkDictionary 0 (ix n2) (fromTexts (V.replicate n2 "v"))))]
       replace = defaultWriteOptions {writeDictHandling = DictReplaceOnChange}
   assert (isLeft (encodeArrowStream defaultWriteOptions sch renamed))
   assert (isLeft (encodeArrowFile defaultWriteOptions sch renamed))
@@ -785,7 +867,8 @@ prop_inconsistentDictionaryValues = withTests 100 . property $ do
 {- | A batch that does not fit its schema is rejected by every writer:
 a missing or extra column, a column whose type its field cannot hold,
 columns of unequal length, and a struct or fixed-size list whose row
-count disagrees with its child. The unbroken batch writes.
+count disagrees with its child (built raw: the public constructors
+refuse them). The unbroken batch writes.
 -}
 prop_schemaMismatch :: Property
 prop_schemaMismatch = withTests 300 . property $ do
@@ -801,16 +884,16 @@ prop_schemaMismatch = withTests 300 . property $ do
         "missing" -> (sch, V.tail batch)
         "extra" -> (sch, V.snoc batch (ColNull n))
         "type" ->
-          let wrong = if fieldType f0 == ABool && isNothing (fieldDictionary f0) then ColNull n else ColBool (V.replicate n False)
+          let wrong = if fieldType f0 == ABool && isNothing (fieldDictionary f0) then ColNull n else fromBools (V.replicate n False)
           in (sch, V.cons wrong (V.tail batch))
         "length" -> (withFields (f0 : f0 {fieldName = "dup"} : V.toList (V.tail (arrowFields sch))), V.cons c0 (V.cons doubled (V.tail batch)))
         "struct" ->
           ( withFields [Field "s" False AStruct (V.singleton f0) Nothing V.empty]
-          , V.singleton (ColStruct (n + 1) (V.singleton (fieldName f0, c0)))
+          , V.singleton (I.ColStruct (n + 1) Nothing (V.singleton (fieldName f0, c0)))
           )
         _ ->
           ( withFields [Field "l" False (AFixedSizeList 1) (V.singleton f0) Nothing V.empty]
-          , V.singleton (ColFixedSizeList 1 (n + 1) c0)
+          , V.singleton (I.ColFixedSizeList 1 (n + 1) Nothing c0)
           )
       replace = defaultWriteOptions {writeDictHandling = DictReplaceOnChange}
   assert (isRight (encodeArrowStream defaultWriteOptions sch [batch]))
@@ -820,3 +903,95 @@ prop_schemaMismatch = withTests 300 . property $ do
   assert (isLeft (encodeArrowFile defaultWriteOptions sch' [bad]))
   assert (isLeft (writeArrowStream sch' (V.singleton bad)))
   assert (isLeft (writeArrowFile sch' (V.singleton bad)))
+
+
+-- ============================================================
+-- Representation guarantees
+-- ============================================================
+
+{- | Flat fixed-width, boolean, var-length and view columns decode
+without copying: placed in an aligned buffer, every buffer of every
+decoded column lies inside the input. Placed one byte off alignment
+(so 2, 4, 8 and 16-byte elements are misaligned) the decode still
+yields the same rows.
+-}
+prop_zeroCopyDecode :: Property
+prop_zeroCopyDecode = withTests 300 . property $ do
+  k <- forAll (Gen.int (Range.linear 1 4))
+  fields <- forAll $ forM' [0 .. k - 1] $ \i -> do
+    ty <- Gen.filter (/= ANull) genFieldType
+    nullable <- Gen.bool
+    pure (Field (T.pack ("c" ++ show i)) nullable ty V.empty Nothing V.empty)
+  let sch = defaultSchema (V.fromList fields)
+  nBatches <- forAll (Gen.int (Range.linear 1 3))
+  batches <- forAll (replicateM nBatches (genBatchFor sch))
+  bytes <- evalEither (encodeArrowStream defaultWriteOptions sch batches)
+  let aligned = placedAt 0 bytes
+      misaligned = placedAt 1 bytes
+  (_, got) <- evalEither (decodeArrowStream aligned)
+  sameTable batches got
+  let outside = filter (\b -> not (BS.null b) && not (regionWithin aligned b)) (concatMap I.columnBuffers (allColumns got))
+  annotateShow (length outside)
+  assert (null outside)
+  cover 10 "has a validity bitmap" (any (any (\c -> nullCount c > 0) . V.toList) got)
+  (_, gotMis) <- evalEither (decodeArrowStream misaligned)
+  sameTable batches gotMis
+
+
+{- | 'copyColumn' of any decoded column is equal to it and shares no
+memory with the input bytes.
+-}
+prop_copyColumnDetaches :: Property
+prop_copyColumnDetaches = withTests 200 . property $ do
+  (sch, batches) <- forAll genTable
+  bytes <- evalEither (encodeArrowStream defaultWriteOptions sch batches)
+  (_, got) <- evalEither (decodeArrowStream bytes)
+  let copies = map (V.map copyColumn) got
+  sameTable got copies
+  let attached = filter (\b -> not (BS.null b) && regionWithin bytes b) (concatMap I.columnBuffers (allColumns copies))
+  annotateShow (length attached)
+  assert (null attached)
+
+
+{- | Writer output is canonical: decoding it and encoding the decoded
+schema and columns again with the same options gives the same bytes,
+for streams and files, every dictionary mode and body compression.
+-}
+prop_canonicalRoundTrip :: Property
+prop_canonicalRoundTrip = withTests 300 . property $ do
+  (sch, batches) <- forAll genTable
+  mode <- forAll (Gen.element [DictEmitOnce, DictReplaceOnChange])
+  codec <- forAll (Gen.element [Nothing, Just LZ4Frame, Just BodyZstd])
+  let opts = defaultWriteOptions {writeDictHandling = mode, writeBodyCompression = codec}
+  stream <- evalEither (encodeArrowStream opts sch batches)
+  (sch1, got1) <- evalEither (decodeArrowStream stream)
+  again <- evalEither (encodeArrowStream opts sch1 got1)
+  again === stream
+  file <- evalEither (encodeArrowFile opts sch batches)
+  (sch2, got2) <- evalEither (decodeArrowFile file)
+  againFile <- evalEither (encodeArrowFile opts sch2 got2)
+  againFile === file
+
+
+-- | The lazy encoders' output, made strict, is the strict encoders' output.
+prop_lazyStrictIdentical :: Property
+prop_lazyStrictIdentical = withTests 200 . property $ do
+  (sch, batches) <- forAll genTable
+  mode <- forAll (Gen.element [DictEmitOnce, DictReplaceOnChange])
+  codec <- forAll (Gen.element [Nothing, Just LZ4Frame, Just BodyZstd])
+  let opts = defaultWriteOptions {writeDictHandling = mode, writeBodyCompression = codec}
+  strict <- evalEither (encodeArrowStream opts sch batches)
+  lazy <- evalEither (encodeArrowStreamLazy opts sch batches)
+  BL.toStrict lazy === strict
+  strictFile <- evalEither (encodeArrowFile opts sch batches)
+  lazyFile <- evalEither (encodeArrowFileLazy opts sch batches)
+  BL.toStrict lazyFile === strictFile
+
+
+forM' :: Monad m => [a] -> (a -> m b) -> m [b]
+forM' xs f = mapM f xs
+
+
+-- | 'buildRecordBatchBytes' for hand-built fixtures that must lay out.
+layoutBatch :: Schema -> V.Vector ColumnArray -> (RecordBatchDef, ByteString)
+layoutBatch sch cols = either (error . ("Test.Arrow.Props: fixture does not lay out: " ++)) id (buildRecordBatchBytes sch cols)

@@ -47,7 +47,7 @@ data TradeTHSnake = TradeTHSnake
 
 
 -- Close the declaration group so the splices below can reify
--- the types (TH stage restriction — 'reify' only sees
+-- the types (TH stage restriction, 'reify' only sees
 -- declarations from PREVIOUS groups).
 $(pure [])
 

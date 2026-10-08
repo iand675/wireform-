@@ -9,8 +9,8 @@ FlatBuffers footer), as written by pyarrow, arrow-cpp, arrow-rs,
 schema and every record batch materialized, with body compression
 undone and dictionary columns resolved. 'readArrowFile' and
 'readArrowStream' expose the raw @(RecordBatchDef, body)@ pairs in wire
-layout (decode them with 'Arrow.FlatBufferIPC.materializeRecordBatchFB'
-after any body decompression).
+layout; decode them with 'Arrow.Read.Columns.decodeRecordBatch' (which
+also undoes body compression).
 -}
 module Arrow.File (
   ArrowFile (..),

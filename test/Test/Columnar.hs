@@ -13,7 +13,7 @@ import Arrow.Column qualified as AC
 import Arrow.Types qualified as AT
 import Data.Int (Int32, Int64)
 import Data.Vector qualified as V
-import Data.Vector.Primitive qualified as VP
+import Data.Vector.Storable qualified as VS
 import Test.Syd
 import Wireform.Columnar qualified as Col
 
@@ -39,8 +39,8 @@ columnarFacadeTests =
                   }
               !batch =
                 V.fromList
-                  [ AC.ColInt64 (VP.fromList [10, 20, 30 :: Int64])
-                  , AC.ColUtf8 (V.fromList ["alpha", "beta", "gamma"])
+                  [ AC.primColumn AC.PInt64 (VS.fromList [10, 20, 30 :: Int64])
+                  , AC.fromTexts (V.fromList ["alpha", "beta", "gamma"])
                   ]
               !batches = [batch]
               !opts = Col.defaultWriteOptions
@@ -80,7 +80,7 @@ columnarFacadeTests =
                   , AT.arrowMetadata = V.empty
                   , AT.arrowFeatures = V.empty
                   }
-              !batches = [V.singleton (AC.ColInt32 (VP.fromList [1, 2, 3 :: Int32]))]
+              !batches = [V.singleton (AC.primColumn AC.PInt32 (VS.fromList [1, 2, 3 :: Int32]))]
               !opts =
                 Col.defaultWriteOptions
                   { Col.parquetWrite =

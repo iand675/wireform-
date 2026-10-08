@@ -15,8 +15,8 @@ module Arrow.IPC (
   validateRecordBatchBuffers,
 ) where
 
-import Arrow.Column (validateRecordBatchBuffers)
 import Arrow.FlatBufferIPC (decodeMessageFrame, encodeMessageFrame)
+import Arrow.Read.Columns (validateRecordBatchBuffers)
 import Arrow.Types (Message)
 import Data.ByteString (ByteString)
 
