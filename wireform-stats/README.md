@@ -61,8 +61,9 @@ The benchmark summaries under `wireform-<pkg>/bench-results/summary/`
 are **measured output, regenerated from real criterion runs** by a
 reproducible, manifest-driven pipeline — not hand-typed numbers.
 [`scripts/bench-manifest.json`](../scripts/bench-manifest.json) maps
-each cabal benchmark target to the summary file(s) it feeds (plus any
-per-cell report-name overrides), and
+each benchmark target (a cabal bench, or a criterion.rs `cargo` bench
+that supplies an external baseline series such as arrow-rs) to the
+summary file(s) it feeds (plus any per-cell report-name overrides), and
 [`scripts/run-benchmarks.py`](../scripts/run-benchmarks.py) drives the
 whole thing:
 

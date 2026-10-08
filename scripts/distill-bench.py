@@ -15,14 +15,23 @@ Each summary cell is `series[name].values[groupIndex]`. We locate the
 matching criterion report by trying, in order:
 
   1. an explicit `--map "<series>|<group>=<reportName>"` override,
-  2. "<series>/<group>",
-  3. "<group>/<series>",
-  4. a bare "<group>" or "<series>" (single-axis benches).
+  2. a pattern override `--map "<series>|<prefix>*<suffix>=<report>"`, whose
+     `*` matches the rest of the group label and is substituted for every
+     `*` in `<report>` (e.g. `"wireform-arrow|encode *=encode/*"` maps the
+     group `encode int64` to the report `encode/int64`),
+  3. "<series>/<group>",
+  4. "<group>/<series>",
+  5. a bare "<group>" or "<series>" (single-axis benches).
 
 Anything still unmatched is reported and left at its previous value unless
 `--strict` is passed, in which case the run fails. This is intentional: a
 few summaries (cbor/msgpack inside the umbrella `format-bench`, the xml/yaml
 comparison benches) use bespoke report names and are matched with `--map`.
+
+`--series NAME` (repeatable) restricts the run to those series and leaves
+the others untouched. A summary whose series come from different benchmark
+runs (wireform-arrow from `cabal bench`, arrow-rs from `cargo bench`) is
+distilled once per run, each with its own series.
 """
 
 from __future__ import annotations
@@ -87,15 +96,27 @@ def main() -> int:
         metavar="SERIES|GROUP=REPORTNAME",
         help="explicit cell -> criterion report-name override; repeatable",
     )
+    ap.add_argument(
+        "--series",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="only fill this series (repeatable); default: every series",
+    )
     ap.add_argument("--strict", action="store_true", help="fail on any unmatched cell")
     ap.add_argument("--dry-run", action="store_true", help="print, do not write")
     args = ap.parse_args()
 
     overrides: dict[tuple[str, str], str] = {}
+    patterns: list[tuple[str, str, str, str]] = []
     for m in args.map:
         key, _, name = m.partition("=")
         s, _, g = key.partition("|")
-        overrides[(s, g)] = name
+        if "*" in g:
+            prefix, _, suffix = g.partition("*")
+            patterns.append((s, prefix, suffix, name))
+        else:
+            overrides[(s, g)] = name
 
     reports = load_reports(args.criterion)
     summary = read_json(args.summary)
@@ -106,15 +127,30 @@ def main() -> int:
     factor = UNIT_PER_SECOND[unit]
     groups = summary["groups"]
 
+    names = [s["name"] for s in summary["series"]]
+    missing = [s for s in args.series if s not in names]
+    if missing:
+        raise SystemExit(f"{args.summary}: no series named {', '.join(missing)} (have {', '.join(names)})")
+    selected = [s for s in summary["series"] if not args.series or s["name"] in args.series]
+
     unmatched: list[str] = []
     changes: list[str] = []
-    for series in summary["series"]:
+    mapped = 0
+    for series in selected:
         sname = series["name"]
         new_vals = list(series["values"])
         for gi, g in enumerate(groups):
             candidates = []
             if (sname, g) in overrides:
                 candidates.append(overrides[(sname, g)])
+            for ps, prefix, suffix, name in patterns:
+                if (
+                    ps == sname
+                    and len(g) >= len(prefix) + len(suffix)
+                    and g.startswith(prefix)
+                    and g.endswith(suffix)
+                ):
+                    candidates.append(name.replace("*", g[len(prefix) : len(g) - len(suffix)]))
             candidates += [f"{sname}/{g}", f"{g}/{sname}", g, sname]
             mean_s = None
             for c in candidates:
@@ -124,6 +160,7 @@ def main() -> int:
             if mean_s is None:
                 unmatched.append(f"{sname} | {g}")
                 continue
+            mapped += 1
             old = new_vals[gi] if gi < len(new_vals) else None
             new = round_like(mean_s * factor)
             if gi < len(new_vals):
@@ -144,7 +181,9 @@ def main() -> int:
 
     summary["capturedAt"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    print(f"{args.summary}: {len(changes)} cell(s) changed")
+    total = len(selected) * len(groups)
+    scope = ", ".join(s["name"] for s in selected)
+    print(f"{args.summary}: mapped {mapped}/{total} cell(s) [{scope}], {len(changes)} changed")
     for c in changes:
         print(c)
 

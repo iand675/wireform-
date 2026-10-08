@@ -1,22 +1,54 @@
 {
   "id": "arrow-encode-decode",
-  "title": "wireform-arrow IPC stream encode + decode (100k rows)",
+  "title": "wireform-arrow vs arrow-rs, IPC stream encode + decode (100k rows)",
   "unit": "Micros",
   "higherIsBetter": false,
   "groups": [
-    "int64",
-    "double",
-    "nullable int64",
-    "utf8",
-    "nullable utf8",
-    "mixed 6-col",
-    "list<int32>",
-    "struct<int32,double,bool>",
-    "dictionary<utf8>"
+    "encode int64",
+    "encode double",
+    "encode nullable int64",
+    "encode utf8",
+    "encode nullable utf8",
+    "encode mixed 6-col",
+    "encode list<int32>",
+    "encode struct<int32,double,bool>",
+    "encode dictionary<utf8>",
+    "decode int64",
+    "decode double",
+    "decode nullable int64",
+    "decode utf8",
+    "decode nullable utf8",
+    "decode mixed 6-col",
+    "decode list<int32>",
+    "decode struct<int32,double,bool>",
+    "decode dictionary<utf8>"
   ],
   "series": [
     {
-      "name": "encode",
+      "name": "arrow-rs",
+      "values": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "name": "wireform-arrow",
       "values": [
         1570.87,
         1706.99,
@@ -26,12 +58,7 @@
         38249.34,
         15347.61,
         3810.1,
-        1631.13
-      ]
-    },
-    {
-      "name": "decode",
-      "values": [
+        1631.13,
         153.4,
         189.3,
         5962.76,
@@ -44,7 +71,7 @@
       ]
     }
   ],
-  "baseline": "encode",
+  "baseline": "arrow-rs",
   "capturedAt": "2026-10-07T23:32:59Z",
-  "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
+  "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5; arrow-rs 58.2.0, rustc 1.98.1, criterion.rs 0.7.0"
 }

@@ -1,6 +1,6 @@
 {
   "id": "arrow-api-paths",
-  "title": "wireform-arrow entry points, mixed 6-column table (100k rows)",
+  "title": "wireform-arrow entry points vs arrow-rs, mixed 6-column table (100k rows)",
   "unit": "Micros",
   "higherIsBetter": false,
   "groups": [
@@ -15,7 +15,20 @@
   ],
   "series": [
     {
-      "name": "mixed 6-col",
+      "name": "arrow-rs",
+      "values": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "name": "wireform-arrow",
       "values": [
         37138.56,
         37770.67,
@@ -28,7 +41,7 @@
       ]
     }
   ],
-  "baseline": "mixed 6-col",
+  "baseline": "arrow-rs",
   "capturedAt": "2026-10-07T23:32:59Z",
-  "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
+  "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5; arrow-rs 58.2.0, rustc 1.98.1, criterion.rs 0.7.0"
 }

@@ -11,6 +11,12 @@ path = "src/read_parquet.rs"
 name = "read_arrow_ipc"
 path = "src/read_arrow_ipc.rs"
 
+# arrow-rs reference numbers for the wireform-arrow benchmark summaries;
+# mirrors wireform-arrow/bench/Bench.hs. Driven by scripts/run-benchmarks.py.
+[[bench]]
+name = "arrow_ipc"
+harness = false
+
 [dependencies]
 # Build with the lz4 + zstd feature flags so the IPC reader
 # can decompress what wireform emits via -fzstd / -flz4.
@@ -25,3 +31,6 @@ path = "src/read_arrow_ipc.rs"
 arrow = { version = "58", features = ["ipc_compression"] }
 parquet = { version = "58", features = ["arrow", "snap", "lz4", "zstd"] }
 arrow-ipc = { version = "58", features = ["zstd", "lz4"] }
+
+[dev-dependencies]
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support", "rayon"] }
