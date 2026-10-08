@@ -590,7 +590,7 @@ structE name sel inner =
         let !innerCols = runRowEncoder inner (V.map sel rs)
             !childNames = map fieldName (rowEncoderFields inner)
             !named = V.fromList (zip childNames innerCols)
-        in [ColStruct named]
+        in [ColStruct (V.length rs) named]
     }
 
 
@@ -600,8 +600,8 @@ columns. Child slots whose parent validity bit is unset are
 arbitrary on the wire (Arrow spec, Layout.rst, "Struct
 Layout") so we fill them by substituting the first present
 row's value; if every row is 'Nothing' the children are
-empty (the validity mask is all @False@ and consumers won't
-index into them).
+'AC.fillerColumn' rows of the child encoders' column shapes (the
+validity mask is all @False@ and consumers won't look at them).
 
 Pair with 'structDMaybe' on the read side. Together they
 give @Maybe c@ a clean nested-record encoding without
@@ -623,11 +623,10 @@ structEMaybe name sel inner =
     , runRowEncoder = \rs ->
         let !mvs = V.map sel rs
             !valid = V.map isJust mvs
-            !cs = case V.find isJust mvs of
-              Just (Just present) -> V.map (fromMaybe present) mvs
-              _ -> V.empty
-            !innerCols = runRowEncoder inner cs
             !childNames = map fieldName (rowEncoderFields inner)
+            !innerCols = case V.find isJust mvs of
+              Just (Just present) -> runRowEncoder inner (V.map (fromMaybe present) mvs)
+              _ -> map (AC.fillerColumn (V.length rs)) (runRowEncoder inner V.empty)
             !named = V.fromList (zip childNames innerCols)
         in [ColStructMaybe valid named]
     }
@@ -821,10 +820,8 @@ structD name inner = RowDecoder [name] $ \fs cs -> do
   let !parentField = V.unsafeIndex fs idx
       !col = V.unsafeIndex cs idx
   case col of
-    ColStruct childCols -> do
-      let !childFields = fieldChildren parentField
-          !childCols' = V.map snd childCols
-      case runRowDecoder inner childFields childCols' of
+    ColStruct n childCols ->
+      case runStructChildren inner (fieldChildren parentField) n childCols of
         Right rs -> Right rs
         Left e -> Left $ "Arrow.Record.structD " ++ show name ++ ": " ++ e
     other ->
@@ -833,6 +830,17 @@ structD name inner = RowDecoder [name] $ \fs cs -> do
           ++ show name
           ++ ": expected ColStruct, got "
           ++ takeWhile (/= ' ') (show other)
+
+
+{- | Run the inner decoder of 'structD' / 'structDMaybe' over a
+struct's children. A struct with no fields has no column to take the
+row count from, so the decoder then sees a single 'ColNull' of the
+struct's length (named lookups still fail: there are no fields).
+-}
+runStructChildren :: RowDecoder c -> V.Vector Field -> Int -> V.Vector (Text, ColumnArray) -> Either String (V.Vector c)
+runStructChildren inner childFields n childCols
+  | V.null childCols = runRowDecoder inner V.empty (V.singleton (ColNull n))
+  | otherwise = runRowDecoder inner childFields (V.map snd childCols)
 
 
 {- | Like 'structD' but the column may be a 'ColStructMaybe' —
@@ -865,14 +873,12 @@ structDMaybe name inner = RowDecoder [name] $ \fs cs -> do
                 valid
                 vs
   case col of
-    ColStruct childCols -> do
-      let !childCols' = V.map snd childCols
-      case runRowDecoder inner childFields childCols' of
+    ColStruct n childCols ->
+      case runStructChildren inner childFields n childCols of
         Right rs -> Right (V.map Just rs)
         Left e -> Left $ "Arrow.Record.structDMaybe " ++ show name ++ ": " ++ e
-    ColStructMaybe valid childCols -> do
-      let !childCols' = V.map snd childCols
-      case runRowDecoder inner childFields childCols' of
+    ColStructMaybe valid childCols ->
+      case runStructChildren inner childFields (V.length valid) childCols of
         Right rs -> mask rs valid
         Left e -> Left $ "Arrow.Record.structDMaybe " ++ show name ++ ": " ++ e
     other ->

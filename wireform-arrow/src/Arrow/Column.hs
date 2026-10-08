@@ -16,6 +16,7 @@ module Arrow.Column (
   placeholderColumn,
   emptyColumnFor,
   expandDictionary,
+  fillerColumn,
 
   -- * Row slicing, concatenation and gathering
   sliceColumnArray,
@@ -59,6 +60,7 @@ import Data.ByteString.Unsafe qualified as BSU
 import Data.Int (Int16, Int32, Int64, Int8)
 import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Vector qualified as V
 import Data.Vector.Primitive qualified as VP
@@ -161,8 +163,15 @@ data ColumnArray
     ColIntervalDayTimeMaybe !(V.Vector (Maybe (Int32, Int32)))
   | -- | Nullable 'ColIntervalMonthDayNano': @(months, days, nanoseconds)@ per present row.
     ColIntervalMonthDayNanoMaybe !(V.Vector (Maybe (Int32, Int32, Int64)))
-  | ColStruct !(V.Vector (Text, ColumnArray))
-  | ColStructMaybe !(V.Vector Bool) !(V.Vector (Text, ColumnArray))
+  | {- | Struct: row count, then the named children in field order. The
+    row count is explicit so a struct with no fields keeps its length.
+    Every child has exactly that many rows: the reader slices longer
+    children to the parent's length, and the writers reject a column
+    whose children disagree with the count.
+    -}
+    ColStruct !Int !(V.Vector (Text, ColumnArray))
+  | -- | Nullable struct: one validity flag per row (the row count), then the children (each with that many rows).
+    ColStructMaybe !(V.Vector Bool) !(V.Vector (Text, ColumnArray))
   | ColList !(VP.Vector Int32) !ColumnArray
   | ColListMaybe !(V.Vector Bool) !(VP.Vector Int32) !ColumnArray
   | {- | Arrow \"LargeList\": semantics identical to 'ColList' but with
@@ -171,8 +180,16 @@ data ColumnArray
     -}
     ColLargeList !(VP.Vector Int64) !ColumnArray
   | ColLargeListMaybe !(V.Vector Bool) !(VP.Vector Int64) !ColumnArray
-  | ColFixedSizeList !Int !ColumnArray
-  | ColFixedSizeListMaybe !Int !(V.Vector Bool) !ColumnArray
+  | {- | Fixed-size list: list size @w@, row count @n@, then the child,
+    which holds exactly @n * w@ elements (row @i@ is child elements
+    @[i * w, (i + 1) * w)@). The row count is explicit so
+    @fixed_size_list\<T, 0\>@ keeps its length. The reader slices a
+    longer child to @n * w@; the writers reject a column whose child
+    disagrees with @n * w@.
+    -}
+    ColFixedSizeList !Int !Int !ColumnArray
+  | -- | Nullable fixed-size list: list size, one validity flag per row, then the child (@rows * size@ elements).
+    ColFixedSizeListMaybe !Int !(V.Vector Bool) !ColumnArray
   | ColMap !(VP.Vector Int32) !ColumnArray !ColumnArray
   | ColMapMaybe !(V.Vector Bool) !(VP.Vector Int32) !ColumnArray !ColumnArray
   | {- | Dense union. The first vector holds one /child index/ per row
@@ -1194,7 +1211,7 @@ columnLength = \case
   ColIntervalYearMonthMaybe v -> V.length v
   ColIntervalDayTimeMaybe v -> V.length v
   ColIntervalMonthDayNanoMaybe v -> V.length v
-  ColStruct children -> if V.null children then 0 else columnLength (snd (V.head children))
+  ColStruct n _ -> n
   ColStructMaybe v _ -> V.length v
   ColList offsets _ -> max 0 (VP.length offsets - 1)
   ColListMaybe v _ _ -> V.length v
@@ -1203,15 +1220,7 @@ columnLength = \case
   ColIntervalYearMonth v -> VP.length v
   ColIntervalDayTime d _ -> VP.length d
   ColIntervalMonthDayNano m _ _ -> VP.length m
-  -- FixedSizeList<n> has parent length = child length / n
-  -- (each row consumes exactly n child elements). The
-  -- previous formula returned child length which made the
-  -- record batch's @length@ field 'n' times larger than the
-  -- actual row count and any downstream reader rejected the
-  -- batch ("Array length did not match record batch length").
-  ColFixedSizeList n child
-    | n > 0 -> columnLength child `quot` n
-    | otherwise -> 0
+  ColFixedSizeList _ n _ -> n
   ColFixedSizeListMaybe _ v _ -> V.length v
   ColMap offsets _ _ -> max 0 (VP.length offsets - 1)
   ColMapMaybe v _ _ _ -> V.length v
@@ -1498,8 +1507,10 @@ the dictionary registered for its id.
 Fails when a column references a dictionary id the lookup does not
 know (unless the column has no non-null index, in which case the
 typed placeholder is kept) and when any non-null index is outside
-the dictionary. Dictionary values themselves are not searched for
-further dictionary columns.
+the dictionary. The values the lookup returns are used as they are:
+dictionaries nested inside dictionary values must already be resolved
+in them ("Arrow.Stream" resolves each dictionary batch against the
+dictionaries in force when it arrives).
 -}
 resolveDictionaryColumn
   :: (Int64 -> Maybe ColumnArray)
@@ -1515,13 +1526,13 @@ resolveDictionaryColumn lookupVals = go
       ColDictionaryMaybe did indices placeholder ->
         ColDictionaryMaybe did indices
           <$> resolve did placeholder (V.all isNothing indices) (\n -> V.all (maybe True (inRange n)) indices)
-      ColStruct cs -> ColStruct <$> V.mapM (traverse go) cs
+      ColStruct n cs -> ColStruct n <$> V.mapM (traverse go) cs
       ColStructMaybe v cs -> ColStructMaybe v <$> V.mapM (traverse go) cs
       ColList offs c -> ColList offs <$> go c
       ColListMaybe v offs c -> ColListMaybe v offs <$> go c
       ColLargeList offs c -> ColLargeList offs <$> go c
       ColLargeListMaybe v offs c -> ColLargeListMaybe v offs <$> go c
-      ColFixedSizeList n c -> ColFixedSizeList n <$> go c
+      ColFixedSizeList w n c -> ColFixedSizeList w n <$> go c
       ColFixedSizeListMaybe n v c -> ColFixedSizeListMaybe n v <$> go c
       ColMap offs k v -> ColMap offs <$> go k <*> go v
       ColMapMaybe vs offs k v -> ColMapMaybe vs offs <$> go k <*> go v
@@ -1611,7 +1622,7 @@ emptyColumnFor f = case fieldDictionary f of
     ABinaryView -> pick (ColBinaryView V.empty) (ColBinaryViewMaybe V.empty)
     AStruct -> do
       cs <- V.mapM (\c -> (,) (fieldName c) <$> emptyColumnFor c) (fieldChildren f)
-      pick (ColStruct cs) (ColStructMaybe V.empty cs)
+      pick (ColStruct 0 cs) (ColStructMaybe V.empty cs)
     AList -> do
       c <- onlyChild
       pick (ColList zero32 c) (ColListMaybe V.empty zero32 c)
@@ -1620,7 +1631,7 @@ emptyColumnFor f = case fieldDictionary f of
       pick (ColLargeList zero64 c) (ColLargeListMaybe V.empty zero64 c)
     AFixedSizeList n -> do
       c <- onlyChild
-      pick (ColFixedSizeList n c) (ColFixedSizeListMaybe n V.empty c)
+      pick (ColFixedSizeList n 0 c) (ColFixedSizeListMaybe n V.empty c)
     AListView -> do
       c <- onlyChild
       pick (ColListView VP.empty VP.empty c) (ColListViewMaybe V.empty VP.empty VP.empty c)
@@ -1730,9 +1741,9 @@ materializeStruct ctx f !nodeIdx !bufIdx = do
   (childCols, !nodeIdx2, !bufIdx2) <- materializeFieldsN ctx (fieldChildren f) (nodeIdx + 1) bufIdx1
   checkChildLengths "struct" len childCols
   validity <- traverse (unpackValidity len) validBs
-  let namedChildren = V.zipWith (\child col -> (fieldName child, col)) (fieldChildren f) childCols
+  let namedChildren = V.zipWith (\child col -> (fieldName child, sliceColumnArray 0 len col)) (fieldChildren f) childCols
   case validity of
-    Nothing -> Right (ColStruct namedChildren, nodeIdx2, bufIdx2)
+    Nothing -> Right (ColStruct len namedChildren, nodeIdx2, bufIdx2)
     Just vs -> Right (ColStructMaybe vs namedChildren, nodeIdx2, bufIdx2)
 
 
@@ -1773,7 +1784,7 @@ materializeMapCol ctx f !nodeIdx !bufIdx = do
   structField <- singleChild "map" f
   (structCol, !nodeIdx2, !bufIdx2) <- materializeNode ctx structField (nodeIdx + 1) (bufIdx1 + 1)
   case structCol of
-    ColStruct children
+    ColStruct _ children
       | V.length children == 2 -> do
           let keyCol = snd (V.unsafeIndex children 0)
               valCol = snd (V.unsafeIndex children 1)
@@ -1887,9 +1898,10 @@ materializeFixedSizeListCol ctx listSize f !nodeIdx !bufIdx = do
         )
     else Right ()
   validity <- traverse (unpackValidity len) validBs
+  let !child = sliceColumnArray 0 (len * listSize) childCol
   case validity of
-    Nothing -> Right (ColFixedSizeList listSize childCol, nodeIdx2, bufIdx2)
-    Just vs -> Right (ColFixedSizeListMaybe listSize vs childCol, nodeIdx2, bufIdx2)
+    Nothing -> Right (ColFixedSizeList listSize len child, nodeIdx2, bufIdx2)
+    Just vs -> Right (ColFixedSizeListMaybe listSize vs child, nodeIdx2, bufIdx2)
 
 
 {- | Read one INTERVAL field. Interval columns are flat (one field
@@ -2226,13 +2238,13 @@ sliceRows !s !l = \case
   ColBinaryView v -> ColBinaryView (bslice s l v)
   ColBinaryViewMaybe v -> ColBinaryViewMaybe (bslice s l v)
   ColNull _ -> ColNull l
-  ColStruct cs -> ColStruct (V.map (fmap (sliceColumnArray s l)) cs)
+  ColStruct _ cs -> ColStruct l (V.map (fmap (sliceColumnArray s l)) cs)
   ColStructMaybe valid cs -> ColStructMaybe (bslice s l valid) (V.map (fmap (sliceColumnArray s l)) cs)
   ColList offs c -> ColList (pslice s (l + 1) offs) c
   ColListMaybe valid offs c -> ColListMaybe (bslice s l valid) (pslice s (l + 1) offs) c
   ColLargeList offs c -> ColLargeList (pslice s (l + 1) offs) c
   ColLargeListMaybe valid offs c -> ColLargeListMaybe (bslice s l valid) (pslice s (l + 1) offs) c
-  ColFixedSizeList w c -> ColFixedSizeList w (sliceColumnArray (s * w) (l * w) c)
+  ColFixedSizeList w _ c -> ColFixedSizeList w l (sliceColumnArray (s * w) (l * w) c)
   ColFixedSizeListMaybe w valid c ->
     ColFixedSizeListMaybe w (bslice s l valid) (sliceColumnArray (s * w) (l * w) c)
   ColMap offs ks vs -> ColMap (pslice s (l + 1) offs) ks vs
@@ -2356,8 +2368,9 @@ concatColumnArray a b = case (a, b) of
   (ColBinaryView x, ColBinaryView y) -> Right (ColBinaryView (x V.++ y))
   (ColBinaryViewMaybe x, ColBinaryViewMaybe y) -> Right (ColBinaryViewMaybe (x V.++ y))
   (ColNull x, ColNull y) -> Right (ColNull (x + y))
-  (ColStruct x, ColStruct y) -> ColStruct <$> concatStructChildren x y
-  (ColStructMaybe vx x, ColStructMaybe vy y) -> ColStructMaybe (vx V.++ vy) <$> concatStructChildren x y
+  (ColStruct nx x, ColStruct ny y) -> ColStruct (nx + ny) <$> concatStructChildren nx x ny y
+  (ColStructMaybe vx x, ColStructMaybe vy y) ->
+    ColStructMaybe (vx V.++ vy) <$> concatStructChildren (V.length vx) x (V.length vy) y
   (ColList ox cx, ColList oy cy) -> do
     (o, cs) <- concatOffsetChildren int32Max ox [cx] oy [cy]
     one (ColList o) cs
@@ -2376,8 +2389,8 @@ concatColumnArray a b = case (a, b) of
   (ColMapMaybe nx ox kx vx, ColMapMaybe ny oy ky vy) -> do
     (o, cs) <- concatOffsetChildren int32Max ox [kx, vx] oy [ky, vy]
     two (ColMapMaybe (nx V.++ ny) o) cs
-  (ColFixedSizeList w x, ColFixedSizeList w' y)
-    | w == w' -> ColFixedSizeList w <$> concatFixedChildren w (columnLength a) x (columnLength b) y
+  (ColFixedSizeList w nx x, ColFixedSizeList w' ny y)
+    | w == w' -> ColFixedSizeList w (nx + ny) <$> concatFixedChildren w nx x ny y
   (ColFixedSizeListMaybe w vx x, ColFixedSizeListMaybe w' vy y)
     | w == w' -> ColFixedSizeListMaybe w (vx V.++ vy) <$> concatFixedChildren w (V.length vx) x (V.length vy) y
   (ColDenseUnion tx ox cx, ColDenseUnion ty oy cy)
@@ -2457,10 +2470,12 @@ concatColumnArray a b = case (a, b) of
       _ -> 0
 
 
-concatStructChildren :: V.Vector (Text, ColumnArray) -> V.Vector (Text, ColumnArray) -> Either String (V.Vector (Text, ColumnArray))
-concatStructChildren xs ys
+-- | Concatenate struct children, each side cut to its parent's row count.
+concatStructChildren :: Int -> V.Vector (Text, ColumnArray) -> Int -> V.Vector (Text, ColumnArray) -> Either String (V.Vector (Text, ColumnArray))
+concatStructChildren na xs nb ys
   | V.map fst xs /= V.map fst ys = Left "Arrow.Column.concatColumnArray: struct field names differ"
-  | otherwise = V.zipWithM (\(nm, x) (_, y) -> (,) nm <$> concatColumnArray x y) xs ys
+  | otherwise =
+      V.zipWithM (\(nm, x) (_, y) -> (,) nm <$> concatColumnArray (sliceColumnArray 0 na x) (sliceColumnArray 0 nb y)) xs ys
 
 
 concatFixedChildren :: Int -> Int -> ColumnArray -> Int -> ColumnArray -> Either String ColumnArray
@@ -2670,10 +2685,10 @@ toNullableColumn col = case col of
     Right (ColIntervalMonthDayNanoMaybe (V.zipWith3 (\x y z -> Just (x, y, z)) (V.convert m) (V.convert d) (V.convert ns)))
   ColUtf8View v -> Right (ColUtf8ViewMaybe (V.map Just v))
   ColBinaryView v -> Right (ColBinaryViewMaybe (V.map Just v))
-  ColStruct cs -> Right (ColStructMaybe allValid cs)
+  ColStruct _ cs -> Right (ColStructMaybe allValid cs)
   ColList o c -> Right (ColListMaybe allValid o c)
   ColLargeList o c -> Right (ColLargeListMaybe allValid o c)
-  ColFixedSizeList w c -> Right (ColFixedSizeListMaybe w allValid c)
+  ColFixedSizeList w _ c -> Right (ColFixedSizeListMaybe w allValid c)
   ColMap o k v -> Right (ColMapMaybe allValid o k v)
   ColDictionary did ix v -> Right (ColDictionaryMaybe did (justs ix) v)
   ColListView o s c -> Right (ColListViewMaybe allValid o s c)
@@ -2818,9 +2833,7 @@ takeColumnArray ix col
       ColNull _ -> Right (ColNull (VP.length ix))
       ColDictionary did v vals -> Right (ColDictionary did (pb v) vals)
       ColDictionaryMaybe did v vals -> Right (ColDictionaryMaybe did (bb v) vals)
-      ColStruct cs
-        | V.null cs -> Right col
-        | otherwise -> ColStruct <$> V.mapM (traverse (takeColumnArray ix)) cs
+      ColStruct _ cs -> ColStruct (VP.length ix) <$> V.mapM (traverse (takeColumnArray ix)) cs
       ColStructMaybe v cs -> ColStructMaybe (bb v) <$> V.mapM (traverse (takeColumnArray ix)) cs
       ColDenseUnion ts offs cs -> Right (ColDenseUnion (pb ts) (pb offs) cs)
       ColSparseUnion ts cs -> ColSparseUnion (pb ts) <$> V.mapM (takeColumnArray ix) cs
@@ -2860,8 +2873,10 @@ indexRuns = VP.foldr step []
 select ('ColDictionary' becomes a column of the value type,
 'ColDictionaryMaybe' its nullable variant with the null-index rows
 null). Any other column is returned unchanged. The dictionary must
-already be resolved (see 'resolveDictionaryColumn'). Null rows over
-an empty dictionary cannot be expanded and are rejected.
+already be resolved (see 'resolveDictionaryColumn'). A nullable
+column whose rows are all null may reference an empty dictionary; it
+expands to an all-null column of the value type (built with
+'fillerColumn').
 -}
 expandDictionary :: ColumnArray -> Either String ColumnArray
 expandDictionary = \case
@@ -2873,13 +2888,128 @@ expandDictionary = \case
     dense <-
       if columnLength vals == 0
         then
-          if rows == 0
-            then Right vals
-            else Left "Arrow.Column.expandDictionary: null rows over an empty dictionary"
+          if V.any isJust ix
+            then Left "Arrow.Column.expandDictionary: dictionary index out of range for an empty dictionary"
+            else Right (fillerColumn rows vals)
         else takeColumnArray (V.convert (V.map (maybe fill fromIntegral) ix)) vals
     nullable <- toNullableColumn dense
     maskValidity valid nullable
   col -> Right col
+
+
+{- | @n@ rows with the shape of the given column (same constructor,
+widths, decimal parameters, child shapes and dictionary ids): every
+nullable slot is null, every other slot holds a zero or empty value,
+lists are empty, unions select their first child and a run-end-encoded
+column is one run. Useful wherever a column must have a row count but
+its rows carry no meaning, such as the children under null struct
+rows or the expansion of null rows over an empty dictionary.
+-}
+fillerColumn :: Int -> ColumnArray -> ColumnArray
+fillerColumn !n0 col = case col of
+  ColInt8 _ -> ColInt8 (zeros 0)
+  ColInt16 _ -> ColInt16 (zeros 0)
+  ColInt32 _ -> ColInt32 (zeros 0)
+  ColInt64 _ -> ColInt64 (zeros 0)
+  ColUInt8 _ -> ColUInt8 (zeros 0)
+  ColUInt16 _ -> ColUInt16 (zeros 0)
+  ColUInt32 _ -> ColUInt32 (zeros 0)
+  ColUInt64 _ -> ColUInt64 (zeros 0)
+  ColFloat16 _ -> ColFloat16 (zeros 0)
+  ColFloat _ -> ColFloat (zeros 0)
+  ColDouble _ -> ColDouble (zeros 0)
+  ColBool _ -> ColBool (V.replicate n False)
+  ColUtf8 _ -> ColUtf8 (V.replicate n T.empty)
+  ColBinary _ -> ColBinary (V.replicate n BS.empty)
+  ColLargeUtf8 _ -> ColLargeUtf8 (V.replicate n T.empty)
+  ColLargeBinary _ -> ColLargeBinary (V.replicate n BS.empty)
+  ColFixedSizeBinary w _ -> ColFixedSizeBinary w (V.replicate n (BS.replicate w 0))
+  ColDate32 _ -> ColDate32 (zeros 0)
+  ColDate64 _ -> ColDate64 (zeros 0)
+  ColTime32 _ -> ColTime32 (zeros 0)
+  ColTime64 _ -> ColTime64 (zeros 0)
+  ColTimestamp _ -> ColTimestamp (zeros 0)
+  ColDuration _ -> ColDuration (zeros 0)
+  ColDecimal128 p s _ -> ColDecimal128 p s (V.replicate n (BS.replicate 16 0))
+  ColDecimal256 p s _ -> ColDecimal256 p s (V.replicate n (BS.replicate 32 0))
+  ColIntervalYearMonth _ -> ColIntervalYearMonth (zeros 0)
+  ColIntervalDayTime _ _ -> ColIntervalDayTime (zeros 0) (zeros 0)
+  ColIntervalMonthDayNano _ _ _ -> ColIntervalMonthDayNano (zeros 0) (zeros 0) (zeros 0)
+  ColInt8Maybe _ -> ColInt8Maybe nulls
+  ColInt16Maybe _ -> ColInt16Maybe nulls
+  ColInt32Maybe _ -> ColInt32Maybe nulls
+  ColInt64Maybe _ -> ColInt64Maybe nulls
+  ColUInt8Maybe _ -> ColUInt8Maybe nulls
+  ColUInt16Maybe _ -> ColUInt16Maybe nulls
+  ColUInt32Maybe _ -> ColUInt32Maybe nulls
+  ColUInt64Maybe _ -> ColUInt64Maybe nulls
+  ColFloat16Maybe _ -> ColFloat16Maybe nulls
+  ColFloatMaybe _ -> ColFloatMaybe nulls
+  ColDoubleMaybe _ -> ColDoubleMaybe nulls
+  ColBoolMaybe _ -> ColBoolMaybe nulls
+  ColUtf8Maybe _ -> ColUtf8Maybe nulls
+  ColBinaryMaybe _ -> ColBinaryMaybe nulls
+  ColLargeUtf8Maybe _ -> ColLargeUtf8Maybe nulls
+  ColLargeBinaryMaybe _ -> ColLargeBinaryMaybe nulls
+  ColFixedSizeBinaryMaybe w _ -> ColFixedSizeBinaryMaybe w nulls
+  ColDate32Maybe _ -> ColDate32Maybe nulls
+  ColDate64Maybe _ -> ColDate64Maybe nulls
+  ColTime32Maybe _ -> ColTime32Maybe nulls
+  ColTime64Maybe _ -> ColTime64Maybe nulls
+  ColTimestampMaybe _ -> ColTimestampMaybe nulls
+  ColDurationMaybe _ -> ColDurationMaybe nulls
+  ColDecimal128Maybe p s _ -> ColDecimal128Maybe p s nulls
+  ColDecimal256Maybe p s _ -> ColDecimal256Maybe p s nulls
+  ColIntervalYearMonthMaybe _ -> ColIntervalYearMonthMaybe nulls
+  ColIntervalDayTimeMaybe _ -> ColIntervalDayTimeMaybe nulls
+  ColIntervalMonthDayNanoMaybe _ -> ColIntervalMonthDayNanoMaybe nulls
+  ColUtf8View _ -> ColUtf8View (V.replicate n T.empty)
+  ColUtf8ViewMaybe _ -> ColUtf8ViewMaybe nulls
+  ColBinaryView _ -> ColBinaryView (V.replicate n BS.empty)
+  ColBinaryViewMaybe _ -> ColBinaryViewMaybe nulls
+  ColNull _ -> ColNull n
+  ColStruct _ cs -> ColStruct n (V.map (fmap (fillerColumn n)) cs)
+  ColStructMaybe _ cs -> ColStructMaybe invalid (V.map (fmap (fillerColumn n)) cs)
+  ColList _ c -> ColList (zeros1 0) (empty c)
+  ColListMaybe _ _ c -> ColListMaybe invalid (zeros1 0) (empty c)
+  ColLargeList _ c -> ColLargeList (zeros1 0) (empty c)
+  ColLargeListMaybe _ _ c -> ColLargeListMaybe invalid (zeros1 0) (empty c)
+  ColFixedSizeList w _ c -> ColFixedSizeList w n (fillerColumn (n * w) c)
+  ColFixedSizeListMaybe w _ c -> ColFixedSizeListMaybe w invalid (fillerColumn (n * w) c)
+  ColMap _ k v -> ColMap (zeros1 0) (empty k) (empty v)
+  ColMapMaybe _ _ k v -> ColMapMaybe invalid (zeros1 0) (empty k) (empty v)
+  ColDenseUnion _ _ cs
+    | n == 0 || V.null cs -> ColDenseUnion (zeros 0) (zeros 0) (V.map empty cs)
+    | otherwise -> ColDenseUnion (zeros 0) (zeros 0) (V.imap (\i c -> if i == 0 then fillerColumn 1 c else empty c) cs)
+  ColSparseUnion _ cs -> ColSparseUnion (zeros 0) (V.map (fillerColumn n) cs)
+  ColDictionary did _ vals
+    | n == 0 -> ColDictionary did VP.empty vals
+    | columnLength vals == 0 -> ColDictionary did (zeros 0) (fillerColumn 1 vals)
+    | otherwise -> ColDictionary did (zeros 0) vals
+  ColDictionaryMaybe did _ vals -> ColDictionaryMaybe did nulls vals
+  ColRunEndEncoded re vals -> case re of
+    ColInt16 _ -> oneRun ColInt16 vals
+    ColInt32 _ -> oneRun ColInt32 vals
+    ColInt64 _ -> oneRun ColInt64 vals
+    _ -> col
+  ColListView _ _ c -> ColListView (zeros 0) (zeros 0) (empty c)
+  ColListViewMaybe _ _ _ c -> ColListViewMaybe invalid (zeros 0) (zeros 0) (empty c)
+  ColLargeListView _ _ c -> ColLargeListView (zeros 0) (zeros 0) (empty c)
+  ColLargeListViewMaybe _ _ _ c -> ColLargeListViewMaybe invalid (zeros 0) (zeros 0) (empty c)
+  where
+    !n = max 0 n0
+    zeros :: VP.Prim a => a -> VP.Vector a
+    zeros = VP.replicate n
+    zeros1 :: VP.Prim a => a -> VP.Vector a
+    zeros1 = VP.replicate (n + 1)
+    nulls :: V.Vector (Maybe a)
+    nulls = V.replicate n Nothing
+    invalid = V.replicate n False
+    empty = sliceColumnArray 0 0
+    oneRun :: (Num a, VP.Prim a) => (VP.Vector a -> ColumnArray) -> ColumnArray -> ColumnArray
+    oneRun con vals
+      | n == 0 = ColRunEndEncoded (con VP.empty) (empty vals)
+      | otherwise = ColRunEndEncoded (con (VP.singleton (fromIntegral n))) (fillerColumn 1 vals)
 
 
 -- ============================================================

@@ -170,7 +170,7 @@ arrowBridgeTests =
                   }
               !batch =
                 V.singleton $
-                  AC.ColStruct
+                  AC.ColStruct 3
                     ( V.fromList
                         [ ("x", AC.ColInt32 (VP.fromList [1, 2, 3 :: Int32]))
                         , ("name", AC.ColUtf8 (V.fromList ["a", "b", "c"]))

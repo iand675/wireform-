@@ -10,7 +10,9 @@ behind a single-call shape that mirrors
 
 @
 -- Write
-let bytes = 'encodeArrowStream' schema batches
+case 'encodeArrowStream' 'defaultWriteOptions' schema batches of
+  Right bytes -> ...
+  Left  err   -> ...   -- the batches do not fit the schema
 
 -- Read
 case 'decodeArrowStream' bytes of
@@ -18,15 +20,20 @@ case 'decodeArrowStream' bytes of
   Left  err               -> ...
 @
 
-@batches@ is a list of @V.'V.Vector' 'ColumnArray'@ — one column
+@batches@ is a list of @V.'V.Vector' 'ColumnArray'@, one column
 per schema field, repeated once per record batch.
 
-'ColDictionary' columns are handled automatically: the writer
-collects unique dictionaries from the input columns and emits a
-'DictBatch' per id ahead of the first record batch that
-references it; the reader resolves the placeholder values
-column in returned 'ColDictionary' nodes against any dict
-batches it saw earlier in the stream.
+'ColDictionary' columns are handled automatically, at any depth and
+inside dictionary values: the writer collects the dictionaries from
+the input columns and emits a 'DictBatch' per id ahead of the first
+record batch that references it (a dictionary nested inside another
+dictionary's values ahead of the outer one); the reader resolves the
+placeholder values column in returned 'ColDictionary' nodes against
+the dictionary batches it saw earlier in the stream.
+
+The writers check every batch against the schema first
+('Arrow.Write.Columns.validateColumns') and report a mismatch, or a
+dictionary they cannot write, as 'Left'.
 
 For the file format ('encodeArrowFile' / 'decodeArrowFile') the
 semantics are identical: same input shape, same output shape,
@@ -73,6 +80,7 @@ import Arrow.Column (
   concatColumnArrays,
   isNullableColumn,
   resolveDictionaryColumn,
+  sliceColumnArray,
  )
 import Arrow.FlatBufferIPC (
   DictBatch (..),
@@ -95,15 +103,17 @@ import Arrow.Types (
   RecordBatchDef (..),
   Schema (..),
  )
+import Arrow.Write.Columns (validateColumns)
 import Columnar.Stream qualified as IS
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Foldable (foldlM)
-import Data.Int (Int64)
-import Data.List (mapAccumL)
+import Data.Int (Int32, Int64)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (mapMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Data.Traversable (mapAccumM)
 import Data.Vector qualified as V
 import Data.Vector.Primitive qualified as VP
 
@@ -138,18 +148,23 @@ data WriteOptions = WriteOptions
 
 -- | Dictionary-emission strategy for the high-level writer.
 data DictHandling
-  = {- | Emit one dict batch per unique id, using the values from
-    the first occurrence. Subsequent occurrences with
-    different values are silently ignored (indices are
-    assumed to map through the original dict). This is the
-    conservative default.
+  = {- | Emit one dictionary batch per id ahead of the first record
+    batch. When batches carry different value columns for one id,
+    the distinct value columns are concatenated into one dictionary
+    and every batch's indices are shifted into it. Fails ('Left')
+    when the combined dictionary has more values than the field's
+    index type can address, or when the value columns cannot be
+    concatenated. This is the default, and the only strategy the
+    file format allows.
     -}
     DictEmitOnce
   | {- | Emit a fresh @isDelta=false@ replacement dict batch
     before any record batch whose dictionary values differ
-    from the most-recently-emitted dict for that id. Matches
-    the semantics pyarrow uses when a stream writer sees a
-    changed dict.
+    from the most-recently-emitted dict for that id (and before
+    it, the dictionaries nested in its values that changed; an
+    outer dictionary is re-sent whenever a dictionary nested in its
+    values is). Matches the semantics pyarrow uses when a stream
+    writer sees a changed dict.
     -}
     DictReplaceOnChange
   deriving (Show, Eq)
@@ -173,74 +188,76 @@ Arrow IPC /stream/. Equivalent to pyarrow's
 @ipc.new_stream + write_batch + close@; see 'WriteOptions' for the
 knobs and 'defaultWriteOptions' for pyarrow-like defaults.
 
-Dictionary-encoded columns ('ColDictionary' / 'ColDictionaryMaybe'
-anywhere in the column tree) are handled automatically. With
-'DictEmitOnce' every dictionary id gets one dictionary batch ahead of
-the first record batch; when batches carry different value columns
-for the same id, the distinct value columns are concatenated into
-one dictionary and each batch's indices are shifted into it (the
-field's index type must be wide enough for the combined dictionary).
-With 'DictReplaceOnChange' a replacement dictionary batch precedes
-every record batch whose dictionary differs from the last one sent.
+Every batch is first checked against the schema
+('Arrow.Write.Columns.validateColumns': column count, equal column
+lengths, column shapes, struct and fixed-size list row counts);
+a mismatch is a 'Left'.
 
-Dictionary batches use the value field the schema declares for the
-id (type, children); a dictionary id that no schema field declares is
-not written, so the reader reports the missing dictionary.
+Dictionary-encoded columns ('ColDictionary' / 'ColDictionaryMaybe'
+anywhere in the column tree, including inside dictionary values) are
+handled automatically, see 'DictHandling'. Dictionary batches use the
+value field the schema declares for the id (type, children), and a
+dictionary nested in another dictionary's values is written before
+the outer one.
 -}
 encodeArrowStream
   :: WriteOptions
   -> Schema
   -> [V.Vector ColumnArray]
-  -> ByteString
-encodeArrowStream opts sch batches = case writeDictHandling opts of
-  DictEmitOnce ->
-    let !(dicts, batchPairs) = compileBatchesWith opts sch batches
-    in writeArrowStreamFBWithDicts sch dicts batchPairs
-  DictReplaceOnChange ->
-    encodeArrowStreamReplaceDicts opts sch batches
+  -> Either String ByteString
+encodeArrowStream opts sch batches = do
+  mapM_ (validateColumns (arrowFields sch)) batches
+  case writeDictHandling opts of
+    DictEmitOnce -> do
+      (dicts, batchPairs) <- compileBatchesWith opts sch batches
+      Right (writeArrowStreamFBWithDicts sch dicts batchPairs)
+    DictReplaceOnChange ->
+      encodeArrowStreamReplaceDicts opts sch batches
 
 
 {- | Writer for the 'DictReplaceOnChange' strategy. Interleaves
 dict batches with record batches: each record batch is
 preceded by fresh @isDelta=false@ dict batches for any
-dictionary id whose values have changed since the last emission.
+dictionary id whose values have changed since the last emission,
+plus every dictionary whose values contain one of those.
 -}
 encodeArrowStreamReplaceDicts
   :: WriteOptions
   -> Schema
   -> [V.Vector ColumnArray]
-  -> ByteString
-encodeArrowStreamReplaceDicts opts sch batches =
-  let !mCodec = writeBodyCompression opts
-      !schemaMsg = FB.encapsulateMessage (FB.buildSchemaMessage sch) BS.empty
-      !eos = BS.pack [0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0]
-      go _ [] !acc = BS.concat (reverse (eos : acc))
-      go !lastDicts (cols0 : rest) !acc =
-        let !(curDicts, rebased) = unifyDictionaries [cols0]
-            !cols = case rebased of
-              [c] -> c
-              _ -> cols0
-            !(rb, body) = buildRecordBatchBytesWith mCodec sch cols
-            !emitDicts =
-              Map.filterWithKey (\did vs -> Map.lookup did lastDicts /= Just vs) curDicts
-            !newLast = Map.union curDicts lastDicts
-            !dictBytes =
-              BS.concat
-                ( map
-                    (\db -> FB.encapsulateMessage (FB.buildDictionaryBatchMessage db) (dbBody db))
-                    (buildDictBatches mCodec sch emitDicts)
-                )
-            !rbBytes =
-              FB.encapsulateMessage
-                (FB.buildRecordBatchMessage rb (fromIntegral (BS.length body)))
-                body
-        in go newLast rest (rbBytes : dictBytes : acc)
-  in go Map.empty batches [schemaMsg]
+  -> Either String ByteString
+encodeArrowStreamReplaceDicts opts sch batches0 = go Map.empty batches0 [schemaMsg]
+  where
+    !mCodec = writeBodyCompression opts
+    !plan = dictPlan sch
+    !schemaMsg = FB.encapsulateMessage (FB.buildSchemaMessage sch) BS.empty
+    !eos = BS.pack [0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0]
+    go _ [] acc = Right (BS.concat (reverse (eos : acc)))
+    go !lastDicts (cols0 : rest) acc = do
+      (curDicts, rebased) <- unifyDictionaries plan [cols0]
+      let !cols = case rebased of
+            [c] -> c
+            _ -> cols0
+          !(rb, body) = buildRecordBatchBytesWith mCodec sch cols
+          !changed = Map.keysSet (Map.filterWithKey (\did vs -> Map.lookup did lastDicts /= Just vs) curDicts)
+          !emitDicts = Map.restrictKeys curDicts (withDependents plan changed)
+          !newLast = Map.union curDicts lastDicts
+          !dictBytes =
+            BS.concat
+              ( map
+                  (\db -> FB.encapsulateMessage (FB.buildDictionaryBatchMessage db) (dbBody db))
+                  (buildDictBatches mCodec sch plan emitDicts)
+              )
+          !rbBytes =
+            FB.encapsulateMessage
+              (FB.buildRecordBatchMessage rb (fromIntegral (BS.length body)))
+              body
+      go newLast rest (rbBytes : dictBytes : acc)
 
 
 {- | Decode an Arrow IPC stream back into 'Schema' + record-batch
 column vectors. Dictionary references are resolved
-transparently — the returned 'ColumnArray' values contain the
+transparently: the returned 'ColumnArray' values contain the
 actual dictionary values, not just indices.
 -}
 decodeArrowStream
@@ -257,18 +274,21 @@ decodeArrowStream bs = do
 
 {- | Encode batches as an Arrow IPC /file/ (@ARROW1@ header, the
 stream payload, a FlatBuffers 'Footer' indexing every dictionary and
-record batch, @ARROW1@ trailer). Dictionaries are always unified into
-one dictionary batch per id (see 'encodeArrowStream'), because the
-file format does not allow replacement dictionaries.
+record batch, @ARROW1@ trailer). Batches are checked against the
+schema as in 'encodeArrowStream'. Dictionaries are always unified
+into one dictionary batch per id ('DictEmitOnce', whatever
+'writeDictHandling' says), because the file format does not allow
+replacement dictionaries.
 -}
 encodeArrowFile
   :: WriteOptions
   -> Schema
   -> [V.Vector ColumnArray]
-  -> ByteString
-encodeArrowFile opts sch batches =
-  let !(dicts, batchPairs) = compileBatchesWith opts sch batches
-  in writeArrowFileFBWithDicts sch dicts batchPairs
+  -> Either String ByteString
+encodeArrowFile opts sch batches = do
+  mapM_ (validateColumns (arrowFields sch)) batches
+  (dicts, batchPairs) <- compileBatchesWith opts sch batches
+  Right (writeArrowFileFBWithDicts sch dicts batchPairs)
 
 
 {- | Decode an Arrow IPC file. Dictionary-resolved 'ColumnArray'
@@ -287,40 +307,93 @@ decodeArrowFile bs = do
 -- ============================================================
 
 {- | Unify the dictionaries of every batch (see 'unifyDictionaries'),
-then build one 'DictBatch' per dictionary id (ascending) and the
-index-only @(rb, body)@ pair of each batch. Both 'DictHandling'
-strategies end up here for the file format, where replacement
-dictionaries are not allowed.
+then build one 'DictBatch' per dictionary id (nested dictionaries
+first, see 'dictPlan') and the index-only @(rb, body)@ pair of each
+batch.
 -}
 compileBatchesWith
   :: WriteOptions
   -> Schema
   -> [V.Vector ColumnArray]
-  -> ([DictBatch], [(RecordBatchDef, ByteString)])
-compileBatchesWith opts sch batches =
+  -> Either String ([DictBatch], [(RecordBatchDef, ByteString)])
+compileBatchesWith opts sch batches = do
   let !mCodec = writeBodyCompression opts
-      !(dictMap, rebased) = unifyDictionaries batches
-      !dicts = buildDictBatches mCodec sch dictMap
+      !plan = dictPlan sch
+  (dictMap, rebased) <- unifyDictionaries plan batches
+  let !dicts = buildDictBatches mCodec sch plan dictMap
       !pairs = map (buildRecordBatchBytesWith mCodec sch) rebased
-  in (dicts, pairs)
+  Right (dicts, pairs)
 
 
-{- | One dictionary batch per id, for ids some schema field declares.
-The value field is the dictionary field itself minus its encoding
-(same type and children); its nullability follows the values column.
+{- | What the writer needs to know about the schema's dictionaries:
+the order to emit them in, the largest index each id's index type
+addresses, and the ids nested inside each id's value type.
 -}
-buildDictBatches :: Maybe BodyCompressionCodec -> Schema -> Map.Map Int64 ColumnArray -> [DictBatch]
-buildDictBatches mCodec sch dictMap =
-  concatMap
-    ( \(did, values) -> case findDictField did (arrowFields sch) of
-        Nothing -> []
-        Just f ->
-          let !valuesField = f {fieldDictionary = Nothing, fieldNullable = isNullableColumn values}
-              !innerSchema = sch {arrowFields = V.singleton valuesField, arrowMetadata = V.empty, arrowFeatures = V.empty}
-              !(rb, body) = buildRecordBatchBytesWith mCodec innerSchema (V.singleton values)
-          in [DictBatch {dbId = did, dbIsDelta = False, dbData = rb, dbBody = body}]
-    )
-    (Map.toAscList dictMap)
+data DictPlan = DictPlan
+  { dpOrder :: ![Int64]
+  -- ^ Every dictionary id, a dictionary nested inside another's values before the outer one.
+  , dpMaxIndex :: !(Map.Map Int64 Int64)
+  -- ^ Largest index the id's index type can hold (the smallest over fields sharing the id).
+  , dpNested :: !(Map.Map Int64 (Set.Set Int64))
+  -- ^ Ids declared anywhere inside the id's value type.
+  }
+
+
+-- | Walk the schema in post-order (children before parents) collecting the 'DictPlan'.
+dictPlan :: Schema -> DictPlan
+dictPlan sch =
+  let ((order, maxIx, nested), _) = goFields ([], Map.empty, Map.empty) (arrowFields sch)
+  in DictPlan {dpOrder = reverse order, dpMaxIndex = maxIx, dpNested = nested}
+  where
+    goFields st fs = V.foldl' (\(s, ids) f -> let (s', ids') = goField s f in (s', Set.union ids ids')) (st, Set.empty) fs
+    goField st f =
+      let ((order, maxIx, nested), inner) = goFields st (fieldChildren f)
+      in case fieldDictionary f of
+           Nothing -> ((order, maxIx, nested), inner)
+           Just de ->
+             let !did = deId de
+             in ( ( if did `elem` order then order else did : order
+                  , Map.insertWith min did (maxIndexFor (deIndexType de)) maxIx
+                  , Map.insertWith Set.union did inner nested
+                  )
+                , Set.insert did inner
+                )
+
+
+-- | Largest dictionary index an index type holds (indices are stored as 'Int32').
+maxIndexFor :: ArrowType -> Int64
+maxIndexFor = \case
+  AInt 8 True -> 127
+  AInt 8 False -> 255
+  AInt 16 True -> 32767
+  AInt 16 False -> 65535
+  _ -> fromIntegral (maxBound :: Int32)
+
+
+-- | The ids together with every dictionary whose values contain one of them.
+withDependents :: DictPlan -> Set.Set Int64 -> Set.Set Int64
+withDependents plan ids =
+  Set.union ids (Map.keysSet (Map.filter (not . Set.disjoint ids) (dpNested plan)))
+
+
+{- | One dictionary batch per id, in 'dpOrder'. The value field is the
+dictionary field itself minus its encoding (same type and children);
+its nullability follows the values column.
+-}
+buildDictBatches :: Maybe BodyCompressionCodec -> Schema -> DictPlan -> Map.Map Int64 ColumnArray -> [DictBatch]
+buildDictBatches mCodec sch plan dictMap = mapMaybe one (dpOrder plan)
+  where
+    one did = do
+      values <- Map.lookup did dictMap
+      f <- findDictField did (arrowFields sch)
+      let !valuesField = f {fieldDictionary = Nothing, fieldNullable = isNullableColumn values}
+          !innerSchema = sch {arrowFields = V.singleton valuesField, arrowMetadata = V.empty, arrowFeatures = V.empty}
+          !(rb, body) = buildRecordBatchBytesWith mCodec innerSchema (V.singleton values)
+      Just DictBatch {dbId = did, dbIsDelta = False, dbData = rb, dbBody = body}
+
+
+-- | Distinct value columns seen for one id (newest first, with their offsets) and their total length.
+data DictAcc = DictAcc ![(ColumnArray, Int32)] !Int64
 
 
 {- | Collect the dictionaries of a run of batches into one values
@@ -329,117 +402,105 @@ values are appended to its id's combined dictionary unless an equal
 values column was already appended, and the column's indices are
 shifted by the position of its values inside the combined dictionary,
 so every batch can be written against a single dictionary batch.
-Value columns of one id that cannot be concatenated (inconsistent
-types) keep the first dictionary and unshifted indices. Dictionary
-columns nested inside dictionary values are not collected.
+
+Dictionary columns inside dictionary values are collected the same
+way, before their outer value column is placed, so the outer
+dictionary is written with indices into the combined inner one. The
+rebased columns carry an empty values column of the right type (the
+writer only needs the indices), which keeps the concatenation of
+outer value columns from shifting already rebased inner indices.
+
+Fails when the value columns of one id cannot be concatenated, or
+when combining them produces more values than the id's index type can
+address.
 -}
-unifyDictionaries :: [V.Vector ColumnArray] -> (Map.Map Int64 ColumnArray, [V.Vector ColumnArray])
-unifyDictionaries batches =
-  let (seen, rebased) = mapAccumL (\st b -> mapAccumL (mapAccumDictionaries shiftOne) st (V.toList b)) Map.empty batches
-      shiftOne st col = case col of
-        ColDictionary did ix vals ->
-          let (st', off) = place st did vals
-          in (st', ColDictionary did (VP.map (+ off) ix) vals)
-        ColDictionaryMaybe did ix vals ->
-          let (st', off) = place st did vals
-          in (st', ColDictionaryMaybe did (V.map (fmap (+ off)) ix) vals)
-        _ -> (st, col)
-      place st did vals = case Map.lookup did st of
-        Nothing -> (Map.insert did ([(vals, 0)], fromIntegral (columnLength vals)) st, 0)
-        Just (entries, total) -> case lookup vals entries of
-          Just off -> (st, off)
-          Nothing -> (Map.insert did ((vals, total) : entries, total + fromIntegral (columnLength vals)) st, total)
-      combine (entries, _) = case reverse entries of
-        ordered@((first, _) : _) -> either (const (Left first)) Right (concatColumnArrays (map fst ordered))
-        [] -> Right (ColNull 0)
-      combined = Map.map combine seen
-      dicts = Map.map (either id id) combined
-      -- Ids whose dictionaries could not be combined keep their own indices.
-      failed = Map.keysSet (Map.filter (either (const True) (const False)) combined)
-      unshift orig new = if Set.null failed then new else V.zipWith (restoreFailed failed) orig new
-  in (dicts, zipWith unshift batches (map V.fromList rebased))
-
-
--- | Undo the index shift of dictionary columns whose id is in the set.
-restoreFailed :: Set.Set Int64 -> ColumnArray -> ColumnArray -> ColumnArray
-restoreFailed failed orig new =
-  if any (`Set.member` failed) (map fst (dictionaryNodes orig)) then orig else new
-
-
--- | Every @(dictionary id, values)@ in a column tree, pre-order.
-dictionaryNodes :: ColumnArray -> [(Int64, ColumnArray)]
-dictionaryNodes col = case col of
-  ColDictionary did _ vals -> [(did, vals)]
-  ColDictionaryMaybe did _ vals -> [(did, vals)]
-  _ -> concatMap dictionaryNodes (columnChildren col)
+unifyDictionaries :: DictPlan -> [V.Vector ColumnArray] -> Either String (Map.Map Int64 ColumnArray, [V.Vector ColumnArray])
+unifyDictionaries plan batches = do
+  (seen, rebased) <- mapAccumM (mapAccumM (mapAccumDictionaries shiftOne)) Map.empty batches
+  dicts <- Map.traverseWithKey combine seen
+  Right (dicts, rebased)
+  where
+    shiftOne st col = case col of
+      ColDictionary did ix vals -> do
+        (st1, vals') <- mapAccumDictionaries shiftOne st vals
+        (st2, off) <- place st1 did vals'
+        Right (st2, ColDictionary did (if off == 0 then ix else VP.map (+ off) ix) (sliceColumnArray 0 0 vals'))
+      ColDictionaryMaybe did ix vals -> do
+        (st1, vals') <- mapAccumDictionaries shiftOne st vals
+        (st2, off) <- place st1 did vals'
+        Right (st2, ColDictionaryMaybe did (if off == 0 then ix else V.map (fmap (+ off)) ix) (sliceColumnArray 0 0 vals'))
+      _ -> Right (st, col)
+    place st did vals =
+      let !len = fromIntegral (columnLength vals) :: Int64
+      in case Map.lookup did st of
+           Nothing -> Right (Map.insert did (DictAcc [(vals, 0)] len) st, 0)
+           Just (DictAcc entries total) -> case lookup vals entries of
+             Just off -> Right (st, off)
+             Nothing
+               | total > fromIntegral (maxBound :: Int32) ->
+                   Left ("Arrow.Stream: dictionary id " ++ show did ++ ": combined dictionary exceeds Int32 indices")
+               | otherwise ->
+                   Right (Map.insert did (DictAcc ((vals, fromIntegral total) : entries) (total + len)) st, fromIntegral total)
+    combine did (DictAcc entries total) = case reverse entries of
+      [(v, _)] -> Right v
+      ordered
+        | total - 1 > maxIx ->
+            Left
+              ( "Arrow.Stream: dictionary id "
+                  ++ show did
+                  ++ ": the batches' dictionaries combine to "
+                  ++ show total
+                  ++ " values but the field's index type addresses at most "
+                  ++ show (maxIx + 1)
+                  ++ " (use DictReplaceOnChange or a wider index type)"
+              )
+        | otherwise -> case concatColumnArrays (map fst ordered) of
+            Right v -> Right v
+            Left e -> Left ("Arrow.Stream: dictionary id " ++ show did ++ ": value columns cannot be combined: " ++ e)
+      where
+        !maxIx = Map.findWithDefault (fromIntegral (maxBound :: Int32)) did (dpMaxIndex plan)
 
 
 {- | Thread a state through every dictionary column of a column tree
-(pre-order, children left to right), rebuilding the tree.
+(pre-order, children left to right), rebuilding the tree. Dictionary
+values are not entered; the callback decides what to do with them.
 -}
-mapAccumDictionaries :: (s -> ColumnArray -> (s, ColumnArray)) -> s -> ColumnArray -> (s, ColumnArray)
+mapAccumDictionaries
+  :: (s -> ColumnArray -> Either String (s, ColumnArray))
+  -> s
+  -> ColumnArray
+  -> Either String (s, ColumnArray)
 mapAccumDictionaries f = go
   where
-    many st cs = mapAccumL go st cs
-    one st c k = let (st', c') = go st c in (st', k c')
+    one st c k = (\(st', c') -> (st', k c')) <$> go st c
     go st col = case col of
       ColDictionary {} -> f st col
       ColDictionaryMaybe {} -> f st col
-      ColStruct cs ->
-        let (st', kids) = many st (map snd (V.toList cs))
-        in (st', ColStruct (V.zip (V.map fst cs) (V.fromList kids)))
-      ColStructMaybe v cs ->
-        let (st', kids) = many st (map snd (V.toList cs))
-        in (st', ColStructMaybe v (V.zip (V.map fst cs) (V.fromList kids)))
+      ColStruct n cs -> (\(st', kids) -> (st', ColStruct n kids)) <$> mapAccumM named st cs
+      ColStructMaybe v cs -> (\(st', kids) -> (st', ColStructMaybe v kids)) <$> mapAccumM named st cs
       ColList o c -> one st c (ColList o)
       ColListMaybe v o c -> one st c (ColListMaybe v o)
       ColLargeList o c -> one st c (ColLargeList o)
       ColLargeListMaybe v o c -> one st c (ColLargeListMaybe v o)
-      ColFixedSizeList n c -> one st c (ColFixedSizeList n)
-      ColFixedSizeListMaybe n v c -> one st c (ColFixedSizeListMaybe n v)
-      ColMap o k v ->
-        let (st1, k') = go st k
-            (st2, v') = go st1 v
-        in (st2, ColMap o k' v')
-      ColMapMaybe vs o k v ->
-        let (st1, k') = go st k
-            (st2, v') = go st1 v
-        in (st2, ColMapMaybe vs o k' v')
-      ColDenseUnion ts o cs ->
-        let (st', kids) = many st (V.toList cs)
-        in (st', ColDenseUnion ts o (V.fromList kids))
-      ColSparseUnion ts cs ->
-        let (st', kids) = many st (V.toList cs)
-        in (st', ColSparseUnion ts (V.fromList kids))
+      ColFixedSizeList w n c -> one st c (ColFixedSizeList w n)
+      ColFixedSizeListMaybe w v c -> one st c (ColFixedSizeListMaybe w v)
+      ColMap o k v -> do
+        (st1, k') <- go st k
+        (st2, v') <- go st1 v
+        Right (st2, ColMap o k' v')
+      ColMapMaybe vs o k v -> do
+        (st1, k') <- go st k
+        (st2, v') <- go st1 v
+        Right (st2, ColMapMaybe vs o k' v')
+      ColDenseUnion ts o cs -> (\(st', kids) -> (st', ColDenseUnion ts o kids)) <$> mapAccumM go st cs
+      ColSparseUnion ts cs -> (\(st', kids) -> (st', ColSparseUnion ts kids)) <$> mapAccumM go st cs
       ColRunEndEncoded re vs -> one st vs (ColRunEndEncoded re)
       ColListView o s c -> one st c (ColListView o s)
       ColListViewMaybe v o s c -> one st c (ColListViewMaybe v o s)
       ColLargeListView o s c -> one st c (ColLargeListView o s)
       ColLargeListViewMaybe v o s c -> one st c (ColLargeListViewMaybe v o s)
-      _ -> (st, col)
-
-
--- | Direct child columns of a nested column (dictionary values excluded).
-columnChildren :: ColumnArray -> [ColumnArray]
-columnChildren = \case
-  ColStruct cs -> map snd (V.toList cs)
-  ColStructMaybe _ cs -> map snd (V.toList cs)
-  ColList _ c -> [c]
-  ColListMaybe _ _ c -> [c]
-  ColLargeList _ c -> [c]
-  ColLargeListMaybe _ _ c -> [c]
-  ColFixedSizeList _ c -> [c]
-  ColFixedSizeListMaybe _ _ c -> [c]
-  ColMap _ k v -> [k, v]
-  ColMapMaybe _ _ k v -> [k, v]
-  ColDenseUnion _ _ cs -> V.toList cs
-  ColSparseUnion _ cs -> V.toList cs
-  ColRunEndEncoded re vs -> [re, vs]
-  ColListView _ _ c -> [c]
-  ColListViewMaybe _ _ _ c -> [c]
-  ColLargeListView _ _ c -> [c]
-  ColLargeListViewMaybe _ _ _ c -> [c]
-  _ -> []
+      _ -> Right (st, col)
+    named st (nm, c) = (\(st', c') -> (st', (nm, c'))) <$> go st c
 
 
 {- | Decode the file's dictionary batches (in file order, honouring
@@ -466,10 +527,17 @@ decodeBatches sch dicts frames = do
 batch appends to the existing dictionary ('concatColumnArray'; a
 delta whose values cannot be appended is an error), any other batch
 replaces it.
+
+Dictionary columns inside the values (a dictionary whose value type
+contains dictionary-encoded fields) are resolved against the
+dictionaries in force when the batch arrives, as Arrow C++ does: a
+later replacement or delta of the inner dictionary affects the outer
+dictionaries sent after it, not the ones already received.
 -}
 applyDictBatch :: Schema -> Map.Map Int64 ColumnArray -> DictBatch -> Either String (Map.Map Int64 ColumnArray)
 applyDictBatch sch dictMap db = do
-  (did, vals) <- decodeDictBatch sch db
+  (did, raw) <- decodeDictBatch sch db
+  vals <- resolveDictionaryColumn (`Map.lookup` dictMap) raw
   if dbIsDelta db
     then case Map.lookup did dictMap of
       Nothing -> Right (Map.insert did vals dictMap)

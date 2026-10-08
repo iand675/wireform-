@@ -23,24 +23,27 @@ that Parquet and ORC readers in wireform can target.
 
 ## Basic usage
 
-Define a record type, build a `Table`, and round-trip through IPC bytes:
+Define a record type, build a `Table`, encode a vector of records to an
+Arrow IPC stream with `Arrow.Stream`, and decode it back:
 
 ```haskell
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Trades where
 
 import Arrow.Record
-import Arrow.IPC (encodeIPCMessage, decodeIPCMessage)
-import Arrow.Types (Message(..), RecordBatch(..))
-import GHC.Generics (Generic)
+import Arrow.Stream (decodeArrowStream, defaultWriteOptions, encodeArrowStream)
+import Data.ByteString (ByteString)
+import Data.Int (Int32)
 import Data.Text (Text)
+import qualified Data.Vector as V
 
 data Trade = Trade
   { tradeSym  :: !Text
   , tradeQty  :: !Int32
   , tradeNote :: !(Maybe Text)
   }
-  deriving stock (Show, Eq, Generic)
+  deriving stock (Show, Eq)
 
 tradeTable :: Table Trade
 tradeTable = table enc dec
@@ -55,29 +58,45 @@ tradeTable = table enc dec
         <*> columnD "qty"  int32D
         <*> columnD "note" (nullableD utf8D)
 
+-- | One record batch in an IPC stream. 'Left' when the columns do not
+-- fit the schema (they always do for a 'Table').
+encodeTrades :: V.Vector Trade -> Either String ByteString
+encodeTrades trades =
+  let (schema, columns) = encodeTable tradeTable trades
+  in encodeArrowStream defaultWriteOptions schema [columns]
+
+-- | Every record of every batch in the stream.
+decodeTrades :: ByteString -> Either String (V.Vector Trade)
+decodeTrades bytes = do
+  (schema, batches) <- decodeArrowStream bytes
+  V.concat <$> traverse (decodeTable tradeTable schema) batches
+
 roundTripTrades :: V.Vector Trade -> Either String (V.Vector Trade)
-roundTripTrades trades = do
-  let batches = encodeTable tradeTable trades
-  msg <- decodeIPCMessage (encodeIPCMessage (RecordBatch (head batches)))
-  case msg of
-    RecordBatch rb -> decodeTable tradeTable rb
-    _              -> Left "expected RecordBatch message"
+roundTripTrades trades = encodeTrades trades >>= decodeTrades
 ```
+
+`encodeArrowFile` / `decodeArrowFile` do the same for the Arrow file
+format. The writers check every batch against the schema and return
+`Left` for a mismatch, or for dictionaries they cannot write (an
+emit-once dictionary larger than its index type can address).
 
 Project column batches down to a subset of fields when the full schema is
 larger than what your query needs:
 
 ```haskell
-import Arrow.Record (projectTable, subsetTable)
+{-# LANGUAGE OverloadedStrings #-}
+import Arrow.Column (ColumnArray)
+import Arrow.Record (projectTable)
 import Arrow.Types (Schema)
+import qualified Data.Vector as V
 
 projectSymQty :: Schema -> V.Vector ColumnArray -> Maybe (Schema, V.Vector ColumnArray)
 projectSymQty schema cols =
   projectTable ["sym", "qty"] schema cols
 ```
 
-For file-level IPC (the Arrow file format), use `Arrow.File` and
-`Arrow.Stream` to read length-prefixed message sequences.
+`Arrow.File` reads the file format and exposes the raw record batches;
+`Arrow.Stream.openStreamReader` reads a stream one batch at a time.
 
 ## Notable modules
 
@@ -89,10 +108,10 @@ For file-level IPC (the Arrow file format), use `Arrow.File` and
 | `Arrow.Record.Generic` / `Arrow.Record.TH` | Generic and TH record derivation |
 | `Arrow.Derive` | Annotation-driven deriver |
 | `Arrow.IPC` | IPC message framing encode/decode |
-| `Arrow.Stream` | Pull-based streaming IPC reader |
-| `Arrow.File` | Arrow file format reader and writer |
+| `Arrow.Stream` | Stream and file encode / decode (with dictionaries, including nested ones), pull-based streaming reader |
+| `Arrow.File` | Arrow file format readers |
 | `Arrow.FlatBufferIPC` | FlatBuffer-backed IPC metadata path |
-| `Arrow.Write` | Record batch and file writer |
+| `Arrow.Write` | `writeArrowStream` / `writeArrowFile`, column encoders, `validateColumns` |
 
 ## Compression
 
@@ -102,9 +121,16 @@ IPC remains the default for maximum interoperability.
 
 ## Performance
 
-One record batch per workload through `Arrow.Stream`, inputs built
-outside the timed region. Run with
-`cabal bench wireform-arrow:wireform-arrow-bench`.
+One record batch per workload through `Arrow.Stream`, set against
+[arrow-rs](https://crates.io/crates/arrow) 58 building the same batches
+from the same generators: `StreamWriter` into a `Vec<u8>` for encode,
+`StreamReader` with its default validation on for decode. Inputs are
+built outside the timed region. The ratio column is wireform-arrow time
+over arrow-rs time, so `2.00x` means wireform-arrow takes twice as long.
+Run both, sequentially, with
+`python3 scripts/run-benchmarks.py --only arrow`; the harnesses are
+`wireform-arrow/bench/Bench.hs` and
+`interop/arrow-rs/benches/arrow_ipc.rs`.
 
 ### Encode/decode, 100k rows
 
@@ -619,5 +645,9 @@ outside the timed region. Run with
 <sub>Last run 2026-10-07 23:32:59 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:arrow-api-paths -->
 
-Comparisons against pyarrow, arrow-rs, and arrow-cpp are not yet
+The entry-point rows map to the closest arrow-rs path: `StreamWriter`
+for both stream writers, `FileReader` for both file readers, and for the
+typed rows a `Vec` of row structs turned into one array per field (or
+read back into owned row structs), since arrow-rs has no record
+deriving. Comparisons against pyarrow and arrow-cpp are not yet
 measured.

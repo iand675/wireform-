@@ -15,12 +15,13 @@ module Arrow.Write.Columns (
   encodeNullBitmap,
 
   -- * Column-tree encoding
+  validateColumns,
   encodeColumns,
   emptyBuildAcc,
   BuildAcc (..),
 ) where
 
-import Arrow.Column (ColumnArray (..), columnLength)
+import Arrow.Column (ColumnArray (..), columnLength, isNullableColumn)
 import Arrow.Types
 import Data.Bits (complement, shiftL, (.&.), (.|.))
 import Data.ByteString (ByteString)
@@ -339,9 +340,243 @@ countNulls = V.foldl' (\c x -> case x of Nothing -> c + 1; Just _ -> c) 0
 -- * Column encoding (DFS preorder, matching Arrow spec)
 
 
+{- | Lay the columns out for the fields. The columns must agree with the
+fields (see 'validateColumns'); this function does not check.
+-}
 encodeColumns :: V.Vector Field -> V.Vector ColumnArray -> BuildAcc -> BuildAcc
 encodeColumns fields cols acc =
   V.ifoldl' (\a i f -> encodeCol f (V.unsafeIndex cols i) a) acc fields
+
+
+{- | Check that a batch agrees with the schema fields before it is
+encoded: one column per field, every column with the same row count,
+and every column (recursively) of its field's shape:
+
+* the constructor matches the field type (integer width and
+  signedness, float precision, date / time / interval unit class,
+  decimal precision and scale, fixed widths, list size), and a
+  dictionary-encoded field holds a 'ColDictionary' /
+  'ColDictionaryMaybe' with the field's dictionary id whose values
+  match the value type;
+* a nullable (@*Maybe@) column sits under a nullable field (a
+  non-nullable column under a nullable field is fine: every row is
+  valid);
+* nested columns have one child per child field, struct children have
+  exactly the struct's row count, a fixed-size list child has exactly
+  @rows * size@ elements, list and map offsets lie inside the child,
+  validity vectors, offsets and sizes have the row count, and sparse
+  union children cover every row.
+
+Only lengths and constructors are inspected; no per-row work.
+-}
+validateColumns :: V.Vector Field -> V.Vector ColumnArray -> Either String ()
+validateColumns fields cols
+  | V.length fields /= V.length cols =
+      Left
+        ( "Arrow.Write: batch has "
+            ++ show (V.length cols)
+            ++ " columns, the schema has "
+            ++ show (V.length fields)
+            ++ " fields"
+        )
+  | otherwise = do
+      let !n = if V.null cols then 0 else columnLength (V.head cols)
+      case V.findIndex (\c -> columnLength c /= n) cols of
+        Just i ->
+          Left
+            ( "Arrow.Write: column "
+                ++ show (fieldName (V.unsafeIndex fields i))
+                ++ " has "
+                ++ show (columnLength (V.unsafeIndex cols i))
+                ++ " rows, the first column has "
+                ++ show n
+            )
+        Nothing -> V.zipWithM_ (checkField []) fields cols
+
+
+-- | One column against its field; @path0@ names the enclosing fields (innermost first).
+checkField :: [Text] -> Field -> ColumnArray -> Either String ()
+checkField path0 f col = case fieldDictionary f of
+  Just de -> case col of
+    ColDictionary did _ vals -> dict de did vals
+    ColDictionaryMaybe did _ vals
+      | not (fieldNullable f) -> bad "nullable dictionary column under a non-nullable field"
+      | otherwise -> dict de did vals
+    _ -> mismatch
+  Nothing
+    | isNullableColumn col && not (fieldNullable f) && hasValidity ->
+        bad ("nullable column " ++ tagOf col ++ " under a non-nullable field")
+    | otherwise -> shape
+  where
+    path = fieldName f : path0
+    bad msg = Left ("Arrow.Write: column " ++ show (T.intercalate "." (reverse path)) ++ ": " ++ msg)
+    mismatch = bad ("field type " ++ show (fieldType f) ++ " cannot hold a " ++ tagOf col ++ " column")
+    ok = Right ()
+    expect cond msg = if cond then ok else bad msg
+    hasValidity = case fieldType f of
+      ANull -> False
+      AUnion _ _ -> False
+      ARunEndEncoded -> False
+      _ -> True
+    kids = fieldChildren f
+    dict de did vals
+      | did /= deId de = bad ("dictionary id " ++ show did ++ ", the field declares " ++ show (deId de))
+      | otherwise = checkField path0 f {fieldDictionary = Nothing, fieldNullable = isNullableColumn vals} vals
+    one k = case V.toList kids of
+      [c] -> k c
+      _ -> bad (show (fieldType f) ++ " field must have exactly one child")
+    rows what n m = expect (n == m) (what ++ " has " ++ show m ++ " entries for " ++ show n ++ " rows")
+    offsets :: (Integral o, VP.Prim o) => Maybe Int -> VP.Vector o -> Int -> Either String ()
+    offsets mrows offs childLen
+      | VP.null offs = bad "offsets are empty (a list needs rows + 1 offsets)"
+      | Just r <- mrows, VP.length offs /= r + 1 = bad ("has " ++ show (VP.length offs) ++ " offsets for " ++ show r ++ " rows")
+      | VP.head offs < 0 = bad "offsets start below zero"
+      | toInteger (VP.last offs) > toInteger childLen =
+          bad ("offsets end at " ++ show (toInteger (VP.last offs)) ++ ", the child has " ++ show childLen ++ " rows")
+      | otherwise = ok
+    listOf mrows offs c = one $ \cf -> offsets mrows offs (columnLength c) >> checkField path cf c
+    viewOf mrows offs sizes c = one $ \cf -> do
+      rows "sizes" (VP.length offs) (VP.length sizes)
+      maybe ok (\r -> rows "offsets" r (VP.length offs)) mrows
+      checkField path cf c
+    struct n cs
+      | V.length cs /= V.length kids =
+          bad ("struct column has " ++ show (V.length cs) ++ " children, the field has " ++ show (V.length kids))
+      | otherwise =
+          V.zipWithM_
+            ( \cf (_, c) -> do
+                expect
+                  (columnLength c == n)
+                  ("struct child " ++ show (fieldName cf) ++ " has " ++ show (columnLength c) ++ " rows, the struct has " ++ show n)
+                checkField path cf c
+            )
+            kids
+            cs
+    fixed w w' n c
+      | w /= w' = mismatch
+      | otherwise = one $ \cf -> do
+          expect
+            (columnLength c == n * w)
+            ("fixed-size list child has " ++ show (columnLength c) ++ " elements, " ++ show n ++ " rows of size " ++ show w ++ " need " ++ show (n * w))
+          checkField path cf c
+    mapOf mrows offs k v = case V.toList kids of
+      [entries] | [kf, vf] <- V.toList (fieldChildren entries) -> do
+        expect (columnLength k == columnLength v) ("map keys have " ++ show (columnLength k) ++ " rows, values " ++ show (columnLength v))
+        offsets mrows offs (columnLength k)
+        checkField (fieldName entries : path) kf k
+        checkField (fieldName entries : path) vf v
+      _ -> bad "map field must have one entries struct child with key and value"
+    union cs extra
+      | V.length cs /= V.length kids =
+          bad ("union column has " ++ show (V.length cs) ++ " children, the field has " ++ show (V.length kids))
+      | otherwise = V.zipWithM_ (\cf c -> extra cf c >> checkField path cf c) kids cs
+    shape = case (fieldType f, col) of
+      (ANull, ColNull _) -> ok
+      (AInt 8 True, ColInt8 _) -> ok
+      (AInt 8 True, ColInt8Maybe _) -> ok
+      (AInt 16 True, ColInt16 _) -> ok
+      (AInt 16 True, ColInt16Maybe _) -> ok
+      (AInt 32 True, ColInt32 _) -> ok
+      (AInt 32 True, ColInt32Maybe _) -> ok
+      (AInt 64 True, ColInt64 _) -> ok
+      (AInt 64 True, ColInt64Maybe _) -> ok
+      (AInt 8 False, ColUInt8 _) -> ok
+      (AInt 8 False, ColUInt8Maybe _) -> ok
+      (AInt 16 False, ColUInt16 _) -> ok
+      (AInt 16 False, ColUInt16Maybe _) -> ok
+      (AInt 32 False, ColUInt32 _) -> ok
+      (AInt 32 False, ColUInt32Maybe _) -> ok
+      (AInt 64 False, ColUInt64 _) -> ok
+      (AInt 64 False, ColUInt64Maybe _) -> ok
+      (AFloatingPoint Half, ColFloat16 _) -> ok
+      (AFloatingPoint Half, ColFloat16Maybe _) -> ok
+      (AFloatingPoint Single, ColFloat _) -> ok
+      (AFloatingPoint Single, ColFloatMaybe _) -> ok
+      (AFloatingPoint DoublePrecision, ColDouble _) -> ok
+      (AFloatingPoint DoublePrecision, ColDoubleMaybe _) -> ok
+      (ABool, ColBool _) -> ok
+      (ABool, ColBoolMaybe _) -> ok
+      (AUtf8, ColUtf8 _) -> ok
+      (AUtf8, ColUtf8Maybe _) -> ok
+      (ABinary, ColBinary _) -> ok
+      (ABinary, ColBinaryMaybe _) -> ok
+      (ALargeUtf8, ColLargeUtf8 _) -> ok
+      (ALargeUtf8, ColLargeUtf8Maybe _) -> ok
+      (ALargeBinary, ColLargeBinary _) -> ok
+      (ALargeBinary, ColLargeBinaryMaybe _) -> ok
+      (AUtf8View, ColUtf8View _) -> ok
+      (AUtf8View, ColUtf8ViewMaybe _) -> ok
+      (ABinaryView, ColBinaryView _) -> ok
+      (ABinaryView, ColBinaryViewMaybe _) -> ok
+      (AFixedSizeBinary w, ColFixedSizeBinary w' _) -> expect (w == w') ("fixed-size binary width " ++ show w' ++ ", the field declares " ++ show w)
+      (AFixedSizeBinary w, ColFixedSizeBinaryMaybe w' _) -> expect (w == w') ("fixed-size binary width " ++ show w' ++ ", the field declares " ++ show w)
+      (ADecimal p s, ColDecimal128 p' s' _) -> decimal p s p' s'
+      (ADecimal p s, ColDecimal128Maybe p' s' _) -> decimal p s p' s'
+      (ADecimal256 p s, ColDecimal256 p' s' _) -> decimal p s p' s'
+      (ADecimal256 p s, ColDecimal256Maybe p' s' _) -> decimal p s p' s'
+      (ADate DateDay, ColDate32 _) -> ok
+      (ADate DateDay, ColDate32Maybe _) -> ok
+      (ADate DateMillisecond, ColDate64 _) -> ok
+      (ADate DateMillisecond, ColDate64Maybe _) -> ok
+      (ATime u _, ColTime32 _) -> expect (time32 u) "time32 column for a 64-bit time unit"
+      (ATime u _, ColTime32Maybe _) -> expect (time32 u) "time32 column for a 64-bit time unit"
+      (ATime u _, ColTime64 _) -> expect (not (time32 u)) "time64 column for a 32-bit time unit"
+      (ATime u _, ColTime64Maybe _) -> expect (not (time32 u)) "time64 column for a 32-bit time unit"
+      (ATimestamp _ _, ColTimestamp _) -> ok
+      (ATimestamp _ _, ColTimestampMaybe _) -> ok
+      (ADuration _, ColDuration _) -> ok
+      (ADuration _, ColDurationMaybe _) -> ok
+      (AInterval YearMonth, ColIntervalYearMonth _) -> ok
+      (AInterval YearMonth, ColIntervalYearMonthMaybe _) -> ok
+      (AInterval DayTime, ColIntervalDayTime d m) -> rows "interval milliseconds" (VP.length d) (VP.length m)
+      (AInterval DayTime, ColIntervalDayTimeMaybe _) -> ok
+      (AInterval MonthDayNano, ColIntervalMonthDayNano m d ns) ->
+        rows "interval days" (VP.length m) (VP.length d) >> rows "interval nanoseconds" (VP.length m) (VP.length ns)
+      (AInterval MonthDayNano, ColIntervalMonthDayNanoMaybe _) -> ok
+      (AStruct, ColStruct n cs) -> struct n cs
+      (AStruct, ColStructMaybe v cs) -> struct (V.length v) cs
+      (AList, ColList o c) -> listOf Nothing o c
+      (AList, ColListMaybe v o c) -> listOf (Just (V.length v)) o c
+      (ALargeList, ColLargeList o c) -> listOf Nothing o c
+      (ALargeList, ColLargeListMaybe v o c) -> listOf (Just (V.length v)) o c
+      (AFixedSizeList w, ColFixedSizeList w' n c) -> fixed w w' n c
+      (AFixedSizeList w, ColFixedSizeListMaybe w' v c) -> fixed w w' (V.length v) c
+      (AMap _, ColMap o k v) -> mapOf Nothing o k v
+      (AMap _, ColMapMaybe valid o k v) -> mapOf (Just (V.length valid)) o k v
+      (AListView, ColListView o s c) -> viewOf Nothing o s c
+      (AListView, ColListViewMaybe v o s c) -> viewOf (Just (V.length v)) o s c
+      (ALargeListView, ColLargeListView o s c) -> viewOf Nothing o s c
+      (ALargeListView, ColLargeListViewMaybe v o s c) -> viewOf (Just (V.length v)) o s c
+      (AUnion Dense _, ColDenseUnion ts offs cs) -> do
+        rows "dense union offsets" (VP.length ts) (VP.length offs)
+        union cs (\_ _ -> ok)
+      (AUnion Sparse _, ColSparseUnion ts cs) ->
+        union cs $ \cf c ->
+          expect
+            (columnLength c >= VP.length ts)
+            ("sparse union child " ++ show (fieldName cf) ++ " has " ++ show (columnLength c) ++ " rows, the union has " ++ show (VP.length ts))
+      (ARunEndEncoded, ColRunEndEncoded re vals) -> case V.toList kids of
+        [rf, vf] -> do
+          expect
+            (columnLength vals >= runCount re)
+            ("run-end-encoded column has " ++ show (runCount re) ++ " runs but " ++ show (columnLength vals) ++ " values")
+          checkField path rf re
+          checkField path vf vals
+        _ -> bad "run-end-encoded field must have two children (run_ends, values)"
+      _ -> mismatch
+    decimal p s p' s' =
+      expect (p == p' && s == s') ("decimal(" ++ show p' ++ ", " ++ show s' ++ "), the field declares decimal(" ++ show p ++ ", " ++ show s ++ ")")
+    time32 u = u == Second || u == Millisecond
+    runCount = \case
+      ColInt16 v -> VP.length v
+      ColInt32 v -> VP.length v
+      ColInt64 v -> VP.length v
+      _ -> 0
+
+
+-- | Constructor name of a column, for error messages.
+tagOf :: ColumnArray -> String
+tagOf = takeWhile (/= ' ') . show
 
 
 {- | Encode one column (depth-first preorder per the Arrow IPC spec).
@@ -462,12 +697,8 @@ encodeCol f col acc = case col of
   -- ============================================================
   -- Nested columns
   -- ============================================================
-  ColStruct children ->
-    let !n =
-          if V.null children
-            then 0
-            else fromIntegral (columnLength (snd (V.head children))) :: Int64
-        acc1 = addFieldNode n 0 acc
+  ColStruct n children ->
+    let acc1 = addFieldNode (fromIntegral n) 0 acc
         childFields = fieldChildren f
     in V.ifoldl' (\a i (_, cc) -> encodeCol (V.unsafeIndex childFields i) cc a) acc1 children
   ColStructMaybe validity children ->
@@ -508,10 +739,8 @@ encodeCol f col acc = case col of
   -- the schema's FixedSizeList type, and the child array is exactly
   -- @parentLen * size@ long. We emit a single FieldNode for the
   -- parent then recurse into the child.
-  ColFixedSizeList w child ->
-    let !listLen = max 1 w
-        !parentLen = fromIntegral (columnLength child `quot` listLen) :: Int64
-        acc1 = addFieldNode parentLen 0 acc
+  ColFixedSizeList _ n child ->
+    let acc1 = addFieldNode (fromIntegral n) 0 acc
         childField = childFieldAt f 0
     in encodeCol childField child acc1
   ColFixedSizeListMaybe _ validity child ->

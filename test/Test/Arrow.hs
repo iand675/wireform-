@@ -528,7 +528,7 @@ columnTests =
             Left e -> expectationFailure e
             Right cols ->
               V.head cols
-                `shouldBe` ColStruct
+                `shouldBe` ColStruct 2
                   ( V.fromList
                       [ ("x", ColInt32 (VP.fromList [1, 2]))
                       , ("y", ColInt32 (VP.fromList [3, 4]))
@@ -603,7 +603,7 @@ writeRoundtrips =
                   }
               vals = VP.fromList [1, 2, 3, 4, 5] :: VP.Vector Int32
               cols = V.singleton (ColInt32 vals)
-              streamBs = writeArrowStream schema (V.singleton cols)
+          streamBs <- either (\e -> expectationFailure e >> pure BS.empty) pure (writeArrowStream schema (V.singleton cols))
           case readIPCMessage streamBs 0 of
             Left e -> expectationFailure e
             Right (SchemaMessage s, _, next) -> do
@@ -633,8 +633,7 @@ writeRoundtrips =
                   [ ColInt32 (VP.fromList [10, 20, 30])
                   , ColBool (V.fromList [True, False, True])
                   ]
-              streamBs = writeArrowStream schema (V.singleton batch1)
-          case readArrowStream streamBs of
+          case writeArrowStream schema (V.singleton batch1) >>= readArrowStream of
             Left e -> expectationFailure e
             Right as -> do
               asSchema as `shouldBe` schema
@@ -663,8 +662,7 @@ writeRoundtrips =
                   , arrowFeatures = V.empty
                   }
               batch1 = V.singleton (ColInt32 (VP.fromList [100, 200, 300]))
-              fileBs = writeArrowFile schema (V.singleton batch1)
-          case readArrowFileColumns fileBs of
+          case writeArrowFile schema (V.singleton batch1) >>= readArrowFileColumns of
             Left e -> expectationFailure e
             Right (readSchema, readBatches) -> do
               readSchema `shouldBe` schema

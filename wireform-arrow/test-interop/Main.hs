@@ -27,7 +27,7 @@ needed), for other readers such as @interop/arrow-rs@.
 -}
 module Main (main) where
 
-import Arrow.Column (ColumnArray (..))
+import Arrow.Column (ColumnArray (..), expandDictionary)
 import Arrow.Stream (
   DictHandling (..),
   WriteOptions (..),
@@ -61,7 +61,7 @@ import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.List (sortOn, stripPrefix)
 import Data.Either (partitionEithers)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust, mapMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Vector qualified as V
@@ -272,8 +272,8 @@ structCases =
   [ simple
       "struct"
       (field "x" False AStruct kids)
-      [ ColStruct (V.fromList [("i", i32 [1, 2, 3]), ("s", utf8m [Just "a", Nothing, Just "c"])])
-      , ColStruct (V.fromList [("i", i32 [4]), ("s", utf8m [Just "d"])])
+      [ ColStruct 3 (V.fromList [("i", i32 [1, 2, 3]), ("s", utf8m [Just "a", Nothing, Just "c"])])
+      , ColStruct 1 (V.fromList [("i", i32 [4]), ("s", utf8m [Just "d"])])
       ]
   , simple
       "struct_nullable"
@@ -283,6 +283,12 @@ structCases =
           (V.fromList [("i", i32 [1, 0, 2, 3]), ("s", utf8m [Just "a", Nothing, Nothing, Just "c"])])
       , ColStructMaybe (V.fromList [True]) (V.fromList [("i", i32 [4]), ("s", utf8m [Just "d"])])
       ]
+  , -- pa.struct([]): the row count is all a fieldless struct carries.
+    simple "struct_empty" (field "x" False AStruct []) [ColStruct 3 V.empty, ColStruct 1 V.empty]
+  , simple
+      "struct_empty_nullable"
+      (field "x" True AStruct [])
+      [ColStructMaybe (bools [True, False, True, True]) V.empty, ColStructMaybe (bools [True]) V.empty]
   ]
   where
     kids = [field "i" False (AInt 32 True) [], field "s" True AUtf8 []]
@@ -317,8 +323,8 @@ listCases =
   , simple
       "fixed_size_list_int16_3"
       (field "x" False (AFixedSizeList 3) [item (AInt 16 True)])
-      [ ColFixedSizeList 3 (i16m [Just 1, Just 2, Just 3, Just 4, Nothing, Just 6])
-      , ColFixedSizeList 3 (i16m [Just 7, Just 8, Just 9])
+      [ ColFixedSizeList 3 2 (i16m [Just 1, Just 2, Just 3, Just 4, Nothing, Just 6])
+      , ColFixedSizeList 3 1 (i16m [Just 7, Just 8, Just 9])
       ]
   , simple
       "fixed_size_list_int16_3_nullable"
@@ -326,6 +332,15 @@ listCases =
       [ ColFixedSizeListMaybe 3 (bools [True, False, True]) (i16m [Just 1, Just 2, Just 3, Nothing, Nothing, Nothing, Just 4, Nothing, Just 6])
       , ColFixedSizeListMaybe 3 (bools [True]) (i16m [Just 7, Just 8, Just 9])
       ]
+  , -- pa.list_(pa.int32(), 0): rows of zero elements over an empty child.
+    simple
+      "fixed_size_list_int32_0"
+      (field "x" False (AFixedSizeList 0) [item (AInt 32 True)])
+      [ColFixedSizeList 0 3 (i32m []), ColFixedSizeList 0 2 (i32m [])]
+  , simple
+      "fixed_size_list_int32_0_nullable"
+      (field "x" True (AFixedSizeList 0) [item (AInt 32 True)])
+      [ColFixedSizeListMaybe 0 (bools [True, False, True, True]) (i32m []), ColFixedSizeListMaybe 0 (bools [True, True]) (i32m [])]
   , simple
       "map_utf8_int32"
       (field "x" False (AMap False) [entries])
@@ -457,9 +472,34 @@ dictCases =
   , simple
       "dict_in_struct"
       (field "x" False AStruct [dictField "d" True AUtf8 0 i32t])
-      [ ColStruct (V.singleton ("d", ColDictionaryMaybe 0 (V.fromList [Just 2, Just 0, Just 1]) abc))
-      , ColStruct (V.singleton ("d", ColDictionaryMaybe 0 (V.fromList [Just 1]) abc))
+      [ ColStruct 3 (V.singleton ("d", ColDictionaryMaybe 0 (V.fromList [Just 2, Just 0, Just 1]) abc))
+      , ColStruct 1 (V.singleton ("d", ColDictionaryMaybe 0 (V.fromList [Just 1]) abc))
       ]
+  , -- Dictionaries nested in dictionary values. pyarrow numbers dictionary
+    -- ids in schema pre-order, so the outer dictionary is 0 and the inner 1.
+    simple
+      "dict_struct_of_dict"
+      (nestedDict "x" False AStruct (dictField "d" True AUtf8 1 (AInt 16 True)) (AInt 8 True))
+      [ColDictionary 0 (ix [2, 0, 1, 0]) (structOfDict [1, 0, 2] abc), ColDictionary 0 (ix [1]) (structOfDict [1, 0, 2] abc)]
+  , simple
+      "dict_list_of_dict"
+      (nestedDict "x" True AList (dictField "item" True AUtf8 1 (AInt 8 True)) i32t)
+      [ ColDictionaryMaybe 0 (V.fromList [Just 1, Nothing, Just 0, Just 2]) listOfDict
+      , ColDictionaryMaybe 0 (V.fromList [Just 2]) listOfDict
+      ]
+  , -- The inner dictionary changes between batches, so both dictionaries are replaced.
+    (simple
+      "dict_nested_replacement"
+      (nestedDict "x" False AStruct (dictField "d" True AUtf8 1 (AInt 16 True)) (AInt 8 True))
+      [ColDictionary 0 (ix [0, 1]) (structOfDict [0, 1] abc), ColDictionary 0 (ix [1, 0]) (structOfDict [0, 0] xy)])
+      { caseStreamOnly = True
+      , caseReplaceDicts = True
+      }
+  , -- A nullable dictionary column whose rows are all null over an empty dictionary.
+    simple
+      "dict_all_null_empty"
+      (dictField "x" True AUtf8 0 i32t)
+      [ColDictionaryMaybe 0 (V.replicate 3 Nothing) (ColUtf8 V.empty), ColDictionaryMaybe 0 (V.replicate 1 Nothing) (ColUtf8 V.empty)]
   ]
   where
     i32t = AInt 32 True
@@ -467,6 +507,10 @@ dictCases =
     xy = ColUtf8 (V.fromList ["x", "y"])
     ab = ColUtf8 (V.fromList ["a", "b"])
     xyz = ColUtf8 (V.fromList ["x", "y", "z"])
+    nestedDict n nullable container inner indexTy =
+      Field n nullable container (V.singleton inner) (Just (DictionaryEncoding 0 indexTy False)) V.empty
+    structOfDict inner vals = ColStruct (length inner) (V.singleton ("d", ColDictionaryMaybe 1 (V.fromList (map Just inner)) vals))
+    listOfDict = ColList (VP.fromList [0, 2, 2, 3]) (ColDictionaryMaybe 1 (V.fromList [Just 0, Just 1, Just 1]) xy)
 
 
 reeCases :: [Case]
@@ -702,8 +746,8 @@ rowsOf f col = case col of
   ColIntervalYearMonthMaybe v -> Right (mints v)
   ColIntervalDayTimeMaybe v -> Right (opt (uncurry dayTime) v)
   ColIntervalMonthDayNanoMaybe v -> Right (opt monthDayNano v)
-  ColStruct cs -> structRows Nothing cs
-  ColStructMaybe valid cs -> structRows (Just valid) cs
+  ColStruct n cs -> structRows Nothing n cs
+  ColStructMaybe valid cs -> structRows (Just valid) (V.length valid) cs
   ColList offs c -> do
     cr <- childRows 0 c
     offsetLists Nothing (map fromIntegral (VP.toList offs)) cr
@@ -716,9 +760,9 @@ rowsOf f col = case col of
   ColLargeListMaybe valid offs c -> do
     cr <- childRows 0 c
     offsetLists (Just valid) (map fromIntegral (VP.toList offs)) cr
-  ColFixedSizeList w c -> do
+  ColFixedSizeList w n c -> do
     cr <- childRows 0 c
-    fixedLists Nothing w (if w > 0 then V.length cr `div` w else 0) cr
+    fixedLists Nothing w n cr
   ColFixedSizeListMaybe w valid c -> do
     cr <- childRows 0 c
     fixedLists (Just valid) w (V.length valid) cr
@@ -787,9 +831,8 @@ rowsOf f col = case col of
     typeCode t = case fieldType f of
       AUnion _ codes | not (V.null codes) -> fromMaybe (-1) (codes V.!? fromIntegral t)
       _ -> fromIntegral t
-    structRows valid cs = do
+    structRows valid n cs = do
       crs <- V.imapM (\i (nm, c) -> (,) nm <$> childRows i c) cs
-      let n = maybe (if V.null crs then 0 else V.length (snd (V.head crs))) V.length valid
       V.generateM n $ \j ->
         if validAt valid j
           then LStruct . V.toList <$> traverse (\(nm, rs) -> (,) nm <$> at rs j) crs
@@ -824,7 +867,10 @@ normaliseSchema s =
     sortMeta = V.fromList . sortOn fst . V.toList
 
 
--- | Compare a decoded file with the case's expectation.
+{- | Compare a decoded file with the case's expectation. Top-level
+dictionary columns must also expand ('expandDictionary') to the same
+rows.
+-}
 compareDecoded :: Case -> Schema -> [V.Vector ColumnArray] -> Either String ()
 compareDecoded c sch batches = do
   unless (normaliseSchema sch == normaliseSchema (caseSchema c)) $
@@ -841,6 +887,11 @@ compareDecoded c sch batches = do
       wr <- either (\e -> Left (ctx ++ "expected column is malformed: " ++ e)) Right (rowsOf fl w)
       unless (gr == wr) $
         Left (ctx ++ "got " ++ show (V.toList gr) ++ " want " ++ show (V.toList wr) ++ " (decoded " ++ show g ++ ")")
+      when (isJust (fieldDictionary fl)) $ do
+        expanded <- either (\e -> Left (ctx ++ "expandDictionary failed: " ++ e)) Right (expandDictionary g)
+        er <- either (\e -> Left (ctx ++ "expanded column is malformed: " ++ e)) Right (rowsOf fl {fieldDictionary = Nothing} expanded)
+        unless (er == gr) $
+          Left (ctx ++ "expanded rows " ++ show (V.toList er) ++ " differ from " ++ show (V.toList gr))
 
 
 -- ============================================================
@@ -908,11 +959,12 @@ writeHaskellFiles dir = do
           (base ++ ".arrows", encodeArrowStream opts (caseSchema c) (caseBatches c))
             : if caseStreamOnly c then [] else [(base ++ ".arrow", encodeArrowFile opts (caseSchema c) (caseBatches c))]
     forM outputs $ \(name, bytes) -> do
-      r <- try (evaluate (force bytes)) :: IO (Either SomeException ByteString)
+      r <- try (evaluate (force bytes)) :: IO (Either SomeException (Either String ByteString))
       case r of
-        Right bs -> do
+        Right (Right bs) -> do
           BS.writeFile (dir </> name) bs
           pure (Right name)
+        Right (Left e) -> pure (Left (name, "wireform-arrow encoder rejected the case: " ++ e))
         Left e -> pure (Left (name, "wireform-arrow encoder threw: " ++ show e))
   let (failures, written) = partitionEithers (concat (concat results))
   pure (written, failures)

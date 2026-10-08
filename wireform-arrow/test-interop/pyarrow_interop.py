@@ -366,6 +366,8 @@ def build_cases() -> None:
     st = pa.struct([pa.field("i", pa.int32(), nullable=False), pa.field("s", pa.utf8())])
     rows = [{"i": 1, "s": "a"}, {"i": 2, "s": None}, {"i": 3, "s": "c"}]
     scalar("struct", st, rows[:1] + [None] + rows[1:], [{"i": 4, "s": "d"}])
+    # A struct with no fields: only the row count (and validity) is on the wire.
+    scalar("struct_empty", pa.struct([]), [{}, None, {}, {}], [{}])
 
     scalar(
         "list_int32",
@@ -385,6 +387,8 @@ def build_cases() -> None:
         [[1, 2, 3], None, [4, None, 6]],
         [[7, 8, 9]],
     )
+    # fixed_size_list<int32, 0>: every row is empty, the child has no elements.
+    scalar("fixed_size_list_int32_0", pa.list_(pa.int32(), 0), [[], None, [], []], [[], []])
     scalar(
         "map_utf8_int32",
         pa.map_(pa.utf8(), pa.int32()),
@@ -530,6 +534,56 @@ def build_cases() -> None:
                 batch1(sd, pa.StructArray.from_arrays([dict_arr([2, 0, 1], abc)], fields=[pa.field("d", dt)])),
                 batch1(sd, pa.StructArray.from_arrays([dict_arr([1], abc)], fields=[pa.field("d", dt)])),
             ],
+        )
+    )
+
+    # Dictionaries nested in dictionary values. pyarrow numbers dictionary
+    # ids in schema pre-order: the outer dictionary is 0, the inner one 1.
+    inner_t = pa.dictionary(pa.int16(), pa.utf8())
+
+    def struct_of_dict(indices, inner_indices, inner_values):
+        values = pa.StructArray.from_arrays(
+            [dict_arr(inner_indices, inner_values, pa.int16())], fields=[pa.field("d", inner_t)]
+        )
+        return dict_arr(indices, values, pa.int8())
+
+    so = schema1("x", pa.dictionary(pa.int8(), pa.struct([pa.field("d", inner_t)])), False)
+    add(
+        Case(
+            "dict_struct_of_dict",
+            so,
+            [
+                batch1(so, struct_of_dict([2, 0, 1, 0], [1, 0, 2], abc)),
+                batch1(so, struct_of_dict([1], [1, 0, 2], abc)),
+            ],
+        )
+    )
+    list_values = pa.ListArray.from_arrays(pa.array([0, 2, 2, 3], pa.int32()), dict_arr([0, 1, 1], xy, pa.int8()))
+    sl = schema1("x", pa.dictionary(pa.int32(), list_values.type), True)
+    add(
+        Case(
+            "dict_list_of_dict",
+            sl,
+            [batch1(sl, dict_arr([1, None, 0, 2], list_values)), batch1(sl, dict_arr([2], list_values))],
+        )
+    )
+    # The inner dictionary changes between batches, so both are replaced.
+    add(
+        Case(
+            "dict_nested_replacement",
+            so,
+            [batch1(so, struct_of_dict([0, 1], [0, 1], abc)), batch1(so, struct_of_dict([1, 0], [0, 0], xy))],
+            stream_only=True,
+        )
+    )
+    # A nullable dictionary column whose rows are all null may reference an
+    # empty dictionary.
+    empty = pa.array([], pa.utf8())
+    add(
+        Case(
+            "dict_all_null_empty",
+            sn,
+            [batch1(sn, dict_arr([None, None, None], empty)), batch1(sn, dict_arr([None], empty))],
         )
     )
 

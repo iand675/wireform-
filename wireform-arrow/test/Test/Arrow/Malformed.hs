@@ -121,21 +121,23 @@ schemaOf fs = Schema (V.fromList fs) Little V.empty V.empty
 
 -- | Every shape is encoded as a stream and as a file by the high-level
 -- writer, uncompressed and with each body-compression codec; the flat
--- shapes also go through 'Arrow.Write'.
+-- shapes also go through 'Arrow.Write'. The shapes match their
+-- schemas, so an encoder 'Left' is a bug in the corpus and aborts.
 builtCorpus :: [Seed]
 builtCorpus = concatMap encodeShape shapes ++ concatMap viaWrite (take 2 shapes)
   where
     encodeShape (nm, sch, batches) = concatMap (encodeWith nm sch batches) codecs
     encodeWith nm sch batches (suffix, codec) =
       let opts = defaultWriteOptions {writeBodyCompression = codec}
-      in [ Seed (nm ++ suffix) StreamEnc (encodeArrowStream opts sch batches)
-         , Seed (nm ++ suffix) FileEnc (encodeArrowFile opts sch batches)
+      in [ Seed (nm ++ suffix) StreamEnc (built nm (encodeArrowStream opts sch batches))
+         , Seed (nm ++ suffix) FileEnc (built nm (encodeArrowFile opts sch batches))
          ]
     codecs = [("", Nothing), (" (zstd)", Just BodyZstd), (" (lz4)", Just LZ4Frame)]
     viaWrite (nm, sch, batches) =
-      [ Seed (nm ++ " via Arrow.Write") StreamEnc (Write.writeArrowStream sch (V.fromList batches))
-      , Seed (nm ++ " via Arrow.Write") FileEnc (Write.writeArrowFile sch (V.fromList batches))
+      [ Seed (nm ++ " via Arrow.Write") StreamEnc (built nm (Write.writeArrowStream sch (V.fromList batches)))
+      , Seed (nm ++ " via Arrow.Write") FileEnc (built nm (Write.writeArrowFile sch (V.fromList batches)))
       ]
+    built nm = either (\e -> error ("Test.Arrow.Malformed: shape " ++ nm ++ " does not encode: " ++ e)) id
 
 
 shapes :: [(String, Schema, [V.Vector ColumnArray])]
@@ -198,7 +200,7 @@ shapes =
         , nested "sm" True AStruct [plain "id" False (AInt 32 True), plain "flag" False ABool]
         ]
     , [ V.fromList
-          [ ColStruct (V.fromList [("id", ColInt64 (VP.fromList [1, 2, 3])), ("name", ColUtf8 (V.fromList ["a", "b", "c"]))])
+          [ ColStruct 3 (V.fromList [("id", ColInt64 (VP.fromList [1, 2, 3])), ("name", ColUtf8 (V.fromList ["a", "b", "c"]))])
           , ColStructMaybe
               (V.fromList [True, False, True])
               (V.fromList [("id", ColInt32 (VP.fromList [1, 2, 3])), ("flag", ColBool (V.fromList [True, False, True]))])
@@ -217,7 +219,7 @@ shapes =
           [ ColList (VP.fromList [0, 2, 2, 5]) (ColInt32 (VP.fromList [10, 20, 30, 40, 50]))
           , ColListMaybe (V.fromList [True, False, True]) (VP.fromList [0, 1, 1, 3]) (ColInt32 (VP.fromList [7, 8, 9]))
           , ColLargeList (VP.fromList [0, 1, 3, 3]) (ColUtf8 (V.fromList ["p", "q", "r"]))
-          , ColFixedSizeList 2 (ColInt32 (VP.fromList [1, 2, 3, 4, 5, 6]))
+          , ColFixedSizeList 2 3 (ColInt32 (VP.fromList [1, 2, 3, 4, 5, 6]))
           , ColFixedSizeListMaybe 2 (V.fromList [True, False, True]) (ColInt32 (VP.fromList [1, 2, 3, 4, 5, 6]))
           ]
       ]

@@ -169,7 +169,7 @@ structSch =
 structBatches :: [V.Vector AC.ColumnArray]
 structBatches =
   [ V.singleton
-      ( AC.ColStruct
+      ( AC.ColStruct 3
           ( V.fromList
               [ ("i", AC.ColInt64 (VP.fromList [1, 2, 3 :: Int64]))
               , ("n", AC.ColUtf8 (V.fromList ["a", "b", "c"]))

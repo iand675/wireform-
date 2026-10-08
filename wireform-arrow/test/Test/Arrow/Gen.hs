@@ -9,9 +9,13 @@ patterns all reduce to the same row values).
 
 Generated schemas cover every 'ArrowType' the codec supports, nullable
 and not, nested to depth 3, with dictionary-encoded fields over every
-index type. Generated column batches respect the reader/writer
-conventions: a nullable field gets the @*Maybe@ constructor, unions and
-run-end-encoded fields have no validity, map keys are non-null.
+index type whose value types may themselves be nested and contain
+dictionary-encoded fields. Structs may have no fields and fixed-size
+lists may have size 0. Generated column batches respect the
+reader/writer conventions: a nullable field gets the @*Maybe@
+constructor, unions and run-end-encoded fields have no validity, map
+keys are non-null, and a nullable dictionary column whose rows are all
+null may reference an empty dictionary.
 -}
 module Test.Arrow.Gen (
   -- * Schemas and tables
@@ -22,6 +26,7 @@ module Test.Arrow.Gen (
   genBatchFor,
   genTable,
   genOrderableKeyField,
+  genDictionaryField,
 
   -- * Logical row model
   Value (..),
@@ -55,13 +60,39 @@ import Hedgehog.Range qualified as Range
 -- Schemas
 -- ============================================================
 
--- | A schema of 1 to 4 uniquely named top-level fields, nested up to depth 3.
+{- | A schema of 1 to 4 uniquely named top-level fields, nested up to
+depth 3, plus (in a third of the schemas) one field of a shape that
+random nesting reaches rarely (see 'genEdgeField').
+-}
 genSchema :: Gen Schema
 genSchema = do
   n <- Gen.int (Range.linear 1 4)
   fs <- forM [0 .. n - 1] $ \i -> genField 3 (T.pack ("c" ++ show i))
+  edge <- Gen.frequency [(2, pure []), (1, (: []) <$> genEdgeField (T.pack ("c" ++ show n)))]
   endian <- pure Little
-  pure (numberDictionaries (Schema (V.fromList fs) endian V.empty V.empty))
+  pure (numberDictionaries (Schema (V.fromList (fs ++ edge)) endian V.empty V.empty))
+
+
+{- | A struct with no fields, a fixed-size list of size 0, a dictionary
+whose struct or list values contain a dictionary field, or a nullable
+dictionary (whose columns are sometimes all null over an empty
+dictionary).
+-}
+genEdgeField :: Text -> Gen Field
+genEdgeField name = do
+  nullable <- Gen.bool
+  Gen.choice
+    [ pure (Field name nullable AStruct V.empty Nothing V.empty)
+    , do
+        c <- genField 1 "item"
+        pure (Field name nullable (AFixedSizeList 0) (V.singleton c) Nothing V.empty)
+    , do
+        inner <- genDictionaryField 0 "e"
+        container <- Gen.element [AStruct, AList, ALargeList]
+        idx <- AInt <$> Gen.element [8, 16, 32, 64] <*> Gen.bool
+        pure (Field name nullable container (V.singleton inner) (Just (DictionaryEncoding 0 idx False)) V.empty)
+    , (\f -> f {fieldNullable = True}) <$> genDictionaryField 0 name
+    ]
 
 
 {- | Give every dictionary-encoded field a distinct dictionary id (in
@@ -91,7 +122,7 @@ genField depth name =
   Gen.frequency
     [ (8, genLeafField name)
     , (if depth > 0 then 6 else 0, genNestedField depth name)
-    , (2, genDictionaryField name)
+    , (2, genDictionaryField depth name)
     ]
 
 
@@ -138,7 +169,7 @@ genNestedField depth name = do
   let child = genField (depth - 1)
   Gen.choice
     [ do
-        n <- Gen.int (Range.linear 1 3)
+        n <- Gen.frequency [(1, pure 0), (3, Gen.int (Range.linear 1 3))]
         kids <- forM [0 .. n - 1] $ \i -> child (T.pack ("f" ++ show i))
         nullable <- Gen.bool
         pure (Field name nullable AStruct (V.fromList kids) Nothing V.empty)
@@ -147,7 +178,7 @@ genNestedField depth name = do
     , listLike AListView
     , listLike ALargeListView
     , do
-        w <- Gen.int (Range.linear 1 3)
+        w <- Gen.frequency [(1, pure 0), (3, Gen.int (Range.linear 1 3))]
         listLike (AFixedSizeList w)
     , do
         sorted <- Gen.bool
@@ -209,14 +240,21 @@ genOrderableKeyField name =
       ]
 
 
--- | A dictionary-encoded field over a flat value type.
-genDictionaryField :: Text -> Gen Field
-genDictionaryField name = do
-  ty <- Gen.filter (/= ANull) genFieldType
+{- | A dictionary-encoded field. The value type is flat or, while
+@depth@ allows, nested (struct, list, map, union, ...), so dictionary
+fields can sit inside dictionary values.
+-}
+genDictionaryField :: Int -> Text -> Gen Field
+genDictionaryField depth name = do
+  value <-
+    Gen.frequency
+      [ (1, leaf name False <$> Gen.filter (/= ANull) genFieldType)
+      , (if depth > 0 then 1 else 0, genNestedField depth name)
+      ]
   idx <- AInt <$> Gen.element [8, 16, 32, 64] <*> Gen.bool
   nullable <- Gen.bool
   ordered <- Gen.bool
-  pure (Field name nullable ty V.empty (Just (DictionaryEncoding 0 idx ordered)) V.empty)
+  pure value {fieldNullable = nullable, fieldDictionary = Just (DictionaryEncoding 0 idx ordered)}
 
 
 -- ============================================================
@@ -242,19 +280,25 @@ genBatchFor sch = do
   V.mapM (`genColumnFor` rows) (arrowFields sch)
 
 
--- | A column of exactly @n@ rows for the field.
+{- | A column of exactly @n@ rows for the field. A nullable dictionary
+column is sometimes all null over an empty dictionary.
+-}
 genColumnFor :: Field -> Int -> Gen ColumnArray
 genColumnFor f n = case fieldDictionary f of
   Just de -> do
-    k <- Gen.int (Range.linear 1 5)
+    emptyDict <- if fieldNullable f then Gen.frequency [(3, pure False), (1, pure True)] else pure False
+    k <- if emptyDict then pure 0 else Gen.int (Range.linear 1 5)
     valuesNullable <- if fieldType f == ANull then pure False else Gen.bool
     vals <- genColumnFor f {fieldDictionary = Nothing, fieldNullable = valuesNullable} k
-    ix <- replicateM n (Gen.int32 (Range.linear 0 (fromIntegral k - 1)))
-    if fieldNullable f
-      then do
-        mix <- forM ix $ \i -> Gen.frequency [(1, pure Nothing), (4, pure (Just i))]
-        pure (ColDictionaryMaybe (deId de) (V.fromList mix) vals)
-      else pure (ColDictionary (deId de) (VP.fromList ix) vals)
+    if emptyDict
+      then pure (ColDictionaryMaybe (deId de) (V.replicate n Nothing) vals)
+      else do
+        ix <- replicateM n (Gen.int32 (Range.linear 0 (fromIntegral k - 1)))
+        if fieldNullable f
+          then do
+            mix <- forM ix $ \i -> Gen.frequency [(1, pure Nothing), (4, pure (Just i))]
+            pure (ColDictionaryMaybe (deId de) (V.fromList mix) vals)
+          else pure (ColDictionary (deId de) (VP.fromList ix) vals)
   Nothing -> case fieldType f of
     ANull -> pure (ColNull n)
     AInt 8 True -> prim ColInt8 ColInt8Maybe genI8
@@ -308,7 +352,7 @@ genColumnFor f n = case fieldDictionary f of
       kids <- V.mapM (\c -> (,) (fieldName c) <$> genColumnFor c n) (fieldChildren f)
       if fieldNullable f
         then (\v -> ColStructMaybe v kids) <$> validity
-        else pure (ColStruct kids)
+        else pure (ColStruct n kids)
     AList -> do
       (offs, total) <- genOffsets
       c <- genColumnFor (onlyChild f) total
@@ -319,7 +363,7 @@ genColumnFor f n = case fieldDictionary f of
       withValidity (ColLargeList (VP.fromList (map fromIntegral offs)) c) (\v -> ColLargeListMaybe v (VP.fromList (map fromIntegral offs)) c)
     AFixedSizeList w -> do
       c <- genColumnFor (onlyChild f) (n * w)
-      withValidity (ColFixedSizeList w c) (\v -> ColFixedSizeListMaybe w v c)
+      withValidity (ColFixedSizeList w n c) (\v -> ColFixedSizeListMaybe w v c)
     AListView -> do
       (offs, sizes, c) <- genViews
       withValidity
@@ -537,13 +581,13 @@ hasDictionaries :: ColumnArray -> Bool
 hasDictionaries = \case
   ColDictionary {} -> True
   ColDictionaryMaybe {} -> True
-  ColStruct cs -> any (hasDictionaries . snd) cs
+  ColStruct _ cs -> any (hasDictionaries . snd) cs
   ColStructMaybe _ cs -> any (hasDictionaries . snd) cs
   ColList _ c -> hasDictionaries c
   ColListMaybe _ _ c -> hasDictionaries c
   ColLargeList _ c -> hasDictionaries c
   ColLargeListMaybe _ _ c -> hasDictionaries c
-  ColFixedSizeList _ c -> hasDictionaries c
+  ColFixedSizeList _ _ c -> hasDictionaries c
   ColFixedSizeListMaybe _ _ c -> hasDictionaries c
   ColMap _ k v -> hasDictionaries k || hasDictionaries v
   ColMapMaybe _ _ k v -> hasDictionaries k || hasDictionaries v
@@ -621,10 +665,9 @@ columnValues col = case col of
   ColIntervalDayTimeMaybe v -> m (uncurry VPair) v
   ColIntervalMonthDayNanoMaybe v -> m (\(a, b, c) -> VTriple a b c) v
   ColNull n -> Right (V.replicate n VNull)
-  ColStruct cs -> do
+  ColStruct n cs -> do
     kids <- V.mapM (traverse columnValues) cs
-    let n = if V.null kids then 0 else V.length (snd (V.head kids))
-    Right (V.generate n (\i -> VStruct (V.toList (V.map (\(nm, vs) -> (nm, vs V.! i)) kids))))
+    V.generateM n $ \i -> VStruct . V.toList <$> V.mapM (\(nm, vs) -> (,) nm <$> at "struct child row" vs i) kids
   ColStructMaybe valid cs -> do
     kids <- V.mapM (traverse columnValues) cs
     masked valid (\i -> VStruct (V.toList (V.map (\(nm, vs) -> (nm, vs V.! i)) kids)))
@@ -632,8 +675,8 @@ columnValues col = case col of
   ColListMaybe valid o c -> listRows (Just valid) (VP.map fromIntegral o) c
   ColLargeList o c -> listRows Nothing (VP.map fromIntegral o) c
   ColLargeListMaybe valid o c -> listRows (Just valid) (VP.map fromIntegral o) c
-  ColFixedSizeList w c -> fixedRows Nothing w c
-  ColFixedSizeListMaybe w valid c -> fixedRows (Just valid) w c
+  ColFixedSizeList w n c -> fixedRows Nothing n w c
+  ColFixedSizeListMaybe w valid c -> fixedRows (Just valid) (V.length valid) w c
   ColMap o k v -> mapRows Nothing o k v
   ColMapMaybe valid o k v -> mapRows (Just valid) o k v
   ColListView o s c -> viewRows Nothing (VP.map fromIntegral o) (VP.map fromIntegral s) c
@@ -688,9 +731,8 @@ columnValues col = case col of
         if maybe True (V.! i) mvalid
           then VList <$> slice vs (VP.unsafeIndex offs i) (VP.unsafeIndex sizes i)
           else Right VNull
-    fixedRows mvalid w c = do
+    fixedRows mvalid n w c = do
       vs <- columnValues c
-      let n = maybe (if w > 0 then V.length vs `div` w else 0) V.length mvalid
       V.generateM n $ \i ->
         if maybe True (V.! i) mvalid
           then VList <$> slice vs (i * w) w

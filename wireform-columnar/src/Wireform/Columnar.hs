@@ -239,7 +239,9 @@ docs for what's currently supported).
 
 Returns 'Left' if the format-specific bridge can't represent
 the input (e.g. nested types in the Parquet flat path,
-unsupported Arrow types in ORC).
+unsupported Arrow types in ORC), or, for the Arrow formats, when a
+batch does not fit the schema or a dictionary cannot be written
+(see 'Arrow.encodeArrowStream').
 -}
 encode
   :: Format
@@ -248,10 +250,8 @@ encode
   -> [V.Vector AC.ColumnArray]
   -> Either String ByteString
 encode fmt opts sch batches = case fmt of
-  Arrow ->
-    Right (Arrow.encodeArrowStream (arrowWrite opts) sch batches)
-  ArrowFile ->
-    Right (Arrow.encodeArrowFile (arrowWrite opts) sch batches)
+  Arrow -> Arrow.encodeArrowStream (arrowWrite opts) sch batches
+  ArrowFile -> Arrow.encodeArrowFile (arrowWrite opts) sch batches
   Parquet
     -- Any nullable column in the schema? Route through the
     -- mixed writer so nulls round-trip via definition-level

@@ -39,7 +39,6 @@ import Arrow.FlatBufferIPC (
  )
 import Arrow.Record qualified as AR
 import Arrow.Stream (
-  BodyCompressionCodec (..),
   DictHandling (..),
   WriteOptions (..),
   decodeArrowStream,
@@ -56,9 +55,9 @@ import Arrow.Types
 import Arrow.Write (writeArrowStream)
 import Columnar.Stream qualified as IS
 import Control.Monad (unless, when)
-import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
-import Data.Int (Int16, Int32, Int64, Int8)
+import Data.Int (Int32, Int64)
+import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Vector qualified as V
@@ -255,7 +254,7 @@ main = do
           , plainField "name" False AUtf8
           ]
     )
-    ( ColStruct $
+    ( ColStruct 3 $
         V.fromList
           [ ("id", ColInt64 (VP.fromList [1, 2, 3]))
           , ("name", ColUtf8 (V.fromList ["a", "b", "c"]))
@@ -333,6 +332,7 @@ main = do
     )
     ( ColFixedSizeList
         3
+        2
         (ColInt32 (VP.fromList [1, 2, 3, 4, 5, 6]))
     )
 
@@ -937,7 +937,7 @@ dictReplacementRoundTrip = do
             (ColUtf8 (V.fromList ["x", "y"]))
       !opts = defaultWriteOptions {writeDictHandling = DictReplaceOnChange}
       !bytes = encodeArrowStream opts sch [batch1, batch2]
-  case decodeArrowStream bytes of
+  case bytes >>= decodeArrowStream of
     Left e -> failTest $ "dict-replace round-trip: " ++ e
     Right (_, batches)
       | [b1, b2] <- batches
@@ -969,10 +969,10 @@ dictReplacementRoundTrip = do
 bodyCompressionRoundTrip :: BodyCompressionCodec -> Schema -> V.Vector ColumnArray -> IO ()
 bodyCompressionRoundTrip codec sch cols = do
   let !opts = defaultWriteOptions {writeBodyCompression = Just codec}
-      !bytes = encodeArrowStream opts sch [cols]
-  case decodeArrowStream bytes of
+      !encoded = encodeArrowStream opts sch [cols]
+  case encoded >>= \bytes -> (,) bytes <$> decodeArrowStream bytes of
     Left e -> failTest $ "body-compression round-trip: " ++ e
-    Right (_sch', batches)
+    Right (bytes, (_sch', batches))
       | [got] <- batches
       , got == cols ->
           putStrLn $
@@ -990,7 +990,7 @@ bodyCompressionRoundTrip codec sch cols = do
 streamingRoundTrip :: Schema -> [V.Vector ColumnArray] -> IO ()
 streamingRoundTrip sch batches = do
   let bytes = encodeArrowStream defaultWriteOptions sch batches
-  case openStreamReader bytes of
+  case bytes >>= openStreamReader of
     Left e -> failTest $ "openStreamReader: " ++ e
     Right rd0 -> do
       when (streamReaderSchema rd0 /= sch) $
@@ -1000,12 +1000,12 @@ streamingRoundTrip sch batches = do
         Left e -> failTest $ "streamReaderNext (first): " ++ e
         Right Nothing -> failTest "streamReaderNext: stream empty"
         Right (Just (cols0, rd1)) -> do
-          when (cols0 /= head batches) $
+          when (Just cols0 /= listToMaybe batches) $
             failTest $
               "streamReaderNext (first) mismatch:\n got "
                 ++ show cols0
                 ++ "\n exp "
-                ++ show (head batches)
+                ++ show (take 1 batches)
           case streamReaderToList rd1 of
             Left e -> failTest $ "streamReaderToList: " ++ e
             Right rest
@@ -1018,7 +1018,7 @@ streamingRoundTrip sch batches = do
                       ++ "\n exp "
                       ++ show (drop 1 batches)
   -- Iter-shaped variant: the same drain via Columnar.Stream.
-  case openStreamReader bytes of
+  case bytes >>= openStreamReader of
     Left e -> failTest $ "openStreamReader (iter): " ++ e
     Right rd0 ->
       case IS.iterToList (streamReaderIter rd0) of
@@ -1057,7 +1057,7 @@ customMetadataRoundTrip = do
           }
       !batch = V.singleton (ColInt32 (VP.fromList ([1, 2, 3] :: [Int32])))
       !bytes = encodeArrowStream defaultWriteOptions sch [batch]
-  case decodeArrowStream bytes of
+  case bytes >>= decodeArrowStream of
     Left e -> failTest $ "customMetadata roundtrip: " ++ e
     Right (sch', _batches) -> do
       expect
@@ -1101,7 +1101,7 @@ nestedStructRoundTrip = do
           ]
       (!sch, !cols) = AR.encodeTable tbl rows
       !bytes = encodeArrowStream defaultWriteOptions sch [cols]
-  case decodeArrowStream bytes of
+  case bytes >>= decodeArrowStream of
     Left e -> failTest $ "nested struct decode: " ++ e
     Right (sch', batches) -> case batches of
       [batch] -> case AR.decodeTable tbl sch' batch of
@@ -1151,7 +1151,7 @@ nullableNestedStructRoundTrip = do
           ]
       (!sch, !cols) = AR.encodeTable tbl rows
       !bytes = encodeArrowStream defaultWriteOptions sch [cols]
-  case decodeArrowStream bytes of
+  case bytes >>= decodeArrowStream of
     Left e -> failTest $ "nullable nested struct decode: " ++ e
     Right (sch', batches) -> case batches of
       [batch] -> case AR.decodeTable tbl sch' batch of
@@ -1383,7 +1383,7 @@ projectionRoundTrip = do
           , ColUtf8 (V.fromList ["x", "y", "z"])
           ]
       !bytes = encodeArrowStream defaultWriteOptions sch [batch]
-  case openStreamReader bytes of
+  case bytes >>= openStreamReader of
     Left e -> failTest $ "projection openStreamReader: " ++ e
     Right rd0 ->
       -- Ask for c then a, in that order — should drop b and reorder.
@@ -1411,27 +1411,26 @@ projectionRoundTrip = do
 highLevelRoundTrip :: String -> Schema -> V.Vector ColumnArray -> IO ()
 highLevelRoundTrip label sch cols = do
   let bytes = encodeArrowStream defaultWriteOptions sch [cols]
-  case decodeArrowStream bytes of
+  case bytes >>= decodeArrowStream of
     Left e -> failTest $ label ++ ": decodeArrowStream: " ++ e
     Right (sch', batches)
-      | length batches /= 1 ->
+      | sch' /= sch ->
+          failTest $ label ++ ": schema mismatch"
+      | [got] <- batches ->
+          if got == cols
+            then putStrLn $ "OK: high-level round-trip " ++ label
+            else
+              failTest $
+                label
+                  ++ ": column mismatch\n got: "
+                  ++ show (V.toList got)
+                  ++ "\n exp: "
+                  ++ show (V.toList cols)
+      | otherwise ->
           failTest $
             label
               ++ ": expected 1 batch, got "
               ++ show (length batches)
-      | sch' /= sch ->
-          failTest $ label ++ ": schema mismatch"
-      | otherwise ->
-          let !got = head batches
-          in if got == cols
-               then putStrLn $ "OK: high-level round-trip " ++ label
-               else
-                 failTest $
-                   label
-                     ++ ": column mismatch\n got: "
-                     ++ show (V.toList got)
-                     ++ "\n exp: "
-                     ++ show (V.toList cols)
 
 
 -- | Build a simple leaf field with no children.
@@ -1455,7 +1454,7 @@ roundTripNested label field col = do
           , arrowFeatures = V.empty
           }
       !stream = writeArrowStream schema (V.singleton (V.singleton col))
-  case readArrowStream stream of
+  case stream >>= readArrowStream of
     Left e -> failTest (label ++ ": readArrowStream: " ++ e)
     Right as -> do
       expect
@@ -1502,7 +1501,7 @@ roundTripPrim label col = do
           , arrowFeatures = V.empty
           }
       !stream = writeArrowStream schema (V.singleton (V.singleton col))
-  case readArrowStream stream of
+  case stream >>= readArrowStream of
     Left e -> failTest (label ++ ": readArrowStream: " ++ e)
     Right as -> do
       expect

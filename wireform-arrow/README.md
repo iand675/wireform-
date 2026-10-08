@@ -66,6 +66,8 @@ to compile locally with both codecs.
 Encode an Arrow `Schema` as an IPC message and round-trip it:
 
 ```haskell
+{-# LANGUAGE OverloadedStrings #-}
+
 import qualified Data.ByteString as BS
 import qualified Data.Vector     as V
 import qualified Arrow.Types as A
@@ -94,21 +96,33 @@ main = do
 
 The runnable version lives in [`examples/ArrowExample.hs`](../examples/ArrowExample.hs).
 
-For typed records, derive the `Arrow.Derive` typeclasses against a
-record:
+For typed records, derive a `Table` for a record and encode a vector of
+them to an IPC stream:
 
 ```haskell
+{-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE TemplateHaskell #-}
 
 import qualified Arrow.Derive as DArrow
+import qualified Arrow.Record as AR
+import qualified Arrow.Stream as AS
+import Data.ByteString (ByteString)
+import Data.Int (Int64)
+import Data.Text (Text)
+import qualified Data.Vector as V
 
 data Trade = Trade
-  { tradeId    :: !Int64
+  { tradeId     :: !Int64
   , tradeTicker :: !Text
-  , tradePrice :: !Double
-  } deriving stock (Show, Eq, Generic)
+  , tradePrice  :: !Double
+  } deriving stock (Show, Eq)
 
 DArrow.deriveArrow ''Trade
+
+tradesToStream :: V.Vector Trade -> Either String ByteString
+tradesToStream trades =
+  let (schema, columns) = AR.encodeTable DArrow.hasTable trades
+  in AS.encodeArrowStream AS.defaultWriteOptions schema [columns]
 ```
 
 ## What's in here
@@ -116,12 +130,12 @@ DArrow.deriveArrow ''Trade
 | Module                   | Role                                                      |
 |--------------------------|-----------------------------------------------------------|
 | `Arrow.Types`            | Arrow schema AST: `Schema`, `Field`, `ArrowType` (`AInt`, `AFloatingPoint`, `AUtf8`, `ABool`, `AStruct`, `AList`, `AMap`, `ADictionary`, ...), endianness, metadata, schema fingerprinting (`schemaFingerprint`, `schemaEquivalent`). |
-| `Arrow.Column`           | `ColumnArray`: the in-memory columnar representation (one constructor per Arrow type, `*Maybe` variants for nullable columns, `ColDictionary` / `ColDictionaryMaybe` for dictionary encoding, union type ids as child indices). Total `sliceColumnArray`, `concatColumnArray`, `takeColumnArray`, `expandDictionary`, and `validateMapKeysSorted` for spec-required map ordering. |
+| `Arrow.Column`           | `ColumnArray`: the in-memory columnar representation (one constructor per Arrow type, `*Maybe` variants for nullable columns, `ColDictionary` / `ColDictionaryMaybe` for dictionary encoding, union type ids as child indices, explicit row counts on `ColStruct` and `ColFixedSizeList` so fieldless structs and size-0 lists keep their length). Total `sliceColumnArray`, `concatColumnArray`, `takeColumnArray`, `expandDictionary`, `fillerColumn`, and `validateMapKeysSorted` for spec-required map ordering. |
 | `Arrow.IPC`              | Single-message framing: `encodeIPCMessage`, `decodeIPCMessage` for the spec FlatBuffers `Message` (Schema, DictionaryBatch, RecordBatch); bodies are appended by the caller. |
 | `Arrow.FlatBufferIPC`    | Arrow's FlatBuffer schema and record batch headers (Arrow IPC's wire layer). |
-| `Arrow.Stream`           | Stream and file writers / readers (`encodeArrowStream`, `decodeArrowStream`, `encodeArrowFile`, `decodeArrowFile`, `openStreamReader`, `streamReaderIter`, projection helpers), with dictionary batches (replacement and delta), and body compression. The `Iter` from [`wireform-columnar`](../wireform-columnar/) is the yield type. |
+| `Arrow.Stream`           | Stream and file writers / readers (`encodeArrowStream`, `decodeArrowStream`, `encodeArrowFile`, `decodeArrowFile`, `openStreamReader`, `streamReaderIter`, projection helpers), with dictionary batches (replacement and delta, and dictionaries nested inside dictionary values), and body compression. The writers return `Either String ByteString`. The `Iter` from [`wireform-columnar`](../wireform-columnar/) is the yield type. |
 | `Arrow.File`             | Arrow file and stream readers over the same spec format (`readArrowFile`, `readArrowFileColumns`, `readArrowStream`, `readIPCMessage`). |
-| `Arrow.Write`            | Column encoders and validity bitmaps (from `Arrow.Write.Columns`), plus `writeArrowStream` and `writeArrowFile`, which emit the standard Arrow IPC format via `Arrow.Stream`. |
+| `Arrow.Write`            | Column encoders and validity bitmaps (from `Arrow.Write.Columns`), `validateColumns`, plus `writeArrowStream` and `writeArrowFile`, which emit the standard Arrow IPC format via `Arrow.Stream`. |
 | `Arrow.Record`           | Typed record surface (`Table`, `structE`, `structEMaybe`, `structD`, `structDMaybe`, `columnDWithDefault`, `subsetTable`, `projectTable`, `NameStrategy`). |
 | `Arrow.Record.Generic`   | `GHC.Generics`-driven default `Table` derivation. |
 | `Arrow.Record.TH`        | `Template Haskell` driver for explicit `Table` derivation when `Generic` doesn't fit. |
@@ -152,6 +166,44 @@ case AS.openStreamReader bytes of
 implement column-projection pushdown so consumers that only want a
 subset of fields can avoid materialising the rest.
 
+## Writing streams and files
+
+`encodeArrowStream` / `encodeArrowFile` (and the `Arrow.Write`
+facades `writeArrowStream` / `writeArrowFile`) take a schema and a
+list of column batches and return `Either String ByteString`. Before
+encoding, every batch is checked against the schema
+(`Arrow.Write.Columns.validateColumns`): one column per field, equal
+column lengths, constructors that match the field types (a nullable
+`*Maybe` column needs a nullable field), dictionary columns carrying
+their field's dictionary id, and nested row counts that agree with
+their children. The checks look at lengths and constructors only, not
+at rows.
+
+`ColStruct` and `ColFixedSizeList` carry their row count explicitly
+(`ColStruct rows children`, `ColFixedSizeList size rows child`), so a
+struct with no fields and `fixed_size_list<T, 0>` round-trip at any
+length. Struct children hold exactly `rows` rows and a fixed-size list
+child exactly `rows * size` elements; the writers reject anything else
+and the reader slices longer children down.
+
+Dictionary columns may appear at any depth, including inside the
+values of another dictionary (`dictionary<struct<d: dictionary<utf8>>>`,
+`dictionary<list<dictionary<utf8>>>`). Nested dictionaries are written
+before the dictionaries whose values use them. With `DictEmitOnce`
+(the default, and the only mode for files) the dictionaries of all
+batches are merged into one per id; that fails with `Left` when the
+merged dictionary is larger than the field's index type can address
+(for example more than 128 values behind an `int8` index) or when the
+value columns cannot be concatenated. `DictReplaceOnChange` sends a
+replacement dictionary whenever a batch's dictionary changes, and
+re-sends an outer dictionary whenever a dictionary nested in it is
+replaced. The reader resolves nested dictionaries when their outer
+dictionary batch arrives, as Arrow C++ does.
+
+A nullable dictionary column whose rows are all null may reference an
+empty dictionary (pyarrow writes these); `expandDictionary` turns it
+into an all-null column of the value type.
+
 ## File reader and writer
 
 `Arrow.File` covers the Arrow file format: the IPC stream framing
@@ -170,17 +222,18 @@ record is mapped to a struct column, with each field becoming a
 child column.
 
 ```haskell
+{-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE TemplateHaskell #-}
 
 import qualified Arrow.Derive as DArrow
-import Wireform.Derive (renameStyle, SnakeCase)
+import Data.Text (Text)
+import Wireform.Derive (NameStyle (..), renameStyle)
 
 data Trade = Trade
   { tradeTicker :: !Text
   , tradePrice  :: !Double
-  } deriving stock (Show, Eq, Generic)
+  } deriving stock (Show, Eq)
 
-{-# ANN type Trade ("Trade" :: String) #-}
 {-# ANN tradeTicker (renameStyle SnakeCase) #-}
 {-# ANN tradePrice  (renameStyle SnakeCase) #-}
 
@@ -208,11 +261,16 @@ cabal test wireform-arrow:wireform-arrow-pyarrow-interop
   pyarrow-written goldens in `test/golden/` (stream and file format).
 - Hedgehog properties (`test/Test/Arrow/Props.hs`) over generated
   schemas and multi-batch tables (`test/Test/Arrow/Gen.hs`): every
-  leaf type with edge values, nesting to depth 3, dictionaries over
-  every index type, run-end encoding, list views, utf8/binary views,
-  zero-row batches. Stream and file round-trips, body compression,
-  replacement and delta dictionaries, projection, slicing and
-  concatenation laws, map key ordering.
+  leaf type with edge values, nesting to depth 3, structs with no
+  fields and fixed-size lists of size 0, dictionaries over every
+  index type (including dictionaries nested in dictionary values, and
+  all-null columns over empty dictionaries), run-end encoding, list
+  views, utf8/binary views, zero-row batches. Stream and file
+  round-trips, body compression, replacement and delta dictionaries
+  (nested ones too), projection, slicing and concatenation laws, map
+  key ordering, and the writer's `Left` cases (dictionary index
+  overflow, uncombinable dictionaries, batches that do not fit the
+  schema).
 - Malformed-input properties (`test/Test/Arrow/Malformed.hs`):
   truncations, bit flips, byte overwrites and corrupted buffer
   descriptors of valid streams and files, plus random bytes. Every
@@ -238,17 +296,29 @@ pyarrow goldens with
 
 ## Benchmarks
 
-A criterion harness in [`bench/Bench.hs`](bench/Bench.hs):
+A criterion harness in [`bench/Bench.hs`](bench/Bench.hs), and an
+[arrow-rs](https://crates.io/crates/arrow) reference harness in
+[`interop/arrow-rs/benches/arrow_ipc.rs`](../interop/arrow-rs/benches/arrow_ipc.rs)
+that builds the same batches from the same generators:
 
 ```bash
 cabal bench wireform-arrow:wireform-arrow-bench
+cargo bench --manifest-path interop/arrow-rs/Cargo.toml --bench arrow_ipc
+
+# Both, sequentially, distilled into the summaries below:
+python3 scripts/run-benchmarks.py --only arrow --render
 ```
 
 Each workload is one record batch encoded with
 `Arrow.Stream.encodeArrowStream` and decoded (fully materialized) with
-`Arrow.Stream.decodeArrowStream`. Inputs are built outside the timed
-region. Nullable columns carry 10% nulls; `list<int32>` has four
-elements per row; `dictionary<utf8>` has 16 distinct values.
+`Arrow.Stream.decodeArrowStream`. The arrow-rs side writes the same
+batch with `StreamWriter` into a `Vec<u8>` (schema, batch, end of
+stream) and reads it back with `StreamReader`, collecting every batch,
+with the reader's default validation on. Inputs are built outside the
+timed region. Nullable columns carry 10% nulls; `list<int32>` has four
+elements per row; `dictionary<utf8>` has 16 distinct values. The ratio
+column is wireform-arrow time over arrow-rs time, so `2.00x` means
+wireform-arrow takes twice as long.
 
 <!-- BEGIN_AUTOGEN bench:arrow-encode-decode -->
 <picture>
@@ -298,7 +368,12 @@ dominates:
 The mixed 6-column table through each public entry point: the
 `Arrow.Stream` and `Arrow.Write` stream writers, the file format,
 the `Arrow.File` reader, and a typed `Arrow.Record` table derived with
-`Arrow.Record.TH.deriveTable` (records to bytes, and bytes to records):
+`Arrow.Record.TH.deriveTable` (records to bytes, and bytes to records).
+Each row is set against the closest arrow-rs path: `StreamWriter` for
+both stream writers, `StreamReader`, `FileWriter`, `FileReader` for
+both file readers, and, for the typed rows, a `Vec` of row structs
+turned into one array per field and written (or read back into owned
+row structs), since arrow-rs has no record deriving:
 
 <!-- BEGIN_AUTOGEN bench:arrow-api-paths -->
 <picture>
@@ -320,20 +395,10 @@ the `Arrow.File` reader, and a typed `Arrow.Record` table derived with
 <sub>Last run 2026-10-07 23:32:59 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:arrow-api-paths -->
 
-External comparisons are not yet measured. The benchmark pipeline
-(`scripts/run-benchmarks.py`) only distills in-process criterion runs,
-and none of the candidate baselines is available as a Haskell
-dependency here. Candidates:
-
-- Haskell:
-  [`arrow`](https://hackage.haskell.org/package/arrow) (the long-
-  standing Hackage Arrow library, primarily for FFI to arrow-cpp).
-- C++: the [arrow-cpp](https://github.com/apache/arrow/tree/main/cpp)
-  reference implementation, the canonical baseline.
-- Rust: [`arrow`](https://crates.io/crates/arrow), the
-  Apache-blessed Rust implementation used by Datafusion and Polars.
-- Python: [`pyarrow`](https://pypi.org/project/pyarrow/) (already the
-  correctness oracle in `wireform-arrow-pyarrow-interop`).
+Not yet compared: arrow-cpp (the reference implementation),
+[`pyarrow`](https://pypi.org/project/pyarrow/) (already the
+correctness oracle in `wireform-arrow-pyarrow-interop`), and the
+Hackage [`arrow`](https://hackage.haskell.org/package/arrow) package.
 
 ## License
 

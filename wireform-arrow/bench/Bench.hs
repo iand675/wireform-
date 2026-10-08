@@ -192,7 +192,7 @@ struct3 n =
           , defaultLeafField "c" False ABool
           ]
     )
-    ( ColStruct $
+    ( ColStruct n $
         V.fromList
           [ ("a", ColInt32 (VP.generate n fromIntegral))
           , ("b", doubleCol n)
@@ -257,13 +257,14 @@ typedDecode bs = case decodeArrowStream bs of
   Right (_, batches) -> Left ("expected one batch, got " <> show (length batches))
 
 
-typedEncode :: V.Vector Trade -> ByteString
+typedEncode :: V.Vector Trade -> Either String ByteString
 typedEncode ts =
   let (sch, cols) = encodeTable tradeTable ts
    in encodeArrowStream defaultWriteOptions sch [cols]
 
 
-encodeW :: Workload -> ByteString
+-- | Encoding fails only on a schema mismatch; the workloads are built to match.
+encodeW :: Workload -> Either String ByteString
 encodeW w = encodeArrowStream defaultWriteOptions (wlSchema w) [wlBatch w]
 
 
@@ -278,10 +279,10 @@ codecGroups suffix n =
   , bgroup ("decode" <> suffix) (map decodeBench (workloads n))
   ]
  where
-  encodeBench w = env (pure w) $ \w' -> bench (wlName w) $ nf encodeW w'
+  encodeBench w = env (checked (wlName w) (encodeW w) >> pure w) $ \w' -> bench (wlName w) $ nf encodeW w'
   decodeBench w = env (decodeInput w) $ \bs -> bench (wlName w) $ nf decodeArrowStream bs
   decodeInput w = do
-    let bs = encodeW w
+    bs <- checked (wlName w) (encodeW w)
     _ <- checked (wlName w) (decodeArrowStream bs)
     pure bs
 
@@ -293,7 +294,7 @@ apiPaths =
   , env (pure (mixed bigRows)) $ \w ->
       bench "stream encode (Arrow.Write)" $
         nf (AW.writeArrowStream (wlSchema w)) (V.singleton (wlBatch w))
-  , env (pure (encodeW (mixed bigRows))) $ \bs ->
+  , env (checked "stream decode" (encodeW (mixed bigRows))) $ \bs ->
       bench "stream decode (Arrow.Stream)" $ nf decodeArrowStream bs
   , env (pure (mixed bigRows)) $ \w ->
       bench "file encode (Arrow.Stream)" $
@@ -311,11 +312,11 @@ apiPaths =
  where
   specFileBytes = do
     let w = mixed bigRows
-        bs = encodeArrowFile defaultWriteOptions (wlSchema w) [wlBatch w]
+    bs <- checked "file encode" (encodeArrowFile defaultWriteOptions (wlSchema w) [wlBatch w])
     _ <- checked "file decode" (decodeArrowFile bs)
     pure bs
   typedBytes = do
-    let bs = typedEncode (trades bigRows)
+    bs <- checked "typed encode" (typedEncode (trades bigRows))
     _ <- checked "typed decode" (typedDecode bs)
     pure bs
 

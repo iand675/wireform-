@@ -880,10 +880,9 @@ columnArrayToNestedRows col = case col of
   AC.ColUtf8Maybe v -> Right (V.map (maybe PN.NRNull (PN.NRLeaf . PN.LvString)) v)
   AC.ColBinaryMaybe v -> Right (V.map (maybe PN.NRNull (PN.NRLeaf . PN.LvBinary)) v)
   -- Struct: each row is an NRStruct of field values indexed in
-  -- declared order. Every child must yield the same row count.
-  AC.ColStruct childCols -> do
+  -- declared order. Every child must yield the struct's row count.
+  AC.ColStruct n childCols -> do
     childRows <- V.mapM (columnArrayToNestedRows . snd) childCols
-    let !n = if V.null childRows then 0 else V.length (V.head childRows)
     when' (V.any ((/= n) . V.length) childRows) $
       Left "Parquet.Arrow: struct children have mismatched row counts"
     Right $

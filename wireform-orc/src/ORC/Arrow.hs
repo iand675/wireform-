@@ -361,7 +361,7 @@ columnArrayToORCStreamsNested
   -> AC.ColumnArray
   -> Either String (V.Vector (Word64, Word64, ByteString))
 columnArrayToORCStreamsNested cid col = case col of
-  AC.ColStruct namedChildren -> do
+  AC.ColStruct _ namedChildren -> do
     childStreams <-
       V.mapM
         (uncurry columnArrayToORCStreamsNested)
@@ -433,7 +433,7 @@ advance the cid cursor when encoding struct children.
 -}
 columnArraySpan :: AC.ColumnArray -> Word64
 columnArraySpan col = case col of
-  AC.ColStruct kids -> 1 + sum (map (columnArraySpan . snd) (V.toList kids))
+  AC.ColStruct _ kids -> 1 + sum (map (columnArraySpan . snd) (V.toList kids))
   AC.ColList _ inner -> 1 + columnArraySpan inner
   AC.ColLargeList _ i -> 1 + columnArraySpan i
   _ -> 1
@@ -732,7 +732,7 @@ decodeColumnNested cid fld numRows stripeBs streams =
           kidCids
           kids
       let !named = V.zipWith (\k c -> (AT.fieldName k, c)) kids childCols
-      Right (AC.ColStruct named)
+      Right (AC.ColStruct numRows named)
     AT.AList -> decodeListLike AC.ColList cid fld numRows stripeBs streams
     AT.ALargeList -> decodeListLikeLarge cid fld numRows stripeBs streams
     AT.AMap _ -> decodeMap cid fld numRows stripeBs streams

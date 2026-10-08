@@ -102,18 +102,14 @@ import Arrow.Types
 import qualified Arrow.Write.Columns as W
 import FlatBuffers.Builder
   ( Builder
-  , Field' (..)
   , alignUp
-  , currentUOff
   , finish
   , newBuilder
-  , prepForObject
   , prependBS
   , prependI16
   , prependI32
   , prependI64
   , prependU8
-  , prependU32
   , scalar
   , struct
   , voff
@@ -620,7 +616,7 @@ decodeTensorMessage meta = do
   msgPos <- fromIntegral <$> peekU32 meta 0
   mSlot  <- resolveTable meta msgPos
   ht <- case mSlot 1 of
-    Nothing -> Right 0
+    Nothing -> Right (0 :: Int)
     Just b  -> fromIntegral <$> peekU8 meta b
   when' (ht /= 4) $
     Left ("Arrow.FlatBufferIPC.decodeTensorMessage: expected header_type=4, got "
@@ -776,7 +772,7 @@ decodeSparseTensorFrame bs = do
   msgPos <- fromIntegral <$> peekU32 meta 0
   mSlot  <- resolveTable meta msgPos
   ht <- case mSlot 1 of
-    Nothing -> Right 0
+    Nothing -> Right (0 :: Int)
     Just b  -> fromIntegral <$> peekU8 meta b
   when' (ht /= 5) $
     Left ("decodeSparseTensorFrame: expected header_type=5, got " ++ show ht)
@@ -1041,10 +1037,10 @@ compressBody codec bufs body0 =
             , newBuf : revBufs
             , (chunk <> BS.replicate pad 0) : revChunks
             )
-      (_, revBufs, revChunks) =
+      (_, revBufsOut, revChunksOut) =
         V.foldl' step (0 :: Int, [], []) chunks
-  in  ( V.fromList (reverse revBufs)
-      , BS.concat (reverse revChunks)
+  in  ( V.fromList (reverse revBufsOut)
+      , BS.concat (reverse revChunksOut)
       )
 
 -- | Wrap a single buffer's bytes per Arrow's @BUFFER@ method: an
@@ -1321,7 +1317,7 @@ injectColumn col bufs bIdx0 varCounts vIdx0 = case col of
           dataBuf       = bufs V.! (bIdx1 + 1)
       in  (bIdx1 + 2 - bIdx0, 0, [vBuf, offsetsBuf, dataBuf])
 
-  ColStruct children          -> goStruct False (V.toList (V.map snd children)) bIdx0 vIdx0
+  ColStruct _ children        -> goStruct False (V.toList (V.map snd children)) bIdx0 vIdx0
   ColStructMaybe _ children   -> goStruct True  (V.toList (V.map snd children)) bIdx0 vIdx0
 
   ColList _ child             -> goList False child bIdx0 vIdx0
@@ -1329,7 +1325,7 @@ injectColumn col bufs bIdx0 varCounts vIdx0 = case col of
   ColLargeList _ child        -> goList False child bIdx0 vIdx0
   ColLargeListMaybe _ _ child -> goList True  child bIdx0 vIdx0
 
-  ColFixedSizeList _ child       -> goFixedSizeList False child bIdx0 vIdx0
+  ColFixedSizeList _ _ child      -> goFixedSizeList False child bIdx0 vIdx0
   ColFixedSizeListMaybe _ _ child -> goFixedSizeList True  child bIdx0 vIdx0
 
   ColMap _ k v                -> goMap False k v bIdx0 vIdx0

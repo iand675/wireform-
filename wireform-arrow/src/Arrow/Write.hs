@@ -18,6 +18,7 @@ module Arrow.Write (
   writeArrowFile,
 
   -- * Column-tree encoding (see "Arrow.FlatBufferIPC")
+  validateColumns,
   encodeColumns,
   emptyBuildAcc,
   BuildAcc (..),
@@ -31,11 +32,16 @@ import Data.ByteString (ByteString)
 import Data.Vector qualified as V
 
 
--- | Write a complete Arrow IPC stream (schema, dictionaries, record batches, end-of-stream marker).
-writeArrowStream :: Schema -> V.Vector (V.Vector ColumnArray) -> ByteString
+{- | Write a complete Arrow IPC stream (schema, dictionaries, record
+batches, end-of-stream marker). 'Left' when a batch does not fit the
+schema or a dictionary cannot be written (see 'Arrow.Stream.encodeArrowStream').
+-}
+writeArrowStream :: Schema -> V.Vector (V.Vector ColumnArray) -> Either String ByteString
 writeArrowStream schema batches = encodeArrowStream defaultWriteOptions schema (V.toList batches)
 
 
--- | Write a complete Arrow IPC file (magic, stream payload, FlatBuffers footer, magic).
-writeArrowFile :: Schema -> V.Vector (V.Vector ColumnArray) -> ByteString
+{- | Write a complete Arrow IPC file (magic, stream payload, FlatBuffers
+footer, magic). 'Left' as for 'writeArrowStream'.
+-}
+writeArrowFile :: Schema -> V.Vector (V.Vector ColumnArray) -> Either String ByteString
 writeArrowFile schema batches = encodeArrowFile defaultWriteOptions schema (V.toList batches)
