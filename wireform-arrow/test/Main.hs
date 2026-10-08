@@ -56,6 +56,7 @@ import Arrow.Types
 import Arrow.Write (writeArrowStream)
 import Columnar.Stream qualified as IS
 import Control.Monad (unless, when)
+import Data.Bits (testBit)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Int (Int16, Int32, Int64, Int8)
@@ -64,7 +65,18 @@ import Data.Text qualified as T
 import Data.Vector qualified as V
 import Data.Vector.Primitive qualified as VP
 import Data.Word (Word16, Word32, Word64, Word8)
+import Foreign.C.Types (CInt (..))
 import System.Exit (exitFailure)
+
+
+{- | Verifies the compile-time (macro-generated) bit-expansion LUT
+in wireform-columnar-core's columnar_simd.c against the runtime
+loop it replaced. Lives in this suite because
+wireform-columnar-core's own test suite is disabled
+(cabal.project: cyclic test deps).
+-}
+foreign import ccall unsafe "hs_columnar_unpack_lut_selfcheck"
+  c_unpackLutSelfCheck :: IO CInt
 
 
 -- Test records used by 'nestedStructRoundTrip'.
@@ -115,6 +127,19 @@ main = do
   roundTripPrim "Float" (ColFloat (VP.fromList [0.0, 1.5, -2.25, 3.14 :: Float]))
   roundTripPrim "Double" (ColDouble (VP.fromList [0.0, 1.5, -2.25, 3.14159265 :: Double]))
   roundTripPrim "Bool" (ColBool (V.fromList [True, False, True, False, True]))
+
+  -- The bit-expansion LUT in columnar_simd.c is generated at compile
+  -- time by a preprocessor macro ladder; check it against the runtime
+  -- loop it replaced.
+  lutOk <- c_unpackLutSelfCheck
+  expect "columnar bit-expansion LUT matches reference loop" (lutOk == 1)
+
+  -- Bool columns at every length 0..65: exercises the whole-byte
+  -- memcpy fast path and the partial head/tail chunks of
+  -- hs_columnar_unpack_bits_lsb, which the short vectors above never
+  -- reach. Values are an independent reference: bit i of a fixed byte
+  -- pattern, LSB-first, matching the Arrow packed-bool layout.
+  mapM_ boolBoundaryRoundTrip [0 .. 65]
 
   roundTripPrim "Date32" (ColDate32 (VP.fromList [0 :: Int32, 18000, -1]))
   roundTripPrim "Date64" (ColDate64 (VP.fromList [0 :: Int64, 1700000000000]))
@@ -1465,6 +1490,18 @@ roundTripNested label field col = do
                   ++ show col
               )
       expect (label ++ ": nested round-trip preserves column") True
+
+
+{- | Round-trip a Bool column of length n whose values are the bits of
+a fixed byte pattern (LSB-first), so the expected values come from
+'testBit' rather than from the packed representation under test.
+-}
+boolBoundaryRoundTrip :: Int -> IO ()
+boolBoundaryRoundTrip n =
+  roundTripPrim ("Bool/len=" ++ show n) (ColBool (V.fromList bits))
+  where
+    pat = cycle ([0xA5, 0x3C, 0xFF, 0x00, 0x81] :: [Word8])
+    bits = [testBit (pat !! (i `div` 8)) (i `mod` 8) | i <- [0 .. n - 1]]
 
 
 {- | Round-trip a single flat (non-nested) column through a single-field

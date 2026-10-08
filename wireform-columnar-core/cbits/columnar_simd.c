@@ -39,25 +39,51 @@ int32_t hs_columnar_bitmap_popcount(const uint8_t *buf, int len)
 }
 
 /*
+ * Bit-expansion LUT: expand[b][k] == (b >> k) & 1 (LSB-first, Arrow / Parquet
+ * PLAIN bool order). Built at compile time by the quadrupling macro ladder
+ * below (1 -> 4 -> 16 -> 64 -> 256 rows); hs_columnar_unpack_lut_selfcheck()
+ * verifies the result against the runtime loop this replaces.
+ */
+#define WF_BIT_ROW(b) \
+    { ((b) >> 0) & 1, ((b) >> 1) & 1, ((b) >> 2) & 1, ((b) >> 3) & 1, \
+      ((b) >> 4) & 1, ((b) >> 5) & 1, ((b) >> 6) & 1, ((b) >> 7) & 1 }
+#define WF_BIT_ROWS_4(b)  WF_BIT_ROW(b),     WF_BIT_ROW((b)+1),      WF_BIT_ROW((b)+2),      WF_BIT_ROW((b)+3)
+#define WF_BIT_ROWS_16(b) WF_BIT_ROWS_4(b),  WF_BIT_ROWS_4((b)+4),   WF_BIT_ROWS_4((b)+8),   WF_BIT_ROWS_4((b)+12)
+#define WF_BIT_ROWS_64(b) WF_BIT_ROWS_16(b), WF_BIT_ROWS_16((b)+16), WF_BIT_ROWS_16((b)+32), WF_BIT_ROWS_16((b)+48)
+
+static const uint8_t expand[256][8] = {
+    WF_BIT_ROWS_64(0), WF_BIT_ROWS_64(64), WF_BIT_ROWS_64(128), WF_BIT_ROWS_64(192)
+};
+
+#undef WF_BIT_ROWS_64
+#undef WF_BIT_ROWS_16
+#undef WF_BIT_ROWS_4
+#undef WF_BIT_ROW
+
+/*
+ * Rebuilds the LUT with the runtime loop that the macro ladder replaced and
+ * compares the two. Returns 1 on match, 0 on mismatch. Test-only.
+ */
+int hs_columnar_unpack_lut_selfcheck(void)
+{
+    uint8_t ref[256][8];
+    int b;
+    for (b = 0; b < 256; b++) {
+        int k;
+        for (k = 0; k < 8; k++) {
+            ref[b][k] = (uint8_t)((b >> k) & 1);
+        }
+    }
+    return memcmp(ref, expand, sizeof ref) == 0;
+}
+
+/*
  * Expand packed bits to dst[i] in {0,1}. Bit order matches Arrow / Parquet
  * PLAIN bool: least-significant bit of each byte is the first logical value in
  * that byte (index i: byte i/8, bit i%8).
  */
 void hs_columnar_unpack_bits_lsb(const uint8_t *src, int32_t n, uint8_t *dst)
 {
-    static uint8_t expand[256][8];
-    static int init = 0;
-    if (!init) {
-        int b;
-        for (b = 0; b < 256; b++) {
-            int k;
-            for (k = 0; k < 8; k++) {
-                expand[b][k] = (uint8_t)((b >> k) & 1);
-            }
-        }
-        init = 1;
-    }
-
     int pos = 0;
     while (pos < n) {
         int bi = pos / 8;
