@@ -369,8 +369,10 @@ foreign import ccall unsafe "hs_xoshiro256pp_next"
 OS thread's xoshiro256++ generator.
 
 State is per-OS-thread (@__thread@), seeded from @getrandom(2)@
-(@arc4random_buf@ on BSDs, @\/dev\/urandom@ everywhere else) on
-first use.  Once seeded, each call is a handful of register-only
+(@arc4random_buf@ on macOS and the BSDs, @BCryptGenRandom@ on
+Windows, @\/dev\/urandom@ elsewhere) on first use, and reseeded in
+the child after @fork@ so parent and child never share a stream.
+Once seeded, each call is a handful of register-only
 arithmetic ops — typically ~1 ns including the FFI boundary,
 versus ~50 ns for the global @splitmix@ generator that takes an
 @MVar@ on every call.
