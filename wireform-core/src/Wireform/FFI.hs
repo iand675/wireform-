@@ -369,8 +369,10 @@ foreign import ccall unsafe "hs_xoshiro256pp_next"
 OS thread's xoshiro256++ generator.
 
 State is per-OS-thread (@__thread@), seeded from @getrandom(2)@
-(@arc4random_buf@ on BSDs, @\/dev\/urandom@ everywhere else) on
-first use.  Once seeded, each call is a handful of register-only
+(@arc4random_buf@ on macOS and the BSDs, @BCryptGenRandom@ on
+Windows, @\/dev\/urandom@ elsewhere) on first use, and reseeded in
+the child after @fork@ so parent and child never share a stream.
+Once seeded, each call is a handful of register-only
 arithmetic ops — typically ~1 ns including the FFI boundary,
 versus ~50 ns for the global @splitmix@ generator that takes an
 @MVar@ on every call.
@@ -559,18 +561,27 @@ compareBoundsBS boundsBs count width searchBs = unsafePerformIO $
 -- SIMD Arrow IPC buffer validation
 ------------------------------------------------------------------------
 
-foreign import ccall safe "hs_proto_validate_arrow_buffers"
+foreign import ccall unsafe "hs_proto_validate_arrow_buffers"
   c_validate_arrow_buffers :: Ptr () -> CInt -> Int64 -> CInt
+
+foreign import ccall safe "hs_proto_validate_arrow_buffers"
+  c_validate_arrow_buffers_safe :: Ptr () -> CInt -> Int64 -> CInt
 
 
 {- | Validate Arrow IPC buffer offset/length pairs.
 Buffers are pairs of @(offset :: Int64, length :: Int64)@ packed contiguously.
 Returns 'True' if all offsets/lengths are non-negative, within body_length,
 and non-overlapping.
+
+The kernel is one linear pass over the pairs (16 bytes each). Like the
+"Columnar.SIMD" kernels it uses an @unsafe@ call for at most 64 KiB of
+input (4096 buffers, far more than a record batch normally has) and a
+@safe@ call above that, so a hostile buffer table cannot hold up the RTS.
 -}
 validateArrowBuffers :: Ptr Int64 -> Int -> Int64 -> Bool
-validateArrowBuffers !ptr !count !bodyLength =
-  c_validate_arrow_buffers (castPtr ptr) (fromIntegral count) bodyLength /= 0
+validateArrowBuffers !ptr !count !bodyLength
+  | count <= 4096 = c_validate_arrow_buffers (castPtr ptr) (fromIntegral count) bodyLength /= 0
+  | otherwise = c_validate_arrow_buffers_safe (castPtr ptr) (fromIntegral count) bodyLength /= 0
 {-# INLINE validateArrowBuffers #-}
 
 

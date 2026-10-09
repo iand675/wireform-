@@ -8,7 +8,6 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Vector as V
 import Numeric (showHex)
-import Data.Bits (shiftL, (.|.))
 import Data.List (isInfixOf)
 import qualified Data.Text as T
 import System.Directory (doesFileExist)
@@ -16,6 +15,7 @@ import System.Exit (ExitCode (..), exitFailure)
 import qualified System.Process as Proc
 
 import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Storable as VS
 import Data.Int (Int32, Int64)
 
 import qualified Crypto.Random as RNG
@@ -218,11 +218,11 @@ main = do
         ]
       vsIdx = ColInt32 (VP.fromList [(1 :: Int32), 2, 3, 4])
       bf    = sbbfInsertHash 0xdeadbeef (newSbbf (optimalNumBytes 1024 0.01))
-      oi    = OffsetIndex
+      oiIdx = OffsetIndex
                 { oiPageLocations = V.singleton (PageLocation 0 16 0)
                 , oiUnencodedByteArrayDataBytes = Nothing
                 }
-      ci    = ColumnIndex
+      ciIdx = ColumnIndex
                 { ciNullPages = V.singleton False
                 , ciMinValues = V.singleton (BS.pack [0x01, 0, 0, 0])
                 , ciMaxValues = V.singleton (BS.pack [0x04, 0, 0, 0])
@@ -231,7 +231,7 @@ main = do
                 , ciRepetitionLevelHistograms = Nothing
                 , ciDefinitionLevelHistograms = Nothing
                 }
-      aux   = ColumnAux (Just bf) (Just oi) (Just ci) Uncompressed PageV1 Nothing
+      aux   = ColumnAux (Just bf) (Just oiIdx) (Just ciIdx) Uncompressed PageV1 Nothing
       fIdx  = buildParquetFileWithIndex schemaIdx
                 (V.singleton (V.singleton vsIdx))
                 (V.singleton (V.singleton aux))
@@ -362,7 +362,7 @@ main = do
   -- Direct page-level V2 encoders must produce DATA_PAGE_V2 headers.
   case encodeColumnDataPageV2 Uncompressed v2Vals of
     Left e   -> failTest ("encodeColumnDataPageV2: " ++ e)
-    Right bs -> case readPageHeaderAt bs 0 of
+    Right pageBs -> case readPageHeaderAt pageBs 0 of
       Left e -> failTest ("V2 page header parse: " ++ e)
       Right (hdr, _) -> case phType hdr of
         PtDataPageV2 v2 -> do
@@ -606,7 +606,7 @@ main = do
                       , feAadPrefix   = BS.empty
                       , feKeyMetadata = BSC.pack "kid:test"
                       }
-        encFile = buildParquetFileWithIndexEncryptedFooter footerEnc
+        encFooterFile = buildParquetFileWithIndexEncryptedFooter footerEnc
                     encSchema
                     (V.singleton (V.singleton encVals))
                     (V.singleton (V.singleton emptyColumnAux))
@@ -614,13 +614,13 @@ main = do
                       (V.singleton (V.singleton encVals))
                       (V.singleton (V.singleton emptyColumnAux))
     expect "encrypted-footer file is non-empty"
-      (BS.length encFile > 0)
+      (BS.length encFooterFile > 0)
     expect "encrypted-footer file ends with PARE magic"
-      (BS.takeEnd 4 encFile == BSC.pack "PARE")
+      (BS.takeEnd 4 encFooterFile == BSC.pack "PARE")
     expect "plaintext-footer file ends with PAR1 magic"
       (BS.takeEnd 4 plainFile == BSC.pack "PAR1")
     expect "encrypted-footer file diverges from plaintext-footer"
-      (encFile /= plainFile)
+      (encFooterFile /= plainFile)
     -- Use the public encrypted-reader API to round-trip via the
     -- ModuleFooter AAD. Per parquet-format §5.4 the bytes between
     -- the leading PAR1 magic and the trailing PARE magic are
@@ -631,7 +631,7 @@ main = do
                  , Parquet.Read.fdFileId    = BSC.pack "fileid01"
                  , Parquet.Read.fdAadPrefix = BS.empty
                  }
-    case Parquet.Read.loadParquetFileEncrypted fdec encFile of
+    case Parquet.Read.loadParquetFileEncrypted fdec encFooterFile of
       Left e -> failTest ("loadParquetFileEncrypted: " ++ e)
       Right pf' -> do
         let fmDecrypted = Parquet.Read.pfFooter pf'
@@ -641,7 +641,7 @@ main = do
           (V.length (fmRowGroups fmDecrypted) == 1)
     -- Wrong key must fail GCM auth.
     let wrongFd = fdec { Parquet.Read.fdKey = BS.replicate 16 0 }
-    case Parquet.Read.loadParquetFileEncrypted wrongFd encFile of
+    case Parquet.Read.loadParquetFileEncrypted wrongFd encFooterFile of
       Left _  -> expect "wrong key rejected by GCM auth" True
       Right _ -> failTest "encrypted footer decrypted with wrong key (BAD)"
 
@@ -711,11 +711,11 @@ main = do
         , ("empty",              VP.empty :: VP.Vector Int64)
         , ("128 mixed",          VP.fromList [let i64 = fromIntegral i :: Int64 in i64 * 7 - i64 `mod` 13 | i <- [(0 :: Int) .. 127]])
         ]
-  flip mapM_ testCases $ \(name, vs) ->
-    case decodeDeltaBinaryPackedInt64 (VP.length vs) (encodeDeltaBinaryPackedInt64 vs) of
+  flip mapM_ testCases $ \(name, xs) ->
+    case decodeDeltaBinaryPackedInt64 (VP.length xs) (encodeDeltaBinaryPackedInt64 xs) of
       Right out ->
         expect ("DELTA_BINARY_PACKED round-trip: " ++ name)
-          (VP.toList out == VP.toList vs)
+          (VP.toList out == VP.toList xs)
       Left e -> failTest ("DELTA_BINARY_PACKED " ++ name ++ ": " ++ e)
 
   -- Modular encryption: round-trip plaintext through encrypt/decrypt for
@@ -803,8 +803,8 @@ main = do
         ]
   mapM_
     (\inp ->
-       let bs = encodeDeltaLengthByteArray inp
-        in case decodeDeltaLengthByteArray (V.length inp) bs of
+       let encoded = encodeDeltaLengthByteArray inp
+        in case decodeDeltaLengthByteArray (V.length inp) encoded of
              Right xs -> expect "DELTA_LENGTH_BYTE_ARRAY round-trip" (xs == inp)
              Left  e  -> failTest ("DELTA_LENGTH_BYTE_ARRAY decode: " ++ e))
     dlbaInputs
@@ -824,8 +824,8 @@ main = do
         ]
   mapM_
     (\inp ->
-       let bs = encodeDeltaByteArray inp
-        in case decodeDeltaByteArray (V.length inp) bs of
+       let encoded = encodeDeltaByteArray inp
+        in case decodeDeltaByteArray (V.length inp) encoded of
              Right xs -> expect "DELTA_BYTE_ARRAY round-trip" (xs == inp)
              Left  e  -> failTest ("DELTA_BYTE_ARRAY decode: " ++ e))
     dbaInputs
@@ -1049,7 +1049,7 @@ encodingRoundTripProperties = do
         & map fromIntegral
       mkFloats s n = map (\x -> fromIntegral x / 1000.0)
                        (mkInts32 s n)
-      mkDoubles s n = map (\x -> fromIntegral x / 1000000.0)
+      mkDoubles s n = map (\x -> fromIntegral (x :: Int64) / 1000000.0)
                         (mkInts64 s n)
       (&) :: a -> (a -> b) -> b
       a & f = f a
@@ -1359,9 +1359,9 @@ arrowParquetProjection = do
         , AT.arrowFeatures = V.empty
         }
       !batch = V.fromList
-        [ AC.ColInt32 (VP.fromList [10, 20, 30 :: Int32])
-        , AC.ColInt32 (VP.fromList [40, 50, 60 :: Int32])
-        , AC.ColUtf8  (V.fromList ["alpha", "beta", "gamma"])
+        [ AC.primColumn AC.PInt32 (VS.fromList [10, 20, 30 :: Int32])
+        , AC.primColumn AC.PInt32 (VS.fromList [40, 50, 60 :: Int32])
+        , AC.fromTexts (V.fromList ["alpha", "beta", "gamma"])
         ]
   case PArrow.arrowToParquet fullSchema [batch] of
     Left  e -> failTest $ "projection arrowToParquet: " ++ e
@@ -1388,8 +1388,8 @@ arrowParquetProjection = do
             Left  e    -> failTest $ "parquetRowGroupToArrow: " ++ show e
             Right cols -> do
               let !expected = V.fromList
-                    [ AC.ColUtf8  (V.fromList ["alpha", "beta", "gamma"])
-                    , AC.ColInt32 (VP.fromList [10, 20, 30 :: Int32])
+                    [ AC.fromTexts (V.fromList ["alpha", "beta", "gamma"])
+                    , AC.primColumn AC.PInt32 (VS.fromList [10, 20, 30 :: Int32])
                     ]
               if cols == expected
                 then putStrLn "OK: Parquet projection + reorder (c, a <- a, b, c)"
@@ -1420,7 +1420,7 @@ arrowParquetProjection = do
           case PArrow.parquetRowGroupToArrow widen pf 0 of
             Left e -> failTest $ "projection coercion: " ++ show e
             Right cols ->
-              if cols == V.singleton (AC.ColInt64 (VP.fromList [10, 20, 30 :: Int64]))
+              if cols == V.singleton (AC.primColumn AC.PInt64 (VS.fromList [10, 20, 30 :: Int64]))
                 then putStrLn "OK: Parquet projection coerces Int32 -> Int64"
                 else failTest $ "coercion mismatch: " ++ show (V.toList cols)
 
@@ -1437,9 +1437,9 @@ arrowParquetNestedBridge = do
            ])
         Nothing
         V.empty
-      structCol = AC.ColStruct (V.fromList
-        [ ("x",    AC.ColInt32 (VP.fromList [1, 2, 3 :: Int32]))
-        , ("name", AC.ColUtf8  (V.fromList ["a", "b", "c"]))
+      structCol = either error id $ AC.mkStruct 3 Nothing (V.fromList
+        [ ("x",    AC.primColumn AC.PInt32 (VS.fromList [1, 2, 3 :: Int32]))
+        , ("name", AC.fromTexts (V.fromList ["a", "b", "c"]))
         ])
   case PArrow.arrowFieldToNestedSchema structField of
     Left  e   -> failTest $ "arrowFieldToNestedSchema: " ++ e
@@ -1467,8 +1467,8 @@ arrowParquetBridge = do
         , AT.arrowFeatures = V.empty
         }
       !batch = V.fromList
-        [ AC.ColInt32 (VP.fromList ([10, 20, 30] :: [Int32]))
-        , AC.ColUtf8  (V.fromList ["alpha", "beta", "gamma"])
+        [ AC.primColumn AC.PInt32 (VS.fromList ([10, 20, 30] :: [Int32]))
+        , AC.fromTexts (V.fromList ["alpha", "beta", "gamma"])
         ]
   case PArrow.arrowToParquet arrowSchema [batch] of
     Left  e  -> failTest $ "arrowToParquet: " ++ e
@@ -1504,15 +1504,15 @@ arrowParquetBridge = do
         Left  e -> failTest $ "decodeParquet (stream): " ++ e
         Right pf -> do
           let results = PArrow.streamRowGroups arrowSchema pf
-          if length results /= 1
-            then failTest $ "streamRowGroups: expected 1 row group, got "
-                              ++ show (length results)
-            else case head results of
-              Left  e    -> failTest $ "streamRowGroups (rg 0): " ++ e
-              Right cols ->
-                if cols == batch
-                  then putStrLn "OK: streamRowGroups iterates row groups"
-                  else failTest $ "streamRowGroups mismatch"
+          case results of
+            [Left e] -> failTest $ "streamRowGroups (rg 0): " ++ e
+            [Right cols] ->
+              if cols == batch
+                then putStrLn "OK: streamRowGroups iterates row groups"
+                else failTest $ "streamRowGroups mismatch"
+            _ ->
+              failTest $ "streamRowGroups: expected 1 row group, got "
+                ++ show (length results)
 
   -- Temporal bridge: Date32, Timestamp round-trip through the
   -- Arrow -> Parquet -> Arrow path.
@@ -1526,8 +1526,8 @@ arrowParquetBridge = do
         , AT.arrowFeatures = V.empty
         }
       !tempBatch = V.fromList
-        [ AC.ColDate32    (VP.fromList ([19000, 19001, 19002] :: [Int32]))
-        , AC.ColTimestamp (VP.fromList ([1700000000000000, 1700001000000000, 1700002000000000] :: [Int64]))
+        [ AC.primColumn AC.PDate32    (VS.fromList ([19000, 19001, 19002] :: [Int32]))
+        , AC.primColumn AC.PTimestamp (VS.fromList ([1700000000000000, 1700001000000000, 1700002000000000] :: [Int64]))
         ]
   case PArrow.arrowToParquet tempSchema [tempBatch] of
     Left  e -> failTest $ "temporal arrowToParquet: " ++ e

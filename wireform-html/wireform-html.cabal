@@ -58,7 +58,7 @@ library
     base >= 4.16 && < 5,
     wireform-derive,
     bytestring >= 0.11 && < 0.13,
-    wireform-core == 0.1.*,
+    wireform-core == 0.2.*,
     -- HTML.Selector unpacks Text via the `ByteArray` constructor
     -- (Data.Text.Array.Array became a re-export of ByteArray in
     -- text 2.1); 2.0.x still wraps a separate Array newtype and

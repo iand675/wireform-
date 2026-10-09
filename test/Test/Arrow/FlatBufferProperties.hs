@@ -9,7 +9,7 @@ This is the part of the Arrow stack with the most delicate
 invariants: vtable layout, soffset computation, inline-
 struct padding, table-dedup. A handful of fixed-value tests
 ('Test.Arrow' covers the simplified 'Arrow.IPC' shape; the
-flatbuffer path has only anecdotal coverage) isn't enough —
+flatbuffer path has only anecdotal coverage) isn't enough , 
 the bugs here tend to show up on payloads the fixed tests
 never generate (the Tensor slot-resolution bug earlier only
 manifested when a table had a 16-byte inline struct slot).
@@ -33,6 +33,7 @@ import Data.ByteString qualified as BS
 import Data.Int (Int32, Int64)
 import Data.Text qualified as T
 import Data.Vector qualified as V
+import Data.Vector.Storable qualified as VS
 import Hedgehog
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
@@ -163,7 +164,7 @@ genStructLikeField = do
   ty <- genStructLikeType
   -- @AList@ / @ALargeList@ require exactly one child by spec;
   -- @AStruct@ admits 0..N. We generate 1..2 children generically
-  -- — a single-child list then reads back correctly.
+  -- a single-child list then reads back correctly.
   nCh <- Gen.int (Range.linear 1 2)
   kids <- Gen.list (Range.singleton nCh) genLeafField
   pure
@@ -226,7 +227,7 @@ genBuffer =
 
 
 {- | RecordBatchDef with arbitrary metadata but no actual body
-bytes — the metadata codec is what we're testing here. Body
+bytes, the metadata codec is what we're testing here. Body
 compression is round-tripped via the codec discriminator;
 only the codec enum, not the actual buffer contents, matters
 for the metadata property.
@@ -235,9 +236,9 @@ genRecordBatchDef :: Gen RecordBatchDef
 genRecordBatchDef = do
   !len <- Gen.int64 (Range.linear 0 1_000_000)
   nNodes <- Gen.int (Range.linear 0 4)
-  !nodes <- V.fromList <$> Gen.list (Range.singleton nNodes) genFieldNode
+  !nodes <- VS.fromList <$> Gen.list (Range.singleton nNodes) genFieldNode
   nBufs <- Gen.int (Range.linear 0 6)
-  !bufs <- V.fromList <$> Gen.list (Range.singleton nBufs) genBuffer
+  !bufs <- VS.fromList <$> Gen.list (Range.singleton nBufs) genBuffer
   nVar <- Gen.int (Range.linear 0 3)
   !variadic <- V.fromList <$> Gen.list (Range.singleton nVar) (Gen.int64 (Range.linear 0 32))
   !bodyComp <- Gen.element [Nothing, Just LZ4Frame, Just BodyZstd]
@@ -308,7 +309,7 @@ genTensor = do
       }
 
 
-{- | Fixed-width numeric types — Tensor values are typed, the
+{- | Fixed-width numeric types, Tensor values are typed, the
 decoder needs to be able to recover bytes-per-element
 unambiguously.
 -}
@@ -385,7 +386,7 @@ propSchemaRoundTrip = withTests 200 $ property $ do
   sch <- forAll genSchema
   -- buildSchemaMessage emits a Message table wrapping the
   -- Schema. decodeSchemaMessage strips the Message and returns
-  -- the inner Schema — if the inner Schema is equal to the
+  -- the inner Schema, if the inner Schema is equal to the
   -- input we've covered the full writeField + writeType +
   -- writeTable stack for every shape the generator produces.
   case decodeSchemaMessage (buildSchemaMessage sch) of
@@ -521,14 +522,14 @@ propFrameAlignment = withTests 100 $ property $ do
 
 {- | Vtable dedup: encoding the same Schema twice as consecutive
 messages in one stream should produce structurally equal
-schemas on decode — stress-tests the vtable-dedup cache.
+schemas on decode, stress-tests the vtable-dedup cache.
 -}
 propVTableDedup :: Property
 propVTableDedup = withTests 50 $ property $ do
   sch <- forAll genSchema
   let !bytes1 = buildSchemaMessage sch
       !bytes2 = buildSchemaMessage sch
-  -- Identical inputs must produce identical bytes — if the
+  -- Identical inputs must produce identical bytes, if the
   -- dedup cache is stateful in a non-deterministic way (e.g.
   -- hash collisions emit different vtables) this property will
   -- catch it.

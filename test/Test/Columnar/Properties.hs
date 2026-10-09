@@ -6,14 +6,14 @@ facade.
 
 The tests are layered by capability rather than by format:
 
-* 'crossFormatRoundTrip' — the shapes every format supports
+* 'crossFormatRoundTrip': the shapes every format supports
   identically. Run against all four 'Col.Format' values.
-* 'arrowFullCoverage' — the shapes the Arrow IPC stream / file
+* 'arrowFullCoverage': the shapes the Arrow IPC stream / file
   format round-trip (nullable + Int16 + binary included).
-* 'parquetBridgeRoundTrip' — the shapes the Arrow <-> Parquet
+* 'parquetBridgeRoundTrip': the shapes the Arrow <-> Parquet
   bridge currently supports (non-nullable flat primitives +
   temporals).
-* 'orcBridgeRoundTrip' — the shapes the Arrow <-> ORC bridge
+* 'orcBridgeRoundTrip': the shapes the Arrow <-> ORC bridge
   currently supports (adds nullable via PRESENT stream).
 
 A failure here indicates either a regression in the round-trip
@@ -63,7 +63,7 @@ columnarPropertyTests =
     -- The Parquet Arrow-bridge reader expects PageV1 +
     -- Uncompressed pages (the simple per-chunk readers used by
     -- Parquet.Arrow don't support V2 / compressed pages yet).
-    -- That's a bridge limitation, not a format one — the
+    -- That's a bridge limitation, not a format one, the
     -- lower-level Parquet.Write path handles every combination.
     parquetOpts =
       Col.defaultWriteOptions

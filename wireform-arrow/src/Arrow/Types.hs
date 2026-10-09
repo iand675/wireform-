@@ -54,7 +54,9 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Vector (Vector)
 import Data.Vector qualified as V
+import Data.Vector.Storable qualified as VS
 import Data.Word (Word64, Word8)
+import Foreign.Storable (Storable (..))
 import GHC.Generics (Generic)
 import Wireform.Builder qualified as BB
 
@@ -142,9 +144,11 @@ data Field = Field
   , fieldType :: !ArrowType
   , fieldChildren :: !(Vector Field)
   , fieldDictionary :: !(Maybe DictionaryEncoding)
-  {- ^ When non-'Nothing', this field's @fieldType@ refers to the
-  /index/ type and the actual values live in a separate
-  'DictionaryBatch' message keyed by 'deId'.
+  {- ^ When non-'Nothing', the column is dictionary-encoded: the
+  record batch carries indices of type 'deIndexType', while
+  @fieldType@ / @fieldChildren@ describe the dictionary /values/,
+  which live in separate 'DictionaryBatch' messages keyed by 'deId'
+  (as in the Arrow spec).
   -}
   , fieldMetadata :: !(Vector (Text, Text))
   {- ^ Arrow per-field @custom_metadata@ (Schema.fbs field 6).
@@ -208,6 +212,10 @@ data Schema = Schema
   deriving anyclass (NFData)
 
 
+{- | One array's length and null count (Message.fbs @struct FieldNode@,
+16 bytes). 'Storable' with the wire layout, so a record batch's nodes
+are one 'VS.Vector'.
+-}
 data FieldNode = FieldNode
   { fnLength :: !Int64
   , fnNullCount :: !Int64
@@ -216,6 +224,18 @@ data FieldNode = FieldNode
   deriving anyclass (NFData)
 
 
+instance Storable FieldNode where
+  sizeOf _ = 16
+  alignment _ = 8
+  peek p = FieldNode <$> peekByteOff p 0 <*> peekByteOff p 8
+  poke p (FieldNode l n) = pokeByteOff p 0 l >> pokeByteOff p 8 n
+  {-# INLINE peek #-}
+  {-# INLINE poke #-}
+
+
+{- | One body buffer's offset and length (Message.fbs @struct Buffer@,
+16 bytes). 'Storable' with the wire layout.
+-}
 data Buffer = Buffer
   { bufOffset :: !Int64
   , bufLength :: !Int64
@@ -224,10 +244,21 @@ data Buffer = Buffer
   deriving anyclass (NFData)
 
 
+instance Storable Buffer where
+  sizeOf _ = 16
+  alignment _ = 8
+  peek p = Buffer <$> peekByteOff p 0 <*> peekByteOff p 8
+  poke p (Buffer o l) = pokeByteOff p 0 o >> pokeByteOff p 8 l
+  {-# INLINE peek #-}
+  {-# INLINE poke #-}
+
+
 data RecordBatchDef = RecordBatchDef
   { rbLength :: !Int64
-  , rbNodes :: !(Vector FieldNode)
-  , rbBuffers :: !(Vector Buffer)
+  , rbNodes :: !(VS.Vector FieldNode)
+  -- ^ Field nodes in schema pre-order (one memcpy from the message).
+  , rbBuffers :: !(VS.Vector Buffer)
+  -- ^ Body buffers in spec layout order.
   , rbVariadicBufferCounts :: !(Vector Int64)
   {- ^ Per Arrow @format/Message.fbs@: when the schema contains
   @Utf8View@ or @BinaryView@ fields each such field has a
@@ -264,9 +295,13 @@ data BodyCompressionCodec
   deriving anyclass (NFData)
 
 
+{- | One Arrow IPC message header: the schema, a dictionary batch
+(dictionary id, is-delta flag, the batch holding the dictionary
+values), or a record batch. Bodies travel separately.
+-}
 data Message
   = SchemaMessage !Schema
-  | DictionaryBatch
+  | DictionaryBatch !Int64 !Bool !RecordBatchDef
   | RecordBatch !RecordBatchDef
   deriving stock (Show, Eq, Generic)
   deriving anyclass (NFData)

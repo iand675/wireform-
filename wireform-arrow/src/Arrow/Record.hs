@@ -1,29 +1,46 @@
 {-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE DerivingStrategies #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 {- | @hasql@-shaped encoder / decoder combinators for Arrow's
 columnar data model.
 
-Four complementary abstractions:
+Five complementary abstractions:
 
-* 'Encoder' @a@ — column-level encoder, 'Contravariant'.
-  Primitives 'int32E', 'utf8E', 'boolE', … reshape with
+* 'Encoder' @a@: column-level encoder, 'Contravariant'.
+  Primitives 'int32E', 'utf8E', 'boolE', ... reshape with
   @'contramap' :: (a -> b) -> Encoder b -> Encoder a@ and
   @'nullable' :: Encoder a -> Encoder (Maybe a)@.
 
-* 'Decoder' @a@ — column-level decoder, 'Functor'. Mirror set
-  of primitives ('int32D', …) with @'nullableD'@.
+* 'Decoder' @a@: column-level decoder, 'Functor'. Mirror set
+  of primitives ('int32D', ...) with @'nullableD'@.
 
-* 'RowEncoder' @r@ — record-level encoder. Combine
+* 'RowEncoder' @r@: record-level encoder. Combine
   'fieldE' calls via 'Semigroup' @<>@.
 
-* 'RowDecoder' @r@ — 'Applicative' row decoder. Build with
+* 'RowDecoder' @r@: 'Applicative' row decoder. Build with
   @<$>@ + @<*>@ + 'columnD'.
 
-* 'Table' @r@ — pairs the two for round-trip use.
+* 'Table' @r@: pairs the two for round-trip use.
+
+== Cost model
+
+Encoding allocates one column buffer per field, sized for the row
+count (fixed-width values and booleans are stored straight into their
+slot; strings and bytes go through "Arrow.Column.Builder"), then
+traverses the input records once, appending each record to every
+column. Field selectors, 'contramap' and the 'nullable' unwrapping
+are fused into that loop, so no intermediate vector and no per-row
+heap object is allocated. Decoding binds each column once (type
+check, dictionary handling) to a row reader, composes the readers
+through the 'Applicative', and runs a single 'V.generate' over the
+rows: the only per-row allocation is the record itself and its boxed
+fields ('Text' fields are slices of one copy of their column's string
+bytes, made when the column is bound; 'ByteString' fields alias the
+input column).
 
 == Example
 
@@ -127,8 +144,49 @@ module Arrow.Record (
   projectTable,
 ) where
 
-import Arrow.Column (ColumnArray (..))
+import Arrow.Column (
+  BoolArray (..),
+  BytesArray (..),
+  ColumnArray,
+  PrimArray (..),
+  PrimType (..),
+  Utf8Array (..),
+  anyBytesAt,
+  anyTextAt,
+  asBinary,
+  asBool,
+  asLargeBinary,
+  asLargeUtf8,
+  asPrim,
+  asUtf8,
+  bitAt,
+  boolArrayAt,
+  columnLength,
+  columnTag,
+  expandDictionary,
+  fillerColumn,
+  isValidAt,
+  mkBitmap,
+  mkBool,
+  mkPrim,
+  mkStruct,
+  mkValidity,
+  nullCount,
+  primColumn,
+  unsafeBytesAt,
+  unsafePrimAt,
+  validity,
+  validityGenerate,
+  pattern ColBinaryView,
+  pattern ColDictionary,
+  pattern ColFixedSizeBinary,
+  pattern ColPrim,
+  pattern ColStruct,
+  pattern ColUtf8View,
+ )
 import Arrow.Column qualified as AC
+import Arrow.Column.Buffer (mallocAligned, unsafeIsValidAt)
+import Arrow.Column.Internal qualified as I
 import Arrow.Types (
   ArrowType (..),
   DateUnit (..),
@@ -138,54 +196,85 @@ import Arrow.Types (
   Schema (..),
   TimeUnit (..),
  )
+import Control.Monad (when)
+import Control.Monad.ST (ST, runST, stToIO)
+import Control.Monad.ST.Unsafe (unsafeIOToST)
+import Data.Bits (complement, unsafeShiftL, unsafeShiftR, (.&.), (.|.))
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
+import Data.ByteString.Internal qualified as BSI
+import Data.ByteString.Unsafe qualified as BSU
 import Data.Functor.Contravariant (Contravariant (..))
 import Data.Int (Int16, Int32, Int64, Int8)
-import Data.Map.Strict qualified as Map
+import Data.List (findIndex)
 import Data.Maybe (fromMaybe, isJust)
+import Data.Primitive.MutVar (newMutVar, readMutVar, writeMutVar)
+import Data.Primitive.PrimArray (MutablePrimArray, newPrimArray, readPrimArray, writePrimArray)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Array qualified as TA
+import Data.Text.Internal qualified as TI
+import Data.Text.Foreign qualified as TF
 import Data.Vector qualified as V
-import Data.Vector.Primitive qualified as VP
+import Data.Vector.Storable qualified as VS
+import Data.Vector.Storable.Mutable qualified as VSM
 import Data.Word (Word16, Word32, Word64, Word8)
+import Foreign.ForeignPtr (ForeignPtr)
+import Foreign.ForeignPtr.Unsafe (unsafeForeignPtrToPtr)
+import Foreign.Marshal.Utils (copyBytes, fillBytes)
+import Foreign.Ptr (Ptr, castPtr, minusPtr, nullPtr, plusPtr)
+import Foreign.Storable (Storable, peekByteOff, pokeByteOff, pokeElemOff, sizeOf)
+import GHC.Exts (Int (I#), Int#)
+import GHC.ForeignPtr (unsafeWithForeignPtr)
+import System.IO.Unsafe (unsafeDupablePerformIO)
 
-
--- AStruct is the constructor in ArrowType; explicit re-import
--- isn't needed because ArrowType (..) brings it in scope.
 
 -- ============================================================
 -- Encoder
 -- ============================================================
 
-{- | Serialises a vector of Haskell values as an Arrow column.
+{- | Serialises Haskell values as an Arrow column.
 
-Pairs the Arrow type (used to populate the schema) with two
-column-builder functions: one for required input, one for
-'Maybe'-wrapped input. Primitive encoders fill both;
-'contramap' threads a projection through both so a derived
-encoder remains liftable via 'nullable'.
+Pairs the Arrow type (used to populate the schema) with a column
+sink: given the row count, it allocates the column's buffers and
+returns an append action (indexed by row), a null-append action and a
+freeze. 'contramap' composes the projection into the append action,
+so a field selector runs inside the encoding loop and no intermediate
+vector is built.
 -}
 data Encoder a = Encoder
-  { encoderType :: !ArrowType
-  , encoderNullable :: !Bool
-  , encoderRequired :: !(V.Vector a -> ColumnArray)
-  , encoderOptional :: !(V.Vector (Maybe a) -> ColumnArray)
+  { encoderType :: ArrowType
+  , encoderNullable :: Bool
+  , encoderSink :: forall s. Int -> ST s (ColSink s a)
   }
 
 
--- | Encode a non-nullable column.
+{- | A column under construction, addressed by row index (rows are
+appended in order @0, 1, ..@ exactly once each): append a value,
+append a null, freeze.
+-}
+data ColSink s a = ColSink (Int# -> a -> ST s ()) (Int# -> ST s ()) (ST s ColumnArray)
+
+
+-- | Encode a column with one row per input value.
 runEncoder :: Encoder a -> V.Vector a -> ColumnArray
-runEncoder = encoderRequired
+runEncoder e v = runST $ do
+  ColSink push _ freeze <- encoderSink e (V.length v)
+  V.imapM_ (\(I# i) x -> push i x) v
+  freeze
+{-# INLINE runEncoder #-}
 
 
 instance Contravariant Encoder where
-  contramap f (Encoder ty nu req opt) =
+  contramap f (Encoder ty nu mk) =
     Encoder
       { encoderType = ty
       , encoderNullable = nu
-      , encoderRequired = req . V.map f
-      , encoderOptional = opt . V.map (fmap f)
+      , encoderSink = \n -> do
+          ColSink push pushNull freeze <- mk n
+          pure (ColSink (\i x -> push i (f x)) pushNull freeze)
       }
+  {-# INLINE contramap #-}
 
 
 {- | Alias for 'contramap' that reads more naturally at call
@@ -193,33 +282,153 @@ sites.
 -}
 contramapE :: (a -> b) -> Encoder b -> Encoder a
 contramapE = contramap
+{-# INLINE contramapE #-}
 
 
-{- | Lift an encoder to build a nullable Arrow column. The
-inner encoder's @Maybe@-builder becomes the new required
-builder; a second 'nullable' wrap is rejected at runtime
-since Arrow has no nested-null representation.
+{- | Lift an encoder to build a nullable Arrow column: 'Nothing'
+rows are null. Arrow has no nested-null representation, so running
+an encoder wrapped in 'nullable' twice is a runtime error.
 -}
 nullable :: Encoder a -> Encoder (Maybe a)
 nullable e =
   Encoder
     { encoderType = encoderType e
     , encoderNullable = True
-    , encoderRequired = encoderOptional e
-    , encoderOptional = \_ ->
-        error
-          "Arrow.Record.nullable: Arrow has no nested-null \
-          \representation; don't wrap 'nullable' twice"
+    , encoderSink = \n ->
+        if encoderNullable e
+          then
+            errorWithoutStackTrace
+              "Arrow.Record.nullable: Arrow has no nested-null \
+              \representation; don't wrap 'nullable' twice"
+          else do
+            ColSink push pushNull freeze <- encoderSink e n
+            let pushMaybe i = \case
+                  Nothing -> pushNull i
+                  Just x -> push i x
+            pure (ColSink pushMaybe pushNull freeze)
     }
+{-# INLINE nullable #-}
 
 
--- Internal: primitive-encoder constructor.
-mkE
-  :: ArrowType
-  -> (V.Vector a -> ColumnArray)
-  -> (V.Vector (Maybe a) -> ColumnArray)
-  -> Encoder a
-mkE ty req opt = Encoder ty False req opt
+{- | Fixed-width encoder. The row count is known up front, so values
+are stored straight into their slot of one pinned buffer (a single
+store per row); nulls are recorded in a side mask and only turned
+into a validity bitmap if one occurred.
+
+Like every encoder here, the append actions write through the raw
+addresses of their pinned buffers and capture nothing else: a row
+encoder's per-row action holds every field's append state, and each
+captured value costs a load and a stack slot per row. The buffers stay
+alive because the freeze action, which runs after the last append,
+holds them.
+-}
+primE :: Storable a => ArrowType -> PrimType a -> Encoder a
+primE ty t =
+  Encoder
+    { encoderType = ty
+    , encoderNullable = False
+    , encoderSink = \n -> do
+        vals <- VSM.unsafeNew n
+        nulls <- newNullMask n
+        let !p = mvectorPtr vals
+            pushNull i = do
+              zeroSlot p (I# i)
+              markNull nulls (I# i)
+            freeze = do
+              v <- VS.unsafeFreeze vals
+              valid <- freezeNullMask nulls n
+              pure $ case valid of
+                Nothing -> primColumn t v
+                Just _ -> encoded "primE" (mkPrim t valid v)
+        pure (ColSink (\i x -> unsafeIOToST (pokeElemOff p (I# i) x)) pushNull freeze)
+    }
+{-# INLINE primE #-}
+
+
+-- | The address of a pinned storable vector's first element.
+mvectorPtr :: VSM.MVector s a -> Ptr a
+mvectorPtr = unsafeForeignPtrToPtr . fst . VSM.unsafeToForeignPtr0
+{-# INLINE mvectorPtr #-}
+
+
+-- | Zero a null row's value slot (deterministic bytes under nulls).
+zeroSlot :: forall s a. Storable a => Ptr a -> Int -> ST s ()
+zeroSlot p i = unsafeIOToST $ do
+  let !w = sizeOf (undefined :: a)
+  fillBytes (castPtr p `plusPtr` (i * w)) 0 w
+
+
+-- | Unwrap a column built from rows that satisfy its invariants by construction.
+encoded :: String -> Either String ColumnArray -> ColumnArray
+encoded who = \case
+  Right c -> c
+  Left e -> errorWithoutStackTrace ("Arrow.Record." ++ who ++ ": " ++ e)
+
+
+{- | Null rows seen so far: a zeroed bit per row (set = null), its
+address, and the null count.
+-}
+data NullMask s = NullMask (Ptr Word8) (ForeignPtr Word8) (MutablePrimArray s Int)
+
+
+newNullMask :: Int -> ST s (NullMask s)
+newNullMask n = do
+  bits <- newBits n
+  count <- newPrimArray 1
+  writePrimArray count 0 0
+  pure (NullMask (unsafeForeignPtrToPtr bits) bits count)
+
+
+markNull :: NullMask s -> Int -> ST s ()
+markNull (NullMask p _ count) i = do
+  setBit' p i
+  c <- readPrimArray count 0
+  writePrimArray count 0 (c + 1)
+{-# INLINE markNull #-}
+
+
+-- | The validity of @n@ rows: 'Nothing' when no row was null.
+freezeNullMask :: NullMask s -> Int -> ST s (Maybe AC.Validity)
+freezeNullMask (NullMask _ bits count) n = do
+  c <- readPrimArray count 0
+  if c == 0
+    then pure Nothing
+    else unsafeIOToST $ do
+      let !len = bitBytes n
+      valid <- BSI.mallocByteString len
+      unsafeWithForeignPtr bits $ \src -> unsafeWithForeignPtr valid $ \dst ->
+        let go j
+              | j >= len = pure ()
+              | otherwise = do
+                  b <- peekByteOff src j :: IO Word8
+                  pokeByteOff dst j (complement b)
+                  go (j + 1)
+        in go 0
+      pure $ case mkBitmap (BSI.BS valid len) 0 n of
+        Right bm -> mkValidity bm
+        Left e -> errorWithoutStackTrace ("Arrow.Record: validity bitmap: " ++ e)
+
+
+bitBytes :: Int -> Int
+bitBytes n = (n + 7) `unsafeShiftR` 3
+{-# INLINE bitBytes #-}
+
+
+-- | A zeroed, pinned bitmap with room for @n@ bits.
+newBits :: Int -> ST s (ForeignPtr Word8)
+newBits n = unsafeIOToST $ do
+  let !len = bitBytes n
+  fp <- BSI.mallocByteString len
+  unsafeWithForeignPtr fp $ \p -> fillBytes p 0 len
+  pure fp
+
+
+setBit' :: Ptr Word8 -> Int -> ST s ()
+setBit' p i = unsafeIOToST $ do
+  let !byte = i `unsafeShiftR` 3
+  b <- peekByteOff p byte :: IO Word8
+  pokeByteOff p byte (b .|. (1 `unsafeShiftL` (i .&. 7)))
+{-# INLINE setBit' #-}
 
 
 -- ============================================================
@@ -227,124 +436,357 @@ mkE ty req opt = Encoder ty False req opt
 -- ============================================================
 
 int8E :: Encoder Int8
-int8E = mkE (AInt 8 True) (ColInt8 . VP.convert) ColInt8Maybe
+int8E = primE (AInt 8 True) PInt8
+{-# INLINE int8E #-}
 
 
 int16E :: Encoder Int16
-int16E = mkE (AInt 16 True) (ColInt16 . VP.convert) ColInt16Maybe
+int16E = primE (AInt 16 True) PInt16
+{-# INLINE int16E #-}
 
 
 int32E :: Encoder Int32
-int32E = mkE (AInt 32 True) (ColInt32 . VP.convert) ColInt32Maybe
+int32E = primE (AInt 32 True) PInt32
+{-# INLINE int32E #-}
 
 
 int64E :: Encoder Int64
-int64E = mkE (AInt 64 True) (ColInt64 . VP.convert) ColInt64Maybe
+int64E = primE (AInt 64 True) PInt64
+{-# INLINE int64E #-}
 
 
 word8E :: Encoder Word8
-word8E = mkE (AInt 8 False) (ColUInt8 . VP.convert) ColUInt8Maybe
+word8E = primE (AInt 8 False) PUInt8
+{-# INLINE word8E #-}
 
 
 word16E :: Encoder Word16
-word16E = mkE (AInt 16 False) (ColUInt16 . VP.convert) ColUInt16Maybe
+word16E = primE (AInt 16 False) PUInt16
+{-# INLINE word16E #-}
 
 
 word32E :: Encoder Word32
-word32E = mkE (AInt 32 False) (ColUInt32 . VP.convert) ColUInt32Maybe
+word32E = primE (AInt 32 False) PUInt32
+{-# INLINE word32E #-}
 
 
 word64E :: Encoder Word64
-word64E = mkE (AInt 64 False) (ColUInt64 . VP.convert) ColUInt64Maybe
+word64E = primE (AInt 64 False) PUInt64
+{-# INLINE word64E #-}
 
 
 floatE :: Encoder Float
-floatE = mkE (AFloatingPoint Single) (ColFloat . VP.convert) ColFloatMaybe
+floatE = primE (AFloatingPoint Single) PFloat
+{-# INLINE floatE #-}
 
 
 doubleE :: Encoder Double
-doubleE = mkE (AFloatingPoint DoublePrecision) (ColDouble . VP.convert) ColDoubleMaybe
+doubleE = primE (AFloatingPoint DoublePrecision) PDouble
+{-# INLINE doubleE #-}
 
 
+{- | One bit per row, set in place in a pinned bitmap sized for the
+row count.
+-}
 boolE :: Encoder Bool
-boolE = mkE ABool ColBool ColBoolMaybe
+boolE =
+  Encoder
+    { encoderType = ABool
+    , encoderNullable = False
+    , encoderSink = \n -> do
+        bits <- newBits n
+        nulls <- newNullMask n
+        let !bp = unsafeForeignPtrToPtr bits
+            push i b = if b then setBit' bp (I# i) else pure ()
+            freeze = do
+              valid <- freezeNullMask nulls n
+              pure $ case mkBitmap (BSI.BS bits (bitBytes n)) 0 n of
+                Right bm -> encoded "boolE" (mkBool valid bm)
+                Left e -> errorWithoutStackTrace ("Arrow.Record.boolE: " ++ e)
+        pure (ColSink push (\i -> markNull nulls (I# i)) freeze)
+    }
+{-# INLINE boolE #-}
 
 
 utf8E :: Encoder Text
-utf8E = mkE AUtf8 ColUtf8 ColUtf8Maybe
+utf8E = varE AUtf8 I.ColUtf8 TF.lengthWord8 TF.unsafeCopyToPtr
+{-# INLINE utf8E #-}
 
 
 binaryE :: Encoder ByteString
-binaryE = mkE ABinary ColBinary ColBinaryMaybe
+binaryE = varE ABinary I.ColBinary BS.length $ \bs dst ->
+  BSU.unsafeUseAsCStringLen bs $ \(src, l) -> copyBytes dst (castPtr src) l
+{-# INLINE binaryE #-}
+
+
+{- | Var-length encoder (32-bit offsets). The row count is known, so
+each row's end offset is stored straight into its slot of one buffer
+sized for the rows; the bytes go into a growable pinned buffer whose
+used size, capacity and address live in one small mutable array. An
+append is three loads, the copy and two stores, and the append action
+captures only that array, the offsets' address and the null mask (a
+column builder keeps several mutable cells per buffer). Nulls are
+recorded as in 'primE'.
+-}
+varE
+  :: ArrowType
+  -> (Maybe AC.Validity -> VS.Vector Int32 -> ByteString -> ColumnArray)
+  -> (a -> Int)
+  -> (a -> Ptr Word8 -> IO ())
+  -> Encoder a
+varE ty mk lenOf copyTo =
+  Encoder
+    { encoderType = ty
+    , encoderNullable = False
+    , encoderSink = \n -> do
+        offs <- VSM.unsafeNew (n + 1)
+        VSM.unsafeWrite offs 0 0
+        let !cap0 = max 64 (n * 8)
+        dat0 <- unsafeIOToST (mallocAligned cap0)
+        ref <- newMutVar dat0
+        st <- newPrimArray 3
+        writePrimArray st varUsed 0
+        writePrimArray st varCap cap0
+        writePrimArray st varAddr (addrOf dat0)
+        nulls <- newNullMask n
+        let !op = mvectorPtr offs
+            grow used need = do
+              cap <- readPrimArray st varCap
+              let !cap' = max need (cap * 2)
+              old <- readMutVar ref
+              new <- unsafeIOToST $ do
+                fp <- mallocAligned cap'
+                unsafeWithForeignPtr fp $ \d -> unsafeWithForeignPtr old $ \s -> copyBytes d s used
+                pure fp
+              writeMutVar ref new
+              writePrimArray st varCap cap'
+              writePrimArray st varAddr (addrOf new)
+            push i x = do
+              used <- readPrimArray st varUsed
+              cap <- readPrimArray st varCap
+              let !end = used + lenOf x
+              when (end > maxOffset) $
+                errorWithoutStackTrace "Arrow.Record: var-length column data exceeds 2^31 - 1 bytes"
+              when (end > cap) (grow used end)
+              base <- readPrimArray st varAddr
+              unsafeIOToST (copyTo x (nullPtr `plusPtr` (base + used)))
+              unsafeIOToST (pokeElemOff op (I# i + 1) (fromIntegral end))
+              writePrimArray st varUsed end
+            pushNull i = do
+              used <- readPrimArray st varUsed
+              unsafeIOToST (pokeElemOff op (I# i + 1) (fromIntegral used))
+              markNull nulls (I# i)
+            freeze = do
+              used <- readPrimArray st varUsed
+              fp <- readMutVar ref
+              o <- VS.unsafeFreeze offs
+              valid <- freezeNullMask nulls n
+              pure (mk valid o (BSI.BS fp used))
+        pure (ColSink push pushNull freeze)
+    }
+  where
+    addrOf fp = unsafeForeignPtrToPtr fp `minusPtr` nullPtr
+    maxOffset = fromIntegral (maxBound :: Int32)
+{-# INLINE varE #-}
+
+
+-- | Slots of a 'varE' state array.
+varUsed, varCap, varAddr :: Int
+varUsed = 0
+varCap = 1
+varAddr = 2
 
 
 -- | Days since Unix epoch (INT32). Arrow logical @Date(DateDay)@.
 date32E :: Encoder Int32
-date32E = mkE (ADate DateDay) (ColDate32 . VP.convert) ColDate32Maybe
+date32E = primE (ADate DateDay) PDate32
+{-# INLINE date32E #-}
 
 
 {- | Microseconds since Unix epoch (INT64, no timezone). Arrow
 logical @Timestamp(Microsecond, None)@.
 -}
 timestampE :: Encoder Int64
-timestampE = mkE (ATimestamp Microsecond Nothing) (ColTimestamp . VP.convert) ColTimestampMaybe
+timestampE = primE (ATimestamp Microsecond Nothing) PTimestamp
+{-# INLINE timestampE #-}
 
 
 -- ============================================================
 -- Decoder
 -- ============================================================
 
-{- | Materialises a Haskell vector from an Arrow column.
+{- | A bound column (or row) reader: row index to value. The index is
+unboxed so that calling a reader through an unknown closure passes it
+in a register instead of allocating a box per row.
+-}
+type Reader a = Int# -> a
 
-The decoder stores two extractors: one for the non-nullable
-'ColumnArray' shape its 'decoderType' advertises, one for the
-matching @Col*Maybe@. 'nullableD' flips to the second path so
-'fmap' composes through both in lockstep.
+
+{- | Reads Haskell values out of an Arrow column.
+
+A decoder binds a column once (type check, dictionary handling) and
+yields a reader that indexes row @i@ straight out of the column's
+buffers. 'nullableD' switches to the second binder, which yields a
+@Maybe a@ reader and accepts columns with nulls.
+
+Dictionary-encoded columns of the decoder's value type are accepted:
+nullable decoders read the values through the keys without expanding
+the dictionary; required decoders expand it first ('AC.expandDictionary'),
+which keeps the plain-column path a single, fully specialisable branch.
 -}
 data Decoder a = Decoder
-  { decoderType :: !ArrowType
-  , decoderRequired :: !(ColumnArray -> Either String (V.Vector a))
-  , decoderOptional :: !(ColumnArray -> Either String (V.Vector (Maybe a)))
+  { decoderType :: ArrowType
+  , decoderBind :: ColumnArray -> Either String (Reader a)
+  , decoderBindMaybe :: ColumnArray -> Either String (Reader (Maybe a))
   }
 
 
 instance Functor Decoder where
-  fmap f (Decoder ty req opt) =
+  fmap f (Decoder ty b bm) =
     Decoder
       { decoderType = ty
-      , decoderRequired = fmap (V.map f) . req
-      , decoderOptional = fmap (V.map (fmap f)) . opt
+      , decoderBind = \c -> case b c of
+          Left e -> Left e
+          Right g -> Right (\i -> f (g i))
+      , decoderBindMaybe = \c -> case bm c of
+          Left e -> Left e
+          Right g -> Right (\i -> fmap f (g i))
       }
+  {-# INLINE fmap #-}
 
 
--- | Decode a non-nullable column into a vector of values.
+-- | Decode a column without nulls into a vector of values.
 runDecoder :: Decoder a -> ColumnArray -> Either String (V.Vector a)
-runDecoder = decoderRequired
+runDecoder d col = case decoderBind d col of
+  Left e -> Left e
+  Right g -> Right (V.generate (columnLength col) (\(I# i) -> g i))
 
 
-{- | Lift a 'Decoder' to recognise nullable columns. Wrapping
-twice is a runtime error — Arrow has no nested-null
-representation.
+{- | Lift a 'Decoder' to read nullable columns: null rows become
+'Nothing'. Arrow has no nested-null representation, so decoding
+through a second 'nullableD' wrap returns 'Left'.
 -}
 nullableD :: Decoder a -> Decoder (Maybe a)
 nullableD d =
   Decoder
     { decoderType = decoderType d
-    , decoderRequired = decoderOptional d
-    , decoderOptional = \_ ->
+    , decoderBind = decoderBindMaybe d
+    , decoderBindMaybe = \_ ->
         Left
           "Arrow.Record.nullableD: Arrow has no nested-null \
           \representation; don't wrap 'nullableD' twice"
     }
+{-# INLINE nullableD #-}
 
 
--- Internal: primitive-decoder constructor.
-mkD
+{- | Build a decoder from binders for the plain (non-dictionary)
+column shapes, adding dictionary support. Required decoders expand a
+dictionary column first (so a key selecting a null value is a null
+row, rejected like any other); nullable decoders read the values
+through the keys without materialising anything.
+-}
+dictD
   :: ArrowType
-  -> (ColumnArray -> Either String (V.Vector a))
-  -> (ColumnArray -> Either String (V.Vector (Maybe a)))
+  -> (ColumnArray -> Either String (Reader a))
+  -> (ColumnArray -> Either String (Reader (Maybe a)))
   -> Decoder a
-mkD = Decoder
+dictD ty req opt = Decoder ty bindReq bindOpt
+  where
+    bindReq col = case undictionary col of
+      Left e -> Left e
+      Right plain -> req plain
+    bindOpt col = case col of
+      ColDictionary _ keys vals -> do
+        checkResolved keys vals
+        gv <- opt vals
+        g <- throughKeys keys gv
+        Right $ case validity keys of
+          Nothing -> g
+          kv -> \i -> if isValidAt kv (I# i) then g i else Nothing
+      _ -> opt col
+{-# INLINE dictD #-}
+
+
+{- | A dictionary column expanded to its value type; other columns
+unchanged. Kept out of line so that a required decoder's binder calls
+its plain-column reader once, letting GHC specialise the reader into
+the row function.
+-}
+{-# NOINLINE undictionary #-}
+undictionary :: ColumnArray -> Either String ColumnArray
+undictionary col = case col of
+  ColDictionary _ keys vals -> do
+    checkResolved keys vals
+    expandDictionary col
+  _ -> Right col
+
+
+{- | An unresolved dictionary column (values still the empty
+placeholder) can only be read when every key is null.
+-}
+checkResolved :: ColumnArray -> ColumnArray -> Either String ()
+checkResolved keys vals
+  | columnLength vals == 0 && nullCount keys < columnLength keys =
+      Left "Arrow.Record: dictionary column has unresolved (empty) values"
+  | otherwise = Right ()
+
+
+{- | Compose a value-row reader with a dictionary's keys. Keys are an
+integer column at wire width; every valid key is in range of the
+values (a 'ColDictionary' invariant, checked by 'checkResolved' for
+the placeholder case). The result reads key slots without consulting
+key validity; callers mask nulls.
+-}
+throughKeys :: forall b. ColumnArray -> Reader b -> Either String (Reader b)
+throughKeys keys gv = case keys of
+  ColPrim t _ ks -> case t of
+    PInt8 -> Right (via ks)
+    PInt16 -> Right (via ks)
+    PInt32 -> Right (via ks)
+    PInt64 -> Right (via ks)
+    PUInt8 -> Right (via ks)
+    PUInt16 -> Right (via ks)
+    PUInt32 -> Right (via ks)
+    PUInt64 -> Right (via ks)
+    _ -> Left ("Arrow.Record: dictionary keys must be integers, got " ++ columnTag keys)
+  _ -> Left ("Arrow.Record: dictionary keys must be integers, got " ++ columnTag keys)
+  where
+    via :: (Storable k, Integral k) => VS.Vector k -> Reader b
+    via ks i = case fromIntegral (VS.unsafeIndex ks (I# i)) of I# k -> gv k
+    {-# INLINE via #-}
+
+
+expectErr :: String -> ColumnArray -> String
+expectErr want got =
+  "Arrow.Record: expected " ++ want ++ ", got " ++ columnTag got
+
+
+nullsErr :: ColumnArray -> String
+nullsErr col =
+  "Arrow.Record: "
+    ++ columnTag col
+    ++ " column has "
+    ++ show (nullCount col)
+    ++ " null rows; decode it with nullableD"
+
+
+{- | Fixed-width decoder: the column must carry the given tag
+(dictionary columns of that value type are accepted, see 'dictD').
+-}
+primD :: Storable a => ArrowType -> PrimType a -> String -> Decoder a
+primD ty t want = dictD ty req opt
+  where
+    req col = case asPrim t col of
+      Just (PrimArray Nothing xs) -> Right (\i -> VS.unsafeIndex xs (I# i))
+      Just _ -> Left (nullsErr col)
+      Nothing -> Left (expectErr want col)
+    opt col = case asPrim t col of
+      Just (PrimArray Nothing xs) -> Right (\i -> let !x = VS.unsafeIndex xs (I# i) in Just x)
+      Just arr -> Right $ \i -> case unsafePrimAt arr (I# i) of
+        Nothing -> Nothing
+        Just x -> x `seq` Just x
+      Nothing -> Left (expectErr want col)
+{-# INLINE primD #-}
 
 
 -- ============================================================
@@ -352,145 +794,207 @@ mkD = Decoder
 -- ============================================================
 
 int8D :: Decoder Int8
-int8D =
-  mkD
-    (AInt 8 True)
-    (expectCol "ColInt8" $ \case ColInt8 v -> Right (VP.convert v); o -> expectErr "ColInt8" o)
-    (expectCol "ColInt8Maybe" $ \case ColInt8Maybe v -> Right v; o -> expectErr "ColInt8Maybe" o)
+int8D = primD (AInt 8 True) PInt8 "ColInt8"
+{-# INLINE int8D #-}
 
 
 int16D :: Decoder Int16
-int16D =
-  mkD
-    (AInt 16 True)
-    (expectCol "ColInt16" $ \case ColInt16 v -> Right (VP.convert v); o -> expectErr "ColInt16" o)
-    (expectCol "ColInt16Maybe" $ \case ColInt16Maybe v -> Right v; o -> expectErr "ColInt16Maybe" o)
+int16D = primD (AInt 16 True) PInt16 "ColInt16"
+{-# INLINE int16D #-}
 
 
 int32D :: Decoder Int32
-int32D =
-  mkD
-    (AInt 32 True)
-    (expectCol "ColInt32" $ \case ColInt32 v -> Right (VP.convert v); o -> expectErr "ColInt32" o)
-    (expectCol "ColInt32Maybe" $ \case ColInt32Maybe v -> Right v; o -> expectErr "ColInt32Maybe" o)
+int32D = primD (AInt 32 True) PInt32 "ColInt32"
+{-# INLINE int32D #-}
 
 
 int64D :: Decoder Int64
-int64D =
-  mkD
-    (AInt 64 True)
-    (expectCol "ColInt64" $ \case ColInt64 v -> Right (VP.convert v); o -> expectErr "ColInt64" o)
-    (expectCol "ColInt64Maybe" $ \case ColInt64Maybe v -> Right v; o -> expectErr "ColInt64Maybe" o)
+int64D = primD (AInt 64 True) PInt64 "ColInt64"
+{-# INLINE int64D #-}
 
 
 word8D :: Decoder Word8
-word8D =
-  mkD
-    (AInt 8 False)
-    (expectCol "ColUInt8" $ \case ColUInt8 v -> Right (VP.convert v); o -> expectErr "ColUInt8" o)
-    (expectCol "ColUInt8Maybe" $ \case ColUInt8Maybe v -> Right v; o -> expectErr "ColUInt8Maybe" o)
+word8D = primD (AInt 8 False) PUInt8 "ColUInt8"
+{-# INLINE word8D #-}
 
 
 word16D :: Decoder Word16
-word16D =
-  mkD
-    (AInt 16 False)
-    (expectCol "ColUInt16" $ \case ColUInt16 v -> Right (VP.convert v); o -> expectErr "ColUInt16" o)
-    (expectCol "ColUInt16Maybe" $ \case ColUInt16Maybe v -> Right v; o -> expectErr "ColUInt16Maybe" o)
+word16D = primD (AInt 16 False) PUInt16 "ColUInt16"
+{-# INLINE word16D #-}
 
 
 word32D :: Decoder Word32
-word32D =
-  mkD
-    (AInt 32 False)
-    (expectCol "ColUInt32" $ \case ColUInt32 v -> Right (VP.convert v); o -> expectErr "ColUInt32" o)
-    (expectCol "ColUInt32Maybe" $ \case ColUInt32Maybe v -> Right v; o -> expectErr "ColUInt32Maybe" o)
+word32D = primD (AInt 32 False) PUInt32 "ColUInt32"
+{-# INLINE word32D #-}
 
 
 word64D :: Decoder Word64
-word64D =
-  mkD
-    (AInt 64 False)
-    (expectCol "ColUInt64" $ \case ColUInt64 v -> Right (VP.convert v); o -> expectErr "ColUInt64" o)
-    (expectCol "ColUInt64Maybe" $ \case ColUInt64Maybe v -> Right v; o -> expectErr "ColUInt64Maybe" o)
+word64D = primD (AInt 64 False) PUInt64 "ColUInt64"
+{-# INLINE word64D #-}
 
 
 floatD :: Decoder Float
-floatD =
-  mkD
-    (AFloatingPoint Single)
-    (expectCol "ColFloat" $ \case ColFloat v -> Right (VP.convert v); o -> expectErr "ColFloat" o)
-    (expectCol "ColFloatMaybe" $ \case ColFloatMaybe v -> Right v; o -> expectErr "ColFloatMaybe" o)
+floatD = primD (AFloatingPoint Single) PFloat "ColFloat"
+{-# INLINE floatD #-}
 
 
 doubleD :: Decoder Double
-doubleD =
-  mkD
-    (AFloatingPoint DoublePrecision)
-    (expectCol "ColDouble" $ \case ColDouble v -> Right (VP.convert v); o -> expectErr "ColDouble" o)
-    (expectCol "ColDoubleMaybe" $ \case ColDoubleMaybe v -> Right v; o -> expectErr "ColDoubleMaybe" o)
+doubleD = primD (AFloatingPoint DoublePrecision) PDouble "ColDouble"
+{-# INLINE doubleD #-}
 
 
 boolD :: Decoder Bool
-boolD =
-  mkD
-    ABool
-    (expectCol "ColBool" $ \case ColBool v -> Right v; o -> expectErr "ColBool" o)
-    (expectCol "ColBoolMaybe" $ \case ColBoolMaybe v -> Right v; o -> expectErr "ColBoolMaybe" o)
+boolD = dictD ABool req opt
+  where
+    req col = case asBool col of
+      Just (BoolArray Nothing bits) -> Right (\i -> bitAt bits (I# i))
+      Just _ -> Left (nullsErr col)
+      Nothing -> Left (expectErr "ColBool" col)
+    opt col = case asBool col of
+      Just (BoolArray Nothing bits) -> Right (\i -> let !b = bitAt bits (I# i) in Just b)
+      Just arr -> Right (\i -> boolArrayAt arr (I# i))
+      Nothing -> Left (expectErr "ColBool" col)
+{-# INLINE boolD #-}
 
 
+{- | Text from a utf8, large utf8 or utf8 view column (the column was
+validated as UTF-8 when it was built or decoded, so nothing is
+re-validated).
+
+Binding a utf8 or large utf8 column copies the string bytes its rows
+reference once into one text array, and every row's 'Text' is a slice
+of it: no per-row allocation beyond the 'Text' itself, and nothing
+keeps the column's (or the IPC input's) buffers alive. Retention rule:
+a 'Text' you keep keeps that column's copied string bytes alive; use
+'T.copy' to detach it. Utf8 view rows are each copied into a fresh
+'Text'.
+-}
 utf8D :: Decoder Text
-utf8D =
-  mkD
-    AUtf8
-    (expectCol "ColUtf8" $ \case ColUtf8 v -> Right v; o -> expectErr "ColUtf8" o)
-    (expectCol "ColUtf8Maybe" $ \case ColUtf8Maybe v -> Right v; o -> expectErr "ColUtf8Maybe" o)
+utf8D = dictD AUtf8 req opt
+  where
+    req col
+      | Just arr <- asUtf8 col = noNulls col (let !rows = textRows arr in \i -> textRowValue rows (I# i))
+      | Just arr <- asLargeUtf8 col = noNulls col (let !rows = textRows arr in \i -> textRowValue rows (I# i))
+      | ColUtf8View {} <- col = noNulls col (\i -> orEmpty T.empty (anyTextAt col (I# i)))
+      | otherwise = Left (expectErr "ColUtf8" col)
+    opt col
+      | Just arr <- asUtf8 col = Right (let !rows = textRows arr in \i -> textRowAt rows (I# i))
+      | Just arr <- asLargeUtf8 col = Right (let !rows = textRows arr in \i -> textRowAt rows (I# i))
+      | ColUtf8View {} <- col = Right (\i -> forceJust (anyTextAt col (I# i)))
+      | otherwise = Left (expectErr "ColUtf8" col)
+{-# INLINE utf8D #-}
 
 
+{- | A utf8 column's rows over one text array holding a copy of the
+bytes they reference: validity, offsets, the array, and the data offset
+of the array's first byte.
+-}
+data TextRows o = TextRows !(Maybe AC.Validity) !(VS.Vector o) !TA.Array {-# UNPACK #-} !Int
+
+
+-- | Copy the referenced string bytes of a utf8 column once.
+textRows :: (Storable o, Integral o) => Utf8Array o -> TextRows o
+textRows (Utf8Array (BytesArray v o d))
+  | len <= 0 = TextRows v o TA.empty base
+  | otherwise = TextRows v o copied base
+  where
+    !n = VS.length o - 1
+    !base = if n < 1 then 0 else fromIntegral (VS.unsafeIndex o 0)
+    !len = if n < 1 then 0 else fromIntegral (VS.unsafeIndex o n) - base
+    copied = unsafeDupablePerformIO $ BSU.unsafeUseAsCString d $ \p -> stToIO $ do
+      ma <- TA.new len
+      TA.copyFromPointer ma 0 (castPtr p `plusPtr` base) len
+      TA.unsafeFreeze ma
+{-# INLINE textRows #-}
+
+
+-- | Row @i@ (in range) as a slice, ignoring validity.
+textRowValue :: (Storable o, Integral o) => TextRows o -> Int -> Text
+textRowValue (TextRows _ o arr base) i =
+  let !s = fromIntegral (VS.unsafeIndex o i)
+      !len = fromIntegral (VS.unsafeIndex o (i + 1)) - s
+  in if len == 0 then T.empty else TI.Text arr (s - base) len
+{-# INLINE textRowValue #-}
+
+
+-- | Row @i@ (in range) as a slice; 'Nothing' when null.
+textRowAt :: (Storable o, Integral o) => TextRows o -> Int -> Maybe Text
+textRowAt rows@(TextRows v _ _ _) i
+  | unsafeIsValidAt v i = let !t = textRowValue rows i in Just t
+  | otherwise = Nothing
+{-# INLINE textRowAt #-}
+
+
+-- | A required decoder's row reader, provided the column has no nulls.
+noNulls :: ColumnArray -> Reader a -> Either String (Reader a)
+noNulls col g
+  | nullCount col > 0 = Left (nullsErr col)
+  | otherwise = Right g
+{-# INLINE noNulls #-}
+
+
+{- | The value of a row known to be valid (the accessors only return
+'Nothing' for null rows, which 'noNulls' excluded).
+-}
+orEmpty :: a -> Maybe a -> a
+orEmpty def = \case
+  Just x -> x
+  Nothing -> def
+{-# INLINE orEmpty #-}
+
+
+-- | Evaluate the payload of a 'Just' so the row holds no thunk.
+forceJust :: Maybe a -> Maybe a
+forceJust = \case
+  Nothing -> Nothing
+  Just x -> x `seq` Just x
+{-# INLINE forceJust #-}
+
+
+{- | Bytes from a binary, large binary, binary view or fixed-size
+binary column (utf8 columns are accepted too). Rows are zero-copy
+slices that keep the column's buffer alive.
+-}
 binaryD :: Decoder ByteString
-binaryD =
-  mkD
-    ABinary
-    (expectCol "ColBinary" $ \case ColBinary v -> Right v; o -> expectErr "ColBinary" o)
-    (expectCol "ColBinaryMaybe" $ \case ColBinaryMaybe v -> Right v; o -> expectErr "ColBinaryMaybe" o)
+binaryD = dictD ABinary req opt
+  where
+    req col
+      | Just arr <- asBinary col = noNulls col (\i -> orEmpty BS.empty (unsafeBytesAt arr (I# i)))
+      | Just arr <- asLargeBinary col = noNulls col (\i -> orEmpty BS.empty (unsafeBytesAt arr (I# i)))
+      | isViewOrFixed col = noNulls col (\i -> orEmpty BS.empty (anyBytesAt col (I# i)))
+      | otherwise = Left (expectErr "ColBinary" col)
+    opt col
+      | Just arr <- asBinary col = Right (\i -> forceJust (unsafeBytesAt arr (I# i)))
+      | Just arr <- asLargeBinary col = Right (\i -> forceJust (unsafeBytesAt arr (I# i)))
+      | isViewOrFixed col = Right (\i -> forceJust (anyBytesAt col (I# i)))
+      | otherwise = Left (expectErr "ColBinary" col)
+{-# INLINE binaryD #-}
+
+
+isViewOrFixed :: ColumnArray -> Bool
+isViewOrFixed = \case
+  ColBinaryView {} -> True
+  ColUtf8View {} -> True
+  ColFixedSizeBinary {} -> True
+  _ -> False
 
 
 date32D :: Decoder Int32
-date32D =
-  mkD
-    (ADate DateDay)
-    (expectCol "ColDate32" $ \case ColDate32 v -> Right (VP.convert v); o -> expectErr "ColDate32" o)
-    (expectCol "ColDate32Maybe" $ \case ColDate32Maybe v -> Right v; o -> expectErr "ColDate32Maybe" o)
+date32D = primD (ADate DateDay) PDate32 "ColDate32"
+{-# INLINE date32D #-}
 
 
 timestampD :: Decoder Int64
-timestampD =
-  mkD
-    (ATimestamp Microsecond Nothing)
-    (expectCol "ColTimestamp" $ \case ColTimestamp v -> Right (VP.convert v); o -> expectErr "ColTimestamp" o)
-    (expectCol "ColTimestampMaybe" $ \case ColTimestampMaybe v -> Right v; o -> expectErr "ColTimestampMaybe" o)
-
-
--- Internal helpers shared by every primitive decoder.
-expectCol :: String -> (ColumnArray -> Either String b) -> ColumnArray -> Either String b
-expectCol _ k = k
-
-
-expectErr :: String -> ColumnArray -> Either String a
-expectErr want got =
-  Left $ "Arrow.Record: expected " ++ want ++ ", got " ++ colTag got
-
-
-colTag :: ColumnArray -> String
-colTag = takeWhile (/= ' ') . show
+timestampD = primD (ATimestamp Microsecond Nothing) PTimestamp "ColTimestamp"
+{-# INLINE timestampD #-}
 
 
 -- ============================================================
 -- RowEncoder
 -- ============================================================
 
-{- | A record-level encoder: produces a 'V.Vector ColumnArray' +
-its 'Field' list from a 'V.Vector' of records.
+{- | A record-level encoder: produces one 'ColumnArray' per field,
+plus the matching 'Field' list, from a 'V.Vector' of records.
 
 'RowEncoder' is 'Contravariant' and a 'Semigroup' / 'Monoid'.
 Combine 'fieldE' calls with @<>@:
@@ -500,31 +1004,67 @@ enc = 'fieldE' "sym" sym utf8E <> 'fieldE' "qty" qty int32E
 @
 -}
 data RowEncoder r = RowEncoder
-  { rowEncoderFields :: ![Field]
+  { rowEncoderFields :: [Field]
   -- ^ 'Field' entries in declaration order.
-  , runRowEncoder :: !(V.Vector r -> [ColumnArray])
-  {- ^ One 'ColumnArray' per field, parallel to
-  'rowEncoderFields'.
+  , rowEncoderSink :: forall s x. V.Vector x -> (x -> r) -> ST s (RowSink s r)
+  {- ^ Allocate one builder per field for the given input rows (seen
+  through a projection, for encoders that need to look at every row
+  up front) and return the per-row append action and the freeze.
   -}
   }
 
 
+{- | Rows under construction: append record @i@ to every field's
+builder, freeze every builder (one column per field).
+-}
+data RowSink s r = RowSink (Int# -> r -> ST s ()) (ST s [ColumnArray])
+
+
 instance Contravariant RowEncoder where
-  contramap f (RowEncoder flds run) =
-    RowEncoder flds (run . V.map f)
+  contramap f (RowEncoder fields mk) = RowEncoder fields $ \v g -> do
+    RowSink push freeze <- mk v (\x -> f (g x))
+    pure (RowSink (\i r -> push i (f r)) freeze)
+  {-# INLINE contramap #-}
 
 
 instance Semigroup (RowEncoder r) where
-  RowEncoder fl rl <> RowEncoder fr rr =
-    RowEncoder (fl ++ fr) (\v -> rl v ++ rr v)
+  RowEncoder fl ml <> RowEncoder fr mr = RowEncoder (fl ++ fr) $ \v g -> do
+    RowSink pl zl <- ml v g
+    RowSink pr zr <- mr v g
+    pure (RowSink (\i r -> pl i r >> pr i r) ((++) <$> zl <*> zr))
+  {-# INLINE (<>) #-}
 
 
 instance Monoid (RowEncoder r) where
-  mempty = RowEncoder [] (const [])
+  mempty = RowEncoder [] (\_ _ -> pure (RowSink (\_ _ -> pure ()) (pure [])))
+  {-# INLINE mempty #-}
+
+
+{- | One 'ColumnArray' per field, parallel to 'rowEncoderFields'. The
+rows are traversed once; each record is appended to every field's
+builder.
+-}
+runRowEncoder :: RowEncoder r -> V.Vector r -> [ColumnArray]
+runRowEncoder e v = runST $ do
+  RowSink push freeze <- rowEncoderSink e v id
+  V.imapM_ (\(I# i) r -> push i r) v
+  freeze
+
+
+leafField :: Text -> Bool -> ArrowType -> V.Vector Field -> Field
+leafField name nu ty children =
+  Field
+    { fieldName = name
+    , fieldNullable = nu
+    , fieldType = ty
+    , fieldChildren = children
+    , fieldDictionary = Nothing
+    , fieldMetadata = V.empty
+    }
 
 
 {- | Build a 'RowEncoder' for a single field: name + selector +
-column encoder.
+column encoder. The selector runs inside the encoder's builder loop.
 
 @
 fieldE "sym" tradeSym utf8E  :: RowEncoder Trade
@@ -532,26 +1072,17 @@ fieldE "sym" tradeSym utf8E  :: RowEncoder Trade
 -}
 fieldE :: Text -> (r -> a) -> Encoder a -> RowEncoder r
 fieldE name sel enc =
-  RowEncoder
-    { rowEncoderFields =
-        [ Field
-            { fieldName = name
-            , fieldNullable = encoderNullable enc
-            , fieldType = encoderType enc
-            , fieldChildren = V.empty
-            , fieldDictionary = Nothing
-            , fieldMetadata = V.empty
-            }
-        ]
-    , runRowEncoder = \rs -> [runEncoder enc (V.map sel rs)]
-    }
+  RowEncoder [leafField name (encoderNullable enc) (encoderType enc) V.empty] $ \v _ -> do
+    ColSink push _ freeze <- encoderSink enc (V.length v)
+    pure (RowSink (\i r -> push i (sel r)) (fmap (: []) freeze))
+{-# INLINE fieldE #-}
 
 
 {- | Embed a nested record as a struct column.
 
 Lifts a 'RowEncoder' for a child record type @c@ into a
 'RowEncoder' for the parent @r@ that emits the child's
-column tree under one named @ColStruct@ field. The struct's
+column tree under one named struct field. The struct's
 children are exactly the child encoder's fields (in the
 order they were declared with '<>').
 
@@ -570,62 +1101,55 @@ customerEnc = 'fieldE'  "name" name  utf8E
 -}
 structE :: Text -> (r -> c) -> RowEncoder c -> RowEncoder r
 structE name sel inner =
-  RowEncoder
-    { rowEncoderFields =
-        [ Field
-            { fieldName = name
-            , fieldNullable = False
-            , fieldType = AStruct
-            , fieldChildren = V.fromList (rowEncoderFields inner)
-            , fieldDictionary = Nothing
-            , fieldMetadata = V.empty
-            }
-        ]
-    , runRowEncoder = \rs ->
-        let !innerCols = runRowEncoder inner (V.map sel rs)
-            !childNames = map fieldName (rowEncoderFields inner)
-            !named = V.fromList (zip childNames innerCols)
-        in [ColStruct named]
-    }
+  RowEncoder [leafField name False AStruct (V.fromList (rowEncoderFields inner))] $ \v g -> do
+    RowSink push freeze <- rowEncoderSink inner v (\x -> sel (g x))
+    pure $
+      RowSink
+        (\i r -> push i (sel r))
+        (do cols <- freeze; pure [buildStruct "structE" (V.length v) Nothing (childNames inner) cols])
+{-# INLINE structE #-}
 
 
-{- | Like 'structE' but the parent rows are @Maybe c@: emits
-a 'ColStructMaybe' with a top-level validity mask + child
-columns. Child slots whose parent validity bit is unset are
-arbitrary on the wire (Arrow spec, Layout.rst, "Struct
-Layout") so we fill them by substituting the first present
-row's value; if every row is 'Nothing' the children are
-empty (the validity mask is all @False@ and consumers won't
-index into them).
+{- | Like 'structE' but the parent rows are @Maybe c@: emits a
+struct column with a validity bitmap. Child slots under a null
+parent are arbitrary on the wire (Arrow spec, Layout.rst, "Struct
+Layout"), so they repeat the first present row's value; if every
+row is 'Nothing' the children are 'AC.fillerColumn' rows of the
+child encoders' column shapes.
 
-Pair with 'structDMaybe' on the read side. Together they
-give @Maybe c@ a clean nested-record encoding without
-requiring per-encoder children metadata on every primitive.
+Pair with 'structDMaybe' on the read side.
 -}
-structEMaybe :: Text -> (r -> Maybe c) -> RowEncoder c -> RowEncoder r
+structEMaybe :: forall r c. Text -> (r -> Maybe c) -> RowEncoder c -> RowEncoder r
 structEMaybe name sel inner =
-  RowEncoder
-    { rowEncoderFields =
-        [ Field
-            { fieldName = name
-            , fieldNullable = True
-            , fieldType = AStruct
-            , fieldChildren = V.fromList (rowEncoderFields inner)
-            , fieldDictionary = Nothing
-            , fieldMetadata = V.empty
-            }
-        ]
-    , runRowEncoder = \rs ->
-        let !mvs = V.map sel rs
-            !valid = V.map isJust mvs
-            !cs = case V.find isJust mvs of
-              Just (Just present) -> V.map (fromMaybe present) mvs
-              _ -> V.empty
-            !innerCols = runRowEncoder inner cs
-            !childNames = map fieldName (rowEncoderFields inner)
-            !named = V.fromList (zip childNames innerCols)
-        in [ColStructMaybe valid named]
-    }
+  RowEncoder [leafField name True AStruct (V.fromList (rowEncoderFields inner))] $ \v g -> do
+    let !n = V.length v
+        pick x = sel (g x)
+        assemble valid cols = [buildStruct "structEMaybe" n valid (childNames inner) cols]
+    case V.find (isJust . pick) v >>= pick of
+      Nothing -> do
+        let !cols = map (fillerColumn n) (runRowEncoder inner (V.empty :: V.Vector c))
+            !col = assemble (validityGenerate n (const False)) cols
+        pure (RowSink (\_ _ -> pure ()) (pure col))
+      Just present -> do
+        let orPresent = fromMaybe present
+            !valid = validityGenerate n (\i -> isJust (pick (V.unsafeIndex v i)))
+        RowSink push freeze <- rowEncoderSink inner v (\x -> orPresent (pick x))
+        pure (RowSink (\i r -> push i (orPresent (sel r))) (assemble valid <$> freeze))
+{-# INLINE structEMaybe #-}
+
+
+childNames :: RowEncoder c -> [Text]
+childNames = map fieldName . rowEncoderFields
+
+
+{- | Assemble an encoded struct. The children were built from the same
+rows, so 'mkStruct' can only fail on a broken builder invariant.
+-}
+buildStruct :: String -> Int -> Maybe AC.Validity -> [Text] -> [ColumnArray] -> ColumnArray
+buildStruct who n valid names cols =
+  case mkStruct n valid (V.fromList (zip names cols)) of
+    Right c -> c
+    Left e -> errorWithoutStackTrace ("Arrow.Record." ++ who ++ ": " ++ e)
 
 
 -- ============================================================
@@ -633,51 +1157,49 @@ structEMaybe name sel inner =
 -- ============================================================
 
 {- | Row decoder. Looks up named columns in a
-'V.Vector ColumnArray' (keyed by the schema's field names) and
-runs the matching 'Decoder' on each.
+'V.Vector ColumnArray' (keyed by the schema's field names), binds
+the matching 'Decoder' to each once, and composes the resulting
+row readers.
 
 'RowDecoder' is an 'Applicative': combine several 'columnD'
-calls with @<$>@ + @<*>@ to build a record.
+calls with @<$>@ + @<*>@ to build a record. Field values are
+evaluated when the record is built (no thunk per field).
 -}
 data RowDecoder r = RowDecoder
-  { rowDecoderRequiredColumns :: ![Text]
+  { rowDecoderRequiredColumns :: [Text]
   {- ^ Names of columns the decoder consults when run.
   Order matches first appearance in the applicative chain;
   duplicates removed. Useful for column projection: a
   caller can ask the source format to only materialise
   these columns rather than the whole record batch.
   -}
-  , runRowDecoder :: !(V.Vector Field -> V.Vector ColumnArray -> Either String (V.Vector r))
+  , rowDecoderBind :: Int -> V.Vector Text -> V.Vector ColumnArray -> Either String (Reader r)
+  {- ^ Given the number of rows that will be read, the column names
+  and the columns (parallel), check and bind every column the
+  decoder needs and return the row reader.
+  -}
   }
 
 
 instance Functor RowDecoder where
-  fmap f (RowDecoder cs0 run) = RowDecoder cs0 $ \fs cs ->
-    V.map f <$> run fs cs
+  fmap f (RowDecoder cs b) = RowDecoder cs $ \n names cols ->
+    case b n names cols of
+      Left e -> Left e
+      Right g -> Right (\i -> let !x = g i in f x)
+  {-# INLINE fmap #-}
 
 
 instance Applicative RowDecoder where
-  pure x = RowDecoder [] $ \_fs cs ->
-    -- Length comes from the first column; an empty batch yields
-    -- V.empty. If callers need a fixed row count with no
-    -- columns they can rely on 'pure' inside an outer
-    -- 'liftA2'-chained RowDecoder that has at least one column.
-    let !n = if V.null cs then 0 else columnLen (V.head cs)
-    in Right (V.replicate n x)
-  RowDecoder cF runF <*> RowDecoder cX runX = RowDecoder
+  pure x = RowDecoder [] (\_ _ _ -> Right (\_ -> x))
+  {-# INLINE pure #-}
+  RowDecoder cF bF <*> RowDecoder cX bX = RowDecoder
     (mergeRequired cF cX)
-    $ \fs cs -> do
-      fvec <- runF fs cs
-      xvec <- runX fs cs
-      if V.length fvec /= V.length xvec
-        then
-          Left $
-            "Arrow.Record.<*>: column length mismatch ("
-              ++ show (V.length fvec)
-              ++ " vs "
-              ++ show (V.length xvec)
-              ++ ")"
-        else Right (V.zipWith ($) fvec xvec)
+    $ \n names cols -> case bF n names cols of
+      Left e -> Left e
+      Right gf -> case bX n names cols of
+        Left e -> Left e
+        Right gx -> Right (\i -> let !x = gx i in gf i x)
+  {-# INLINE (<*>) #-}
 
 
 {- | Order-preserving union of two 'rowDecoderRequiredColumns'
@@ -688,19 +1210,62 @@ mergeRequired :: [Text] -> [Text] -> [Text]
 mergeRequired xs ys = xs ++ filter (`notElem` xs) ys
 
 
+{- | Decode a batch: field names and columns are parallel and every
+column has the same number of rows.
+-}
+runRowDecoder :: RowDecoder r -> V.Vector Field -> V.Vector ColumnArray -> Either String (V.Vector r)
+runRowDecoder d fields cols
+  | V.length fields /= V.length cols =
+      Left $
+        "Arrow.Record: schema has "
+          ++ show (V.length fields)
+          ++ " fields but the batch has "
+          ++ show (V.length cols)
+          ++ " columns"
+  | V.any ((/= n) . columnLength) cols =
+      Left $
+        "Arrow.Record: column lengths differ ("
+          ++ show (V.toList (V.map columnLength cols))
+          ++ ")"
+  | otherwise = case rowDecoderBind d n (V.map fieldName fields) cols of
+      Left e -> Left e
+      Right g -> Right (V.generate n (\(I# i) -> g i))
+  where
+    !n = if V.null cols then 0 else columnLength (V.unsafeHead cols)
+
+
+lookupColumn :: Text -> V.Vector Text -> V.Vector ColumnArray -> Maybe ColumnArray
+lookupColumn name names cols = V.findIndex (== name) names >>= (cols V.!?)
+
+
+-- | Bind a decoder to a column that must hold at least @n@ rows.
+bindColumn :: String -> Text -> Decoder a -> Int -> ColumnArray -> Either String (Reader a)
+bindColumn who name d n col
+  | columnLength col < n =
+      Left $
+        prefix
+          ++ "column has "
+          ++ show (columnLength col)
+          ++ " rows, expected "
+          ++ show n
+  | otherwise = case decoderBind d col of
+      Left e -> Left (prefix ++ e)
+      Right g -> Right g
+  where
+    prefix = "Arrow.Record." ++ who ++ " " ++ show name ++ ": "
+{-# INLINE bindColumn #-}
+
+
 {- | Decode the named column via the supplied 'Decoder'. Looks
 the column up by 'Field' name in the schema the caller passes
 to 'runRowDecoder'; returns 'Left' if the name isn't present.
 -}
 columnD :: Text -> Decoder a -> RowDecoder a
-columnD name d = RowDecoder [name] $ \fs cs -> do
-  idx <- case V.findIndex ((== name) . fieldName) fs of
-    Just i -> Right i
+columnD name d = RowDecoder [name] $ \n names cols ->
+  case lookupColumn name names cols of
     Nothing -> Left $ "Arrow.Record.columnD: no column named " ++ show name
-  let !col = V.unsafeIndex cs idx
-  case runDecoder d col of
-    Right vs -> Right vs
-    Left e -> Left $ "Arrow.Record.columnD " ++ show name ++ ": " ++ e
+    Just col -> bindColumn "columnD" name d n col
+{-# INLINE columnD #-}
 
 
 {- | Like 'columnD' but supplies a default value if the
@@ -713,24 +1278,11 @@ Decoding errors on a /present/ column still propagate
 (e.g. wrong type); only "no such column" falls back.
 -}
 columnDWithDefault :: Text -> a -> Decoder a -> RowDecoder a
-columnDWithDefault name def d = RowDecoder [name] $ \fs cs ->
-  case V.findIndex ((== name) . fieldName) fs of
-    Nothing ->
-      -- Missing column: produce default for every row. Length
-      -- comes from the first present column; an empty batch
-      -- yields V.empty.
-      let !n = if V.null cs then 0 else AC.columnLength (V.head cs)
-      in Right (V.replicate n def)
-    Just idx ->
-      let !col = V.unsafeIndex cs idx
-      in case runDecoder d col of
-           Right vs -> Right vs
-           Left e ->
-             Left $
-               "Arrow.Record.columnDWithDefault "
-                 ++ show name
-                 ++ ": "
-                 ++ e
+columnDWithDefault name def d = RowDecoder [name] $ \n names cols ->
+  case lookupColumn name names cols of
+    Nothing -> Right (\_ -> def)
+    Just col -> bindColumn "columnDWithDefault" name d n col
+{-# INLINE columnDWithDefault #-}
 
 
 {- | Strategy for converting a record's selector name to its
@@ -802,88 +1354,59 @@ applyNameStrategy NameUpperSnakeCase =
   T.toUpper . applyNameStrategy NameSnakeCase
 
 
-{- | Inverse of 'structE': decode a 'ColStruct' column at the
-given name as a record using the supplied inner 'RowDecoder'.
-The inner decoder sees the struct's child fields + child
-columns; the outer decoder threads the nested record into the
-parent record's applicative chain like any other column.
+{- | Inverse of 'structE': decode a struct column at the given name as
+a record using the supplied inner 'RowDecoder'. The inner decoder
+sees the struct's children by name; the outer decoder threads the
+nested record into the parent record's applicative chain like any
+other column. A struct with null rows needs 'structDMaybe'.
 -}
 structD :: Text -> RowDecoder c -> RowDecoder c
-structD name inner = RowDecoder [name] $ \fs cs -> do
-  idx <- case V.findIndex ((== name) . fieldName) fs of
-    Just i -> Right i
-    Nothing -> Left $ "Arrow.Record.structD: no column named " ++ show name
-  let !parentField = V.unsafeIndex fs idx
-      !col = V.unsafeIndex cs idx
-  case col of
-    ColStruct childCols -> do
-      let !childFields = fieldChildren parentField
-          !childCols' = V.map snd childCols
-      case runRowDecoder inner childFields childCols' of
-        Right rs -> Right rs
-        Left e -> Left $ "Arrow.Record.structD " ++ show name ++ ": " ++ e
-    other ->
-      Left $
-        "Arrow.Record.structD "
-          ++ show name
-          ++ ": expected ColStruct, got "
-          ++ takeWhile (/= ' ') (show other)
+structD name inner = RowDecoder [name] $ \n names cols ->
+  bindStruct "structD" name inner n names cols $ \col v g -> case v of
+    Nothing -> Right g
+    Just _ -> Left $ "Arrow.Record.structD " ++ show name ++ ": " ++ nullsErr col
+{-# INLINE structD #-}
 
 
-{- | Like 'structD' but the column may be a 'ColStructMaybe' —
-decodes per-row to @Maybe c@ honouring the parent validity
-mask. Required-struct columns are accepted too (every row
+{- | Like 'structD' but the struct may have null rows, which decode
+to 'Nothing'. Structs without nulls are accepted too (every row
 becomes 'Just').
 -}
 structDMaybe :: Text -> RowDecoder c -> RowDecoder (Maybe c)
-structDMaybe name inner = RowDecoder [name] $ \fs cs -> do
-  idx <- case V.findIndex ((== name) . fieldName) fs of
-    Just i -> Right i
-    Nothing -> Left $ "Arrow.Record.structDMaybe: no column named " ++ show name
-  let !parentField = V.unsafeIndex fs idx
-      !col = V.unsafeIndex cs idx
-      !childFields = fieldChildren parentField
-      mask vs valid =
-        if V.length vs /= V.length valid
-          then
-            Left $
-              "Arrow.Record.structDMaybe "
-                ++ show name
-                ++ ": child length "
-                ++ show (V.length vs)
-                ++ " /= validity length "
-                ++ show (V.length valid)
-          else
-            Right $
-              V.zipWith
-                (\b v -> if b then Just v else Nothing)
-                valid
-                vs
-  case col of
-    ColStruct childCols -> do
-      let !childCols' = V.map snd childCols
-      case runRowDecoder inner childFields childCols' of
-        Right rs -> Right (V.map Just rs)
-        Left e -> Left $ "Arrow.Record.structDMaybe " ++ show name ++ ": " ++ e
-    ColStructMaybe valid childCols -> do
-      let !childCols' = V.map snd childCols
-      case runRowDecoder inner childFields childCols' of
-        Right rs -> mask rs valid
-        Left e -> Left $ "Arrow.Record.structDMaybe " ++ show name ++ ": " ++ e
-    other ->
-      Left $
-        "Arrow.Record.structDMaybe "
-          ++ show name
-          ++ ": expected ColStruct/ColStructMaybe, got "
-          ++ takeWhile (/= ' ') (show other)
+structDMaybe name inner = RowDecoder [name] $ \n names cols ->
+  bindStruct "structDMaybe" name inner n names cols $ \_ v g -> case v of
+    Nothing -> Right (\i -> let !x = g i in Just x)
+    Just _ -> Right (\i -> if isValidAt v (I# i) then let !x = g i in Just x else Nothing)
+{-# INLINE structDMaybe #-}
 
 
-{- | Vector length of a 'ColumnArray'. Now delegates to
-'Arrow.Column.columnLength' (originally re-implemented here
-to dodge a non-existent import cycle).
+{- | Find the struct column, bind the inner decoder to its children
+(each holds at least as many rows as the struct), and hand the
+struct's validity and the child row reader to the continuation.
 -}
-columnLen :: ColumnArray -> Int
-columnLen = AC.columnLength
+bindStruct
+  :: String
+  -> Text
+  -> RowDecoder c
+  -> Int
+  -> V.Vector Text
+  -> V.Vector ColumnArray
+  -> (ColumnArray -> Maybe AC.Validity -> Reader c -> Either String (Reader r))
+  -> Either String (Reader r)
+bindStruct who name inner n names cols k =
+  case lookupColumn name names cols of
+    Nothing -> Left $ prefix ++ "no column named " ++ show name
+    Just col -> case col of
+      ColStruct m v children
+        | m < n -> Left $ prefix ++ "struct has " ++ show m ++ " rows, expected " ++ show n
+        | otherwise ->
+            case rowDecoderBind inner n (V.map fst children) (V.map snd children) of
+              Left e -> Left (prefix ++ e)
+              Right g -> k col v g
+      other -> Left $ prefix ++ "expected ColStruct, got " ++ columnTag other
+  where
+    prefix = "Arrow.Record." ++ who ++ " " ++ show name ++ ": "
+{-# INLINE bindStruct #-}
 
 
 -- ============================================================
@@ -895,8 +1418,8 @@ record type. This is the handle you pass to the top-level
 encode / decode helpers below.
 -}
 data Table r = Table
-  { tableEncode :: !(RowEncoder r)
-  , tableDecode :: !(RowDecoder r)
+  { tableEncode :: RowEncoder r
+  , tableDecode :: RowDecoder r
   }
 
 
@@ -905,6 +1428,7 @@ better in call-site positions.
 -}
 table :: RowEncoder r -> RowDecoder r -> Table r
 table = Table
+{-# INLINE table #-}
 
 
 -- | Schema implied by the 'RowEncoder'.
@@ -929,31 +1453,26 @@ tableRequiredColumns = rowDecoderRequiredColumns . tableDecode
 
 {- | Encode a vector of records as an Arrow batch + its schema.
 The schema comes from 'tableSchema'; the batch is parallel to
-'arrowFields' of that schema.
+'arrowFields' of that schema. Every column is built before the
+pair is returned.
 -}
 encodeTable :: Table r -> V.Vector r -> (Schema, V.Vector ColumnArray)
 encodeTable t rs =
-  ( tableSchema t
-  , V.fromList (runRowEncoder (tableEncode t) rs)
-  )
+  let !cols = V.fromList (runRowEncoder (tableEncode t) rs)
+  in (tableSchema t, cols)
 
 
 {- | Decode an Arrow batch into a vector of records. Looks up
 columns by schema field name; returns 'Left' on missing
-columns or type mismatches.
+columns, type mismatches, nulls in a non-nullable decoder, or a
+malformed batch (field and column counts or column lengths differ).
 -}
 decodeTable
   :: Table r
   -> Schema
   -> V.Vector ColumnArray
   -> Either String (V.Vector r)
-decodeTable t sch cs =
-  runRowDecoder (tableDecode t) (arrowFields sch) cs
-
-
--- Map import is kept for future @byIndex@ variants.
-_mapShim :: Map.Map Text Int
-_mapShim = Map.empty
+decodeTable t sch = runRowDecoder (tableDecode t) (arrowFields sch)
 
 
 -- ============================================================
@@ -962,41 +1481,27 @@ _mapShim = Map.empty
 
 {- | Build a 'Table' for a subset of columns by name. The
 resulting decoder ignores columns not in @keep@; the encoder
-only emits the kept ones. Useful for callers that have a
-single 'Table' and want to read or write only a slice
-without writing a parallel @Table SubsetRecord@.
+only emits the kept ones. Useful
+for callers that have a single 'Table' and want to read or write
+only a slice without writing a parallel @Table SubsetRecord@.
 
 Returns 'Nothing' if any name in @keep@ isn't present in the
 original table.
 -}
 subsetTable :: [Text] -> Table r -> Maybe (Table r)
-subsetTable keep tbl =
-  let !srcFields = rowEncoderFields (tableEncode tbl)
-      keepIdx :: [Int]
-      keepIdx =
-        [ i
-        | nm <- keep
-        , (i, f) <- zip [0 ..] srcFields
-        , fieldName f == nm
-        ]
-  in if length keepIdx /= length keep
-       then Nothing
-       else
-         Just
-           Table
-             { tableEncode = subsetRowEncoder keepIdx (tableEncode tbl)
-             , tableDecode = tableDecode tbl -- decoder uses byName lookup so subset is automatic
-             }
-
-
-subsetRowEncoder :: [Int] -> RowEncoder r -> RowEncoder r
-subsetRowEncoder keepIdx (RowEncoder fields0 run0) =
-  RowEncoder
-    { rowEncoderFields = [fields0 !! i | i <- keepIdx]
-    , runRowEncoder = \rs ->
-        let !allCols = run0 rs
-        in [allCols !! i | i <- keepIdx]
-    }
+subsetTable keep tbl = do
+  let RowEncoder fields mk = tableEncode tbl
+      byName nm = findIndex ((== nm) . fieldName) fields
+  idxs <- traverse byName keep
+  let !fieldVec = V.fromList fields
+      pickCols cols = let !cv = V.fromList cols in map (V.unsafeIndex cv) idxs
+  Just
+    Table
+      { tableEncode = RowEncoder (map (V.unsafeIndex fieldVec) idxs) $ \v g -> do
+          RowSink push freeze <- mk v g
+          pure (RowSink push (pickCols <$> freeze))
+      , tableDecode = tableDecode tbl -- decoder looks columns up by name, so the subset is automatic
+      }
 
 
 {- | Project an existing batch by column name, in the order
@@ -1012,16 +1517,7 @@ projectTable
   -> V.Vector ColumnArray
   -> Maybe (Schema, V.Vector ColumnArray)
 projectTable keep sch cols = do
-  let !nameToIdx =
-        Map.fromList
-          [ (fieldName f, i)
-          | (i, f) <- V.toList (V.indexed (arrowFields sch))
-          ]
-  idxs <- traverse (`Map.lookup` nameToIdx) keep
-  let !newFields =
-        V.fromList
-          [V.unsafeIndex (arrowFields sch) i | i <- idxs]
-      !newCols =
-        V.fromList
-          [V.unsafeIndex cols i | i <- idxs]
-  pure (sch {arrowFields = newFields}, newCols)
+  let !fields = arrowFields sch
+  idxs <- V.fromList <$> traverse (\nm -> V.findIndex ((== nm) . fieldName) fields) keep
+  newCols <- traverse (cols V.!?) idxs
+  pure (sch {arrowFields = V.map (V.unsafeIndex fields) idxs}, newCols)

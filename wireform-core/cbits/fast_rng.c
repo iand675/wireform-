@@ -8,8 +8,9 @@
  *
  * One 256-bit state per pthread, stored in '__thread' storage so
  * concurrent generation across many Haskell capabilities never
- * touches a shared cache line.  Seeded on first use from
- * @getrandom(2)@.
+ * touches a shared cache line.  Seeded on first use from the
+ * platform CSPRNG and reseeded in a forked child (see
+ * pthread_atfork below).
  *
  * Used by 'wireform-websocket' to roll per-frame masking keys
  * without going through the global 'splitmix' MVar.  Exposed
@@ -21,9 +22,20 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
-#include <unistd.h>
 
-#if defined(__linux__)
+#if defined(_WIN32) || defined(_WIN64)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <bcrypt.h>
+static int kernel_random(void *buf, size_t len)
+{
+    NTSTATUS status = BCryptGenRandom(
+        NULL, (PUCHAR)buf, (ULONG)len, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    return BCRYPT_SUCCESS(status) ? 0 : -1;
+}
+#elif defined(__linux__)
+#include <unistd.h>
+#include <pthread.h>
 #include <sys/syscall.h>
 #include <linux/random.h>
 static int kernel_random(void *buf, size_t len)
@@ -32,6 +44,8 @@ static int kernel_random(void *buf, size_t len)
     return r == (long)len ? 0 : -1;
 }
 #elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
+#include <unistd.h>
+#include <pthread.h>
 #include <stdlib.h>
 static int kernel_random(void *buf, size_t len)
 {
@@ -40,6 +54,8 @@ static int kernel_random(void *buf, size_t len)
 }
 #else
 /* Fall back to /dev/urandom for portability. */
+#include <unistd.h>
+#include <pthread.h>
 #include <fcntl.h>
 static int kernel_random(void *buf, size_t len)
 {
@@ -152,3 +168,21 @@ void hs_xoshiro256pp_reseed(void)
 {
     xoshiro_seeded = 0;
 }
+
+/* Fork safety.  A forked child inherits the parent's TLS, so without
+ * this the child would replay the parent's stream: two processes
+ * emitting identical WebSocket masking keys.  The child handler runs
+ * in the forking thread of the child (the only thread it has) and
+ * forces a fresh kernel seed on its next draw. */
+#if !defined(_WIN32) && !defined(_WIN64)
+static void xoshiro_atfork_child(void)
+{
+    xoshiro_seeded = 0;
+}
+
+__attribute__((constructor))
+static void xoshiro_register_atfork(void)
+{
+    pthread_atfork(NULL, NULL, xoshiro_atfork_child);
+}
+#endif

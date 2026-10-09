@@ -12,10 +12,95 @@
     "",
     "A `map` entry is `\"<series>|<group>=<criterion reportName>\"`; cells",
     "not listed are matched automatically by trying `<series>/<group>`,",
-    "`<group>/<series>`, then the bare label."
+    "`<group>/<series>`, then the bare label. A `*` in `<group>` matches the",
+    "rest of the label and is substituted into the report name.",
+    "",
+    "`kind` is `cabal` (default; `target` is the cabal bench target) or",
+    "`cargo` (a criterion.rs bench: `cargoManifest` + `cargoBench`; `target`",
+    "is only a label for --only). A summary entry's `series` names the series",
+    "that bench fills; omitted means all of them. Every series of a summary",
+    "must be filled by exactly one bench, so a wireform-vs-external summary",
+    "lists the wireform series under the cabal bench and the external one",
+    "under the cargo bench."
   ],
   "rawDir": "dist-stats/bench-raw",
   "benches": [
+    {
+      "target": "wireform-arrow:bench:wireform-arrow-bench",
+      "raw": "arrow",
+      "summaries": [
+        {
+          "path": "wireform-arrow/bench-results/summary/arrow-encode-decode.json",
+          "series": ["wireform-arrow"],
+          "map": [
+            "wireform-arrow|encode lazy *=encode lazy/*",
+            "wireform-arrow|decode + toVector *=decode + toVector/*",
+            "wireform-arrow|encode *=encode/*",
+            "wireform-arrow|decode *=decode/*"
+          ]
+        },
+        {
+          "path": "wireform-arrow/bench-results/summary/arrow-encode-decode-small.json",
+          "series": ["wireform-arrow"],
+          "map": [
+            "wireform-arrow|encode lazy *=encode lazy (100 rows)/*",
+            "wireform-arrow|decode + toVector *=decode + toVector (100 rows)/*",
+            "wireform-arrow|encode *=encode (100 rows)/*",
+            "wireform-arrow|decode *=decode (100 rows)/*"
+          ]
+        },
+        {
+          "path": "wireform-arrow/bench-results/summary/arrow-api-paths.json",
+          "series": ["wireform-arrow"],
+          "map": []
+        }
+      ]
+    },
+    {
+      "kind": "cargo",
+      "target": "interop/arrow-rs:bench:arrow_ipc",
+      "cargoManifest": "interop/arrow-rs/Cargo.toml",
+      "cargoBench": "arrow_ipc",
+      "raw": "arrow-rs",
+      "summaries": [
+        {
+          "path": "wireform-arrow/bench-results/summary/arrow-encode-decode.json",
+          "series": ["arrow-rs"],
+          "map": [
+            "arrow-rs|encode lazy *=encode/*",
+            "arrow-rs|decode + toVector *=decode + to_vec/*",
+            "arrow-rs|encode *=encode/*",
+            "arrow-rs|decode *=decode/*"
+          ]
+        },
+        {
+          "path": "wireform-arrow/bench-results/summary/arrow-encode-decode-small.json",
+          "series": ["arrow-rs"],
+          "map": [
+            "arrow-rs|encode lazy *=encode (100 rows)/*",
+            "arrow-rs|decode + toVector *=decode + to_vec (100 rows)/*",
+            "arrow-rs|encode *=encode (100 rows)/*",
+            "arrow-rs|decode *=decode (100 rows)/*"
+          ]
+        },
+        {
+          "path": "wireform-arrow/bench-results/summary/arrow-api-paths.json",
+          "series": ["arrow-rs"],
+          "map": [
+            "arrow-rs|stream encode (Arrow.Stream)=stream encode (StreamWriter)",
+            "arrow-rs|stream encode lazy (Arrow.Stream)=stream encode (StreamWriter)",
+            "arrow-rs|stream encode (Arrow.Write)=stream encode (StreamWriter)",
+            "arrow-rs|stream decode (Arrow.Stream)=stream decode (StreamReader)",
+            "arrow-rs|file encode (Arrow.Stream)=file encode (FileWriter)",
+            "arrow-rs|file encode lazy (Arrow.Stream)=file encode (FileWriter)",
+            "arrow-rs|file decode (Arrow.Stream)=file decode (FileReader)",
+            "arrow-rs|file read (Arrow.File)=file decode (FileReader)",
+            "arrow-rs|typed encode (Arrow.Record)=typed encode (row structs)",
+            "arrow-rs|typed decode (Arrow.Record)=typed decode (row structs)"
+          ]
+        }
+      ]
+    },
     {
       "target": "wireform-avro:bench:wireform-avro-bench",
       "raw": "avro",

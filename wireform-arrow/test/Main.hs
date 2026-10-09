@@ -6,7 +6,7 @@ Two layers of coverage:
 
   1. Internal round-trips: every 'ColumnArray' constructor
      the writer emits must be parsed back correctly by
-     'decodeArrowStream' + 'materializeRecordBatch'.
+     'decodeArrowStream' + 'decodeRecordBatch'.
   2. Golden pyarrow interop: the bytes in
      @test/golden/pa_*.arrows@ were produced by pyarrow
      ('pa.ipc.new_stream') against the reference spec.
@@ -19,12 +19,7 @@ the bidirectional interop works and these tests pin it.
 -}
 module Main (main) where
 
-import Arrow.Column (
-  ColumnArray (..),
-  columnLength,
-  materializeRecordBatch,
-  validateMapKeysSorted,
- )
+import Arrow.Column
 import Arrow.File (asBatches, asSchema, readArrowStream)
 import Arrow.FlatBufferIPC (
   SparseTensor (..),
@@ -36,10 +31,10 @@ import Arrow.FlatBufferIPC (
   decodeTensorFrame,
   encodeSparseTensorFrame,
   encodeTensorFrame,
+  decodeRecordBatch,
  )
 import Arrow.Record qualified as AR
 import Arrow.Stream (
-  BodyCompressionCodec (..),
   DictHandling (..),
   WriteOptions (..),
   decodeArrowStream,
@@ -56,14 +51,19 @@ import Arrow.Types
 import Arrow.Write (writeArrowStream)
 import Columnar.Stream qualified as IS
 import Control.Monad (unless, when)
-import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
-import Data.Int (Int16, Int32, Int64, Int8)
+import Data.Int (Int32, Int64)
+import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Vector qualified as V
-import Data.Vector.Primitive qualified as VP
+import Data.Vector.Generic qualified as VG
+import Data.Vector.Storable qualified as VS
 import Data.Word (Word16, Word32, Word64, Word8)
+import Test.Arrow.Core qualified as Core
+import Test.Arrow.Malformed qualified as Malformed
+import Test.Arrow.Props qualified as Props
+import Test.Arrow.Vector qualified as Vector
 import System.Exit (exitFailure)
 
 
@@ -83,7 +83,7 @@ data Customer = Customer
   deriving (Show, Eq)
 
 
-{- | Customer with an optional address — exercises the
+{- | Customer with an optional address; exercises the
 'encoderFromRowEncoder' / 'decoderFromRowDecoder' nullable
 nested-struct path.
 -}
@@ -103,142 +103,144 @@ main = do
   -- that column, serialise it, parse it, materialise, and assert
   -- the recovered ColumnArray equals the one we put in.
 
-  roundTripPrim "Int8" (ColInt8 (VP.fromList [0, 1, -1, 100, -128, 127]))
-  roundTripPrim "Int16" (ColInt16 (VP.fromList [0, 1, -1, 32767, -32768]))
-  roundTripPrim "Int32" (ColInt32 (VP.fromList [0, 1, -1, maxBound, minBound]))
-  roundTripPrim "Int64" (ColInt64 (VP.fromList [0, 1, -1, maxBound, minBound]))
-  roundTripPrim "UInt8" (ColUInt8 (VP.fromList ([0, 255] :: [Word8])))
-  roundTripPrim "UInt16" (ColUInt16 (VP.fromList ([0, 65535] :: [Word16])))
-  roundTripPrim "UInt32" (ColUInt32 (VP.fromList ([0, maxBound] :: [Word32])))
-  roundTripPrim "UInt64" (ColUInt64 (VP.fromList ([0, maxBound] :: [Word64])))
-  roundTripPrim "Float16" (ColFloat16 (VP.fromList ([0, 0x3C00, 0xBC00] :: [Word16])))
-  roundTripPrim "Float" (ColFloat (VP.fromList [0.0, 1.5, -2.25, 3.14 :: Float]))
-  roundTripPrim "Double" (ColDouble (VP.fromList [0.0, 1.5, -2.25, 3.14159265 :: Double]))
-  roundTripPrim "Bool" (ColBool (V.fromList [True, False, True, False, True]))
+  roundTripPrim "Int8" (primColumn PInt8 (VS.fromList [0, 1, -1, 100, -128, 127]))
+  roundTripPrim "Int16" (primColumn PInt16 (VS.fromList [0, 1, -1, 32767, -32768]))
+  roundTripPrim "Int32" (primColumn PInt32 (VS.fromList [0, 1, -1, maxBound, minBound]))
+  roundTripPrim "Int64" (primColumn PInt64 (VS.fromList [0, 1, -1, maxBound, minBound]))
+  roundTripPrim "UInt8" (primColumn PUInt8 (VS.fromList ([0, 255] :: [Word8])))
+  roundTripPrim "UInt16" (primColumn PUInt16 (VS.fromList ([0, 65535] :: [Word16])))
+  roundTripPrim "UInt32" (primColumn PUInt32 (VS.fromList ([0, maxBound] :: [Word32])))
+  roundTripPrim "UInt64" (primColumn PUInt64 (VS.fromList ([0, maxBound] :: [Word64])))
+  roundTripPrim
+    "Float16"
+    (primColumn PFloat16 (VS.fromList [Float16 0, Float16 0x3C00, Float16 0xBC00]))
+  roundTripPrim "Float" (primColumn PFloat (VS.fromList [0.0, 1.5, -2.25, 3.14 :: Float]))
+  roundTripPrim "Double" (primColumn PDouble (VS.fromList [0.0, 1.5, -2.25, 3.14159265 :: Double]))
+  roundTripPrim "Bool" (fromBools (V.fromList [True, False, True, False, True]))
 
-  roundTripPrim "Date32" (ColDate32 (VP.fromList [0 :: Int32, 18000, -1]))
-  roundTripPrim "Date64" (ColDate64 (VP.fromList [0 :: Int64, 1700000000000]))
-  roundTripPrim "Time32" (ColTime32 (VP.fromList [0 :: Int32, 12345]))
-  roundTripPrim "Time64" (ColTime64 (VP.fromList [0 :: Int64, 12345000000]))
+  roundTripPrim "Date32" (primColumn PDate32 (VS.fromList [0 :: Int32, 18000, -1]))
+  roundTripPrim "Date64" (primColumn PDate64 (VS.fromList [0 :: Int64, 1700000000000]))
+  roundTripPrim "Time32" (primColumn PTime32 (VS.fromList [0 :: Int32, 12345]))
+  roundTripPrim "Time64" (primColumn PTime64 (VS.fromList [0 :: Int64, 12345000000]))
   roundTripPrim
     "Timestamp"
-    (ColTimestamp (VP.fromList [0 :: Int64, 1700000000_000_000_000]))
-  roundTripPrim "Duration" (ColDuration (VP.fromList [0 :: Int64, 60_000_000_000]))
+    (primColumn PTimestamp (VS.fromList [0 :: Int64, 1700000000_000_000_000]))
+  roundTripPrim "Duration" (primColumn PDuration (VS.fromList [0 :: Int64, 60_000_000_000]))
 
   roundTripPrim
     "IntervalYearMonth"
-    (ColIntervalYearMonth (VP.fromList [0 :: Int32, 12, -6, 100]))
+    (primColumn PIntervalYearMonth (VS.fromList [0 :: Int32, 12, -6, 100]))
   roundTripPrim
     "IntervalDayTime"
-    (ColIntervalDayTime (VP.fromList [1 :: Int32, 2, 30]) (VP.fromList [500, -1, 0]))
+    ( primColumn
+        PIntervalDayTime
+        ( VS.fromList
+            [IntervalDayTime 1 500, IntervalDayTime 2 (-1), IntervalDayTime 30 0]
+        )
+    )
   roundTripPrim
     "IntervalMonthDayNano"
-    ( ColIntervalMonthDayNano
-        (VP.fromList [1 :: Int32, 2])
-        (VP.fromList [3 :: Int32, 4])
-        (VP.fromList [1000 :: Int64, -500])
+    ( primColumn
+        PIntervalMonthDayNano
+        ( VS.fromList
+            [IntervalMonthDayNano 1 3 1000, IntervalMonthDayNano 2 4 (-500)]
+        )
     )
 
   roundTripPrim
     "Decimal128"
-    ( ColDecimal128
-        18
-        2
-        ( V.fromList
-            [ BS.replicate 16 0
-            , BS.pack [0x64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-            ]
-        )
+    ( primColumn
+        (PDecimal128 18 2)
+        (VS.fromList [decimal128FromInteger 0, decimal128FromInteger 100])
     )
   roundTripPrim
     "Decimal256"
-    ( ColDecimal256
-        38
-        4
-        ( V.fromList
-            [ BS.replicate 32 0
-            , BS.pack (0x2A : replicate 31 0)
-            ]
-        )
+    ( primColumn
+        (PDecimal256 38 4)
+        (VS.fromList [decimal256FromInteger 0, decimal256FromInteger 42])
     )
 
   roundTripPrim
     "FixedSizeBinary"
-    ( ColFixedSizeBinary
-        4
-        ( V.fromList
-            [BS.pack [0, 1, 2, 3], BS.pack [0xFF, 0xFE, 0xFD, 0xFC]]
-        )
+    ( fixture $
+        fromMaybeFixedSizeBinary
+          4
+          ( V.fromList
+              [Just (BS.pack [0, 1, 2, 3]), Just (BS.pack [0xFF, 0xFE, 0xFD, 0xFC])]
+          )
     )
 
-  roundTripPrim "Utf8" (ColUtf8 (V.fromList ["alpha", "beta", "", "\xe2\x9a\xa1"]))
-  roundTripPrim "Binary" (ColBinary (V.fromList [BS.pack [1, 2, 3], BS.empty, BS.pack [0xFF]]))
-  roundTripPrim "LargeUtf8" (ColLargeUtf8 (V.fromList ["alpha", "beta"]))
-  roundTripPrim "LargeBinary" (ColLargeBinary (V.fromList [BS.pack [0, 1, 2], BS.pack [0xFF]]))
+  roundTripPrim "Utf8" (fromTexts (V.fromList ["alpha", "beta", "", "\xe2\x9a\xa1"]))
+  roundTripPrim "Binary" (fromByteStrings (V.fromList [BS.pack [1, 2, 3], BS.empty, BS.pack [0xFF]]))
+  roundTripPrim "LargeUtf8" (fromMaybeLargeTexts (V.fromList [Just "alpha", Just "beta"]))
+  roundTripPrim
+    "LargeBinary"
+    (fromMaybeLargeByteStrings (V.fromList [Just (BS.pack [0, 1, 2]), Just (BS.pack [0xFF])]))
 
-  -- Nullable variants.
+  -- Nullable variants (every fixture holds at least one null row).
   roundTripPrim
     "Int8Maybe"
-    (ColInt8Maybe (V.fromList [Just 1, Nothing, Just (-1), Just 42]))
+    (fromMaybes PInt8 (V.fromList [Just 1, Nothing, Just (-1), Just 42]))
   roundTripPrim
     "Int16Maybe"
-    (ColInt16Maybe (V.fromList [Just 100, Nothing, Just (-200)]))
+    (fromMaybes PInt16 (V.fromList [Just 100, Nothing, Just (-200)]))
   roundTripPrim
     "Int32Maybe"
-    (ColInt32Maybe (V.fromList [Nothing, Just 0, Just maxBound]))
+    (fromMaybes PInt32 (V.fromList [Nothing, Just 0, Just maxBound]))
   roundTripPrim
     "Int64Maybe"
-    (ColInt64Maybe (V.fromList [Just 0, Nothing, Just (-1)]))
+    (fromMaybes PInt64 (V.fromList [Just 0, Nothing, Just (-1)]))
   roundTripPrim
     "UInt8Maybe"
-    (ColUInt8Maybe (V.fromList [Just (0 :: Word8), Just 255, Nothing]))
+    (fromMaybes PUInt8 (V.fromList [Just 0, Just 255, Nothing]))
   roundTripPrim
     "UInt16Maybe"
-    (ColUInt16Maybe (V.fromList [Just (0 :: Word16), Nothing]))
+    (fromMaybes PUInt16 (V.fromList [Just 0, Nothing]))
   roundTripPrim
     "UInt32Maybe"
-    (ColUInt32Maybe (V.fromList [Just (0 :: Word32), Nothing, Just maxBound]))
+    (fromMaybes PUInt32 (V.fromList [Just 0, Nothing, Just maxBound]))
   roundTripPrim
     "UInt64Maybe"
-    (ColUInt64Maybe (V.fromList [Just (0 :: Word64), Nothing]))
+    (fromMaybes PUInt64 (V.fromList [Just 0, Nothing]))
   roundTripPrim
     "Float16Maybe"
-    (ColFloat16Maybe (V.fromList [Just (0 :: Word16), Just 0x3C00, Nothing]))
+    (fromMaybes PFloat16 (V.fromList [Just (Float16 0), Just (Float16 0x3C00), Nothing]))
   roundTripPrim
     "FloatMaybe"
-    (ColFloatMaybe (V.fromList [Just 1.5, Nothing, Just (-2.25 :: Float)]))
+    (fromMaybes PFloat (V.fromList [Just 1.5, Nothing, Just (-2.25)]))
   roundTripPrim
     "DoubleMaybe"
-    (ColDoubleMaybe (V.fromList [Just 1.5, Nothing]))
+    (fromMaybes PDouble (V.fromList [Just 1.5, Nothing]))
   roundTripPrim
     "BoolMaybe"
-    (ColBoolMaybe (V.fromList [Just True, Nothing, Just False, Just True]))
+    (fromMaybeBools (V.fromList [Just True, Nothing, Just False, Just True]))
 
   roundTripPrim
     "Utf8Maybe"
-    (ColUtf8Maybe (V.fromList [Just "alpha", Nothing, Just ""]))
+    (fromMaybeTexts (V.fromList [Just "alpha", Nothing, Just ""]))
   roundTripPrim
     "BinaryMaybe"
-    (ColBinaryMaybe (V.fromList [Just (BS.pack [1, 2]), Nothing]))
+    (fromMaybeByteStrings (V.fromList [Just (BS.pack [1, 2]), Nothing]))
   roundTripPrim
     "LargeUtf8Maybe"
-    (ColLargeUtf8Maybe (V.fromList [Nothing, Just "beta"]))
+    (fromMaybeLargeTexts (V.fromList [Nothing, Just "beta"]))
   roundTripPrim
     "LargeBinaryMaybe"
-    (ColLargeBinaryMaybe (V.fromList [Just (BS.pack [0xFF]), Nothing]))
+    (fromMaybeLargeByteStrings (V.fromList [Just (BS.pack [0xFF]), Nothing]))
   roundTripPrim
     "FixedSizeBinaryMaybe"
-    ( ColFixedSizeBinaryMaybe
-        3
-        (V.fromList [Just (BS.pack [1, 2, 3]), Nothing, Just (BS.pack [4, 5, 6])])
+    ( fixture $
+        fromMaybeFixedSizeBinary
+          3
+          (V.fromList [Just (BS.pack [1, 2, 3]), Nothing, Just (BS.pack [4, 5, 6])])
     )
 
-  roundTripPrim "Date32Maybe" (ColDate32Maybe (V.fromList [Just (0 :: Int32), Nothing]))
-  roundTripPrim "Date64Maybe" (ColDate64Maybe (V.fromList [Just (0 :: Int64), Nothing]))
-  roundTripPrim "Time32Maybe" (ColTime32Maybe (V.fromList [Just (0 :: Int32), Nothing]))
-  roundTripPrim "Time64Maybe" (ColTime64Maybe (V.fromList [Just (0 :: Int64), Nothing]))
-  roundTripPrim "TimestampMaybe" (ColTimestampMaybe (V.fromList [Just (0 :: Int64), Nothing]))
-  roundTripPrim "DurationMaybe" (ColDurationMaybe (V.fromList [Just (0 :: Int64), Nothing]))
+  roundTripPrim "Date32Maybe" (fromMaybes PDate32 (V.fromList [Just 0, Nothing]))
+  roundTripPrim "Date64Maybe" (fromMaybes PDate64 (V.fromList [Just 0, Nothing]))
+  roundTripPrim "Time32Maybe" (fromMaybes PTime32 (V.fromList [Just 0, Nothing]))
+  roundTripPrim "Time64Maybe" (fromMaybes PTime64 (V.fromList [Just 0, Nothing]))
+  roundTripPrim "TimestampMaybe" (fromMaybes PTimestamp (V.fromList [Just 0, Nothing]))
+  roundTripPrim "DurationMaybe" (fromMaybes PDuration (V.fromList [Just 0, Nothing]))
 
   -- ============================================================
   -- Nested columns
@@ -253,10 +255,10 @@ main = do
           , plainField "name" False AUtf8
           ]
     )
-    ( ColStruct $
+    ( fixture . mkStruct 3 Nothing $
         V.fromList
-          [ ("id", ColInt64 (VP.fromList [1, 2, 3]))
-          , ("name", ColUtf8 (V.fromList ["a", "b", "c"]))
+          [ ("id", primColumn PInt64 (VS.fromList [1, 2, 3]))
+          , ("name", fromTexts (V.fromList ["a", "b", "c"]))
           ]
     )
 
@@ -268,13 +270,15 @@ main = do
           , plainField "flag" False ABool
           ]
     )
-    ( ColStructMaybe
-        (V.fromList [True, False, True])
-        ( V.fromList
-            [ ("id", ColInt32 (VP.fromList [1, 2, 3]))
-            , ("flag", ColBool (V.fromList [True, False, True]))
-            ]
-        )
+    ( fixture $
+        mkStruct
+          3
+          (validityFromBools (V.fromList [True, False, True]))
+          ( V.fromList
+              [ ("id", primColumn PInt32 (VS.fromList [1, 2, 3]))
+              , ("flag", fromBools (V.fromList [True, False, True]))
+              ]
+          )
     )
 
   roundTripNested
@@ -283,9 +287,11 @@ main = do
         V.fromList
           [plainField "item" False (AInt 32 True)]
     )
-    ( ColList
-        (VP.fromList [0, 2, 2, 5])
-        (ColInt32 (VP.fromList [10, 20, 30, 40, 50]))
+    ( fixture $
+        mkList
+          Nothing
+          (VS.fromList [0, 2, 2, 5])
+          (primColumn PInt32 (VS.fromList [10, 20, 30, 40, 50]))
     )
 
   roundTripNested
@@ -294,10 +300,11 @@ main = do
         V.fromList
           [plainField "item" False (AInt 32 True)]
     )
-    ( ColListMaybe
-        (V.fromList [True, False, True])
-        (VP.fromList [0, 2, 2, 5])
-        (ColInt32 (VP.fromList [10, 20, 30, 40, 50]))
+    ( fixture $
+        mkList
+          (validityFromBools (V.fromList [True, False, True]))
+          (VS.fromList [0, 2, 2, 5])
+          (primColumn PInt32 (VS.fromList [10, 20, 30, 40, 50]))
     )
 
   roundTripNested
@@ -306,9 +313,11 @@ main = do
         V.fromList
           [plainField "item" False (AInt 32 True)]
     )
-    ( ColLargeList
-        (VP.fromList [0, 2, 2, 5])
-        (ColInt32 (VP.fromList [1, 2, 3, 4, 5]))
+    ( fixture $
+        mkLargeList
+          Nothing
+          (VS.fromList [0, 2, 2, 5])
+          (primColumn PInt32 (VS.fromList [1, 2, 3, 4, 5]))
     )
 
   roundTripNested
@@ -317,10 +326,11 @@ main = do
         V.fromList
           [plainField "item" False (AInt 32 True)]
     )
-    ( ColLargeListMaybe
-        (V.fromList [True, False, True])
-        (VP.fromList [0, 2, 2, 5])
-        (ColInt32 (VP.fromList [1, 2, 3, 4, 5]))
+    ( fixture $
+        mkLargeList
+          (validityFromBools (V.fromList [True, False, True]))
+          (VS.fromList [0, 2, 2, 5])
+          (primColumn PInt32 (VS.fromList [1, 2, 3, 4, 5]))
     )
 
   roundTripNested
@@ -329,9 +339,12 @@ main = do
         V.fromList
           [plainField "item" False (AInt 32 True)]
     )
-    ( ColFixedSizeList
-        3
-        (ColInt32 (VP.fromList [1, 2, 3, 4, 5, 6]))
+    ( fixture $
+        mkFixedSizeList
+          3
+          2
+          Nothing
+          (primColumn PInt32 (VS.fromList [1, 2, 3, 4, 5, 6]))
     )
 
   roundTripNested
@@ -340,10 +353,12 @@ main = do
         V.fromList
           [plainField "item" False (AInt 32 True)]
     )
-    ( ColFixedSizeListMaybe
-        2
-        (V.fromList [True, False, True])
-        (ColInt32 (VP.fromList [1, 2, 3, 4, 5, 6]))
+    ( fixture $
+        mkFixedSizeList
+          2
+          3
+          (validityFromBools (V.fromList [True, False, True]))
+          (primColumn PInt32 (VS.fromList [1, 2, 3, 4, 5, 6]))
     )
 
   -- Map<string, int32>. Arrow encodes maps as a list of struct
@@ -359,10 +374,12 @@ main = do
                 ]
           ]
     )
-    ( ColMap
-        (VP.fromList [0, 2, 2, 3])
-        (ColUtf8 (V.fromList ["a", "b", "c"]))
-        (ColInt32 (VP.fromList [1, 2, 3]))
+    ( fixture $
+        mkMap
+          Nothing
+          (VS.fromList [0, 2, 2, 3])
+          (fromTexts (V.fromList ["a", "b", "c"]))
+          (primColumn PInt32 (VS.fromList [1, 2, 3]))
     )
 
   -- Dense union over (int32, utf8).
@@ -374,14 +391,15 @@ main = do
           , plainField "v_text" False AUtf8
           ]
     )
-    ( ColDenseUnion
-        (VP.fromList [0, 1, 0])
-        (VP.fromList [0, 0, 1])
-        ( V.fromList
-            [ ColInt32 (VP.fromList [100, 200])
-            , ColUtf8 (V.fromList ["hello"])
-            ]
-        )
+    ( fixture $
+        mkDenseUnion
+          (VS.fromList [0, 1, 0])
+          (VS.fromList [0, 0, 1])
+          ( V.fromList
+              [ primColumn PInt32 (VS.fromList [100, 200])
+              , fromTexts (V.fromList ["hello"])
+              ]
+          )
     )
 
   -- Sparse union over (bool, int32).
@@ -393,13 +411,14 @@ main = do
           , plainField "value" False (AInt 32 True)
           ]
     )
-    ( ColSparseUnion
-        (VP.fromList [0, 1, 0])
-        ( V.fromList
-            [ ColBool (V.fromList [True, False, False])
-            , ColInt32 (VP.fromList [0, 42, 0])
-            ]
-        )
+    ( fixture $
+        mkSparseUnion
+          (VS.fromList [0, 1, 0])
+          ( V.fromList
+              [ fromBools (V.fromList [True, False, False])
+              , primColumn PInt32 (VS.fromList [0, 42, 0])
+              ]
+          )
     )
 
   -- FlatBuffers reader / writer round-trip: build a typical
@@ -414,6 +433,16 @@ main = do
   -- shapes arrow-cpp emits (vs only what wireform's own
   -- writer produces).
   pyarrowGoldenRoundTrip
+
+  -- Hedgehog property suites: column core, generated round-trips,
+  -- malformed-input robustness and the Arrow-layout vectors. Each
+  -- returns False on failure.
+  coreOk <- Core.tests
+  propsOk <- Props.tests
+  malformedOk <- Malformed.tests
+  vectorOk <- Vector.tests
+  unless (coreOk && propsOk && malformedOk && vectorOk) $
+    failTest "FAIL: wireform-arrow property suites"
 
   putStrLn "All wireform-arrow round-trip tests passed."
 
@@ -497,8 +526,8 @@ flatBufRoundTrip = do
         }
     )
     ( V.fromList
-        [ ColInt32 (VP.fromList ([1, 2, 3] :: [Int32]))
-        , ColUtf8Maybe (V.fromList [Just "x", Nothing, Just "z"])
+        [ primColumn PInt32 (VS.fromList ([1, 2, 3] :: [Int32]))
+        , fromMaybeTexts (V.fromList [Just "x", Nothing, Just "z"])
         ]
     )
 
@@ -507,7 +536,7 @@ flatBufRoundTrip = do
     "Utf8View"
     (Schema (V.singleton (plainField "v" True AUtf8View)) Little V.empty V.empty)
     ( V.singleton
-        ( ColUtf8ViewMaybe
+        ( fromMaybeUtf8View
             ( V.fromList
                 [ Just "short"
                 , Nothing
@@ -535,10 +564,12 @@ flatBufRoundTrip = do
         V.empty
     )
     ( V.singleton
-        ( ColListView
-            (VP.fromList ([0, 2, 5] :: [Int32]))
-            (VP.fromList ([2, 3, 1] :: [Int32]))
-            (ColInt32 (VP.fromList ([10, 20, 30, 40, 50, 60] :: [Int32])))
+        ( fixture $
+            mkListView
+              Nothing
+              (VS.fromList ([0, 2, 5] :: [Int32]))
+              (VS.fromList ([2, 3, 1] :: [Int32]))
+              (primColumn PInt32 (VS.fromList ([10, 20, 30, 40, 50, 60] :: [Int32])))
         )
     )
 
@@ -558,18 +589,19 @@ flatBufRoundTrip = do
         V.empty
     )
     ( V.singleton
-        ( ColRunEndEncoded
-            (ColInt32 (VP.fromList ([3, 5, 8] :: [Int32])))
-            (ColInt64Maybe (V.fromList [Just 100, Nothing, Just 300]))
+        ( fixture $
+            mkRunEndEncoded
+              (primColumn PInt32 (VS.fromList ([3, 5, 8] :: [Int32])))
+              (fromMaybes PInt64 (V.fromList [Just 100, Nothing, Just 300]))
         )
     )
 
-  -- Dictionary-encoded utf8 — the high-level API auto-extracts
+  -- Dictionary-encoded utf8: the high-level API auto-extracts
   -- the dictionary batch and auto-resolves on read.
   let dictField =
         Field
           "d"
-          True
+          False
           AUtf8
           V.empty
           (Just (DictionaryEncoding 0 (AInt 32 True) False))
@@ -578,10 +610,11 @@ flatBufRoundTrip = do
     "Dictionary<utf8>"
     (Schema (V.singleton dictField) Little V.empty V.empty)
     ( V.singleton
-        ( ColDictionary
-            0
-            (VP.fromList ([0, 1, 0, 2, 1] :: [Int32]))
-            (ColUtf8 (V.fromList ["a", "b", "c"]))
+        ( fixture $
+            mkDictionary
+              0
+              (primColumn PInt32 (VS.fromList ([0, 1, 0, 2, 1] :: [Int32])))
+              (fromTexts (V.fromList ["a", "b", "c"]))
         )
     )
 
@@ -611,9 +644,9 @@ flatBufRoundTrip = do
   -- Streaming reader: pull batches one at a time, then drain.
   streamingRoundTrip
     (Schema (V.fromList [plainField "n" False (AInt 32 True)]) Little V.empty V.empty)
-    [ V.singleton (ColInt32 (VP.fromList ([1, 2] :: [Int32])))
-    , V.singleton (ColInt32 (VP.fromList ([3] :: [Int32])))
-    , V.singleton (ColInt32 (VP.fromList ([4, 5, 6, 7] :: [Int32])))
+    [ V.singleton (primColumn PInt32 (VS.fromList ([1, 2] :: [Int32])))
+    , V.singleton (primColumn PInt32 (VS.fromList ([3] :: [Int32])))
+    , V.singleton (primColumn PInt32 (VS.fromList ([4, 5, 6, 7] :: [Int32])))
     ]
 
   -- Column projection on a multi-column stream: a 3-column
@@ -637,11 +670,12 @@ flatBufRoundTrip = do
         V.empty
     )
     ( V.fromList
-        [ ColInt64
-            ( VP.fromList
+        [ primColumn
+            PInt64
+            ( VS.fromList
                 ([1 .. 1000] :: [Int64]) -- enough bytes that ZSTD shrinks
             )
-        , ColUtf8 (V.replicate 1000 "highly-compressible-payload")
+        , fromTexts (V.replicate 1000 "highly-compressible-payload")
         ]
     )
 
@@ -663,8 +697,8 @@ flatBufRoundTrip = do
         V.empty
     )
     ( V.fromList
-        [ ColInt64 (VP.fromList ([1 .. 1000] :: [Int64]))
-        , ColUtf8 (V.replicate 1000 "highly-compressible-payload")
+        [ primColumn PInt64 (VS.fromList ([1 .. 1000] :: [Int64]))
+        , fromTexts (V.replicate 1000 "highly-compressible-payload")
         ]
     )
 
@@ -695,14 +729,14 @@ pyarrowGoldenRoundTrip :: IO ()
 pyarrowGoldenRoundTrip = do
   goldenCheck
     "pa_int32.arrows"
-    (V.singleton (ColInt32 (VP.fromList [1, 2, 3, 4, 5 :: Int32])))
+    (V.singleton (primColumn PInt32 (VS.fromList [1, 2, 3, 4, 5 :: Int32])))
 
   goldenCheck
     "pa_mixed.arrows"
     ( V.fromList
-        [ ColInt64 (VP.fromList [10, 20, 30 :: Int64])
-        , ColUtf8Maybe (V.fromList [Just "alpha", Nothing, Just "gamma"])
-        , ColBoolMaybe (V.fromList [Just True, Just False, Nothing])
+        [ primColumn PInt64 (VS.fromList [10, 20, 30 :: Int64])
+        , fromMaybeTexts (V.fromList [Just "alpha", Nothing, Just "gamma"])
+        , fromMaybeBools (V.fromList [Just True, Just False, Nothing])
         ]
     )
 
@@ -712,7 +746,7 @@ pyarrowGoldenRoundTrip = do
   goldenDictCheck
     "pa_dict.arrows"
     [0, 1, 0, 2, 1]
-    (ColUtf8 (V.fromList ["a", "b", "c"]))
+    (fromTexts (V.fromList ["a", "b", "c"]))
 
 
 goldenCheck :: FilePath -> V.Vector ColumnArray -> IO ()
@@ -734,19 +768,22 @@ goldenCheck name expected = do
               <> show [expected]
 
 
--- Dictionary-encoded batches need a bespoke matcher because
--- 'ColDictionary' carries both the indices vector and the
--- resolved values vector; we compare them piecewise.
+-- Dictionary-encoded batches need a bespoke matcher: the keys and
+-- the resolved values are compared piecewise. pyarrow fields are
+-- nullable, so the column decodes as a 'ColDictionary' whose keys
+-- carry a validity slot (here without null rows).
 goldenDictCheck
-  :: FilePath -> [Int32] -> ColumnArray -> IO ()
+  :: FilePath -> [Int] -> ColumnArray -> IO ()
 goldenDictCheck name expectedIndices expectedValues = do
   bs <- BS.readFile ("test/golden/" <> name)
   case decodeArrowStream bs of
     Left e -> failTest $ "golden " <> name <> ": decode: " <> e
     Right (_sch, batches) -> case batches of
       [b] | V.length b == 1 -> case V.head b of
-        ColDictionary _ idx vals
-          | VP.toList idx == expectedIndices
+        col@(ColDictionary _ _ vals)
+          | hasValiditySlot col
+          , nullCount col == 0
+          , keysOf col == map Just expectedIndices
           , vals == expectedValues ->
               putStrLn $ "OK: pyarrow golden " <> name
           | otherwise ->
@@ -754,12 +791,14 @@ goldenDictCheck name expectedIndices expectedValues = do
                 "golden "
                   <> name
                   <> " dict mismatch:\n idx="
-                  <> show (VP.toList idx)
+                  <> show (keysOf col)
                   <> " vals="
                   <> show vals
         other ->
-          failTest $ "golden " <> name <> " expected ColDictionary, got " <> show other
+          failTest $ "golden " <> name <> " expected ColDictionary, got " <> columnTag other
       _ -> failTest $ "golden " <> name <> " expected 1 batch with 1 column"
+  where
+    keysOf col = map (dictKeyAt col) [0 .. columnLength col - 1]
 
 
 sparseTensorRoundTrip :: IO ()
@@ -839,7 +878,7 @@ sparseTensorRoundTrip = do
 
 tensorRoundTrip :: IO ()
 tensorRoundTrip = do
-  -- 2×3 tensor of Int32: raw little-endian body, row-major.
+  -- 2x3 tensor of Int32: raw little-endian body, row-major.
   let !body =
         BS.pack
           [ 0x01
@@ -902,7 +941,7 @@ dictReplacementRoundTrip = do
           ( V.singleton
               ( Field
                   "d"
-                  True
+                  False
                   AUtf8
                   V.empty
                   (Just (DictionaryEncoding 0 (AInt 32 True) False))
@@ -913,20 +952,20 @@ dictReplacementRoundTrip = do
           V.empty
           V.empty
       !batch1 =
-        V.singleton $
-          ColDictionary
+        V.singleton . fixture $
+          mkDictionary
             0
-            (VP.fromList [0, 1, 0])
-            (ColUtf8 (V.fromList ["a", "b"]))
+            (primColumn PInt32 (VS.fromList [0, 1, 0]))
+            (fromTexts (V.fromList ["a", "b"]))
       !batch2 =
-        V.singleton $
-          ColDictionary
+        V.singleton . fixture $
+          mkDictionary
             0
-            (VP.fromList [0, 1, 0])
-            (ColUtf8 (V.fromList ["x", "y"]))
+            (primColumn PInt32 (VS.fromList [0, 1, 0]))
+            (fromTexts (V.fromList ["x", "y"]))
       !opts = defaultWriteOptions {writeDictHandling = DictReplaceOnChange}
       !bytes = encodeArrowStream opts sch [batch1, batch2]
-  case decodeArrowStream bytes of
+  case bytes >>= decodeArrowStream of
     Left e -> failTest $ "dict-replace round-trip: " ++ e
     Right (_, batches)
       | [b1, b2] <- batches
@@ -936,10 +975,10 @@ dictReplacementRoundTrip = do
               !c2 = V.unsafeIndex b2 0
           in case (c1, c2) of
                (ColDictionary _ ix1 v1, ColDictionary _ ix2 v2)
-                 | V.toList (valuesToList v1) == ["a", "b"]
-                 , V.toList (valuesToList v2) == ["x", "y"]
-                 , VP.toList ix1 == [0, 1, 0]
-                 , VP.toList ix2 == [0, 1, 0] ->
+                 | valuesToList v1 == ["a", "b"]
+                 , valuesToList v2 == ["x", "y"]
+                 , keysToList ix1 == [Just 0, Just 1, Just 0]
+                 , keysToList ix2 == [Just 0, Just 1, Just 0] ->
                      putStrLn "OK: dictionary replacement across batches"
                _ ->
                  failTest $
@@ -950,18 +989,19 @@ dictReplacementRoundTrip = do
             "dict-replace expected 2 batches, got "
               ++ show (length batches)
   where
-    valuesToList (ColUtf8 v) = v
-    valuesToList (ColUtf8Maybe v) = V.mapMaybe id v
-    valuesToList _ = V.empty
+    valuesToList :: ColumnArray -> [Text]
+    valuesToList c = either (const []) (VG.toList . VG.mapMaybe id) (toTextVector c)
+    keysToList :: ColumnArray -> [Maybe Int32]
+    keysToList c = maybe [] (VG.toList . toMaybeVector) (asPrim PInt32 c)
 
 
 bodyCompressionRoundTrip :: BodyCompressionCodec -> Schema -> V.Vector ColumnArray -> IO ()
 bodyCompressionRoundTrip codec sch cols = do
   let !opts = defaultWriteOptions {writeBodyCompression = Just codec}
-      !bytes = encodeArrowStream opts sch [cols]
-  case decodeArrowStream bytes of
+      !encoded = encodeArrowStream opts sch [cols]
+  case encoded >>= \bytes -> (,) bytes <$> decodeArrowStream bytes of
     Left e -> failTest $ "body-compression round-trip: " ++ e
-    Right (_sch', batches)
+    Right (bytes, (_sch', batches))
       | [got] <- batches
       , got == cols ->
           putStrLn $
@@ -979,7 +1019,7 @@ bodyCompressionRoundTrip codec sch cols = do
 streamingRoundTrip :: Schema -> [V.Vector ColumnArray] -> IO ()
 streamingRoundTrip sch batches = do
   let bytes = encodeArrowStream defaultWriteOptions sch batches
-  case openStreamReader bytes of
+  case bytes >>= openStreamReader of
     Left e -> failTest $ "openStreamReader: " ++ e
     Right rd0 -> do
       when (streamReaderSchema rd0 /= sch) $
@@ -989,12 +1029,12 @@ streamingRoundTrip sch batches = do
         Left e -> failTest $ "streamReaderNext (first): " ++ e
         Right Nothing -> failTest "streamReaderNext: stream empty"
         Right (Just (cols0, rd1)) -> do
-          when (cols0 /= head batches) $
+          when (Just cols0 /= listToMaybe batches) $
             failTest $
               "streamReaderNext (first) mismatch:\n got "
                 ++ show cols0
                 ++ "\n exp "
-                ++ show (head batches)
+                ++ show (take 1 batches)
           case streamReaderToList rd1 of
             Left e -> failTest $ "streamReaderToList: " ++ e
             Right rest
@@ -1007,7 +1047,7 @@ streamingRoundTrip sch batches = do
                       ++ "\n exp "
                       ++ show (drop 1 batches)
   -- Iter-shaped variant: the same drain via Columnar.Stream.
-  case openStreamReader bytes of
+  case bytes >>= openStreamReader of
     Left e -> failTest $ "openStreamReader (iter): " ++ e
     Right rd0 ->
       case IS.iterToList (streamReaderIter rd0) of
@@ -1024,7 +1064,7 @@ streamingRoundTrip sch batches = do
 
 
 {- | Schema-level + field-level @custom_metadata@ pairs survive
-a full encode → decode round-trip via the FlatBuffers schema
+a full encode to decode round-trip via the FlatBuffers schema
 writer + reader.
 -}
 customMetadataRoundTrip :: IO ()
@@ -1044,9 +1084,9 @@ customMetadataRoundTrip = do
                 ]
           , arrowFeatures = V.empty
           }
-      !batch = V.singleton (ColInt32 (VP.fromList ([1, 2, 3] :: [Int32])))
+      !batch = V.singleton (primColumn PInt32 (VS.fromList ([1, 2, 3] :: [Int32])))
       !bytes = encodeArrowStream defaultWriteOptions sch [batch]
-  case decodeArrowStream bytes of
+  case bytes >>= decodeArrowStream of
     Left e -> failTest $ "customMetadata roundtrip: " ++ e
     Right (sch', _batches) -> do
       expect
@@ -1090,7 +1130,7 @@ nestedStructRoundTrip = do
           ]
       (!sch, !cols) = AR.encodeTable tbl rows
       !bytes = encodeArrowStream defaultWriteOptions sch [cols]
-  case decodeArrowStream bytes of
+  case bytes >>= decodeArrowStream of
     Left e -> failTest $ "nested struct decode: " ++ e
     Right (sch', batches) -> case batches of
       [batch] -> case AR.decodeTable tbl sch' batch of
@@ -1109,7 +1149,7 @@ nestedStructRoundTrip = do
 
 {- | Nullable nested record. Same shape as 'nestedStructRoundTrip'
 but the @addr@ column is @Maybe Address@; the encoder builds
-a 'ColStructMaybe' with a top-level validity mask, and the
+a nullable 'ColStruct' with a top-level validity mask, and the
 decoder reconstructs the @Just@/@Nothing@ pattern.
 -}
 nullableNestedStructRoundTrip :: IO ()
@@ -1140,7 +1180,7 @@ nullableNestedStructRoundTrip = do
           ]
       (!sch, !cols) = AR.encodeTable tbl rows
       !bytes = encodeArrowStream defaultWriteOptions sch [cols]
-  case decodeArrowStream bytes of
+  case bytes >>= decodeArrowStream of
     Left e -> failTest $ "nullable nested struct decode: " ++ e
     Right (sch', batches) -> case batches of
       [batch] -> case AR.decodeTable tbl sch' batch of
@@ -1247,12 +1287,12 @@ recordHelperTests = do
 
   -- validateMapKeysSorted
   -- Build a ColMap with sorted keys vs unsorted keys.
-  let !sortedKeys = ColUtf8 (V.fromList ["a", "b", "c"])
-      !unsortedKeys = ColUtf8 (V.fromList ["b", "a", "c"])
-      !vals = ColInt32 (VP.fromList [1, 2, 3 :: Int32])
-      !offsets = VP.fromList [0, 3 :: Int32]
-      !sortedMap = ColMap offsets sortedKeys vals
-      !unsortedMap = ColMap offsets unsortedKeys vals
+  let !sortedKeys = fromTexts (V.fromList ["a", "b", "c"])
+      !unsortedKeys = fromTexts (V.fromList ["b", "a", "c"])
+      !vals = primColumn PInt32 (VS.fromList [1, 2, 3 :: Int32])
+      !offsets = VS.fromList [0, 3 :: Int32]
+      !sortedMap = fixture (mkMap Nothing offsets sortedKeys vals)
+      !unsortedMap = fixture (mkMap Nothing offsets unsortedKeys vals)
   case validateMapKeysSorted sortedMap of
     Right () -> putStrLn "OK: validateMapKeysSorted accepts sorted keys"
     Left e -> failTest $ "expected sorted accept, got " ++ e
@@ -1367,15 +1407,15 @@ projectionRoundTrip = do
           V.empty
       !batch =
         V.fromList
-          [ ColInt32 (VP.fromList ([1, 2, 3] :: [Int32]))
-          , ColInt64 (VP.fromList ([10, 20, 30] :: [Int64]))
-          , ColUtf8 (V.fromList ["x", "y", "z"])
+          [ primColumn PInt32 (VS.fromList ([1, 2, 3] :: [Int32]))
+          , primColumn PInt64 (VS.fromList ([10, 20, 30] :: [Int64]))
+          , fromTexts (V.fromList ["x", "y", "z"])
           ]
       !bytes = encodeArrowStream defaultWriteOptions sch [batch]
-  case openStreamReader bytes of
+  case bytes >>= openStreamReader of
     Left e -> failTest $ "projection openStreamReader: " ++ e
     Right rd0 ->
-      -- Ask for c then a, in that order — should drop b and reorder.
+      -- Ask for c then a, in that order: should drop b and reorder.
       case streamReaderProjected ["c", "a"] rd0 of
         Left e -> failTest $ "streamReaderProjected: " ++ e
         Right (projSch, batches')
@@ -1400,27 +1440,26 @@ projectionRoundTrip = do
 highLevelRoundTrip :: String -> Schema -> V.Vector ColumnArray -> IO ()
 highLevelRoundTrip label sch cols = do
   let bytes = encodeArrowStream defaultWriteOptions sch [cols]
-  case decodeArrowStream bytes of
+  case bytes >>= decodeArrowStream of
     Left e -> failTest $ label ++ ": decodeArrowStream: " ++ e
     Right (sch', batches)
-      | length batches /= 1 ->
+      | sch' /= sch ->
+          failTest $ label ++ ": schema mismatch"
+      | [got] <- batches ->
+          if got == cols
+            then putStrLn $ "OK: high-level round-trip " ++ label
+            else
+              failTest $
+                label
+                  ++ ": column mismatch\n got: "
+                  ++ show (V.toList got)
+                  ++ "\n exp: "
+                  ++ show (V.toList cols)
+      | otherwise ->
           failTest $
             label
               ++ ": expected 1 batch, got "
               ++ show (length batches)
-      | sch' /= sch ->
-          failTest $ label ++ ": schema mismatch"
-      | otherwise ->
-          let !got = head batches
-          in if got == cols
-               then putStrLn $ "OK: high-level round-trip " ++ label
-               else
-                 failTest $
-                   label
-                     ++ ": column mismatch\n got: "
-                     ++ show (V.toList got)
-                     ++ "\n exp: "
-                     ++ show (V.toList cols)
 
 
 -- | Build a simple leaf field with no children.
@@ -1444,18 +1483,21 @@ roundTripNested label field col = do
           , arrowFeatures = V.empty
           }
       !stream = writeArrowStream schema (V.singleton (V.singleton col))
-  case readArrowStream stream of
+  case stream >>= readArrowStream of
     Left e -> failTest (label ++ ": readArrowStream: " ++ e)
     Right as -> do
       expect
         (label ++ ": batch count == 1")
         (V.length (asBatches as) == 1)
       let (rb, body) = V.unsafeIndex (asBatches as) 0
-      case materializeRecordBatch (asSchema as) rb body of
+      case decodeRecordBatch (asSchema as) rb body of
         Left e -> failTest (label ++ ": materialize: " ++ e)
         Right cols -> do
           expect (label ++ ": column count == 1") (V.length cols == 1)
           let !got = V.unsafeIndex cols 0
+          expect
+            (label ++ ": null count matches")
+            (nullCount got == nullCount col)
           when (got /= col) $
             failTest
               ( label
@@ -1473,7 +1515,7 @@ single-batch Arrow stream.
 roundTripPrim :: String -> ColumnArray -> IO ()
 roundTripPrim label col = do
   let !ty = inferArrowType col
-      !nullable = isNullable col
+      !nullable = nullCount col > 0
       !schema =
         Schema
           { arrowEndianness = Little
@@ -1491,7 +1533,7 @@ roundTripPrim label col = do
           , arrowFeatures = V.empty
           }
       !stream = writeArrowStream schema (V.singleton (V.singleton col))
-  case readArrowStream stream of
+  case stream >>= readArrowStream of
     Left e -> failTest (label ++ ": readArrowStream: " ++ e)
     Right as -> do
       expect
@@ -1501,7 +1543,7 @@ roundTripPrim label col = do
         (label ++ ": batch count == 1")
         (V.length (asBatches as) == 1)
       let (rb, body) = V.unsafeIndex (asBatches as) 0
-      case materializeRecordBatch (asSchema as) rb body of
+      case decodeRecordBatch (asSchema as) rb body of
         Left e -> failTest (label ++ ": materialize: " ++ e)
         Right cols -> do
           expect (label ++ ": column count == 1") (V.length cols == 1)
@@ -1509,6 +1551,11 @@ roundTripPrim label col = do
           expect
             (label ++ ": row count matches")
             (columnLength got == columnLength col)
+          expect
+            (label ++ ": null count and validity slot match")
+            ( nullCount got == nullCount col
+                && hasValiditySlot got == hasValiditySlot col
+            )
           when (got /= col) $
             failTest (label ++ ": got " ++ show got ++ ", expected " ++ show col)
       expect (label ++ ": round-trip preserves column") True
@@ -1519,88 +1566,42 @@ the test driver feeds in. Used only to build per-test schemas.
 -}
 inferArrowType :: ColumnArray -> ArrowType
 inferArrowType = \case
-  ColInt8 _ -> AInt 8 True
-  ColInt16 _ -> AInt 16 True
-  ColInt32 _ -> AInt 32 True
-  ColInt64 _ -> AInt 64 True
-  ColUInt8 _ -> AInt 8 False
-  ColUInt16 _ -> AInt 16 False
-  ColUInt32 _ -> AInt 32 False
-  ColUInt64 _ -> AInt 64 False
-  ColFloat16 _ -> AFloatingPoint Half
-  ColFloat _ -> AFloatingPoint Single
-  ColDouble _ -> AFloatingPoint DoublePrecision
-  ColBool _ -> ABool
-  ColUtf8 _ -> AUtf8
-  ColBinary _ -> ABinary
-  ColLargeUtf8 _ -> ALargeUtf8
-  ColLargeBinary _ -> ALargeBinary
-  ColFixedSizeBinary w _ -> AFixedSizeBinary w
-  ColDate32 _ -> ADate DateDay
-  ColDate64 _ -> ADate DateMillisecond
-  ColTime32 _ -> ATime Second 32
-  ColTime64 _ -> ATime Microsecond 64
-  ColTimestamp _ -> ATimestamp Nanosecond Nothing
-  ColDuration _ -> ADuration Nanosecond
-  ColDecimal128 p s _ -> ADecimal p s
-  ColDecimal256 p s _ -> ADecimal256 p s
-  ColIntervalYearMonth _ -> AInterval YearMonth
+  ColInt8 _ _ -> AInt 8 True
+  ColInt16 _ _ -> AInt 16 True
+  ColInt32 _ _ -> AInt 32 True
+  ColInt64 _ _ -> AInt 64 True
+  ColUInt8 _ _ -> AInt 8 False
+  ColUInt16 _ _ -> AInt 16 False
+  ColUInt32 _ _ -> AInt 32 False
+  ColUInt64 _ _ -> AInt 64 False
+  ColFloat16 _ _ -> AFloatingPoint Half
+  ColFloat _ _ -> AFloatingPoint Single
+  ColDouble _ _ -> AFloatingPoint DoublePrecision
+  ColBool _ _ -> ABool
+  ColUtf8 {} -> AUtf8
+  ColBinary {} -> ABinary
+  ColLargeUtf8 {} -> ALargeUtf8
+  ColLargeBinary {} -> ALargeBinary
+  ColFixedSizeBinary w _ _ _ -> AFixedSizeBinary w
+  ColDate32 _ _ -> ADate DateDay
+  ColDate64 _ _ -> ADate DateMillisecond
+  ColTime32 _ _ -> ATime Second 32
+  ColTime64 _ _ -> ATime Microsecond 64
+  ColTimestamp _ _ -> ATimestamp Nanosecond Nothing
+  ColDuration _ _ -> ADuration Nanosecond
+  ColDecimal128 p s _ _ -> ADecimal p s
+  ColDecimal256 p s _ _ -> ADecimal256 p s
+  ColIntervalYearMonth _ _ -> AInterval YearMonth
   ColIntervalDayTime _ _ -> AInterval DayTime
-  ColIntervalMonthDayNano _ _ _ -> AInterval MonthDayNano
-  ColInt8Maybe _ -> AInt 8 True
-  ColInt16Maybe _ -> AInt 16 True
-  ColInt32Maybe _ -> AInt 32 True
-  ColInt64Maybe _ -> AInt 64 True
-  ColUInt8Maybe _ -> AInt 8 False
-  ColUInt16Maybe _ -> AInt 16 False
-  ColUInt32Maybe _ -> AInt 32 False
-  ColUInt64Maybe _ -> AInt 64 False
-  ColFloat16Maybe _ -> AFloatingPoint Half
-  ColFloatMaybe _ -> AFloatingPoint Single
-  ColDoubleMaybe _ -> AFloatingPoint DoublePrecision
-  ColBoolMaybe _ -> ABool
-  ColUtf8Maybe _ -> AUtf8
-  ColBinaryMaybe _ -> ABinary
-  ColLargeUtf8Maybe _ -> ALargeUtf8
-  ColLargeBinaryMaybe _ -> ALargeBinary
-  ColFixedSizeBinaryMaybe w _ -> AFixedSizeBinary w
-  ColDate32Maybe _ -> ADate DateDay
-  ColDate64Maybe _ -> ADate DateMillisecond
-  ColTime32Maybe _ -> ATime Second 32
-  ColTime64Maybe _ -> ATime Microsecond 64
-  ColTimestampMaybe _ -> ATimestamp Nanosecond Nothing
-  ColDurationMaybe _ -> ADuration Nanosecond
+  ColIntervalMonthDayNano _ _ -> AInterval MonthDayNano
   -- The test driver doesn't invoke inferArrowType for nested columns;
   -- those are fed through a dedicated roundTripNested helper below.
-  other -> error ("inferArrowType: unsupported: " ++ show other)
+  other -> error ("inferArrowType: unsupported: " ++ columnTag other)
 
 
-isNullable :: ColumnArray -> Bool
-isNullable = \case
-  ColInt8Maybe _ -> True
-  ColInt16Maybe _ -> True
-  ColInt32Maybe _ -> True
-  ColInt64Maybe _ -> True
-  ColUInt8Maybe _ -> True
-  ColUInt16Maybe _ -> True
-  ColUInt32Maybe _ -> True
-  ColUInt64Maybe _ -> True
-  ColFloat16Maybe _ -> True
-  ColFloatMaybe _ -> True
-  ColDoubleMaybe _ -> True
-  ColBoolMaybe _ -> True
-  ColUtf8Maybe _ -> True
-  ColBinaryMaybe _ -> True
-  ColLargeUtf8Maybe _ -> True
-  ColLargeBinaryMaybe _ -> True
-  ColFixedSizeBinaryMaybe _ _ -> True
-  ColDate32Maybe _ -> True
-  ColDate64Maybe _ -> True
-  ColTime32Maybe _ -> True
-  ColTime64Maybe _ -> True
-  ColTimestampMaybe _ -> True
-  ColDurationMaybe _ -> True
-  _ -> False
+-- | Unwrap a validated fixture constructor, failing loudly on 'Left'.
+fixture :: Either String ColumnArray -> ColumnArray
+fixture = either (error . ("bad fixture: " ++)) id
 
 
 expect :: String -> Bool -> IO ()

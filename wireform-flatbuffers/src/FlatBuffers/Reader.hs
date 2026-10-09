@@ -80,7 +80,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Vector qualified as V
 import Data.Word (Word16, Word32, Word64, Word8)
-import Foreign.ForeignPtr (withForeignPtr)
+import GHC.ForeignPtr (unsafeWithForeignPtr)
 import Foreign.Ptr (Ptr)
 import Foreign.Storable (Storable, peekByteOff)
 import GHC.Float (castWord32ToFloat, castWord64ToDouble)
@@ -160,7 +160,7 @@ peekDouble bs off = castWord64ToDouble <$> peekU64 bs off
 
 {- | Generic fixed-width LE peek. Specialised internally by
 'peekU16' / 'peekU32' / 'peekU64'. Picks up a 'Ptr Word8'
-through 'withForeignPtr' and lets GHC inline the @Storable@
+through 'unsafeWithForeignPtr' and lets GHC inline the @Storable@
 dictionary into a single aligned load.
 -}
 peekFixed
@@ -173,7 +173,7 @@ peekFixed
   -> Pos
   -> Either String a
 peekFixed !w name bs off
-  | off < 0 || off + w > BS.length bs = boundsErr name
+  | off < 0 || off > BS.length bs - w = boundsErr name
   | otherwise =
       let !val = unsafeDupablePerformIO (withBSPtr bs (\p -> peekByteOff p off))
       in Right val
@@ -182,10 +182,12 @@ peekFixed !w name bs off
 
 {- | Run @f@ with a 'Ptr' to the start of the input 'ByteString'.
 Reads are pure in the value sense; the 'IO' bracket is just a
-consequence of 'withForeignPtr'\'s API.
+consequence of the 'ForeignPtr' API. Every caller passes a single
+load, which cannot diverge, so 'unsafeWithForeignPtr' is sound and
+avoids the @keepAlive#@ frame 'withForeignPtr' pushes on every peek.
 -}
 withBSPtr :: ByteString -> (Ptr Word8 -> IO a) -> IO a
-withBSPtr (BSI.BS fp _) f = withForeignPtr fp f
+withBSPtr (BSI.BS fp _) f = unsafeWithForeignPtr fp f
 {-# INLINE withBSPtr #-}
 
 
@@ -307,20 +309,28 @@ traversal that doesn't need the materialised vector, use
 -}
 readVectorOfOffsets :: ByteString -> Pos -> Either String (V.Vector Pos)
 readVectorOfOffsets bs vecPos = do
-  n <- peekU32 bs vecPos
-  let elemPositions = V.generate (fromIntegral n) $ \i ->
-        let !ePos = vecPos + 4 + 4 * i
-        in case peekU32 bs ePos of
-             Left _ -> ePos
-             Right rel -> ePos + fromIntegral rel
-  Right elemPositions
+  n <- checkedVectorLength "readVectorOfOffsets" bs vecPos 4
+  V.generateM n $ \i -> followUOffset bs (vecPos + 4 + 4 * i)
 
 
 -- | Decode a vector of little-endian Int64 values.
 readVectorInt64 :: ByteString -> Pos -> Either String [Int64]
 readVectorInt64 bs vecPos = do
-  n <- peekU32 bs vecPos
-  goVec (fromIntegral n) (\i -> peekI64 bs (vecPos + 4 + 8 * i))
+  n <- checkedVectorLength "readVectorInt64" bs vecPos 8
+  goVec n (\i -> peekI64 bs (vecPos + 4 + 8 * i))
+
+
+{- | Element count of the vector at @vecPos@, checked so that all
+@count * stride@ payload bytes lie inside the buffer. Callers can
+then size allocations by the count without trusting the wire.
+-}
+checkedVectorLength :: String -> ByteString -> Pos -> Int -> Either String Int
+checkedVectorLength name bs vecPos stride = do
+  n <- fromIntegral <$> peekU32 bs vecPos
+  -- peekU32 succeeded, so 0 <= vecPos <= length - 4.
+  if n > (BS.length bs - vecPos - 4) `quot` max 1 stride
+    then Left ("FlatBuffers.Reader." <> name <> ": vector of " <> show n <> " elements overruns the buffer")
+    else Right n
 
 
 {- | Walk @0..n-1@ and accumulate results, short-circuiting on
@@ -340,7 +350,8 @@ goVec n f = go 0
 
 
 {- | Decode a vector of fixed-size inline structs. Returns
-@(elemCount, byte position of each element start)@.
+@(elemCount, byte position of each element start)@; every element
+lies inside the buffer.
 -}
 readVectorOfStructs
   :: ByteString
@@ -349,6 +360,6 @@ readVectorOfStructs
   -- ^ stride (per-struct size)
   -> Either String (Int, V.Vector Pos)
 readVectorOfStructs bs vecPos stride = do
-  n <- peekU32 bs vecPos
-  let elems = V.generate (fromIntegral n) (\i -> vecPos + 4 + i * stride)
-  Right (fromIntegral n, elems)
+  n <- checkedVectorLength "readVectorOfStructs" bs vecPos stride
+  let elems = V.generate n (\i -> vecPos + 4 + i * stride)
+  Right (n, elems)

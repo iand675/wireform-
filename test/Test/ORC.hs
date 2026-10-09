@@ -7,6 +7,7 @@ import Data.Int (Int16, Int32, Int64, Int8)
 import Data.Text qualified as T
 import Data.Vector qualified as V
 import Data.Vector.Primitive qualified as VP
+import Data.Vector.Storable qualified as VS
 import Hedgehog
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
@@ -58,8 +59,8 @@ arrowBridgeTests =
                   }
               !batch =
                 V.fromList
-                  [ AC.ColInt64 (VP.fromList ([10, 20, 30] :: [Int64]))
-                  , AC.ColUtf8 (V.fromList ["alpha", "beta", "gamma"])
+                  [ AC.primColumn AC.PInt64 (VS.fromList ([10, 20, 30] :: [Int64]))
+                  , AC.fromTexts (V.fromList ["alpha", "beta", "gamma"])
                   ]
           case OArrow.arrowToORC arrowSchema [batch] of
             Left e -> expectationFailure ("arrowToORC: " ++ e)
@@ -83,8 +84,8 @@ arrowBridgeTests =
                   }
               !batch =
                 V.fromList
-                  [ AC.ColInt64Maybe (V.fromList [Just 10, Nothing, Just 30])
-                  , AC.ColUtf8Maybe (V.fromList [Just "a", Just "b", Nothing])
+                  [ AC.fromMaybes AC.PInt64 (V.fromList [Just 10, Nothing, Just 30])
+                  , AC.fromMaybeTexts (V.fromList [Just "a", Just "b", Nothing])
                   ]
           case OArrow.arrowToORC arrowSchema [batch] of
             Left e -> expectationFailure ("arrowToORC: " ++ e)
@@ -123,9 +124,9 @@ arrowBridgeTests =
                   }
               !batch =
                 V.fromList
-                  [ AC.ColDate32 (VP.fromList ([19000, 19001, 19002] :: [Int32]))
-                  , AC.ColTime32 (VP.fromList ([0, 60000, 120000] :: [Int32]))
-                  , AC.ColTimestamp (VP.fromList ([1700000000000000, 1700001000000000, 1700002000000000] :: [Int64]))
+                  [ AC.primColumn AC.PDate32 (VS.fromList ([19000, 19001, 19002] :: [Int32]))
+                  , AC.primColumn AC.PTime32 (VS.fromList ([0, 60000, 120000] :: [Int32]))
+                  , AC.primColumn AC.PTimestamp (VS.fromList ([1700000000000000, 1700001000000000, 1700002000000000] :: [Int64]))
                   ]
           case OArrow.arrowToORC arrowSchema [batch] of
             Left e -> expectationFailure ("arrowToORC: " ++ e)
@@ -169,11 +170,13 @@ arrowBridgeTests =
                   , AT.arrowFeatures = V.empty
                   }
               !batch =
-                V.singleton $
-                  AC.ColStruct
+                V.singleton . either error id $
+                  AC.mkStruct
+                    3
+                    Nothing
                     ( V.fromList
-                        [ ("x", AC.ColInt32 (VP.fromList [1, 2, 3 :: Int32]))
-                        , ("name", AC.ColUtf8 (V.fromList ["a", "b", "c"]))
+                        [ ("x", AC.primColumn AC.PInt32 (VS.fromList [1, 2, 3 :: Int32]))
+                        , ("name", AC.fromTexts (V.fromList ["a", "b", "c"]))
                         ]
                     )
           case OArrow.arrowToORC arrowSchema [batch] of
@@ -216,10 +219,11 @@ arrowBridgeTests =
                   }
               -- 3 rows: [1,2,3], [], [4,5]
               !batch =
-                V.singleton $
-                  AC.ColList
-                    (VP.fromList [0, 3, 3, 5 :: Int32])
-                    (AC.ColInt32 (VP.fromList [1, 2, 3, 4, 5 :: Int32]))
+                V.singleton . either error id $
+                  AC.mkList
+                    Nothing
+                    (VS.fromList [0, 3, 3, 5 :: Int32])
+                    (AC.primColumn AC.PInt32 (VS.fromList [1, 2, 3, 4, 5 :: Int32]))
           case OArrow.arrowToORC arrowSchema [batch] of
             Left e -> expectationFailure ("arrowToORC (list): " ++ e)
             Right (types, stripesWithRows) ->

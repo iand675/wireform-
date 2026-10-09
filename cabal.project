@@ -80,10 +80,6 @@ package flatparse
 constraints: text >= 2.1
            , crypton >= 1.0 && < 1.2
 
--- Avoid cyclic test deps between columnar packages
-package wireform-columnar-core
-  tests: False
-
 package wireform-arrow
   flags: +zstd +lz4
 

@@ -116,7 +116,7 @@ library
     c-sources: cbits/magic_ring_posix.c
   if os(windows)
     c-sources: cbits/magic_ring_windows.c
-    extra-libraries: kernel32
+    extra-libraries: kernel32 bcrypt
 
   build-depends:
     base >= 4.18 && < 5,

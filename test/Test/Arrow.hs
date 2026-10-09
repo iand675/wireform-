@@ -2,6 +2,7 @@ module Test.Arrow (arrowTests) where
 
 import Arrow.Column
 import Arrow.File
+import Arrow.Read.Columns (decodeRecordBatch)
 import Arrow.IPC
 import Arrow.Types
 import Arrow.Write
@@ -10,7 +11,7 @@ import Data.ByteString.Lazy qualified as BL
 import Data.Int (Int32)
 import Data.Text qualified as T
 import Data.Vector qualified as V
-import Data.Vector.Primitive qualified as VP
+import Data.Vector.Storable qualified as VS
 import Hedgehog
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
@@ -252,8 +253,8 @@ recordBatchRoundtrips =
                 RecordBatch
                   RecordBatchDef
                     { rbLength = 0
-                    , rbNodes = V.empty
-                    , rbBuffers = V.empty
+                    , rbNodes = VS.empty
+                    , rbBuffers = VS.empty
                     , rbVariadicBufferCounts = V.empty
                     , rbBodyCompression = Nothing
                     }
@@ -264,12 +265,12 @@ recordBatchRoundtrips =
                   RecordBatchDef
                     { rbLength = 1000
                     , rbNodes =
-                        V.fromList
+                        VS.fromList
                           [ FieldNode 1000 50
                           , FieldNode 1000 0
                           ]
                     , rbBuffers =
-                        V.fromList
+                        VS.fromList
                           [ Buffer 0 128
                           , Buffer 128 8000
                           , Buffer 8128 128
@@ -292,7 +293,7 @@ edgeCases =
             Left _ -> pure ()
             Right _ -> expectationFailure "expected error on empty input"
       , it "DictionaryBatch roundtrip" $ do
-          let msg = DictionaryBatch
+          let msg = DictionaryBatch 3 True emptyBatchDef
           decodeIPCMessage (encodeIPCMessage msg) `shouldBe` Right msg
       , it "Field with empty name" $ do
           let msg =
@@ -322,13 +323,13 @@ wireFormatTests =
     "Wire format"
     $ sequence_
       [ it "Starts with continuation 0xFFFFFFFF" $ do
-          let bs = encodeIPCMessage DictionaryBatch
+          let bs = encodeIPCMessage (DictionaryBatch 0 False emptyBatchDef)
           BS.index bs 0 `shouldBe` 0xFF
           BS.index bs 1 `shouldBe` 0xFF
           BS.index bs 2 `shouldBe` 0xFF
           BS.index bs 3 `shouldBe` 0xFF
       , it "Metadata is 8-byte aligned" $ do
-          let bs = encodeIPCMessage DictionaryBatch
+          let bs = encodeIPCMessage (DictionaryBatch 0 False emptyBatchDef)
               metaLen =
                 fromIntegral (BS.index bs 4)
                   + fromIntegral (BS.index bs 5) * 256
@@ -428,8 +429,8 @@ propertyRoundtrips =
               traverse
                 ( \_ -> do
                     nodeLen <- Gen.int64 (Range.linear 0 100000)
-                    nullCount <- Gen.int64 (Range.linear 0 1000)
-                    pure (FieldNode nodeLen nullCount)
+                    nulls <- Gen.int64 (Range.linear 0 1000)
+                    pure (FieldNode nodeLen nulls)
                 )
                 [1 .. nNodes]
           nBufs <- forAll $ Gen.int (Range.linear 0 8)
@@ -446,8 +447,8 @@ propertyRoundtrips =
                 RecordBatch
                   RecordBatchDef
                     { rbLength = len
-                    , rbNodes = V.fromList nodes
-                    , rbBuffers = V.fromList bufs
+                    , rbNodes = VS.fromList nodes
+                    , rbBuffers = VS.fromList bufs
                     , rbVariadicBufferCounts = V.empty
                     , rbBodyCompression = Nothing
                     }
@@ -480,8 +481,8 @@ columnTests =
               rb =
                 RecordBatchDef
                   { rbLength = 3
-                  , rbNodes = V.singleton (FieldNode 3 1)
-                  , rbBuffers = V.fromList [Buffer 0 1, Buffer 8 12]
+                  , rbNodes = VS.singleton (FieldNode 3 1)
+                  , rbBuffers = VS.fromList [Buffer 0 1, Buffer 8 12]
                   , rbVariadicBufferCounts = V.empty
                   , rbBodyCompression = Nothing
                   }
@@ -492,9 +493,9 @@ columnTests =
                   <> leI32 10
                   <> leI32 0
                   <> leI32 30
-          case materializeFlatRecordBatch schema rb body of
+          case decodeRecordBatch schema rb body of
             Left e -> expectationFailure e
-            Right cols -> V.head cols `shouldBe` ColInt32Maybe (V.fromList [Just 10, Nothing, Just 30])
+            Right cols -> V.head cols `shouldBe` fromMaybes PInt32 (V.fromList [Just 10, Nothing, Just 30])
       , it "Struct column" $ do
           let childX = Field "x" False (AInt 32 True) V.empty Nothing V.empty
               childY = Field "y" False (AInt 32 True) V.empty Nothing V.empty
@@ -517,21 +518,25 @@ columnTests =
               rb =
                 RecordBatchDef
                   { rbLength = 2
-                  , rbNodes = V.fromList [FieldNode 2 0, FieldNode 2 0, FieldNode 2 0]
-                  , rbBuffers = V.fromList [Buffer 0 8, Buffer 8 8]
+                  , rbNodes = VS.fromList [FieldNode 2 0, FieldNode 2 0, FieldNode 2 0]
+                  , rbBuffers = VS.fromList [Buffer 0 0, Buffer 0 0, Buffer 0 8, Buffer 8 0, Buffer 8 8]
                   , rbVariadicBufferCounts = V.empty
                   , rbBodyCompression = Nothing
                   }
               body = leI32 1 <> leI32 2 <> leI32 3 <> leI32 4
-          case materializeRecordBatch schema rb body of
+          case decodeRecordBatch schema rb body of
             Left e -> expectationFailure e
             Right cols ->
               V.head cols
-                `shouldBe` ColStruct
-                  ( V.fromList
-                      [ ("x", ColInt32 (VP.fromList [1, 2]))
-                      , ("y", ColInt32 (VP.fromList [3, 4]))
-                      ]
+                `shouldBe` fixture
+                  ( mkStruct
+                      2
+                      Nothing
+                      ( V.fromList
+                          [ ("x", primColumn PInt32 (VS.fromList [1, 2]))
+                          , ("y", primColumn PInt32 (VS.fromList [3, 4]))
+                          ]
+                      )
                   )
       , it "List column" $ do
           let childField = Field "item" False (AInt 32 True) V.empty Nothing V.empty
@@ -554,8 +559,8 @@ columnTests =
               rb =
                 RecordBatchDef
                   { rbLength = 2
-                  , rbNodes = V.fromList [FieldNode 2 0, FieldNode 5 0]
-                  , rbBuffers = V.fromList [Buffer 0 12, Buffer 16 20]
+                  , rbNodes = VS.fromList [FieldNode 2 0, FieldNode 5 0]
+                  , rbBuffers = VS.fromList [Buffer 0 0, Buffer 0 12, Buffer 16 0, Buffer 16 20]
                   , rbVariadicBufferCounts = V.empty
                   , rbBodyCompression = Nothing
                   }
@@ -568,13 +573,16 @@ columnTests =
                   <> leI32 3
                   <> leI32 4
                   <> leI32 5
-          case materializeRecordBatch schema rb body of
+          case decodeRecordBatch schema rb body of
             Left e -> expectationFailure e
             Right cols ->
               V.head cols
-                `shouldBe` ColList
-                  (VP.fromList [0, 2, 5])
-                  (ColInt32 (VP.fromList [1, 2, 3, 4, 5]))
+                `shouldBe` fixture
+                  ( mkList
+                      Nothing
+                      (VS.fromList [0, 2, 5])
+                      (primColumn PInt32 (VS.fromList [1, 2, 3, 4, 5]))
+                  )
       ]
 
 
@@ -600,17 +608,21 @@ writeRoundtrips =
                   , arrowMetadata = V.empty
                   , arrowFeatures = V.empty
                   }
-              vals = VP.fromList [1, 2, 3, 4, 5] :: VP.Vector Int32
-              cols = V.singleton (ColInt32 vals)
-              batchBs = buildRecordBatch schema cols
-          case readIPCMessage batchBs 0 of
+              vals = VS.fromList [1, 2, 3, 4, 5] :: VS.Vector Int32
+              cols = V.singleton (primColumn PInt32 vals)
+          streamBs <- either (\e -> expectationFailure e >> pure BS.empty) pure (writeArrowStream schema (V.singleton cols))
+          case readIPCMessage streamBs 0 of
             Left e -> expectationFailure e
-            Right (msg, body, _) -> case msg of
-              RecordBatch rb ->
-                case materializeRecordBatch schema rb body of
-                  Left e2 -> expectationFailure e2
-                  Right result -> V.head result `shouldBe` ColInt32 vals
-              _ -> expectationFailure "Expected RecordBatch message"
+            Right (SchemaMessage s, _, next) -> do
+              s `shouldBe` schema
+              case readIPCMessage streamBs next of
+                Left e -> expectationFailure e
+                Right (RecordBatch rb, body, _) ->
+                  case decodeRecordBatch schema rb body of
+                    Left e2 -> expectationFailure e2
+                    Right result -> V.head result `shouldBe` primColumn PInt32 vals
+                Right _ -> expectationFailure "Expected RecordBatch message"
+            Right _ -> expectationFailure "Expected Schema message"
       , it "Arrow stream round-trip" $ do
           let schema =
                 Schema
@@ -625,21 +637,20 @@ writeRoundtrips =
                   }
               batch1 =
                 V.fromList
-                  [ ColInt32 (VP.fromList [10, 20, 30])
-                  , ColBool (V.fromList [True, False, True])
+                  [ primColumn PInt32 (VS.fromList [10, 20, 30])
+                  , fromBools (V.fromList [True, False, True])
                   ]
-              streamBs = writeArrowStream schema (V.singleton batch1)
-          case readArrowStream streamBs of
+          case writeArrowStream schema (V.singleton batch1) >>= readArrowStream of
             Left e -> expectationFailure e
             Right as -> do
               asSchema as `shouldBe` schema
               V.length (asBatches as) `shouldBe` 1
               let (rb, body) = V.head (asBatches as)
-              case materializeRecordBatch schema rb body of
+              case decodeRecordBatch schema rb body of
                 Left e2 -> expectationFailure e2
                 Right result -> do
-                  result V.! 0 `shouldBe` ColInt32 (VP.fromList [10, 20, 30])
-                  result V.! 1 `shouldBe` ColBool (V.fromList [True, False, True])
+                  result V.! 0 `shouldBe` primColumn PInt32 (VS.fromList [10, 20, 30])
+                  result V.! 1 `shouldBe` fromBools (V.fromList [True, False, True])
       , it "Arrow file round-trip" $ do
           let schema =
                 Schema
@@ -657,16 +668,24 @@ writeRoundtrips =
                   , arrowMetadata = V.empty
                   , arrowFeatures = V.empty
                   }
-              batch1 = V.singleton (ColInt32 (VP.fromList [100, 200, 300]))
-              fileBs = writeArrowFile schema (V.singleton batch1)
-          case readArrowFileColumns fileBs of
+              batch1 = V.singleton (primColumn PInt32 (VS.fromList [100, 200, 300]))
+          case writeArrowFile schema (V.singleton batch1) >>= readArrowFileColumns of
             Left e -> expectationFailure e
             Right (readSchema, readBatches) -> do
               readSchema `shouldBe` schema
               V.length readBatches `shouldBe` 1
-              V.head (V.head readBatches) `shouldBe` ColInt32 (VP.fromList [100, 200, 300])
+              V.head (V.head readBatches) `shouldBe` primColumn PInt32 (VS.fromList [100, 200, 300])
       ]
 
 
 leI32 :: Int32 -> BS.ByteString
 leI32 = BL.toStrict . B.toLazyByteString . B.int32LE
+
+
+emptyBatchDef :: RecordBatchDef
+emptyBatchDef = RecordBatchDef 0 VS.empty VS.empty V.empty Nothing
+
+
+-- | Unwrap a checked fixture constructor, failing loudly on a bad fixture.
+fixture :: Either String ColumnArray -> ColumnArray
+fixture = either (error . ("bad fixture: " ++)) id

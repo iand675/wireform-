@@ -1,0 +1,53 @@
+{
+  "id": "arrow-api-paths",
+  "title": "wireform-arrow entry points vs arrow-rs, mixed 6-column table (100k rows)",
+  "unit": "Micros",
+  "higherIsBetter": false,
+  "groups": [
+    "stream encode (Arrow.Stream)",
+    "stream encode lazy (Arrow.Stream)",
+    "stream encode (Arrow.Write)",
+    "stream decode (Arrow.Stream)",
+    "file encode (Arrow.Stream)",
+    "file encode lazy (Arrow.Stream)",
+    "file decode (Arrow.Stream)",
+    "file read (Arrow.File)",
+    "typed encode (Arrow.Record)",
+    "typed decode (Arrow.Record)"
+  ],
+  "series": [
+    {
+      "name": "arrow-rs",
+      "values": [
+        392.76,
+        392.76,
+        392.76,
+        276.8,
+        397.03,
+        397.03,
+        276.89,
+        276.89,
+        1644.79,
+        3075.63
+      ]
+    },
+    {
+      "name": "wireform-arrow",
+      "values": [
+        61.51,
+        2.07,
+        61.25,
+        96.82,
+        64.25,
+        3.69,
+        97.35,
+        97.85,
+        1470.49,
+        2944.47
+      ]
+    }
+  ],
+  "baseline": "arrow-rs",
+  "capturedAt": "2026-10-09T11:04:54Z",
+  "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5; arrow-rs 58.2.0, rustc 1.98.1, criterion.rs 0.7.0"
+}

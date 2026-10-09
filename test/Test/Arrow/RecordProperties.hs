@@ -124,7 +124,7 @@ genBatch =
 -- Hand-written combinator table. One 'fieldE' per selector,
 -- mirrored by 'columnD' on the decoder side. Nullable fields
 -- use the 'nullable' / 'nullableD' combinators rather than the
--- default 'Maybe' behaviour — the two are observationally
+-- default 'Maybe' behaviour, the two are observationally
 -- equivalent but we want both paths exercised.
 combinatorTable :: Table AllPrims
 combinatorTable = table enc dec
@@ -264,7 +264,7 @@ propColumnarParquet = withTests 50 $ property $ do
   --
   -- We bound the generator away from empty batches for this
   -- path: the Parquet writer for nullable columns has a
-  -- pre-existing issue with zero-row input — tracked separately
+  -- pre-existing issue with zero-row input, tracked separately
   -- from this property's focus on Arrow.Record's Table
   -- plumbing. The Arrow / ORC round-trips still exercise the
   -- full 0..15 row range.

@@ -103,7 +103,7 @@ vector alignment for arrow-rs".)
 
 Drivers:
 
-- `wireform-arrow/scripts/pyarrow_interop.py`
+- `cabal test wireform-arrow:wireform-arrow-pyarrow-interop` (both directions against pyarrow; case matrix in `wireform-arrow/test-interop/`)
 - `interop/arrow-rs/target/release/read_arrow_ipc`
 
 ## Apache Delta Lake (table format)
@@ -233,7 +233,7 @@ python3 wireform-orc/scripts/orc_interop.py
 python3 wireform-orc/scripts/orc_reverse_interop.py
 
 # Arrow IPC
-python3 wireform-arrow/scripts/pyarrow_interop.py
+WIREFORM_ARROW_REQUIRE_PYARROW=1 cabal test wireform-arrow:wireform-arrow-pyarrow-interop --enable-tests
 
 # Iceberg / Delta / Hudi / Lance (table-format readers)
 python3 wireform-iceberg/scripts/iceberg_interop.py
@@ -244,7 +244,7 @@ python3 wireform-lance/scripts/lance_interop.py
 # Rust side: feed the wireform probe outputs to arrow-rs / parquet-rs
 mkdir -p /tmp/wf-pq /tmp/wf-arrow
 cabal run wireform-parquet:wireform-parquet-interop-probe -- /tmp/wf-pq
-cabal run wireform-arrow:wireform-arrow-pyarrow-probe   -- /tmp/wf-arrow
+cabal run wireform-arrow:test:wireform-arrow-pyarrow-interop --enable-tests -- --write /tmp/wf-arrow
 ./interop/arrow-rs/target/release/read_parquet /tmp/wf-pq
 ./interop/arrow-rs/target/release/read_arrow_ipc /tmp/wf-arrow
 ```
