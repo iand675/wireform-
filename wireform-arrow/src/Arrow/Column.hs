@@ -1,4 +1,6 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE UnboxedTuples #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE RankNTypes #-}
@@ -155,7 +157,7 @@ module Arrow.Column (
   listRange,
   dictKeyAt,
 
-  -- * Conversions (cost in the name)
+  -- * Conversions to "Arrow.Vector" (aliasing the column; see each for its cost)
   toStorable,
   toMaybeVector,
   toTextVector,
@@ -169,6 +171,8 @@ module Arrow.Column (
   primColumnV,
   mkPrim,
   fromMaybes,
+  fromMaybeVector,
+  fromBoolVector,
   fromBools,
   fromMaybeBools,
   fromTexts,
@@ -229,12 +233,14 @@ import Arrow.Column.Builder
 import Arrow.Column.Internal (ColumnArray)
 import Arrow.Column.Internal hiding (ColumnArray (..))
 import Arrow.Column.Internal qualified as I
+import Arrow.Vector.Internal (FixedWidth)
+import Arrow.Vector.Internal qualified as AV
 import Arrow.Types (ArrowType (..), DictionaryEncoding (..), Field (..), UnionMode (..))
 import Columnar.SIMD qualified as K
 import Control.DeepSeq (NFData (..))
 import Control.Monad (forM_, when)
 import Control.Monad.ST (stToIO)
-import Data.Bits (unsafeShiftR)
+import Data.Bits (unsafeShiftR, (.&.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Internal qualified as BSI
@@ -245,15 +251,16 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Array qualified as TA
 import Data.Text.Foreign qualified as TF
-import Data.Text.Internal qualified as TI
 import Data.Type.Equality ((:~:) (..))
 import Data.Vector qualified as V
-import Data.Vector.Mutable qualified as VM
+import Data.Vector.Generic qualified as G
 import Data.Vector.Storable qualified as VS
 import Data.Vector.Storable.Mutable qualified as VSM
 import Data.Word (Word16, Word32, Word64, Word8)
 import Foreign.ForeignPtr (castForeignPtr)
-import GHC.ForeignPtr (unsafeWithForeignPtr)
+import GHC.Exts (Int (I#), MutableByteArray#, RealWorld, byteArrayContents#, minusAddr#, unsafeFreezeByteArray#)
+import GHC.ForeignPtr (ForeignPtr (..), ForeignPtrContents (..), unsafeWithForeignPtr)
+import GHC.IO (IO (..))
 import Foreign.Marshal.Utils (copyBytes, fillBytes)
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
 import Foreign.Storable (Storable (..))
@@ -683,9 +690,12 @@ toStorable :: PrimArray a -> VS.Vector a
 toStorable (PrimArray _ xs) = xs
 
 
--- | O(n), boxes every row.
-toMaybeVector :: Storable a => PrimArray a -> V.Vector (Maybe a)
-toMaybeVector arr = generateStrict (primArrayLength arr) (unsafePrimAt arr)
+{- | O(1) for the values (the result aliases the column's value buffer
+and validity bitmap); a column without nulls gets a fresh all-set
+validity bitmap (rows / 8 bytes).
+-}
+toMaybeVector :: FixedWidth a => PrimArray a -> AV.Vector (Maybe a)
+toMaybeVector (PrimArray v xs) = withValidity (VS.length xs) v (AV.fromStorable xs)
 {-# INLINE toMaybeVector #-}
 
 
@@ -906,40 +916,89 @@ keyAt c i = case c of
 -- Conversions
 -- ============================================================
 
-{- | O(n): utf8, large utf8 and utf8 view columns, and dictionaries whose
-values are one of those.
-
-Utf8 and large utf8: the bytes the column references are copied once
-into a fresh array and every row is a 'Text' slice of it (no per-row
-copy, no re-validation). The rows share that array, so keeping any one
-of them keeps the whole column's text alive ('T.copy' detaches a row).
-Utf8 views copy each row on its own. Dictionaries convert their values
-once and the rows share the resulting 'Text's (and their 'Just' boxes).
+{- | Pair a values vector with a column validity: the bitmap is aliased;
+no nulls is a fresh all-set bitmap of @n@ bits.
 -}
-toTextVector :: ColumnArray -> Either String (V.Vector (Maybe Text))
+withValidity :: Int -> Maybe Validity -> AV.Vector a -> AV.Vector (Maybe a)
+withValidity n v xs = case v of
+  Just (Validity (Bitmap bs off _) _) -> AV.V_Maybe (off .&. 7) (VS.unsafeDrop (off `unsafeShiftR` 3) (AV.bytesToBits bs)) xs
+  Nothing -> AV.V_Maybe 0 (AV.allSetBits n) xs
+{-# INLINE withValidity #-}
+
+
+{- | Utf8, large utf8 and utf8 view columns, and dictionaries whose
+values are one of those. Rows are 'Text' slices of one text array and
+are never re-validated.
+
+* Utf8 and large utf8: O(rows) (the offsets are widened to 'Int').
+  Data in GHC heap memory (an in-memory decoded input, or a column
+  built by this package) is aliased without a copy; other memory (an
+  mmapped file) has its referenced bytes copied once.
+* Utf8 views: O(bytes), every valid row copied once into one buffer.
+* Dictionaries: the values convert once and the rows share them
+  (O(rows) gather).
+-}
+toTextVector :: ColumnArray -> Either String (AV.Vector (Maybe Text))
 toTextVector c = case c of
-  I.ColUtf8 v o d -> Right (textSlices v o d)
-  I.ColLargeUtf8 v o d -> Right (textSlices v o d)
-  I.ColUtf8View v views bufs -> Right (generateStrict (columnLength c) (\i -> if unsafeIsValidAt v i then Just $! utf8ToText (viewAt views bufs i) else Nothing))
+  I.ColUtf8 v o d -> Right (withValidity (offsetRows o) v (AV.V_Text (textRows o d)))
+  I.ColLargeUtf8 v o d -> Right (withValidity (offsetRows o) v (AV.V_Text (textRows o d)))
+  I.ColUtf8View v views bufs ->
+    let !n = columnLength c
+    in Right (withValidity n v (AV.V_Text (bytesToText (packRows n v (viewAt views bufs)))))
   I.ColDictionary _ keys vals -> toTextVector vals >>= gatherDictionary "Arrow.Column.toTextVector" keys
   _ -> Left ("Arrow.Column.toTextVector: not a utf8 column: " ++ columnTag c)
 
 
--- | Every row of a utf8 column as a slice of one fresh copy of the referenced bytes.
-textSlices :: (Storable o, Integral o) => Maybe Validity -> VS.Vector o -> ByteString -> V.Vector (Maybe Text)
-textSlices v o d
-  | VS.length o < 2 = V.empty
-  | otherwise =
-      let !n = offsetRows o
-          !base = fromIntegral (VS.unsafeIndex o 0) :: Int
-          !total = fromIntegral (VS.unsafeIndex o n) - base
-          !arr = copyToTextArray d base total
-          row i =
-            let !s = fromIntegral (VS.unsafeIndex o i)
-                !e = fromIntegral (VS.unsafeIndex o (i + 1))
-            in if e == s then T.empty else TI.Text arr (s - base) (e - s)
-      in generateStrict n (\i -> if unsafeIsValidAt v i then Just $! row i else Nothing)
-{-# INLINE textSlices #-}
+-- | The rows of a utf8 column over its data, as a text array.
+textRows :: (Storable o, Integral o) => VS.Vector o -> ByteString -> AV.VarVec Text
+textRows o d
+  | VS.length o < 2 = AV.VarVec VS.empty VS.empty TA.empty
+  | otherwise = withTextArray d base (top - base) (offsetsVar o)
+  where
+    !base = fromIntegral (VS.unsafeIndex o 0)
+    !top = fromIntegral (VS.unsafeIndex o (VS.length o - 1))
+{-# INLINE textRows #-}
+
+
+-- | Byte rows whose store is valid UTF-8 at every row boundary, as text rows.
+bytesToText :: AV.VarVec ByteString -> AV.VarVec Text
+bytesToText (AV.VarVec st en bs) = withTextArray bs 0 (BS.length bs) $ \arr delta ->
+  if delta == 0
+    then AV.VarVec st en arr
+    else AV.VarVec (VS.map (+ delta) st) (VS.map (+ delta) en) arr
+
+
+{- | Rows from Arrow offsets: starts and ends are two overlapping slices
+of one widened offsets buffer, each offset shifted by @delta@.
+-}
+offsetsVar :: (Storable o, Integral o) => VS.Vector o -> AV.Store a -> Int -> AV.VarVec a
+offsetsVar o store delta =
+  let !n = VS.length o - 1
+      !offs = VS.generate (n + 1) (\i -> fromIntegral (VS.unsafeIndex o i) + delta)
+  in AV.VarVec (VS.unsafeSlice 0 n offs) (VS.unsafeSlice 1 n offs) store
+{-# INLINE offsetsVar #-}
+
+
+{- | Bytes @[base, base + len)@ of a 'ByteString' as a text array, and
+the shift from a data offset to an array offset. A 'ByteString' backed
+by GHC heap memory (every in-memory decoded input and every buffer this
+package allocates) is aliased with no copy; other memory is copied once.
+-}
+withTextArray :: ByteString -> Int -> Int -> (TA.Array -> Int -> r) -> r
+withTextArray bs@(BSI.BS (ForeignPtr addr contents) _) base len k = case contents of
+  PlainPtr mba -> heap mba
+  MallocPtr mba _ -> heap mba
+  _ -> k (copyToTextArray bs base len) (negate base)
+  where
+    heap mba = case freezeHeapBytes mba of
+      arr@(TA.ByteArray ba) -> k arr (I# (minusAddr# addr (byteArrayContents# ba)))
+{-# INLINE withTextArray #-}
+
+
+-- | The heap array behind a 'ByteString' (immutable by contract) as a text array.
+freezeHeapBytes :: MutableByteArray# RealWorld -> TA.Array
+freezeHeapBytes mba = unsafeDupablePerformIO $ IO $ \s -> case unsafeFreezeByteArray# mba s of
+  (# s', ba #) -> (# s', TA.ByteArray ba #)
 
 
 -- | @len@ bytes of @bs@ from byte @off@, copied into a fresh text array.
@@ -952,44 +1011,87 @@ copyToTextArray bs off len
       TA.unsafeFreeze ma
 
 
-{- | O(n): every byte-like column (zero-copy slices of the column's
-buffers), and dictionaries whose values are byte-like (the values are
-converted once and the rows share them).
+{- | Every byte-like column, and dictionaries whose values are byte-like.
+Rows are zero-copy 'ByteString' slices.
+
+* Utf8, binary and their large variants: O(rows) (offsets widened),
+  the data buffer aliased.
+* Fixed-size binary: O(rows), the data buffer aliased.
+* Views: O(bytes), every valid row copied once into one buffer.
+* Dictionaries: the values convert once and the rows share them
+  (O(rows) gather).
 -}
-toBytesVector :: ColumnArray -> Either String (V.Vector (Maybe ByteString))
+toBytesVector :: ColumnArray -> Either String (AV.Vector (Maybe ByteString))
 toBytesVector c = case c of
-  I.ColUtf8 v o d -> Right (varSlices v o d)
-  I.ColBinary v o d -> Right (varSlices v o d)
-  I.ColLargeUtf8 v o d -> Right (varSlices v o d)
-  I.ColLargeBinary v o d -> Right (varSlices v o d)
-  I.ColUtf8View v views bufs -> Right (rows v (viewAt views bufs))
-  I.ColBinaryView v views bufs -> Right (rows v (viewAt views bufs))
-  I.ColFixedSizeBinary w _ v d -> Right (rows v (\i -> BSU.unsafeTake w (BSU.unsafeDrop (i * w) d)))
+  I.ColUtf8 v o d -> Right (offsetBytes v o d)
+  I.ColBinary v o d -> Right (offsetBytes v o d)
+  I.ColLargeUtf8 v o d -> Right (offsetBytes v o d)
+  I.ColLargeBinary v o d -> Right (offsetBytes v o d)
+  I.ColUtf8View v views bufs -> Right (withValidity n v (AV.V_Bytes (packRows n v (viewAt views bufs))))
+  I.ColBinaryView v views bufs -> Right (withValidity n v (AV.V_Bytes (packRows n v (viewAt views bufs))))
+  I.ColFixedSizeBinary w _ v d ->
+    Right (withValidity n v (AV.V_Bytes (AV.VarVec (VS.generate n (* w)) (VS.generate n (\i -> i * w + w)) d)))
   I.ColDictionary _ keys vals -> toBytesVector vals >>= gatherDictionary "Arrow.Column.toBytesVector" keys
   _ -> Left ("Arrow.Column.toBytesVector: not a byte column: " ++ columnTag c)
   where
-    rows :: Maybe Validity -> (Int -> ByteString) -> V.Vector (Maybe ByteString)
-    rows v at = generateStrict (columnLength c) (\i -> if unsafeIsValidAt v i then Just $! at i else Nothing)
-    {-# INLINE rows #-}
-    varSlices :: (Storable o, Integral o) => Maybe Validity -> VS.Vector o -> ByteString -> V.Vector (Maybe ByteString)
-    varSlices v o d = rows v (varSlice o d)
-    {-# INLINE varSlices #-}
+    !n = columnLength c
+    offsetBytes :: (Storable o, Integral o) => Maybe Validity -> VS.Vector o -> ByteString -> AV.Vector (Maybe ByteString)
+    offsetBytes v o d
+      | VS.length o < 2 = withValidity 0 v (AV.V_Bytes (AV.VarVec VS.empty VS.empty BS.empty))
+      | otherwise = withValidity (offsetRows o) v (AV.V_Bytes (offsetsVar o d 0))
+    {-# INLINE offsetBytes #-}
 
 
--- | O(n), boxes every row (the two 'Just' boxes are shared).
-toBoolVector :: ColumnArray -> Either String (V.Vector (Maybe Bool))
+{- | O(bytes): the valid rows given by @at@ copied into one fresh buffer
+(null rows are empty).
+-}
+packRows :: Int -> Maybe Validity -> (Int -> ByteString) -> AV.VarVec ByteString
+packRows n v at = unsafeDupablePerformIO $ do
+  let lenAt i = if unsafeIsValidAt v i then BS.length (at i) else 0
+      total = go 0 0
+        where
+          go !i !acc
+            | i >= n = acc
+            | otherwise = go (i + 1) (acc + lenAt i)
+  fp <- mallocAligned total
+  st <- VSM.unsafeNew n
+  en <- VSM.unsafeNew n
+  unsafeWithForeignPtr fp $ \dst -> do
+    let fill !i !pos
+          | i >= n = pure ()
+          | unsafeIsValidAt v i = do
+              let row = at i
+                  !len = BS.length row
+              withBytesPtr row $ \src -> copyBytes (dst `plusPtr` pos) src len
+              VSM.unsafeWrite st i pos
+              VSM.unsafeWrite en i (pos + len)
+              fill (i + 1) (pos + len)
+          | otherwise = do
+              VSM.unsafeWrite st i pos
+              VSM.unsafeWrite en i pos
+              fill (i + 1) pos
+    fill 0 0
+  AV.VarVec <$> VS.unsafeFreeze st <*> VS.unsafeFreeze en <*> pure (BSI.BS fp total)
+{-# INLINE packRows #-}
+
+
+{- | O(1) for the bits (the result aliases the column's bitmaps); a
+column without nulls gets a fresh all-set validity bitmap.
+-}
+toBoolVector :: ColumnArray -> Either String (AV.Vector (Maybe Bool))
 toBoolVector c = case c of
-  I.ColBool v b -> Right (generateStrict (bitmapLength b) (\i -> if unsafeIsValidAt v i then (if unsafeBitAt b i then justTrue else justFalse) else Nothing))
+  I.ColBool v (Bitmap bs off len) ->
+    Right (withValidity len v (AV.V_Bool (off .&. 7) len (VS.unsafeDrop (off `unsafeShiftR` 3) (AV.bytesToBits bs))))
   _ -> Left ("Arrow.Column.toBoolVector: not a bool column: " ++ columnTag c)
 
 
-{- | O(n) plus the child conversion: list, large list, list view and
-fixed-size list columns. The child rows the lists reference are
-converted once with the given function, and every list row is a slice
-of that vector (the rows share it); null rows are 'Nothing'. The
-function must return one element per child row it is given.
+{- | List, large list, list view and fixed-size list columns, O(rows)
+plus the child conversion. The child rows the lists reference are
+converted once with the given function and every list row is a slice
+of that child vector; null rows are 'Nothing'. The function must
+return one element per child row it is given.
 -}
-toListVector :: forall a. (ColumnArray -> Either String (V.Vector a)) -> ColumnArray -> Either String (V.Vector (Maybe (V.Vector a)))
+toListVector :: forall a. AV.Element a => (ColumnArray -> Either String (AV.Vector a)) -> ColumnArray -> Either String (AV.Vector (Maybe (AV.Vector a)))
 toListVector conv c = case c of
   I.ColList v o child -> offsets v o child
   I.ColLargeList v o child -> offsets v o child
@@ -997,43 +1099,54 @@ toListVector conv c = case c of
   I.ColLargeListView v o z child -> views v o z child
   I.ColFixedSizeList w n v child -> do
     kids <- convert (sliceColumnArray 0 (n * w) child) (n * w)
-    Right (rows n v (\i -> V.unsafeSlice (i * w) w kids))
+    Right (withValidity n v (AV.V_List (AV.VarVec (VS.generate n (* w)) (VS.generate n (\i -> i * w + w)) kids)))
   _ -> Left ("Arrow.Column.toListVector: not a list column: " ++ columnTag c)
   where
     convert ch len = do
       kids <- conv ch
-      if V.length kids == len
+      if G.length kids == len
         then Right kids
-        else Left ("Arrow.Column.toListVector: the child conversion returned " ++ show (V.length kids) ++ " rows for " ++ show len)
-    rows :: Int -> Maybe Validity -> (Int -> V.Vector a) -> V.Vector (Maybe (V.Vector a))
-    rows n v at = generateStrict n (\i -> if unsafeIsValidAt v i then Just $! at i else Nothing)
-    {-# INLINE rows #-}
-    offsets :: (Storable o, Integral o) => Maybe Validity -> VS.Vector o -> ColumnArray -> Either String (V.Vector (Maybe (V.Vector a)))
+        else Left ("Arrow.Column.toListVector: the child conversion returned " ++ show (G.length kids) ++ " rows for " ++ show len)
+    offsets :: (Storable o, Integral o) => Maybe Validity -> VS.Vector o -> ColumnArray -> Either String (AV.Vector (Maybe (AV.Vector a)))
     offsets v o child
-      | VS.length o < 2 = Right V.empty
+      | VS.length o < 2 = Right (withValidity 0 v (AV.V_List (AV.VarVec VS.empty VS.empty G.empty)))
       | otherwise = do
-          let !n = offsetRows o
+          let !n = VS.length o - 1
               !base = fromIntegral (VS.unsafeIndex o 0)
               !len = fromIntegral (VS.unsafeIndex o n) - base
           kids <- convert (sliceColumnArray base len child) len
-          Right $ rows n v $ \i ->
-            let !s = fromIntegral (VS.unsafeIndex o i)
-            in V.unsafeSlice (s - base) (fromIntegral (VS.unsafeIndex o (i + 1)) - s) kids
+          Right (withValidity n v (AV.V_List (offsetsVar o kids (negate base))))
     {-# INLINE offsets #-}
-    views :: (Storable o, Integral o) => Maybe Validity -> VS.Vector o -> VS.Vector o -> ColumnArray -> Either String (V.Vector (Maybe (V.Vector a)))
+    -- Null list-view rows may hold any offset and size, so they become empty rows.
+    views :: (Storable o, Integral o) => Maybe Validity -> VS.Vector o -> VS.Vector o -> ColumnArray -> Either String (AV.Vector (Maybe (AV.Vector a)))
     views v o z child = do
       kids <- convert child (columnLength child)
-      Right (rows (VS.length o) v (\i -> V.unsafeSlice (fromIntegral (VS.unsafeIndex o i)) (fromIntegral (VS.unsafeIndex z i)) kids))
+      let !n = VS.length o
+          st = VS.generate n (\i -> if unsafeIsValidAt v i then fromIntegral (VS.unsafeIndex o i) else 0)
+          en = VS.generate n (\i -> if unsafeIsValidAt v i then fromIntegral (VS.unsafeIndex o i) + fromIntegral (VS.unsafeIndex z i) else 0)
+      Right (withValidity n v (AV.V_List (AV.VarVec st en kids)))
     {-# INLINE views #-}
 
 
-{- | Rows of a dictionary column from its converted values: row @i@ is
-the value its key selects (shared, not copied), 'Nothing' where the key
-is null. Every valid key is checked against the values first.
+{- | Rows of a dictionary column from its converted values, O(rows):
+row @i@ is the value its key selects (sharing the values' store), null
+where the key or the selected value is null. Every valid key is checked
+against the values first.
 -}
-gatherDictionary :: forall a. String -> ColumnArray -> V.Vector (Maybe a) -> Either String (V.Vector (Maybe a))
-gatherDictionary what keys vals = do
-  validateKeys what keys (V.length vals)
+gatherDictionary :: forall a. AV.VarElem a => String -> ColumnArray -> AV.Vector (Maybe a) -> Either String (AV.Vector (Maybe a))
+gatherDictionary what keys (AV.V_Maybe vo vbits vals) = do
+  let !(AV.VarVec vst ven store) = AV.toVar vals
+  validateKeys what keys (VS.length vst)
+  let go :: (Storable k, Integral k) => Maybe Validity -> VS.Vector k -> AV.Vector (Maybe a)
+      go kv xs =
+        let !n = VS.length xs
+            key i = fromIntegral (VS.unsafeIndex xs i) :: Int
+            valid i = unsafeIsValidAt kv i && AV.indexBit vbits (vo + key i)
+            !st = VS.generate n (\i -> if valid i then VS.unsafeIndex vst (key i) else 0)
+            !en = VS.generate n (\i -> if valid i then VS.unsafeIndex ven (key i) else 0)
+        in case bitmapGenerate n valid of
+             Bitmap bs _ _ -> AV.V_Maybe 0 (AV.bytesToBits bs) (AV.fromVar (AV.VarVec st en store))
+      {-# INLINE go #-}
   case keys of
     I.ColPrim t kv xs -> case t of
       PInt8 -> Right (go kv xs)
@@ -1048,38 +1161,6 @@ gatherDictionary what keys vals = do
     _ -> notInt
   where
     notInt = Left (what ++ ": dictionary indices must be an integer column")
-    go :: (Storable k, Integral k) => Maybe Validity -> VS.Vector k -> V.Vector (Maybe a)
-    go kv xs = generateStrict (VS.length xs) $ \i ->
-      if unsafeIsValidAt kv i then V.unsafeIndex vals (fromIntegral (VS.unsafeIndex xs i)) else Nothing
-    {-# INLINE go #-}
-
-
-{- | 'V.generate' that forces each element to WHNF as it is written. The
-boxed conversions go through it so their results hold no thunks: a lazy
-element would allocate a thunk per row and keep the column (and the
-decoded input buffer it aliases) alive until every row is forced.
-
-The loop writes two elements per iteration. On AArch64, GHC 9.8 compiles
-'writeArray#' to a store-release ('stlr') plus the card mark, and a loop
-whose body is one fresh allocation followed by one such write runs about
-3.5x slower on Apple cores than the same work unrolled by two (measured:
-100k boxed @Maybe Int64@, 0.80 ms against 0.23 ms; a C loop with the same
-store sequence shows the same cliff). Unrolling further gains nothing.
--}
-generateStrict :: Int -> (Int -> a) -> V.Vector a
-generateStrict n f = V.create $ do
-  mv <- VM.unsafeNew n
-  let go !i
-        | i + 1 < n = do
-            VM.unsafeWrite mv i $! f i
-            VM.unsafeWrite mv (i + 1) $! f (i + 1)
-            go (i + 2)
-        | i < n = do
-            VM.unsafeWrite mv i $! f i
-            pure mv
-        | otherwise = pure mv
-  go 0
-{-# INLINE generateStrict #-}
 
 
 -- ============================================================
@@ -1134,6 +1215,23 @@ fromMaybeBools v =
   I.ColBool
     (validityGenerate (V.length v) (isJustAt v))
     (bitmapGenerate (V.length v) (\i -> V.unsafeIndex v i == Just True))
+
+
+{- | O(1) plus a popcount: a fixed-width column over the vector's own
+buffers (no copy; the inverse of 'toMaybeVector'). Null slots keep
+whatever values the vector holds there.
+-}
+fromMaybeVector :: PrimType a -> AV.Vector (Maybe a) -> ColumnArray
+fromMaybeVector t (AV.V_Maybe off bits xs) = withPrim t $
+  let !vals = AV.storableVector xs
+  in I.ColPrim t (mkValidity (Bitmap (AV.bitsToBytes bits) off (VS.length vals))) vals
+
+
+-- | O(1) plus a popcount: a bool column over the vector's own bitmaps (the inverse of 'toBoolVector').
+fromBoolVector :: AV.Vector (Maybe Bool) -> ColumnArray
+fromBoolVector (AV.V_Maybe off bits (AV.V_Bool bo n bs)) =
+  I.ColBool (mkValidity (Bitmap (AV.bitsToBytes bits) off n)) (Bitmap (AV.bitsToBytes bs) bo n)
+
 
 
 -- | Utf8 column, two passes (lengths, then one copy per row). Errors past 2^31 - 1 bytes.

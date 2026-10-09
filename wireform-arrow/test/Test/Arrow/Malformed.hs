@@ -98,6 +98,7 @@ import Arrow.Stream (
   streamReaderToList,
  )
 import Arrow.Types
+import Arrow.Vector qualified as AV
 import Arrow.Write qualified as Write
 import Control.DeepSeq (NFData, force)
 import Control.Exception (SomeException, displayException, evaluate, try)
@@ -110,6 +111,7 @@ import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Vector qualified as V
+import Data.Vector.Generic qualified as VG
 import Data.Vector.Storable qualified as VS
 import Data.ByteString.Unsafe qualified as BSU
 import Foreign.Marshal.Utils (copyBytes)
@@ -430,8 +432,8 @@ exerciseColumn c = do
           + maybe 0 fromEnum (boolAt c i)
           + fromEnum (isValidAt (validity c) i)
           + primScore i
-      sized :: (a -> Int) -> Either String (V.Vector (Maybe a)) -> Int
-      sized f = either (const 0) (V.foldl' (\acc x -> acc + maybe 1 f x) 0)
+      sized :: AV.Element a => (a -> Int) -> Either String (AV.Vector (Maybe a)) -> Int
+      sized f = either (const 0) (VG.foldl' (\acc x -> acc + maybe 1 f x) 0)
       conversions =
         sized T.length (toTextVector c)
           + sized BS.length (toBytesVector c)

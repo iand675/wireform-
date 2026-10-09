@@ -57,11 +57,13 @@ import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Vector qualified as V
+import Data.Vector.Generic qualified as VG
 import Data.Vector.Storable qualified as VS
 import Data.Word (Word16, Word32, Word64, Word8)
 import Test.Arrow.Core qualified as Core
 import Test.Arrow.Malformed qualified as Malformed
 import Test.Arrow.Props qualified as Props
+import Test.Arrow.Vector qualified as Vector
 import System.Exit (exitFailure)
 
 
@@ -432,12 +434,14 @@ main = do
   -- writer produces).
   pyarrowGoldenRoundTrip
 
-  -- Hedgehog property suites: column core, generated round-trips and
-  -- malformed-input robustness. Each returns False on failure.
+  -- Hedgehog property suites: column core, generated round-trips,
+  -- malformed-input robustness and the Arrow-layout vectors. Each
+  -- returns False on failure.
   coreOk <- Core.tests
   propsOk <- Props.tests
   malformedOk <- Malformed.tests
-  unless (coreOk && propsOk && malformedOk) $
+  vectorOk <- Vector.tests
+  unless (coreOk && propsOk && malformedOk && vectorOk) $
     failTest "FAIL: wireform-arrow property suites"
 
   putStrLn "All wireform-arrow round-trip tests passed."
@@ -986,9 +990,9 @@ dictReplacementRoundTrip = do
               ++ show (length batches)
   where
     valuesToList :: ColumnArray -> [Text]
-    valuesToList c = either (const []) (V.toList . V.mapMaybe id) (toTextVector c)
+    valuesToList c = either (const []) (VG.toList . VG.mapMaybe id) (toTextVector c)
     keysToList :: ColumnArray -> [Maybe Int32]
-    keysToList c = maybe [] (V.toList . toMaybeVector) (asPrim PInt32 c)
+    keysToList c = maybe [] (VG.toList . toMaybeVector) (asPrim PInt32 c)
 
 
 bodyCompressionRoundTrip :: BodyCompressionCodec -> Schema -> V.Vector ColumnArray -> IO ()

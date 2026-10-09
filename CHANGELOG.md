@@ -85,14 +85,24 @@
   holds storable vectors; `ColRunEndEncoded` carries a logical offset and
   length (O(log runs) slicing). New modules: `Arrow.Column.Buffer`,
   `Arrow.Column.Internal`, `Arrow.Column.Builder`, `Arrow.Read.Columns`,
-  `Arrow.FlatBufferIPC.{Common,Read,Write}`. Migration table in
+  `Arrow.FlatBufferIPC.{Common,Read,Write}`, `Arrow.Vector`,
+  `Arrow.Vector.Internal`. Migration table in
   `wireform-arrow/README.md`. The bench gains `encode lazy` and
-  `decode + toVector` (decode then box every value, the old metric) rows
-  with arrow-rs counterparts, and runs with `-with-rtsopts=-A64m`.
-  Boxed conversions: `toTextVector` copies a utf8 column once and slices
-  every row from the copy, `toTextVector` / `toBytesVector` accept
-  dictionaries (values converted once, rows share them), and the new
-  `toListVector` converts list children once and slices each row.
+  `decode + toVector` (decode, convert, then detach every column into
+  owned vectors) rows with arrow-rs counterparts, and runs with
+  `-with-rtsopts=-A64m`. The conversions (`toMaybeVector`,
+  `toTextVector`, `toBytesVector`, `toBoolVector`, `toListVector`) return
+  the new `Arrow.Vector.Vector`, a data family behind the
+  `Data.Vector.Generic` API that keeps Arrow's layout: storable values
+  for fixed-width types, bitmaps for `Bool`, a validity bitmap plus values
+  for `Maybe a` (8 bytes and one bit per `Maybe Int64` row instead of
+  three heap objects), offsets into one store for `Text`, `ByteString`
+  and list rows. They alias the column (O(1) for fixed-width and bool
+  columns, O(rows) for offsets); `Text` rows are slices of the column's
+  data with no copy or re-validation, dictionaries share their converted
+  values, and `G.convert` gives a boxed `Data.Vector`. New:
+  `fromMaybeVector` / `fromBoolVector` (columns over a vector's buffers,
+  O(1) plus a popcount), and `withPrim` now provides `FixedWidth`.
 
 * **`Parquet.Arrow` / `ORC.Arrow` follow the new columns.** Decoding
   writes straight into Arrow buffers (fixed-width values copied once,

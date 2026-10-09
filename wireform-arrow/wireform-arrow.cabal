@@ -61,6 +61,8 @@ library
     Arrow.Record.TH
     Arrow.Stream
     Arrow.Types
+    Arrow.Vector
+    Arrow.Vector.Internal
     Arrow.Write
     Arrow.Write.Columns
   build-depends:
@@ -98,6 +100,7 @@ test-suite wireform-arrow-test
     Test.Arrow.Gen
     Test.Arrow.Malformed
     Test.Arrow.Props
+    Test.Arrow.Vector
   build-depends:
     base >= 4.16 && < 5,
     wireform-arrow,

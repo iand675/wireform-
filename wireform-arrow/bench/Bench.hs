@@ -10,8 +10,12 @@ Three summaries consume these reports (see @scripts/bench-manifest.json@):
   @encode/<workload>@ (one allocation for the whole stream),
   @encode lazy/<workload>@ (lazy chunks aliasing the column buffers),
   @decode/<workload>@ (zero-copy columns aliasing the input) and
-  @decode + toVector/<workload>@ (decode, then materialize every column
-  to boxed Haskell values, the metric the pre-redesign decoder reported).
+  @decode + toVector/<workload>@ (decode, convert every column with the
+  @to*Vector@ conversions to "Arrow.Vector" vectors, then 'VG.force'
+  each into fresh buffers: the result owns its data and keeps nothing
+  of the input alive, the same work as arrow-rs's @to_owned_column@
+  copying into @Vec<Option<T>>@, @String@s and nested @Vec@s; the
+  conversions alone alias the decoded buffers and cost O(rows) or less).
 * @arrow-encode-decode-small@: the same four groups as a 100-row batch,
   suffixed @ (100 rows)@.
 * @arrow-api-paths@: the mixed 6-column table at 100k rows through
@@ -48,6 +52,7 @@ import Arrow.Types (
   defaultLeafField,
   defaultSchema,
  )
+import Arrow.Vector qualified as AV
 import Arrow.Write qualified as AW
 import Control.DeepSeq (NFData)
 import Control.Monad.ST (ST, runST)
@@ -57,6 +62,7 @@ import Data.ByteString.Lazy qualified as BL
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import Data.Vector qualified as V
+import Data.Vector.Generic qualified as VG
 import Data.Vector.Storable qualified as VS
 import Foreign.Storable (Storable)
 import GHC.Generics (Generic)
@@ -257,45 +263,51 @@ dictUtf8 n =
     )
 
 
--- | A decoded column materialized to boxed Haskell values, one
--- constructor per shape the workloads use.
-data Boxed
-  = BInt32 !(V.Vector (Maybe Int32))
-  | BInt64 !(V.Vector (Maybe Int64))
-  | BDouble !(V.Vector (Maybe Double))
-  | BText !(V.Vector (Maybe Text))
-  | BBool !(V.Vector (Maybe Bool))
-  | BListInt32 !(V.Vector (Maybe (V.Vector (Maybe Int32))))
-  | BStruct !(V.Vector Boxed)
+{- | A decoded column converted to "Arrow.Vector" vectors and detached
+from the input, one constructor per shape the workloads use.
+-}
+data Owned
+  = OInt32 !(AV.Vector (Maybe Int32))
+  | OInt64 !(AV.Vector (Maybe Int64))
+  | ODouble !(AV.Vector (Maybe Double))
+  | OText !(AV.Vector (Maybe Text))
+  | OBool !(AV.Vector (Maybe Bool))
+  | OListInt32 !(AV.Vector (Maybe (AV.Vector (Maybe Int32))))
+  | OStruct !(V.Vector Owned)
   deriving stock (Generic)
   deriving anyclass (NFData)
 
 
--- | The "toVector" half of the decode + toVector rows.
-toBoxed :: ColumnArray -> Either String Boxed
-toBoxed c
-  | Just p <- asPrim PInt64 c = Right (BInt64 (toMaybeVector p))
-  | Just p <- asPrim PInt32 c = Right (BInt32 (toMaybeVector p))
-  | Just p <- asPrim PDouble c = Right (BDouble (toMaybeVector p))
-  | Just _ <- asUtf8 c = BText <$> toTextVector c
-  | Just _ <- asBool c = BBool <$> toBoolVector c
-toBoxed c = case c of
+{- | The "toVector" half of the decode + toVector rows: convert (which
+aliases the decoded buffers), then 'VG.force' into fresh buffers so the
+result owns its data, as arrow-rs's @to_owned_column@ does with its
+@Vec@s and @String@s.
+-}
+toOwned :: ColumnArray -> Either String Owned
+toOwned c
+  | Just p <- asPrim PInt64 c = Right (OInt64 (VG.force (toMaybeVector p)))
+  | Just p <- asPrim PInt32 c = Right (OInt32 (VG.force (toMaybeVector p)))
+  | Just p <- asPrim PDouble c = Right (ODouble (VG.force (toMaybeVector p)))
+  | Just _ <- asUtf8 c = OText . VG.force <$> toTextVector c
+  | Just _ <- asBool c = OBool . VG.force <$> toBoolVector c
+toOwned c = case c of
   ColList _ _ child
-    | Just _ <- asPrim PInt32 child -> BListInt32 <$> toListVector int32s c
+    | Just _ <- asPrim PInt32 child -> OListInt32 . VG.force <$> toListVector int32s c
   -- The workloads build struct children exactly as long as the struct.
-  ColStruct _ _ fs -> BStruct <$> traverse (toBoxed . snd) fs
-  -- String dictionaries convert their values once; the rows share them.
-  ColDictionary _ _ vals | Just _ <- asUtf8 vals -> BText <$> toTextVector c
-  ColDictionary {} -> expandDictionary c >>= toBoxed
-  _ -> Left ("toBoxed: unsupported column " <> columnTag c)
+  ColStruct _ _ fs -> OStruct <$> traverse (toOwned . snd) fs
+  -- String dictionaries convert their values once; the owned rows share
+  -- one copy of the values instead of one string per row.
+  ColDictionary _ _ vals | Just _ <- asUtf8 vals -> OText . VG.force <$> toTextVector c
+  ColDictionary {} -> expandDictionary c >>= toOwned
+  _ -> Left ("toOwned: unsupported column " <> columnTag c)
  where
-  int32s ch = maybe (Left ("toBoxed: list child " <> columnTag ch)) (Right . toMaybeVector) (asPrim PInt32 ch)
+  int32s ch = maybe (Left ("toOwned: list child " <> columnTag ch)) (Right . toMaybeVector) (asPrim PInt32 ch)
 
 
-decodeToVector :: ByteString -> Either String [V.Vector Boxed]
+decodeToVector :: ByteString -> Either String [V.Vector Owned]
 decodeToVector bs = do
   (_, batches) <- decodeArrowStream bs
-  traverse (traverse toBoxed) batches
+  traverse (traverse toOwned) batches
 
 
 -- | Derived record matching 'mixedSchema' column for column.

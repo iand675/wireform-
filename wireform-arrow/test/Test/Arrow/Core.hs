@@ -30,6 +30,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Vector qualified as V
+import Data.Vector.Generic qualified as VG
 import Data.Vector.Storable qualified as VS
 import Data.Word (Word8)
 import Foreign.ForeignPtr.Unsafe (unsafeForeignPtrToPtr)
@@ -611,14 +612,14 @@ prop_accessors = withTests 300 . property $ do
       map (fmap (primValue pt) . primAt arr) [0 .. n - 1] === map (\v -> if v == VNull then Nothing else Just v) m
       primAt arr (-1) === Nothing
       primAt arr n === Nothing
-      V.toList (V.map (fmap (primValue pt)) (toMaybeVector arr)) === map (\v -> if v == VNull then Nothing else Just v) m
+      map (fmap (primValue pt)) (VG.toList (toMaybeVector arr)) === map (\v -> if v == VNull then Nothing else Just v) m
       VS.length (toStorable arr) === n
   (tm, tc) <- forAll (genColumnOf TUtf8 n)
   u <- maybe failure pure (asUtf8 tc)
   map (fmap VText . textAt u) [0 .. n - 1] === map (\v -> if v == VNull then Nothing else Just v) tm
   map (fmap (VText . TE.decodeUtf8) . bytesAt (utf8Bytes u)) [0 .. n - 1] === map (\v -> if v == VNull then Nothing else Just v) tm
   textAt u n === Nothing
-  fmap V.toList (toTextVector tc) === Right (map (\case VText x -> Just x; _ -> Nothing) tm)
+  fmap VG.toList (toTextVector tc) === Right (map (\case VText x -> Just x; _ -> Nothing) tm)
   (bm, bc) <- forAll (genColumnOf TBool n)
   map (boolAt bc) [-1 .. n] === Nothing : map (\case VBool x -> Just x; _ -> Nothing) bm ++ [Nothing]
   where
@@ -649,19 +650,21 @@ prop_conversions = withTests 500 . property $ do
       textKind = case leaf ty of TUtf8 -> True; TLargeUtf8 -> True; TUtf8View -> True; _ -> False
       listKind = case ty of TList _ -> True; TLargeList _ -> True; TListView _ _ -> True; TFixedList _ _ -> True; _ -> False
   case ty of
-    TBool -> fmap V.toList (toBoolVector c) === Right (map (\case VBool x -> Just x; _ -> Nothing) m)
+    TBool -> fmap VG.toList (toBoolVector c) === Right (map (\case VBool x -> Just x; _ -> Nothing) m)
     _
       | listKind -> do
-          fmap (V.toList . fmap (fmap V.toList)) (toListVector (Right . V.fromList . observe) c) === Right lists
+          fmap (map (fmap (map (maybe VNull (VInt . toInteger)) . VG.toList)) . VG.toList) (toListVector int32s c) === Right lists
           -- A child conversion that returns too few rows is an error, not a short slice.
           case ty of
-            TList _ | any (maybe False (not . null)) lists -> assert (isLeft (toListVector (Right . V.drop 1 . V.fromList . observe) c))
+            TList _ | any (maybe False (not . null)) lists -> assert (isLeft (toListVector (fmap (VG.drop 1) . int32s) c))
             _ -> success
       | otherwise -> do
-          fmap V.toList (toBytesVector c) === Right bytes
+          fmap VG.toList (toBytesVector c) === Right bytes
           if textKind
-            then fmap V.toList (toTextVector c) === Right texts
+            then fmap VG.toList (toTextVector c) === Right texts
             else assert (isLeft (toTextVector c))
+  where
+    int32s ch = maybe (Left ("not an int32 child: " ++ columnTag ch)) (Right . toMaybeVector) (asPrim PInt32 ch)
 
 
 prop_builders :: Property

@@ -121,6 +121,7 @@ import Arrow.Types (
   TimeUnit (..),
   UnionMode (..),
  )
+import Arrow.Vector qualified as AV
 import Control.DeepSeq (force)
 import Control.Exception (SomeException, evaluate, try)
 import Control.Monad (forM, forM_, unless, when)
@@ -135,6 +136,7 @@ import Data.Maybe (catMaybes, fromMaybe, isJust, mapMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Vector qualified as V
+import Data.Vector.Generic qualified as VG
 import Data.Vector.Storable qualified as VS
 import GHC.Float (float2Double)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
@@ -686,8 +688,9 @@ data LV
 type Rows = V.Vector LV
 
 
-opt :: (a -> LV) -> V.Vector (Maybe a) -> Rows
-opt f = V.map (maybe LNull f)
+-- | Converted rows, through a boxed vector ('VG.convert').
+opt :: AV.Element a => (a -> LV) -> AV.Vector (Maybe a) -> Rows
+opt f = V.map (maybe LNull f) . VG.convert
 
 
 childField :: Field -> Int -> Either String Field

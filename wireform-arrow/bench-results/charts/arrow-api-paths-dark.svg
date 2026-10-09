@@ -19,48 +19,48 @@
     <text x="72" y="64" text-anchor="end" font-size="10" fill="#7d8590">5000</text>
   </g>
   <g>
-    <rect x="86.2" y="297.5" width="22.8" height="22.5" rx="2" fill="#58a6ff"/>
+    <rect x="86.2" y="297.9" width="22.8" height="22.1" rx="2" fill="#58a6ff"/>
     <rect x="111" y="316.8" width="22.8" height="3.2" rx="2" fill="#ff7b72"/>
-    <rect x="148.2" y="297.5" width="22.8" height="22.5" rx="2" fill="#58a6ff"/>
+    <rect x="148.2" y="297.9" width="22.8" height="22.1" rx="2" fill="#58a6ff"/>
     <rect x="173" y="319.9" width="22.8" height="0.1" rx="2" fill="#ff7b72"/>
-    <rect x="210.2" y="297.5" width="22.8" height="22.5" rx="2" fill="#58a6ff"/>
+    <rect x="210.2" y="297.9" width="22.8" height="22.1" rx="2" fill="#58a6ff"/>
     <rect x="235" y="316.8" width="22.8" height="3.2" rx="2" fill="#ff7b72"/>
-    <rect x="272.2" y="305.3" width="22.8" height="14.7" rx="2" fill="#58a6ff"/>
+    <rect x="272.2" y="304.8" width="22.8" height="15.2" rx="2" fill="#58a6ff"/>
     <rect x="297" y="315.0" width="22.8" height="5.0" rx="2" fill="#ff7b72"/>
-    <rect x="334.2" y="297.4" width="22.8" height="22.6" rx="2" fill="#58a6ff"/>
-    <rect x="359" y="316.7" width="22.8" height="3.3" rx="2" fill="#ff7b72"/>
-    <rect x="396.2" y="297.4" width="22.8" height="22.6" rx="2" fill="#58a6ff"/>
+    <rect x="334.2" y="296.5" width="22.8" height="23.5" rx="2" fill="#58a6ff"/>
+    <rect x="359" y="316.6" width="22.8" height="3.4" rx="2" fill="#ff7b72"/>
+    <rect x="396.2" y="296.5" width="22.8" height="23.5" rx="2" fill="#58a6ff"/>
     <rect x="421" y="319.8" width="22.8" height="0.2" rx="2" fill="#ff7b72"/>
-    <rect x="458.2" y="305.2" width="22.8" height="14.8" rx="2" fill="#58a6ff"/>
+    <rect x="458.2" y="304.6" width="22.8" height="15.4" rx="2" fill="#58a6ff"/>
     <rect x="483" y="315.0" width="22.8" height="5.0" rx="2" fill="#ff7b72"/>
-    <rect x="520.2" y="305.2" width="22.8" height="14.8" rx="2" fill="#58a6ff"/>
-    <rect x="545" y="315.0" width="22.8" height="5.0" rx="2" fill="#ff7b72"/>
-    <rect x="582.2" y="230.7" width="22.8" height="89.3" rx="2" fill="#58a6ff"/>
-    <rect x="607" y="213.4" width="22.8" height="106.6" rx="2" fill="#ff7b72"/>
-    <rect x="644.2" y="155.9" width="22.8" height="164.1" rx="2" fill="#58a6ff"/>
-    <rect x="669" y="127.8" width="22.8" height="192.2" rx="2" fill="#ff7b72"/>
+    <rect x="520.2" y="304.6" width="22.8" height="15.4" rx="2" fill="#58a6ff"/>
+    <rect x="545" y="314.8" width="22.8" height="5.2" rx="2" fill="#ff7b72"/>
+    <rect x="582.2" y="231.0" width="22.8" height="89.0" rx="2" fill="#58a6ff"/>
+    <rect x="607" y="207.8" width="22.8" height="112.2" rx="2" fill="#ff7b72"/>
+    <rect x="644.2" y="153.8" width="22.8" height="166.2" rx="2" fill="#58a6ff"/>
+    <rect x="669" y="122.2" width="22.8" height="197.8" rx="2" fill="#ff7b72"/>
   </g>
   <g>
-    <text x="97.6" y="293.5" text-anchor="middle" font-size="10" fill="#e6edf3">433</text>
-    <text x="122.4" y="312.8" text-anchor="middle" font-size="10" fill="#e6edf3">60.7</text>
-    <text x="159.6" y="293.5" text-anchor="middle" font-size="10" fill="#e6edf3">433</text>
-    <text x="184.4" y="315.9" text-anchor="middle" font-size="10" fill="#e6edf3">2.13</text>
-    <text x="221.6" y="293.5" text-anchor="middle" font-size="10" fill="#e6edf3">433</text>
-    <text x="246.4" y="312.8" text-anchor="middle" font-size="10" fill="#e6edf3">61.6</text>
-    <text x="283.6" y="301.3" text-anchor="middle" font-size="10" fill="#e6edf3">283</text>
-    <text x="308.4" y="311.0" text-anchor="middle" font-size="10" fill="#e6edf3">95.2</text>
-    <text x="345.6" y="293.4" text-anchor="middle" font-size="10" fill="#e6edf3">434</text>
-    <text x="370.4" y="312.7" text-anchor="middle" font-size="10" fill="#e6edf3">62.6</text>
-    <text x="407.6" y="293.4" text-anchor="middle" font-size="10" fill="#e6edf3">434</text>
-    <text x="432.4" y="315.8" text-anchor="middle" font-size="10" fill="#e6edf3">3.60</text>
-    <text x="469.6" y="301.2" text-anchor="middle" font-size="10" fill="#e6edf3">284</text>
-    <text x="494.4" y="311.0" text-anchor="middle" font-size="10" fill="#e6edf3">95.9</text>
-    <text x="531.6" y="301.2" text-anchor="middle" font-size="10" fill="#e6edf3">284</text>
-    <text x="556.4" y="311.0" text-anchor="middle" font-size="10" fill="#e6edf3">95.5</text>
-    <text x="593.6" y="226.7" text-anchor="middle" font-size="10" fill="#e6edf3">1718</text>
-    <text x="618.4" y="209.4" text-anchor="middle" font-size="10" fill="#e6edf3">2050</text>
-    <text x="655.6" y="151.9" text-anchor="middle" font-size="10" fill="#e6edf3">3156</text>
-    <text x="680.4" y="123.8" text-anchor="middle" font-size="10" fill="#e6edf3">3696</text>
+    <text x="97.6" y="293.9" text-anchor="middle" font-size="10" fill="#e6edf3">425</text>
+    <text x="122.4" y="312.8" text-anchor="middle" font-size="10" fill="#e6edf3">61.6</text>
+    <text x="159.6" y="293.9" text-anchor="middle" font-size="10" fill="#e6edf3">425</text>
+    <text x="184.4" y="315.9" text-anchor="middle" font-size="10" fill="#e6edf3">2.11</text>
+    <text x="221.6" y="293.9" text-anchor="middle" font-size="10" fill="#e6edf3">425</text>
+    <text x="246.4" y="312.8" text-anchor="middle" font-size="10" fill="#e6edf3">62.0</text>
+    <text x="283.6" y="300.8" text-anchor="middle" font-size="10" fill="#e6edf3">293</text>
+    <text x="308.4" y="311.0" text-anchor="middle" font-size="10" fill="#e6edf3">96.8</text>
+    <text x="345.6" y="292.5" text-anchor="middle" font-size="10" fill="#e6edf3">452</text>
+    <text x="370.4" y="312.6" text-anchor="middle" font-size="10" fill="#e6edf3">65.3</text>
+    <text x="407.6" y="292.5" text-anchor="middle" font-size="10" fill="#e6edf3">452</text>
+    <text x="432.4" y="315.8" text-anchor="middle" font-size="10" fill="#e6edf3">3.72</text>
+    <text x="469.6" y="300.6" text-anchor="middle" font-size="10" fill="#e6edf3">297</text>
+    <text x="494.4" y="311.0" text-anchor="middle" font-size="10" fill="#e6edf3">97.1</text>
+    <text x="531.6" y="300.6" text-anchor="middle" font-size="10" fill="#e6edf3">297</text>
+    <text x="556.4" y="310.8" text-anchor="middle" font-size="10" fill="#e6edf3">100</text>
+    <text x="593.6" y="227.0" text-anchor="middle" font-size="10" fill="#e6edf3">1712</text>
+    <text x="618.4" y="203.8" text-anchor="middle" font-size="10" fill="#e6edf3">2158</text>
+    <text x="655.6" y="149.8" text-anchor="middle" font-size="10" fill="#e6edf3">3196</text>
+    <text x="680.4" y="118.2" text-anchor="middle" font-size="10" fill="#e6edf3">3803</text>
   </g>
   <g>
     <text x="111" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">stream encode (Arrow.Stream)</text>

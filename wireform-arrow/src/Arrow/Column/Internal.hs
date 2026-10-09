@@ -55,6 +55,7 @@ module Arrow.Column.Internal (
 
 import Arrow.Column.Buffer
 import Arrow.Types (ArrowType (..), DateUnit (..), IntervalUnit (..), Precision (..), TimeUnit (..))
+import Arrow.Vector.Internal (FixedWidth)
 import Columnar.SIMD qualified as K
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -105,8 +106,10 @@ deriving stock instance Show (PrimType a)
 deriving stock instance Eq (PrimType a)
 
 
--- | Bring the element type's instances into scope from the tag.
-withPrim :: PrimType a -> ((Storable a, Eq a, Show a) => r) -> r
+{- | Bring the element type's instances into scope from the tag
+('FixedWidth' includes 'Storable').
+-}
+withPrim :: PrimType a -> ((FixedWidth a, Eq a, Show a) => r) -> r
 withPrim t k = case t of
   PInt8 -> k
   PInt16 -> k

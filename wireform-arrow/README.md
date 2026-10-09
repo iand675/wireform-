@@ -134,6 +134,8 @@ tradesToStream trades =
 | `Arrow.Column.Builder`   | Growable pinned builders in `ST` or `IO` (`newPrimBuilder`, `newUtf8Builder`, `newBoolBuilder`, `newBinaryBuilder`, ...); freezing hands the buffers to the column without a copy. Re-exported by `Arrow.Column`. |
 | `Arrow.Column.Buffer`    | `Bitmap`, `Validity`, the fixed-width element types (`Float16`, `IntervalDayTime`, `IntervalMonthDayNano`, `Decimal128`, `Decimal256`), 64-byte aligned allocation and `ByteString`/storable aliasing. |
 | `Arrow.Column.Internal`  | Raw constructors, `PrimType` utilities and the structural validators (C kernels in `wireform-columnar-core`). For readers, writers and malformed-input tests; ordinary code never needs it. |
+| `Arrow.Vector`           | `Vector a`: a data family with the `vector` package's generic API (`Data.Vector.Generic`) whose instances keep Arrow's layout: storable values for fixed-width types, bitmaps for `Bool`, a validity bitmap plus values for `Maybe a`, offsets into one store for `Text`, `ByteString` and list rows. The `to*Vector` conversions return it by aliasing the column. |
+| `Arrow.Vector.Internal`  | The instance constructors and the bit and var-length helpers behind `Arrow.Vector`; for `Arrow.Column` and tests. |
 | `Arrow.Read.Columns`     | IPC record batch to columns: buffer slicing, validation, zero-copy aliasing. |
 | `Arrow.IPC`              | Single-message framing: `encodeIPCMessage`, `decodeIPCMessage` for the spec FlatBuffers `Message` (Schema, DictionaryBatch, RecordBatch); bodies are appended by the caller. |
 | `Arrow.FlatBufferIPC`    | Arrow's FlatBuffer schema and record batch headers (Arrow IPC's wire layer). |
@@ -206,21 +208,44 @@ fills = mkList Nothing (VS.fromList [0, 2, 2, 3]) (primColumn PInt32 (VS.fromLis
 Bind a typed view once per column (`asPrim`, `asUtf8`, `asBinary`,
 `asBool`), then index it (`primAt`, `textAt`, `bytesAt`,
 `boolArrayAt`). `listRange` gives the child range of a list or map
-row and `dictKeyAt` the key of a dictionary row. The `to*Vector`
-conversions box every row; their cost is in the name.
-`toTextVector` copies a utf8 column's bytes once and makes every row
-a `Text` slice of that copy (so one row keeps the column's text alive;
-`T.copy` detaches it). Dictionaries of strings or bytes convert their
-values once and the rows share them. `toListVector` converts the
-child rows of a list column once and makes every list row a slice.
+row and `dictKeyAt` the key of a dictionary row.
+
+To get a whole column out as Haskell values, the `to*Vector`
+conversions return an `Arrow.Vector.Vector`, a data family (like
+`Data.Vector.Unboxed`) used through `Data.Vector.Generic` with the
+element type you expect, `Maybe Int64` or `Maybe Text`, but stored the
+way the column is: a `Vector (Maybe Int64)` is the column's validity
+bitmap plus its storable values, 8 bytes and one bit per row with no
+heap object per row. Fused consumers (`G.foldl'`, `G.sum . G.mapMaybe
+id`, ...) compile to a loop over the bitmap and the values that
+allocates nothing per row (`Just` is eliminated in GHC core).
+
+| Conversion | Result | Cost |
+|------------|--------|------|
+| `toMaybeVector` | `Vector (Maybe a)`, any fixed-width type | O(1): aliases the values and validity (a column without nulls gets a fresh all-set bitmap, rows / 8 bytes) |
+| `toBoolVector` | `Vector (Maybe Bool)` | O(1): aliases both bitmaps |
+| `toTextVector` | `Vector (Maybe Text)` | O(rows): offsets widened to `Int`, every row a `Text` slice of the column's data with no copy and no re-validation (data outside the GHC heap, such as an mmapped file, is copied once); views copy their bytes once |
+| `toBytesVector` | `Vector (Maybe ByteString)` | O(rows): offsets widened, rows are zero-copy slices; views copy their bytes once |
+| `toListVector conv` | `Vector (Maybe (Vector a))` | O(rows) plus `conv` on the referenced child rows; every row a slice of the converted child |
+
+Dictionaries of strings or bytes convert their values once and the rows
+share them. The inverses `fromMaybeVector` and `fromBoolVector` build a
+column over a vector's buffers in O(1) plus a popcount. `G.convert`
+turns any of these into a boxed `Data.Vector` (or another generic
+vector) and back. The results alias the column, so they keep the
+decoded input alive like the column does (see below); `G.force` copies
+just the rows into fresh buffers.
 
 ```haskell
 {-# LANGUAGE BangPatterns #-}
 module Read where
 
 import Arrow.Column
+import Arrow.Vector (Vector)
 import Data.Int (Int64)
 import Data.Text (Text)
+import qualified Data.Vector as V
+import qualified Data.Vector.Generic as G
 
 -- Bind the typed view once, then index; the loop does not allocate.
 sumQuantities :: ColumnArray -> Maybe Int64
@@ -232,14 +257,29 @@ sumQuantities c = do
         | otherwise = go (acc + maybe 0 id (primAt p i)) (i + 1)
   pure (go 0 0)
 
+-- The same sum over the whole column: O(1) conversion, then a fused,
+-- non-allocating fold.
+sumQuantities' :: ColumnArray -> Maybe Int64
+sumQuantities' c = G.foldl' (\acc m -> maybe acc (+ acc) m) 0 . toMaybeVector <$> asPrim PInt64 c
+
 -- One copy into a Text, no UTF-8 re-validation.
 noteAt :: ColumnArray -> Int -> Maybe Text
 noteAt c i = asUtf8 c >>= \u -> textAt u i
 
--- Boxed materialization when you really want Haskell values.
-quantityList :: ColumnArray -> Maybe [Maybe Int64]
-quantityList c = foldr (:) [] . toMaybeVector <$> asPrim PInt64 c
+-- Every note, as Text slices of the column's data.
+notes :: ColumnArray -> Either String (Vector (Maybe Text))
+notes = toTextVector
+
+-- A boxed Data.Vector when an API wants one.
+quantityList :: ColumnArray -> Maybe (V.Vector (Maybe Int64))
+quantityList c = G.convert . toMaybeVector <$> asPrim PInt64 c
 ```
+
+Mutable `Text`, `ByteString` and list vectors keep their rows in an
+append-only store shared by every slice: writing a row appends its
+bytes (O(row size)) and leaves earlier bytes alone, and `G.freeze`
+keeps every byte ever written; `G.force` (or `G.freeze` of a fresh
+`G.thaw`) copies only what the rows reference.
 
 ### Input lifetime
 
@@ -541,18 +581,21 @@ Each workload is one record batch through `Arrow.Stream`, in four
 groups: `encode` (`encodeArrowStream`, one allocation), `encode lazy`
 (`encodeArrowStreamLazy`, chunks aliasing the column buffers, forced
 to the end of the chunk list), `decode` (`decodeArrowStream`, columns
-aliasing the input), and `decode + toVector` (decode, then convert
-every column to boxed Haskell values: `Vector (Maybe Int64)`,
-`Vector (Maybe Text)`, nested vectors for lists and structs,
-dictionaries as their string values; built with `toMaybeVector`,
-`toTextVector`, `toBoolVector` and `toListVector`). `decode + toVector`
-is the cost of getting Haskell values out, and what the decoder
-measured before it went zero
-copy. The arrow-rs side writes the same batch with `StreamWriter` into
-a `Vec<u8>` (schema, batch, end of stream) and reads it back with
-`StreamReader`, collecting every batch, with the reader's default
-validation on; its `decode + toVector` counterpart copies every column
-into owned Rust values (`Vec<Option<i64>>`, `String`, ...). arrow-rs
+aliasing the input), and `decode + toVector` (decode, convert every
+column with `toMaybeVector`, `toTextVector`, `toBoolVector` and
+`toListVector` to `Arrow.Vector` vectors (`Vector (Maybe Int64)`,
+`Vector (Maybe Text)`, nested vectors for lists, one per struct child,
+dictionaries as their string values), then `G.force` each into fresh
+buffers). The conversions alone alias the decoded buffers; the
+`G.force` makes the result own its data and keep nothing of the input
+alive, which is the work arrow-rs does when it copies into owned
+values. Dictionary rows share one owned copy of the 16 values rather
+than one string per row. The arrow-rs side writes the same batch with
+`StreamWriter` into a `Vec<u8>` (schema, batch, end of stream) and
+reads it back with `StreamReader`, collecting every batch, with the
+reader's default validation on; its `decode + toVector` counterpart
+(`to_owned_column`) copies every column into owned Rust values
+(`Vec<Option<i64>>`, `String`, nested `Vec`s, ...). arrow-rs
 has no lazy writer, so `encode lazy` is set against `StreamWriter`.
 Inputs are built with the column builders outside the timed region.
 Nullable columns carry 10% nulls; `list<int32>` has four elements per
@@ -561,26 +604,13 @@ wireform-arrow time over arrow-rs time, so `2.00x` means
 wireform-arrow takes twice as long.
 
 The bench binary runs with a 64 MB nursery (`-with-rtsopts=-A64m` in
-the cabal stanza). The decoders and lazy encoders barely allocate, but
-anything that builds boxed values (`decode + toVector`, the typed
-`Arrow.Record` rows, your own conversion code) is dominated by minor
-collections at GHC's default 4 MB nursery. Give programs that move
-large batches the same advice: link with `-rtsopts` and run with
-`+RTS -A64m` (or bake it in with `-with-rtsopts`).
-
-Every cell is within 2x of arrow-rs, and the codec cells are mostly
-well below it, except four 100k-row `decode + toVector` rows: int64,
-double and nullable int64 (about 3x)
-and struct<int32,double,bool> (about 4x). They measure building boxed
-Haskell values, not the codec: the conversions run at the speed of
-the smallest GHC program that builds the same `V.Vector (Maybe Int64)`
-shape from memory already in place. A boxed `Maybe Int64` row is 40
-bytes (array slot, `Just`, `I64#`) against Rust's contiguous 16-byte
-`Option<i64>`, and GHC 9.8 on AArch64 emits a store-release plus a
-card-table write for every boxed array element and a load-acquire for
-every read during forcing. GC is not the cost (3 to 7% of the run).
-If you need fixed-width values in Haskell, read them with `primAt` or
-`toStorable` instead of boxing a whole column.
+the cabal stanza). The decoders, lazy encoders and `Arrow.Vector`
+conversions barely allocate, but anything that builds boxed values
+(the typed `Arrow.Record` rows, `G.convert` to a boxed vector, your own
+conversion code) is dominated by minor collections at GHC's default
+4 MB nursery. Give programs that move large batches the same advice:
+link with `-rtsopts` and run with `+RTS -A64m` (or bake it in with
+`-with-rtsopts`).
 
 <!-- BEGIN_AUTOGEN bench:arrow-encode-decode -->
 <picture>
@@ -590,44 +620,44 @@ If you need fixed-width values in Haskell, read them with `primAt` or
 
 | Operation                                   | arrow-rs | wireform-arrow | ratio |
 | :------------------------------------------ | -------: | -------------: | ----: |
-| encode int64                                |  38.1 µs |        10.9 µs | 0.29x |
-| encode double                               | 37.10 µs |        10.5 µs | 0.28x |
-| encode nullable int64                       |  37.8 µs |        10.8 µs | 0.29x |
-| encode utf8                                 |  47.8 µs |        13.8 µs | 0.29x |
-| encode nullable utf8                        |  43.8 µs |        13.0 µs | 0.30x |
-| encode mixed 6-col                          |   442 µs |        65.9 µs | 0.15x |
-| encode list<int32>                          |  96.3 µs |        27.1 µs | 0.28x |
-| encode struct<int32,double,bool>            |  64.0 µs |        17.2 µs | 0.27x |
-| encode dictionary<utf8>                     |  31.5 µs |        6.08 µs | 0.19x |
-| encode lazy int64                           |  38.1 µs |        0.64 µs | 0.02x |
-| encode lazy double                          | 37.10 µs |        0.63 µs | 0.02x |
-| encode lazy nullable int64                  |  37.8 µs |        0.76 µs | 0.02x |
-| encode lazy utf8                            |  47.8 µs |        0.73 µs | 0.02x |
-| encode lazy nullable utf8                   |  43.8 µs |        0.76 µs | 0.02x |
-| encode lazy mixed 6-col                     |   442 µs |        2.11 µs | 0.00x |
-| encode lazy list<int32>                     |  96.3 µs |        1.05 µs | 0.01x |
-| encode lazy struct<int32,double,bool>       |  64.0 µs |        1.59 µs | 0.02x |
-| encode lazy dictionary<utf8>                |  31.5 µs |        1.29 µs | 0.04x |
-| decode int64                                |  13.2 µs |        0.78 µs | 0.06x |
-| decode double                               |  13.7 µs |        0.78 µs | 0.06x |
-| decode nullable int64                       |  13.8 µs |        1.08 µs | 0.08x |
-| decode utf8                                 |   123 µs |        50.7 µs | 0.41x |
-| decode nullable utf8                        |   123 µs |        47.4 µs | 0.39x |
-| decode mixed 6-col                          |   280 µs |       95.10 µs | 0.34x |
-| decode list<int32>                          |   109 µs |        6.37 µs | 0.06x |
-| decode struct<int32,double,bool>            |  22.9 µs |        1.39 µs | 0.06x |
-| decode dictionary<utf8>                     |  33.8 µs |        20.8 µs | 0.62x |
-| decode + toVector int64                     |   159 µs |         551 µs | 3.46x |
-| decode + toVector double                    |   170 µs |         519 µs | 3.06x |
-| decode + toVector nullable int64            |   158 µs |         505 µs | 3.20x |
-| decode + toVector utf8                      |  1410 µs |         815 µs | 0.58x |
-| decode + toVector nullable utf8             |  1454 µs |         862 µs | 0.59x |
-| decode + toVector mixed 6-col               |  3491 µs |        4293 µs | 1.23x |
-| decode + toVector list<int32>               |  3694 µs |        3384 µs | 0.92x |
-| decode + toVector struct<int32,double,bool> |   335 µs |        1404 µs | 4.19x |
-| decode + toVector dictionary<utf8>          |  1403 µs |         348 µs | 0.25x |
+| encode int64                                |  38.6 µs |        10.9 µs | 0.28x |
+| encode double                               |  38.5 µs |        10.6 µs | 0.28x |
+| encode nullable int64                       |  37.7 µs |        10.9 µs | 0.29x |
+| encode utf8                                 |  38.9 µs |        13.1 µs | 0.34x |
+| encode nullable utf8                        |  38.1 µs |        12.7 µs | 0.33x |
+| encode mixed 6-col                          |   486 µs |        61.9 µs | 0.13x |
+| encode list<int32>                          |  96.4 µs |        27.5 µs | 0.28x |
+| encode struct<int32,double,bool>            |  63.6 µs |        16.8 µs | 0.26x |
+| encode dictionary<utf8>                     |  28.6 µs |        6.14 µs | 0.21x |
+| encode lazy int64                           |  38.6 µs |        0.64 µs | 0.02x |
+| encode lazy double                          |  38.5 µs |        0.62 µs | 0.02x |
+| encode lazy nullable int64                  |  37.7 µs |        0.66 µs | 0.02x |
+| encode lazy utf8                            |  38.9 µs |        0.68 µs | 0.02x |
+| encode lazy nullable utf8                   |  38.1 µs |        0.70 µs | 0.02x |
+| encode lazy mixed 6-col                     |   486 µs |        2.06 µs | 0.00x |
+| encode lazy list<int32>                     |  96.4 µs |        0.92 µs | 0.01x |
+| encode lazy struct<int32,double,bool>       |  63.6 µs |        1.39 µs | 0.02x |
+| encode lazy dictionary<utf8>                |  28.6 µs |        1.14 µs | 0.04x |
+| decode int64                                |  13.2 µs |        0.69 µs | 0.05x |
+| decode double                               |  12.8 µs |        0.67 µs | 0.05x |
+| decode nullable int64                       |  13.1 µs |        0.96 µs | 0.07x |
+| decode utf8                                 |   122 µs |        47.1 µs | 0.38x |
+| decode nullable utf8                        |   125 µs |        47.0 µs | 0.38x |
+| decode mixed 6-col                          |   296 µs |        95.3 µs | 0.32x |
+| decode list<int32>                          |   108 µs |        6.24 µs | 0.06x |
+| decode struct<int32,double,bool>            |  20.4 µs |        1.37 µs | 0.07x |
+| decode dictionary<utf8>                     |  36.6 µs |        20.4 µs | 0.56x |
+| decode + toVector int64                     |   155 µs |        15.5 µs | 0.10x |
+| decode + toVector double                    |   167 µs |        15.2 µs | 0.09x |
+| decode + toVector nullable int64            |   157 µs |        14.9 µs | 0.10x |
+| decode + toVector utf8                      |  1422 µs |         242 µs | 0.17x |
+| decode + toVector nullable utf8             |  1455 µs |         259 µs | 0.18x |
+| decode + toVector mixed 6-col               |  3462 µs |         556 µs | 0.16x |
+| decode + toVector list<int32>               |  3669 µs |         190 µs | 0.05x |
+| decode + toVector struct<int32,double,bool> |   326 µs |        26.1 µs | 0.08x |
+| decode + toVector dictionary<utf8>          |  1387 µs |         433 µs | 0.31x |
 
-<sub>Last run 2026-10-09 05:21:40 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5; arrow-rs 58.2.0, rustc 1.98.1, criterion.rs 0.7.0.</sub>
+<sub>Last run 2026-10-09 07:00:11 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5; arrow-rs 58.2.0, rustc 1.98.1, criterion.rs 0.7.0.</sub>
 <!-- END_AUTOGEN bench:arrow-encode-decode -->
 
 The same workloads as a small (100-row) batch, where per-message framing
@@ -641,44 +671,44 @@ dominates:
 
 | Operation                                   | arrow-rs | wireform-arrow | ratio |
 | :------------------------------------------ | -------: | -------------: | ----: |
-| encode int64                                |  1.01 µs |        0.61 µs | 0.60x |
-| encode double                               |  1.02 µs |        0.62 µs | 0.61x |
-| encode nullable int64                       |  1.00 µs |        0.63 µs | 0.63x |
-| encode utf8                                 |  1.09 µs |        0.66 µs | 0.61x |
-| encode nullable utf8                        |  1.08 µs |        0.69 µs | 0.64x |
-| encode mixed 6-col                          |  2.56 µs |        2.10 µs | 0.82x |
-| encode list<int32>                          |  1.40 µs |        0.96 µs | 0.69x |
-| encode struct<int32,double,bool>            |  1.96 µs |        1.44 µs | 0.73x |
-| encode dictionary<utf8>                     |  2.22 µs |        1.05 µs | 0.47x |
-| encode lazy int64                           |  1.01 µs |        0.61 µs | 0.60x |
-| encode lazy double                          |  1.02 µs |        0.62 µs | 0.61x |
-| encode lazy nullable int64                  |  1.00 µs |        0.65 µs | 0.65x |
-| encode lazy utf8                            |  1.09 µs |        0.67 µs | 0.61x |
-| encode lazy nullable utf8                   |  1.08 µs |        0.72 µs | 0.67x |
-| encode lazy mixed 6-col                     |  2.56 µs |        2.12 µs | 0.83x |
-| encode lazy list<int32>                     |  1.40 µs |        0.99 µs | 0.71x |
-| encode lazy struct<int32,double,bool>       |  1.96 µs |        1.52 µs | 0.78x |
-| encode lazy dictionary<utf8>                |  2.22 µs |        1.20 µs | 0.54x |
+| encode int64                                |  0.97 µs |        0.64 µs | 0.66x |
+| encode double                               |  0.98 µs |        0.63 µs | 0.64x |
+| encode nullable int64                       |  0.96 µs |        0.65 µs | 0.68x |
+| encode utf8                                 |  1.05 µs |        0.68 µs | 0.65x |
+| encode nullable utf8                        |  1.06 µs |        0.66 µs | 0.62x |
+| encode mixed 6-col                          |  2.56 µs |        2.18 µs | 0.85x |
+| encode list<int32>                          |  1.41 µs |        0.94 µs | 0.67x |
+| encode struct<int32,double,bool>            |  1.92 µs |        1.39 µs | 0.72x |
+| encode dictionary<utf8>                     |  2.17 µs |        1.09 µs | 0.50x |
+| encode lazy int64                           |  0.97 µs |        0.64 µs | 0.66x |
+| encode lazy double                          |  0.98 µs |        0.62 µs | 0.63x |
+| encode lazy nullable int64                  |  0.96 µs |        0.65 µs | 0.68x |
+| encode lazy utf8                            |  1.05 µs |        0.69 µs | 0.66x |
+| encode lazy nullable utf8                   |  1.06 µs |        0.72 µs | 0.68x |
+| encode lazy mixed 6-col                     |  2.56 µs |        2.06 µs | 0.80x |
+| encode lazy list<int32>                     |  1.41 µs |        0.91 µs | 0.65x |
+| encode lazy struct<int32,double,bool>       |  1.92 µs |        1.38 µs | 0.72x |
+| encode lazy dictionary<utf8>                |  2.17 µs |        1.14 µs | 0.53x |
 | decode int64                                |  0.62 µs |        0.69 µs | 1.11x |
-| decode double                               |  0.62 µs |        0.71 µs | 1.15x |
-| decode nullable int64                       |  0.66 µs |        0.83 µs | 1.26x |
-| decode utf8                                 |  0.75 µs |        0.84 µs | 1.12x |
-| decode nullable utf8                        |  0.76 µs |        0.80 µs | 1.05x |
-| decode mixed 6-col                          |  2.32 µs |        2.08 µs | 0.90x |
-| decode list<int32>                          |  1.07 µs |        0.99 µs | 0.93x |
-| decode struct<int32,double,bool>            |  1.29 µs |        1.39 µs | 1.08x |
-| decode dictionary<utf8>                     |  1.36 µs |        1.27 µs | 0.93x |
-| decode + toVector int64                     |  0.80 µs |        1.25 µs | 1.56x |
-| decode + toVector double                    |  0.72 µs |        1.18 µs | 1.64x |
-| decode + toVector nullable int64            |  0.79 µs |        1.21 µs | 1.53x |
-| decode + toVector utf8                      |  1.96 µs |        1.41 µs | 0.72x |
-| decode + toVector nullable utf8             |  1.91 µs |        1.49 µs | 0.78x |
-| decode + toVector mixed 6-col               |  5.07 µs |        4.96 µs | 0.98x |
-| decode + toVector list<int32>               |  4.88 µs |        3.23 µs | 0.66x |
-| decode + toVector struct<int32,double,bool> |  1.64 µs |        2.64 µs | 1.61x |
-| decode + toVector dictionary<utf8>          |  2.59 µs |        1.67 µs | 0.64x |
+| decode double                               |  0.61 µs |        0.67 µs | 1.10x |
+| decode nullable int64                       |  0.65 µs |        0.71 µs | 1.09x |
+| decode utf8                                 |  0.73 µs |        0.77 µs | 1.05x |
+| decode nullable utf8                        |  0.76 µs |        0.78 µs | 1.03x |
+| decode mixed 6-col                          |  2.22 µs |        1.98 µs | 0.89x |
+| decode list<int32>                          |  1.06 µs |        0.95 µs | 0.90x |
+| decode struct<int32,double,bool>            |  1.27 µs |        1.38 µs | 1.09x |
+| decode dictionary<utf8>                     |  1.34 µs |        1.24 µs | 0.93x |
+| decode + toVector int64                     |  0.72 µs |        0.79 µs | 1.10x |
+| decode + toVector double                    |  0.71 µs |        0.78 µs | 1.10x |
+| decode + toVector nullable int64            |  0.78 µs |        0.80 µs | 1.03x |
+| decode + toVector utf8                      |  1.90 µs |        1.24 µs | 0.65x |
+| decode + toVector nullable utf8             |  1.93 µs |        1.24 µs | 0.64x |
+| decode + toVector mixed 6-col               |  5.07 µs |        3.25 µs | 0.64x |
+| decode + toVector list<int32>               |  4.61 µs |        1.57 µs | 0.34x |
+| decode + toVector struct<int32,double,bool> |  1.54 µs |        1.68 µs | 1.09x |
+| decode + toVector dictionary<utf8>          |  2.58 µs |        1.98 µs | 0.77x |
 
-<sub>Last run 2026-10-09 05:21:40 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5; arrow-rs 58.2.0, rustc 1.98.1, criterion.rs 0.7.0.</sub>
+<sub>Last run 2026-10-09 07:00:11 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5; arrow-rs 58.2.0, rustc 1.98.1, criterion.rs 0.7.0.</sub>
 <!-- END_AUTOGEN bench:arrow-encode-decode-small -->
 
 The mixed 6-column table through each public entry point: the
@@ -700,18 +730,18 @@ row structs), since arrow-rs has no record deriving:
 
 | Operation                         | arrow-rs | wireform-arrow | ratio |
 | :-------------------------------- | -------: | -------------: | ----: |
-| stream encode (Arrow.Stream)      |   433 µs |        60.7 µs | 0.14x |
-| stream encode lazy (Arrow.Stream) |   433 µs |        2.13 µs | 0.00x |
-| stream encode (Arrow.Write)       |   433 µs |        61.6 µs | 0.14x |
-| stream decode (Arrow.Stream)      |   283 µs |        95.2 µs | 0.34x |
-| file encode (Arrow.Stream)        |   434 µs |        62.6 µs | 0.14x |
-| file encode lazy (Arrow.Stream)   |   434 µs |        3.60 µs | 0.01x |
-| file decode (Arrow.Stream)        |   284 µs |        95.9 µs | 0.34x |
-| file read (Arrow.File)            |   284 µs |        95.5 µs | 0.34x |
-| typed encode (Arrow.Record)       |  1718 µs |        2050 µs | 1.19x |
-| typed decode (Arrow.Record)       |  3156 µs |        3696 µs | 1.17x |
+| stream encode (Arrow.Stream)      |   425 µs |        61.6 µs | 0.14x |
+| stream encode lazy (Arrow.Stream) |   425 µs |        2.11 µs | 0.00x |
+| stream encode (Arrow.Write)       |   425 µs |        62.0 µs | 0.15x |
+| stream decode (Arrow.Stream)      |   293 µs |        96.8 µs | 0.33x |
+| file encode (Arrow.Stream)        |   452 µs |        65.3 µs | 0.14x |
+| file encode lazy (Arrow.Stream)   |   452 µs |        3.72 µs | 0.01x |
+| file decode (Arrow.Stream)        |   297 µs |        97.1 µs | 0.33x |
+| file read (Arrow.File)            |   297 µs |         100 µs | 0.34x |
+| typed encode (Arrow.Record)       |  1712 µs |        2158 µs | 1.26x |
+| typed decode (Arrow.Record)       |  3196 µs |        3803 µs | 1.19x |
 
-<sub>Last run 2026-10-09 05:21:40 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5; arrow-rs 58.2.0, rustc 1.98.1, criterion.rs 0.7.0.</sub>
+<sub>Last run 2026-10-09 07:00:11 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5; arrow-rs 58.2.0, rustc 1.98.1, criterion.rs 0.7.0.</sub>
 <!-- END_AUTOGEN bench:arrow-api-paths -->
 
 Not yet compared: arrow-cpp (the reference implementation),
