@@ -4,10 +4,18 @@
 Arrow buffers, used by the Parquet and Arrow column readers.
 
 The 'BS.ByteString' helpers ('bitmapPopCount', 'unpackBitsLsbUnsafe') are
-pure. Everything else is a thin @IO@ wrapper over an @unsafe@ foreign call
-taking raw pointers; the caller keeps the memory alive for the duration of
-the call and guarantees the buffers are as large as described below. No
-kernel assumes any pointer alignment.
+pure. Everything else is a thin @IO@ wrapper over a foreign call taking raw
+pointers; the caller keeps the memory alive for the duration of the call and
+guarantees the buffers are as large as described below. No kernel assumes
+any pointer alignment.
+
+Calling convention: an @unsafe@ call saves about 100 ns but stops every
+other capability from reaching a GC sync point until it returns, so it is
+only worth it for bounded work. Each wrapper uses the @unsafe@ import when
+the input is at most 'unsafeCallBytes' and the @safe@ import otherwise
+(the same split @bytestring@ uses for 'BS.isValidUtf8'). Kernels whose work
+is not bounded by their arguments ('takeBytesI32', 'takeBytesI64',
+'viewRefsCheck' with UTF-8 validation) are always @safe@.
 
 Conventions:
 
@@ -271,12 +279,132 @@ foreign import ccall unsafe "hs_columnar_take_offsets_i64"
   c_take_offsets_i64 :: Ptr Int64 -> Ptr Int64 -> Ptr Int -> CSize -> IO Int64
 
 
-foreign import ccall unsafe "hs_columnar_take_bytes_i32"
-  c_take_bytes_i32 :: Ptr Word8 -> Ptr Int32 -> Ptr Word8 -> Ptr Int -> CSize -> IO ()
+-- Safe twins of the kernels above, for inputs over 'unsafeCallBytes'.
+
+foreign import ccall safe "hs_columnar_bitmap_popcount"
+  c_bitmap_popcount_safe :: Ptr Word8 -> CInt -> Int32
+
+foreign import ccall safe "hs_columnar_memcpy_fast"
+  c_memcpy_fast_safe :: Ptr Word8 -> Ptr Word8 -> CInt -> IO ()
+
+foreign import ccall safe "hs_columnar_offsets_i32"
+  c_offsets_i32_safe :: Ptr Int32 -> CSize -> Int64 -> IO Int64
+
+foreign import ccall safe "hs_columnar_offsets_i64"
+  c_offsets_i64_safe :: Ptr Int64 -> CSize -> Int64 -> IO Int64
+
+foreign import ccall safe "hs_columnar_utf8_boundaries_i32"
+  c_utf8_boundaries_i32_safe :: Ptr Int32 -> CSize -> Ptr Word8 -> Int64 -> IO Int64
+
+foreign import ccall safe "hs_columnar_utf8_boundaries_i64"
+  c_utf8_boundaries_i64_safe :: Ptr Int64 -> CSize -> Ptr Word8 -> Int64 -> IO Int64
+
+foreign import ccall safe "hs_columnar_popcount_bits"
+  c_popcount_bits_safe :: Ptr Word8 -> CSize -> CSize -> IO Int64
+
+foreign import ccall safe "hs_columnar_keys_in_range_i8"
+  c_keys_in_range_i8_safe :: Ptr Int8 -> CSize -> Ptr Word8 -> CSize -> Int64 -> IO Int64
+
+foreign import ccall safe "hs_columnar_keys_in_range_i16"
+  c_keys_in_range_i16_safe :: Ptr Int16 -> CSize -> Ptr Word8 -> CSize -> Int64 -> IO Int64
+
+foreign import ccall safe "hs_columnar_keys_in_range_i32"
+  c_keys_in_range_i32_safe :: Ptr Int32 -> CSize -> Ptr Word8 -> CSize -> Int64 -> IO Int64
+
+foreign import ccall safe "hs_columnar_keys_in_range_i64"
+  c_keys_in_range_i64_safe :: Ptr Int64 -> CSize -> Ptr Word8 -> CSize -> Int64 -> IO Int64
+
+foreign import ccall safe "hs_columnar_keys_in_range_u8"
+  c_keys_in_range_u8_safe :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Int64 -> IO Int64
+
+foreign import ccall safe "hs_columnar_keys_in_range_u16"
+  c_keys_in_range_u16_safe :: Ptr Word16 -> CSize -> Ptr Word8 -> CSize -> Int64 -> IO Int64
+
+foreign import ccall safe "hs_columnar_keys_in_range_u32"
+  c_keys_in_range_u32_safe :: Ptr Word32 -> CSize -> Ptr Word8 -> CSize -> Int64 -> IO Int64
+
+foreign import ccall safe "hs_columnar_keys_in_range_u64"
+  c_keys_in_range_u64_safe :: Ptr Word64 -> CSize -> Ptr Word8 -> CSize -> Int64 -> IO Int64
+
+foreign import ccall safe "hs_columnar_copy_bits"
+  c_copy_bits_safe :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> CSize -> IO ()
+
+foreign import ccall safe "hs_columnar_rebase_offsets_i32"
+  c_rebase_offsets_i32_safe :: Ptr Int32 -> Ptr Int32 -> CSize -> Int64 -> IO ()
+
+foreign import ccall safe "hs_columnar_rebase_offsets_i64"
+  c_rebase_offsets_i64_safe :: Ptr Int64 -> Ptr Int64 -> CSize -> Int64 -> IO ()
+
+foreign import ccall safe "hs_columnar_run_ends_i16"
+  c_run_ends_i16_safe :: Ptr Int16 -> CSize -> Int64 -> IO Int64
+
+foreign import ccall safe "hs_columnar_run_ends_i32"
+  c_run_ends_i32_safe :: Ptr Int32 -> CSize -> Int64 -> IO Int64
+
+foreign import ccall safe "hs_columnar_run_ends_i64"
+  c_run_ends_i64_safe :: Ptr Int64 -> CSize -> Int64 -> IO Int64
+
+foreign import ccall safe "hs_columnar_list_view_i32"
+  c_list_view_i32_safe :: Ptr Int32 -> Ptr Int32 -> CSize -> Ptr Word8 -> CSize -> Int64 -> IO Int64
+
+foreign import ccall safe "hs_columnar_list_view_i64"
+  c_list_view_i64_safe :: Ptr Int64 -> Ptr Int64 -> CSize -> Ptr Word8 -> CSize -> Int64 -> IO Int64
+
+foreign import ccall safe "hs_columnar_dense_union"
+  c_dense_union_safe :: Ptr Int8 -> Ptr Int32 -> CSize -> Ptr Int64 -> CSize -> IO Int64
+
+foreign import ccall safe "hs_columnar_view_refs"
+  c_view_refs_safe
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr (Ptr Word8) -> Ptr Int64 -> CSize -> CInt -> IO Int64
+
+foreign import ccall safe "hs_columnar_gather_1"
+  c_gather_1_safe :: Ptr Word8 -> Ptr Word8 -> Ptr Int -> CSize -> IO ()
+
+foreign import ccall safe "hs_columnar_gather_2"
+  c_gather_2_safe :: Ptr Word8 -> Ptr Word8 -> Ptr Int -> CSize -> IO ()
+
+foreign import ccall safe "hs_columnar_gather_4"
+  c_gather_4_safe :: Ptr Word8 -> Ptr Word8 -> Ptr Int -> CSize -> IO ()
+
+foreign import ccall safe "hs_columnar_gather_8"
+  c_gather_8_safe :: Ptr Word8 -> Ptr Word8 -> Ptr Int -> CSize -> IO ()
+
+foreign import ccall safe "hs_columnar_gather_16"
+  c_gather_16_safe :: Ptr Word8 -> Ptr Word8 -> Ptr Int -> CSize -> IO ()
+
+foreign import ccall safe "hs_columnar_gather_bits"
+  c_gather_bits_safe :: Ptr Word8 -> Ptr Word8 -> CSize -> Ptr Int -> CSize -> IO Int64
+
+foreign import ccall safe "hs_columnar_and_bits"
+  c_and_bits_safe :: Ptr Word8 -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> CSize -> IO Int64
+
+foreign import ccall safe "hs_columnar_take_offsets_i32"
+  c_take_offsets_i32_safe :: Ptr Int32 -> Ptr Int32 -> Ptr Int -> CSize -> IO Int64
+
+foreign import ccall safe "hs_columnar_take_offsets_i64"
+  c_take_offsets_i64_safe :: Ptr Int64 -> Ptr Int64 -> Ptr Int -> CSize -> IO Int64
+
+foreign import ccall safe "hs_columnar_take_bytes_i32"
+  c_take_bytes_i32_safe :: Ptr Word8 -> Ptr Int32 -> Ptr Word8 -> Ptr Int -> CSize -> IO ()
+
+foreign import ccall safe "hs_columnar_take_bytes_i64"
+  c_take_bytes_i64_safe :: Ptr Word8 -> Ptr Int64 -> Ptr Word8 -> Ptr Int -> CSize -> IO ()
 
 
-foreign import ccall unsafe "hs_columnar_take_bytes_i64"
-  c_take_bytes_i64 :: Ptr Word8 -> Ptr Int64 -> Ptr Word8 -> Ptr Int -> CSize -> IO ()
+{- | Largest input, in bytes, a kernel reads through an @unsafe@ call.
+The slowest kernels run at about 0.35 ns per byte here (UTF-8 boundary
+checks), so 64 KiB keeps an unsafe call under roughly 25 us of
+uninterruptible work; anything larger pays the ~100 ns safe-call overhead,
+which is noise next to the work itself.
+-}
+unsafeCallBytes :: Int
+unsafeCallBytes = 65536
+
+
+-- | Whether a kernel reading this many bytes may use the @unsafe@ import.
+small :: Int -> Bool
+small bytes = bytes <= unsafeCallBytes
+{-# INLINE small #-}
 
 
 -- | Count set bits in a byte range (entire bytes).
@@ -287,7 +415,10 @@ bitmapPopCount bs
       fromIntegral $
         unsafePerformIO $
           unsafeUseAsCStringLen bs $ \(p, len) ->
-            pure $! c_bitmap_popcount (castPtr p) (fromIntegral len)
+            pure $!
+              if small len
+                then c_bitmap_popcount (castPtr p) (fromIntegral len)
+                else c_bitmap_popcount_safe (castPtr p) (fromIntegral len)
 
 
 {- | Expand @n@ LSB-first packed bits (Arrow / Parquet bool layout) into a
@@ -307,154 +438,201 @@ unpackBitsLsbUnsafe !n bs = unsafeDupablePerformIO $ do
 bytes; only @len@ bytes are written.
 -}
 memcpyFast :: Ptr Word8 -> Ptr Word8 -> Int -> IO ()
-memcpyFast !dst !src !len =
-  c_memcpy_fast src dst (fromIntegral len)
+memcpyFast !dst !src !len
+  | small len = c_memcpy_fast src dst (fromIntegral len)
+  | otherwise = c_memcpy_fast_safe src dst (fromIntegral len)
 
 
 -- | Offsets check: @offs@, number of offsets (rows + 1), limit.
 offsetsCheckI32 :: Ptr Int32 -> Int -> Int64 -> IO Int
-offsetsCheckI32 offs n limit = fromIntegral <$> c_offsets_i32 offs (fromIntegral n) limit
+offsetsCheckI32 offs n limit =
+  fromIntegral <$> (if small (n * 4) then c_offsets_i32 else c_offsets_i32_safe) offs (fromIntegral n) limit
 {-# INLINE offsetsCheckI32 #-}
 
 
 -- | Offsets check: @offs@, number of offsets (rows + 1), limit.
 offsetsCheckI64 :: Ptr Int64 -> Int -> Int64 -> IO Int
-offsetsCheckI64 offs n limit = fromIntegral <$> c_offsets_i64 offs (fromIntegral n) limit
+offsetsCheckI64 offs n limit =
+  fromIntegral <$> (if small (n * 8) then c_offsets_i64 else c_offsets_i64_safe) offs (fromIntegral n) limit
 {-# INLINE offsetsCheckI64 #-}
 
 
 -- | Character boundary check: @offs@, number of offsets, data, data length.
 utf8BoundariesI32 :: Ptr Int32 -> Int -> Ptr Word8 -> Int -> IO Int
 utf8BoundariesI32 offs n dat len =
-  fromIntegral <$> c_utf8_boundaries_i32 offs (fromIntegral n) dat (fromIntegral len)
+  fromIntegral
+    <$> (if small (n * 4) then c_utf8_boundaries_i32 else c_utf8_boundaries_i32_safe)
+      offs
+      (fromIntegral n)
+      dat
+      (fromIntegral len)
 {-# INLINE utf8BoundariesI32 #-}
 
 
 -- | Character boundary check: @offs@, number of offsets, data, data length.
 utf8BoundariesI64 :: Ptr Int64 -> Int -> Ptr Word8 -> Int -> IO Int
 utf8BoundariesI64 offs n dat len =
-  fromIntegral <$> c_utf8_boundaries_i64 offs (fromIntegral n) dat (fromIntegral len)
+  fromIntegral
+    <$> (if small (n * 8) then c_utf8_boundaries_i64 else c_utf8_boundaries_i64_safe)
+      offs
+      (fromIntegral n)
+      dat
+      (fromIntegral len)
 {-# INLINE utf8BoundariesI64 #-}
 
 
 -- | Set bits in a bit range: buffer, bit offset, number of bits.
 popCountBits :: Ptr Word8 -> Int -> Int -> IO Int
 popCountBits buf bitoff nbits =
-  fromIntegral <$> c_popcount_bits buf (fromIntegral bitoff) (fromIntegral nbits)
+  fromIntegral
+    <$> (if small (nbits `quot` 8) then c_popcount_bits else c_popcount_bits_safe)
+      buf
+      (fromIntegral bitoff)
+      (fromIntegral nbits)
 {-# INLINE popCountBits #-}
 
 
 -- | Dictionary key check: keys, rows, validity (or 'nullPtr'), validity bit offset, max.
 keysInRangeI8 :: Ptr Int8 -> Int -> Ptr Word8 -> Int -> Int64 -> IO Int
 keysInRangeI8 keys n valid validoff mx =
-  fromIntegral <$> c_keys_in_range_i8 keys (fromIntegral n) valid (fromIntegral validoff) mx
+  fromIntegral <$> (if small n then c_keys_in_range_i8 else c_keys_in_range_i8_safe) keys (fromIntegral n) valid (fromIntegral validoff) mx
 {-# INLINE keysInRangeI8 #-}
 
 
 -- | See 'keysInRangeI8'.
 keysInRangeI16 :: Ptr Int16 -> Int -> Ptr Word8 -> Int -> Int64 -> IO Int
 keysInRangeI16 keys n valid validoff mx =
-  fromIntegral <$> c_keys_in_range_i16 keys (fromIntegral n) valid (fromIntegral validoff) mx
+  fromIntegral <$> (if small (n * 2) then c_keys_in_range_i16 else c_keys_in_range_i16_safe) keys (fromIntegral n) valid (fromIntegral validoff) mx
 {-# INLINE keysInRangeI16 #-}
 
 
 -- | See 'keysInRangeI8'.
 keysInRangeI32 :: Ptr Int32 -> Int -> Ptr Word8 -> Int -> Int64 -> IO Int
 keysInRangeI32 keys n valid validoff mx =
-  fromIntegral <$> c_keys_in_range_i32 keys (fromIntegral n) valid (fromIntegral validoff) mx
+  fromIntegral <$> (if small (n * 4) then c_keys_in_range_i32 else c_keys_in_range_i32_safe) keys (fromIntegral n) valid (fromIntegral validoff) mx
 {-# INLINE keysInRangeI32 #-}
 
 
 -- | See 'keysInRangeI8'.
 keysInRangeI64 :: Ptr Int64 -> Int -> Ptr Word8 -> Int -> Int64 -> IO Int
 keysInRangeI64 keys n valid validoff mx =
-  fromIntegral <$> c_keys_in_range_i64 keys (fromIntegral n) valid (fromIntegral validoff) mx
+  fromIntegral <$> (if small (n * 8) then c_keys_in_range_i64 else c_keys_in_range_i64_safe) keys (fromIntegral n) valid (fromIntegral validoff) mx
 {-# INLINE keysInRangeI64 #-}
 
 
 -- | See 'keysInRangeI8'.
 keysInRangeU8 :: Ptr Word8 -> Int -> Ptr Word8 -> Int -> Int64 -> IO Int
 keysInRangeU8 keys n valid validoff mx =
-  fromIntegral <$> c_keys_in_range_u8 keys (fromIntegral n) valid (fromIntegral validoff) mx
+  fromIntegral <$> (if small n then c_keys_in_range_u8 else c_keys_in_range_u8_safe) keys (fromIntegral n) valid (fromIntegral validoff) mx
 {-# INLINE keysInRangeU8 #-}
 
 
 -- | See 'keysInRangeI8'.
 keysInRangeU16 :: Ptr Word16 -> Int -> Ptr Word8 -> Int -> Int64 -> IO Int
 keysInRangeU16 keys n valid validoff mx =
-  fromIntegral <$> c_keys_in_range_u16 keys (fromIntegral n) valid (fromIntegral validoff) mx
+  fromIntegral <$> (if small (n * 2) then c_keys_in_range_u16 else c_keys_in_range_u16_safe) keys (fromIntegral n) valid (fromIntegral validoff) mx
 {-# INLINE keysInRangeU16 #-}
 
 
 -- | See 'keysInRangeI8'.
 keysInRangeU32 :: Ptr Word32 -> Int -> Ptr Word8 -> Int -> Int64 -> IO Int
 keysInRangeU32 keys n valid validoff mx =
-  fromIntegral <$> c_keys_in_range_u32 keys (fromIntegral n) valid (fromIntegral validoff) mx
+  fromIntegral <$> (if small (n * 4) then c_keys_in_range_u32 else c_keys_in_range_u32_safe) keys (fromIntegral n) valid (fromIntegral validoff) mx
 {-# INLINE keysInRangeU32 #-}
 
 
 -- | See 'keysInRangeI8'.
 keysInRangeU64 :: Ptr Word64 -> Int -> Ptr Word8 -> Int -> Int64 -> IO Int
 keysInRangeU64 keys n valid validoff mx =
-  fromIntegral <$> c_keys_in_range_u64 keys (fromIntegral n) valid (fromIntegral validoff) mx
+  fromIntegral <$> (if small (n * 8) then c_keys_in_range_u64 else c_keys_in_range_u64_safe) keys (fromIntegral n) valid (fromIntegral validoff) mx
 {-# INLINE keysInRangeU64 #-}
 
 
 -- | Bit copy: dst, dst bit offset, src, src bit offset, number of bits.
 copyBits :: Ptr Word8 -> Int -> Ptr Word8 -> Int -> Int -> IO ()
 copyBits dst dstoff src srcoff nbits =
-  c_copy_bits dst (fromIntegral dstoff) src (fromIntegral srcoff) (fromIntegral nbits)
+  (if small (nbits `quot` 8) then c_copy_bits else c_copy_bits_safe)
+    dst
+    (fromIntegral dstoff)
+    src
+    (fromIntegral srcoff)
+    (fromIntegral nbits)
 {-# INLINE copyBits #-}
 
 
 -- | Offset rebase: dst, src, count, delta.
 rebaseOffsetsI32 :: Ptr Int32 -> Ptr Int32 -> Int -> Int64 -> IO ()
-rebaseOffsetsI32 dst src n delta = c_rebase_offsets_i32 dst src (fromIntegral n) delta
+rebaseOffsetsI32 dst src n delta =
+  (if small (n * 4) then c_rebase_offsets_i32 else c_rebase_offsets_i32_safe) dst src (fromIntegral n) delta
 {-# INLINE rebaseOffsetsI32 #-}
 
 
 -- | Offset rebase: dst, src, count, delta.
 rebaseOffsetsI64 :: Ptr Int64 -> Ptr Int64 -> Int -> Int64 -> IO ()
-rebaseOffsetsI64 dst src n delta = c_rebase_offsets_i64 dst src (fromIntegral n) delta
+rebaseOffsetsI64 dst src n delta =
+  (if small (n * 8) then c_rebase_offsets_i64 else c_rebase_offsets_i64_safe) dst src (fromIntegral n) delta
 {-# INLINE rebaseOffsetsI64 #-}
 
 
 -- | Run-end check: ends, count, minimum last end.
 runEndsCheckI16 :: Ptr Int16 -> Int -> Int64 -> IO Int
-runEndsCheckI16 ends n minEnd = fromIntegral <$> c_run_ends_i16 ends (fromIntegral n) minEnd
+runEndsCheckI16 ends n minEnd =
+  fromIntegral <$> (if small (n * 2) then c_run_ends_i16 else c_run_ends_i16_safe) ends (fromIntegral n) minEnd
 {-# INLINE runEndsCheckI16 #-}
 
 
 -- | Run-end check: ends, count, minimum last end.
 runEndsCheckI32 :: Ptr Int32 -> Int -> Int64 -> IO Int
-runEndsCheckI32 ends n minEnd = fromIntegral <$> c_run_ends_i32 ends (fromIntegral n) minEnd
+runEndsCheckI32 ends n minEnd =
+  fromIntegral <$> (if small (n * 4) then c_run_ends_i32 else c_run_ends_i32_safe) ends (fromIntegral n) minEnd
 {-# INLINE runEndsCheckI32 #-}
 
 
 -- | Run-end check: ends, count, minimum last end.
 runEndsCheckI64 :: Ptr Int64 -> Int -> Int64 -> IO Int
-runEndsCheckI64 ends n minEnd = fromIntegral <$> c_run_ends_i64 ends (fromIntegral n) minEnd
+runEndsCheckI64 ends n minEnd =
+  fromIntegral <$> (if small (n * 8) then c_run_ends_i64 else c_run_ends_i64_safe) ends (fromIntegral n) minEnd
 {-# INLINE runEndsCheckI64 #-}
 
 
 -- | List view check: offsets, sizes, rows, validity (or 'nullPtr'), validity bit offset, child length.
 listViewCheckI32 :: Ptr Int32 -> Ptr Int32 -> Int -> Ptr Word8 -> Int -> Int64 -> IO Int
 listViewCheckI32 offs sizes n valid validoff childLen =
-  fromIntegral <$> c_list_view_i32 offs sizes (fromIntegral n) valid (fromIntegral validoff) childLen
+  fromIntegral
+    <$> (if small (n * 8) then c_list_view_i32 else c_list_view_i32_safe)
+      offs
+      sizes
+      (fromIntegral n)
+      valid
+      (fromIntegral validoff)
+      childLen
 {-# INLINE listViewCheckI32 #-}
 
 
 -- | See 'listViewCheckI32'.
 listViewCheckI64 :: Ptr Int64 -> Ptr Int64 -> Int -> Ptr Word8 -> Int -> Int64 -> IO Int
 listViewCheckI64 offs sizes n valid validoff childLen =
-  fromIntegral <$> c_list_view_i64 offs sizes (fromIntegral n) valid (fromIntegral validoff) childLen
+  fromIntegral
+    <$> (if small (n * 16) then c_list_view_i64 else c_list_view_i64_safe)
+      offs
+      sizes
+      (fromIntegral n)
+      valid
+      (fromIntegral validoff)
+      childLen
 {-# INLINE listViewCheckI64 #-}
 
 
 -- | Dense union check: type ids, offsets, rows, child lengths, number of children.
 denseUnionCheck :: Ptr Int8 -> Ptr Int32 -> Int -> Ptr Int64 -> Int -> IO Int
 denseUnionCheck types offs n childLens nchildren =
-  fromIntegral <$> c_dense_union types offs (fromIntegral n) childLens (fromIntegral nchildren)
+  fromIntegral
+    <$> (if small (n * 5) then c_dense_union else c_dense_union_safe)
+      types
+      offs
+      (fromIntegral n)
+      childLens
+      (fromIntegral nchildren)
 {-# INLINE denseUnionCheck #-}
 
 
@@ -464,7 +642,7 @@ data buffer pointers, data buffer lengths, number of buffers, UTF-8 flag.
 viewRefsCheck :: Ptr Word8 -> Int -> Ptr Word8 -> Int -> Ptr (Ptr Word8) -> Ptr Int64 -> Int -> Bool -> IO Int
 viewRefsCheck views n valid validoff bufs buflens nbufs utf8 =
   fromIntegral
-    <$> c_view_refs
+    <$> (if not utf8 && small (n * 16) then c_view_refs else c_view_refs_safe)
       views
       (fromIntegral n)
       valid
@@ -478,38 +656,44 @@ viewRefsCheck views n valid validoff bufs buflens nbufs utf8 =
 
 -- | Fixed-width gather of 1-byte elements: dst, src, indices, count.
 gather1 :: Ptr Word8 -> Ptr Word8 -> Ptr Int -> Int -> IO ()
-gather1 dst src idx n = c_gather_1 dst src idx (fromIntegral n)
+gather1 dst src idx n = (if small (n * 9) then c_gather_1 else c_gather_1_safe) dst src idx (fromIntegral n)
 {-# INLINE gather1 #-}
 
 
 -- | Fixed-width gather of 2-byte elements: dst, src, indices, count.
 gather2 :: Ptr Word8 -> Ptr Word8 -> Ptr Int -> Int -> IO ()
-gather2 dst src idx n = c_gather_2 dst src idx (fromIntegral n)
+gather2 dst src idx n = (if small (n * 10) then c_gather_2 else c_gather_2_safe) dst src idx (fromIntegral n)
 {-# INLINE gather2 #-}
 
 
 -- | Fixed-width gather of 4-byte elements: dst, src, indices, count.
 gather4 :: Ptr Word8 -> Ptr Word8 -> Ptr Int -> Int -> IO ()
-gather4 dst src idx n = c_gather_4 dst src idx (fromIntegral n)
+gather4 dst src idx n = (if small (n * 12) then c_gather_4 else c_gather_4_safe) dst src idx (fromIntegral n)
 {-# INLINE gather4 #-}
 
 
 -- | Fixed-width gather of 8-byte elements: dst, src, indices, count.
 gather8 :: Ptr Word8 -> Ptr Word8 -> Ptr Int -> Int -> IO ()
-gather8 dst src idx n = c_gather_8 dst src idx (fromIntegral n)
+gather8 dst src idx n = (if small (n * 16) then c_gather_8 else c_gather_8_safe) dst src idx (fromIntegral n)
 {-# INLINE gather8 #-}
 
 
 -- | Fixed-width gather of 16-byte elements: dst, src, indices, count.
 gather16 :: Ptr Word8 -> Ptr Word8 -> Ptr Int -> Int -> IO ()
-gather16 dst src idx n = c_gather_16 dst src idx (fromIntegral n)
+gather16 dst src idx n = (if small (n * 24) then c_gather_16 else c_gather_16_safe) dst src idx (fromIntegral n)
 {-# INLINE gather16 #-}
 
 
 -- | Bit gather: dst, src, src bit offset, indices, count. Returns the set-bit count.
 gatherBits :: Ptr Word8 -> Ptr Word8 -> Int -> Ptr Int -> Int -> IO Int
 gatherBits dst src srcoff idx n =
-  fromIntegral <$> c_gather_bits dst src (fromIntegral srcoff) idx (fromIntegral n)
+  fromIntegral
+    <$> (if small (n * 8) then c_gather_bits else c_gather_bits_safe)
+      dst
+      src
+      (fromIntegral srcoff)
+      idx
+      (fromIntegral n)
 {-# INLINE gatherBits #-}
 
 
@@ -517,31 +701,38 @@ gatherBits dst src srcoff idx n =
 andBits :: Ptr Word8 -> Ptr Word8 -> Int -> Ptr Word8 -> Int -> Int -> IO Int
 andBits dst a aoff b boff nbits =
   fromIntegral
-    <$> c_and_bits dst a (fromIntegral aoff) b (fromIntegral boff) (fromIntegral nbits)
+    <$> (if small (nbits `quot` 4) then c_and_bits else c_and_bits_safe)
+      dst
+      a
+      (fromIntegral aoff)
+      b
+      (fromIntegral boff)
+      (fromIntegral nbits)
 {-# INLINE andBits #-}
 
 
 -- | Take pass 1: dst offsets, src offsets, indices, count. Returns the total or -1.
 takeOffsetsI32 :: Ptr Int32 -> Ptr Int32 -> Ptr Int -> Int -> IO Int
 takeOffsetsI32 dstOffs srcOffs idx n =
-  fromIntegral <$> c_take_offsets_i32 dstOffs srcOffs idx (fromIntegral n)
+  fromIntegral <$> (if small (n * 8) then c_take_offsets_i32 else c_take_offsets_i32_safe) dstOffs srcOffs idx (fromIntegral n)
 {-# INLINE takeOffsetsI32 #-}
 
 
 -- | See 'takeOffsetsI32'.
 takeOffsetsI64 :: Ptr Int64 -> Ptr Int64 -> Ptr Int -> Int -> IO Int
 takeOffsetsI64 dstOffs srcOffs idx n =
-  fromIntegral <$> c_take_offsets_i64 dstOffs srcOffs idx (fromIntegral n)
+  fromIntegral <$> (if small (n * 8) then c_take_offsets_i64 else c_take_offsets_i64_safe) dstOffs srcOffs idx (fromIntegral n)
 {-# INLINE takeOffsetsI64 #-}
 
 
--- | Take pass 2: dst bytes, src offsets, src bytes, indices, count.
+-- | Take pass 2: dst bytes, src offsets, src bytes, indices, count. Always a
+-- safe call: the bytes copied are not bounded by the row count.
 takeBytesI32 :: Ptr Word8 -> Ptr Int32 -> Ptr Word8 -> Ptr Int -> Int -> IO ()
-takeBytesI32 dst srcOffs src idx n = c_take_bytes_i32 dst srcOffs src idx (fromIntegral n)
+takeBytesI32 dst srcOffs src idx n = c_take_bytes_i32_safe dst srcOffs src idx (fromIntegral n)
 {-# INLINE takeBytesI32 #-}
 
 
 -- | See 'takeBytesI32'.
 takeBytesI64 :: Ptr Word8 -> Ptr Int64 -> Ptr Word8 -> Ptr Int -> Int -> IO ()
-takeBytesI64 dst srcOffs src idx n = c_take_bytes_i64 dst srcOffs src idx (fromIntegral n)
+takeBytesI64 dst srcOffs src idx n = c_take_bytes_i64_safe dst srcOffs src idx (fromIntegral n)
 {-# INLINE takeBytesI64 #-}
