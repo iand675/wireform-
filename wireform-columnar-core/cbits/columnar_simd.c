@@ -532,27 +532,60 @@ int64_t hs_columnar_gather_bits(uint8_t *dst, const uint8_t *src, size_t srcoff,
 /* ------------------------------------------------------------------------ */
 
 /*
- * For every valid row: 0 <= keys[i] < max. Each key is widened to uint64
- * (signed keys through int64), so negative keys and unsigned keys >= 2^63
- * compare above any positive max.
+ * For every valid row: 0 <= keys[i] < max.
+ *
+ * The test runs at the key's own width: key i is in range iff
+ * (UT)keys[i] < lim, where lim is max clamped to the type. A negative
+ * signed key casts to an unsigned value >= 2^(bits-1) >= lim, so it fails;
+ * an unsigned 64-bit key >= 2^63 is >= any int64 max, so it fails too. When
+ * max exceeds every value an unsigned key type can hold, all keys pass.
+ *
+ * Each 64-row block is first checked with a branch-free OR of the compares,
+ * which the compiler vectorises (no validity, no per-row shift). Only a
+ * block that contains an out-of-range value is rescanned exactly with its
+ * validity mask, because null slots may hold any key.
  */
-#define DEF_KEYS(NAME, T, LD, WIDEN)                                          \
+#define DEF_KEYS(NAME, T, UT, IS_SIGNED)                                      \
+    static inline int NAME##_block_hit(const uint8_t *p, size_t m, UT lim)    \
+    {                                                                         \
+        UT hit = 0;                                                           \
+        for (size_t j = 0; j < m; j++) {                                      \
+            UT k;                                                             \
+            memcpy(&k, p + j * sizeof(UT), sizeof(UT));                       \
+            hit |= (UT)(k >= lim);                                            \
+        }                                                                     \
+        return hit != 0;                                                      \
+    }                                                                         \
+                                                                              \
     int64_t NAME(const T *keys, size_t n, const uint8_t *valid,               \
                  size_t validoff, int64_t max)                                \
     {                                                                         \
         if (max <= 0) {                                                       \
             return first_valid(n, valid, validoff);                           \
         }                                                                     \
-        const uint64_t umax = (uint64_t)max;                                  \
+        const unsigned bits = (unsigned)(sizeof(T) * 8);                      \
+        uint64_t limv = (uint64_t)max;                                        \
+        if (IS_SIGNED) {                                                      \
+            const uint64_t top = (uint64_t)1 << (bits - 1);                   \
+            if (limv > top) {                                                 \
+                limv = top;                                                   \
+            }                                                                 \
+        } else if (bits < 64 && limv > (((uint64_t)1 << bits) - 1)) {         \
+            return -1;                                                        \
+        }                                                                     \
+        const UT lim = (UT)limv;                                              \
+        const uint8_t *p = (const uint8_t *)keys;                             \
         for (size_t i = 0; i < n; i += 64) {                                  \
             size_t m = min_sz(64, n - i);                                     \
-            uint64_t vm = valid_mask(valid, validoff, i, m);                  \
-            if (!vm) {                                                        \
+            if (!NAME##_block_hit(p + i * sizeof(T), m, lim)) {               \
                 continue;                                                     \
             }                                                                 \
+            uint64_t vm = valid_mask(valid, validoff, i, m);                  \
             uint64_t bad = 0;                                                 \
             for (size_t j = 0; j < m; j++) {                                  \
-                bad |= (uint64_t)(WIDEN(LD(keys, i + j)) >= umax) << j;       \
+                UT k;                                                         \
+                memcpy(&k, p + (i + j) * sizeof(T), sizeof(T));               \
+                bad |= (uint64_t)(k >= lim) << j;                             \
             }                                                                 \
             bad &= vm;                                                        \
             if (bad) {                                                        \
@@ -562,17 +595,14 @@ int64_t hs_columnar_gather_bits(uint8_t *dst, const uint8_t *src, size_t srcoff,
         return -1;                                                            \
     }
 
-#define WIDEN_S(x) ((uint64_t)(int64_t)(x))
-#define WIDEN_U(x) ((uint64_t)(x))
-
-DEF_KEYS(hs_columnar_keys_in_range_i8, int8_t, ld_i8, WIDEN_S)
-DEF_KEYS(hs_columnar_keys_in_range_i16, int16_t, ld_i16, WIDEN_S)
-DEF_KEYS(hs_columnar_keys_in_range_i32, int32_t, ld_i32, WIDEN_S)
-DEF_KEYS(hs_columnar_keys_in_range_i64, int64_t, ld_i64, WIDEN_S)
-DEF_KEYS(hs_columnar_keys_in_range_u8, uint8_t, ld_u8, WIDEN_U)
-DEF_KEYS(hs_columnar_keys_in_range_u16, uint16_t, ld_u16, WIDEN_U)
-DEF_KEYS(hs_columnar_keys_in_range_u32, uint32_t, ld_u32, WIDEN_U)
-DEF_KEYS(hs_columnar_keys_in_range_u64, uint64_t, ld_u64, WIDEN_U)
+DEF_KEYS(hs_columnar_keys_in_range_i8, int8_t, uint8_t, 1)
+DEF_KEYS(hs_columnar_keys_in_range_i16, int16_t, uint16_t, 1)
+DEF_KEYS(hs_columnar_keys_in_range_i32, int32_t, uint32_t, 1)
+DEF_KEYS(hs_columnar_keys_in_range_i64, int64_t, uint64_t, 1)
+DEF_KEYS(hs_columnar_keys_in_range_u8, uint8_t, uint8_t, 0)
+DEF_KEYS(hs_columnar_keys_in_range_u16, uint16_t, uint16_t, 0)
+DEF_KEYS(hs_columnar_keys_in_range_u32, uint32_t, uint32_t, 0)
+DEF_KEYS(hs_columnar_keys_in_range_u64, uint64_t, uint64_t, 0)
 
 /*
  * List view: for every valid row, offs[i] >= 0, sizes[i] >= 0 and

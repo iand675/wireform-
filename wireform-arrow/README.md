@@ -626,44 +626,44 @@ link with `-rtsopts` and run with `+RTS -A64m` (or bake it in with
 
 | Operation                                   | arrow-rs | wireform-arrow | ratio |
 | :------------------------------------------ | -------: | -------------: | ----: |
-| encode int64                                |  38.9 µs |        11.2 µs | 0.29x |
-| encode double                               |  38.6 µs |        10.8 µs | 0.28x |
-| encode nullable int64                       |  38.5 µs |        11.0 µs | 0.29x |
-| encode utf8                                 | 45.10 µs |        13.3 µs | 0.29x |
-| encode nullable utf8                        |  44.1 µs |        12.8 µs | 0.29x |
-| encode mixed 6-col                          |   456 µs |        64.1 µs | 0.14x |
-| encode list<int32>                          |  95.7 µs |        27.7 µs | 0.29x |
-| encode struct<int32,double,bool>            |  65.3 µs |        17.3 µs | 0.26x |
-| encode dictionary<utf8>                     |  30.5 µs |        6.29 µs | 0.21x |
-| encode lazy int64                           |  38.9 µs |        0.65 µs | 0.02x |
-| encode lazy double                          |  38.6 µs |        0.64 µs | 0.02x |
-| encode lazy nullable int64                  |  38.5 µs |        0.72 µs | 0.02x |
-| encode lazy utf8                            | 45.10 µs |        0.76 µs | 0.02x |
-| encode lazy nullable utf8                   |  44.1 µs |        0.82 µs | 0.02x |
-| encode lazy mixed 6-col                     |   456 µs |        2.16 µs | 0.00x |
-| encode lazy list<int32>                     |  95.7 µs |        0.95 µs | 0.01x |
-| encode lazy struct<int32,double,bool>       |  65.3 µs |        1.42 µs | 0.02x |
-| encode lazy dictionary<utf8>                |  30.5 µs |        1.17 µs | 0.04x |
-| decode int64                                |  13.3 µs |        0.50 µs | 0.04x |
-| decode double                               |  13.2 µs |        0.48 µs | 0.04x |
-| decode nullable int64                       |  13.5 µs |        0.76 µs | 0.06x |
-| decode utf8                                 |   121 µs |        48.4 µs | 0.40x |
-| decode nullable utf8                        |   120 µs |        48.3 µs | 0.40x |
-| decode mixed 6-col                          |   286 µs |        98.3 µs | 0.34x |
-| decode list<int32>                          |   111 µs |        6.11 µs | 0.06x |
-| decode struct<int32,double,bool>            |  21.3 µs |        1.08 µs | 0.05x |
-| decode dictionary<utf8>                     |  33.9 µs |        20.4 µs | 0.60x |
-| decode + toVector int64                     |   160 µs |        15.6 µs | 0.10x |
-| decode + toVector double                    |   172 µs |        15.0 µs | 0.09x |
-| decode + toVector nullable int64            |   161 µs |        14.8 µs | 0.09x |
-| decode + toVector utf8                      |  1415 µs |         244 µs | 0.17x |
-| decode + toVector nullable utf8             |  1439 µs |         262 µs | 0.18x |
-| decode + toVector mixed 6-col               |  3440 µs |         571 µs | 0.17x |
-| decode + toVector list<int32>               |  4028 µs |         192 µs | 0.05x |
-| decode + toVector struct<int32,double,bool> |   333 µs |        26.7 µs | 0.08x |
-| decode + toVector dictionary<utf8>          |  1359 µs |         436 µs | 0.32x |
+| encode int64                                |  39.3 µs |        10.7 µs | 0.27x |
+| encode double                               |  39.5 µs |        10.3 µs | 0.26x |
+| encode nullable int64                       |  37.8 µs |        10.7 µs | 0.28x |
+| encode utf8                                 |  45.2 µs |        12.9 µs | 0.28x |
+| encode nullable utf8                        |  43.5 µs |        12.5 µs | 0.29x |
+| encode mixed 6-col                          |   413 µs |        61.7 µs | 0.15x |
+| encode list<int32>                          |  93.9 µs |        26.8 µs | 0.29x |
+| encode struct<int32,double,bool>            | 62.10 µs |        16.4 µs | 0.26x |
+| encode dictionary<utf8>                     |  31.4 µs |        6.05 µs | 0.19x |
+| encode lazy int64                           |  39.3 µs |        0.63 µs | 0.02x |
+| encode lazy double                          |  39.5 µs |        0.61 µs | 0.02x |
+| encode lazy nullable int64                  |  37.8 µs |        0.65 µs | 0.02x |
+| encode lazy utf8                            |  45.2 µs |        0.69 µs | 0.02x |
+| encode lazy nullable utf8                   |  43.5 µs |        0.69 µs | 0.02x |
+| encode lazy mixed 6-col                     |   413 µs |        2.07 µs | 0.01x |
+| encode lazy list<int32>                     |  93.9 µs |        0.91 µs | 0.01x |
+| encode lazy struct<int32,double,bool>       | 62.10 µs |        1.36 µs | 0.02x |
+| encode lazy dictionary<utf8>                |  31.4 µs |        1.12 µs | 0.04x |
+| decode int64                                |  13.1 µs |        0.48 µs | 0.04x |
+| decode double                               |  13.1 µs |        0.46 µs | 0.04x |
+| decode nullable int64                       |  13.4 µs |        0.75 µs | 0.06x |
+| decode utf8                                 |   125 µs |       47.10 µs | 0.38x |
+| decode nullable utf8                        |   123 µs |        47.8 µs | 0.39x |
+| decode mixed 6-col                          |   293 µs |        97.4 µs | 0.33x |
+| decode list<int32>                          |   110 µs |        6.08 µs | 0.06x |
+| decode struct<int32,double,bool>            |  20.9 µs |        1.04 µs | 0.05x |
+| decode dictionary<utf8>                     |  34.1 µs |        6.29 µs | 0.18x |
+| decode + toVector int64                     |   159 µs |        15.0 µs | 0.09x |
+| decode + toVector double                    |   171 µs |        14.6 µs | 0.08x |
+| decode + toVector nullable int64            |   160 µs |        14.3 µs | 0.09x |
+| decode + toVector utf8                      |  1411 µs |         241 µs | 0.17x |
+| decode + toVector nullable utf8             |  1458 µs |         297 µs | 0.20x |
+| decode + toVector mixed 6-col               |  3458 µs |         556 µs | 0.16x |
+| decode + toVector list<int32>               |  3702 µs |         189 µs | 0.05x |
+| decode + toVector struct<int32,double,bool> |   330 µs |        25.7 µs | 0.08x |
+| decode + toVector dictionary<utf8>          |  1338 µs |         401 µs | 0.30x |
 
-<sub>Last run 2026-10-09 09:26:33 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5; arrow-rs 58.2.0, rustc 1.98.1, criterion.rs 0.7.0.</sub>
+<sub>Last run 2026-10-09 11:04:54 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5; arrow-rs 58.2.0, rustc 1.98.1, criterion.rs 0.7.0.</sub>
 <!-- END_AUTOGEN bench:arrow-encode-decode -->
 
 The same workloads as a small (100-row) batch, where per-message framing
@@ -677,44 +677,44 @@ dominates:
 
 | Operation                                   | arrow-rs | wireform-arrow | ratio |
 | :------------------------------------------ | -------: | -------------: | ----: |
-| encode int64                                |  1.01 µs |        0.65 µs | 0.64x |
-| encode double                               |  1.01 µs |        0.65 µs | 0.64x |
-| encode nullable int64                       |  0.99 µs |        0.66 µs | 0.67x |
-| encode utf8                                 |  1.08 µs |        0.68 µs | 0.63x |
-| encode nullable utf8                        |  1.08 µs |        0.67 µs | 0.62x |
-| encode mixed 6-col                          |  2.65 µs |        2.18 µs | 0.82x |
-| encode list<int32>                          |  1.43 µs |        0.96 µs | 0.67x |
-| encode struct<int32,double,bool>            |  1.99 µs |        1.41 µs | 0.71x |
-| encode dictionary<utf8>                     |  2.25 µs |        1.12 µs | 0.50x |
-| encode lazy int64                           |  1.01 µs |        0.65 µs | 0.64x |
-| encode lazy double                          |  1.01 µs |        0.63 µs | 0.62x |
-| encode lazy nullable int64                  |  0.99 µs |        0.69 µs | 0.70x |
-| encode lazy utf8                            |  1.08 µs |        0.73 µs | 0.68x |
-| encode lazy nullable utf8                   |  1.08 µs |        0.75 µs | 0.69x |
-| encode lazy mixed 6-col                     |  2.65 µs |        2.17 µs | 0.82x |
-| encode lazy list<int32>                     |  1.43 µs |        0.96 µs | 0.67x |
-| encode lazy struct<int32,double,bool>       |  1.99 µs |        1.42 µs | 0.71x |
-| encode lazy dictionary<utf8>                |  2.25 µs |        1.18 µs | 0.52x |
-| decode int64                                |  0.63 µs |        0.50 µs | 0.79x |
-| decode double                               |  0.63 µs |        0.49 µs | 0.78x |
-| decode nullable int64                       |  0.66 µs |        0.52 µs | 0.79x |
-| decode utf8                                 |  0.75 µs |        0.60 µs | 0.80x |
-| decode nullable utf8                        |  0.77 µs |        0.60 µs | 0.78x |
-| decode mixed 6-col                          |  2.26 µs |        1.59 µs | 0.70x |
-| decode list<int32>                          |  1.09 µs |        0.72 µs | 0.66x |
-| decode struct<int32,double,bool>            |  1.32 µs |        1.08 µs | 0.82x |
-| decode dictionary<utf8>                     |  1.36 µs |        0.93 µs | 0.68x |
-| decode + toVector int64                     |  0.73 µs |        0.59 µs | 0.81x |
-| decode + toVector double                    |  0.78 µs |        0.58 µs | 0.74x |
-| decode + toVector nullable int64            |  0.80 µs |        0.61 µs | 0.76x |
-| decode + toVector utf8                      |  1.89 µs |        1.08 µs | 0.57x |
-| decode + toVector nullable utf8             |  1.91 µs |        1.07 µs | 0.56x |
-| decode + toVector mixed 6-col               |  5.07 µs |        2.90 µs | 0.57x |
-| decode + toVector list<int32>               |  4.79 µs |        1.31 µs | 0.27x |
-| decode + toVector struct<int32,double,bool> |  1.57 µs |        1.37 µs | 0.87x |
-| decode + toVector dictionary<utf8>          |  2.57 µs |        1.79 µs | 0.70x |
+| encode int64                                |  0.98 µs |        0.63 µs | 0.64x |
+| encode double                               |  1.00 µs |        0.62 µs | 0.62x |
+| encode nullable int64                       |  0.98 µs |        0.64 µs | 0.65x |
+| encode utf8                                 |  1.07 µs |        0.66 µs | 0.62x |
+| encode nullable utf8                        |  1.06 µs |        0.66 µs | 0.62x |
+| encode mixed 6-col                          |  2.56 µs |        2.11 µs | 0.82x |
+| encode list<int32>                          |  1.42 µs |        0.93 µs | 0.65x |
+| encode struct<int32,double,bool>            |  1.94 µs |        1.37 µs | 0.71x |
+| encode dictionary<utf8>                     |  2.24 µs |        1.09 µs | 0.49x |
+| encode lazy int64                           |  0.98 µs |        0.63 µs | 0.64x |
+| encode lazy double                          |  1.00 µs |        0.61 µs | 0.61x |
+| encode lazy nullable int64                  |  0.98 µs |        0.65 µs | 0.66x |
+| encode lazy utf8                            |  1.07 µs |        0.69 µs | 0.64x |
+| encode lazy nullable utf8                   |  1.06 µs |        0.71 µs | 0.67x |
+| encode lazy mixed 6-col                     |  2.56 µs |        2.08 µs | 0.81x |
+| encode lazy list<int32>                     |  1.42 µs |        0.91 µs | 0.64x |
+| encode lazy struct<int32,double,bool>       |  1.94 µs |        1.36 µs | 0.70x |
+| encode lazy dictionary<utf8>                |  2.24 µs |        1.12 µs | 0.50x |
+| decode int64                                |  0.63 µs |        0.48 µs | 0.76x |
+| decode double                               |  0.62 µs |        0.46 µs | 0.74x |
+| decode nullable int64                       |  0.66 µs |        0.50 µs | 0.76x |
+| decode utf8                                 |  0.74 µs |        0.57 µs | 0.77x |
+| decode nullable utf8                        |  0.76 µs |        0.57 µs | 0.75x |
+| decode mixed 6-col                          |  2.25 µs |        1.54 µs | 0.68x |
+| decode list<int32>                          |  1.08 µs |        0.69 µs | 0.64x |
+| decode struct<int32,double,bool>            |  1.29 µs |        1.04 µs | 0.81x |
+| decode dictionary<utf8>                     |  1.36 µs |        0.88 µs | 0.65x |
+| decode + toVector int64                     |  0.73 µs |        0.57 µs | 0.78x |
+| decode + toVector double                    |  0.72 µs |        0.56 µs | 0.78x |
+| decode + toVector nullable int64            |  0.79 µs |        0.58 µs | 0.73x |
+| decode + toVector utf8                      |  1.93 µs |        1.02 µs | 0.53x |
+| decode + toVector nullable utf8             |  1.94 µs |        1.02 µs | 0.53x |
+| decode + toVector mixed 6-col               |  5.25 µs |        2.76 µs | 0.53x |
+| decode + toVector list<int32>               |  4.76 µs |        1.26 µs | 0.26x |
+| decode + toVector struct<int32,double,bool> |  1.55 µs |        1.29 µs | 0.83x |
+| decode + toVector dictionary<utf8>          |  2.54 µs |        1.56 µs | 0.61x |
 
-<sub>Last run 2026-10-09 09:26:33 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5; arrow-rs 58.2.0, rustc 1.98.1, criterion.rs 0.7.0.</sub>
+<sub>Last run 2026-10-09 11:04:54 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5; arrow-rs 58.2.0, rustc 1.98.1, criterion.rs 0.7.0.</sub>
 <!-- END_AUTOGEN bench:arrow-encode-decode-small -->
 
 The mixed 6-column table through each public entry point: the
@@ -736,18 +736,18 @@ row structs), since arrow-rs has no record deriving:
 
 | Operation                         | arrow-rs | wireform-arrow | ratio |
 | :-------------------------------- | -------: | -------------: | ----: |
-| stream encode (Arrow.Stream)      |   456 µs |        64.1 µs | 0.14x |
-| stream encode lazy (Arrow.Stream) |   456 µs |        2.16 µs | 0.00x |
-| stream encode (Arrow.Write)       |   456 µs |        64.0 µs | 0.14x |
-| stream decode (Arrow.Stream)      |   288 µs |        98.4 µs | 0.34x |
-| file encode (Arrow.Stream)        |   455 µs |        66.6 µs | 0.15x |
-| file encode lazy (Arrow.Stream)   |   455 µs |        3.72 µs | 0.01x |
-| file decode (Arrow.Stream)        |   289 µs |        98.3 µs | 0.34x |
-| file read (Arrow.File)            |   289 µs |        98.1 µs | 0.34x |
-| typed encode (Arrow.Record)       |  1760 µs |        1488 µs | 0.85x |
-| typed decode (Arrow.Record)       |  3156 µs |        2954 µs | 0.94x |
+| stream encode (Arrow.Stream)      |   393 µs |        61.5 µs | 0.16x |
+| stream encode lazy (Arrow.Stream) |   393 µs |        2.07 µs | 0.01x |
+| stream encode (Arrow.Write)       |   393 µs |        61.2 µs | 0.16x |
+| stream decode (Arrow.Stream)      |   277 µs |        96.8 µs | 0.35x |
+| file encode (Arrow.Stream)        |   397 µs |        64.2 µs | 0.16x |
+| file encode lazy (Arrow.Stream)   |   397 µs |        3.69 µs | 0.01x |
+| file decode (Arrow.Stream)        |   277 µs |        97.3 µs | 0.35x |
+| file read (Arrow.File)            |   277 µs |        97.8 µs | 0.35x |
+| typed encode (Arrow.Record)       |  1645 µs |        1470 µs | 0.89x |
+| typed decode (Arrow.Record)       |  3076 µs |        2944 µs | 0.96x |
 
-<sub>Last run 2026-10-09 09:26:33 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5; arrow-rs 58.2.0, rustc 1.98.1, criterion.rs 0.7.0.</sub>
+<sub>Last run 2026-10-09 11:04:54 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5; arrow-rs 58.2.0, rustc 1.98.1, criterion.rs 0.7.0.</sub>
 <!-- END_AUTOGEN bench:arrow-api-paths -->
 
 Not yet compared: arrow-cpp (the reference implementation),
