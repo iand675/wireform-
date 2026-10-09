@@ -80,7 +80,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Vector qualified as V
 import Data.Word (Word16, Word32, Word64, Word8)
-import Foreign.ForeignPtr (withForeignPtr)
+import GHC.ForeignPtr (unsafeWithForeignPtr)
 import Foreign.Ptr (Ptr)
 import Foreign.Storable (Storable, peekByteOff)
 import GHC.Float (castWord32ToFloat, castWord64ToDouble)
@@ -160,7 +160,7 @@ peekDouble bs off = castWord64ToDouble <$> peekU64 bs off
 
 {- | Generic fixed-width LE peek. Specialised internally by
 'peekU16' / 'peekU32' / 'peekU64'. Picks up a 'Ptr Word8'
-through 'withForeignPtr' and lets GHC inline the @Storable@
+through 'unsafeWithForeignPtr' and lets GHC inline the @Storable@
 dictionary into a single aligned load.
 -}
 peekFixed
@@ -182,10 +182,12 @@ peekFixed !w name bs off
 
 {- | Run @f@ with a 'Ptr' to the start of the input 'ByteString'.
 Reads are pure in the value sense; the 'IO' bracket is just a
-consequence of 'withForeignPtr'\'s API.
+consequence of the 'ForeignPtr' API. Every caller passes a single
+load, which cannot diverge, so 'unsafeWithForeignPtr' is sound and
+avoids the @keepAlive#@ frame 'withForeignPtr' pushes on every peek.
 -}
 withBSPtr :: ByteString -> (Ptr Word8 -> IO a) -> IO a
-withBSPtr (BSI.BS fp _) f = withForeignPtr fp f
+withBSPtr (BSI.BS fp _) f = unsafeWithForeignPtr fp f
 {-# INLINE withBSPtr #-}
 
 
