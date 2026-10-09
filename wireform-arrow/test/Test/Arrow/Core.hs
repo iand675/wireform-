@@ -15,6 +15,7 @@ module Test.Arrow.Core (tests) where
 
 import Arrow.Column
 import Arrow.Column.Internal (Bitmap (..), Validity (..), checkValidity, columnBuffers, concatBitmaps, copyBitmap, integralPrim, IntegralPrim (..), sliceBitmap, takeBitmap)
+import Arrow.Record qualified as AR
 import Control.Monad (forM, replicateM)
 import Control.Monad.ST (runST)
 import Data.Bits (setBit)
@@ -25,7 +26,7 @@ import Data.Either (isLeft, isRight)
 import Data.Foldable (foldl')
 import Data.Int (Int32, Int64)
 import Data.List (sortOn)
-import Data.Maybe (isJust, isNothing)
+import Data.Maybe (catMaybes, isJust, isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -50,7 +51,7 @@ tests =
       , ("validity is normalised: no nulls means Nothing", prop_validityNormalised)
       , ("generated columns observe as their model", prop_observeModel)
       , ("typed accessors agree with the model and reject out-of-range rows", prop_accessors)
-      , ("boxed conversions agree with the model on every kind they accept", prop_conversions)
+      , ("boxed conversions and Arrow.Record utf8D agree with the model on every kind they accept", prop_conversions)
       , ("builders build what the from* conversions build, and reset on freeze", prop_builders)
       , ("Eq is reflexive and agrees with the model", prop_eq)
       , ("slice keeps the clamped window", prop_slice)
@@ -661,7 +662,14 @@ prop_conversions = withTests 500 . property $ do
       | otherwise -> do
           fmap VG.toList (toBytesVector c) === Right bytes
           if textKind
-            then fmap VG.toList (toTextVector c) === Right texts
+            then do
+              fmap VG.toList (toTextVector c) === Right texts
+              -- Arrow.Record's utf8D reads the same rows, as slices of
+              -- one copy of the column's referenced bytes.
+              fmap V.toList (AR.runDecoder (AR.nullableD AR.utf8D) c) === Right texts
+              if all isJust texts
+                then fmap V.toList (AR.runDecoder AR.utf8D c) === Right (catMaybes texts)
+                else assert (isLeft (AR.runDecoder AR.utf8D c))
             else assert (isLeft (toTextVector c))
   where
     int32s ch = maybe (Left ("not an int32 child: " ++ columnTag ch)) (Right . toMaybeVector) (asPrim PInt32 ch)

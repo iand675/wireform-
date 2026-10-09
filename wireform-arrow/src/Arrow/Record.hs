@@ -38,8 +38,9 @@ heap object is allocated. Decoding binds each column once (type
 check, dictionary handling) to a row reader, composes the readers
 through the 'Applicative', and runs a single 'V.generate' over the
 rows: the only per-row allocation is the record itself and its boxed
-fields ('Text' fields copy their bytes once, 'ByteString' fields
-alias the input column).
+fields ('Text' fields are slices of one copy of their column's string
+bytes, made when the column is bound; 'ByteString' fields alias the
+input column).
 
 == Example
 
@@ -145,14 +146,13 @@ module Arrow.Record (
 
 import Arrow.Column (
   BoolArray (..),
+  BytesArray (..),
   ColumnArray,
-  ColumnBuilder (..),
   PrimArray (..),
   PrimType (..),
+  Utf8Array (..),
   anyBytesAt,
   anyTextAt,
-  appendBytes,
-  appendText,
   asBinary,
   asBool,
   asLargeBinary,
@@ -171,13 +171,10 @@ import Arrow.Column (
   mkPrim,
   mkStruct,
   mkValidity,
-  newBinaryBuilder,
-  newUtf8Builder,
   nullCount,
   primColumn,
   unsafeBytesAt,
   unsafePrimAt,
-  unsafeTextAt,
   validity,
   validityGenerate,
   pattern ColBinaryView,
@@ -188,6 +185,8 @@ import Arrow.Column (
   pattern ColUtf8View,
  )
 import Arrow.Column qualified as AC
+import Arrow.Column.Buffer (mallocAligned, unsafeIsValidAt)
+import Arrow.Column.Internal qualified as I
 import Arrow.Types (
   ArrowType (..),
   DateUnit (..),
@@ -197,29 +196,37 @@ import Arrow.Types (
   Schema (..),
   TimeUnit (..),
  )
-import Control.Monad.ST (ST, runST)
+import Control.Monad (when)
+import Control.Monad.ST (ST, runST, stToIO)
 import Control.Monad.ST.Unsafe (unsafeIOToST)
 import Data.Bits (complement, unsafeShiftL, unsafeShiftR, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Internal qualified as BSI
+import Data.ByteString.Unsafe qualified as BSU
 import Data.Functor.Contravariant (Contravariant (..))
 import Data.Int (Int16, Int32, Int64, Int8)
 import Data.List (findIndex)
 import Data.Maybe (fromMaybe, isJust)
+import Data.Primitive.MutVar (newMutVar, readMutVar, writeMutVar)
 import Data.Primitive.PrimArray (MutablePrimArray, newPrimArray, readPrimArray, writePrimArray)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Array qualified as TA
+import Data.Text.Internal qualified as TI
+import Data.Text.Foreign qualified as TF
 import Data.Vector qualified as V
 import Data.Vector.Storable qualified as VS
 import Data.Vector.Storable.Mutable qualified as VSM
 import Data.Word (Word16, Word32, Word64, Word8)
 import Foreign.ForeignPtr (ForeignPtr)
-import Foreign.Marshal.Utils (fillBytes)
-import Foreign.Ptr (castPtr, plusPtr)
-import Foreign.Storable (Storable, peekByteOff, pokeByteOff, sizeOf)
+import Foreign.ForeignPtr.Unsafe (unsafeForeignPtrToPtr)
+import Foreign.Marshal.Utils (copyBytes, fillBytes)
+import Foreign.Ptr (Ptr, castPtr, minusPtr, nullPtr, plusPtr)
+import Foreign.Storable (Storable, peekByteOff, pokeByteOff, pokeElemOff, sizeOf)
 import GHC.Exts (Int (I#), Int#)
 import GHC.ForeignPtr (unsafeWithForeignPtr)
+import System.IO.Unsafe (unsafeDupablePerformIO)
 
 
 -- ============================================================
@@ -307,6 +314,13 @@ nullable e =
 are stored straight into their slot of one pinned buffer (a single
 store per row); nulls are recorded in a side mask and only turned
 into a validity bitmap if one occurred.
+
+Like every encoder here, the append actions write through the raw
+addresses of their pinned buffers and capture nothing else: a row
+encoder's per-row action holds every field's append state, and each
+captured value costs a load and a stack slot per row. The buffers stay
+alive because the freeze action, which runs after the last append,
+holds them.
 -}
 primE :: Storable a => ArrowType -> PrimType a -> Encoder a
 primE ty t =
@@ -316,8 +330,9 @@ primE ty t =
     , encoderSink = \n -> do
         vals <- VSM.unsafeNew n
         nulls <- newNullMask n
-        let pushNull i = do
-              zeroSlot vals (I# i)
+        let !p = mvectorPtr vals
+            pushNull i = do
+              zeroSlot p (I# i)
               markNull nulls (I# i)
             freeze = do
               v <- VS.unsafeFreeze vals
@@ -325,17 +340,22 @@ primE ty t =
               pure $ case valid of
                 Nothing -> primColumn t v
                 Just _ -> encoded "primE" (mkPrim t valid v)
-        pure (ColSink (\i x -> VSM.unsafeWrite vals (I# i) x) pushNull freeze)
+        pure (ColSink (\i x -> unsafeIOToST (pokeElemOff p (I# i) x)) pushNull freeze)
     }
 {-# INLINE primE #-}
 
 
+-- | The address of a pinned storable vector's first element.
+mvectorPtr :: VSM.MVector s a -> Ptr a
+mvectorPtr = unsafeForeignPtrToPtr . fst . VSM.unsafeToForeignPtr0
+{-# INLINE mvectorPtr #-}
+
+
 -- | Zero a null row's value slot (deterministic bytes under nulls).
-zeroSlot :: forall s a. Storable a => VSM.MVector s a -> Int -> ST s ()
-zeroSlot vals i = unsafeIOToST $ do
-  let (fp, _) = VSM.unsafeToForeignPtr0 vals
-      !w = sizeOf (undefined :: a)
-  unsafeWithForeignPtr fp $ \p -> fillBytes (castPtr p `plusPtr` (i * w)) 0 w
+zeroSlot :: forall s a. Storable a => Ptr a -> Int -> ST s ()
+zeroSlot p i = unsafeIOToST $ do
+  let !w = sizeOf (undefined :: a)
+  fillBytes (castPtr p `plusPtr` (i * w)) 0 w
 
 
 -- | Unwrap a column built from rows that satisfy its invariants by construction.
@@ -345,10 +365,10 @@ encoded who = \case
   Left e -> errorWithoutStackTrace ("Arrow.Record." ++ who ++ ": " ++ e)
 
 
-{- | Null rows seen so far: a zeroed bit per row (set = null) and the
-null count.
+{- | Null rows seen so far: a zeroed bit per row (set = null), its
+address, and the null count.
 -}
-data NullMask s = NullMask (ForeignPtr Word8) (MutablePrimArray s Int)
+data NullMask s = NullMask (Ptr Word8) (ForeignPtr Word8) (MutablePrimArray s Int)
 
 
 newNullMask :: Int -> ST s (NullMask s)
@@ -356,12 +376,12 @@ newNullMask n = do
   bits <- newBits n
   count <- newPrimArray 1
   writePrimArray count 0 0
-  pure (NullMask bits count)
+  pure (NullMask (unsafeForeignPtrToPtr bits) bits count)
 
 
 markNull :: NullMask s -> Int -> ST s ()
-markNull (NullMask bits count) i = do
-  setBit' bits i
+markNull (NullMask p _ count) i = do
+  setBit' p i
   c <- readPrimArray count 0
   writePrimArray count 0 (c + 1)
 {-# INLINE markNull #-}
@@ -369,7 +389,7 @@ markNull (NullMask bits count) i = do
 
 -- | The validity of @n@ rows: 'Nothing' when no row was null.
 freezeNullMask :: NullMask s -> Int -> ST s (Maybe AC.Validity)
-freezeNullMask (NullMask bits count) n = do
+freezeNullMask (NullMask _ bits count) n = do
   c <- readPrimArray count 0
   if c == 0
     then pure Nothing
@@ -403,8 +423,8 @@ newBits n = unsafeIOToST $ do
   pure fp
 
 
-setBit' :: ForeignPtr Word8 -> Int -> ST s ()
-setBit' bits i = unsafeIOToST $ unsafeWithForeignPtr bits $ \p -> do
+setBit' :: Ptr Word8 -> Int -> ST s ()
+setBit' p i = unsafeIOToST $ do
   let !byte = i `unsafeShiftR` 3
   b <- peekByteOff p byte :: IO Word8
   pokeByteOff p byte (b .|. (1 `unsafeShiftL` (i .&. 7)))
@@ -476,7 +496,8 @@ boolE =
     , encoderSink = \n -> do
         bits <- newBits n
         nulls <- newNullMask n
-        let push i b = if b then setBit' bits (I# i) else pure ()
+        let !bp = unsafeForeignPtrToPtr bits
+            push i b = if b then setBit' bp (I# i) else pure ()
             freeze = do
               valid <- freezeNullMask nulls n
               pure $ case mkBitmap (BSI.BS bits (bitBytes n)) 0 n of
@@ -488,34 +509,92 @@ boolE =
 
 
 utf8E :: Encoder Text
-utf8E = builderE AUtf8 newUtf8Builder appendText
+utf8E = varE AUtf8 I.ColUtf8 TF.lengthWord8 TF.unsafeCopyToPtr
 {-# INLINE utf8E #-}
 
 
 binaryE :: Encoder ByteString
-binaryE = builderE ABinary newBinaryBuilder appendBytes
+binaryE = varE ABinary I.ColBinary BS.length $ \bs dst ->
+  BSU.unsafeUseAsCStringLen bs $ \(src, l) -> copyBytes dst (castPtr src) l
 {-# INLINE binaryE #-}
 
 
-{- | Var-length encoder over a growable column builder sized for the
-row count (the builder appends offsets in order, so the row index is
-not needed).
+{- | Var-length encoder (32-bit offsets). The row count is known, so
+each row's end offset is stored straight into its slot of one buffer
+sized for the rows; the bytes go into a growable pinned buffer whose
+used size, capacity and address live in one small mutable array. An
+append is three loads, the copy and two stores, and the append action
+captures only that array, the offsets' address and the null mask (a
+column builder keeps several mutable cells per buffer). Nulls are
+recorded as in 'primE'.
 -}
-builderE
-  :: ColumnBuilder b
-  => ArrowType
-  -> (forall s. Int -> ST s (b s))
-  -> (forall s. b s -> a -> ST s ())
+varE
+  :: ArrowType
+  -> (Maybe AC.Validity -> VS.Vector Int32 -> ByteString -> ColumnArray)
+  -> (a -> Int)
+  -> (a -> Ptr Word8 -> IO ())
   -> Encoder a
-builderE ty new app =
+varE ty mk lenOf copyTo =
   Encoder
     { encoderType = ty
     , encoderNullable = False
     , encoderSink = \n -> do
-        b <- new n
-        pure (ColSink (\_ x -> app b x) (\_ -> appendNull b) (freezeBuilder b))
+        offs <- VSM.unsafeNew (n + 1)
+        VSM.unsafeWrite offs 0 0
+        let !cap0 = max 64 (n * 8)
+        dat0 <- unsafeIOToST (mallocAligned cap0)
+        ref <- newMutVar dat0
+        st <- newPrimArray 3
+        writePrimArray st varUsed 0
+        writePrimArray st varCap cap0
+        writePrimArray st varAddr (addrOf dat0)
+        nulls <- newNullMask n
+        let !op = mvectorPtr offs
+            grow used need = do
+              cap <- readPrimArray st varCap
+              let !cap' = max need (cap * 2)
+              old <- readMutVar ref
+              new <- unsafeIOToST $ do
+                fp <- mallocAligned cap'
+                unsafeWithForeignPtr fp $ \d -> unsafeWithForeignPtr old $ \s -> copyBytes d s used
+                pure fp
+              writeMutVar ref new
+              writePrimArray st varCap cap'
+              writePrimArray st varAddr (addrOf new)
+            push i x = do
+              used <- readPrimArray st varUsed
+              cap <- readPrimArray st varCap
+              let !end = used + lenOf x
+              when (end > maxOffset) $
+                errorWithoutStackTrace "Arrow.Record: var-length column data exceeds 2^31 - 1 bytes"
+              when (end > cap) (grow used end)
+              base <- readPrimArray st varAddr
+              unsafeIOToST (copyTo x (nullPtr `plusPtr` (base + used)))
+              unsafeIOToST (pokeElemOff op (I# i + 1) (fromIntegral end))
+              writePrimArray st varUsed end
+            pushNull i = do
+              used <- readPrimArray st varUsed
+              unsafeIOToST (pokeElemOff op (I# i + 1) (fromIntegral used))
+              markNull nulls (I# i)
+            freeze = do
+              used <- readPrimArray st varUsed
+              fp <- readMutVar ref
+              o <- VS.unsafeFreeze offs
+              valid <- freezeNullMask nulls n
+              pure (mk valid o (BSI.BS fp used))
+        pure (ColSink push pushNull freeze)
     }
-{-# INLINE builderE #-}
+  where
+    addrOf fp = unsafeForeignPtrToPtr fp `minusPtr` nullPtr
+    maxOffset = fromIntegral (maxBound :: Int32)
+{-# INLINE varE #-}
+
+
+-- | Slots of a 'varE' state array.
+varUsed, varCap, varAddr :: Int
+varUsed = 0
+varCap = 1
+varAddr = 2
 
 
 -- | Days since Unix epoch (INT32). Arrow logical @Date(DateDay)@.
@@ -778,24 +857,72 @@ boolD = dictD ABool req opt
 {-# INLINE boolD #-}
 
 
-{- | Text from a utf8, large utf8 or utf8 view column; each row is
-copied once into a fresh 'Text' (the column was validated as UTF-8
-when it was built or decoded).
+{- | Text from a utf8, large utf8 or utf8 view column (the column was
+validated as UTF-8 when it was built or decoded, so nothing is
+re-validated).
+
+Binding a utf8 or large utf8 column copies the string bytes its rows
+reference once into one text array, and every row's 'Text' is a slice
+of it: no per-row allocation beyond the 'Text' itself, and nothing
+keeps the column's (or the IPC input's) buffers alive. Retention rule:
+a 'Text' you keep keeps that column's copied string bytes alive; use
+'T.copy' to detach it. Utf8 view rows are each copied into a fresh
+'Text'.
 -}
 utf8D :: Decoder Text
 utf8D = dictD AUtf8 req opt
   where
     req col
-      | Just arr <- asUtf8 col = noNulls col (\i -> orEmpty T.empty (unsafeTextAt arr (I# i)))
-      | Just arr <- asLargeUtf8 col = noNulls col (\i -> orEmpty T.empty (unsafeTextAt arr (I# i)))
+      | Just arr <- asUtf8 col = noNulls col (let !rows = textRows arr in \i -> textRowValue rows (I# i))
+      | Just arr <- asLargeUtf8 col = noNulls col (let !rows = textRows arr in \i -> textRowValue rows (I# i))
       | ColUtf8View {} <- col = noNulls col (\i -> orEmpty T.empty (anyTextAt col (I# i)))
       | otherwise = Left (expectErr "ColUtf8" col)
     opt col
-      | Just arr <- asUtf8 col = Right (\i -> forceJust (unsafeTextAt arr (I# i)))
-      | Just arr <- asLargeUtf8 col = Right (\i -> forceJust (unsafeTextAt arr (I# i)))
+      | Just arr <- asUtf8 col = Right (let !rows = textRows arr in \i -> textRowAt rows (I# i))
+      | Just arr <- asLargeUtf8 col = Right (let !rows = textRows arr in \i -> textRowAt rows (I# i))
       | ColUtf8View {} <- col = Right (\i -> forceJust (anyTextAt col (I# i)))
       | otherwise = Left (expectErr "ColUtf8" col)
 {-# INLINE utf8D #-}
+
+
+{- | A utf8 column's rows over one text array holding a copy of the
+bytes they reference: validity, offsets, the array, and the data offset
+of the array's first byte.
+-}
+data TextRows o = TextRows !(Maybe AC.Validity) !(VS.Vector o) !TA.Array {-# UNPACK #-} !Int
+
+
+-- | Copy the referenced string bytes of a utf8 column once.
+textRows :: (Storable o, Integral o) => Utf8Array o -> TextRows o
+textRows (Utf8Array (BytesArray v o d))
+  | len <= 0 = TextRows v o TA.empty base
+  | otherwise = TextRows v o copied base
+  where
+    !n = VS.length o - 1
+    !base = if n < 1 then 0 else fromIntegral (VS.unsafeIndex o 0)
+    !len = if n < 1 then 0 else fromIntegral (VS.unsafeIndex o n) - base
+    copied = unsafeDupablePerformIO $ BSU.unsafeUseAsCString d $ \p -> stToIO $ do
+      ma <- TA.new len
+      TA.copyFromPointer ma 0 (castPtr p `plusPtr` base) len
+      TA.unsafeFreeze ma
+{-# INLINE textRows #-}
+
+
+-- | Row @i@ (in range) as a slice, ignoring validity.
+textRowValue :: (Storable o, Integral o) => TextRows o -> Int -> Text
+textRowValue (TextRows _ o arr base) i =
+  let !s = fromIntegral (VS.unsafeIndex o i)
+      !len = fromIntegral (VS.unsafeIndex o (i + 1)) - s
+  in if len == 0 then T.empty else TI.Text arr (s - base) len
+{-# INLINE textRowValue #-}
+
+
+-- | Row @i@ (in range) as a slice; 'Nothing' when null.
+textRowAt :: (Storable o, Integral o) => TextRows o -> Int -> Maybe Text
+textRowAt rows@(TextRows v _ _ _) i
+  | unsafeIsValidAt v i = let !t = textRowValue rows i in Just t
+  | otherwise = Nothing
+{-# INLINE textRowAt #-}
 
 
 -- | A required decoder's row reader, provided the column has no nulls.
