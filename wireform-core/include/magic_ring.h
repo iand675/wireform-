@@ -12,9 +12,6 @@
 struct hs_ring {
     void   *base;
     size_t  size;
-#ifdef _WIN32
-    void   *section; /* HANDLE */
-#endif
 };
 
 /* System page size (the allocation granularity on Windows). Thread-safe. */

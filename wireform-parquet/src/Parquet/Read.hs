@@ -820,11 +820,12 @@ decodePlainDouble n bs
           go2 0
 
 decodePlainBool :: Int -> ByteString -> Either String (V.Vector Bool)
-decodePlainBool n bs =
-  let !need = (n + 7) `quot` 8
-  in if BS.length bs < need
-    then Left "Parquet.Read: PLAIN BOOLEAN buffer too small"
-    else Right $! unpackBitsLsbUnsafe n bs
+decodePlainBool n bs
+  -- n comes from the page header (dphNumValues, an Int32), so it can be
+  -- negative in a malformed file; unpackBitsLsbUnsafe allocates n slots.
+  | n < 0 = Left "Parquet.Read: PLAIN BOOLEAN negative value count"
+  | BS.length bs < (n + 7) `quot` 8 = Left "Parquet.Read: PLAIN BOOLEAN buffer too small"
+  | otherwise = Right $! unpackBitsLsbUnsafe n bs
 
 decodePlainByteArray :: Int -> ByteString -> Either String (V.Vector ByteString)
 decodePlainByteArray n bs0 = go 0 0 V.empty
