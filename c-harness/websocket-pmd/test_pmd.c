@@ -174,7 +174,7 @@ static void roundtrip_matrix(void)
     static const int levels[] = { -1, 0, 1, 6, 9, 42, -7 };
     static const int memlevels[] = { 1, 8, 9, 0, 10 };
 #ifdef WF_PMD_CHUNK
-    /* zlib moves 7 bytes per call in this variant: keep messages small. */
+    /* zlib moves at most 14 bytes per call in this variant: keep messages small. */
     static const size_t sizes[] = { 0, 1, 5, 0, 300, 1500, 0, 17 };
 #else
     static const size_t sizes[] = { 0, 1, 5, 0, 300, 4096, 70000, 0, 17 };
@@ -347,7 +347,7 @@ static void every_capacity(void)
 }
 
 /* An inflate bomb (16 MiB of zeros in ~16 KiB; 1 MiB in the chunked
- * variant, where zlib moves 7 bytes per call) stays inside every buffer
+ * variant, where zlib moves at most 14 bytes per call) stays inside every buffer
  * it is given: each call fills exactly its cap and reports
  * NEEDS_MORE_OUT, so a caller enforcing a message-size limit stops after
  * limit bytes. Resuming afterwards still yields the exact plaintext. */

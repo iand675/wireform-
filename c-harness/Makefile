@@ -53,10 +53,20 @@ FUZZER ?=
 REPLAY_RANDOM_RUNS ?= 2000
 
 COMMON := $(HARNESS_DIR)/common
-COMMON_DEPS := $(COMMON)/harness.h $(COMMON)/standalone_main.c $(HARNESS_DIR)/Makefile
+COMMON_DEPS := $(COMMON)/harness.h $(COMMON)/standalone_main.c $(COMMON)/watchdog.c $(HARNESS_DIR)/Makefile
 
-BASE_CFLAGS := -std=gnu11 -g -I$(COMMON) \
+BASE_CFLAGS := -std=gnu11 -g -pthread -I$(COMMON) \
   -Wall -Wextra -Werror -Wno-unused-function
+
+# Memory ceiling (common/watchdog.c, WF_MEM_LIMIT_MB) for every binary
+# that libFuzzer's own -rss_limit_mb does not cover.
+WATCHDOG := $(COMMON)/watchdog.c
+WATCHDOG_asan := $(WATCHDOG)
+WATCHDOG_release := $(WATCHDOG)
+WATCHDOG_msan := $(WATCHDOG)
+WATCHDOG_tsan := $(WATCHDOG)
+WATCHDOG_cov := $(WATCHDOG)
+WATCHDOG_valgrind := $(WATCHDOG)
 
 SANITIZE := address,undefined
 SAN_FLAGS := -fsanitize=$(SANITIZE) -fno-sanitize-recover=all -fno-omit-frame-pointer
@@ -159,7 +169,7 @@ $(BUILD)/$(1)/$(2)/$(3)/$(4): $(HARNESS_DIR)/$(2)/$(4).c $$($(2)_SRCS) $(5) $(CO
 	@mkdir -p $$(@D)
 	@$(if $(V),:,echo "  CC  $(1)/$(2)/$(3)/$(4)")
 	$$(Q)$$(CC_$(1)) $$(BASE_CFLAGS) $$(CFLAGS_$(1)) $$(call opt,$(1),$(2)) $$(call arch,$(1),$(2)) $$($(2)_CFLAGS) $$($(2)_VFLAGS_$(3)) -I$(HARNESS_DIR)/$(2) \
-	  -o $$@ $(HARNESS_DIR)/$(2)/$(4).c $$($(2)_SRCS) $(5) $$($(2)_LIBS) $$(LDFLAGS_$(1))
+	  -o $$@ $(HARNESS_DIR)/$(2)/$(4).c $$($(2)_SRCS) $(5) $$(WATCHDOG_$(1)) $$($(2)_LIBS) $$(LDFLAGS_$(1))
 endef
 
 # Tests and standalone replay binaries for the non-libFuzzer configs.

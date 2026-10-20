@@ -6,10 +6,10 @@ websocket-pmd_OPT := -O2
 websocket-pmd_LIBS := $(shell $(PKG_CONFIG) --libs zlib)
 websocket-pmd_TESTS := test_pmd
 websocket-pmd_FUZZERS := fuzz_pmd_inflate fuzz_pmd_roundtrip
-# native: the cabal build. chunked: zlib is handed at most 7 bytes of
+# native: the cabal build. chunked: zlib is handed at most 14 bytes of
 # input / output per call (WF_PMD_CHUNK), driving the > 4 GiB splitting
 # loops that the native build only reaches with multi-GiB buffers.
 websocket-pmd_VARIANTS := native chunked
-websocket-pmd_VFLAGS_chunked := -DWF_PMD_CHUNK=7
+websocket-pmd_VFLAGS_chunked := -DWF_PMD_CHUNK=14
 # zlib is not MSan-instrumented.
 websocket-pmd_MSAN := no

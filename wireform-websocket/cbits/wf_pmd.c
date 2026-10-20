@@ -45,6 +45,15 @@ struct wf_pmd_stream {
 #define WF_PMD_CHUNK ((size_t)(uInt)-1)
 #endif
 
+/* deflate() with Z_SYNC_FLUSH must get more than six bytes of avail_out:
+ * a call that ends exactly on a completed flush marker makes the next
+ * call start another marker (zlib.h, deflate()), so a buffer split into
+ * pieces below this size never finishes. */
+#define PMD_MIN_OUT ((size_t)7)
+
+_Static_assert(WF_PMD_CHUNK >= 2 * PMD_MIN_OUT,
+               "WF_PMD_CHUNK must leave room for two PMD_MIN_OUT pieces");
+
 /* Install a new message's input. src == NULL && src_len == 0 is the
  * resume call after WF_PMD_NEEDS_MORE_OUT: the z_stream (and in_left)
  * still hold the unconsumed input, so leave them alone. */
@@ -67,7 +76,12 @@ static void pmd_refill(wf_pmd_stream *s, size_t *out_left) {
         s->in_left -= n;
     }
     if (s->zs.avail_out == 0 && *out_left != 0) {
-        size_t n = *out_left < WF_PMD_CHUNK ? *out_left : WF_PMD_CHUNK;
+        size_t n = *out_left;
+        if (n > WF_PMD_CHUNK) {
+            n = WF_PMD_CHUNK;
+            /* Leave no piece smaller than PMD_MIN_OUT behind. */
+            if (*out_left - n < PMD_MIN_OUT) n -= PMD_MIN_OUT;
+        }
         s->zs.avail_out = (uInt) n;
         *out_left -= n;
     }

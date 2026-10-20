@@ -142,7 +142,10 @@ static inline int pmd_deflate_msg(wf_pmd_stream *s, const uint8_t *msg,
      * stored block, forever. The Haskell's buffers start at 64 bytes. */
     if (step && step < 7) step = 7;
     uint8_t *m = n ? wf_dup(msg, n) : NULL;
-    int rc = pmd_drive(wf_pmd_deflate, s, m, n, step, 0, out, bad);
+    /* Deflate never needs more than about n + 5 bytes per stored block;
+     * the limit turns a deflater that never finishes into a failed check
+     * (rc NEEDS_MORE_OUT) instead of unbounded buffer doubling. */
+    int rc = pmd_drive(wf_pmd_deflate, s, m, n, step, 2 * n + 1024, out, bad);
     if (m) wf_free(m, n);
     size_t got = out->n - start;
     if (rc == WF_PMD_OK && got >= 4
