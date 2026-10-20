@@ -6,6 +6,7 @@
  */
 
 #include <lz4frame.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -79,50 +80,95 @@ size_t lz4_compress_wrapper_level(const char* input, size_t input_length,
 }
 
 /*
+ * Run one LZ4 frame from src into dst[0, cap). Returns 0 when the frame
+ * is complete, 1 when dst filled up first, -1 on malformed or truncated
+ * input. *produced is the number of bytes written.
+ */
+static int lz4f_run(LZ4F_dctx* dctx, char* dst, size_t cap,
+                    const char* src, size_t len, size_t* produced) {
+    size_t in_off = 0, out_off = 0;
+    for (;;) {
+        size_t d = cap - out_off, s = len - in_off;
+        size_t hint = LZ4F_decompress(dctx, dst + out_off, &d,
+                                      src + in_off, &s, NULL);
+        if (LZ4F_isError(hint)) {
+            return -1;
+        }
+        in_off += s;
+        out_off += d;
+        *produced = out_off;
+        if (hint == 0) {
+            return 0;
+        }
+        if (out_off == cap) {
+            return 1;
+        }
+        if (in_off == len || (s == 0 && d == 0)) {
+            return -1;  /* input ran out mid-frame */
+        }
+    }
+}
+
+/*
  * Decompress LZ4-compressed data (frame format).
- * 
- * Returns the decompressed size, or 0 on error.
- * The caller must free the output buffer.
+ *
+ * Returns the decompressed size, or 0 on error. On success *output is a
+ * malloc'd buffer the caller must free. A frame that decompresses to
+ * zero bytes also returns 0, with *output = NULL (nothing to free).
+ *
+ * The output buffer starts at max(4 * input, 64 KiB) and doubles until
+ * the frame fits. Each attempt restarts the frame in a fresh buffer:
+ * with linked blocks the decoder keeps pointers into earlier output, so
+ * the buffer cannot be realloc'd under it.
  */
 size_t lz4_decompress_wrapper(const char* input, size_t input_length,
                                char** output, size_t* output_length) {
     if (!input || !output || !output_length) {
         return 0;
     }
-    
+    *output = NULL;
+
     LZ4F_dctx* dctx;
     LZ4F_errorCode_t err = LZ4F_createDecompressionContext(&dctx, LZ4F_VERSION);
     if (LZ4F_isError(err)) {
         return 0;
     }
-    
-    // Start with a reasonable buffer size (try 4x input size as heuristic)
-    size_t output_capacity = input_length * 4;
-    if (output_capacity < 64 * 1024) {
-        output_capacity = 64 * 1024; // At least 64KB
+
+    size_t cap = input_length <= SIZE_MAX / 4 ? input_length * 4 : SIZE_MAX;
+    if (cap < 64 * 1024) {
+        cap = 64 * 1024;
     }
-    
-    *output = (char*)malloc(output_capacity);
-    if (!*output) {
-        LZ4F_freeDecompressionContext(dctx);
-        return 0;
+    char* buf = NULL;
+    size_t produced = 0;
+    int rc;
+    for (;;) {
+        buf = (char*)malloc(cap);
+        if (!buf) {
+            rc = -1;
+            break;
+        }
+        rc = lz4f_run(dctx, buf, cap, input, input_length, &produced);
+        if (rc != 1) {
+            break;
+        }
+        free(buf);
+        buf = NULL;
+        if (cap > SIZE_MAX / 2) {
+            rc = -1;
+            break;
+        }
+        cap *= 2;
+        LZ4F_resetDecompressionContext(dctx);
     }
-    
-    // Decompress
-    size_t src_size = input_length;
-    size_t dst_size = output_capacity;
-    size_t result = LZ4F_decompress(dctx, *output, &dst_size,
-                                     input, &src_size, NULL);
-    
+
     LZ4F_freeDecompressionContext(dctx);
-    
-    if (LZ4F_isError(result)) {
-        free(*output);
-        *output = NULL;
+
+    if (rc != 0 || produced == 0) {
+        free(buf);
         return 0;
     }
-    
-    *output_length = dst_size;
-    return dst_size;
+    *output = buf;
+    *output_length = produced;
+    return produced;
 }
 

@@ -55,7 +55,7 @@ import Network.WebSocket.PerMessageDeflate (
   Direction (..),
   PmdContext,
   compressMessage,
-  decompressMessage,
+  decompressMessageBounded,
   pmdMaybeReset,
  )
 
@@ -175,10 +175,20 @@ receiveDataMessage conn (MessageLimit lim) = do
         if compressed
           then case mPmd of
             Just ctx -> do
-              inflated <- decompressMessage ctx bs0
-              pmdMaybeReset ctx Inbound
-              when (BS.length inflated > lim) tooBig
-              pure inflated
+              -- Bounded: the inflated size is checked while inflating,
+              -- not after, so an inflate bomb cannot allocate past the
+              -- limit.
+              mInflated <- decompressMessageBounded ctx lim bs0
+              case mInflated of
+                Nothing ->
+                  failConnection
+                    conn
+                    messageTooBig
+                    "message exceeds configured limit"
+                Just inflated -> do
+                  pmdMaybeReset ctx Inbound
+                  when (BS.length inflated > lim) tooBig
+                  pure inflated
             Nothing ->
               failConnection
                 conn

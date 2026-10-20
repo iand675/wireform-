@@ -44,6 +44,13 @@
 #define WF_DECOMPRESS_OOM            -3  /* libc malloc / alloc failed  */
 #define WF_DECOMPRESS_INIT_FAIL      -4  /* lib init returned an error  */
 
+/* zlib counts in 32-bit uInt; larger buffers are fed in chunks of at
+ * most this size. Overridable so the test harness can drive the
+ * chunking with small buffers. */
+#ifndef WF_DECOMPRESS_ZCHUNK
+#define WF_DECOMPRESS_ZCHUNK ((size_t)(uInt)-1)
+#endif
+
 /* =================================================================== *
  *  Gzip (RFC 1952) via libz                                            *
  * =================================================================== *
@@ -77,14 +84,36 @@ int wf_gzip_inflate_into(const uint8_t *src, size_t src_len,
         return WF_DECOMPRESS_INIT_FAIL;
     }
 
-    zs.next_in  = (Bytef *) src;
-    zs.avail_in = (uInt) src_len;
-    zs.next_out = (Bytef *) dst;
-    zs.avail_out = (uInt) dst_cap;
+    /* zlib counts in 32-bit uInt: hand it the buffers in chunks so
+     * src_len / dst_cap above 4 GiB are neither truncated nor
+     * miscounted. Z_FINISH on the final chunk keeps zlib's one-shot
+     * fast path (no sliding window) for everything below 4 GiB. */
+    size_t in_left = src_len, out_left = dst_cap;
+    zs.next_in   = (Bytef *) src;
+    zs.next_out  = (Bytef *) dst;
+    zs.avail_in  = 0;
+    zs.avail_out = 0;
+    for (;;) {
+        if (zs.avail_in == 0) {
+            size_t n = in_left < WF_DECOMPRESS_ZCHUNK ? in_left : WF_DECOMPRESS_ZCHUNK;
+            zs.avail_in = (uInt) n;
+            in_left -= n;
+        }
+        if (zs.avail_out == 0) {
+            size_t n = out_left < WF_DECOMPRESS_ZCHUNK ? out_left : WF_DECOMPRESS_ZCHUNK;
+            zs.avail_out = (uInt) n;
+            out_left -= n;
+        }
+        rc = inflate(&zs, in_left == 0 && out_left == 0 ? Z_FINISH : Z_NO_FLUSH);
+        if (rc != Z_OK && rc != Z_BUF_ERROR) {
+            break;
+        }
+        if (!((zs.avail_in == 0 && in_left != 0) || (zs.avail_out == 0 && out_left != 0))) {
+            break;
+        }
+    }
 
-    rc = inflate(&zs, Z_FINISH);
-
-    size_t produced = dst_cap - zs.avail_out;
+    size_t produced = dst_cap - out_left - zs.avail_out;
     inflateEnd(&zs);
 
     if (out_produced) *out_produced = produced;
@@ -92,9 +121,13 @@ int wf_gzip_inflate_into(const uint8_t *src, size_t src_len,
     if (rc == Z_STREAM_END) {
         return WF_DECOMPRESS_OK;
     } else if (rc == Z_BUF_ERROR || rc == Z_OK) {
-        /* Z_BUF_ERROR with non-zero produced count means we ran out
-         * of destination space mid-stream; caller should grow + retry. */
-        return WF_DECOMPRESS_NEEDS_MORE_OUT;
+        /* Stopped short of the end of the stream. A full destination
+         * may be hiding more output: grow + retry. Otherwise all input
+         * was consumed mid-stream, i.e. the input is truncated; asking
+         * for more output would make the caller double its buffer
+         * forever. */
+        return zs.avail_out == 0 ? WF_DECOMPRESS_NEEDS_MORE_OUT
+                                 : WF_DECOMPRESS_BAD_INPUT;
     } else {
         return WF_DECOMPRESS_BAD_INPUT;
     }
@@ -127,24 +160,44 @@ int wf_lz4f_decompress_into(const uint8_t *src, size_t src_len,
         return WF_DECOMPRESS_INIT_FAIL;
     }
 
-    size_t dst_size = dst_cap;
-    size_t src_size = src_len;
-    /* options: NULL ⇒ default (no checksum override) */
-    size_t hint = LZ4F_decompress(dctx, dst, &dst_size, src, &src_size, NULL);
+    /* LZ4F_decompress returns when the frame ends, src is consumed or
+     * dst is full; call again while it made progress and both have
+     * bytes left. dst stays one contiguous buffer, so linked blocks
+     * that reference earlier output in dst remain valid. */
+    size_t in_off = 0, out_off = 0, hint;
+    for (;;) {
+        size_t dst_size = dst_cap - out_off;
+        size_t src_size = src_len - in_off;
+        hint = LZ4F_decompress(dctx, dst + out_off, &dst_size,
+                               src + in_off, &src_size, NULL);
+        if (LZ4F_isError(hint)) {
+            break;
+        }
+        in_off += src_size;
+        out_off += dst_size;
+        if (hint == 0 || in_off == src_len || out_off == dst_cap
+            || (src_size == 0 && dst_size == 0)) {
+            break;
+        }
+    }
 
     LZ4F_freeDecompressionContext(dctx);
 
-    if (out_produced) *out_produced = dst_size;
-    if (out_consumed) *out_consumed = src_size;
+    if (out_produced) *out_produced = out_off;
+    if (out_consumed) *out_consumed = in_off;
 
     if (LZ4F_isError(hint)) {
         return WF_DECOMPRESS_BAD_INPUT;
     }
-    /* hint == 0 means the frame is fully consumed.  Non-zero hint
-     * means the decompressor wants more input — but we passed it
-     * the whole frame from Kafka, so a non-zero hint here means we
-     * also ran out of output space.  Tell the caller to grow. */
-    return hint == 0 ? WF_DECOMPRESS_OK : WF_DECOMPRESS_NEEDS_MORE_OUT;
+    if (hint == 0) {
+        return WF_DECOMPRESS_OK;
+    }
+    /* The frame is incomplete. With dst full, more output may follow:
+     * grow + retry. With room left, the input ran out mid-frame
+     * (truncated); before, this also said NEEDS_MORE_OUT and the
+     * Haskell caller doubled its buffer until allocation failed. */
+    return out_off == dst_cap ? WF_DECOMPRESS_NEEDS_MORE_OUT
+                              : WF_DECOMPRESS_BAD_INPUT;
 }
 
 /* =================================================================== *
@@ -165,10 +218,44 @@ int wf_lz4f_decompress_into(const uint8_t *src, size_t src_len,
  * without C↔Haskell round-trips on each grow.
  */
 
+/* Largest block a zstd frame can regenerate (Block_Maximum_Size) and
+ * the smallest block that regenerates anything: a 3-byte header plus
+ * one RLE byte. */
+#define WF_ZSTD_BLOCK_MAX 131072u
+#define WF_ZSTD_MIN_BLOCK 4u
+
+#ifndef ZSTD_MAGIC_SKIPPABLE_START
+#define ZSTD_MAGIC_SKIPPABLE_START 0x184D2A50U
+#endif
+#ifndef ZSTD_MAGIC_SKIPPABLE_MASK
+#define ZSTD_MAGIC_SKIPPABLE_MASK 0xFFFFFFF0U
+#endif
+
 size_t wf_zstd_get_frame_content_size(const uint8_t *src, size_t src_len) {
     /* Returns: actual size, ZSTD_CONTENTSIZE_UNKNOWN (-1ULL), or
      * ZSTD_CONTENTSIZE_ERROR (-2ULL). */
-    return ZSTD_getFrameContentSize(src, src_len);
+    unsigned long long fcs = ZSTD_getFrameContentSize(src, src_len);
+    if (fcs == ZSTD_CONTENTSIZE_UNKNOWN || fcs == ZSTD_CONTENTSIZE_ERROR) {
+        return (size_t) fcs;
+    }
+    /* A leading skippable frame reports 0, which is not the size of
+     * the data frames after it; let the caller size the output itself.
+     * (A non-error result means zstd parsed at least the 4-byte magic.) */
+    uint32_t magic = (uint32_t) src[0] | ((uint32_t) src[1] << 8)
+                   | ((uint32_t) src[2] << 16) | ((uint32_t) src[3] << 24);
+    if ((magic & ZSTD_MAGIC_SKIPPABLE_MASK) == ZSTD_MAGIC_SKIPPABLE_START) {
+        return (size_t) ZSTD_CONTENTSIZE_UNKNOWN;
+    }
+    /* The header is untrusted: a 13-byte frame can claim 2^64 - 3
+     * bytes. The frame cannot regenerate more than one maximum block per
+     * 4 bytes of input, and decompression of a frame claiming more fails
+     * anyway, so reject the claim before the caller allocates it (or, in
+     * the Haskell ring path, converts it to a negative Int that slips
+     * past the capacity check). */
+    if (fcs / WF_ZSTD_BLOCK_MAX > src_len / WF_ZSTD_MIN_BLOCK + 1) {
+        return (size_t) ZSTD_CONTENTSIZE_ERROR;
+    }
+    return (size_t) fcs;
 }
 
 int wf_zstd_decompress_into(const uint8_t *src, size_t src_len,

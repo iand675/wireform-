@@ -18,17 +18,46 @@
  */
 
 #define _GNU_SOURCE
+#include <errno.h>
 #include <sched.h>
 
 #include "HsFFI.h"
 
-/* Returns 0 on success, or -1 (with errno set by sched_setaffinity) on
- * failure. HsInt is used for both the argument and the result so the C
- * ABI matches the Haskell `Int -> IO Int` foreign import exactly. */
+/* Largest core index accepted: the kernel's CPU mask limit is far below. */
+#define AFFINITY_MAX_CORE (1 << 20)
+
+/* Returns 0 on success, or -1 with errno set on failure: EINVAL for a
+ * negative or absurd core index (the argument is an arbitrary Haskell
+ * Int, and truncating it to int used to pin core 2^32 + k to core k),
+ * otherwise whatever sched_setaffinity reports (EINVAL for a core that
+ * does not exist or is outside the allowed set). Cores past the static
+ * cpu_set_t (CPU_SETSIZE, 1024) use a dynamically sized set. HsInt is
+ * used for both the argument and the result so the C ABI matches the
+ * Haskell `Int -> IO Int` foreign import exactly. */
 HsInt sched_setaffinity_single(HsInt core)
 {
-    cpu_set_t set;
-    CPU_ZERO(&set);
-    CPU_SET((int) core, &set);
-    return (HsInt) sched_setaffinity(0, sizeof(set), &set);
+    if (core < 0 || core >= AFFINITY_MAX_CORE) {
+        errno = EINVAL;
+        return -1;
+    }
+    int cpu = (int) core;
+    if (cpu < CPU_SETSIZE) {
+        cpu_set_t set;
+        CPU_ZERO(&set);
+        CPU_SET(cpu, &set);
+        return (HsInt) sched_setaffinity(0, sizeof(set), &set);
+    }
+    cpu_set_t *set = CPU_ALLOC(cpu + 1);
+    if (!set) {
+        errno = ENOMEM;
+        return -1;
+    }
+    size_t size = CPU_ALLOC_SIZE(cpu + 1);
+    CPU_ZERO_S(size, set);
+    CPU_SET_S(cpu, size, set);
+    int rc = sched_setaffinity(0, size, set);
+    int saved_errno = errno;
+    CPU_FREE(set);
+    errno = saved_errno;
+    return (HsInt) rc;
 }

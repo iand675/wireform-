@@ -142,7 +142,12 @@ newMagicRing requested = alloca $ \p -> do
           }
 
 
--- | Release the ring's virtual mappings.  Safe to call multiple times.
+{- | Release the ring's virtual mappings.  Call it exactly once per ring:
+each call passes a fresh copy of the base pointer to C, so a second call
+unmaps whatever has been mapped at that address since (callers that may
+close twice need their own once-guard, as
+"Wireform.Network.Transport.Duplex" does).
+-}
 destroyMagicRing :: MagicRing s -> IO ()
 destroyMagicRing mr = alloca $ \p -> do
   poke p (CRing (mrBase mr) (fromIntegral (mrSize mr)))

@@ -4,20 +4,25 @@
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include "magic_ring.h"
 
-static long cached_page_size = 0;
+/* Filled lazily. Several capabilities can call in at once, so the cache is
+ * an atomic: every racer stores the same value, relaxed order suffices. */
+static _Atomic long cached_page_size = 0;
 
 long hs_page_size(void) {
-    if (cached_page_size == 0) {
-        cached_page_size = sysconf(_SC_PAGESIZE);
+    long ps = atomic_load_explicit(&cached_page_size, memory_order_relaxed);
+    if (ps == 0) {
+        ps = sysconf(_SC_PAGESIZE);
+        atomic_store_explicit(&cached_page_size, ps, memory_order_relaxed);
     }
-    return cached_page_size;
+    return ps;
 }
 
-/* Round up to the next power of two >= val, with val >= page_size. */
+/* Round up to the next power of two >= val, for 1 <= val <= RING_MAX_SIZE. */
 static size_t next_pow2(size_t val) {
     val--;
     val |= val >> 1;
@@ -25,15 +30,31 @@ static size_t next_pow2(size_t val) {
     val |= val >> 4;
     val |= val >> 8;
     val |= val >> 16;
+#if SIZE_MAX > 0xFFFFFFFFu
     val |= val >> 32;
+#endif
     val++;
     return val;
 }
 
+/* Largest ring: a power of two whose 2N reservation still fits in size_t
+ * (and in off_t and the Haskell Int that receives the size). Larger
+ * requests would wrap the rounding arithmetic. */
+#define RING_MAX_SIZE ((size_t)1 << (sizeof(size_t) * 8 - 2))
+
+/* Close fd on an error path without clobbering the errno being reported. */
+static int fail_close(int fd) {
+    int saved_errno = errno;
+    close(fd);
+    errno = saved_errno;
+    return -1;
+}
+
 /*
  * Allocate a double-mapped ring of at least `requested` bytes.
- * Returns 0 on success, -1 on failure (sets errno).
- * On success, out->base and out->size are populated.
+ * Returns 0 on success, -1 on failure (sets errno; ENOMEM for a request
+ * above RING_MAX_SIZE). On success, out->base and out->size are populated;
+ * on failure *out is left untouched.
  */
 int hs_ring_create(size_t requested, struct hs_ring *out) {
     long ps = hs_page_size();
@@ -41,6 +62,10 @@ int hs_ring_create(size_t requested, struct hs_ring *out) {
     int fd;
     void *base, *m1, *m2;
 
+    if (requested > RING_MAX_SIZE) {
+        errno = ENOMEM;
+        return -1;
+    }
     if (requested < (size_t)ps)
         requested = (size_t)ps;
 
@@ -52,34 +77,32 @@ int hs_ring_create(size_t requested, struct hs_ring *out) {
     if (fd < 0)
         return -1;
 
-    if (ftruncate(fd, (off_t)size) != 0) {
-        close(fd);
-        return -1;
-    }
+    if (ftruncate(fd, (off_t)size) != 0)
+        return fail_close(fd);
 
     /* Reserve 2N contiguous virtual addresses with no permissions */
     base = mmap(NULL, size * 2, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (base == MAP_FAILED) {
-        close(fd);
-        return -1;
-    }
+    if (base == MAP_FAILED)
+        return fail_close(fd);
 
     /* Map the first copy */
     m1 = mmap(base, size, PROT_READ | PROT_WRITE,
               MAP_SHARED | MAP_FIXED, fd, 0);
     if (m1 == MAP_FAILED) {
+        int saved_errno = errno;
         munmap(base, size * 2);
-        close(fd);
-        return -1;
+        errno = saved_errno;
+        return fail_close(fd);
     }
 
     /* Map the second copy immediately after */
     m2 = mmap((char *)base + size, size, PROT_READ | PROT_WRITE,
               MAP_SHARED | MAP_FIXED, fd, 0);
     if (m2 == MAP_FAILED) {
+        int saved_errno = errno;
         munmap(base, size * 2);
-        close(fd);
-        return -1;
+        errno = saved_errno;
+        return fail_close(fd);
     }
 
     close(fd); /* mappings keep the memfd alive */
@@ -92,6 +115,8 @@ int hs_ring_create(size_t requested, struct hs_ring *out) {
     return 0;
 }
 
+/* Idempotent for one struct: clears base/size, so a second call on the
+ * same struct is a no-op. A copy of the struct is NOT protected. */
 void hs_ring_destroy(struct hs_ring *ring) {
     if (ring && ring->base) {
         munmap(ring->base, ring->size * 2);

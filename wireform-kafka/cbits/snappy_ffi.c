@@ -51,21 +51,35 @@ size_t snappy_compress_wrapper(const char* input, size_t input_length,
 }
 
 /*
+ * The varint header of a snappy block is untrusted: five bytes can
+ * claim 4 GiB. No snappy element regenerates more than 64 bytes per 3
+ * input bytes (a 2-byte-offset copy), so a block of n bytes cannot
+ * decompress to more than (n / 3 + 1) * 64. A larger claim is malformed
+ * (snappy_uncompress would reject it after the caller allocated it).
+ */
+static int snappy_length_plausible(size_t uncompressed, size_t input_length) {
+    return uncompressed / 64 <= input_length / 3 + 1;
+}
+
+/*
  * Decompress Snappy-compressed data.
- * 
- * Returns the decompressed size, or 0 on error.
- * The caller must free the output buffer.
+ *
+ * Returns the decompressed size, or 0 on error. On success *output is a
+ * malloc'd buffer the caller must free. A valid block that decompresses
+ * to zero bytes also returns 0, with *output = NULL (nothing to free).
  */
 size_t snappy_decompress_wrapper(const char* input, size_t input_length,
                                   char** output, size_t* output_length) {
     if (!input || !output || !output_length) {
         return 0;
     }
-    
+    *output = NULL;
+
     // Get the uncompressed length
     snappy_status status = snappy_uncompressed_length(input, input_length,
                                                       output_length);
-    if (status != SNAPPY_OK) {
+    if (status != SNAPPY_OK || *output_length == 0
+        || !snappy_length_plausible(*output_length, input_length)) {
         return 0;
     }
     
@@ -111,7 +125,8 @@ int snappy_decompress_into(const char* input, size_t input_length,
  * destination ForeignPtr for snappy_decompress_into.
  *
  * Returns the uncompressed length on success, or (size_t)-1 on
- * malformed input.
+ * malformed input (including a claimed length the block cannot
+ * possibly produce, see snappy_length_plausible).
  */
 size_t snappy_get_uncompressed_length_wrapper(const char* input,
                                                size_t input_length) {
@@ -121,6 +136,9 @@ size_t snappy_get_uncompressed_length_wrapper(const char* input,
     size_t out;
     snappy_status status = snappy_uncompressed_length(input, input_length,
                                                        &out);
-    return status == SNAPPY_OK ? out : (size_t)-1;
+    if (status != SNAPPY_OK || !snappy_length_plausible(out, input_length)) {
+        return (size_t)-1;
+    }
+    return out;
 }
 

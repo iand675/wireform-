@@ -72,17 +72,21 @@ void wf_pmd_free(wf_pmd_stream *s);
  *
  * @src / @src_len: caller's message payload with the trailing
  *   00 00 FF FF marker already appended (RFC 7692 §7.2.2).
- * @dst / @dst_cap: caller-provided output buffer.  Returns
- *   WF_PMD_NEEDS_MORE_OUT if @dst_cap was too small; the partial
- *   output is in @dst (0..@dst_cap bytes) and *out_produced is set
- *   so the caller can grow + retry against the remaining input
- *   (the stream's internal state advances on each call).
+ * @dst / @dst_cap: caller-provided output buffer (non-NULL).  Returns
+ *   WF_PMD_NEEDS_MORE_OUT when @dst filled up before the message
+ *   ended; the partial output is in @dst (*out_produced == @dst_cap)
+ *   and the caller grows + retries with @src=NULL, @src_len=0 (the
+ *   stream keeps the unconsumed input).  If the message ended exactly
+ *   at the end of @dst, the retry returns WF_PMD_OK with nothing more.
+ *   *out_produced never exceeds @dst_cap; @src_len and @dst_cap may
+ *   exceed 4 GiB.
  *
- * On WF_PMD_OK the message is fully decompressed.
- *
- * @sync_flush is *informational* on the inflate side: we always run
- *   inflate with Z_SYNC_FLUSH so multi-fragment messages assembled
- *   ahead of the call go through cleanly. */
+ * On WF_PMD_OK the message is fully decompressed: all input consumed,
+ * ending on a block boundary.  WF_PMD_BAD_INPUT covers corrupt and
+ * truncated messages (input exhausted mid-block).  A BFINAL = 1 block
+ * may be followed by more blocks in the same message and later
+ * messages keep its LZ77 window (RFC 7692 sec 7.2.1, 7.2.3.4); at most
+ * one BFINAL block per message is accepted. */
 int wf_pmd_inflate(wf_pmd_stream *s,
                    const uint8_t *src, size_t src_len,
                    uint8_t *dst, size_t dst_cap,
@@ -91,14 +95,19 @@ int wf_pmd_inflate(wf_pmd_stream *s,
 /* Deflate one PMD message.
  *
  * @src / @src_len: caller's plaintext message payload.
- * @dst / @dst_cap: caller-provided output buffer.  The output ends
- *   with 00 00 FF FF (Z_SYNC_FLUSH); the Haskell side strips those
- *   four bytes per RFC 7692 §7.2.1 before sending.
+ * @dst / @dst_cap: caller-provided output buffer (non-NULL).  The
+ *   output ends with 00 00 FF FF (Z_SYNC_FLUSH); the Haskell side
+ *   strips those four bytes per RFC 7692 §7.2.1 before sending.  An
+ *   empty message (@src may be NULL) yields an empty stored block, so
+ *   the stripped payload is the 0x00 octet of sec 7.2.3.6.
  *
- * Returns WF_PMD_NEEDS_MORE_OUT if @dst_cap was too small; the
- * partial output is in @dst and the stream's internal state has
- * advanced — the caller should grow and call again with @src=NULL,
- * @src_len=0 to drain the remaining buffered output. */
+ * Returns WF_PMD_NEEDS_MORE_OUT if @dst filled up; the partial output
+ * is in @dst and the stream's internal state has advanced: the caller
+ * grows and calls again with @src=NULL, @src_len=0 to drain the rest.
+ * Every call must offer more than 6 bytes of room (zlib's rule for
+ * sync flushes): a flush that ends exactly at the end of @dst is
+ * followed by another empty stored block on the retry, so with tiny
+ * buffers the retries never end. */
 int wf_pmd_deflate(wf_pmd_stream *s,
                    const uint8_t *src, size_t src_len,
                    uint8_t *dst, size_t dst_cap,

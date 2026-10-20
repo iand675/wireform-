@@ -50,6 +50,7 @@ module Network.WebSocket.PerMessageDeflate (
   -- * Compression
   compressMessage,
   decompressMessage,
+  decompressMessageBounded,
   pmdMaybeReset,
   Direction (..),
 
@@ -540,6 +541,21 @@ decompressMessage ctx payload = do
     else runInflate infPtr (payload <> "\x00\x00\xFF\xFF")
 
 
+{- | 'decompressMessage' with a cap on the inflated size: 'Nothing' as
+soon as the message would exceed @limit@ bytes.  The output buffer never
+grows past @limit + 64@ bytes, so a small compressed message cannot make
+the receiver allocate without bound (an inflate bomb) before the
+message-size check.  After 'Nothing' the inflate stream is mid-message;
+the caller fails the connection.
+-}
+decompressMessageBounded :: PmdContext -> Int -> ByteString -> IO (Maybe ByteString)
+decompressMessageBounded ctx limit payload = do
+  infPtr <- readIORef (pmdInflate ctx)
+  if infPtr == nullPtr
+    then throwIO PmdInitFailed
+    else driveZ infPtr (payload <> "\x00\x00\xFF\xFF") c_wf_pmd_inflate limit
+
+
 {- | Reset whichever streams need resetting between messages
 according to the negotiated @*_no_context_takeover@ flags.  Call
 after every successful 'compressMessage' \/ 'decompressMessage'
@@ -581,11 +597,16 @@ data Direction = Inbound | Outbound
 ------------------------------------------------------------------------
 
 runInflate :: Ptr WfPmdStream -> ByteString -> IO ByteString
-runInflate s input = driveZ s input c_wf_pmd_inflate "inflate"
+runInflate s input = driveZ s input c_wf_pmd_inflate maxBound >>= unbounded
 
 
 runDeflate :: Ptr WfPmdStream -> ByteString -> IO ByteString
-runDeflate s input = driveZ s input c_wf_pmd_deflate "deflate"
+runDeflate s input = driveZ s input c_wf_pmd_deflate maxBound >>= unbounded
+
+
+-- | With a limit of 'maxBound' 'driveZ' never gives up.
+unbounded :: Maybe ByteString -> IO ByteString
+unbounded = maybe (throwIO (PmdInternal 0)) pure
 
 
 driveZ
@@ -599,9 +620,10 @@ driveZ
        -> Ptr CSize
        -> IO CInt
      )
-  -> String
-  -> IO ByteString
-driveZ s input op _what =
+  -> Int
+  -- ^ output limit: 'Nothing' once the output exceeds this many bytes
+  -> IO (Maybe ByteString)
+driveZ s input op limit =
   BSU.unsafeUseAsCStringLen input $ \(srcPtr0, srcLen0) -> do
     let initialCap = max 64 (srcLen0 * 2)
     buf0 <- mallocBytes initialCap
@@ -637,13 +659,21 @@ driveZ s input op _what =
               withForeignPtr fp $ \p ->
                 copyBytes p buf nowProduced
               free buf
-              pure $! BSI.BS fp nowProduced
-          | rc == codeNeedsMoreOut -> do
-              let !newCap = cap * 2
-              buf' <- reallocBytes buf newCap
-              -- Subsequent shim call: input was fully delivered;
-              -- avail_in on the z_stream is whatever didn't fit.
-              drive (castPtr nullPtr) 0 buf' nowProduced newCap
+              pure $! Just $! BSI.BS fp nowProduced
+          | rc == codeNeedsMoreOut ->
+              if nowProduced > limit
+                then do
+                  free buf
+                  pure Nothing
+                else do
+                  -- Never grow past limit + 64: the output only has to
+                  -- show that it exceeds the limit.  (64 > 6 keeps
+                  -- zlib's minimum room for a sync flush.)
+                  let !newCap = min (cap * 2) (limit + min 64 (maxBound - limit))
+                  buf' <- reallocBytes buf newCap
+                  -- Subsequent shim call: input was fully delivered;
+                  -- avail_in on the z_stream is whatever didn't fit.
+                  drive (castPtr nullPtr) 0 buf' nowProduced newCap
           | rc == codeBadInput -> do
               free buf
               throwIO PmdBadInput

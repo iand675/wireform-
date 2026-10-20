@@ -37,7 +37,10 @@ int wf_ssl_ctx_set_min_proto(SSL_CTX *ctx, int version);   /* 12 or 13 */
 int wf_ssl_ctx_set_cipher_suites(SSL_CTX *ctx, const char *cipher_list);
 
 /* ALPN.  protos / protos_len: length-prefixed list,
- * e.g. "\x02h2\x08http/1.1". */
+ * e.g. "\x02h2\x08http/1.1"; OpenSSL rejects a malformed one (nonzero).
+ * The server list is the same encoding ended by a zero length byte
+ * (each protocol 1..255 bytes); it is copied into the SSL_CTX, so the
+ * caller's buffer need not outlive the call.  NULL clears it. */
 int  wf_ssl_ctx_set_alpn(SSL_CTX *ctx,
                           const unsigned char *protos,
                           unsigned int protos_len);

@@ -1,0 +1,22 @@
+# TLS record and handshake framing
+rec_hs10="\x16\x03\x01"
+rec_hs12="\x16\x03\x03"
+rec_app="\x17\x03\x03"
+rec_alert="\x15\x03\x03"
+rec_ccs="\x14\x03\x03\x00\x01\x01"
+client_hello="\x01\x00"
+# extensions: SNI, ALPN, supported_versions, key_share, signature_algorithms
+ext_sni="\x00\x00"
+ext_alpn="\x00\x10"
+ext_versions="\x00\x2b"
+ext_keyshare="\x00\x33"
+ext_sigalgs="\x00\x0d"
+tls13="\x03\x04"
+tls12="\x03\x03"
+# ALPN lists
+alpn_h2="\x02h2"
+alpn_h11="\x08http/1.1"
+alpn_list="\x00\x0c\x02h2\x08http/1.1"
+alpn_h2c="\x03h2c"
+alpn_zero="\x00"
+alpn_overlong="\xffh2"

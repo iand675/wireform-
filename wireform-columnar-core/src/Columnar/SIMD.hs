@@ -138,7 +138,7 @@ import System.IO.Unsafe (unsafeDupablePerformIO, unsafePerformIO)
 
 
 foreign import ccall unsafe "hs_columnar_bitmap_popcount"
-  c_bitmap_popcount :: Ptr Word8 -> CInt -> Int32
+  c_bitmap_popcount :: Ptr Word8 -> CSize -> Int64
 
 
 foreign import ccall safe "hs_columnar_unpack_bits_lsb"
@@ -282,7 +282,7 @@ foreign import ccall unsafe "hs_columnar_take_offsets_i64"
 -- Safe twins of the kernels above, for inputs over 'unsafeCallBytes'.
 
 foreign import ccall safe "hs_columnar_bitmap_popcount"
-  c_bitmap_popcount_safe :: Ptr Word8 -> CInt -> Int32
+  c_bitmap_popcount_safe :: Ptr Word8 -> CSize -> Int64
 
 foreign import ccall safe "hs_columnar_memcpy_fast"
   c_memcpy_fast_safe :: Ptr Word8 -> Ptr Word8 -> CInt -> IO ()

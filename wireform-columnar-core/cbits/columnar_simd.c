@@ -42,10 +42,6 @@ DEF_LD(ld_i8, int8_t)
 DEF_LD(ld_i16, int16_t)
 DEF_LD(ld_i32, int32_t)
 DEF_LD(ld_i64, int64_t)
-DEF_LD(ld_u8, uint8_t)
-DEF_LD(ld_u16, uint16_t)
-DEF_LD(ld_u32, uint32_t)
-DEF_LD(ld_u64, uint64_t)
 DEF_ST(st_i32, int32_t)
 DEF_ST(st_i64, int64_t)
 
@@ -161,35 +157,37 @@ static int64_t first_valid(size_t n, const uint8_t *valid, size_t validoff)
 
 /*
  * Population count of all bits in buf[0..len). Uses 64-bit popcount builtins
- * on the main loop.
+ * on the main loop. The count is up to 8 * len, so it is accumulated and
+ * returned in 64 bits (an int32 total overflowed past 256 MiB).
  */
-int32_t hs_columnar_bitmap_popcount(const uint8_t *buf, int len)
+int64_t hs_columnar_bitmap_popcount(const uint8_t *buf, size_t len)
 {
-    int32_t total = 0;
-    int i = 0;
+    uint64_t total = 0;
+    size_t i = 0;
 
     for (; i + 8 <= len; i += 8) {
         uint64_t w;
         memcpy(&w, buf + i, 8);
-        total += (int32_t)__builtin_popcountll(w);
+        total += (uint64_t)__builtin_popcountll(w);
     }
 
     for (; i + 4 <= len; i += 4) {
         uint32_t w;
         memcpy(&w, buf + i, 4);
-        total += (int32_t)__builtin_popcountl((unsigned long)w);
+        total += (uint64_t)__builtin_popcount(w);
     }
 
     for (; i < len; i++) {
-        total += (int32_t)__builtin_popcount((unsigned int)buf[i]);
+        total += (uint64_t)__builtin_popcount((unsigned int)buf[i]);
     }
-    return total;
+    return (int64_t)total;
 }
 
 /*
  * Expand packed bits to dst[i] in {0,1}. Bit order matches Arrow / Parquet
  * PLAIN bool: least-significant bit of each byte is the first logical value in
- * that byte (index i: byte i/8, bit i%8).
+ * that byte (index i: byte i/8, bit i%8). Precondition: src holds at least
+ * (n + 7) / 8 bytes (Parquet.Read.decodePlainBool checks it) and dst n bytes.
  *
  * No lookup table: this used to fill a function-local `static` table on
  * first call behind a plain `int` flag. Concurrent unsafe ccalls from
@@ -218,7 +216,8 @@ void hs_columnar_unpack_bits_lsb(const uint8_t *src, int32_t n, uint8_t *dst)
 
 /*
  * Bulk copy with 16-byte SIMDe loads/stores (libc memcpy is often similar; this
- * keeps one place to tune for Parquet/Arrow page bodies).
+ * keeps one place to tune for Parquet/Arrow page bodies). Copies exactly len
+ * bytes, len <= INT32_MAX; src and dst must not overlap.
  */
 void hs_columnar_memcpy_fast(const uint8_t *src, uint8_t *dst, int32_t len)
 {
@@ -819,7 +818,9 @@ int64_t hs_columnar_take_offsets_i64(int64_t *dstOffs, const int64_t *srcOffs, c
     return acc;
 }
 
-/* Pass 2: concatenate the selected rows' bytes into dst. */
+/* Pass 2: concatenate the selected rows' bytes into dst. Empty rows are
+ * skipped without forming a pointer: an all-empty selection may come with a
+ * NULL data buffer (an empty ByteString) and a NULL destination. */
 #define DEF_TAKE_BYTES(NAME, T, LD)                                           \
     void NAME(uint8_t *dst, const T *srcOffs, const uint8_t *src,             \
               const int64_t *idx, size_t n)                                   \
@@ -829,8 +830,10 @@ int64_t hs_columnar_take_offsets_i64(int64_t *dstOffs, const int64_t *srcOffs, c
             size_t j = (size_t)ld_i64(idx, k);                                \
             size_t a = (size_t)LD(srcOffs, j);                                \
             size_t len = (size_t)LD(srcOffs, j + 1) - a;                      \
-            memcpy(dst + pos, src + a, len);                                  \
-            pos += len;                                                       \
+            if (len) {                                                        \
+                memcpy(dst + pos, src + a, len);                              \
+                pos += len;                                                   \
+            }                                                                 \
         }                                                                     \
     }
 
