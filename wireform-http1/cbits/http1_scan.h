@@ -7,6 +7,10 @@
  *
  * Build with -O3. On x86 we use SSE2 (universally available since 2003);
  * the scalar fallback is correct on every platform.
+ *
+ * Caller contract for the scanners: 0 <= offset and 0 <= len <= INT_MAX;
+ * offset may exceed len (a miss: returns len without reading). Only
+ * buf[offset .. len) is read; buf has no alignment requirement.
  */
 #ifndef WIREFORM_HTTP1_SCAN_H
 #define WIREFORM_HTTP1_SCAN_H
@@ -48,20 +52,25 @@ int hs_http1_find_non_token(const void *buf, int offset, int len);
 int hs_http1_find_non_fieldvalue(const void *buf, int offset, int len);
 
 /* ASCII-lowercase a buffer into a caller-supplied destination. Used for
- * normalising HTTP header field names. SIMD-accelerated. */
+ * normalising HTTP header field names. SIMD-accelerated. src and dst are
+ * `len` bytes each and either the same pointer (in place) or disjoint;
+ * len <= 0 is a no-op. */
 void hs_http1_to_lower_ascii(const void *src, void *dst, int len);
 
 /* Compare two buffers for ASCII case-insensitive equality. Returns 1
- * on match, 0 otherwise. Both buffers are exactly `len` bytes. */
+ * on match, 0 otherwise. Both buffers are exactly `len` bytes; len <= 0
+ * returns 1. */
 int hs_http1_ascii_ieq(const void *a, const void *b, int len);
 
-/* Parse up to `len` hex digits at `buf+offset`, stopping at the first
- * non-hex byte (or after `max_digits` digits, whichever comes first).
+/* Parse hex digits at buf[offset .. len), stopping at the first non-hex
+ * byte or at len.
  *
- *   On success, *out is the parsed Word64 value and *consumed is the
- *   number of hex digits consumed (>= 0).
- *   Returns 1 on success (>=1 digit consumed), 0 if zero digits at the
- *   given offset, -1 on overflow (more than 16 hex digits parsed).
+ *   Returns 1 when 1..16 digits were read: *out is the value and
+ *   *consumed the digit count.
+ *   Returns 0 when buf[offset] is not a hex digit (or offset >= len):
+ *   *out = 0, *consumed = 0.
+ *   Returns -1 when a 17th digit follows (leading zeros count too):
+ *   *consumed = 16 and *out is left untouched.
  */
 int hs_http1_parse_hex(const void *buf, int offset, int len, uint64_t *out, int *consumed);
 

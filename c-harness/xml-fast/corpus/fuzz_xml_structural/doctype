@@ -1,0 +1,7 @@
+ÿÿ<?xml version="1.0" standalone="no"?>
+<!DOCTYPE note [
+<!ENTITY writer "Writer: Donald Duck.">
+<!ELEMENT note (to,from,heading,body)>
+]>
+<note><to>Tove</to><from>&writer;</from><heading>Re: &#169;</heading><body>Don't forget me
+this weekend!</body></note>

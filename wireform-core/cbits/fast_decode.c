@@ -28,6 +28,9 @@ int hs_proto_decode_varint_fast(
     int offset,
     uint64_t *out)
 {
+    /* Requires 0 <= offset. Bounds are tested as len - offset, which
+     * cannot overflow once offset < len (offset + k could for len near
+     * INT_MAX). */
     if (offset >= len) return 0;
 
     /* Fast path: single byte (extremely common for tags and small values) */
@@ -37,14 +40,14 @@ int hs_proto_decode_varint_fast(
         return 1;
     }
 
-    if (offset + 1 >= len) return 0;
+    if (len - offset <= 1) return 0;
     uint8_t b1 = buf[offset + 1];
     if (b1 < 0x80) {
         *out = (uint64_t)(b0 & 0x7F) | ((uint64_t)b1 << 7);
         return 2;
     }
 
-    if (offset + 2 >= len) return 0;
+    if (len - offset <= 2) return 0;
     uint8_t b2 = buf[offset + 2];
     if (b2 < 0x80) {
         *out = (uint64_t)(b0 & 0x7F)
@@ -57,7 +60,7 @@ int hs_proto_decode_varint_fast(
      * SWAR technique for 4+ byte varints:
      * Load remaining bytes and process with parallel bit extraction.
      */
-    if (offset + 3 >= len) return 0;
+    if (len - offset <= 3) return 0;
     uint8_t b3 = buf[offset + 3];
     if (b3 < 0x80) {
         *out = (uint64_t)(b0 & 0x7F)
@@ -67,7 +70,7 @@ int hs_proto_decode_varint_fast(
         return 4;
     }
 
-    if (offset + 4 >= len) return 0;
+    if (len - offset <= 4) return 0;
     uint8_t b4 = buf[offset + 4];
     if (b4 < 0x80) {
         *out = (uint64_t)(b0 & 0x7F)
@@ -129,9 +132,11 @@ int hs_proto_decode_tag_fast(
  * bytes, and strips the remaining sign bits.
  *
  * REQUIRES: at least 8 readable bytes starting at buf+offset.
- * The caller must ensure this (via page boundary relocation or bounds check).
+ * The caller must ensure this (Proto.Dynamic checks off + 8 <= length).
  *
- * Returns bytes consumed (1-10), or 0 on overflow (>10 byte varint).
+ * Returns bytes consumed (1-8), or 0 if none of the 8 bytes terminates
+ * the varint (9- and 10-byte varints, or malformed input); the caller
+ * then falls back to its byte-at-a-time decoder.
  * Result is written to *out.
  */
 int hs_proto_decode_varint_swar(
@@ -141,6 +146,9 @@ int hs_proto_decode_varint_swar(
 {
     uint64_t word;
     memcpy(&word, buf + offset, 8);
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    word = __builtin_bswap64(word); /* byte 0 must be the low byte */
+#endif
 
     /* Fast path: single byte (most common for tags) */
     if ((word & 0x80) == 0) {
@@ -186,13 +194,13 @@ int hs_proto_decode_varint_swar(
 
     /* Now compact the 7-bit groups. Each byte has 7 useful bits in [6:0]. */
     uint64_t result = (stripped & 0x7F)
-        | ((stripped >> 1) & (0x7FUL << 7))
-        | ((stripped >> 2) & (0x7FUL << 14))
-        | ((stripped >> 3) & (0x7FUL << 21))
-        | ((stripped >> 4) & (0x7FUL << 28))
-        | ((stripped >> 5) & (0x7FUL << 35))
-        | ((stripped >> 6) & (0x7FUL << 42))
-        | ((stripped >> 7) & (0x7FUL << 49));
+        | ((stripped >> 1) & (0x7FULL << 7))
+        | ((stripped >> 2) & (0x7FULL << 14))
+        | ((stripped >> 3) & (0x7FULL << 21))
+        | ((stripped >> 4) & (0x7FULL << 28))
+        | ((stripped >> 5) & (0x7FULL << 35))
+        | ((stripped >> 6) & (0x7FULL << 42))
+        | ((stripped >> 7) & (0x7FULL << 49));
 
     *out = result;
     return (int)(tag_bits / 8) + 1;
@@ -207,7 +215,8 @@ int hs_proto_decode_varint_swar(
  * terminators (byte < 0x80).
  *
  * Returns 1 if a copy was made (caller should use out_buf), 0 if the
- * original buffer is safe (no copy needed).
+ * original buffer is safe (no copy needed) or len <= 0, -1 if a copy is
+ * needed but out_len < len + 7.
  */
 int hs_proto_relocate_page_boundary(
     const uint8_t *buf,
@@ -215,7 +224,7 @@ int hs_proto_relocate_page_boundary(
     uint8_t *out_buf,
     int out_len)
 {
-    if (len == 0) return 0;
+    if (len <= 0) return 0;
 
     /* Check if the buffer end is within 7 bytes of a page boundary. */
     /* Pages are typically 4096 bytes on all platforms we care about. */
@@ -224,7 +233,8 @@ int hs_proto_relocate_page_boundary(
 
     if (page_end - end_addr < 8) {
         /* Too close to page boundary; need to copy. */
-        if (out_len < len + 7) return -1; /* buffer too small */
+        /* buffer too small; written so that len + 7 cannot overflow */
+        if (out_len < 7 || out_len - 7 < len) return -1;
         memcpy(out_buf, buf, len);
         memset(out_buf + len, 0, 7); /* Zero padding acts as varint terminators */
         return 1;
@@ -234,30 +244,19 @@ int hs_proto_relocate_page_boundary(
 
 /*
  * Skip a varint without decoding its value.
- * Returns bytes consumed, or 0 on error.
- *
- * Uses SWAR: load up to 8 bytes and find the first byte < 0x80
- * using bit manipulation.
+ * Returns bytes consumed (1-10), or 0 if it is unterminated within len
+ * or longer than 10 bytes. Requires 0 <= offset.
  */
 int hs_proto_skip_varint(
     const uint8_t *buf,
     int len,
     int offset)
 {
-    int pos = offset;
-    /* Unrolled: most varints are 1-3 bytes */
-    if (pos < len && buf[pos] < 0x80) return 1;
-    pos++;
-    if (pos < len && buf[pos] < 0x80) return 2;
-    pos++;
-    if (pos < len && buf[pos] < 0x80) return 3;
-    pos++;
-
-    /* Slow path for longer varints */
-    while (pos < len) {
-        if (buf[pos] < 0x80) return pos - offset + 1;
-        pos++;
-        if (pos - offset > 10) return 0; /* varint too long */
+    /* A varint is at most 10 bytes; the compiler unrolls this. */
+    int avail = offset < len ? len - offset : 0;
+    if (avail > 10) avail = 10;
+    for (int k = 0; k < avail; k++) {
+        if (buf[offset + k] < 0x80) return k + 1;
     }
     return 0;
 }
@@ -300,7 +299,7 @@ int hs_proto_count_packed_varints(
 
     {
         simde__m128i high_bit = simde_mm_set1_epi8((char)0x80);
-        for (; i + 16 <= len; i += 16) {
+        for (; len - i >= 16; i += 16) {
             simde__m128i chunk = simde_mm_loadu_si128(
                 (const simde__m128i *)(buf + i));
             simde__m128i has_high = simde_mm_and_si128(chunk, high_bit);
@@ -312,7 +311,7 @@ int hs_proto_count_packed_varints(
     }
 
 #if defined(__x86_64__) || defined(__aarch64__)
-    for (; i + 8 <= len; i += 8) {
+    for (; len - i >= 8; i += 8) {
         uint64_t word;
         memcpy(&word, buf + i, 8);
         uint64_t term_mask = ~word & 0x8080808080808080ULL;
@@ -342,7 +341,7 @@ int hs_proto_packed_all_single_byte(
 
     {
         simde__m128i high_bit = simde_mm_set1_epi8((char)0x80);
-        for (; i + 16 <= len; i += 16) {
+        for (; len - i >= 16; i += 16) {
             simde__m128i chunk = simde_mm_loadu_si128(
                 (const simde__m128i *)(buf + i));
             simde__m128i has_high = simde_mm_and_si128(chunk, high_bit);
@@ -351,7 +350,7 @@ int hs_proto_packed_all_single_byte(
     }
 
 #if defined(__x86_64__) || defined(__aarch64__)
-    for (; i + 8 <= len; i += 8) {
+    for (; len - i >= 8; i += 8) {
         uint64_t word;
         memcpy(&word, buf + i, 8);
         if (word & 0x8080808080808080ULL) return 0;
@@ -378,9 +377,12 @@ int hs_proto_decode_packed_single_byte_varints(
     int i = 0;
 
 #if defined(__x86_64__) || defined(__aarch64__)
-    for (; i + 8 <= len; i += 8) {
+    for (; len - i >= 8; i += 8) {
         uint64_t word;
         memcpy(&word, buf + i, 8);
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        word = __builtin_bswap64(word); /* out[i] is the first byte */
+#endif
         out[i]     = (word)       & 0xFF;
         out[i + 1] = (word >> 8)  & 0xFF;
         out[i + 2] = (word >> 16) & 0xFF;
@@ -418,7 +420,7 @@ int hs_proto_validate_utf8_fast(
 
     {
         simde__m128i high_bit = simde_mm_set1_epi8((char)0x80);
-        for (; i + 16 <= len; i += 16) {
+        for (; len - i >= 16; i += 16) {
             simde__m128i chunk = simde_mm_loadu_si128(
                 (const simde__m128i *)(buf + i));
             simde__m128i has_high = simde_mm_and_si128(chunk, high_bit);
@@ -429,7 +431,7 @@ int hs_proto_validate_utf8_fast(
     }
 
 #if defined(__x86_64__) || defined(__aarch64__)
-    for (; i + 8 <= len; i += 8) {
+    for (; len - i >= 8; i += 8) {
         uint64_t word;
         memcpy(&word, buf + i, 8);
         if (word & 0x8080808080808080ULL) {
@@ -469,7 +471,7 @@ slow_from_i:
             return 0;
         }
 
-        if (i + count > len) return 0;
+        if (len - i < count) return 0;
 
         for (int j = 1; j < count; j++) {
             uint8_t cb = buf[i + j];
@@ -554,7 +556,9 @@ int hs_proto_encode_length_delimited(
     uint8_t *p = buf + offset;
     p[0] = tag;
     int n = 1 + hs_proto_encode_varint(buf, offset + 1, (uint64_t)len);
-    memcpy(buf + offset + n, data, len);
+    /* An empty ByteString / Text arrives as (NULL, 0); memcpy from NULL
+     * is undefined even for zero bytes. */
+    if (len > 0) memcpy(buf + offset + n, data, (size_t)len);
     return n + len;
 }
 
@@ -617,6 +621,7 @@ uint64_t hs_proto_decode_fixed64(const uint8_t *buf, int offset)
  * Scan for the next field tag in a message buffer.
  * Skips the current field value based on wire type.
  * Returns the new offset after skipping, or -1 on error.
+ * Requires 0 <= offset <= len.
  */
 int hs_proto_skip_field(
     const uint8_t *buf,
@@ -631,18 +636,19 @@ int hs_proto_skip_field(
             return offset + consumed;
         }
         case 1: /* 64-bit */
-            if (offset + 8 > len) return -1;
+            if (len - offset < 8) return -1;
             return offset + 8;
         case 2: { /* length-delimited */
             uint64_t field_len;
             int consumed = hs_proto_decode_varint_fast(buf, len, offset, &field_len);
             if (consumed == 0) return -1;
-            int new_offset = offset + consumed + (int)field_len;
-            if (new_offset > len) return -1;
-            return new_offset;
+            /* Compare in 64 bits: the declared length is untrusted and may
+             * exceed INT_MAX (narrowing it to int could go negative). */
+            if (field_len > (uint64_t)(len - offset - consumed)) return -1;
+            return offset + consumed + (int)field_len;
         }
         case 5: /* 32-bit */
-            if (offset + 4 > len) return -1;
+            if (len - offset < 4) return -1;
             return offset + 4;
         default:
             return -1;
@@ -707,7 +713,8 @@ int hs_proto_find_nul(const uint8_t *buf, int offset, int len)
     int i = offset;
     simde__m128i zero = simde_mm_setzero_si128();
 
-    for (; i + 16 <= len; i += 16) {
+    /* len - i, not i + 16: i starts at the caller's offset */
+    for (; len - i >= 16; i += 16) {
         simde__m128i chunk = simde_mm_loadu_si128((const simde__m128i *)(buf + i));
         simde__m128i cmp = simde_mm_cmpeq_epi8(chunk, zero);
         int mask = simde_mm_movemask_epi8(cmp);
@@ -725,11 +732,13 @@ int hs_proto_find_nul(const uint8_t *buf, int offset, int len)
    Uses 16-byte SIMD. Returns 1 if all ASCII, 0 otherwise. */
 int hs_proto_is_ascii(const uint8_t *buf, int offset, int len)
 {
+    /* An empty ByteString arrives as (NULL, 0, 0): do not form NULL + 0. */
+    if (len <= 0) return 1;
     int i = 0;
     const uint8_t *p = buf + offset;
     simde__m128i highbit = simde_mm_set1_epi8((char)0x80);
 
-    for (; i + 16 <= len; i += 16) {
+    for (; len - i >= 16; i += 16) {
         simde__m128i chunk = simde_mm_loadu_si128((const simde__m128i *)(p + i));
         simde__m128i test = simde_mm_and_si128(chunk, highbit);
         if (simde_mm_movemask_epi8(test) != 0) return 0;
@@ -797,12 +806,14 @@ void hs_proto_write_le64(uint8_t *buf, int offset, uint64_t val) {
  */
 int hs_proto_find_json_escape(const uint8_t *buf, int offset, int len)
 {
+    /* Do not form NULL + 0 for an empty input. */
+    if (len <= 0) return offset + len;
     int i = 0;
     const uint8_t *p = buf + offset;
     simde__m128i dquote = simde_mm_set1_epi8('"');
     simde__m128i bslash = simde_mm_set1_epi8('\\');
 
-    for (; i + 16 <= len; i += 16) {
+    for (; len - i >= 16; i += 16) {
         simde__m128i chunk = simde_mm_loadu_si128((const simde__m128i *)(p + i));
         int m1 = simde_mm_movemask_epi8(simde_mm_cmpeq_epi8(chunk, dquote));
         int m2 = simde_mm_movemask_epi8(simde_mm_cmpeq_epi8(chunk, bslash));
@@ -832,7 +843,7 @@ int hs_proto_skip_ws(const uint8_t *buf, int offset, int len)
 
     while (i < len) {
         /* SIMD fast path: skip blocks of 16 whitespace bytes */
-        while (i + 16 <= len) {
+        while (len - i >= 16) {
             simde__m128i chunk = simde_mm_loadu_si128((const simde__m128i *)(buf + i));
             /* Check each byte against whitespace chars */
             simde__m128i eq_space = simde_mm_cmpeq_epi8(chunk, simde_mm_set1_epi8(' '));
@@ -868,56 +879,63 @@ int hs_proto_skip_ws(const uint8_t *buf, int offset, int len)
 }
 
 /*
- * Compare a search value against N serialized LE int32 bounds.
- * Returns a bitmask where bit i is set if bounds[i] <= search_val.
- * Processes 4 bounds at a time using SSE2.
- * count must be <= 32.
+ * Compare a search value against N serialized bounds.
+ * Returns a bitmask where bit i (i < 32) is set if bounds[i] <= search:
+ * for width 4 as little-endian signed int32 (4 at a time with SSE2),
+ * otherwise by memcmp. Bounds past the 32nd are ignored. The mask is
+ * built unsigned (bit 31 is a valid result bit) and returned as an int.
  */
 int hs_proto_compare_bounds(
     const uint8_t *bounds, int count, int width,
     const uint8_t *search)
 {
+    int n = count < 32 ? count : 32;
+
     if (width != 4) {
         /* Scalar fallback for non-int32 widths */
-        int result = 0;
-        for (int i = 0; i < count && i < 32; i++) {
-            int cmp = memcmp(bounds + i * width, search, width);
-            if (cmp <= 0) result |= (1 << i);
+        uint32_t result = 0;
+        for (int i = 0; i < n; i++) {
+            /* width 0: every (empty) bound equals the search value; do
+             * not form bounds + 0 when an empty ByteString passed NULL */
+            int cmp = width > 0
+                ? memcmp(bounds + (size_t)i * (size_t)width, search, (size_t)width)
+                : 0;
+            if (cmp <= 0) result |= 1u << i;
         }
-        return result;
+        return (int)result;
     }
 
     /* Fast path for 4-byte LE int32 bounds */
     int32_t search_val;
     memcpy(&search_val, search, 4);
 #if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-    search_val = __builtin_bswap32(search_val);
+    search_val = (int32_t)__builtin_bswap32((uint32_t)search_val);
 #endif
 
-    int result = 0;
+    uint32_t result = 0;
     int i = 0;
     simde__m128i sv = simde_mm_set1_epi32(search_val);
 
-    for (; i + 4 <= count; i += 4) {
+    for (; i + 4 <= n; i += 4) {
         simde__m128i bv = simde_mm_loadu_si128((const simde__m128i *)(bounds + i * 4));
         /* bounds[j] <= search_val  iff  NOT (search_val < bounds[j]) */
         simde__m128i lt = simde_mm_cmplt_epi32(sv, bv);
         /* lt has 0xFFFFFFFF where search < bound, 0 where search >= bound */
         int mask = simde_mm_movemask_ps(simde_mm_castsi128_ps(lt));
         /* Invert: we want bits set where search >= bound */
-        result |= ((~mask) & 0xF) << i;
+        result |= (uint32_t)(~mask & 0xF) << i;
     }
 
     /* Scalar tail */
-    for (; i < count && i < 32; i++) {
+    for (; i < n; i++) {
         int32_t bval;
         memcpy(&bval, bounds + i * 4, 4);
 #if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-        bval = __builtin_bswap32(bval);
+        bval = (int32_t)__builtin_bswap32((uint32_t)bval);
 #endif
-        if (bval <= search_val) result |= (1 << i);
+        if (bval <= search_val) result |= 1u << i;
     }
-    return result;
+    return (int)result;
 }
 
 /*
@@ -941,10 +959,10 @@ int hs_proto_validate_arrow_buffers(
 
     /* SSE2 path: validate 2 buffers (4 int64s) at a time for non-negative */
     for (; i + 1 < count; i += 2) {
-        simde__m128i pair0 = simde_mm_loadu_si128(
-            (const simde__m128i *)(buf_pairs + i * 2));
-        simde__m128i pair1 = simde_mm_loadu_si128(
-            (const simde__m128i *)(buf_pairs + i * 2 + 2));
+        /* size_t index: i * 2 overflows int for count > 2^30 */
+        const int64_t *pp = buf_pairs + (size_t)i * 2;
+        simde__m128i pair0 = simde_mm_loadu_si128((const simde__m128i *)pp);
+        simde__m128i pair1 = simde_mm_loadu_si128((const simde__m128i *)(pp + 2));
         /* Check all 4 values are non-negative: the sign bit of each
          * int64 lives in byte 7 of its 8-byte lane (movemask bits 7, 15). */
         simde__m128i combined = simde_mm_or_si128(pair0, pair1);
@@ -952,9 +970,8 @@ int hs_proto_validate_arrow_buffers(
 
         /* Scalar bounds + overlap checks */
         for (int j = 0; j < 2; j++) {
-            int idx = i + j;
-            int64_t off = buf_pairs[idx * 2];
-            int64_t len = buf_pairs[idx * 2 + 1];
+            int64_t off = pp[j * 2];
+            int64_t len = pp[j * 2 + 1];
             /* off, len >= 0, so this cannot overflow (off + len could). */
             if (len > body_length || off > body_length - len) return 0;
             if (off < prev_end && len > 0) return 0;
@@ -965,8 +982,8 @@ int hs_proto_validate_arrow_buffers(
 
     /* Scalar tail */
     for (; i < count; i++) {
-        int64_t off = buf_pairs[i * 2];
-        int64_t len = buf_pairs[i * 2 + 1];
+        int64_t off = buf_pairs[(size_t)i * 2];
+        int64_t len = buf_pairs[(size_t)i * 2 + 1];
         if (off < 0 || len < 0) return 0;
         if (len > body_length || off > body_length - len) return 0;
         if (off < prev_end && len > 0) return 0;

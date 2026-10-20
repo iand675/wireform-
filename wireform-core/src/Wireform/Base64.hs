@@ -94,16 +94,28 @@ decodeBase64MaxLength = fromIntegral . c_base64_decoded_max_length . fromIntegra
 {- | Encode a 'ByteString' to RFC 4648 \u00a74 base64 (with @=@
 padding).  One allocation of the exact output length, one
 SIMD pass.
+
+The C kernel works in 'CInt' lengths, so the input may be at most
+@3 * (maxBound :: CInt) \`quot\` 4@ bytes (about 1.5 GiB); larger
+inputs raise an error instead of being silently truncated.
 -}
 encodeBase64 :: ByteString -> ByteString
-encodeBase64 bs = unsafePerformIO $ do
-  let !inLen = BS.length bs
-      !outLen = encodeBase64Length inLen
-  BSI.create outLen $ \outPtr ->
-    BSU.unsafeUseAsCStringLen bs $ \(inPtr, _) -> do
-      _ <- c_base64_encode (castPtr inPtr) (fromIntegral inLen) outPtr
-      pure ()
+encodeBase64 bs
+  | BS.length bs > maxEncodeInput =
+      errorWithoutStackTrace "Wireform.Base64.encodeBase64: input longer than 3 * (2^31 - 1) / 4 bytes"
+  | otherwise = unsafePerformIO $ do
+      let !inLen = BS.length bs
+          !outLen = encodeBase64Length inLen
+      BSI.create outLen $ \outPtr ->
+        BSU.unsafeUseAsCStringLen bs $ \(inPtr, _) -> do
+          _ <- c_base64_encode (castPtr inPtr) (fromIntegral inLen) outPtr
+          pure ()
 {-# NOINLINE encodeBase64 #-}
+
+
+-- | Largest input whose padded encoding length fits in a 'CInt'.
+maxEncodeInput :: Int
+maxEncodeInput = 3 * (fromIntegral (maxBound :: CInt) `quot` 4)
 
 
 ------------------------------------------------------------------------
@@ -117,11 +129,15 @@ in an invalid position.
 
 Whitespace is /not/ tolerated; strip it before calling if your
 input is line-wrapped (PEM, MIME, etc.).
+
+Inputs longer than @maxBound :: CInt@ characters (the C kernel's
+length type) yield 'Nothing' rather than being silently truncated.
 -}
 decodeBase64 :: ByteString -> Maybe ByteString
 decodeBase64 bs
   | BS.null bs = Just BS.empty
   | (BS.length bs .&. 3) /= 0 = Nothing
+  | BS.length bs > fromIntegral (maxBound :: CInt) = Nothing
   | otherwise = unsafePerformIO $ do
       let !inLen = BS.length bs
           !maxOut = decodeBase64MaxLength inLen

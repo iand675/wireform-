@@ -22,6 +22,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include <time.h>
 
 #if defined(_WIN32) || defined(_WIN64)
 #define WIN32_LEAN_AND_MEAN
@@ -34,14 +35,36 @@ static int kernel_random(void *buf, size_t len)
     return BCRYPT_SUCCESS(status) ? 0 : -1;
 }
 #elif defined(__linux__)
+#include <errno.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/syscall.h>
 #include <linux/random.h>
+#if defined(__has_feature)
+#  if __has_feature(memory_sanitizer)
+#    include <sanitizer/msan_interface.h>
+#    define WF_RNG_MSAN 1
+#  endif
+#endif
+/* getrandom(2) through syscall(2), so libcs without the wrapper still
+ * build.  Before the kernel pool is initialised the call blocks and a
+ * signal can interrupt it (EINTR); a short count is allowed by the
+ * interface too.  Retry both rather than dropping to the weak fallback
+ * seed.  MemorySanitizer cannot see writes made by a raw syscall, so
+ * mark the bytes initialised in that build. */
 static int kernel_random(void *buf, size_t len)
 {
-    long r = syscall(SYS_getrandom, buf, len, 0);
-    return r == (long)len ? 0 : -1;
+    size_t off = 0;
+    while (off < len) {
+        long r = syscall(SYS_getrandom, (char *)buf + off, len - off, 0);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0 || (size_t)r > len - off) return -1;
+        off += (size_t)r;
+    }
+#ifdef WF_RNG_MSAN
+    __msan_unpoison(buf, len);
+#endif
+    return 0;
 }
 #elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
 #include <unistd.h>
@@ -112,11 +135,8 @@ static inline uint64_t rotl64(uint64_t x, int k)
     return (x << k) | (x >> (64 - k));
 }
 
-/* Recover from a degenerate all-zero seed (xoshiro256++ has a
- * fixed point at 0).  Vigna's reference splitmix64 is the
- * recommended way to expand a single 64-bit input into a 256-bit
- * xoshiro seed.  We only invoke this when 'kernel_random'
- * returns all-zero, which on a working kernel never happens. */
+/* Vigna's splitmix64, the recommended way to expand one 64-bit value
+ * into a 256-bit xoshiro seed.  Used only by the fallback below. */
 static inline uint64_t splitmix64_step(uint64_t *x)
 {
     *x += 0x9E3779B97F4A7C15ULL;
@@ -126,14 +146,30 @@ static inline uint64_t splitmix64_step(uint64_t *x)
     return z ^ (z >> 31);
 }
 
+/* Seed from the kernel.  If that fails (no getrandom, seccomp denial)
+ * or returns the all-zero state (xoshiro256++'s fixed point), fall
+ * back to splitmix64 over the state's TLS address mixed with the pid
+ * and a monotonic timestamp.  The pid matters: after fork() the child
+ * has the parent's TLS address, so an address-only seed would make a
+ * reseeding child replay the parent's stream from its first draw.
+ * Four consecutive splitmix64 outputs come from four distinct counter
+ * values of a bijection, so at most one is zero and the fallback state
+ * is never all-zero. */
 static void xoshiro_seed(void)
 {
     if (kernel_random(xoshiro_state, sizeof(xoshiro_state)) != 0
         || (xoshiro_state[0] | xoshiro_state[1]
           | xoshiro_state[2] | xoshiro_state[3]) == 0)
     {
-        /* Last-resort fallback: tid + nanotime through splitmix. */
         uint64_t fallback = (uint64_t)(uintptr_t)&xoshiro_state;
+#if !defined(_WIN32) && !defined(_WIN64)
+        struct timespec ts;
+        if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+            fallback ^= (uint64_t)ts.tv_sec * 1000000000ULL
+                      + (uint64_t)ts.tv_nsec;
+        }
+        fallback = splitmix64_step(&fallback) ^ ((uint64_t)getpid() << 32);
+#endif
         for (int i = 0; i < 4; i++) {
             xoshiro_state[i] = splitmix64_step(&fallback);
         }
@@ -161,9 +197,9 @@ uint64_t hs_xoshiro256pp_next(void)
     return result;
 }
 
-/* Force reseed.  Useful after fork() and for tests that want
- * deterministic state — they can call this then immediately
- * overwrite the seed via hs_xoshiro256pp_reseed. */
+/* Discard the calling thread's state: its next draw reseeds from the
+ * kernel.  Not imported by Haskell (fork safety goes through the
+ * pthread_atfork handler below); kept for C callers and tests. */
 void hs_xoshiro256pp_reseed(void)
 {
     xoshiro_seeded = 0;

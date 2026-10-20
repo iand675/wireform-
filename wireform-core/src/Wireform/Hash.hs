@@ -139,7 +139,10 @@ data RoaringContainerKind = ArrayContainer | BitsetContainer
 
 
 {- | Decode a Roaring ARRAY container payload into a vector of 32-bit
-positions, OR'd with @hi << 16@.
+positions, OR'd with @hi << 16@. Only the payload's whole little-endian
+lows are read: a payload shorter than @cardinality * 2@ bytes (a
+truncated blob) decodes to that many positions, and a negative
+cardinality to none.
 -}
 roaringDecodeArray
   :: BS.ByteString
@@ -150,17 +153,19 @@ roaringDecodeArray
   -- ^ High 32 bits to OR onto each position.
   -> VS.Vector Int32
 roaringDecodeArray bs card hi = unsafeDupablePerformIO $ do
-  mv <- VSM.unsafeNew card
+  let !n = arrayCard bs card
+  mv <- VSM.unsafeNew n
   VSM.unsafeWith mv $ \dst ->
     unsafeUseAsCStringLen bs $ \(src, _) -> do
-      _ <- pure $! c_roaring_decode_array (castPtr src) (fromIntegral card) hi dst
+      _ <- pure $! c_roaring_decode_array (castPtr src) (fromIntegral n) hi dst
       pure ()
   VS.unsafeFreeze mv
 {-# INLINE roaringDecodeArray #-}
 
 
 {- | Decode a Roaring BITSET container payload (exactly 8192 bytes) into
-a vector of set positions, OR'd with @hi << 16@.
+a vector of set positions, OR'd with @hi << 16@. A shorter payload reads
+as if zero-padded to 8192 bytes.
 -}
 roaringDecodeBitset
   :: BS.ByteString
@@ -171,14 +176,16 @@ roaringDecodeBitset
 roaringDecodeBitset bs hi = unsafeDupablePerformIO $ do
   mv <- VSM.unsafeNew 65536
   written <- VSM.unsafeWith mv $ \dst ->
-    unsafeUseAsCStringLen bs $ \(src, _) ->
+    unsafeUseAsCStringLen (bitsetPayload bs) $ \(src, _) ->
       pure $! c_roaring_decode_bitset (castPtr src) hi dst
   let n = fromIntegral written
   VS.unsafeFreeze (VSM.unsafeSlice 0 n mv)
 {-# INLINE roaringDecodeBitset #-}
 
 
--- | Test whether a 16-bit low value is present in a Roaring container.
+{- | Test whether a 16-bit low value is present in a Roaring container.
+The payload is bounded as in 'roaringDecodeArray' / 'roaringDecodeBitset'.
+-}
 roaringContains
   :: RoaringContainerKind
   -> BS.ByteString
@@ -187,10 +194,33 @@ roaringContains
   -> Word16
   -> Bool
 roaringContains kind bs card v = unsafePerformIO $
-  unsafeUseAsCStringLen bs $ \(p, _) ->
-    let !k = case kind of ArrayContainer -> 0; BitsetContainer -> 1
-    in pure $! c_roaring_contains k (castPtr p) (fromIntegral card) v /= 0
+  case kind of
+    ArrayContainer ->
+      unsafeUseAsCStringLen bs $ \(p, _) ->
+        pure $! c_roaring_contains 0 (castPtr p) (fromIntegral (arrayCard bs card)) v /= 0
+    BitsetContainer ->
+      unsafeUseAsCStringLen (bitsetPayload bs) $ \(p, _) ->
+        pure $! c_roaring_contains 1 (castPtr p) 0 v /= 0
 {-# INLINE roaringContains #-}
+
+
+{- | The ARRAY cardinality the C kernels may read: the caller's count
+clamped to the payload's whole uint16 lows and to the Int32 range. The C
+side has no payload length, and Iceberg's @decodeDV@ passes a count taken
+from untrusted blob bytes next to a payload that may be truncated.
+-}
+arrayCard :: BS.ByteString -> Int -> Int
+arrayCard bs card =
+  max 0 (min card (min (BS.length bs `quot` 2) (fromIntegral (maxBound :: Int32))))
+{-# INLINE arrayCard #-}
+
+
+-- | A BITSET payload zero-padded to the 8192 bytes the C kernels read.
+bitsetPayload :: BS.ByteString -> BS.ByteString
+bitsetPayload bs
+  | BS.length bs >= 8192 = bs
+  | otherwise = bs <> BS.replicate (8192 - BS.length bs) 0
+{-# INLINE bitsetPayload #-}
 
 
 {- | Encode a sorted vector of 16-bit positions as a Roaring ARRAY

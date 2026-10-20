@@ -13,7 +13,8 @@
  *       decoding. Returns the number of bytes written to `dst` on
  *       success, or a negative error code:
  *         -1  truncated escape ('%' or '%H' at EOF)
- *         -2  non-hex digit in an escape
+ *         -2  non-hex digit in an escape (including "%z" at EOF);
+ *             the first error in input order wins
  *
  * The scan loop is the only SIMD-sensitive part. We pick the
  * widest registers available at compile time (AVX2 → SSE2 → NEON
@@ -157,7 +158,13 @@ ptrdiff_t hermes_url_decode(
             dst[out++] = ' ';
             in++;
         } else { /* '%' */
-            if (srclen - in < 3) return -1;
+            if (srclen - in < 3) {
+                /* Truncated, unless the one escape byte present is
+                 * already not a hex digit ("%z" at EOF is -2, like
+                 * "%zz"): errors are reported in input order. */
+                if (srclen - in == 2 && hex_value(src[in + 1]) < 0) return -2;
+                return -1;
+            }
             int hi = hex_value(src[in + 1]);
             int lo = hex_value(src[in + 2]);
             if (hi < 0 || lo < 0) return -2;

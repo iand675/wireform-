@@ -5,6 +5,11 @@
  * at a time on x86, and fall back to a SWAR-style scalar loop otherwise.
  *
  * All return values use the "absolute offset or len-on-miss" convention.
+ *
+ * Block loops test `len - i >= 16`, not `i + 16 <= len`: with 0 <= i and
+ * 0 <= len the difference cannot overflow, while the sum overflows int for
+ * len > INT_MAX - 16 (at -O3 the wrapped sum passes and the next block is
+ * read past len).
  */
 
 #include "http1_scan.h"
@@ -64,17 +69,15 @@ static const uint8_t is_fv_ok[256] = {
   1, 0,0,0, 0,0,0,
   /* 0x10..0x1F — controls, all bad */
   0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
-  /* 0x20..0x7E : SP + VCHAR — all OK */
+  /* 0x20..0x7E : SP + VCHAR, all OK; 0x7F DEL is bad (last entry) */
   1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1,
   1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1,
   1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1,
   1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1,
   1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1,
-  1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1,
-  /* 0x7F DEL — bad */
-  0,
+  1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,0,
   /* 0x80..0xFF : obs-text — all OK */
-  1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,
+  1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1,
   1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1,
   1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1,
   1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1,
@@ -100,7 +103,7 @@ static inline int find_single_byte(const uint8_t *p, int offset, int len, uint8_
 #if WIREFORM_HTTP1_HAS_SSE2
   /* 16-byte SSE2 scan. */
   __m128i n = _mm_set1_epi8((char)needle);
-  for (; i + 16 <= len; i += 16) {
+  for (; len - i >= 16; i += 16) {
     __m128i v = _mm_loadu_si128((const __m128i *)(p + i));
     __m128i eq = _mm_cmpeq_epi8(v, n);
     int mask = _mm_movemask_epi8(eq);
@@ -140,7 +143,7 @@ int hs_http1_find_non_token(const void *buf, int offset, int len) {
   const uint8_t *p = (const uint8_t *)buf;
   int i = offset;
   /* 16-byte unrolled scan over the byte-class table. */
-  for (; i + 16 <= len; i += 16) {
+  for (; len - i >= 16; i += 16) {
     uint8_t acc = 1;
     #pragma GCC unroll 16
     for (int j = 0; j < 16; j++) acc &= is_tchar[p[i + j]];
@@ -187,7 +190,7 @@ int hs_http1_find_non_fieldvalue(const void *buf, int offset, int len) {
   const __m128i v_tab   = _mm_set1_epi8(0x09);
   const __m128i v_del   = _mm_set1_epi8(0x7f);
   const __m128i v_sign  = _mm_set1_epi8((char)0x80);
-  for (; i + 16 <= len; i += 16) {
+  for (; len - i >= 16; i += 16) {
     __m128i v = _mm_loadu_si128((const __m128i *)(p + i));
     __m128i v_signed = _mm_xor_si128(v, v_sign);                 /* signed-space */
     __m128i lt_20 = _mm_cmplt_epi8(v_signed, v_2080);            /* b <u 0x20 */
@@ -218,7 +221,7 @@ void hs_http1_to_lower_ascii(const void *src_v, void *dst_v, int len) {
   const __m128i v_Z = _mm_set1_epi8(0x5a - 0x80 + 1);     /* used with signed cmpgt: 0x5b > b ⇔ b <= 'Z' */
   const __m128i v_sign = _mm_set1_epi8((char)0x80);
   const __m128i v_diff = _mm_set1_epi8(0x20);
-  for (; i + 16 <= len; i += 16) {
+  for (; len - i >= 16; i += 16) {
     __m128i v = _mm_loadu_si128((const __m128i *)(src + i));
     __m128i vs = _mm_xor_si128(v, v_sign);
     __m128i ge_A = _mm_cmpgt_epi8(vs, v_A);
@@ -249,7 +252,7 @@ int hs_http1_ascii_ieq(const void *a_v, const void *b_v, int len) {
   const __m128i v_Z     = _mm_set1_epi8(0x5a - 0x80 + 1);
   const __m128i v_sign  = _mm_set1_epi8((char)0x80);
   const __m128i v_diff  = _mm_set1_epi8(0x20);
-  for (; i + 16 <= len; i += 16) {
+  for (; len - i >= 16; i += 16) {
     __m128i va = _mm_loadu_si128((const __m128i *)(a + i));
     __m128i vb = _mm_loadu_si128((const __m128i *)(b + i));
     __m128i vas = _mm_xor_si128(va, v_sign);

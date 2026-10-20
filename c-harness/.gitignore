@@ -1,0 +1,17 @@
+# Binaries, scratch corpora, crash artifacts, coverage and AFL output.
+build/
+
+# libFuzzer artifacts written to the working directory when a fuzz
+# binary is run by hand without -artifact_prefix. Promote a real crash
+# by renaming it into <module>/regressions/<fuzzer>/.
+crash-*
+leak-*
+timeout-*
+oom-*
+slow-unit-*
+fuzz-*.log
+!*/regressions/**
+
+# Coverage data from running cov binaries outside `make coverage`.
+*.profraw
+*.profdata

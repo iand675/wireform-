@@ -468,14 +468,67 @@
           touch "$out"
         '';
 
+        # C kernel harness (c-harness/): tests, sanitizers, fuzz smoke and
+        # static analysis for every */cbits C file. LLVM 22 rather than the
+        # default clang: LLVM 21's AddressSanitizer runtime deadlocks before
+        # main() on macOS 26+ (llvm/llvm-project#200447).
+        cHarnessLLVM = pkgs.llvmPackages_22;
+        cHarnessTools = [
+          cHarnessLLVM.clang
+          cHarnessLLVM.llvm
+          pkgs.gnumake
+          pkgs.pkg-config
+        ] ++ lib.optionals pkgs.stdenv.isLinux [
+          pkgs.valgrind
+          pkgs.aflplusplus
+        ];
+        cHarnessLibs = systemDeps
+          ++ lib.optionals pkgs.stdenv.isLinux [ pkgs.liburing ];
+        cHarnessEnv = {
+          WIREFORM_CLANG = "${cHarnessLLVM.clang}/bin/clang";
+          LLVM_PROFDATA = "${cHarnessLLVM.llvm}/bin/llvm-profdata";
+          LLVM_COV = "${cHarnessLLVM.llvm}/bin/llvm-cov";
+          # The harness picks its own hardening per config (the release
+          # config adds _FORTIFY_SOURCE and the stack protector itself).
+          hardeningDisable = [ "all" ];
+        };
+        # Only the C sources and the harness: Haskell edits don't rebuild it.
+        cHarnessSrc = lib.fileset.toSource {
+          root = ./.;
+          fileset = lib.fileset.unions [
+            ./c-harness
+            (lib.fileset.fileFilter (f: f.hasExt "c" || f.hasExt "h") ./.)
+          ];
+        };
+        cHarnessCheck = pkgs.stdenv.mkDerivation (cHarnessEnv // {
+          name = "wireform-c-harness";
+          src = cHarnessSrc;
+          nativeBuildInputs = cHarnessTools;
+          buildInputs = cHarnessLibs;
+          dontConfigure = true;
+          buildPhase = ''
+            runHook preBuild
+            make -C c-harness -k -j$NIX_BUILD_CORES ci
+            runHook postBuild
+          '';
+          installPhase = ''
+            touch "$out"
+          '';
+        });
+        cHarnessShell = pkgs.mkShell (cHarnessEnv // {
+          packages = cHarnessTools ++ cHarnessLibs;
+        });
+
         checksAttrs = sandboxChecks // {
           hlint = hlintCheck;
           fourmolu = fourmoluCheck;
+          c-harness = cHarnessCheck;
         };
       in
       {
         devShells = devShells // {
           default = devShells.${defaultGHC};
+          c-harness = cHarnessShell;
         };
 
         # Every per-format package is also exposed as a build

@@ -27,12 +27,14 @@
  * for big payloads via the proto3 JSON mapping -- stays SSSE3.
  */
 
+#include <limits.h>
 #include <stdint.h>
 #include <string.h>
 #include <simde/x86/sse2.h>
 #include <simde/x86/ssse3.h>
 
-static const char b64_alphabet[64] =
+/* 64 symbols plus the literal's terminating NUL (never indexed). */
+static const char b64_alphabet[65] =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
   "abcdefghijklmnopqrstuvwxyz"
   "0123456789+/";
@@ -82,11 +84,20 @@ static const uint8_t b64_dec_table[256] = {
  * trailing '=' chars subtract one byte each.  The exact decoded
  * length is reported by hs_base64_decode itself; this helper just
  * sizes the output buffer.
+ *
+ * Both take and return int (the FFI uses CInt).  The largest input
+ * whose padded encoding still fits in an int is 3 * (INT_MAX / 4);
+ * for anything longer the encoded length is not representable, so
+ * hs_base64_encoded_length returns -1 and hs_base64_encode refuses
+ * to run (instead of overflowing its output index).
  * ------------------------------------------------------------------ */
+
+#define B64_MAX_ENCODE_INPUT (3 * (INT_MAX / 4))
 
 int hs_base64_encoded_length(int in_len)
 {
     if (in_len < 0) return 0;
+    if (in_len > B64_MAX_ENCODE_INPUT) return -1;
     return ((in_len + 2) / 3) * 4;
 }
 
@@ -99,8 +110,10 @@ int hs_base64_decoded_max_length(int in_len)
 /* ------------------------------------------------------------------
  * Encode
  *
- * Returns the number of bytes written to @out.  Always equals
- * hs_base64_encoded_length(in_len) (padded form).
+ * Returns the number of bytes written to @out, which must hold
+ * hs_base64_encoded_length(in_len) bytes; always equals that length
+ * (padded form).  in_len <= 0 writes nothing and returns 0;
+ * in_len > 3 * (INT_MAX / 4) writes nothing and returns -1.
  * ------------------------------------------------------------------ */
 
 static inline simde__m128i enc_reshuffle(simde__m128i in)
@@ -137,6 +150,8 @@ static inline simde__m128i enc_translate(simde__m128i in)
 int hs_base64_encode(const uint8_t *in, int in_len, uint8_t *out)
 {
     int i = 0, j = 0;
+
+    if (in_len > B64_MAX_ENCODE_INPUT) return -1;
 
     /* SIMD: 12 in -> 16 out per iter.  Need 16 readable input bytes
      * (we load 16 then mask out the upper 4) so guard accordingly. */

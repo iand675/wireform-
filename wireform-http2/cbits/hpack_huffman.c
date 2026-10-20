@@ -43,6 +43,8 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "hpack_huffman.h"
+
 /* ---------- Encode table (RFC 7541 Appendix B, LSB-aligned) ---------- */
 
 struct huff_sym {

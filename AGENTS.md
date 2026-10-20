@@ -324,6 +324,31 @@ regressions are invisible in a source review.
   is acceptable (slightly less optimal but far simpler to generate).
 - Always `{-# INLINE messageDecoder #-}` on instances.
 
+## C kernels (`*/cbits`)
+
+Every first-party C file under `*/cbits/` has a module in
+[`c-harness/`](c-harness/README.md): unit, boundary and differential tests
+plus libFuzzer targets, run under ASan+UBSan, MSan, valgrind, guard-page
+`-O3` builds and the clang static analyzer. The Haskell suites only reach
+the C through FFI wrappers, so they are not a substitute.
+
+- Changing a C kernel: run `nix develop .#c-harness -c make -C c-harness
+  ONLY=<module> ci` (the Buildkite `C harness` step runs the full set on
+  x86-64 Linux whenever a `.c`/`.h` file changes). A new exported function
+  gets tests and a fuzz target in the same change.
+- Adding a C file: add a module (`c-harness/<module>/module.mk`, see the
+  harness README) in the same change.
+- Fixing a C bug: commit its reproducer under
+  `c-harness/<module>/regressions/<fuzzer>/` (or a named unit test).
+- No reads or writes outside the caller's buffers, including "harmless"
+  aligned SIMD over-reads that stay within a page (they blind the
+  sanitizers, and unmasked lanes leak neighbouring bytes into results).
+  For tails, `memcpy` the remaining bytes into a zeroed local vector block,
+  run one more vector step and mask the result by the remaining length; use
+  `memcpy` for unaligned loads. No `no_sanitize` exemptions.
+- On macOS 26+, use the `c-harness` shell: older AddressSanitizer runtimes
+  (LLVM 21, Xcode before 26.4) hang before `main`.
+
 ## Code style
 
 - Do not use list comprehensions. Prefer `do` block syntax or

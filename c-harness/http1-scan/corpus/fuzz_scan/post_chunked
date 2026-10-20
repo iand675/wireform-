@@ -1,0 +1,10 @@
+POST /upload HTTP/1.1
+Host: api.example
+Transfer-Encoding: gzip, chunked
+Content-Type: application/octet-stream
+Expect: 100-continue
+
+1a;ext=v
+abcdefghijklmnopqrstuvwxyz
+0
+

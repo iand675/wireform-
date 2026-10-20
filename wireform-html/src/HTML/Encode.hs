@@ -24,7 +24,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Word (Word8)
-import Foreign.C.Types (CInt (..))
+import Foreign.C.Types (CPtrdiff (..))
 import Foreign.Ptr (Ptr, castPtr)
 import HTML.Value
 import System.IO.Unsafe (unsafeDupablePerformIO)
@@ -32,11 +32,11 @@ import Wireform.Builder qualified as BB
 
 
 foreign import ccall unsafe "hs_html_find_text_escape"
-  c_find_text_escape :: Ptr Word8 -> CInt -> CInt -> IO CInt
+  c_find_text_escape :: Ptr Word8 -> CPtrdiff -> CPtrdiff -> IO CPtrdiff
 
 
 foreign import ccall unsafe "hs_html_find_attr_escape"
-  c_find_attr_escape :: Ptr Word8 -> CInt -> CInt -> IO CInt
+  c_find_attr_escape :: Ptr Word8 -> CPtrdiff -> CPtrdiff -> IO CPtrdiff
 
 
 encodeHTML :: HTMLDocument -> ByteString
@@ -144,7 +144,7 @@ escapeText bs
         let go !off
               | off >= len = pure mempty
               | otherwise = do
-                  CInt pos <- c_find_text_escape ptr (fromIntegral off) (fromIntegral len)
+                  CPtrdiff pos <- c_find_text_escape ptr (fromIntegral off) (fromIntegral len)
                   let !absPos = fromIntegral pos
                   if absPos >= len
                     then pure $! BB.byteString (bsDrop off bs)
@@ -168,7 +168,7 @@ escapeAttrValue bs
         let go !off
               | off >= len = pure mempty
               | otherwise = do
-                  CInt pos <- c_find_attr_escape ptr (fromIntegral off) (fromIntegral len)
+                  CPtrdiff pos <- c_find_attr_escape ptr (fromIntegral off) (fromIntegral len)
                   let !absPos = fromIntegral pos
                   if absPos >= len
                     then pure $! BB.byteString (bsDrop off bs)

@@ -117,9 +117,17 @@ dVarint !p !off !n
       pokeByteOff p (off + 1) (fromIntegral ((n `shiftR` 7) .&. 0x7F .|. 0x80) :: Word8)
       pokeByteOff p (off + 2) (fromIntegral (n `shiftR` 14) :: Word8)
       pure $! off + 3
-  | otherwise = do
-      n' <- encodeVarintFieldC p off 0 n
-      pure $! off + n'
+  | otherwise = go off n
+  where
+    -- Values of 2^21 and up are rare (lengths of 2 MiB+), so a plain loop.
+    -- Not encodeVarintFieldC: that writes a field tag byte first.
+    go !o !v
+      | v < 0x80 = do
+          pokeByteOff p o (fromIntegral v :: Word8)
+          pure $! o + 1
+      | otherwise = do
+          pokeByteOff p o (fromIntegral (v .&. 0x7F .|. 0x80) :: Word8)
+          go (o + 1) (v `shiftR` 7)
 {-# INLINE dVarint #-}
 
 

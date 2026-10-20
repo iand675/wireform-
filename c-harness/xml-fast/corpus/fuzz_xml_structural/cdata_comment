@@ -1,0 +1,3 @@
+ÿÿ<root><!-- comment with -- double dash and -> arrow --><code><![CDATA[
+if (a[b[i]] > 0 && c-->d) { x = "]]"; y = ']>'; }
+]]></code><!----><![CDATA[]]><e a="1" b='2'/></root>

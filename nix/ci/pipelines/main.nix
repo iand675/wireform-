@@ -195,6 +195,48 @@ let
   };
 
   # ------------------------------------------------------------------
+  # C kernel harness (c-harness/): sanitizer tests, corpus replay,
+  # deterministic fuzz smoke, static analysis, MSan and valgrind. Runs
+  # when any C source, the harness, or global build config changes.
+  # ------------------------------------------------------------------
+  touchesC = builtins.any
+    (f: lib.hasPrefix "c-harness/" f
+        || lib.hasSuffix ".c" f
+        || lib.hasSuffix ".h" f
+        || changes.isGlobalChange f)
+    changedFiles;
+
+  cHarnessGroup = ci.group ":shield: C harness" {
+    key = "c-harness";
+    steps = [
+      (ci.command {
+        label = ":shield: C kernels: sanitizers, fuzz smoke, analyzer";
+        key = "c-harness-ci";
+        command = "nix build .#checks.x86_64-linux.c-harness --print-build-logs";
+        agents = nixAgents;
+        timeout = 45;
+      })
+    ];
+  };
+
+  # Long fuzz campaigns: scheduled builds only. Crashes are uploaded as
+  # artifacts; reproduce one with the fuzz binary from `make fuzz-build`.
+  fuzzCampaignGroup = ci.group ":bug: C fuzz campaign" {
+    key = "c-fuzz";
+    if_ = "build.source == 'schedule'";
+    steps = [
+      (ci.command {
+        label = ":bug: libFuzzer campaign (5 min per target)";
+        key = "c-fuzz-campaign";
+        command = "nix develop .#c-harness -c make -C c-harness -k fuzz FUZZ_TIME=300 FUZZ_FORK=4";
+        agents = nixAgents;
+        timeout = 600;
+        artifact_paths = [ "c-harness/build/crashes/**/*" ];
+      })
+    ];
+  };
+
+  # ------------------------------------------------------------------
   # Annotation summary step
   # ------------------------------------------------------------------
   summaryStep = ci.command {
@@ -216,6 +258,8 @@ let
     (if hasAffected then [ buildGroup ] else [])
     ++ (if testSteps != [] || conformanceSteps != [] then [ testGroup ] else [])
     ++ (if hasAffected then [ lintGroup ] else [])
+    ++ (if touchesC then [ cHarnessGroup ] else [])
+    ++ [ fuzzCampaignGroup ]
     ++ (if codegenSteps != [] then [ codegenGroup ] else [])
     ++ (if benchSteps != [] then [ benchGroup ] else [])
     ++ [ docsGroup ]

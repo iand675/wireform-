@@ -1,0 +1,8 @@
+# chunk-size tokens (RFC 9112 7.1)
+d16="ffffffffffffffff"
+d17="10000000000000000"
+zeros="0000000000000000"
+ext=";name=value"
+crlf="\x0d\x0a"
+hexu="ABCDEF"
+hexl="abcdef"

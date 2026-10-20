@@ -1,0 +1,1 @@
+<form action="/login" method="post"><label for="u">User</label><input id="u" name="user" type="text" value="" required><input type=password name=pw autocomplete=off><select name="c"><option value="a" selected>A</option><option value='b'>B</option></select><textarea rows=3>x &lt; y</textarea><button type="submit" disabled>Go</button></form>

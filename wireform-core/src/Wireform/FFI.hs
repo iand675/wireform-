@@ -251,7 +251,11 @@ relocatePageBoundary bs
                 (castPtr outBuf)
                 (fromIntegral outLen)
         if result == 1
-          then BS.packCStringLen (outBuf, len)
+          then do
+            -- packCStringLen copies; the scratch buffer is ours to free.
+            copied <- BS.packCStringLen (outBuf, len)
+            Foreign.Marshal.Alloc.free outBuf
+            pure copied
           else do
             Foreign.Marshal.Alloc.free outBuf
             pure bs

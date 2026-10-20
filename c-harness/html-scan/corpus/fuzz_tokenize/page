@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Café &amp; Bar</title>
+<link rel="stylesheet" href="/s.css">
+</head>
+<body class="home page">
+<h1 id=top>Hello, world</h1>
+<p>Fish &amp; chips &lt; &gt; &quot;quoted&quot; &#39;s &#x2014;</p>
+<a href="/search?q=a&amp;b=c" title='it&#39;s'>search</a>
+<img src="a.png" alt="" width=10 height=20/>
+<br/><hr>
+</body>
+</html>

@@ -60,3 +60,11 @@ network-3.2.8.0/
 flatparse-*/
 bench-output.txt
 traffic.html
+
+# libFuzzer artifacts from running a c-harness fuzz binary at the repo root
+/crash-*
+/leak-*
+/timeout-*
+/oom-*
+/slow-unit-*
+/default.profraw

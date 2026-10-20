@@ -3,6 +3,11 @@
  *
  * Uses SSE2 via simde for portable SIMD: load 16 bytes, pcmpeqb against
  * target byte(s), pmovmskb to get a bitmask, ctz to find first match.
+ *
+ * Callers pass the whole document (buf, len) and a start offset with
+ * 0 <= offset; only buf[offset .. len) is read. len can be as large as
+ * INT_MAX, so bounds are written `len - i >= 16` / `len - i > 2` rather
+ * than `i + 16 <= len` / `i + 2 < len`, which overflow int near INT_MAX.
  */
 
 #include <stdint.h>
@@ -29,7 +34,7 @@ int hs_xml_scan_structural(const uint8_t *buf, int len,
     simde__m128i v_sq   = simde_mm_set1_epi8('\'');
     simde__m128i v_amp  = simde_mm_set1_epi8('&');
 
-    for (; i + 16 <= len && count < max_indices; i += 16) {
+    for (; len - i >= 16 && count < max_indices; i += 16) {
         simde__m128i chunk = simde_mm_loadu_si128((const simde__m128i *)(buf + i));
 
         simde__m128i m1 = simde_mm_cmpeq_epi8(chunk, v_lt);
@@ -78,7 +83,7 @@ int hs_xml_find_lt(const uint8_t *buf, int offset, int len)
         i++;
     }
 
-    for (; i + 16 <= len; i += 16) {
+    for (; len - i >= 16; i += 16) {
         simde__m128i chunk = simde_mm_load_si128((const simde__m128i *)(buf + i));
         int mask = simde_mm_movemask_epi8(simde_mm_cmpeq_epi8(chunk, target));
         if (mask != 0) return i + __builtin_ctz(mask);
@@ -115,7 +120,7 @@ int hs_xml_find_byte(const uint8_t *buf, int offset, int len, uint8_t target_byt
         i++;
     }
 
-    for (; i + 16 <= len; i += 16) {
+    for (; len - i >= 16; i += 16) {
         simde__m128i chunk = simde_mm_load_si128((const simde__m128i *)(buf + i));
         int mask = simde_mm_movemask_epi8(simde_mm_cmpeq_epi8(chunk, target));
         if (mask != 0) return i + __builtin_ctz(mask);
@@ -151,7 +156,7 @@ int hs_xml_find_text_end(const uint8_t *buf, int offset, int len)
         i++;
     }
 
-    for (; i + 16 <= len; i += 16) {
+    for (; len - i >= 16; i += 16) {
         simde__m128i chunk = simde_mm_load_si128((const simde__m128i *)(buf + i));
         int m1 = simde_mm_movemask_epi8(simde_mm_cmpeq_epi8(chunk, v_lt));
         int m2 = simde_mm_movemask_epi8(simde_mm_cmpeq_epi8(chunk, v_amp));
@@ -175,19 +180,19 @@ int hs_xml_find_cdata_end(const uint8_t *buf, int offset, int len)
     simde__m128i v_rb = simde_mm_set1_epi8(']');
 
     while (i < len && ((uintptr_t)(buf + i) & 15) != 0) {
-        if (buf[i] == ']' && i + 2 < len && buf[i+1] == ']' && buf[i+2] == '>') {
+        if (buf[i] == ']' && len - i > 2 && buf[i+1] == ']' && buf[i+2] == '>') {
             return i;
         }
         i++;
     }
 
-    for (; i + 16 <= len; i += 16) {
+    for (; len - i >= 16; i += 16) {
         simde__m128i chunk = simde_mm_load_si128((const simde__m128i *)(buf + i));
         int mask = simde_mm_movemask_epi8(simde_mm_cmpeq_epi8(chunk, v_rb));
         while (mask != 0) {
             int bit = __builtin_ctz(mask);
             int pos = i + bit;
-            if (pos + 2 < len && buf[pos+1] == ']' && buf[pos+2] == '>') {
+            if (len - pos > 2 && buf[pos+1] == ']' && buf[pos+2] == '>') {
                 return pos;
             }
             mask &= mask - 1;
@@ -195,7 +200,7 @@ int hs_xml_find_cdata_end(const uint8_t *buf, int offset, int len)
     }
 
     for (; i < len; i++) {
-        if (buf[i] == ']' && i + 2 < len && buf[i+1] == ']' && buf[i+2] == '>') {
+        if (buf[i] == ']' && len - i > 2 && buf[i+1] == ']' && buf[i+2] == '>') {
             return i;
         }
     }
@@ -212,19 +217,19 @@ int hs_xml_find_comment_end(const uint8_t *buf, int offset, int len)
     simde__m128i v_dash = simde_mm_set1_epi8('-');
 
     while (i < len && ((uintptr_t)(buf + i) & 15) != 0) {
-        if (buf[i] == '-' && i + 2 < len && buf[i+1] == '-' && buf[i+2] == '>') {
+        if (buf[i] == '-' && len - i > 2 && buf[i+1] == '-' && buf[i+2] == '>') {
             return i;
         }
         i++;
     }
 
-    for (; i + 16 <= len; i += 16) {
+    for (; len - i >= 16; i += 16) {
         simde__m128i chunk = simde_mm_load_si128((const simde__m128i *)(buf + i));
         int mask = simde_mm_movemask_epi8(simde_mm_cmpeq_epi8(chunk, v_dash));
         while (mask != 0) {
             int bit = __builtin_ctz(mask);
             int pos = i + bit;
-            if (pos + 2 < len && buf[pos+1] == '-' && buf[pos+2] == '>') {
+            if (len - pos > 2 && buf[pos+1] == '-' && buf[pos+2] == '>') {
                 return pos;
             }
             mask &= mask - 1;
@@ -232,7 +237,7 @@ int hs_xml_find_comment_end(const uint8_t *buf, int offset, int len)
     }
 
     for (; i < len; i++) {
-        if (buf[i] == '-' && i + 2 < len && buf[i+1] == '-' && buf[i+2] == '>') {
+        if (buf[i] == '-' && len - i > 2 && buf[i+1] == '-' && buf[i+2] == '>') {
             return i;
         }
     }
@@ -258,7 +263,7 @@ int hs_html_find_text_end(const uint8_t *buf, int offset, int len)
         i++;
     }
 
-    for (; i + 16 <= len; i += 16) {
+    for (; len - i >= 16; i += 16) {
         simde__m128i chunk = simde_mm_load_si128((const simde__m128i *)(buf + i));
         int m1 = simde_mm_movemask_epi8(simde_mm_cmpeq_epi8(chunk, v_lt));
         int m2 = simde_mm_movemask_epi8(simde_mm_cmpeq_epi8(chunk, v_amp));
@@ -298,7 +303,7 @@ int hs_xml_find_escape(const uint8_t *buf, int offset, int len)
     simde__m128i v_dq  = simde_mm_set1_epi8('"');
     simde__m128i v_sq  = simde_mm_set1_epi8('\'');
 
-    for (; i + 16 <= len; i += 16) {
+    for (; len - i >= 16; i += 16) {
         simde__m128i chunk = simde_mm_loadu_si128((const simde__m128i *)(p + i));
         int m1 = simde_mm_movemask_epi8(simde_mm_cmpeq_epi8(chunk, v_lt));
         int m2 = simde_mm_movemask_epi8(simde_mm_cmpeq_epi8(chunk, v_gt));

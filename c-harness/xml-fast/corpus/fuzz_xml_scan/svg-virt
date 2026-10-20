@@ -1,0 +1,5 @@
+'<svg xmlns="http://www.w3.org/2000/svg" width='120' height='120' viewBox="0 0 120 120">
+  <!-- a circle -->
+  <circle cx="60" cy="60" r="50" fill="none" stroke="#0a0" stroke-width='4'/>
+  <text x="20" y="65" font-family="Verdana">It&apos;s &#x2603;</text>
+</svg>
