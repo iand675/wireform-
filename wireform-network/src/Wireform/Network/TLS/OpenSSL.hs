@@ -86,12 +86,10 @@ import Control.Concurrent (threadWaitRead, threadWaitWrite)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Exception (Exception, SomeException, catch, throwIO)
 import Data.ByteString qualified as BS
-import Data.ByteString.Internal qualified as BSI
 import Data.ByteString.Unsafe qualified as BSU
 import Data.Word (Word8)
 import Foreign.C.String (CString, peekCStringLen, withCString)
 import Foreign.C.Types
-import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Marshal.Alloc (alloca, allocaBytes)
 import Foreign.Ptr (Ptr, castPtr, nullPtr, plusPtr)
 import Foreign.Storable (peek)
@@ -220,14 +218,18 @@ foreign import ccall unsafe "wireform_openssl.h wf_ssl_last_error"
   c_ssl_last_error :: CString -> CSize -> IO CSize
 
 
-pattern WfSslOk, WfSslEof, WfSslWantRetry, WfSslFatal :: CInt
+pattern WfSslOk, WfSslEof, WfSslWantRetry, WfSslWantWrite, WfSslFatal :: CInt
 pattern WfSslOk = 0
 pattern WfSslEof = -1
+-- | Retry, parking on readability.
 pattern WfSslWantRetry = -2
+-- | Retry, parking on writability (a read that must send first, e.g. a
+-- TLS 1.3 key update, or a send whose socket buffer is full).
+pattern WfSslWantWrite = -4
 pattern WfSslFatal = -3
 
 
-{-# COMPLETE WfSslOk, WfSslEof, WfSslWantRetry, WfSslFatal #-}
+{-# COMPLETE WfSslOk, WfSslEof, WfSslWantRetry, WfSslWantWrite, WfSslFatal #-}
 
 
 ------------------------------------------------------------------------
@@ -400,42 +402,12 @@ it without a length parameter.
 -}
 setAlpnServer :: SslCtx -> [BS.ByteString] -> IO ()
 setAlpnServer (SslCtx ctx) protos = do
-  -- We need the BS to outlive the SSL_CTX.  Cheapest correct path:
-  -- allocate a pinned ByteString (FinalPtr) that lives as long as
-  -- the IORef-held reference.  We park the reference on the SslCtx
-  -- via a single global map keyed on the pointer — but the caller
-  -- already keeps a Haskell reference to the SslCtx, so we just
-  -- pin the encoded BS to the context's lifetime by using a
-  -- ForeignPtr finalizer would be cleaner; for the simple case
-  -- here we copy + Term + just keep it pinned via an unsafe
-  -- 'pure' that GHC won't reorder past the callback registration.
   let !encoded = encodeAlpn protos `BS.snoc` 0 -- NUL terminator
-  -- 'unsafeUseAsCStringLen' would let the BS get freed after the
-  -- callback registration; instead, force a copy that stays
-  -- referenced via the IORef below.
-  withPinnedBs encoded $ \p ->
+  -- The C side copies the list into the SSL_CTX (it owns the copy and
+  -- frees it with the context), so the buffer only has to stay alive
+  -- for the duration of this call.
+  BSU.unsafeUseAsCStringLen encoded $ \(p, _) ->
     c_ssl_ctx_set_alpn_select_server ctx (castUCharPtr p)
-
-
-{- | Copy @bs@ into a freshly mallocBytes-backed 'BSI.fromForeignPtr'
-buffer and run the continuation with a 'Ptr' into it.  The
-buffer is alive for the duration of @action@; intentionally
-/not/ freed afterwards because the OpenSSL ALPN-select callback
-retains a raw 'Ptr' into it for the SSL_CTX's lifetime.  Memory
-"leak" is bounded by the number of SSL_CTX objects in the
-process (one per server endpoint, typically a single-digit
-count); negligible vs. SSL_CTX itself.
--}
-withPinnedBs :: BS.ByteString -> (Ptr CChar -> IO a) -> IO a
-withPinnedBs bs action = do
-  let len = BS.length bs
-  fp <- BSI.mallocByteString len
-  withForeignPtr fp $ \p -> do
-    BSU.unsafeUseAsCStringLen bs $ \(src, _) ->
-      BSI.memcpy p (castPtr src) len
-    -- Keep fp alive past 'action' by forcing it into the closure.
-    _ <- pure fp
-    action (castPtr p)
 
 
 castUCharPtr :: Ptr a -> Ptr CUChar
@@ -585,11 +557,10 @@ retryHandshake sock step ssl = loop
       case rc of
         WfSslOk -> pure ()
         WfSslWantRetry -> do
-          -- Conservatively wait for both directions: OpenSSL doesn't
-          -- distinguish WANT_READ from WANT_WRITE here without an
-          -- extra round-trip and threadWaitRead is the common case
-          -- during handshake.
           withFdSocket sock $ \fd -> threadWaitRead (Fd (fromIntegral fd))
+          loop
+        WfSslWantWrite -> do
+          withFdSocket sock $ \fd -> threadWaitWrite (Fd (fromIntegral fd))
           loop
         WfSslEof -> throwSsl "handshake: peer closed"
         WfSslFatal -> throwSsl "handshake failed"
@@ -663,6 +634,12 @@ tlsReceiveFn (SslConn ssl sock lock) = recv
             WfSslWantRetry -> do
               withFdSocket sock $ \fd -> threadWaitRead (Fd (fromIntegral fd))
               loop
+            WfSslWantWrite -> do
+              -- A read that has to send first (TLS 1.3 key update):
+              -- waiting for readability would wait on the peer, which is
+              -- waiting for this record.
+              withFdSocket sock $ \fd -> threadWaitWrite (Fd (fromIntegral fd))
+              loop
             WfSslFatal -> throwSsl "tlsReceiveFn"
 
 
@@ -684,7 +661,11 @@ tlsSendFn (SslConn ssl sock lock) = send
             pure (rc, n)
           case rc of
             WfSslOk -> pure (fromIntegral n)
+            -- A send can want to read first (renegotiation / key update).
             WfSslWantRetry -> do
+              withFdSocket sock $ \fd -> threadWaitRead (Fd (fromIntegral fd))
+              loop
+            WfSslWantWrite -> do
               withFdSocket sock $ \fd -> threadWaitWrite (Fd (fromIntegral fd))
               loop
             WfSslEof -> throwSsl "tlsSendFn: peer closed"
@@ -711,6 +692,9 @@ tlsSend (SslConn ssl sock lock) bs = BSU.unsafeUseAsCStringLen bs go
                   let !wroteI = fromIntegral wrote
                   loop (p `plusPtr` wroteI) (n - wroteI)
                 WfSslWantRetry -> do
+                  withFdSocket sock $ \fd -> threadWaitRead (Fd (fromIntegral fd))
+                  loop p n
+                WfSslWantWrite -> do
                   withFdSocket sock $ \fd -> threadWaitWrite (Fd (fromIntegral fd))
                   loop p n
                 WfSslEof -> throwSsl "tlsSend: peer closed"

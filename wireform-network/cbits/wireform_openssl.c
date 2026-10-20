@@ -89,7 +89,13 @@ static int is_transient_failure(int err) {
  * a system error are retries, everything else is fatal. */
 static int map_handshake(SSL *ssl, int rc) {
     int err = SSL_get_error(ssl, rc);
-    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+    /* WANT_WRITE is kept distinct: a read that has to send first (a TLS
+     * 1.3 key update) must park on writability, or it waits for a peer
+     * that is waiting for it. */
+    if (err == SSL_ERROR_WANT_WRITE) {
+        return WF_SSL_WANT_WRITE;
+    }
+    if (err == SSL_ERROR_WANT_READ) {
         return WF_SSL_WANT_RETRY;
     }
     if (is_transient_failure(err)) {
@@ -370,7 +376,13 @@ int wf_ssl_read_into(SSL *ssl, void *buf, size_t buf_len, size_t *out) {
     }
     int err = SSL_get_error(ssl, rc);
     if (err == SSL_ERROR_ZERO_RETURN) return WF_SSL_EOF;
-    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+    /* WANT_WRITE is kept distinct: a read that has to send first (a TLS
+     * 1.3 key update) must park on writability, or it waits for a peer
+     * that is waiting for it. */
+    if (err == SSL_ERROR_WANT_WRITE) {
+        return WF_SSL_WANT_WRITE;
+    }
+    if (err == SSL_ERROR_WANT_READ) {
         return WF_SSL_WANT_RETRY;
     }
     /* SSL_ERROR_SYSCALL, or SSL_ERROR_SSL whose newest entry is a
@@ -420,7 +432,13 @@ int wf_ssl_write_from(SSL *ssl, const void *buf, size_t buf_len, size_t *out) {
         return WF_SSL_OK;
     }
     int err = SSL_get_error(ssl, rc);
-    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+    /* WANT_WRITE is kept distinct: a read that has to send first (a TLS
+     * 1.3 key update) must park on writability, or it waits for a peer
+     * that is waiting for it. */
+    if (err == SSL_ERROR_WANT_WRITE) {
+        return WF_SSL_WANT_WRITE;
+    }
+    if (err == SSL_ERROR_WANT_READ) {
         return WF_SSL_WANT_RETRY;
     }
     /* As on the read side, a non-blocking send that would block can be
@@ -431,7 +449,7 @@ int wf_ssl_write_from(SSL *ssl, const void *buf, size_t buf_len, size_t *out) {
      * down. */
     if (is_transient_failure(err)) {
         ERR_clear_error();
-        return WF_SSL_WANT_RETRY;
+        return WF_SSL_WANT_WRITE;
     }
     return WF_SSL_FATAL;
 }

@@ -36,20 +36,20 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
     size_t sent = 0;
     int rc = WF_SSL_WANT_RETRY;
-    for (int p = 1; p <= parts && rc == WF_SSL_WANT_RETRY; p++) {
+    for (int p = 1; p <= parts && wf_ssl_want(rc); p++) {
         size_t upto = n * (size_t)p / (size_t)parts;
         sent += tls_push(fds[0], in + sent, upto - sent);
         if (p == parts && !keep_open) shutdown(fds[0], SHUT_WR);
-        for (int step = 0; step < 4 && rc == WF_SSL_WANT_RETRY; step++) {
+        for (int step = 0; step < 4 && wf_ssl_want(rc); step++) {
             rc = wf_ssl_accept(s);
             WF_FUZZ_ASSERT(tls_rc_valid(rc));
             tls_drain(fds[0]); /* the server's flight */
         }
     }
-    if (!keep_open && rc == WF_SSL_WANT_RETRY) {
+    if (!keep_open && wf_ssl_want(rc)) {
         /* Everything delivered and the peer gone: must not keep waiting. */
         rc = wf_ssl_accept(s);
-        WF_FUZZ_ASSERT(rc != WF_SSL_WANT_RETRY || sent < n);
+        WF_FUZZ_ASSERT(!wf_ssl_want(rc) || sent < n);
     }
     if (rc == WF_SSL_OK) {
         WF_FUZZ_ASSERT(tls_alpn_ok(s));

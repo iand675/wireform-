@@ -18,10 +18,13 @@ nix develop .#c-harness        # clang, llvm-cov, pkg-config, the C libs,
 make -C c-harness ci
 ```
 
-The shell pins its clang through `WIREFORM_CLANG`, which the Makefile
-prefers over a bare `clang`. Any clang with compiler-rt works outside the
-shell (`make CC=/path/to/clang`). The `fuzz` and `afl` configs need
-libFuzzer, which Apple's Xcode clang does not ship.
+The shell and the `checks.c-harness` derivation pin clang (`CC`,
+`FUZZ_CC`, `WIREFORM_CLANG`), because every config needs compiler-rt
+(ASan/UBSan/MSan, libFuzzer) and because `-Werror` with gcc trips on
+`-Wmaybe-uninitialized` false positives in simde and on pointer arguments
+it cannot see through. Any clang with compiler-rt works outside the shell
+(`make CC=/path/to/clang`). The `fuzz` and `afl` configs need libFuzzer,
+which Apple's Xcode clang does not ship.
 
 macOS 26+ note: the AddressSanitizer runtime in LLVM 21 and in Xcode
 before 26.4 deadlocks at process start on macOS 26 and later
@@ -52,6 +55,11 @@ binaries hang before `main`, you are on an affected runtime.
 them; `ONLY="mod-a mod-b"` restricts any target to those modules. Property
 tests read `WF_SEED` (replay a failure with the seed it
 prints) and `WF_ITERS` (iteration multiplier for long runs).
+
+Every test and replay binary carries a memory ceiling: a watchdog thread
+aborts the process once its private memory passes `WF_MEM_LIMIT_MB`
+(default 4096, 0 disables), so a runaway test fails its own binary instead
+of the machine. libFuzzer binaries use `-rss_limit_mb` for the same job.
 
 Build output, scratch corpora and crash artifacts go to `build/`
 (git-ignored). libFuzzer always writes new inputs to a scratch directory

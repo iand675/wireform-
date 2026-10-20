@@ -114,12 +114,24 @@ int hs_iouring_submit_recv(struct hs_iouring *uring, size_t max_bytes) {
     return io_uring_submit(&uring->ring);
 }
 
+/* Drain the eventfd's counter. The eventfd is level-triggered and the
+ * kernel increments it per completion; leaving the count in place would
+ * make every threadWaitRead return immediately. Called after a
+ * completion is consumed, so a pending completion is still found by the
+ * peek that precedes each wait. */
+static void drain_eventfd(struct hs_iouring *uring) {
+    uint64_t v;
+    while (read(uring->event_fd, &v, sizeof v) == (ssize_t)sizeof v) {
+    }
+}
+
 /* Consume one completion: >0 = bytes received (head advanced), 0 = EOF,
  * <0 = -errno from the recv. */
 static int consume_cqe(struct hs_iouring *uring, struct io_uring_cqe *cqe,
                        uint64_t *new_head) {
     int res = cqe->res;
     io_uring_cqe_seen(&uring->ring, cqe);
+    drain_eventfd(uring);
 
     if (res > 0) {
         uring->head += (uint64_t)res;

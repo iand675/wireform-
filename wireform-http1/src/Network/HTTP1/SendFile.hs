@@ -75,8 +75,7 @@ header + body to land in a single TCP segment should set
 sendFile :: Socket -> Fd -> Word64 -> Word64 -> IO ()
 sendFile sock fileFd offset0 totalLen =
   withFdSocket sock $ \sockFdInt -> do
-    let sockFd = fromIntegral sockFdInt :: CInt
-    sendFileFd sockFd fileFd offset0 totalLen
+    sendFileFd sockFdInt fileFd offset0 totalLen
 
 
 {- | Same as 'sendFile' but takes a raw socket file descriptor. Useful

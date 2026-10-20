@@ -48,7 +48,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString.Internal qualified as BSI
 import Data.Typeable (Typeable)
 import Data.Word (Word64, Word8)
-import Foreign.C.Types (CInt (..), CLong (..), CSize (..))
+import Foreign.C.Types (CInt (..), CSize (..))
 import Foreign.Marshal.Alloc (alloca)
 import Foreign.Marshal.Utils (copyBytes)
 import Foreign.Ptr (Ptr, nullPtr, plusPtr)

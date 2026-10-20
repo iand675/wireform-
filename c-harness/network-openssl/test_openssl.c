@@ -81,7 +81,7 @@ static size_t read_all(SSL *ssl, uint8_t *dst, size_t n, size_t chunk)
             idle++;
         }
         wf_free(buf, want);
-        if (rc != WF_SSL_OK && rc != WF_SSL_WANT_RETRY) break;
+        if (rc != WF_SSL_OK && !wf_ssl_want(rc)) break;
     }
     return got;
 }
@@ -101,7 +101,9 @@ static void transfer(SSL *w, SSL *r, const uint8_t *src, size_t n, uint8_t *dst,
             WF_CHECK_EQ(out, len);
             sent += out;
         } else {
-            WF_CHECK_EQ(rc, WF_SSL_WANT_RETRY);
+            /* A full socket wants write (or read, mid-renegotiation);
+             * either way the loop drains the peer and retries. */
+            WF_CHECK(wf_ssl_want(rc));
             WF_CHECK_EQ(out, 0);
             /* Retry with the same (buf, len) after draining the peer. */
             uint8_t *buf = wf_alloc(chunk);
@@ -132,6 +134,9 @@ enum fault_mode {
     FAULT_EOF,       /* return 0 (orderly EOF) */
     FAULT_ERRNO,     /* set errno = fault_arg, return -1 */
     FAULT_PUSH,      /* ERR_raise(fault_lib, fault_arg), return -1 */
+    FAULT_RETRY_WRITE, /* return -1 with only the retry-WRITE flag: a
+                        * read that must send before it can progress (a
+                        * TLS 1.3 key update), or a blocked send. */
 };
 static enum fault_mode fault_mode;
 static int fault_arg, fault_lib;
@@ -142,6 +147,7 @@ static int fault_io(BIO *b)
     switch (fault_mode) {
     case FAULT_PLAIN: return -1;
     case FAULT_RETRY: BIO_set_retry_read(b); BIO_set_retry_write(b); return -1;
+    case FAULT_RETRY_WRITE: BIO_set_retry_write(b); return -1;
     case FAULT_EOF: return 0;
     case FAULT_ERRNO: errno = fault_arg; return -1;
     case FAULT_PUSH:
@@ -514,7 +520,7 @@ static void protocol_mismatch_is_fatal(void)
     tls_handshake(k.c, k.s, &crc, &src);
     WF_CHECK_EQ(src, WF_SSL_FATAL);
     /* The client sees the server's alert on its next step. */
-    for (int i = 0; i < 10 && crc == WF_SSL_WANT_RETRY; i++) crc = wf_ssl_connect(k.c);
+    for (int i = 0; i < 10 && wf_ssl_want(crc); i++) crc = wf_ssl_connect(k.c);
     WF_CHECK(crc == WF_SSL_FATAL || crc == WF_SSL_EOF);
     conn_close(&k);
 }
@@ -531,7 +537,7 @@ static void handshake_peer_gone(void)
     int rs = wf_ssl_accept(k.s);
     /* The ClientHello is still queued, so the server may get as far as
      * sending its flight before it sees the hangup. */
-    for (int i = 0; i < 10 && rs == WF_SSL_WANT_RETRY; i++) rs = wf_ssl_accept(k.s);
+    for (int i = 0; i < 10 && wf_ssl_want(rs); i++) rs = wf_ssl_accept(k.s);
     WF_CHECK(rs == WF_SSL_FATAL || rs == WF_SSL_EOF);
     conn_close(&k);
 
@@ -595,7 +601,7 @@ static void zero_length_and_null_out(void)
     WF_CHECK_EQ(wf_ssl_write_from(k.c, &one, 1, NULL), WF_SSL_OK);
     uint8_t got = 0;
     int rc = WF_SSL_WANT_RETRY;
-    for (int i = 0; i < 100 && rc == WF_SSL_WANT_RETRY; i++)
+    for (int i = 0; i < 100 && wf_ssl_want(rc); i++)
         rc = wf_ssl_read_into(k.s, &got, 1, NULL);
     WF_CHECK_EQ(rc, WF_SSL_OK);
     WF_CHECK_EQ(got, 0x5A);
@@ -731,7 +737,7 @@ static void write_backpressure(void)
     wf_rng_fill(&rng, src, n);
     size_t out = 0;
     int rc = wf_ssl_write_from(k.c, src, n, &out);
-    WF_CHECK_EQ(rc, WF_SSL_WANT_RETRY); /* 1 MiB cannot fit a socketpair */
+    WF_CHECK_EQ(rc, WF_SSL_WANT_WRITE); /* 1 MiB cannot fit a socketpair */
     WF_CHECK_EQ(out, 0);
     transfer(k.c, k.s, src, n, dst, 16384);
     free(src);
@@ -769,7 +775,7 @@ static void stale_error_queue_is_ignored(void)
         size_t n = 1 << 20;
         uint8_t *big = calloc(1, n);
         ERR_raise(stale[i].lib, stale[i].reason);
-        WF_CHECK_EQ(wf_ssl_write_from(k.c, big, n, &out), WF_SSL_WANT_RETRY);
+        WF_CHECK_EQ(wf_ssl_write_from(k.c, big, n, &out), WF_SSL_WANT_WRITE);
         uint8_t *sink = malloc(n);
         transfer(k.c, k.s, big, n, sink, 16384);
         free(sink);
@@ -815,6 +821,16 @@ static void bio_failure_mapping(void)
     WF_CHECK_EQ(read_with(&k, FAULT_RETRY, 0, 0, 0), WF_SSL_WANT_RETRY);
     conn_close(&k);
 
+    /* A read that must write first (TLS 1.3 key update) reports the
+     * write direction even though the caller asked to read, so the
+     * Haskell loop parks on writability; likewise a blocked send. */
+    conn_fault_rbio(&k);
+    WF_CHECK_EQ(read_with(&k, FAULT_RETRY_WRITE, 0, 0, 0), WF_SSL_WANT_WRITE);
+    conn_close(&k);
+    conn_fault_wbio(&k);
+    WF_CHECK_EQ(write_with(&k, FAULT_RETRY_WRITE, 0, 0, 0), WF_SSL_WANT_WRITE);
+    conn_close(&k);
+
     /* Orderly EOF from the BIO with no close_notify: EOF. */
     conn_fault_rbio(&k);
     WF_CHECK_EQ(read_with(&k, FAULT_EOF, 0, 0, 0), WF_SSL_EOF);
@@ -827,7 +843,7 @@ static void bio_failure_mapping(void)
         WF_CHECK_EQ(read_with(&k, FAULT_ERRNO, 0, retry_errnos[i], 0), WF_SSL_WANT_RETRY);
         conn_close(&k);
         conn_fault_wbio(&k);
-        WF_CHECK_EQ(write_with(&k, FAULT_ERRNO, 0, retry_errnos[i], 0), WF_SSL_WANT_RETRY);
+        WF_CHECK_EQ(write_with(&k, FAULT_ERRNO, 0, retry_errnos[i], 0), WF_SSL_WANT_WRITE);
         conn_close(&k);
     }
     conn_fault_rbio(&k);
@@ -857,7 +873,7 @@ static void bio_failure_mapping(void)
     WF_CHECK_EQ(read_with(&k, FAULT_PUSH, ERR_LIB_SYS, ECONNRESET, 0), WF_SSL_EOF);
     conn_close(&k);
     conn_fault_wbio(&k);
-    WF_CHECK_EQ(write_with(&k, FAULT_PUSH, ERR_LIB_SYS, EINTR, 0), WF_SSL_WANT_RETRY);
+    WF_CHECK_EQ(write_with(&k, FAULT_PUSH, ERR_LIB_SYS, EINTR, 0), WF_SSL_WANT_WRITE);
     conn_close(&k);
     conn_fault_wbio(&k);
     WF_CHECK_EQ(write_with(&k, FAULT_PUSH, ERR_LIB_SYS, EPIPE, 0), WF_SSL_FATAL);
@@ -890,15 +906,21 @@ static void bio_failure_mapping(void)
  * system error is a retry, any other system error is fatal. */
 static void handshake_bio_failure_mapping(void)
 {
-    struct { enum fault_mode mode; int lib, arg, want; } cases[] = {
-        { FAULT_RETRY, 0, 0, WF_SSL_WANT_RETRY },
-        { FAULT_ERRNO, 0, EAGAIN, WF_SSL_WANT_RETRY },
-        { FAULT_ERRNO, 0, EINTR, WF_SSL_WANT_RETRY },
-        { FAULT_PUSH, ERR_LIB_SYS, EWOULDBLOCK, WF_SSL_WANT_RETRY },
-        { FAULT_ERRNO, 0, ECONNRESET, WF_SSL_FATAL },
-        { FAULT_PLAIN, 0, 0, WF_SSL_FATAL },
-        { FAULT_EOF, 0, 0, WF_SSL_FATAL },
-        { FAULT_PUSH, ERR_LIB_EVP, EAGAIN, WF_SSL_FATAL }, /* not a system error */
+    /* want = expectation for a failing read step, want_w = for a failing
+     * write step: a BIO retry flag set during the client's ClientHello
+     * write is a definite WANT_WRITE, an errno-only failure leaves the
+     * direction unknown and the handshake waits on readability. */
+    struct { enum fault_mode mode; int lib, arg, want, want_w; } cases[] = {
+        { FAULT_RETRY, 0, 0, WF_SSL_WANT_RETRY, WF_SSL_WANT_WRITE },
+        { FAULT_RETRY_WRITE, 0, 0, WF_SSL_WANT_WRITE, WF_SSL_WANT_WRITE },
+        { FAULT_ERRNO, 0, EAGAIN, WF_SSL_WANT_RETRY, WF_SSL_WANT_RETRY },
+        { FAULT_ERRNO, 0, EINTR, WF_SSL_WANT_RETRY, WF_SSL_WANT_RETRY },
+        { FAULT_PUSH, ERR_LIB_SYS, EWOULDBLOCK, WF_SSL_WANT_RETRY, WF_SSL_WANT_RETRY },
+        { FAULT_ERRNO, 0, ECONNRESET, WF_SSL_FATAL, WF_SSL_FATAL },
+        { FAULT_PLAIN, 0, 0, WF_SSL_FATAL, WF_SSL_FATAL },
+        { FAULT_EOF, 0, 0, WF_SSL_FATAL, WF_SSL_FATAL },
+        /* not a system error */
+        { FAULT_PUSH, ERR_LIB_EVP, EAGAIN, WF_SSL_FATAL, WF_SSL_FATAL },
     };
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
         for (int side = 0; side < 2; side++) {
@@ -919,7 +941,7 @@ static void handshake_bio_failure_mapping(void)
                 SSL_set0_wbio(k.c, BIO_new(fault_method()));
                 rc = wf_ssl_connect(k.c);
             }
-            WF_CHECK_EQ(rc, cases[i].want);
+            WF_CHECK_EQ(rc, side == 0 ? cases[i].want : cases[i].want_w);
             conn_close(&k);
         }
     }
@@ -927,8 +949,10 @@ static void handshake_bio_failure_mapping(void)
 
 /* TLS 1.3 KeyUpdate with update_requested: the reader must answer with
  * its own KeyUpdate, so a read can need to WRITE. With the write side
- * blocked, the read reports WANT_RETRY (OpenSSL's WANT_WRITE); once the
- * socket drains, data flows again under the new keys. */
+ * blocked the read reports WF_SSL_WANT_WRITE, so the Haskell receive
+ * path parks on writability; waiting for readability there would wait on
+ * a peer that is waiting for this record (the stall this pins down).
+ * Once the socket drains, data flows again under the new keys. */
 static void key_update_read_wants_write(void)
 {
     conn k;
@@ -943,7 +967,11 @@ static void key_update_read_wants_write(void)
     SSL_set0_wbio(k.s, BIO_new(fault_method()));
     uint8_t buf[64];
     int rc = wf_ssl_read_into(k.s, buf, sizeof buf, &out);
-    WF_CHECK(rc == WF_SSL_WANT_RETRY || rc == WF_SSL_OK);
+    /* OpenSSL may hand back the application data first and answer the
+     * update later, so either outcome is valid here; when the read does
+     * need to send, the code must say WRITE (bio_failure_mapping pins
+     * that direction exactly). */
+    WF_CHECK(rc == WF_SSL_OK || rc == WF_SSL_WANT_WRITE);
     SSL_set0_wbio(k.s, real);
     size_t got = rc == WF_SSL_OK ? out : 0;
     got += read_all(k.s, buf + got, sizeof msg - got, sizeof buf - got);

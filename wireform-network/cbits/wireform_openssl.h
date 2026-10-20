@@ -16,8 +16,9 @@ extern "C" {
 /* Return codes shared by every entry point. */
 #define WF_SSL_OK          0
 #define WF_SSL_EOF        -1
-#define WF_SSL_WANT_RETRY -2
+#define WF_SSL_WANT_RETRY -2  /* retry, waiting for readability       */
 #define WF_SSL_FATAL      -3
+#define WF_SSL_WANT_WRITE -4  /* retry, waiting for writability       */
 
 /* One-time process init.  Idempotent; safe to call from FFI on
  * every connection setup (OpenSSL 1.1+ guards itself). */

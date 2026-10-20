@@ -6,6 +6,7 @@
 #include "api.h"
 
 #include <errno.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/eventfd.h>
 
@@ -92,9 +93,11 @@ static void basic_receive(void)
     WF_CHECK_EQ(head, 100);
     WF_CHECK_EQ(hs_iouring_get_head(r.u), 100);
     WF_CHECK_MEM(r.buf, msg, 100);
+    /* Consuming the completion drains the eventfd (see
+     * eventfd_signals_then_drains), so it must read as empty now. */
     uint64_t ev = 0;
-    WF_CHECK_EQ(read(efd, &ev, sizeof ev), (ssize_t)sizeof ev);
-    WF_CHECK(ev >= 1);
+    WF_CHECK_EQ(read(efd, &ev, sizeof ev), (ssize_t)-1);
+    WF_CHECK_EQ(errno, EAGAIN);
 
     /* peek path */
     WF_CHECK(hs_iouring_submit_recv(r.u, 50) >= 0);
@@ -107,6 +110,38 @@ static void basic_receive(void)
     /* the remaining 30 */
     WF_CHECK_EQ(recv_once(&r, 1000, NULL, 0, &head), 30);
     WF_CHECK_MEM(r.buf + 150, msg + 50, 30);
+    rig_close(&r, 1);
+}
+
+/* The eventfd is level-triggered, so it must be readable exactly while a
+ * completion is waiting to be consumed: the transport peeks after every
+ * wake and parks otherwise, and an eventfd left set would spin that loop
+ * (or, drained too eagerly, lose the wakeup). */
+static void eventfd_signals_then_drains(void)
+{
+    rig r;
+    WF_CHECK_EQ(rig_open(&r, 4096, 4), 0);
+    int efd = hs_iouring_get_eventfd(r.u);
+    WF_CHECK(efd >= 0);
+    WF_CHECK(hs_iouring_submit_recv(r.u, r.size) >= 0);
+    uint64_t ev = 0;
+    errno = 0;
+    WF_CHECK_EQ(read(efd, &ev, sizeof ev), (ssize_t)-1);
+    WF_CHECK_EQ(errno, EAGAIN); /* nothing completed yet */
+
+    peer_send(&r, (const uint8_t *)"hello", 5);
+    struct pollfd pfd = { efd, POLLIN, 0 };
+    WF_CHECK_EQ(poll(&pfd, 1, 1000), 1);
+    WF_CHECK((pfd.revents & POLLIN) != 0);
+
+    uint64_t head = 0;
+    WF_CHECK_EQ(hs_iouring_peek_cqe(r.u, &head), 5);
+    WF_CHECK_EQ(head, 5);
+    pfd.revents = 0;
+    WF_CHECK_EQ(poll(&pfd, 1, 0), 0); /* drained with the completion */
+    errno = 0;
+    WF_CHECK_EQ(read(efd, &ev, sizeof ev), (ssize_t)-1);
+    WF_CHECK_EQ(errno, EAGAIN);
     rig_close(&r, 1);
 }
 
@@ -274,6 +309,7 @@ int main(void)
         return wf_finish("test_iouring");
     }
     WF_RUN(basic_receive);
+    WF_RUN(eventfd_signals_then_drains);
     WF_RUN(clamps_at_ring_end);
     WF_RUN(zero_length_submit_rejected);
     WF_RUN(eof_and_errors);

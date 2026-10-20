@@ -30,9 +30,11 @@
  *   empty queue and a clean errno or SSL_get_error() misreports.
  * - wf_ssl_last_error(buf, 512) right after a failed call.
  *
- * Return codes: WF_SSL_OK 0, WF_SSL_EOF -1, WF_SSL_WANT_RETRY -2,
- * WF_SSL_FATAL -3. (wf_ssl_get_alpn returns -1 for "none"; set_alpn
- * returns OpenSSL's 0 / nonzero.)
+ * Return codes: WF_SSL_OK 0, WF_SSL_EOF -1, WF_SSL_WANT_RETRY -2
+ * (retry, wait for readability), WF_SSL_FATAL -3, WF_SSL_WANT_WRITE -4
+ * (retry, wait for writability: a TLS 1.3 key update makes a read want
+ * to send first, and a send can block). (wf_ssl_get_alpn returns -1 for
+ * "none"; set_alpn returns OpenSSL's 0 / nonzero.)
  */
 #ifndef WF_NETWORK_OPENSSL_API_H
 #define WF_NETWORK_OPENSSL_API_H
@@ -56,9 +58,17 @@
 
 #include "wireform_openssl.h"
 
+/* Both WANT codes mean "retry now"; the value says what to wait on
+ * (readable vs writable). Tests that pin the direction use the code
+ * itself, everything else only needs "would retry". */
+static inline int wf_ssl_want(int rc)
+{
+    return rc == WF_SSL_WANT_RETRY || rc == WF_SSL_WANT_WRITE;
+}
+
 static inline int tls_rc_valid(int rc)
 {
-    return rc == WF_SSL_OK || rc == WF_SSL_EOF || rc == WF_SSL_WANT_RETRY
+    return rc == WF_SSL_OK || rc == WF_SSL_EOF || wf_ssl_want(rc)
            || rc == WF_SSL_FATAL;
 }
 
@@ -189,11 +199,11 @@ static inline int tls_handshake(SSL *c, SSL *s, int *crc, int *src)
 {
     int rc = WF_SSL_WANT_RETRY, rs = WF_SSL_WANT_RETRY;
     for (int it = 0; it < 1000; it++) {
-        if (rc == WF_SSL_WANT_RETRY) rc = wf_ssl_connect(c);
-        if (rs == WF_SSL_WANT_RETRY) rs = wf_ssl_accept(s);
-        if (rc != WF_SSL_WANT_RETRY && rs != WF_SSL_WANT_RETRY) break;
-        if ((rc != WF_SSL_WANT_RETRY && rc != WF_SSL_OK)
-            || (rs != WF_SSL_WANT_RETRY && rs != WF_SSL_OK))
+        if (wf_ssl_want(rc)) rc = wf_ssl_connect(c);
+        if (wf_ssl_want(rs)) rs = wf_ssl_accept(s);
+        if (!wf_ssl_want(rc) && !wf_ssl_want(rs)) break;
+        if ((!wf_ssl_want(rc) && rc != WF_SSL_OK)
+            || (!wf_ssl_want(rs) && rs != WF_SSL_OK))
             break;
     }
     if (crc) *crc = rc;

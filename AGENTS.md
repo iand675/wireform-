@@ -348,6 +348,13 @@ the C through FFI wrappers, so they are not a substitute.
   `memcpy` for unaligned loads. No `no_sanitize` exemptions.
 - On macOS 26+, use the `c-harness` shell: older AddressSanitizer runtimes
   (LLVM 21, Xcode before 26.4) hang before `main`.
+- FFI widths: a byte count is `size_t`/`CSize` and a buffer position
+  (including a `-1` miss) is `ptrdiff_t`/`CPtrdiff`; never `CInt`. Haskell
+  `Int` is 64-bit, so `fromIntegral` of a length or offset into `CInt`
+  silently truncates anything over 2 GiB into a short or negative value.
+  `CInt` stays only for fds, flags, enum codes and status returns. Where a
+  third-party API is `int`-based (LZ4, zlib `uInt`, `SSL_read_ex` sizes),
+  the wrapper enforces and documents the bound instead of truncating.
 
 ## Code style
 

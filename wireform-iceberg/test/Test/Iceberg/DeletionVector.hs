@@ -1,5 +1,6 @@
 module Test.Iceberg.DeletionVector (tests) where
 
+import Data.ByteString qualified as BS
 import Data.Vector qualified as V
 import Iceberg.DeletionVector
 import Iceberg.Puffin (pbData, pbFields)
@@ -25,6 +26,21 @@ tests =
           case decodeDV (encodeDV dv) of
             Right dv' -> deletedPositions dv' `shouldBe` map fromIntegral highVals
             Left e -> expectationFailure e
+      , it "a truncated container payload is an error, not fewer deletions" $ do
+          -- The bitmap says positions 0..5 are deleted; dropping payload
+          -- bytes must not decode to a smaller set, or the reader would
+          -- return rows the file marks as deleted.
+          let bs = encodeDV (addPositions [0, 1, 2, 3, 4, 5] emptyDV)
+          case decodeDV (BS.take (BS.length bs - 2) bs) of
+            Left _ -> pure ()
+            Right dv -> expectationFailure $ "truncated bitmap decoded: " <> show (deletedPositions dv)
+      , it "a truncated container table is an error" $ do
+          let bs = encodeDV (addPositions [1, 2, 3] emptyDV)
+          -- 8 (count) + 4 (hi-32 key) + 4 (cookie) + 4 (containers): the
+          -- container table that should follow is gone.
+          case decodeDV (BS.take 20 bs) of
+            Left _ -> pure ()
+            Right dv -> expectationFailure $ "truncated header decoded: " <> show (deletedPositions dv)
       , it "toPuffinBlob emits the right blob type and field id" $ do
           let dv = addPositions [3, 7] emptyDV
               blob = toPuffinBlob 99 1 42 dv

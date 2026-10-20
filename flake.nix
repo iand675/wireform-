@@ -485,6 +485,14 @@
         cHarnessLibs = systemDeps
           ++ lib.optionals pkgs.stdenv.isLinux [ pkgs.liburing ];
         cHarnessEnv = {
+          # Every config, including MSan and the libFuzzer builds, needs
+          # clang's compiler-rt. `stdenv.mkDerivation` on Linux exports CC
+          # (gcc), which the Makefile honours, so it is pinned here; gcc
+          # also rejects the suite under -Werror (-Wmaybe-uninitialized
+          # false positives on simde and on pointer arguments it cannot
+          # see through).
+          CC = "${cHarnessLLVM.clang}/bin/clang";
+          FUZZ_CC = "${cHarnessLLVM.clang}/bin/clang";
           WIREFORM_CLANG = "${cHarnessLLVM.clang}/bin/clang";
           LLVM_PROFDATA = "${cHarnessLLVM.llvm}/bin/llvm-profdata";
           LLVM_COV = "${cHarnessLLVM.llvm}/bin/llvm-cov";

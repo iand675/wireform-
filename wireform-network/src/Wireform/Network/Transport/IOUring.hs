@@ -126,8 +126,18 @@ withIOUringReceiveTransport cfg sock action =
           stateRef <- newIORef IOpen
           tailRef  <- newIORef (0 :: Word64)
 
+          -- Whether a recv SQE is outstanding. A completion whose ring
+          -- space is all unconsumed data submits no replacement, so a
+          -- later wait has to submit one itself or it would park on an
+          -- eventfd no completion can ever signal.
+          pendingRef <- newIORef False
+
           -- Submit initial recv SQE
-          _ <- c_iouring_submit_recv uringPtr (fromIntegral sz)
+          initRc <- c_iouring_submit_recv uringPtr (fromIntegral sz)
+          if initRc < 0
+            then writeIORef stateRef (IClosedErr (toException (userError
+                   ("io_uring submit failed with code " <> show initRc))))
+            else writeIORef pendingRef True
 
           let loadHead :: IO Word64
               loadHead = c_iouring_get_head uringPtr
@@ -135,53 +145,85 @@ withIOUringReceiveTransport cfg sock action =
               advanceTail :: Word64 -> IO ()
               advanceTail pos = writeIORef tailRef pos
 
+              -- Ring space the consumer has freed at head `h`.
+              ringSpace :: Word64 -> IO Word64
+              ringSpace h = do
+                t <- readIORef tailRef
+                let !size' = fromIntegral sz :: Word64
+                    !used = if h > t then h - t else 0
+                pure (if used < size' then size' - used else 0)
+
+              -- Keep exactly one recv in flight while there is space for
+              -- one; a submit failure is reported as a transport error
+              -- rather than left to hang the next wait.
+              submitIfIdle :: Word64 -> IO ()
+              submitIfIdle h = do
+                pending <- readIORef pendingRef
+                unless pending $ do
+                  space <- ringSpace h
+                  when (space > 0) $ do
+                    rc' <- submitRetrying (fromIntegral space)
+                    if rc' < 0
+                      then writeIORef stateRef
+                             (IClosedErr (toException (userError
+                               ("io_uring submit failed with code " <> show rc'))))
+                      else writeIORef pendingRef True
+
+              submitRetrying :: CSize -> IO CInt
+              submitRetrying n = go2
+                where
+                  go2 = do
+                    rc' <- c_iouring_submit_recv uringPtr n
+                    -- -EINTR: the SQE is still queued; retry the submit.
+                    if rc' == eIntr then go2 else pure rc'
+
+              eIntr :: CInt
+              eIntr = -4
+
               waitData :: Word64 -> IO ReceiveWait
-              waitData pos = do
+              waitData pos = doWait pos
+
+              doWait :: Word64 -> IO ReceiveWait
+              doWait pos = do
                 st <- readIORef stateRef
                 case st of
                   IClosedEof   -> pure ReceiveEndOfInput
                   IClosedErr e -> pure (ReceiveFailed e)
-                  IOpen        -> doWait pos
+                  IOpen        -> do
+                    h <- loadHead
+                    if h > pos
+                      then pure (ReceiveMoreData h)
+                      else do
+                        submitIfIdle h
+                        st' <- readIORef stateRef
+                        case st' of
+                          IClosedErr e -> pure (ReceiveFailed e)
+                          _ -> alloca \headPtr -> do
+                            -- Try non-blocking peek first; parking is only
+                            -- safe once something can complete, which
+                            -- submitIfIdle just ensured.
+                            peekRc <- c_iouring_peek_cqe uringPtr headPtr
+                            if peekRc > 0
+                              then handleCompletion headPtr
+                              else if peekRc == 0
+                                then do
+                                  writeIORef stateRef IClosedEof
+                                  pure ReceiveEndOfInput
+                                else do
+                                  -- No completion ready: park until the
+                                  -- kernel signals the eventfd (which
+                                  -- consume_cqe drains), then look again.
+                                  threadWaitRead (Fd eventFd)
+                                  doWait pos
 
-              doWait :: Word64 -> IO ReceiveWait
-              doWait pos = do
-                h <- loadHead
-                if h > pos
-                  then pure (ReceiveMoreData h)
-                  else do
-                    -- Try non-blocking peek first
-                    alloca \headPtr -> do
-                      peekRc <- c_iouring_peek_cqe uringPtr headPtr
-                      if peekRc > 0
-                        then handleCompletion headPtr peekRc
-                        else if peekRc == 0
-                          then do
-                            writeIORef stateRef IClosedEof
-                            pure ReceiveEndOfInput
-                          else do
-                            -- No completion ready — park on eventfd
-                            threadWaitRead (Fd eventFd)
-                            alloca \headPtr2 -> do
-                              waitRc <- c_iouring_wait_cqe uringPtr headPtr2
-                              if waitRc > 0
-                                then handleCompletion headPtr2 waitRc
-                                else if waitRc == 0
-                                  then do
-                                    writeIORef stateRef IClosedEof
-                                    pure ReceiveEndOfInput
-                                  else do
-                                    let exc = toException (userError $ "io_uring CQE error: " <> show waitRc)
-                                    writeIORef stateRef (IClosedErr exc)
-                                    pure (ReceiveFailed exc)
-
-              handleCompletion :: Ptr Word64 -> CInt -> IO ReceiveWait
-              handleCompletion headPtr _bytesRc = do
+              handleCompletion :: Ptr Word64 -> IO ReceiveWait
+              handleCompletion headPtr = do
                 newH <- peek headPtr
-                -- Submit replacement recv bounded by available ring space
-                t <- readIORef tailRef
-                let !available = fromIntegral sz - fromIntegral (newH - t)
-                when (available > 0) $
-                  void $ c_iouring_submit_recv uringPtr (fromIntegral available)
+                writeIORef pendingRef False
+                -- Submit a replacement recv bounded by ring space; when
+                -- the consumer lags a whole ring there is none, and the
+                -- next wait submits one after the tail moves.
+                submitIfIdle newH
                 pure (ReceiveMoreData newH)
 
               transport = ReceiveTransport
@@ -209,6 +251,9 @@ withIOUringReceiveTransport cfg sock action =
     when :: Bool -> IO () -> IO ()
     when True  m = m
     when False _ = pure ()
+
+    unless :: Bool -> IO () -> IO ()
+    unless cond m = when (not cond) m
 
     void :: IO a -> IO ()
     void m = m >> pure ()

@@ -39,24 +39,24 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     WF_FUZZ_ASSERT(wf_ssl_set_verify_hostname(c, host) == WF_SSL_OK);
 
     int rc = wf_ssl_connect(c); /* sends the ClientHello */
-    WF_FUZZ_ASSERT(rc == WF_SSL_WANT_RETRY);
+    WF_FUZZ_ASSERT(wf_ssl_want(rc));
     tls_drain(fds[1]);
 
     size_t sent = 0;
-    for (int p = 1; p <= parts && rc == WF_SSL_WANT_RETRY; p++) {
+    for (int p = 1; p <= parts && wf_ssl_want(rc); p++) {
         size_t upto = n * (size_t)p / (size_t)parts;
         sent += tls_push(fds[1], in + sent, upto - sent);
         if (p == parts && !keep_open) shutdown(fds[1], SHUT_WR);
-        for (int step = 0; step < 4 && rc == WF_SSL_WANT_RETRY; step++) {
+        for (int step = 0; step < 4 && wf_ssl_want(rc); step++) {
             rc = wf_ssl_connect(c);
             WF_FUZZ_ASSERT(tls_rc_valid(rc));
             tls_drain(fds[1]);
         }
     }
     WF_FUZZ_ASSERT(rc != WF_SSL_OK);
-    if (!keep_open && rc == WF_SSL_WANT_RETRY) {
+    if (!keep_open && wf_ssl_want(rc)) {
         rc = wf_ssl_connect(c);
-        WF_FUZZ_ASSERT(rc != WF_SSL_WANT_RETRY || sent < n);
+        WF_FUZZ_ASSERT(!wf_ssl_want(rc) || sent < n);
     }
     WF_FUZZ_ASSERT(tls_last_error_ok(errcap));
     wf_ssl_shutdown(c);

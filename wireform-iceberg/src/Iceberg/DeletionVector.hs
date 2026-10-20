@@ -203,7 +203,12 @@ decodeRoaring32C _ bs = do
     else pure ()
   (numContainers, r2) <- takeWord32LE r1
   let n = fromIntegral numContainers
-      (keysAndCards, r3) = BS.splitAt (4 * n) r2
+  -- A short table would silently drop containers, i.e. report rows as
+  -- not deleted when the bitmap says they are. Reject it instead.
+  if BS.length r2 < 8 * n
+    then Left "Roaring32: truncated container table"
+    else pure ()
+  let (keysAndCards, r3) = BS.splitAt (4 * n) r2
       (_offsets, r4) = BS.splitAt (4 * n) r3
       kacEntries = unflatten4 keysAndCards
   goContainers kacEntries r4 IntSet.empty
@@ -218,13 +223,18 @@ decodeRoaring32C _ bs = do
           in (key, card) : unflatten4 (BS.drop 4 b)
 
     goContainers [] tail' acc = Right (acc, tail')
-    goContainers ((key, card) : rest) tail' acc =
-      let (payload, after) = BS.splitAt (2 * card) tail'
-          decoded = Hash.roaringDecodeArray payload card 0 -- decode lows; OR'ing 0
-          -- convert to ascending Int list and shift back into 32-bit space
-          ascList = map ((key * 0x10000) +) (map fromIntegral (VS.toList decoded))
-          set = IntSet.fromAscList ascList
-      in goContainers rest after (IntSet.union acc set)
+    goContainers ((key, card) : rest) tail' acc
+      -- Same reasoning as the table check: a short payload must not
+      -- decode to a smaller set of deleted positions.
+      | BS.length tail' < 2 * card =
+          Left "Roaring32: truncated container payload"
+      | otherwise =
+          let (payload, after) = BS.splitAt (2 * card) tail'
+              decoded = Hash.roaringDecodeArray payload card 0 -- decode lows; OR'ing 0
+              -- convert to ascending Int list and shift back into 32-bit space
+              ascList = map ((key * 0x10000) +) (map fromIntegral (VS.toList decoded))
+              set = IntSet.fromAscList ascList
+          in goContainers rest after (IntSet.union acc set)
 
 
 readWord16LE :: ByteString -> Int -> Int

@@ -83,7 +83,7 @@ static int do_read(stream *d, size_t cap)
                 WF_FUZZ_ASSERT(d->nrecv == d->nsent);
             }
             if (rc == WF_SSL_FATAL) WF_FUZZ_ASSERT(d->closed);
-            if (rc == WF_SSL_WANT_RETRY) {
+            if (wf_ssl_want(rc)) {
                 /* Nothing pending can be readable data we lost. */
                 WF_FUZZ_ASSERT(!d->closed || d->nrecv < d->nsent || d->notify_stuck);
             }
@@ -110,7 +110,7 @@ static void do_write(stream *d, stream *back, size_t len, uint8_t seed)
             break;
         }
         WF_FUZZ_ASSERT(out == 0);
-        if (rc != WF_SSL_WANT_RETRY) {
+        if (!wf_ssl_want(rc)) {
             /* Only a peer that is gone or a poisoned session fails. */
             WF_FUZZ_ASSERT(disturbed(d) || d->dead || back->closed || back->dead
                            || back->corrupt);
@@ -201,7 +201,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             WF_FUZZ_ASSERT(d->nrecv == d->nsent);
             int rc = do_read(d, 64);
             WF_FUZZ_ASSERT(rc == (d->closed ? WF_SSL_EOF : WF_SSL_WANT_RETRY)
-                           || (d->notify_stuck && rc == WF_SSL_WANT_RETRY));
+                           || (d->notify_stuck && wf_ssl_want(rc)));
         }
     }
     WF_FUZZ_ASSERT(tls_last_error_ok(256));
