@@ -27,7 +27,6 @@ module Proto.API.Payments (
 
 import Network.GRPC.Common
 import Network.GRPC.Common.Protobuf
-import Network.GRPC.Server.Protobuf (ServiceMethods)
 import Network.GRPC.Spec (
   HasStreamingType (..),
   Input,
@@ -37,6 +36,7 @@ import Network.GRPC.Spec (
   RequestMetadata,
   ResponseInitialMetadata,
   ResponseTrailingMetadata,
+  ServiceMethods,
   SupportsClientRpc (..),
   SupportsServerRpc (..),
   SupportsStreamingType,

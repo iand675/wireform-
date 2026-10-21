@@ -37,9 +37,8 @@ import Kafka.Topic qualified as Topic
 import Network.GRPC.Common
 import Network.GRPC.Common.Protobuf
 import Network.GRPC.Server
-import Network.GRPC.Server.Protobuf
 import Network.GRPC.Server.Run
-import Network.GRPC.Server.StreamType
+import Network.GRPC.Server.Service (Handlers (..), Service, fromService, method, service)
 import Payments.Domain (transactionEventFromRequest)
 import Payments.Serdes (transactionsTopic)
 import Proto.API.Payments
@@ -53,7 +52,7 @@ runPaymentServer port brokers =
   Kafka.withProducer brokers Kafka.defaultProducerConfig $ \prod -> do
     putStrLn $ "PaymentService listening on 0.0.0.0:" <> show port
     putStrLn $ "  emitting events to topic '" <> show transactionsTopic <> "'"
-    runServerWithHandlers def (serverConfig port) (fromServices (services prod))
+    runServerWithHandlers def (serverConfig port) (fromService (paymentService prod))
 
 
 {- | The transactions event log, typed as @Text@ keys (payer account) and
@@ -63,16 +62,9 @@ transactionsLog :: Topic.Topic Text TransactionEvent
 transactionsLog = Topic.topic transactionsTopic textSerde protoSerde
 
 
-services :: Kafka.Producer -> Services IO (ProtobufServices '[PaymentService])
-services prod =
-  Service (methods prod) $
-    NoMoreServices
-
-
-methods :: Kafka.Producer -> Methods IO (ProtobufMethodsOf PaymentService)
-methods prod =
-  Method (mkNonStreaming @CreatePayment (handleCreatePayment prod)) $
-    NoMoreMethods
+paymentService :: Kafka.Producer -> Service PaymentService IO
+paymentService prod =
+  service (method @CreatePayment (handleCreatePayment prod) :& Done)
 
 
 handleCreatePayment
