@@ -12,6 +12,7 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Unsafe qualified as BSU
 import Data.Word (Word8)
 import Foreign.Ptr (Ptr, castPtr)
+import Hedgehog.Internal.Config (resolveSkip)
 import Sim.Net.Link
 import System.Timeout (timeout)
 import Test.Syd
@@ -19,7 +20,12 @@ import Wireform.Network (DuplexTransport (..), closeDuplexTransport)
 import Wireform.Transport.Send (sendByteString)
 
 main :: IO ()
-main =
+main = do
+  -- Force Hedgehog's "HEDGEHOG_SKIP" CAF before sydtest starts its workers.
+  -- Every property forces it first; when many capabilities hit it at once,
+  -- GHC 9.8.4's RTS can lose the wakeup of a thread blocked on it, leaving
+  -- one property hung until the per-test timeout.
+  _ <- resolveSkip Nothing
   sydTest $
     describe "wireform-dst-net" $
       sequence_

@@ -1,5 +1,6 @@
 module Main (main) where
 
+import Hedgehog.Internal.Config (resolveSkip)
 import qualified Test.Hermes.AcceptCharset
 import qualified Test.Hermes.AcceptEncoding
 import qualified Test.Hermes.AcceptPatchPost
@@ -62,15 +63,16 @@ import qualified Test.Hermes.WebDavExt
 import qualified Test.Hermes.WebPush
 import qualified Test.Hermes.WebSocket
 import Test.Syd
-import Test.Syd.OptParse (Timeout (DoNotTimeout), defaultSettings, settingTimeout)
 
 
 main :: IO ()
-main =
-  -- sydtest's per-test wall-clock timeout occasionally fires spuriously on this
-  -- (sub-second) suite; the parsers are total over the bounded generators, so we
-  -- disable it rather than let CI flake. See SYDTEST_TIMEOUT / --no-timeout.
-  sydTestWith defaultSettings {settingTimeout = DoNotTimeout} $
+main = do
+  -- Force Hedgehog's "HEDGEHOG_SKIP" CAF before sydtest starts its workers.
+  -- Every property forces it first; when many capabilities hit it at once,
+  -- GHC 9.8.4's RTS can lose the wakeup of a thread blocked on it, leaving
+  -- one property hung until the per-test timeout.
+  _ <- resolveSkip Nothing
+  sydTest $
     describe "hermes" $
       sequence_
         [ Test.Hermes.AcceptCharset.tests

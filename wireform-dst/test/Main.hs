@@ -13,6 +13,7 @@ import Data.Set qualified as Set
 import Hedgehog (forAll, property, (===))
 import Hedgehog qualified as H
 import Hedgehog.Gen qualified as Gen
+import Hedgehog.Internal.Config (resolveSkip)
 import Hedgehog.Range qualified as Range
 import Sim
 import Sim.Coverage
@@ -27,7 +28,12 @@ import Test.Syd
 import Test.Syd.Hedgehog ()
 
 main :: IO ()
-main =
+main = do
+  -- Force Hedgehog's "HEDGEHOG_SKIP" CAF before sydtest starts its workers.
+  -- Every property forces it first; when many capabilities hit it at once,
+  -- GHC 9.8.4's RTS can lose the wakeup of a thread blocked on it, leaving
+  -- one property hung until the per-test timeout.
+  _ <- resolveSkip Nothing
   sydTest $
     describe "wireform-dst" $
       sequence_

@@ -3,6 +3,7 @@ module Main (main) where
 -- Proto-specific tests moved to wireform-proto-test suite.
 -- Cross-format integration tests remain here.
 
+import Hedgehog.Internal.Config (resolveSkip)
 import Test.ASN1 (asn1Tests)
 import Test.ASN1CodeGen (asn1CodeGenTests)
 import Test.ASN1Parser (asn1ParserTests)
@@ -56,7 +57,12 @@ import Test.XML (xmlTests)
 
 
 main :: IO ()
-main =
+main = do
+  -- Force Hedgehog's "HEDGEHOG_SKIP" CAF before sydtest starts its workers.
+  -- Every property forces it first; when many capabilities hit it at once,
+  -- GHC 9.8.4's RTS can lose the wakeup of a thread blocked on it, leaving
+  -- one property hung until the per-test timeout.
+  _ <- resolveSkip Nothing
   sydTest $
     describe "wireform" $
       sequence_

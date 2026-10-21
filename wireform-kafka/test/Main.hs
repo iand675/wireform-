@@ -74,6 +74,7 @@ import Client.TransactionHelpersSpec qualified
 import Client.TransactionSpec qualified
 import Codegen.WireGeneratorSpec qualified
 import Compression.RingSpec qualified
+import Hedgehog.Internal.Config (resolveSkip)
 import Network.AuthSpec qualified
 import Network.BootstrapSpec qualified
 import Network.ConnectionHelpersSpec qualified
@@ -109,6 +110,11 @@ import Test.Syd
 
 main :: IO ()
 main = do
+  -- Force Hedgehog's "HEDGEHOG_SKIP" CAF before sydtest starts its workers.
+  -- Every property forces it first; when many capabilities hit it at once,
+  -- GHC 9.8.4's RTS can lose the wakeup of a thread blocked on it, leaving
+  -- one property hung until the per-test timeout.
+  _ <- resolveSkip Nothing
   knownGoodTests <- Protocol.Generated.KnownGoodSpec.tests
   comprehensiveTests <- Protocol.Generated.ComprehensiveSpec.tests
   sydTest $ tests knownGoodTests comprehensiveTests
