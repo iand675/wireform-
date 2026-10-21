@@ -44,7 +44,10 @@ import Network.Socket (Socket)
 import qualified Network.Socket as NS
 
 import qualified Wireform.Builder as B
-import Wireform.Transport.Send (sendBuilderDirect, sendByteString)
+import Wireform.Transport.Send (SendTransport (..), sendBuilderDirect, sendByteString)
+import Wireform.Transport.Receive (ReceiveTransport (..), ReceiveWait (..))
+import System.Timeout (timeout)
+import Control.Monad (when)
 import qualified Network.HTTP1.SendFile as SF
 import Data.Word (Word64)
 import System.IO
@@ -205,10 +208,10 @@ handleConnection cfg conn0 = loop conn0 `finally` closeConnection conn0
       case hdE of
         Left SR.ReadUnexpectedEof   -> pure ()  -- EOF before a request
         Left (SR.ReadMessageTooLong _) ->
-          sendErrorResponse conn RequestHeaderFieldsTooLarge
+          sendErrorResponse conn RequestHeaderFieldsTooLarge >> lingeringClose conn
         Left (SR.ReadTransportError _) -> pure ()
         Left (SR.ReadParse err) ->
-          sendErrorResponse conn (errorToStatus err)
+          sendErrorResponse conn (errorToStatus err) >> lingeringClose conn
         Right (req0, _) | requestMethod req0 == CONNECT
                        , not (serverAllowConnect cfg) ->
           -- Reject CONNECT by default. RFC 9110 § 9.3.6: CONNECT is
@@ -490,6 +493,29 @@ sendErrorResponse conn st = do
         }
   connectionSendBuilderDirect conn (responseBuilder resp)
     `catch` (\(_ :: SomeException) -> pure ())
+
+-- | Close after an error response sent before the request was read in
+-- full (RFC 9112 §9.6). Closing a socket with unread input makes the
+-- kernel send RST, which can discard our response from the client's
+-- receive buffer before it reads it (seen as EOF instead of a 431 when
+-- a client is still sending an oversized header block). So: flush and
+-- half-close, then discard what the peer still sends until it closes,
+-- bounded to 2 s and 1 MiB so a client cannot pin the connection.
+lingeringClose :: Connection -> IO ()
+lingeringClose conn = do
+  let tx = connectionSend conn
+      rx = connectionReceive conn
+      discard !budget = do
+        h <- receiveLoadHead rx
+        receiveAdvanceTail rx h
+        when (budget > 0) $ do
+          r <- receiveWaitData rx h
+          case r of
+            ReceiveMoreData h' -> discard (budget - fromIntegral (h' - h))
+            _ -> pure ()
+  (sendFlush tx >> sendShutdownWrite tx) `catch` (\(_ :: SomeException) -> pure ())
+  _ <- timeout 2000000 (discard (1024 * 1024 :: Int)) `catch` (\(_ :: SomeException) -> pure Nothing)
+  pure ()
 
 errorToStatus :: ParseError -> Status
 errorToStatus = \case
