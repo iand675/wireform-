@@ -20,6 +20,14 @@ C primitives and what they accelerate:
 * 'compareBounds' \/ 'compareBoundsBS' — Iceberg partition bounds comparison
 * 'validateArrowBuffers' — Arrow IPC buffer offset validation
 * @read\/writeBE\/LE@ — endianness conversion helpers
+
+Widths: every length and offset crosses the FFI at its full width, so a
+'ByteString' or encode buffer over 2 GiB is not silently truncated. Byte
+counts, capacities and reported counts are 'CSize' (\'size_t\'); positions
+into a buffer, write cursors and scanner results are 'CPtrdiff'
+(\'ptrdiff_t\'), which also carries the @-1@ / @len@ miss conventions.
+Only genuinely small values (booleans, byte counts like bytes consumed,
+the 32-bit bounds bitmask) stay 'CInt'.
 -}
 module Wireform.FFI (
   -- * Packed varint helpers
@@ -105,7 +113,7 @@ import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Text.Encoding qualified as TE
 import Data.Word (Word16, Word32, Word64, Word8, byteSwap16, byteSwap32, byteSwap64)
-import Foreign.C.Types (CInt (..))
+import Foreign.C.Types (CInt (..), CPtrdiff (..), CSize (..))
 import Foreign.Marshal.Alloc (alloca)
 import Foreign.Marshal.Alloc qualified
 import Foreign.Marshal.Array qualified
@@ -116,40 +124,52 @@ import System.IO.Unsafe (unsafePerformIO)
 import Wireform.Builder qualified as B
 
 
+-- (byte count, varint count): both can exceed INT_MAX.
 foreign import ccall unsafe "hs_proto_count_packed_varints"
-  c_count_packed_varints :: Ptr () -> CInt -> CInt
+  c_count_packed_varints :: Ptr () -> CSize -> CSize
 
 
+-- (byte count), boolean result.
 foreign import ccall unsafe "hs_proto_packed_all_single_byte"
-  c_packed_all_single_byte :: Ptr () -> CInt -> CInt
+  c_packed_all_single_byte :: Ptr () -> CSize -> CInt
 
 
+-- (byte count), boolean result.
 foreign import ccall unsafe "hs_proto_validate_utf8_fast"
-  c_validate_utf8_fast :: Ptr () -> CInt -> CInt
+  c_validate_utf8_fast :: Ptr () -> CSize -> CInt
 
 
+-- (position), bytes consumed (1..8, or 0 on overflow).
 foreign import ccall unsafe "hs_proto_decode_varint_swar"
-  c_decode_varint_swar :: Ptr () -> CInt -> Ptr Word64 -> CInt
+  c_decode_varint_swar :: Ptr () -> CPtrdiff -> Ptr Word64 -> CInt
 
 
+-- (byte count, destination capacity), 1/0/-1 decision.
 foreign import ccall unsafe "hs_proto_relocate_page_boundary"
-  c_relocate_page_boundary :: Ptr () -> CInt -> Ptr () -> CInt -> CInt
+  c_relocate_page_boundary :: Ptr () -> CSize -> Ptr () -> CSize -> CInt
 
 
+-- (write cursor, byte count), bytes written.
 foreign import ccall unsafe "hs_proto_encode_length_delimited"
-  c_encode_length_delimited :: Ptr () -> CInt -> Word8 -> Ptr () -> CInt -> CInt
+  c_encode_length_delimited :: Ptr () -> CSize -> Word8 -> Ptr () -> CSize -> CSize
 
 
+-- (write cursor), bytes written.
 foreign import ccall unsafe "hs_proto_encode_varint_field"
-  c_encode_varint_field :: Ptr () -> CInt -> Word8 -> Word64 -> CInt
+  c_encode_varint_field :: Ptr () -> CSize -> Word8 -> Word64 -> CSize
 
 
+-- (write cursor), bytes written.
 foreign import ccall unsafe "hs_proto_encode_bool_field"
-  c_encode_bool_field :: Ptr () -> CInt -> Word8 -> CInt -> CInt
+  c_encode_bool_field :: Ptr () -> CSize -> Word8 -> CInt -> CSize
 
 
 {- | Count the number of varints in a packed buffer using SWAR.
 Each byte with its high bit clear terminates one varint.
+
+Both the length and the count cross the FFI at full width ('CSize'), so a
+packed run over 2 GiB is counted whole, even when its count passes
+'Prelude.maxBound' @::@ 'CInt'.
 -}
 countPackedVarints :: ByteString -> Int
 countPackedVarints bs = unsafePerformIO $
@@ -168,7 +188,12 @@ packedAllSingleByte bs = unsafePerformIO $
 {-# INLINE packedAllSingleByte #-}
 
 
--- | Encode a length-delimited field (tag + length varint + data) in one C call.
+{- | Encode a length-delimited field (tag + length varint + data) in one C call.
+
+@off@ is a non-negative write cursor and @dataLen@ a byte count; both are
+passed as 'CSize' (the C @off@/return are \'size_t\'), so a direct-encode
+buffer or a single field over 2 GiB is written whole.
+-}
 encodeLengthDelimitedC :: Ptr Word8 -> Int -> Word8 -> Ptr Word8 -> Int -> IO Int
 encodeLengthDelimitedC buf off tag dataPtr dataLen =
   pure $!
@@ -266,8 +291,9 @@ relocatePageBoundary bs
 -- SIMD NUL scanner
 ------------------------------------------------------------------------
 
+-- (start position, buffer length): both indices, so CPtrdiff; -1 on a miss.
 foreign import ccall unsafe "hs_proto_find_nul"
-  c_find_nul :: Ptr () -> CInt -> CInt -> CInt
+  c_find_nul :: Ptr () -> CPtrdiff -> CPtrdiff -> CPtrdiff
 
 
 {- | Find the first NUL byte starting at the given offset within a raw pointer.
@@ -295,13 +321,17 @@ occurrence of @target@ in @buf[offset..len)@. Returns the
 absolute offset (0-based from the start of @buf@) of the
 first match, or @len@ if no match was found.
 
+Both @offset@ and @len@ are indices into @buf@ and cross the FFI as
+'CPtrdiff', so a 'ByteString' or scan range over 2 GiB is scanned whole
+and a miss reports the real @len@ instead of a wrapped value.
+
 Callers that prefer @Maybe Int@ semantics should wrap the
 result; the @len@-on-miss convention matches the existing
 CSV / NDJSON / XML call sites that reused the primitive
 before it was lifted here.
 -}
 foreign import ccall unsafe "hs_find_byte"
-  c_find_byte :: Ptr () -> CInt -> CInt -> Word8 -> CInt
+  c_find_byte :: Ptr () -> CPtrdiff -> CPtrdiff -> Word8 -> CPtrdiff
 
 
 findByte :: Ptr Word8 -> Int -> Int -> Word8 -> Int
@@ -328,8 +358,9 @@ findByteBS bs off target = unsafePerformIO $
 -- 4-byte repeating-key XOR (WebSocket masking)
 ------------------------------------------------------------------------
 
+-- (byte count), in place.
 foreign import ccall unsafe "hs_ws_mask"
-  c_ws_mask :: Ptr Word8 -> CInt -> Word32 -> IO ()
+  c_ws_mask :: Ptr Word8 -> CSize -> Word32 -> IO ()
 
 
 {- | In-place XOR of the 4-byte repeating @key@ over @buf[0..len)@.
@@ -399,8 +430,9 @@ fastRandomWord64 = c_xoshiro256pp_next
 -- SIMD ASCII check
 ------------------------------------------------------------------------
 
+-- (position, byte count from there), boolean result.
 foreign import ccall unsafe "hs_proto_is_ascii"
-  c_is_ascii :: Ptr () -> CInt -> CInt -> CInt
+  c_is_ascii :: Ptr () -> CPtrdiff -> CPtrdiff -> CInt
 
 
 -- | Check if @len@ bytes starting at @ptr+offset@ are all ASCII.
@@ -435,8 +467,9 @@ decodeTextFast bs = case TE.decodeUtf8' bs of
 -- SIMD JSON escape scanner
 ------------------------------------------------------------------------
 
+-- (position, byte count from there), position or offset+len: CPtrdiff.
 foreign import ccall unsafe "hs_proto_find_json_escape"
-  c_find_json_escape :: Ptr () -> CInt -> CInt -> CInt
+  c_find_json_escape :: Ptr () -> CPtrdiff -> CPtrdiff -> CPtrdiff
 
 
 {- | Find the first byte that needs JSON escaping (control char < 0x20,
@@ -512,8 +545,9 @@ escapeJSONText = escapeJSONStringBS . TE.encodeUtf8
 -- SIMD EDN whitespace skipper
 ------------------------------------------------------------------------
 
+-- (start position, buffer length), position: CPtrdiff throughout.
 foreign import ccall unsafe "hs_proto_skip_ws"
-  c_skip_ws :: Ptr () -> CInt -> CInt -> CInt
+  c_skip_ws :: Ptr () -> CPtrdiff -> CPtrdiff -> CPtrdiff
 
 
 {- | Skip EDN whitespace (space, tab, newline, CR, comma) and comments
@@ -538,13 +572,19 @@ skipWhitespaceBS bs off = unsafePerformIO $
 -- SIMD Iceberg bounds comparison
 ------------------------------------------------------------------------
 
+-- (count, width in bytes), 32-bit bitmask result.
 foreign import ccall unsafe "hs_proto_compare_bounds"
-  c_compare_bounds :: Ptr () -> CInt -> CInt -> Ptr () -> CInt
+  c_compare_bounds :: Ptr () -> CSize -> CSize -> Ptr () -> CInt
 
 
 {- | Compare a search value against N serialized bounds (all same width).
 Returns a bitmask where bit i is set if @bounds[i] <= search@.
 For 4-byte LE int32 bounds, uses SSE2 to compare 4 at a time.
+
+@count@ and @width@ are counts, not offsets, and must be non-negative:
+they cross the FFI as 'CSize', so a negative value is a caller bug (it
+becomes a huge count) rather than an empty mask. @width == 0@ means empty
+bounds, which compare equal to the search value.
 -}
 compareBounds :: Ptr Word8 -> Int -> Int -> Ptr Word8 -> Int
 compareBounds !boundsPtr !count !width !searchPtr =
@@ -552,12 +592,22 @@ compareBounds !boundsPtr !count !width !searchPtr =
 {-# INLINE compareBounds #-}
 
 
--- | Compare bounds stored in a 'ByteString' against a search value 'ByteString'.
+-- | Compare bounds stored in a 'ByteString' against a search value
+-- 'ByteString'.
+--
+-- @count@ and @width@ are clamped to what the buffers actually hold, so a
+-- caller that passes an inconsistent count cannot make the kernel read
+-- past either buffer (the kernel trusts them: it compares @count*width@
+-- bytes and reads @width@ from the search value).
 compareBoundsBS :: ByteString -> Int -> Int -> ByteString -> Int
-compareBoundsBS boundsBs count width searchBs = unsafePerformIO $
-  BSU.unsafeUseAsCStringLen boundsBs $ \(bPtr, _) ->
-    BSU.unsafeUseAsCStringLen searchBs $ \(sPtr, _) ->
-      pure $! compareBounds (castPtr bPtr) count width (castPtr sPtr)
+compareBoundsBS boundsBs count width searchBs =
+  let !w = max 0 (min width (BS.length searchBs))
+      !fits = if w == 0 then 0 else BS.length boundsBs `quot` w
+      !n = max 0 (min count fits)
+  in unsafePerformIO $
+       BSU.unsafeUseAsCStringLen boundsBs $ \(bPtr, _) ->
+         BSU.unsafeUseAsCStringLen searchBs $ \(sPtr, _) ->
+           pure $! compareBounds (castPtr bPtr) n w (castPtr sPtr)
 {-# INLINE compareBoundsBS #-}
 
 
@@ -566,10 +616,10 @@ compareBoundsBS boundsBs count width searchBs = unsafePerformIO $
 ------------------------------------------------------------------------
 
 foreign import ccall unsafe "hs_proto_validate_arrow_buffers"
-  c_validate_arrow_buffers :: Ptr () -> CInt -> Int64 -> CInt
+  c_validate_arrow_buffers :: Ptr () -> CSize -> Int64 -> CInt
 
 foreign import ccall safe "hs_proto_validate_arrow_buffers"
-  c_validate_arrow_buffers_safe :: Ptr () -> CInt -> Int64 -> CInt
+  c_validate_arrow_buffers_safe :: Ptr () -> CSize -> Int64 -> CInt
 
 
 {- | Validate Arrow IPC buffer offset/length pairs.
@@ -581,6 +631,9 @@ The kernel is one linear pass over the pairs (16 bytes each). Like the
 "Columnar.SIMD" kernels it uses an @unsafe@ call for at most 64 KiB of
 input (4096 buffers, far more than a record batch normally has) and a
 @safe@ call above that, so a hostile buffer table cannot hold up the RTS.
+
+@count@ is the number of pairs (it crosses the FFI as 'CSize'), so it must
+be non-negative; the callers pass @VS.length@ of the buffer vector.
 -}
 validateArrowBuffers :: Ptr Int64 -> Int -> Int64 -> Bool
 validateArrowBuffers !ptr !count !bodyLength

@@ -16,11 +16,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     int max_out = data[0] == 0xFF ? len : data[0];
     uint8_t *buf = wf_dup(data + 1, (size_t)len);
 
-    int count = hs_proto_count_packed_varints(buf, len);
+    size_t count = hs_proto_count_packed_varints(buf, len);
     WF_FUZZ_ASSERT(count == ref_count_packed(buf, len));
     int single = hs_proto_packed_all_single_byte(buf, len);
     WF_FUZZ_ASSERT(single == ref_all_single_byte(buf, len));
-    WF_FUZZ_ASSERT(single == (count == len));
+    WF_FUZZ_ASSERT(single == (count == (size_t)len));
 
     size_t osz = (size_t)max_out * sizeof(uint64_t);
     a8buf ob1 = a8_alloc(osz);
@@ -32,7 +32,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     if (c1 > 0) {
         WF_FUZZ_ASSERT(memcmp(o1, o2, (size_t)c1 * sizeof(uint64_t)) == 0);
         /* a well-formed run has exactly one terminator per value */
-        WF_FUZZ_ASSERT(c1 == count);
+        WF_FUZZ_ASSERT(c1 == (int)count);
     }
     free(o2);
     a8_free(ob1);

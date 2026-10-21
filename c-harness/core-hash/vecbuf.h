@@ -10,9 +10,10 @@
  *
  * zero_span_map: a multi-GiB read-only all-zero input that costs 1 MiB of
  * memory (one zero-filled temp file mapped repeatedly over a reserved
- * range), ending flush against a PROT_NONE page. For lengths near
- * INT32_MAX. Returns 0, mapping nothing, under valgrind (minutes of
- * emulation) or if the mapping fails. */
+ * range), ending flush against a PROT_NONE page. Used for lengths at the
+ * old int32 ceiling and above it (the murmur3 kernel now takes a size_t
+ * byte count, so its tests hash 2^31 + 16 bytes too). Returns 0, mapping
+ * nothing, under valgrind (minutes of emulation) or if the mapping fails. */
 #ifndef CORE_HASH_VECBUF_H
 #define CORE_HASH_VECBUF_H
 

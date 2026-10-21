@@ -60,7 +60,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Internal qualified as BSI
 import Data.Word (Word64, Word8)
-import Foreign.C.Types (CInt (..))
+import Foreign.C.Types (CPtrdiff (..))
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
 import Foreign.Storable (peekByteOff)
 import GHC.Exts (Int (..))
@@ -117,8 +117,11 @@ instance Show ReadError where
 -- C imports — share the SIMD scanners with the classic recv-buffer.
 ------------------------------------------------------------------------
 
+{- | @offset@ and the absolute end position @avail@ are 'CPtrdiff' (the C
+kernel's @ptrdiff_t@); a miss returns @avail@ in the same type.
+-}
 foreign import ccall unsafe "hs_http1_find_cr"
-  c_find_cr :: Ptr Word8 -> CInt -> CInt -> CInt
+  c_find_cr :: Ptr Word8 -> CPtrdiff -> CPtrdiff -> CPtrdiff
 
 
 ------------------------------------------------------------------------
@@ -641,8 +644,9 @@ scanCrlfOrBareLf base msk startPos scanFrom avail
                         else go ptr (crPos + 1)
 
 
+-- | As 'c_find_cr'.
 foreign import ccall unsafe "hs_http1_find_lf"
-  c_find_lf :: Ptr Word8 -> CInt -> CInt -> CInt
+  c_find_lf :: Ptr Word8 -> CPtrdiff -> CPtrdiff -> CPtrdiff
 
 
 {- | Tell the transport that bytes up to @pos@ are no longer needed

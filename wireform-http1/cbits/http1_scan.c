@@ -6,10 +6,15 @@
  *
  * All return values use the "absolute offset or len-on-miss" convention.
  *
- * Block loops test `len - i >= 16`, not `i + 16 <= len`: with 0 <= i and
- * 0 <= len the difference cannot overflow, while the sum overflows int for
- * len > INT_MAX - 16 (at -O3 the wrapped sum passes and the next block is
- * read past len).
+ * Offsets and the absolute end position `len` are ptrdiff_t; pure byte
+ * counts (hs_http1_to_lower_ascii, hs_http1_ascii_ieq) are size_t. A
+ * ByteString or recv ring larger than 2 GiB therefore scans correctly.
+ * The hex parser's `consumed` is 0..16 and stays int.
+ *
+ * Block loops test `len - i >= 16`, not `i + 16 <= len`: with 0 <= i <= len
+ * the difference cannot overflow (and `i + 16` can overflow ptrdiff_t for
+ * a buffer near PTRDIFF_MAX, at which -O3 the wrapped sum would pass and
+ * the next block be read past len).
  */
 
 #include "http1_scan.h"
@@ -91,15 +96,15 @@ static const uint8_t is_fv_ok[256] = {
  *  find_byte: single-target SSE2 scan (CR, LF).                          *
  * ---------------------------------------------------------------------- */
 
-static inline int find_single_byte_scalar(const uint8_t *p, int offset, int len, uint8_t needle) {
-  for (int i = offset; i < len; i++) {
+static inline ptrdiff_t find_single_byte_scalar(const uint8_t *p, ptrdiff_t offset, ptrdiff_t len, uint8_t needle) {
+  for (ptrdiff_t i = offset; i < len; i++) {
     if (p[i] == needle) return i;
   }
   return len;
 }
 
-static inline int find_single_byte(const uint8_t *p, int offset, int len, uint8_t needle) {
-  int i = offset;
+static inline ptrdiff_t find_single_byte(const uint8_t *p, ptrdiff_t offset, ptrdiff_t len, uint8_t needle) {
+  ptrdiff_t i = offset;
 #if WIREFORM_HTTP1_HAS_SSE2
   /* 16-byte SSE2 scan. */
   __m128i n = _mm_set1_epi8((char)needle);
@@ -113,11 +118,11 @@ static inline int find_single_byte(const uint8_t *p, int offset, int len, uint8_
   return find_single_byte_scalar(p, i, len, needle);
 }
 
-int hs_http1_find_cr(const void *buf, int offset, int len) {
+ptrdiff_t hs_http1_find_cr(const void *buf, ptrdiff_t offset, ptrdiff_t len) {
   return find_single_byte((const uint8_t *)buf, offset, len, 0x0d);
 }
 
-int hs_http1_find_lf(const void *buf, int offset, int len) {
+ptrdiff_t hs_http1_find_lf(const void *buf, ptrdiff_t offset, ptrdiff_t len) {
   return find_single_byte((const uint8_t *)buf, offset, len, 0x0a);
 }
 
@@ -132,16 +137,16 @@ int hs_http1_find_lf(const void *buf, int offset, int len) {
  *  the inner loop is fully unrolled and branch-free.                     *
  * ---------------------------------------------------------------------- */
 
-static inline int find_non_token_scalar(const uint8_t *p, int offset, int len) {
-  for (int i = offset; i < len; i++) {
+static inline ptrdiff_t find_non_token_scalar(const uint8_t *p, ptrdiff_t offset, ptrdiff_t len) {
+  for (ptrdiff_t i = offset; i < len; i++) {
     if (!is_tchar[p[i]]) return i;
   }
   return len;
 }
 
-int hs_http1_find_non_token(const void *buf, int offset, int len) {
+ptrdiff_t hs_http1_find_non_token(const void *buf, ptrdiff_t offset, ptrdiff_t len) {
   const uint8_t *p = (const uint8_t *)buf;
-  int i = offset;
+  ptrdiff_t i = offset;
   /* 16-byte unrolled scan over the byte-class table. */
   for (; len - i >= 16; i += 16) {
     uint8_t acc = 1;
@@ -166,16 +171,16 @@ int hs_http1_find_non_token(const void *buf, int offset, int len) {
  *  LF / NUL injection (RFC 9112 § 5.2).                                  *
  * ---------------------------------------------------------------------- */
 
-static inline int find_non_fv_scalar(const uint8_t *p, int offset, int len) {
-  for (int i = offset; i < len; i++) {
+static inline ptrdiff_t find_non_fv_scalar(const uint8_t *p, ptrdiff_t offset, ptrdiff_t len) {
+  for (ptrdiff_t i = offset; i < len; i++) {
     if (!is_fv_ok[p[i]]) return i;
   }
   return len;
 }
 
-int hs_http1_find_non_fieldvalue(const void *buf, int offset, int len) {
+ptrdiff_t hs_http1_find_non_fieldvalue(const void *buf, ptrdiff_t offset, ptrdiff_t len) {
   const uint8_t *p = (const uint8_t *)buf;
-  int i = offset;
+  ptrdiff_t i = offset;
 #if WIREFORM_HTTP1_HAS_SSE2
   /* SSE2 fast path: every forbidden byte is in [0..0x1F]\{0x09} or == 0x7F.
    * We test (b < 0x20 && b != 0x09) || b == 0x7F:
@@ -210,10 +215,10 @@ int hs_http1_find_non_fieldvalue(const void *buf, int offset, int len) {
  *  ASCII case-fold helpers.                                              *
  * ---------------------------------------------------------------------- */
 
-void hs_http1_to_lower_ascii(const void *src_v, void *dst_v, int len) {
+void hs_http1_to_lower_ascii(const void *src_v, void *dst_v, size_t len) {
   const uint8_t *src = (const uint8_t *)src_v;
   uint8_t *dst = (uint8_t *)dst_v;
-  int i = 0;
+  size_t i = 0;
 #if WIREFORM_HTTP1_HAS_SSE2
   /* For each byte, if it's in [A..Z] (0x41..0x5A) OR with 0x20 to lower.
    * SSE2: mask = (b >= 'A') & (b <= 'Z'); dst = src | (mask & 0x20). */
@@ -239,10 +244,10 @@ void hs_http1_to_lower_ascii(const void *src_v, void *dst_v, int len) {
   }
 }
 
-int hs_http1_ascii_ieq(const void *a_v, const void *b_v, int len) {
+int hs_http1_ascii_ieq(const void *a_v, const void *b_v, size_t len) {
   const uint8_t *a = (const uint8_t *)a_v;
   const uint8_t *b = (const uint8_t *)b_v;
-  int i = 0;
+  size_t i = 0;
 #if WIREFORM_HTTP1_HAS_SSE2
   /* Compare lowercased(a) == lowercased(b) in 16-byte chunks.
    * Lowercasing a byte:
@@ -285,10 +290,10 @@ int hs_http1_ascii_ieq(const void *a_v, const void *b_v, int len) {
  *  RFC 9112 § 7.1: chunk-size = 1*HEXDIG.                                *
  * ---------------------------------------------------------------------- */
 
-int hs_http1_parse_hex(const void *buf_v, int offset, int len, uint64_t *out, int *consumed) {
+int hs_http1_parse_hex(const void *buf_v, ptrdiff_t offset, ptrdiff_t len, uint64_t *out, int *consumed) {
   const uint8_t *buf = (const uint8_t *)buf_v;
   uint64_t value = 0;
-  int i = offset;
+  ptrdiff_t i = offset;
   int n = 0;
   while (i < len) {
     uint8_t b = buf[i];

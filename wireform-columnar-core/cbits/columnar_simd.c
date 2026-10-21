@@ -165,13 +165,13 @@ int64_t hs_columnar_bitmap_popcount(const uint8_t *buf, size_t len)
     uint64_t total = 0;
     size_t i = 0;
 
-    for (; i + 8 <= len; i += 8) {
+    for (; len - i >= 8; i += 8) {
         uint64_t w;
         memcpy(&w, buf + i, 8);
         total += (uint64_t)__builtin_popcountll(w);
     }
 
-    for (; i + 4 <= len; i += 4) {
+    for (; len - i >= 4; i += 4) {
         uint32_t w;
         memcpy(&w, buf + i, 4);
         total += (uint64_t)__builtin_popcount(w);
@@ -189,16 +189,20 @@ int64_t hs_columnar_bitmap_popcount(const uint8_t *buf, size_t len)
  * that byte (index i: byte i/8, bit i%8). Precondition: src holds at least
  * (n + 7) / 8 bytes (Parquet.Read.decodePlainBool checks it) and dst n bytes.
  *
+ * n is a count of bits, never negative, so it is a size_t: an int32_t
+ * silently wrapped a >2 GiB bit count. The loop bound is written as
+ * "eight or more remain", which cannot overflow for any size_t n.
+ *
  * No lookup table: this used to fill a function-local `static` table on
  * first call behind a plain `int` flag. Concurrent unsafe ccalls from
  * several capabilities raced on that initialisation, and on weakly ordered
  * CPUs (aarch64) a caller could see the flag set before the table writes
  * and expand garbage. Shifting is as fast and has no shared state.
  */
-void hs_columnar_unpack_bits_lsb(const uint8_t *src, int32_t n, uint8_t *dst)
+void hs_columnar_unpack_bits_lsb(const uint8_t *src, size_t n, uint8_t *dst)
 {
-    int32_t pos = 0;
-    for (; pos + 8 <= n; pos += 8) {
+    size_t pos = 0;
+    for (; n - pos >= 8; pos += 8) {
         const uint8_t b = src[pos >> 3];
         dst[pos + 0] = (uint8_t)(b & 1);
         dst[pos + 1] = (uint8_t)((b >> 1) & 1);
@@ -217,17 +221,21 @@ void hs_columnar_unpack_bits_lsb(const uint8_t *src, int32_t n, uint8_t *dst)
 /*
  * Bulk copy with 16-byte SIMDe loads/stores (libc memcpy is often similar; this
  * keeps one place to tune for Parquet/Arrow page bodies). Copies exactly len
- * bytes, len <= INT32_MAX; src and dst must not overlap.
+ * bytes; src and dst must not overlap.
+ *
+ * len is a byte count, so it is a size_t: the int32_t parameter truncated
+ * a >2 GiB copy. The block bound is "sixteen or more remain", which cannot
+ * overflow for any size_t len.
  */
-void hs_columnar_memcpy_fast(const uint8_t *src, uint8_t *dst, int32_t len)
+void hs_columnar_memcpy_fast(const uint8_t *src, uint8_t *dst, size_t len)
 {
-    int i = 0;
-    for (; i + 16 <= len; i += 16) {
+    size_t i = 0;
+    for (; len - i >= 16; i += 16) {
         simde__m128i v = simde_mm_loadu_si128((const simde__m128i *)(src + i));
         simde_mm_storeu_si128((simde__m128i *)(dst + i), v);
     }
     if (i < len) {
-        memcpy(dst + i, src + i, (size_t)(len - i));
+        memcpy(dst + i, src + i, len - i);
     }
 }
 
@@ -386,7 +394,7 @@ int64_t hs_columnar_popcount_bits(const uint8_t *buf, size_t bitoff, size_t nbit
     size_t nbytes = nbits >> 3;
     size_t i = 0;
     uint64_t t0 = 0, t1 = 0, t2 = 0, t3 = 0;
-    for (; i + 32 <= nbytes; i += 32) {
+    for (; nbytes - i >= 32; i += 32) {
         uint64_t w0, w1, w2, w3;
         memcpy(&w0, p + i, 8);
         memcpy(&w1, p + i + 8, 8);
@@ -398,7 +406,7 @@ int64_t hs_columnar_popcount_bits(const uint8_t *buf, size_t bitoff, size_t nbit
         t3 += (uint64_t)__builtin_popcountll(w3);
     }
     total += (int64_t)(t0 + t1 + t2 + t3);
-    for (; i + 8 <= nbytes; i += 8) {
+    for (; nbytes - i >= 8; i += 8) {
         uint64_t w;
         memcpy(&w, p + i, 8);
         total += __builtin_popcountll(w);
@@ -492,7 +500,7 @@ int64_t hs_columnar_and_bits(uint8_t *dst, const uint8_t *a, size_t aoff, const 
 {
     int64_t total = 0;
     size_t i = 0;
-    for (; i + 64 <= nbits; i += 64) {
+    for (; nbits - i >= 64; i += 64) {
         uint64_t r = load_bits64(a, aoff + i) & load_bits64(b, boff + i);
         st_le64(dst + (i >> 3), r);
         total += __builtin_popcountll(r);
@@ -659,12 +667,14 @@ int64_t hs_columnar_dense_union(const int8_t *types, const int32_t *offs, size_t
 /* ------------------------------------------------------------------------ */
 
 /* Strict UTF-8: rejects overlongs, surrogates, code points above U+10FFFF and
- * truncated sequences. Returns 1 when s[0..len) is valid. */
+ * truncated sequences. Returns 1 when s[0..len) is valid. Every bound below
+ * asks how many bytes remain (len - i) rather than forming i + k, so no
+ * check can overflow. */
 static int utf8_valid(const uint8_t *s, size_t len)
 {
     size_t i = 0;
     while (i < len) {
-        if (i + 8 <= len) {
+        if (len - i >= 8) {
             uint64_t w;
             memcpy(&w, s + i, 8);
             if (!(w & UINT64_C(0x8080808080808080))) {
@@ -679,12 +689,12 @@ static int utf8_valid(const uint8_t *s, size_t len)
             /* stray continuation byte, or overlong C0 / C1 lead */
             return 0;
         } else if (c < 0xE0) {
-            if (i + 1 >= len || (s[i + 1] & 0xC0) != 0x80) {
+            if (len - i <= 1 || (s[i + 1] & 0xC0) != 0x80) {
                 return 0;
             }
             i += 2;
         } else if (c < 0xF0) {
-            if (i + 2 >= len) {
+            if (len - i <= 2) {
                 return 0;
             }
             unsigned c1 = s[i + 1], c2 = s[i + 2];
@@ -699,7 +709,7 @@ static int utf8_valid(const uint8_t *s, size_t len)
             }
             i += 3;
         } else if (c < 0xF5) {
-            if (i + 3 >= len) {
+            if (len - i <= 3) {
                 return 0;
             }
             unsigned c1 = s[i + 1], c2 = s[i + 2], c3 = s[i + 3];

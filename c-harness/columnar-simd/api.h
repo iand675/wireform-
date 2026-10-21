@@ -28,14 +28,32 @@
 int64_t hs_columnar_bitmap_popcount(const uint8_t *buf, size_t len);
 
 /* unpackBitsLsbUnsafe (Parquet PLAIN BOOLEAN): dst[i] = bit i of src for
- * i in [0, n). Precondition: 0 <= n, src has >= (n + 7) / 8 bytes
+ * i in [0, n). Precondition: n is a non-negative bit count (Columnar.SIMD
+ * imports it as CSize), src has >= (n + 7) / 8 bytes
  * (Parquet.Read.decodePlainBool checks it), dst has n bytes. */
-void hs_columnar_unpack_bits_lsb(const uint8_t *src, int32_t n, uint8_t *dst);
+void hs_columnar_unpack_bits_lsb(const uint8_t *src, size_t n, uint8_t *dst);
 
 /* memcpyFast: copy len bytes src -> dst, no overlap. Arguments are
- * (src, dst, len) in that order. Precondition: 0 <= len <= INT32_MAX (the
- * Haskell Int is narrowed to CInt). */
-void hs_columnar_memcpy_fast(const uint8_t *src, uint8_t *dst, int32_t len);
+ * (src, dst, len) in that order. Precondition: len is a non-negative byte
+ * count (Columnar.SIMD imports it as CSize, so there is no 2 GiB ceiling);
+ * a copy needs len bytes at src and len at dst, so in practice the length
+ * is bounded by the buffers, not by the type. */
+void hs_columnar_memcpy_fast(const uint8_t *src, uint8_t *dst, size_t len);
+
+/* The two kernels above were the last with a 32-bit length parameter
+ * (CInt -> int32_t), which truncated a >2 GiB source. Both touch every byte
+ * they are given, so unlike the sparse-offset kernels a >2 GiB runtime case
+ * cannot be cheap: assert the widths at compile time instead. */
+_Static_assert(
+    _Generic(&hs_columnar_unpack_bits_lsb,
+             void (*)(const uint8_t *, size_t, uint8_t *): 1,
+             default: 0),
+    "hs_columnar_unpack_bits_lsb must take a size_t bit count");
+_Static_assert(
+    _Generic(&hs_columnar_memcpy_fast,
+             void (*)(const uint8_t *, uint8_t *, size_t): 1,
+             default: 0),
+    "hs_columnar_memcpy_fast must take a size_t byte count");
 
 /* offsetsCheck: n offsets (rows + 1). Valid iff n == 0, or offs[0] >= 0,
  * offs never decreases and offs[n-1] <= limit. Reads offs[0, n). */
@@ -149,9 +167,9 @@ static inline int64_t ref_bitmap_popcount(const uint8_t *buf, size_t len)
     return t;
 }
 
-static inline void ref_unpack_bits_lsb(const uint8_t *src, int32_t n, uint8_t *dst)
+static inline void ref_unpack_bits_lsb(const uint8_t *src, size_t n, uint8_t *dst)
 {
-    for (int32_t i = 0; i < n; i++) dst[i] = (uint8_t)ref_bit(src, (uint64_t)i);
+    for (size_t i = 0; i < n; i++) dst[i] = (uint8_t)ref_bit(src, (uint64_t)i);
 }
 
 static inline int64_t ref_popcount_bits(const uint8_t *buf, size_t off, size_t n)

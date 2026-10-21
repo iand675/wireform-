@@ -17,11 +17,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     int64_t value = (int64_t)(lo | (hi << 32));
 
     uint8_t *buf = wf_dup(in.p, in.n);
-    int32_t got = hs_wf_murmur3_32(buf, (int32_t)in.n);
+    int32_t got = hs_wf_murmur3_32(buf, in.n);
     WF_FUZZ_ASSERT(got == ref_murmur3_32(buf, in.n, 0));
     /* The whole input, too: the header bytes are realistic data as well. */
     uint8_t *all = wf_dup(data, size);
-    WF_FUZZ_ASSERT(hs_wf_murmur3_32(all, (int32_t)size)
+    WF_FUZZ_ASSERT(hs_wf_murmur3_32(all, size)
                    == ref_murmur3_32(all, size, 0));
     wf_free(all, size);
     wf_free(buf, in.n);

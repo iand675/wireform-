@@ -17,6 +17,12 @@ wireform format packages.
 The implementations live in @cbits/wireform_hash_simd.c@. All entry
 points are 'unsafePerformIO' / 'unsafeDupablePerformIO' wrapped so
 callers don't think about IO.
+
+Byte counts ('murmur3_32', 'xxh64') cross the FFI as 'CSize' (@size_t@),
+so a 'BS.ByteString' of any length on a 64-bit platform is hashed in
+full rather than truncated at 2^31. The Roaring kernels take element
+counts instead, which the container format bounds far below 2^31 (see
+'arrayCard'), so those stay 'Int32'.
 -}
 module Wireform.Hash (
   -- * Murmur3 32-bit (Iceberg @BucketUtil@)
@@ -44,6 +50,7 @@ import Data.Int (Int32, Int64)
 import Data.Vector.Storable qualified as VS
 import Data.Vector.Storable.Mutable qualified as VSM
 import Data.Word (Word16, Word32, Word64, Word8)
+import Foreign.C.Types (CSize (..))
 import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (Ptr, castPtr)
 import System.IO.Unsafe (unsafeDupablePerformIO, unsafePerformIO)
@@ -53,8 +60,10 @@ import System.IO.Unsafe (unsafeDupablePerformIO, unsafePerformIO)
 -- C entry points
 -- ============================================================
 
+-- Byte counts cross the FFI as CSize (size_t): a ByteString over 2 GiB is
+-- hashed in full, and the C kernels index with the same width.
 foreign import ccall unsafe "hs_wf_murmur3_32"
-  c_murmur3_32 :: Ptr Word8 -> Int32 -> Int32
+  c_murmur3_32 :: Ptr Word8 -> CSize -> Int32
 
 
 foreign import ccall unsafe "hs_wf_bucket_long"
@@ -62,7 +71,7 @@ foreign import ccall unsafe "hs_wf_bucket_long"
 
 
 foreign import ccall unsafe "hs_wf_xxh64"
-  c_xxh64 :: Ptr Word8 -> Int64 -> Word64 -> Word64
+  c_xxh64 :: Ptr Word8 -> CSize -> Word64 -> Word64
 
 
 foreign import ccall unsafe "hs_wf_roaring_decode_array"
@@ -89,7 +98,14 @@ foreign import ccall unsafe "hs_wf_roaring_encode_bitset"
 -- Public wrappers
 -- ============================================================
 
--- | Murmur3 32-bit hash with seed 0, matching Iceberg's @BucketUtil.hash@.
+{- | Murmur3 32-bit hash with seed 0, matching Iceberg's @BucketUtil.hash@.
+
+The whole 'BS.ByteString' is hashed: its length is passed as 'CSize'
+(@size_t@), so inputs above 2 GiB are not narrowed. Note that the
+algorithm folds the length into the finalizer as a @uint32@, so two
+lengths differing by a multiple of 2^32 hash alike; that is the
+reference behaviour, not a truncation here.
+-}
 murmur3_32 :: BS.ByteString -> Int32
 murmur3_32 bs = unsafePerformIO $
   unsafeUseAsCStringLen bs $ \(p, len) ->
@@ -122,7 +138,8 @@ bucketBytes n bs
 {-# INLINE bucketBytes #-}
 
 
--- | XXH64 with caller-supplied seed.
+-- | XXH64 with caller-supplied seed. The byte length is a 'CSize'
+-- (@size_t@), so a 'BS.ByteString' over 2 GiB is hashed in full.
 xxh64 :: Word64 -> BS.ByteString -> Word64
 xxh64 seed bs = unsafePerformIO $
   unsafeUseAsCStringLen bs $ \(p, len) ->
@@ -208,6 +225,11 @@ roaringContains kind bs card v = unsafePerformIO $
 clamped to the payload's whole uint16 lows and to the Int32 range. The C
 side has no payload length, and Iceberg's @decodeDV@ passes a count taken
 from untrusted blob bytes next to a payload that may be truncated.
+
+The Int32 clamp is not a width compromise: a Roaring ARRAY container
+holds at most 4096 distinct 16-bit lows (and a BITSET at most 65536), so
+no valid container can ask for a count above 2^31. The clamp exists to
+reject an untrusted count before any allocation.
 -}
 arrayCard :: BS.ByteString -> Int -> Int
 arrayCard bs card =

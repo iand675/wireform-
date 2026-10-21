@@ -12,7 +12,7 @@
  *                                 (hs_http1_parse_hex)
  *   Network.HTTP1.Internal.Ascii  asciiLower (disjoint dst of exactly len
  *                                 bytes), asciiIeq (equal lengths checked
- *                                 first, len > 0)
+ *                                 first, len >= 0)
  *   Network.HTTP1.StreamingReader findCRLF / findCRLFCRLF /
  *                                 scanCrlfOrBareLf (find_cr / find_lf over a
  *                                 ring slice, 0 <= offset < avail)
@@ -25,13 +25,16 @@
  *     readable and nothing before buf + offset is touched.
  *   - Returns the absolute index of the first matching byte in
  *     [offset, len), else len.
- *   - len <= INT_MAX: the Haskell wrappers narrow Int to CInt, so a
- *     ByteString of 2 GiB or more is outside the contract (HTTP heads and
- *     recv rings are far smaller). Every len up to INT_MAX itself is in.
+ *   - offset, len and the result are ptrdiff_t (the Haskell wrappers pass
+ *     Int, which is 64-bit on the platforms this package builds for), so a
+ *     ByteString or recv ring larger than 2 GiB is in the contract; the
+ *     calls no longer narrow to CInt.
  *
- * hs_http1_to_lower_ascii(src, dst, len): len <= 0 is a no-op; src and dst
+ * hs_http1_to_lower_ascii(src, dst, len): len == 0 is a no-op; src and dst
  *   are exactly len bytes and either identical (in-place) or disjoint.
- * hs_http1_ascii_ieq(a, b, len): both exactly len bytes; len <= 0 -> 1.
+ *   len is a byte count, size_t (CSize on the Haskell side).
+ * hs_http1_ascii_ieq(a, b, len): both exactly len bytes (size_t);
+ *   len == 0 -> 1.
  * hs_http1_parse_hex(buf, offset, len, out, consumed): reads hex digits
  *   from buf[offset .. len). Returns 1 with *out / *consumed set when
  *   1..16 digits were read, 0 with *out = 0 / *consumed = 0 when none,
@@ -46,13 +49,14 @@
 #include <stdint.h>
 #include <string.h>
 
-int hs_http1_find_cr(const void *buf, int offset, int len);
-int hs_http1_find_lf(const void *buf, int offset, int len);
-int hs_http1_find_non_token(const void *buf, int offset, int len);
-int hs_http1_find_non_fieldvalue(const void *buf, int offset, int len);
-void hs_http1_to_lower_ascii(const void *src, void *dst, int len);
-int hs_http1_ascii_ieq(const void *a, const void *b, int len);
-int hs_http1_parse_hex(const void *buf, int offset, int len, uint64_t *out, int *consumed);
+ptrdiff_t hs_http1_find_cr(const void *buf, ptrdiff_t offset, ptrdiff_t len);
+ptrdiff_t hs_http1_find_lf(const void *buf, ptrdiff_t offset, ptrdiff_t len);
+ptrdiff_t hs_http1_find_non_token(const void *buf, ptrdiff_t offset, ptrdiff_t len);
+ptrdiff_t hs_http1_find_non_fieldvalue(const void *buf, ptrdiff_t offset, ptrdiff_t len);
+void hs_http1_to_lower_ascii(const void *src, void *dst, size_t len);
+int hs_http1_ascii_ieq(const void *a, const void *b, size_t len);
+int hs_http1_parse_hex(const void *buf, ptrdiff_t offset, ptrdiff_t len,
+                       uint64_t *out, int *consumed);
 
 /* ------------------------------------------------------------------ */
 /* Byte classes, straight from the RFC grammar                         */
@@ -124,14 +128,14 @@ static inline int ref_find_non_fv(const uint8_t *p, int off, int len)
     return len;
 }
 
-static inline void ref_to_lower(const uint8_t *src, uint8_t *dst, int len)
+static inline void ref_to_lower(const uint8_t *src, uint8_t *dst, size_t len)
 {
-    for (int i = 0; i < len; i++) dst[i] = ref_lower(src[i]);
+    for (size_t i = 0; i < len; i++) dst[i] = ref_lower(src[i]);
 }
 
-static inline int ref_ieq(const uint8_t *a, const uint8_t *b, int len)
+static inline int ref_ieq(const uint8_t *a, const uint8_t *b, size_t len)
 {
-    for (int i = 0; i < len; i++) {
+    for (size_t i = 0; i < len; i++) {
         if (ref_lower(a[i]) != ref_lower(b[i])) return 0;
     }
     return 1;
@@ -157,7 +161,7 @@ static inline int ref_parse_hex(const uint8_t *p, int off, int len, uint64_t *ou
 /* Dispatch used by the table-driven tests and the scan fuzzer. */
 enum { SCAN_CR, SCAN_LF, SCAN_NON_TOKEN, SCAN_NON_FV, SCAN_KINDS };
 
-static inline int scan_kernel(int kind, const uint8_t *p, int off, int len)
+static inline ptrdiff_t scan_kernel(int kind, const uint8_t *p, ptrdiff_t off, ptrdiff_t len)
 {
     switch (kind) {
     case SCAN_CR: return hs_http1_find_cr(p, off, len);

@@ -86,6 +86,55 @@ static void find_byte_random(void)
     }
 }
 
+/* Regression: hs_find_byte took and returned int, so a ByteString or scan
+ * range over 2 GiB was truncated: the kernel scanned a wrapped (negative
+ * or short) range and the returned position came back as a bogus int.
+ * A sparse mapping just over 2 GiB is reserved; only the page holding the
+ * scanned window is touched, so this costs one page of memory and never
+ * reads the middle of the range. Skipped if the mapping cannot be made. */
+static void find_byte_beyond_2gib(void)
+{
+    /* Sparse, so one page of memory; valgrind emulates it in minutes and
+     * skips. The widths are also pinned at compile time in api.h. */
+    if (wf_under_valgrind()) {
+        printf("    find_byte_beyond_2gib: skipped (valgrind)\n");
+        return;
+    }
+    if (sizeof(ptrdiff_t) < 8 || sizeof(size_t) < 8) {
+        printf("    find_byte_beyond_2gib: skipped (32-bit position width)\n");
+        return;
+    }
+    size_t pg = (size_t)sysconf(_SC_PAGESIZE);
+    size_t total = ((size_t)1 << 31) + 4 * pg; /* > INT_MAX */
+    uint8_t *big = mmap(NULL, total, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (big == MAP_FAILED) {
+        printf("    find_byte_beyond_2gib: skipped (no >2 GiB of address space)\n");
+        return;
+    }
+    /* len and offset are both past INT_MAX; only [off, len) is written. */
+    ptrdiff_t len = (ptrdiff_t)total;
+    ptrdiff_t off = len - 128;
+    memset(big + off, 'a', 128);
+    big[off + 37] = 'x';
+    big[off + 120] = 'x';
+    /* The first match at or after a >INT_MAX offset is reported. */
+    WF_CHECK_EQ(hs_find_byte(big, off, len, 'x'), off + 37);
+    WF_CHECK_EQ(ref_find_byte(big, off, len, 'x'), off + 37);
+    /* Starting past that match finds the next one; nothing before the
+     * scan start is reported. */
+    WF_CHECK_EQ(hs_find_byte(big, off + 38, len, 'x'), off + 120);
+    /* A miss returns len itself, a position CInt could not carry. */
+    WF_CHECK_EQ(hs_find_byte(big, off + 121, len, 'y'), len);
+    /* The last byte of the range is scanned. */
+    big[off + 120] = 'a';
+    big[len - 1] = 'x';
+    WF_CHECK_EQ(hs_find_byte(big, len - 64, len, 'x'), len - 1);
+    /* offset >= len is still a miss that touches nothing. */
+    WF_CHECK_EQ(hs_find_byte(big, len + 8, len, 'x'), len);
+    munmap(big, total);
+}
+
 /* Masking against the reference for every start alignment (skew) and
  * length across a few SIMD blocks; masking twice restores the input
  * (involution). With skew > 0 the bytes between the buffer end and the
@@ -150,6 +199,7 @@ int main(void)
     WF_RUN(find_byte_all_values);
     WF_RUN(find_byte_empty_ranges);
     WF_RUN(find_byte_random);
+    WF_RUN(find_byte_beyond_2gib);
     WF_RUN(ws_mask_exhaustive);
     WF_RUN(ws_mask_split_rotation);
     return wf_finish("core-fast-scan");

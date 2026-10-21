@@ -11,24 +11,16 @@
 
 #include <limits.h>
 
+/* Lengths are byte counts size_t end to end: the test never narrows a
+ * buffer size before it reaches the kernel. */
 static int32_t murmur(const uint8_t *p, size_t n)
 {
-    return hs_wf_murmur3_32(p, (int32_t)n);
+    return hs_wf_murmur3_32(p, n);
 }
 
 static uint64_t xxh(const uint8_t *p, size_t n, uint64_t seed)
 {
-    return hs_wf_xxh64(p, (int64_t)n, seed);
-}
-
-static uint32_t fmix32(uint32_t h)
-{
-    h ^= h >> 16;
-    h *= 0x85ebca6bu;
-    h ^= h >> 13;
-    h *= 0xc2b2ae35u;
-    h ^= h >> 16;
-    return h;
+    return hs_wf_xxh64(p, n, seed);
 }
 
 static void le64(uint8_t out[8], int64_t v)
@@ -178,23 +170,16 @@ static void adversarial_bytes(void)
 }
 
 /* Data.ByteString.empty hands the kernels a NULL pointer with length 0;
- * len <= 0 must read nothing (NULL makes any read fault). */
-static void null_and_negative_lengths(void)
+ * len == 0 must read nothing (NULL makes any read fault). Negative
+ * lengths no longer exist in the interface: the C parameter is size_t and
+ * the Haskell one CSize, so the old negative-length cases were removed
+ * with the int32_t/int64_t parameters rather than kept as dead contract. */
+static void null_and_zero_lengths(void)
 {
     WF_CHECK_EQ(hs_wf_murmur3_32(NULL, 0), 0);
     WF_CHECK(hs_wf_xxh64(NULL, 0, 0) == 0xef46db3751d8e999ULL);
     WF_CHECK(hs_wf_xxh64(NULL, 0, 1) == 0xd5afba1336a3be4bULL);
-    static const int32_t neg32[] = { -1, -2, -3, -4, -15, -16, -17, INT32_MIN,
-                                     INT32_MIN + 1 };
-    for (size_t i = 0; i < sizeof neg32 / sizeof neg32[0]; i++) {
-        /* No blocks, no tail bytes: only the length enters the hash. */
-        WF_CHECK_EQ(hs_wf_murmur3_32(NULL, neg32[i]),
-                    (int32_t)fmix32((uint32_t)neg32[i]));
-    }
-    static const int64_t neg64[] = { -1, -7, -8, -31, -32, -33, INT64_MIN };
-    for (size_t i = 0; i < sizeof neg64 / sizeof neg64[0]; i++) {
-        WF_CHECK(hs_wf_xxh64(NULL, neg64[i], 7) == ref_xxh64(NULL, 0, 7));
-    }
+    WF_CHECK(hs_wf_xxh64(NULL, 0, 7) == ref_xxh64(NULL, 0, 7));
 }
 
 static void random_differential(void)
@@ -270,22 +255,33 @@ static void bucket_long(void)
     }
 }
 
-/* Lengths at the top of the int32 range. The old loop conditions
- * `i + 16 <= len` / `i + 4 <= len` overflowed int32 for len >= 2^31-16
- * (UBSan: signed integer overflow); with the overflow wrapping, the block
- * loop kept going and read past the end of the input (SIGBUS against the
- * guard). Expected values from mmh3 over bytes(n). */
-static void murmur_int32_max_length(void)
+/* Lengths at and above the old int32 ceiling, over a sparse all-zero
+ * mapping (vecbuf.h: 1 MiB of zero file mapped repeatedly, so the >2 GiB
+ * span costs a MiB of memory and no touched anonymous pages).
+ *
+ * Historically the loop conditions `i + 16 <= len` / `i + 4 <= len`
+ * overflowed int32 for len >= 2^31-16 (UBSan: signed integer overflow),
+ * and with the overflow wrapping the block loop read past the end of the
+ * input (SIGBUS against the guard). len is a size_t byte count now, so
+ * these values keep their mmh3-over-bytes(n) digests while the arithmetic
+ * stays exact. The 2^31 + 16 case is the regression for the old
+ * Int32 truncation: as int32_t that length wrapped negative and the
+ * kernel hashed zero bytes, so matching the byte-wise reference over the
+ * whole span proves the new signature hashes all of it. */
+static void murmur_lengths_beyond_int32(void)
 {
+    const size_t big = ((size_t)1 << 31) + 16; /* just over 2 GiB */
     zero_span z;
-    if (!zero_span_map(&z, (size_t)2 << 30)) return;
-    static const struct { int32_t len; int32_t h; } v[] = {
+    if (!zero_span_map(&z, big)) return;
+    static const struct { size_t len; int32_t h; } v[] = {
         { INT32_MAX, 1387477367 },
-        { INT32_MAX - 15, 2001921547 },
+        { (size_t)INT32_MAX - 15, 2001921547 },
     };
     for (size_t i = 0; i < sizeof v / sizeof v[0]; i++) {
-        WF_CHECK_EQ(hs_wf_murmur3_32(z.end - (size_t)v[i].len, v[i].len), v[i].h);
+        WF_CHECK_EQ(hs_wf_murmur3_32(z.end - v[i].len, v[i].len), v[i].h);
     }
+    const uint8_t *pbig = z.end - big;
+    WF_CHECK_EQ(hs_wf_murmur3_32(pbig, big), ref_murmur3_32(pbig, big, 0));
     zero_span_unmap(&z);
 }
 
@@ -296,10 +292,10 @@ int main(void)
     WF_RUN(oracle_table);
     WF_RUN(boundary_sweep);
     WF_RUN(adversarial_bytes);
-    WF_RUN(null_and_negative_lengths);
+    WF_RUN(null_and_zero_lengths);
     WF_RUN(random_differential);
     WF_RUN(single_byte_sensitivity);
     WF_RUN(bucket_long);
-    WF_RUN(murmur_int32_max_length);
+    WF_RUN(murmur_lengths_beyond_int32);
     return wf_finish("core-hash/test_hash");
 }

@@ -16,13 +16,12 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     uint64_t seed = lo | (hi << 32);
 
     uint8_t *buf = wf_dup(in.p, in.n);
-    WF_FUZZ_ASSERT(hs_wf_xxh64(buf, (int64_t)in.n, seed)
-                   == ref_xxh64(buf, in.n, seed));
-    WF_FUZZ_ASSERT(hs_wf_xxh64(buf, (int64_t)in.n, 0) == ref_xxh64(buf, in.n, 0));
+    WF_FUZZ_ASSERT(hs_wf_xxh64(buf, in.n, seed) == ref_xxh64(buf, in.n, seed));
+    WF_FUZZ_ASSERT(hs_wf_xxh64(buf, in.n, 0) == ref_xxh64(buf, in.n, 0));
     wf_free(buf, in.n);
 
     uint8_t *all = wf_dup(data, size);
-    WF_FUZZ_ASSERT(hs_wf_xxh64(all, (int64_t)size, 0) == ref_xxh64(all, size, 0));
+    WF_FUZZ_ASSERT(hs_wf_xxh64(all, size, 0) == ref_xxh64(all, size, 0));
     wf_free(all, size);
     return 0;
 }

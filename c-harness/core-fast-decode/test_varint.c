@@ -460,34 +460,36 @@ static void fixed_and_endian(void)
 }
 
 /* relocate_page_boundary: the 0/1/-1 decision follows the address of
- * buf+len, the copy is exact and the 7 padding bytes are zero. */
+ * buf+len, the copy is exact and the 7 padding bytes are zero. len and
+ * out_len are byte counts (size_t), so a negative capacity is not
+ * expressible: the too-small cases are capacities below len + 7. */
 static void relocate(void)
 {
     WF_CHECK_EQ(hs_proto_relocate_page_boundary(NULL, 0, NULL, 7), 0);
     wf_guarded g = wf_guard_tail(9000);
     uint8_t *page_end = g.p + g.n; /* page aligned */
     for (int back = 0; back < 40; back++) {
-        for (int len = 1; len < 40; len++) {
+        for (size_t len = 1; len < 40; len++) {
             const uint8_t *buf = page_end - back - len;
             uintptr_t e = (uintptr_t)(buf + len) & 4095;
             int near = e == 0 || e > 4088;
-            int out_len = len + 7;
-            uint8_t *o = wf_alloc((size_t)out_len);
-            memset(o, 0xAA, (size_t)out_len);
-            for (int i = 0; i < len; i++) ((uint8_t *)buf)[i] = (uint8_t)(i * 7 + back);
+            size_t out_len = len + 7;
+            uint8_t *o = wf_alloc(out_len);
+            memset(o, 0xAA, out_len);
+            for (size_t i = 0; i < len; i++) ((uint8_t *)buf)[i] = (uint8_t)(i * 7 + (size_t)back);
             int rc = hs_proto_relocate_page_boundary(buf, len, o, out_len);
             WF_CHECK_EQ(rc, near);
             if (near) {
-                WF_CHECK_MEM(o, buf, (size_t)len);
-                for (int i = 0; i < 7; i++) WF_CHECK_EQ(o[len + i], 0);
+                WF_CHECK_MEM(o, buf, len);
+                for (size_t i = 0; i < 7; i++) WF_CHECK_EQ(o[len + i], 0);
                 /* too-small output buffers are refused */
                 WF_CHECK_EQ(hs_proto_relocate_page_boundary(buf, len, o, out_len - 1), -1);
                 WF_CHECK_EQ(hs_proto_relocate_page_boundary(buf, len, o, 0), -1);
-                WF_CHECK_EQ(hs_proto_relocate_page_boundary(buf, len, o, INT_MIN), -1);
+                WF_CHECK_EQ(hs_proto_relocate_page_boundary(buf, len, o, 6), -1);
             } else {
-                for (int i = 0; i < out_len; i++) WF_CHECK_EQ(o[i], 0xAA);
+                for (size_t i = 0; i < out_len; i++) WF_CHECK_EQ(o[i], 0xAA);
             }
-            wf_free(o, (size_t)out_len);
+            wf_free(o, out_len);
         }
     }
     wf_guard_free(g);

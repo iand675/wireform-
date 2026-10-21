@@ -54,20 +54,27 @@ HS_INLINE uint32_t hs_rotl32(uint32_t x, int r) {
     return (x << r) | (x >> ((32 - r) & 31));
 }
 
-/* buf may be NULL when len == 0 (an empty ByteString). Reads exactly
- * buf[0, len); len <= 0 reads nothing. */
-int32_t hs_wf_murmur3_32(const uint8_t *buf, int32_t len)
+/* Murmur3 x86_32, seed 0, of buf[0, len).
+ *
+ * len is a byte count (size_t), so a ByteString over 2 GiB is hashed in
+ * full; it is never narrowed. buf may be NULL when len == 0 (an empty
+ * ByteString). Reads exactly buf[0, len). i is a byte position with
+ * 0 <= i <= len, and the bounds are written as len - i, which is exact
+ * and cannot wrap for any size_t length. The length also enters the
+ * finalizer as a uint32, as the reference algorithm specifies, so two
+ * lengths that differ by a multiple of 2^32 produce the same digest. */
+int32_t hs_wf_murmur3_32(const uint8_t *buf, size_t len)
 {
     const uint32_t c1 = MURMUR_C1;
     const uint32_t c2 = MURMUR_C2;
     uint32_t h = 0;
-    int32_t i = 0;
+    size_t i = 0;
 
     /* Body: 4-byte blocks. We unroll 4 lanes at a time (16 bytes per iter)
      * because the kernel is dominated by integer multiplies and rotates,
      * which run independently on the typical CPU pipeline. The bounds are
-     * written as len - i (0 <= i <= len) so they cannot overflow for len
-     * near INT32_MAX. */
+     * written as len - i (0 <= i <= len) so they are exact at any length,
+     * including the old INT32_MAX overflow point and above it. */
     for (; len - i >= 16; i += 16) {
         uint32_t k0 = hs_load_le32(buf + i);
         uint32_t k1 = hs_load_le32(buf + i + 4);
@@ -90,7 +97,7 @@ int32_t hs_wf_murmur3_32(const uint8_t *buf, int32_t len)
 
     /* Tail */
     uint32_t k1 = 0;
-    int32_t tail = len - i;
+    size_t tail = len - i;
     if (tail == 3) {
         k1 = (uint32_t)buf[i] |
              ((uint32_t)buf[i + 1] << 8) |
@@ -105,7 +112,8 @@ int32_t hs_wf_murmur3_32(const uint8_t *buf, int32_t len)
         h ^= k1;
     }
 
-    /* Finalize */
+    /* Finalize. The reference algorithm folds in the length as a uint32,
+     * so this cast is the specification, not a truncation bug. */
     h ^= (uint32_t)len;
     h ^= h >> 16;
     h *= 0x85ebca6bu;
@@ -116,9 +124,12 @@ int32_t hs_wf_murmur3_32(const uint8_t *buf, int32_t len)
 }
 
 /* Inline 8-byte (long) bucket: avoid a tiny memcpy + function call.
- * buckets <= 0 returns 0: the Haskell wrapper narrows N to Int32, so a
- * bucket count >= 2^31 from table metadata arrives here as 0 or negative,
- * and the modulus must not divide by zero. */
+ *
+ * `buckets` stays int32_t on purpose. It is Iceberg's bucket[N] count from
+ * table metadata, a small transform parameter rather than a buffer size;
+ * the Haskell wrapper narrows N to Int32 (documented there), so a count
+ * >= 2^31 arrives here as 0 or negative and returns 0 rather than dividing
+ * by zero. Widening it would buy nothing a real table can reach. */
 int32_t hs_wf_bucket_long(int64_t value, int32_t buckets)
 {
     if (buckets <= 0) return 0;
@@ -168,12 +179,14 @@ HS_INLINE uint64_t xxh_merge(uint64_t acc, uint64_t val) {
     return acc;
 }
 
-/* buf may be NULL when len == 0 (an empty ByteString). Reads exactly
- * buf[0, len); len <= 0 hashes the empty input. Offsets are tracked as
- * indices so no pointer is formed past buf + len (or from NULL). */
-uint64_t hs_wf_xxh64(const uint8_t *buf, int64_t len, uint64_t seed)
+/* len is a byte count (size_t) and is neither narrowed nor sign-checked;
+ * the caller passes a ByteString length, which cannot be negative. buf
+ * may be NULL when len == 0 (an empty ByteString) and hashes the empty
+ * input. Reads exactly buf[0, len). Offsets are tracked as indices so no
+ * pointer is formed past buf + len (or from NULL). */
+uint64_t hs_wf_xxh64(const uint8_t *buf, size_t len, uint64_t seed)
 {
-    const size_t n = len > 0 ? (size_t)len : 0;
+    const size_t n = len;
     size_t i = 0;
     uint64_t h64;
 
@@ -243,6 +256,14 @@ uint64_t hs_wf_xxh64(const uint8_t *buf, int64_t len, uint64_t seed)
  * The Haskell side produces only ARRAY containers when packing deletion
  * vectors, so this kernel is fast-pathed for them. BITSET containers are
  * decoded with a SIMDe popcount-for-bit-extraction loop.
+ *
+ * Widths: the kernel below has no byte length parameters, only element
+ * counts (`cardinality`). Those stay int32_t deliberately. A container is
+ * bounded by the format (ARRAY holds at most 4096 distinct 16-bit lows,
+ * BITSET at most 65536), so a count that needs more than 31 bits cannot
+ * arise from a real container, and the Haskell wrappers additionally
+ * clamp untrusted counts to the payload size. Widening them would change
+ * the Haskell vector signatures without removing a reachable truncation.
  * ============================================================ */
 
 /* Decode an ARRAY container of @cardinality@ uint16 values starting at

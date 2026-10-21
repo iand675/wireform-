@@ -36,7 +36,7 @@ import Data.Vector (Vector)
 import Data.Vector qualified as V
 import Data.Vector.Mutable qualified as MV
 import Data.Word (Word8)
-import Foreign.C.Types (CInt (..), CUChar (..))
+import Foreign.C.Types (CPtrdiff (..), CUChar (..))
 import Foreign.Ptr (Ptr, castPtr)
 import System.IO.Unsafe (unsafeDupablePerformIO)
 import XML.Value (
@@ -101,24 +101,30 @@ instance NFData FastDoc where
 -- FFI imports
 ------------------------------------------------------------------------
 
+-- The scanners take and return @CPtrdiff@ (C @ptrdiff_t@): @off@ is the
+-- parser position, @len@ the document length, and every scanner reports a
+-- miss as @-1@. Both used to be @CInt@, which truncated offsets and
+-- lengths on documents longer than @INT_MAX@ bytes. @fromIntegral@ on the
+-- way in and out is exact (never negative in, and the result is at most
+-- the buffer length on the way out).
 foreign import ccall unsafe "hs_xml_find_lt"
-  c_find_lt :: Ptr Word8 -> CInt -> CInt -> IO CInt
+  c_find_lt :: Ptr Word8 -> CPtrdiff -> CPtrdiff -> IO CPtrdiff
 
 
 foreign import ccall unsafe "hs_xml_find_byte"
-  c_find_byte :: Ptr Word8 -> CInt -> CInt -> CUChar -> IO CInt
+  c_find_byte :: Ptr Word8 -> CPtrdiff -> CPtrdiff -> CUChar -> IO CPtrdiff
 
 
 foreign import ccall unsafe "hs_xml_find_attr_end"
-  c_find_attr_end :: Ptr Word8 -> CInt -> CInt -> CUChar -> IO CInt
+  c_find_attr_end :: Ptr Word8 -> CPtrdiff -> CPtrdiff -> CUChar -> IO CPtrdiff
 
 
 foreign import ccall unsafe "hs_xml_find_cdata_end"
-  c_find_cdata_end :: Ptr Word8 -> CInt -> CInt -> IO CInt
+  c_find_cdata_end :: Ptr Word8 -> CPtrdiff -> CPtrdiff -> IO CPtrdiff
 
 
 foreign import ccall unsafe "hs_xml_find_comment_end"
-  c_find_comment_end :: Ptr Word8 -> CInt -> CInt -> IO CInt
+  c_find_comment_end :: Ptr Word8 -> CPtrdiff -> CPtrdiff -> IO CPtrdiff
 
 
 ------------------------------------------------------------------------

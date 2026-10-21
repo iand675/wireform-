@@ -150,6 +150,7 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Internal qualified as BSI
 import Data.Int
 import Data.Word
+import Foreign.C.Types (CSize (..))
 import Foreign.Marshal.Utils (copyBytes)
 import GHC.Exts
 import GHC.Float (castWord32ToFloat, castWord64ToDouble)
@@ -361,13 +362,17 @@ bsAddr# (BSI.BS (ForeignPtr addr _) _) = addr
 
 
 memcmpAddr# :: Addr# -> Addr# -> Int# -> Int#
-memcmpAddr# a b n = case unsafeDupablePerformIO (c_memcmp (Ptr a) (Ptr b) (I# n)) of
+memcmpAddr# a b n = case unsafeDupablePerformIO (c_memcmp (Ptr a) (Ptr b) (fromIntegral (I# n))) of
   r -> if r == 0 then 0# else 1#
 {-# INLINE memcmpAddr# #-}
 
 
+-- memcmp's third parameter is size_t. n is the length of a literal
+-- ByteString, which byteString has already compared against the bytes
+-- remaining (`len# <=# ...`), so it is non-negative here and Int -> CSize
+-- cannot narrow.
 foreign import ccall unsafe "memcmp"
-  c_memcmp :: Ptr Word8 -> Ptr Word8 -> Int -> IO Int
+  c_memcmp :: Ptr Word8 -> Ptr Word8 -> CSize -> IO Int
 
 
 ------------------------------------------------------------------------

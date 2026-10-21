@@ -21,6 +21,7 @@ import Data.Bits (shiftL, testBit, xor, (.&.), (.|.))
 import Data.ByteString qualified as BS
 import Data.ByteString.Builder qualified as BB
 import Data.ByteString.Char8 qualified as BSC
+import Data.ByteString.Internal qualified as BSI
 import Data.ByteString.Lazy qualified as BL
 import Data.ByteString.Unsafe qualified as BSU
 import Data.Int (Int32, Int64)
@@ -29,6 +30,7 @@ import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Word (Word32, Word8)
+import Foreign.C.Types (CInt)
 import Foreign.Marshal.Alloc (allocaBytesAligned)
 import Foreign.Marshal.Array (withArray)
 import Foreign.Marshal.Utils (copyBytes)
@@ -120,6 +122,31 @@ lz4Tests =
           case LZ4.decompress (BS.length bs) truncated of
             Left _ -> H.success
             Right back -> H.diff back (/=) bs
+      , it "compressBound rejects non-positive and over-long inputs" $ do
+          -- The raw block API sizes are ints: 0x7E000000 is
+          -- LZ4_MAX_INPUT_SIZE, and one byte past it must not be
+          -- narrowed into a plausible smaller length.
+          LZ4.compressBound 0 `shouldBe` -1
+          LZ4.compressBound (-1) `shouldBe` -1
+          LZ4.compressBound (LZ4.lz4MaxInputSize + 1) `shouldBe` -1
+          LZ4.compressBound maxBound `shouldBe` -1
+          (LZ4.compressBound LZ4.lz4MaxInputSize > 0) `shouldBe` True
+          (LZ4.compressBound 16 > 16) `shouldBe` True
+      , it "decompress refuses an output size over maxBound :: CInt" $ do
+          -- Checked before allocating, so this stays cheap.
+          let !block = BS.pack [0x50, 0x68, 0x65, 0x6c, 0x6c, 0x6f]
+          LZ4.decompress (fromIntegral (maxBound :: CInt) + 1) block
+            `shouldBe` Left (LZ4.prettyLZ4Error LZ4.LZ4LengthTooLarge)
+      , it "decompress refuses compressed input over maxBound :: CInt" $ do
+          -- The length is only inspected: the guard must fire before the
+          -- bytes are touched, so a ByteString that merely claims to be
+          -- 2^31 bytes long (over a 16-byte allocation) is enough, and no
+          -- 2 GiB buffer is ever allocated. If the guard is ever dropped
+          -- this test stops returning LZ4LengthTooLarge.
+          fp <- BSI.mallocByteString 16
+          let !hugeInput = BSI.fromForeignPtr fp 0 (fromIntegral (maxBound :: CInt) + 1)
+          LZ4.decompress 16 hugeInput
+            `shouldBe` Left (LZ4.prettyLZ4Error LZ4.LZ4LengthTooLarge)
       ]
 
 

@@ -22,15 +22,15 @@
 #include <limits.h>
 
 static uint8_t g_target;
-static int k_find_byte(const uint8_t *b, int o, int n) { return hs_xml_find_byte(b, o, n, g_target); }
-static int r_find_byte(const uint8_t *b, int o, int n) { return ref_xml_find_byte(b, o, n, g_target); }
-static int k_attr_end(const uint8_t *b, int o, int n) { return hs_xml_find_attr_end(b, o, n, g_target); }
-static int k_attr_dq(const uint8_t *b, int o, int n) { return hs_xml_find_attr_end(b, o, n, '"'); }
-static int r_attr_dq(const uint8_t *b, int o, int n) { return ref_xml_find_byte(b, o, n, '"'); }
-static int k_attr_sq(const uint8_t *b, int o, int n) { return hs_xml_find_attr_end(b, o, n, '\''); }
-static int r_attr_sq(const uint8_t *b, int o, int n) { return ref_xml_find_byte(b, o, n, '\''); }
+static ptrdiff_t k_find_byte(const uint8_t *b, ptrdiff_t o, ptrdiff_t n) { return hs_xml_find_byte(b, o, n, g_target); }
+static ptrdiff_t r_find_byte(const uint8_t *b, ptrdiff_t o, ptrdiff_t n) { return ref_xml_find_byte(b, o, n, g_target); }
+static ptrdiff_t k_attr_end(const uint8_t *b, ptrdiff_t o, ptrdiff_t n) { return hs_xml_find_attr_end(b, o, n, g_target); }
+static ptrdiff_t k_attr_dq(const uint8_t *b, ptrdiff_t o, ptrdiff_t n) { return hs_xml_find_attr_end(b, o, n, '"'); }
+static ptrdiff_t r_attr_dq(const uint8_t *b, ptrdiff_t o, ptrdiff_t n) { return ref_xml_find_byte(b, o, n, '"'); }
+static ptrdiff_t k_attr_sq(const uint8_t *b, ptrdiff_t o, ptrdiff_t n) { return hs_xml_find_attr_end(b, o, n, '\''); }
+static ptrdiff_t r_attr_sq(const uint8_t *b, ptrdiff_t o, ptrdiff_t n) { return ref_xml_find_byte(b, o, n, '\''); }
 
-typedef int (*scan_fn)(const uint8_t *, int, int);
+typedef ptrdiff_t (*scan_fn)(const uint8_t *, ptrdiff_t, ptrdiff_t);
 static const struct {
     scan_fn kernel, ref;
 } SCANNERS[] = {
@@ -49,27 +49,28 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     if (size < 3 || size > (1u << 20)) return 0;
     uint8_t flags = data[0];
-    int n = (int)(size - 3);
-    int off = data[1] % (n + 3);
+    ptrdiff_t n = (ptrdiff_t)(size - 3);
+    ptrdiff_t off = (ptrdiff_t)(data[1] % (unsigned)(n + 3));
     g_target = data[2];
     uint8_t *real = wf_dup(data + 3, (size_t)n);
     /* (buf, len) as the kernel sees them. In virtual mode real[0] sits at
-     * index INT_MAX - n and offsets past len are clamped to len (they
-     * cannot be represented past INT_MAX). */
+     * index INT_MAX - n, so len is past INT_MAX; offsets past len are
+     * clamped to len (the parser's one-past-EOF is exercised in local
+     * mode, where it is small enough to stay inside the buffer). */
     const uint8_t *buf = real;
-    int len = n;
+    ptrdiff_t len = n;
     if (flags & 1) {
-        int shift = INT_MAX - n;
+        ptrdiff_t shift = INT_MAX - n;
         buf = (const uint8_t *)((uintptr_t)real - (uintptr_t)shift);
         len = INT_MAX;
         off = (off > n ? n : off) + shift;
     }
 
     for (size_t si = 0; si < sizeof SCANNERS / sizeof SCANNERS[0]; si++) {
-        int o = off;
-        for (int steps = 0; steps <= n + 1; steps++) {
-            int got = SCANNERS[si].kernel(buf, o, len);
-            int want = SCANNERS[si].ref(buf, o, len);
+        ptrdiff_t o = off;
+        for (ptrdiff_t steps = 0; steps <= n + 1; steps++) {
+            ptrdiff_t got = SCANNERS[si].kernel(buf, o, len);
+            ptrdiff_t want = SCANNERS[si].ref(buf, o, len);
             WF_FUZZ_ASSERT(got == want);
             WF_FUZZ_ASSERT(got == -1 || got == len || (got >= o && got < len));
             if (got < 0 || got >= len) break;
@@ -78,8 +79,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     }
 
     /* find_escape takes a count, not an end index: scan [o, len). */
-    for (int o = off; o <= len;) {
-        int got = hs_xml_find_escape(buf, o, len - o);
+    for (ptrdiff_t o = off; o <= len;) {
+        ptrdiff_t got = hs_xml_find_escape(buf, o, len - o);
         WF_FUZZ_ASSERT(got == ref_xml_find_escape(buf, o, len - o));
         WF_FUZZ_ASSERT(got >= o && got <= len);
         if (got == len) break;

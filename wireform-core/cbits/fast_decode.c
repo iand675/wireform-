@@ -6,8 +6,18 @@
  * - Branchless byte-level parallelism for common varint sizes
  * - Prefetch hints for sequential buffer access
  * - Unrolled loops for fixed-width fields
+ *
+ * Widths, applied per value (see the module docs in Wireform.FFI):
+ * positions into a buffer (and every scanner result, which can return a
+ * miss or an end index) are ptrdiff_t; pure byte counts, capacities and
+ * the counts these kernels report are size_t. Nothing a Haskell caller
+ * passes narrows to CInt, so a ByteString over 2 GiB is not truncated.
+ * The functions below that still take int are the ones with no Haskell
+ * caller (the scalar varint / fixed-width helpers); they are reached
+ * only from C with buffer-sized indices.
  */
 
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 #include <simde/x86/sse2.h>
@@ -134,14 +144,15 @@ int hs_proto_decode_tag_fast(
  * REQUIRES: at least 8 readable bytes starting at buf+offset.
  * The caller must ensure this (Proto.Dynamic checks off + 8 <= length).
  *
- * Returns bytes consumed (1-8), or 0 if none of the 8 bytes terminates
- * the varint (9- and 10-byte varints, or malformed input); the caller
- * then falls back to its byte-at-a-time decoder.
- * Result is written to *out.
+ * `offset` is a position into `buf` (ptrdiff_t: a ByteString over 2 GiB
+ * must not truncate it). Returns bytes consumed (1-8), a genuinely small
+ * value, or 0 if none of the 8 bytes terminates the varint (9- and
+ * 10-byte varints, or malformed input); the caller then falls back to
+ * its byte-at-a-time decoder. Result is written to *out.
  */
 int hs_proto_decode_varint_swar(
     const uint8_t *buf,
-    int offset,
+    ptrdiff_t offset,
     uint64_t *out)
 {
     uint64_t word;
@@ -214,17 +225,22 @@ int hs_proto_decode_varint_swar(
  * bytes of padding. The padding bytes are zero, which look like varint
  * terminators (byte < 0x80).
  *
+ * `len` and `out_len` are byte counts, not positions: `len` bytes of the
+ * original buffer are copied, and `out_len` is the capacity of the
+ * destination, so both are size_t (a capacity can never be negative; a
+ * ByteString over 2 GiB needs len + 7 to be representable).
+ *
  * Returns 1 if a copy was made (caller should use out_buf), 0 if the
- * original buffer is safe (no copy needed) or len <= 0, -1 if a copy is
+ * original buffer is safe (no copy needed) or len == 0, -1 if a copy is
  * needed but out_len < len + 7.
  */
 int hs_proto_relocate_page_boundary(
     const uint8_t *buf,
-    int len,
+    size_t len,
     uint8_t *out_buf,
-    int out_len)
+    size_t out_len)
 {
-    if (len <= 0) return 0;
+    if (len == 0) return 0;
 
     /* Check if the buffer end is within 7 bytes of a page boundary. */
     /* Pages are typically 4096 bytes on all platforms we care about. */
@@ -289,13 +305,18 @@ int hs_proto_decode_packed_varints(
  * Count the number of varints in a packed buffer.
  * Uses SWAR to process 8 bytes at a time: each byte with its high bit
  * clear terminates a varint, so we popcount the inverted high-bit mask.
+ *
+ * `len` is a byte count and the result a varint count, both size_t: a
+ * packed run can be larger than 2 GiB, and its count can exceed INT_MAX
+ * (which the old int count would have reported wrapped). Uses len - i
+ * for the trip counts, never i + N <= len, so the bound cannot wrap.
  */
-int hs_proto_count_packed_varints(
+size_t hs_proto_count_packed_varints(
     const uint8_t *buf,
-    int len)
+    size_t len)
 {
-    int count = 0;
-    int i = 0;
+    size_t count = 0;
+    size_t i = 0;
 
     {
         simde__m128i high_bit = simde_mm_set1_epi8((char)0x80);
@@ -306,7 +327,7 @@ int hs_proto_count_packed_varints(
             simde__m128i is_term = simde_mm_cmpeq_epi8(has_high,
                 simde_mm_setzero_si128());
             int mask = simde_mm_movemask_epi8(is_term);
-            count += __builtin_popcount(mask);
+            count += (size_t)__builtin_popcount(mask);
         }
     }
 
@@ -315,7 +336,7 @@ int hs_proto_count_packed_varints(
         uint64_t word;
         memcpy(&word, buf + i, 8);
         uint64_t term_mask = ~word & 0x8080808080808080ULL;
-        count += __builtin_popcountll(term_mask >> 7);
+        count += (size_t)__builtin_popcountll(term_mask >> 7);
     }
 #endif
 
@@ -331,13 +352,14 @@ int hs_proto_count_packed_varints(
  * just read the bytes directly as values without varint parsing.
  *
  * Uses SWAR: if no byte has its high bit set, the entire buffer is
- * single-byte varints.  Returns 1 if all single-byte, 0 otherwise.
+ * single-byte varints.  `len` is a byte count (size_t). Returns 1 if all
+ * single-byte, 0 otherwise.
  */
 int hs_proto_packed_all_single_byte(
     const uint8_t *buf,
-    int len)
+    size_t len)
 {
-    int i = 0;
+    size_t i = 0;
 
     {
         simde__m128i high_bit = simde_mm_set1_epi8((char)0x80);
@@ -411,12 +433,15 @@ int hs_proto_decode_packed_single_byte_varints(
  * For the ASCII-only case (the vast majority of protobuf string fields:
  * URLs, identifiers, enum names, etc.) this is dramatically faster than
  * calling into a full UTF-8 state machine.
+ *
+ * `len` is a byte count (size_t), so a string field over 2 GiB is
+ * validated over its whole length rather than a truncated prefix.
  */
 int hs_proto_validate_utf8_fast(
     const uint8_t *buf,
-    int len)
+    size_t len)
 {
-    int i = 0;
+    size_t i = 0;
 
     {
         simde__m128i high_bit = simde_mm_set1_epi8((char)0x80);
@@ -471,7 +496,7 @@ slow_from_i:
             return 0;
         }
 
-        if (len - i < count) return 0;
+        if (len - i < (size_t)count) return 0;
 
         for (int j = 1; j < count; j++) {
             uint8_t cb = buf[i + j];
@@ -496,10 +521,15 @@ slow_from_i:
 /*
  * Encode a varint into buf at the given offset.
  * Returns the number of bytes written.
+ *
+ * `offset` is the write cursor into a direct-encode buffer (Encode.Direct
+ * allocates one ByteString and fills it front to back), so it is a
+ * non-negative index that can pass INT_MAX: size_t, like the count
+ * written. The caller guarantees the space.
  */
-int hs_proto_encode_varint(
+size_t hs_proto_encode_varint(
     uint8_t *buf,
-    int offset,
+    size_t offset,
     uint64_t value)
 {
     uint8_t *p = buf + offset;
@@ -533,7 +563,7 @@ int hs_proto_encode_varint(
         p[4] = (uint8_t)(value >> 28);
         return 5;
     }
-    int n = 0;
+    size_t n = 0;
     while (value >= 0x80) {
         p[n++] = (uint8_t)((value & 0x7F) | 0x80);
         value >>= 7;
@@ -545,30 +575,36 @@ int hs_proto_encode_varint(
 /*
  * Encode a length-delimited field: tag_byte + varint(len) + memcpy(data, len).
  * Returns bytes written. This is a single C call for the entire field.
+ *
+ * `offset` is the write cursor (size_t, see hs_proto_encode_varint) and
+ * `len` the byte count of `data`: a single field over 2 GiB is encoded
+ * in one call, and the result (1 + varint + len) exceeds INT_MAX for
+ * one, so both the length and the return are size_t.
  */
-int hs_proto_encode_length_delimited(
+size_t hs_proto_encode_length_delimited(
     uint8_t *buf,
-    int offset,
+    size_t offset,
     uint8_t tag,
     const uint8_t *data,
-    int len)
+    size_t len)
 {
-    uint8_t *p = buf + offset;
-    p[0] = tag;
-    int n = 1 + hs_proto_encode_varint(buf, offset + 1, (uint64_t)len);
+    buf[offset] = tag;
+    size_t n = 1 + hs_proto_encode_varint(buf, offset + 1, (uint64_t)len);
     /* An empty ByteString / Text arrives as (NULL, 0); memcpy from NULL
      * is undefined even for zero bytes. */
-    if (len > 0) memcpy(buf + offset + n, data, (size_t)len);
+    if (len > 0) memcpy(buf + offset + n, data, len);
     return n + len;
 }
 
 /*
  * Encode a varint field: tag_byte + varint(value).
  * Returns bytes written.
+ *
+ * `offset` is the write cursor (size_t, like the other encoders).
  */
-int hs_proto_encode_varint_field(
+size_t hs_proto_encode_varint_field(
     uint8_t *buf,
-    int offset,
+    size_t offset,
     uint8_t tag,
     uint64_t value)
 {
@@ -579,10 +615,12 @@ int hs_proto_encode_varint_field(
 /*
  * Encode a bool field: tag_byte + 0x01/0x00.
  * Returns 2 (always 2 bytes).
+ *
+ * `offset` is the write cursor (size_t, like the other encoders).
  */
-int hs_proto_encode_bool_field(
+size_t hs_proto_encode_bool_field(
     uint8_t *buf,
-    int offset,
+    size_t offset,
     uint8_t tag,
     int value)
 {
@@ -707,10 +745,16 @@ void hs_proto_write_be64(uint8_t *buf, int offset, uint64_t val) {
 
 /* Find the offset of the first NUL byte starting at buf+offset.
    Returns offset relative to buf, or -1 if not found within len bytes.
-   16-byte SIMD fast path. */
-int hs_proto_find_nul(const uint8_t *buf, int offset, int len)
+   16-byte SIMD fast path.
+
+   `offset` is the start position and `len` the buffer's length (also the
+   exclusive end of the scan): both are indices into `buf`, so ptrdiff_t,
+   which keeps a ByteString over 2 GiB from truncating and keeps the -1
+   miss representable. Requires 0 <= offset; offset >= len returns -1
+   without reading. */
+ptrdiff_t hs_proto_find_nul(const uint8_t *buf, ptrdiff_t offset, ptrdiff_t len)
 {
-    int i = offset;
+    ptrdiff_t i = offset;
     simde__m128i zero = simde_mm_setzero_si128();
 
     /* len - i, not i + 16: i starts at the caller's offset */
@@ -729,12 +773,17 @@ int hs_proto_find_nul(const uint8_t *buf, int offset, int len)
 }
 
 /* Check if len bytes starting at buf+offset are all ASCII (< 0x80).
-   Uses 16-byte SIMD. Returns 1 if all ASCII, 0 otherwise. */
-int hs_proto_is_ascii(const uint8_t *buf, int offset, int len)
+   Uses 16-byte SIMD. Returns 1 if all ASCII, 0 otherwise.
+
+   `offset` is a position into `buf` and `len` a count of bytes from
+   there (so the window is [offset, offset + len)): both ptrdiff_t, like
+   the other scanners, so neither truncates for a ByteString over 2 GiB.
+   len <= 0 returns 1 without touching memory. */
+int hs_proto_is_ascii(const uint8_t *buf, ptrdiff_t offset, ptrdiff_t len)
 {
     /* An empty ByteString arrives as (NULL, 0, 0): do not form NULL + 0. */
     if (len <= 0) return 1;
-    int i = 0;
+    ptrdiff_t i = 0;
     const uint8_t *p = buf + offset;
     simde__m128i highbit = simde_mm_set1_epi8((char)0x80);
 
@@ -803,12 +852,16 @@ void hs_proto_write_le64(uint8_t *buf, int offset, uint64_t val) {
  * anything < 0x20, or '"', or '\\'.
  * Returns the offset of the first such byte, or offset+len if none found.
  * 16-byte SIMD fast path.
+ *
+ * `offset` is a position into `buf` and `len` a count of bytes from
+ * there; the result is a position again, so all three are ptrdiff_t
+ * (a miss of offset + len must be representable, and can pass INT_MAX).
  */
-int hs_proto_find_json_escape(const uint8_t *buf, int offset, int len)
+ptrdiff_t hs_proto_find_json_escape(const uint8_t *buf, ptrdiff_t offset, ptrdiff_t len)
 {
     /* Do not form NULL + 0 for an empty input. */
     if (len <= 0) return offset + len;
-    int i = 0;
+    ptrdiff_t i = 0;
     const uint8_t *p = buf + offset;
     simde__m128i dquote = simde_mm_set1_epi8('"');
     simde__m128i bslash = simde_mm_set1_epi8('\\');
@@ -836,10 +889,15 @@ int hs_proto_find_json_escape(const uint8_t *buf, int offset, int len)
  * Returns the offset of the first non-whitespace character.
  * EDN treats commas as whitespace. Also skips ; comments to end of line.
  * 16-byte SIMD fast path for the common whitespace chars.
+ *
+ * `offset` is the start position and `len` the buffer's length (the
+ * exclusive end), and the result is a position, so all three are
+ * ptrdiff_t like the other scanners. Requires 0 <= offset; offset >= len
+ * returns offset unchanged without reading.
  */
-int hs_proto_skip_ws(const uint8_t *buf, int offset, int len)
+ptrdiff_t hs_proto_skip_ws(const uint8_t *buf, ptrdiff_t offset, ptrdiff_t len)
 {
-    int i = offset;
+    ptrdiff_t i = offset;
 
     while (i < len) {
         /* SIMD fast path: skip blocks of 16 whitespace bytes */
@@ -884,21 +942,27 @@ int hs_proto_skip_ws(const uint8_t *buf, int offset, int len)
  * for width 4 as little-endian signed int32 (4 at a time with SSE2),
  * otherwise by memcmp. Bounds past the 32nd are ignored. The mask is
  * built unsigned (bit 31 is a valid result bit) and returned as an int.
+ *
+ * `count` is the number of bounds and `width` their size in bytes: both
+ * are counts, so size_t (a caller that passes a negative Int would be a
+ * bug: the value becomes huge, not empty). width == 0 means empty bounds,
+ * which compare equal without touching `bounds`. The result is a 32-bit
+ * bitmask, not a length, so it stays an int.
  */
 int hs_proto_compare_bounds(
-    const uint8_t *bounds, int count, int width,
+    const uint8_t *bounds, size_t count, size_t width,
     const uint8_t *search)
 {
-    int n = count < 32 ? count : 32;
+    size_t n = count < 32 ? count : 32;
 
     if (width != 4) {
         /* Scalar fallback for non-int32 widths */
         uint32_t result = 0;
-        for (int i = 0; i < n; i++) {
+        for (size_t i = 0; i < n; i++) {
             /* width 0: every (empty) bound equals the search value; do
              * not form bounds + 0 when an empty ByteString passed NULL */
-            int cmp = width > 0
-                ? memcmp(bounds + (size_t)i * (size_t)width, search, (size_t)width)
+            int cmp = width != 0
+                ? memcmp(bounds + i * width, search, width)
                 : 0;
             if (cmp <= 0) result |= 1u << i;
         }
@@ -913,10 +977,11 @@ int hs_proto_compare_bounds(
 #endif
 
     uint32_t result = 0;
-    int i = 0;
+    size_t i = 0;
     simde__m128i sv = simde_mm_set1_epi32(search_val);
 
-    for (; i + 4 <= n; i += 4) {
+    /* n - i, not i + 4 <= n: the bound cannot wrap. */
+    for (; n - i >= 4; i += 4) {
         simde__m128i bv = simde_mm_loadu_si128((const simde__m128i *)(bounds + i * 4));
         /* bounds[j] <= search_val  iff  NOT (search_val < bounds[j]) */
         simde__m128i lt = simde_mm_cmplt_epi32(sv, bv);
@@ -948,19 +1013,24 @@ int hs_proto_compare_bounds(
  *
  * For the non-overlap check, we do a simple O(n) scan since buffers in
  * Arrow IPC are typically in order. Returns 1 if valid, 0 if invalid.
+ *
+ * `count` is the number of (offset, length) pairs and `buf_pairs` holds
+ * 2 * count int64s, so it is size_t (a negative Int would be a caller
+ * bug: it becomes a huge count rather than an empty table).
  */
 int hs_proto_validate_arrow_buffers(
-    const int64_t *buf_pairs, int count, int64_t body_length)
+    const int64_t *buf_pairs, size_t count, int64_t body_length)
 {
     if (count == 0) return 1;
 
     int64_t prev_end = 0;
-    int i = 0;
+    size_t i = 0;
 
-    /* SSE2 path: validate 2 buffers (4 int64s) at a time for non-negative */
-    for (; i + 1 < count; i += 2) {
-        /* size_t index: i * 2 overflows int for count > 2^30 */
-        const int64_t *pp = buf_pairs + (size_t)i * 2;
+    /* SSE2 path: validate 2 buffers (4 int64s) at a time for non-negative.
+     * count - i >= 2: no wrap for a count near SIZE_MAX. */
+    for (; count - i >= 2; i += 2) {
+        /* size_t index: i * 2 must not overflow */
+        const int64_t *pp = buf_pairs + i * 2;
         simde__m128i pair0 = simde_mm_loadu_si128((const simde__m128i *)pp);
         simde__m128i pair1 = simde_mm_loadu_si128((const simde__m128i *)(pp + 2));
         /* Check all 4 values are non-negative: the sign bit of each
@@ -982,8 +1052,8 @@ int hs_proto_validate_arrow_buffers(
 
     /* Scalar tail */
     for (; i < count; i++) {
-        int64_t off = buf_pairs[(size_t)i * 2];
-        int64_t len = buf_pairs[(size_t)i * 2 + 1];
+        int64_t off = buf_pairs[i * 2];
+        int64_t len = buf_pairs[i * 2 + 1];
         if (off < 0 || len < 0) return 0;
         if (len > body_length || off > body_length - len) return 0;
         if (off < prev_end && len > 0) return 0;

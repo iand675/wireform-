@@ -28,7 +28,7 @@ import Data.Vector (Vector)
 import Data.Vector qualified as V
 import Data.Vector.Mutable qualified as MV
 import Data.Word (Word8)
-import Foreign.C.Types (CInt (..), CUChar (..))
+import Foreign.C.Types (CPtrdiff (..), CUChar (..))
 import Foreign.Ptr (Ptr, castPtr)
 import System.IO.Unsafe (unsafeDupablePerformIO)
 import XML.Value (Attribute (..), Name (..), XMLDecl (..), qualifiedName, simpleName)
@@ -61,24 +61,33 @@ instance NFData SAXEvent where
 -- FFI imports for SIMD scanning
 ------------------------------------------------------------------------
 
+-- The scanners take and return @CPtrdiff@ (C @ptrdiff_t@): @off@ and @len@
+-- are the parser position and the document length. A miss is @-1@ for
+-- every scanner here except @hs_xml_find_text_end@, which reports @len@.
+-- @CInt@ used to truncate both, so a document
+-- longer than @INT_MAX@ bytes scanned a wrapped range. The Haskell side
+-- converts an @Int@ position or length with @fromIntegral@ (never
+-- negative by construction) and the result back to @Int@; both are exact
+-- on 64-bit and on 32-bit, where @Int@ and the buffer length are both
+-- 32-bit.
 foreign import ccall unsafe "hs_xml_find_byte"
-  c_find_byte :: Ptr Word8 -> CInt -> CInt -> CUChar -> IO CInt
+  c_find_byte :: Ptr Word8 -> CPtrdiff -> CPtrdiff -> CUChar -> IO CPtrdiff
 
 
 foreign import ccall unsafe "hs_xml_find_text_end"
-  c_find_text_end :: Ptr Word8 -> CInt -> CInt -> IO CInt
+  c_find_text_end :: Ptr Word8 -> CPtrdiff -> CPtrdiff -> IO CPtrdiff
 
 
 foreign import ccall unsafe "hs_xml_find_cdata_end"
-  c_find_cdata_end :: Ptr Word8 -> CInt -> CInt -> IO CInt
+  c_find_cdata_end :: Ptr Word8 -> CPtrdiff -> CPtrdiff -> IO CPtrdiff
 
 
 foreign import ccall unsafe "hs_xml_find_comment_end"
-  c_find_comment_end :: Ptr Word8 -> CInt -> CInt -> IO CInt
+  c_find_comment_end :: Ptr Word8 -> CPtrdiff -> CPtrdiff -> IO CPtrdiff
 
 
 foreign import ccall unsafe "hs_xml_find_attr_end"
-  c_find_attr_end :: Ptr Word8 -> CInt -> CInt -> CUChar -> IO CInt
+  c_find_attr_end :: Ptr Word8 -> CPtrdiff -> CPtrdiff -> CUChar -> IO CPtrdiff
 
 
 -- hs_xml_find_lt available via findTextEndP (which finds both '<' and '&')

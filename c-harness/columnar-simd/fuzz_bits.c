@@ -33,22 +33,22 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         break;
     }
     case 1: {
-        int32_t n = (int32_t)(p1 % (bits + 1));
-        uint8_t *dst = wf_alloc((size_t)n), *want = malloc((size_t)n + 1);
-        size_t nb = ((size_t)n + 7) / 8;
+        size_t n = (size_t)(p1 % (bits + 1));
+        uint8_t *dst = wf_alloc(n), *want = malloc(n + 1);
+        size_t nb = (n + 7) / 8;
         /* src is exactly the covering bytes */
         uint8_t *src = wf_dup(buf, nb);
         hs_columnar_unpack_bits_lsb(src, n, dst);
         ref_unpack_bits_lsb(src, n, want);
-        WF_FUZZ_ASSERT(memcmp(dst, want, (size_t)n) == 0);
+        WF_FUZZ_ASSERT(memcmp(dst, want, n) == 0);
         wf_free(src, nb);
-        wf_free(dst, (size_t)n);
+        wf_free(dst, n);
         free(want);
         break;
     }
     case 2: {
         uint8_t *dst = wf_alloc(len);
-        hs_columnar_memcpy_fast(buf, dst, (int32_t)len);
+        hs_columnar_memcpy_fast(buf, dst, len);
         WF_FUZZ_ASSERT(len == 0 || memcmp(dst, buf, len) == 0);
         wf_free(dst, len);
         break;

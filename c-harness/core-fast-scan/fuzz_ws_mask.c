@@ -21,8 +21,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     uint8_t *want = malloc(len ? len : 1);
     memcpy(want, in.p, len);
 
-    hs_ws_mask(buf, (int)len, mask);
-    ref_ws_mask(want, (int)len, mask);
+    hs_ws_mask(buf, len, mask);
+    ref_ws_mask(want, len, mask);
     WF_FUZZ_ASSERT(len == 0 || memcmp(buf, want, len) == 0);
     for (size_t i = 0; i < skew; i++) WF_FUZZ_ASSERT(region[i] == 0xa5);
 

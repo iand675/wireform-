@@ -13,6 +13,7 @@ module Wireform.Network.Transport.Profile (
 
 import Control.Exception (SomeException, try)
 import Data.Word (Word8)
+import Foreign.C.Types (CSize (..))
 import Foreign.Ptr (Ptr)
 import System.IO (hPutStrLn, stderr)
 import Wireform.Transport.Capabilities
@@ -99,7 +100,7 @@ foreign import ccall unsafe "sched_setaffinity_single"
 applyMemoryLocking :: Ptr Word8 -> Int -> CapabilityAction -> IO ()
 applyMemoryLocking ptr size onFail = do
 #if defined(linux_HOST_OS) || defined(darwin_HOST_OS) || defined(freebsd_HOST_OS)
-  result <- try @SomeException (c_mlock ptr size)
+  result <- try @SomeException (c_mlock ptr (fromIntegral size))
   case result of
     Right 0 -> pure ()
     _       -> warnCapability onFail "mlock failed (check RLIMIT_MEMLOCK)"
@@ -108,8 +109,10 @@ applyMemoryLocking ptr size onFail = do
 #endif
 
 #if defined(linux_HOST_OS) || defined(darwin_HOST_OS) || defined(freebsd_HOST_OS)
+-- mlock's second parameter is size_t. `size` is a byte count (the ring
+-- buffer's length, never negative), so Int -> CSize cannot narrow.
 foreign import ccall unsafe "mlock"
-  c_mlock :: Ptr Word8 -> Int -> IO Int
+  c_mlock :: Ptr Word8 -> CSize -> IO Int
 #endif
 
 

@@ -13,15 +13,15 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     int off = data[0] % (len + 2);
     uint8_t *buf = wf_dup(data + 1, (size_t)len);
 
-    int nul = hs_proto_find_nul(buf, off, len);
+    ptrdiff_t nul = hs_proto_find_nul(buf, off, len);
     WF_FUZZ_ASSERT(nul == ref_find_nul(buf, off, len));
-    int ws = hs_proto_skip_ws(buf, off, len);
+    ptrdiff_t ws = hs_proto_skip_ws(buf, off, len);
     WF_FUZZ_ASSERT(ws == ref_skip_ws(buf, off, len));
     if (off <= len) {
         WF_FUZZ_ASSERT(ws >= off && ws <= len);
         int n = len - off;
         WF_FUZZ_ASSERT(hs_proto_is_ascii(buf, off, n) == ref_is_ascii(buf, off, n));
-        int je = hs_proto_find_json_escape(buf, off, n);
+        ptrdiff_t je = hs_proto_find_json_escape(buf, off, n);
         WF_FUZZ_ASSERT(je == ref_find_json_escape(buf, off, n));
         WF_FUZZ_ASSERT(je >= off && je <= len);
     }

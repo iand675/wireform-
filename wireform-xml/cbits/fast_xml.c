@@ -4,12 +4,25 @@
  * Uses SSE2 via simde for portable SIMD: load 16 bytes, pcmpeqb against
  * target byte(s), pmovmskb to get a bitmask, ctz to find first match.
  *
+ * Positions and lengths are ptrdiff_t, not int: the Haskell wrappers in
+ * XML/SAX.hs and XML/FastDOM.hs pass offsets and the document length
+ * straight through, and a document longer than INT_MAX bytes used to wrap
+ * into a negative or short int here. `offset` is a position into the
+ * document (a parser position derived from earlier scanner results, so it
+ * may equal `len` at EOF or exceed it by a small amount); `len` is the
+ * document length, used as an end index (exclusive upper bound of the
+ * scan). Both are signed, so `len - offset` stays well defined when
+ * offset > len and the overflow-free bound forms below
+ * (`len - i >= 16`, `len - i > 2`) keep their sign.
+ *
  * Callers pass the whole document (buf, len) and a start offset with
- * 0 <= offset; only buf[offset .. len) is read. len can be as large as
- * INT_MAX, so bounds are written `len - i >= 16` / `len - i > 2` rather
- * than `i + 16 <= len` / `i + 2 < len`, which overflow int near INT_MAX.
+ * 0 <= offset, 0 <= len. Only buf[offset .. len) is read, and nothing is
+ * read when offset >= len. The index arithmetic never overflows: with
+ * len <= PTRDIFF_MAX, i >= 0 and len - i >= 16, `i += 16` stays <= len,
+ * and `i + __builtin_ctz(mask)` stays < len.
  */
 
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 #include <simde/x86/sse2.h>
@@ -17,14 +30,17 @@
 /*
  * Scan for XML structural characters in 16-byte chunks.
  * Finds: '<', '>', '/', '=', '"', '\'', '&'
- * Writes positions of structural bytes into indices[].
- * Returns number of indices written (<= max_indices).
+ * Writes positions of structural bytes into indices[0 .. max_indices).
+ * Returns the number of indices written (<= max_indices).
+ *
+ * len is a byte count and the index array holds positions, so all three
+ * are size_t: a document or match position beyond 4 GiB is not truncated.
  */
-int hs_xml_scan_structural(const uint8_t *buf, int len,
-                           uint32_t *indices, int max_indices)
+size_t hs_xml_scan_structural(const uint8_t *buf, size_t len,
+                              size_t *indices, size_t max_indices)
 {
-    int count = 0;
-    int i = 0;
+    size_t count = 0;
+    size_t i = 0;
 
     simde__m128i v_lt   = simde_mm_set1_epi8('<');
     simde__m128i v_gt   = simde_mm_set1_epi8('>');
@@ -50,10 +66,10 @@ int hs_xml_scan_structural(const uint8_t *buf, int len,
                               simde_mm_or_si128(m3, m4)),
             simde_mm_or_si128(simde_mm_or_si128(m5, m6), m7));
 
-        int mask = simde_mm_movemask_epi8(combined);
+        unsigned mask = (unsigned)simde_mm_movemask_epi8(combined);
         while (mask != 0 && count < max_indices) {
-            int bit = __builtin_ctz(mask);
-            indices[count++] = (uint32_t)(i + bit);
+            size_t bit = (size_t)__builtin_ctz(mask);
+            indices[count++] = i + bit;
             mask &= mask - 1;
         }
     }
@@ -62,7 +78,7 @@ int hs_xml_scan_structural(const uint8_t *buf, int len,
         uint8_t b = buf[i];
         if (b == '<' || b == '>' || b == '/' || b == '=' ||
             b == '"' || b == '\'' || b == '&') {
-            indices[count++] = (uint32_t)i;
+            indices[count++] = i;
         }
     }
     return count;
@@ -72,9 +88,9 @@ int hs_xml_scan_structural(const uint8_t *buf, int len,
  * Fast scan for '<' in 16-byte chunks.
  * Returns offset of first '<' at or after offset, or -1 if not found.
  */
-int hs_xml_find_lt(const uint8_t *buf, int offset, int len)
+ptrdiff_t hs_xml_find_lt(const uint8_t *buf, ptrdiff_t offset, ptrdiff_t len)
 {
-    int i = offset;
+    ptrdiff_t i = offset;
     simde__m128i target = simde_mm_set1_epi8('<');
 
     /* Scalar lead-in to align to 16-byte boundary */
@@ -110,9 +126,10 @@ int hs_xml_find_lt(const uint8_t *buf, int offset, int len)
  * XML callers depend on the -1 convention, and
  * hs_xml_find_attr_end below calls this version internally.
  */
-int hs_xml_find_byte(const uint8_t *buf, int offset, int len, uint8_t target_byte)
+ptrdiff_t hs_xml_find_byte(const uint8_t *buf, ptrdiff_t offset, ptrdiff_t len,
+                           uint8_t target_byte)
 {
-    int i = offset;
+    ptrdiff_t i = offset;
     simde__m128i target = simde_mm_set1_epi8((char)target_byte);
 
     while (i < len && ((uintptr_t)(buf + i) & 15) != 0) {
@@ -136,7 +153,8 @@ int hs_xml_find_byte(const uint8_t *buf, int offset, int len, uint8_t target_byt
  * Scan for end of attribute value (find unescaped quote_char).
  * Returns offset of the closing quote, or -1 if not found.
  */
-int hs_xml_find_attr_end(const uint8_t *buf, int offset, int len, uint8_t quote_char)
+ptrdiff_t hs_xml_find_attr_end(const uint8_t *buf, ptrdiff_t offset, ptrdiff_t len,
+                               uint8_t quote_char)
 {
     return hs_xml_find_byte(buf, offset, len, quote_char);
 }
@@ -145,9 +163,9 @@ int hs_xml_find_attr_end(const uint8_t *buf, int offset, int len, uint8_t quote_
  * Scan for end of text content: find '<' or '&'.
  * Returns offset of first '<' or '&', or len if neither found.
  */
-int hs_xml_find_text_end(const uint8_t *buf, int offset, int len)
+ptrdiff_t hs_xml_find_text_end(const uint8_t *buf, ptrdiff_t offset, ptrdiff_t len)
 {
-    int i = offset;
+    ptrdiff_t i = offset;
     simde__m128i v_lt  = simde_mm_set1_epi8('<');
     simde__m128i v_amp = simde_mm_set1_epi8('&');
 
@@ -174,9 +192,9 @@ int hs_xml_find_text_end(const uint8_t *buf, int offset, int len)
  * Scan for end of CDATA section (find ']]>').
  * Returns offset of the first ']' of ']]>', or -1 if not found.
  */
-int hs_xml_find_cdata_end(const uint8_t *buf, int offset, int len)
+ptrdiff_t hs_xml_find_cdata_end(const uint8_t *buf, ptrdiff_t offset, ptrdiff_t len)
 {
-    int i = offset;
+    ptrdiff_t i = offset;
     simde__m128i v_rb = simde_mm_set1_epi8(']');
 
     while (i < len && ((uintptr_t)(buf + i) & 15) != 0) {
@@ -191,7 +209,7 @@ int hs_xml_find_cdata_end(const uint8_t *buf, int offset, int len)
         int mask = simde_mm_movemask_epi8(simde_mm_cmpeq_epi8(chunk, v_rb));
         while (mask != 0) {
             int bit = __builtin_ctz(mask);
-            int pos = i + bit;
+            ptrdiff_t pos = i + bit;
             if (len - pos > 2 && buf[pos+1] == ']' && buf[pos+2] == '>') {
                 return pos;
             }
@@ -211,9 +229,9 @@ int hs_xml_find_cdata_end(const uint8_t *buf, int offset, int len)
  * Scan for end of comment (find '-->').
  * Returns offset of the first '-' of '-->', or -1.
  */
-int hs_xml_find_comment_end(const uint8_t *buf, int offset, int len)
+ptrdiff_t hs_xml_find_comment_end(const uint8_t *buf, ptrdiff_t offset, ptrdiff_t len)
 {
-    int i = offset;
+    ptrdiff_t i = offset;
     simde__m128i v_dash = simde_mm_set1_epi8('-');
 
     while (i < len && ((uintptr_t)(buf + i) & 15) != 0) {
@@ -228,7 +246,7 @@ int hs_xml_find_comment_end(const uint8_t *buf, int offset, int len)
         int mask = simde_mm_movemask_epi8(simde_mm_cmpeq_epi8(chunk, v_dash));
         while (mask != 0) {
             int bit = __builtin_ctz(mask);
-            int pos = i + bit;
+            ptrdiff_t pos = i + bit;
             if (len - pos > 2 && buf[pos+1] == '-' && buf[pos+2] == '>') {
                 return pos;
             }
@@ -249,9 +267,9 @@ int hs_xml_find_comment_end(const uint8_t *buf, int offset, int len)
  * Returns offset of first match, or len if none found.
  * Used by the HTML tokenizer for bulk text scanning.
  */
-int hs_html_find_text_end(const uint8_t *buf, int offset, int len)
+ptrdiff_t hs_html_find_text_end(const uint8_t *buf, ptrdiff_t offset, ptrdiff_t len)
 {
-    int i = offset;
+    ptrdiff_t i = offset;
     simde__m128i v_lt  = simde_mm_set1_epi8('<');
     simde__m128i v_amp = simde_mm_set1_epi8('&');
     simde__m128i v_nul = simde_mm_set1_epi8('\0');
@@ -291,11 +309,16 @@ int hs_html_find_text_end(const uint8_t *buf, int offset, int len)
 
 /*
  * Fast scan for bytes that need XML escaping: '<', '>', '&', '"', '\''.
- * Returns offset of first such byte, or offset+scan_len if none found.
+ * Returns offset of first such byte, or offset + len if none found.
+ *
+ * NOTE different convention from the find_* scanners above: `len` is the
+ * number of bytes to scan starting at buf + offset, not an end index.
+ * Requires offset >= 0 and len >= 0; buf[offset .. offset + len) must be
+ * readable. The return value is a position, so it is ptrdiff_t as well.
  */
-int hs_xml_find_escape(const uint8_t *buf, int offset, int len)
+ptrdiff_t hs_xml_find_escape(const uint8_t *buf, ptrdiff_t offset, ptrdiff_t len)
 {
-    int i = 0;
+    ptrdiff_t i = 0;
     const uint8_t *p = buf + offset;
     simde__m128i v_lt  = simde_mm_set1_epi8('<');
     simde__m128i v_gt  = simde_mm_set1_epi8('>');

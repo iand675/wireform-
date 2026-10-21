@@ -3,8 +3,13 @@
  * Haskell wrappers establish, and slow reference implementations the
  * tests compare against.
  *
- * Haskell types map as: Ptr Word8 -> const uint8_t *, Int32 -> int32_t,
- * Int64 -> int64_t, Word16/32/64 -> uint16_t/uint32_t/uint64_t.
+ * Haskell types map as: Ptr Word8 -> const uint8_t *, CSize -> size_t,
+ * Int32 -> int32_t, Int64 -> int64_t,
+ * Word16/32/64 -> uint16_t/uint32_t/uint64_t.
+ *
+ * Widths: a byte count (a buffer length that cannot be negative) is
+ * size_t; an element count that the container format bounds stays
+ * int32_t; everything else keeps the C definition's type.
  */
 #ifndef CORE_HASH_API_H
 #define CORE_HASH_API_H
@@ -16,10 +21,13 @@
 /* Murmur3 x86_32, seed 0, signed result (Iceberg BucketUtil / Guava).
  * Caller (murmur3_32): buf/len from unsafeUseAsCStringLen. buf is NULL for
  * an empty ByteString (Data.ByteString.empty uses nullForeignPtr). len is
- * the ByteString length narrowed to Int32, so it is negative or wrapped
- * for inputs of 2 GiB or more (Java's int-indexed BucketUtil cannot hash
- * those either). Reads exactly buf[0, len); len <= 0 reads nothing. */
-int32_t hs_wf_murmur3_32(const uint8_t *buf, int32_t len);
+ * the ByteString length, a byte count passed as CSize (size_t): inputs
+ * over 2 GiB are hashed in full and are not narrowed. Reads exactly
+ * buf[0, len); len == 0 reads nothing. Negative lengths cannot be
+ * expressed (a caller must not pass `-1` for "unknown"). The length is
+ * folded into the finalizer as a uint32, per the reference algorithm, so
+ * lengths differing by a multiple of 2^32 hash alike. */
+int32_t hs_wf_murmur3_32(const uint8_t *buf, size_t len);
 
 /* Iceberg bucket[N] of a long: (murmur3(8-byte LE value) & INT_MAX) % N.
  * Caller (bucketLong) returns 0 for N <= 0 itself, but narrows N to Int32,
@@ -29,9 +37,10 @@ int32_t hs_wf_bucket_long(int64_t value, int32_t buckets);
 
 /* XXH64 (xxHash 0.6.x+ layout; identical output to current libxxhash).
  * Caller (xxh64): buf NULL for an empty ByteString, len = ByteString
- * length (>= 0). Reads exactly buf[0, len); len <= 0 hashes the empty
- * input. */
-uint64_t hs_wf_xxh64(const uint8_t *buf, int64_t len, uint64_t seed);
+ * length as a byte count (CSize/size_t; negative lengths cannot be
+ * expressed). Reads exactly buf[0, len); len == 0 hashes the empty input
+ * and is the only way to hash empty input (it never reads buf). */
+uint64_t hs_wf_xxh64(const uint8_t *buf, size_t len, uint64_t seed);
 
 /* Roaring ARRAY container -> dst[i] = (hi << 16) | lows[i], i < cardinality.
  * Contract: src holds >= 2*cardinality bytes (little-endian uint16 lows),
@@ -39,7 +48,12 @@ uint64_t hs_wf_xxh64(const uint8_t *buf, int64_t len, uint64_t seed);
  * clamps cardinality to [0, min(len/2, INT32_MAX)] because Iceberg
  * decodeDV passes a cardinality from untrusted blob bytes alongside a
  * payload that may be truncated. Returns 2*cardinality (bytes consumed),
- * computed modulo 2^32. */
+ * computed modulo 2^32.
+ *
+ * `cardinality` is an element count, not a byte length, and stays int32_t
+ * deliberately: a Roaring ARRAY container holds at most 4096 distinct
+ * 16-bit lows (BITSET at most 65536), so no valid container can exceed
+ * that, and the clamp rejects an untrusted count before any allocation. */
 int32_t hs_wf_roaring_decode_array(const uint8_t *src, int32_t cardinality,
                                    uint32_t hi, int32_t *dst);
 
@@ -56,7 +70,13 @@ int32_t hs_wf_roaring_decode_bitset(const uint8_t *src, uint32_t hi,
  * bytes (wrapper clamps cardinality to len/2). Arrays are sorted
  * ascending by contract; on unsorted input the result may be a false
  * negative but never a false positive or an out-of-bounds read.
- * cardinality <= 0 is the empty array. */
+ * cardinality <= 0 is the empty array.
+ *
+ * cardinality is an element count bounded by the container payload
+ * (format cap 4096 for ARRAY, 65536 for BITSET), not a byte length, so
+ * int32_t cannot truncate it; there is no >2^31 case to widen for. The
+ * pointer arithmetic uses size_t (`src + (size_t)mid * 2`), so the
+ * INT32_MAX-count regression stays clean. */
 int32_t hs_wf_roaring_contains(int32_t kind, const uint8_t *src,
                                int32_t cardinality, uint16_t value16);
 
@@ -72,6 +92,22 @@ int32_t hs_wf_roaring_encode_array(const uint16_t *src, int32_t cardinality,
  * duplicates allowed. Caller (roaringEncodeBitset): dst fresh 8192 bytes. */
 void hs_wf_roaring_encode_bitset(const uint16_t *src, int32_t cardinality,
                                  uint8_t *dst);
+
+/* ------------------------------------------------------------------ */
+/* Signature pinning                                                   */
+/* ------------------------------------------------------------------ */
+/* The hashes read every byte of the input, so a >2 GiB runtime case costs
+ * a multi-GiB page-fault walk (and is skipped under valgrind or when the
+ * mapping fails). These pins make a regression to int32_t/int64_t a
+ * compile error regardless. */
+#define WF_SIG(fn, type) _Generic(&(fn), type: 1, default: 0)
+
+_Static_assert(
+    WF_SIG(hs_wf_murmur3_32, int32_t (*)(const uint8_t *, size_t)),
+    "hs_wf_murmur3_32 must take a size_t byte count");
+_Static_assert(
+    WF_SIG(hs_wf_xxh64, uint64_t (*)(const uint8_t *, size_t, uint64_t)),
+    "hs_wf_xxh64 must take a size_t byte count");
 
 /* ------------------------------------------------------------------ */
 /* References                                                          */

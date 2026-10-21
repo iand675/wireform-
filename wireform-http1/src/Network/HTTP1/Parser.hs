@@ -80,7 +80,7 @@ import Data.ByteString.Char8 qualified as BSC
 import Data.ByteString.Internal qualified as BSI
 import Data.ByteString.Unsafe qualified as BSU
 import Data.Word (Word64, Word8)
-import Foreign.C.Types (CInt (..))
+import Foreign.C.Types (CInt (..), CPtrdiff (..), CSize (..))
 import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Marshal.Alloc (alloca)
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
@@ -95,16 +95,23 @@ import System.IO.Unsafe (unsafePerformIO)
 -- everything because the framing case-alts mention Status / Version /
 -- Method constructors directly.
 
+{- | Scanner ABI: @offset@ and the absolute end position @len@ are
+'CPtrdiff' (the C kernel's @ptrdiff_t@), and the miss value @len@ is
+returned in the same type, so a ByteString larger than 2 GiB is not
+truncated.
+-}
 foreign import ccall unsafe "hs_http1_find_non_token"
-  c_find_non_token :: Ptr () -> CInt -> CInt -> CInt
+  c_find_non_token :: Ptr () -> CPtrdiff -> CPtrdiff -> CPtrdiff
 
 
+-- | As 'c_find_non_token'.
 foreign import ccall unsafe "hs_http1_find_non_fieldvalue"
-  c_find_non_fv :: Ptr () -> CInt -> CInt -> CInt
+  c_find_non_fv :: Ptr () -> CPtrdiff -> CPtrdiff -> CPtrdiff
 
 
+-- | @len@ is a non-negative byte count, passed as 'CSize'.
 foreign import ccall unsafe "hs_http1_to_lower_ascii"
-  c_to_lower_ascii :: Ptr () -> Ptr () -> CInt -> IO ()
+  c_to_lower_ascii :: Ptr () -> Ptr () -> CSize -> IO ()
 
 
 ------------------------------------------------------------------------
@@ -743,8 +750,12 @@ parseDecimalW64 bs
 -- Chunked transfer encoding
 ------------------------------------------------------------------------
 
+{- | @offset@ and @len@ are positions in 'CPtrdiff'; the return value is a
+status (1 success, 0 no digits, -1 too many digits), and @consumed@ counts
+0..16 digits, so both stay 'CInt'.
+-}
 foreign import ccall unsafe "hs_http1_parse_hex"
-  c_parse_hex :: Ptr () -> CInt -> CInt -> Ptr Word64 -> Ptr CInt -> CInt
+  c_parse_hex :: Ptr () -> CPtrdiff -> CPtrdiff -> Ptr Word64 -> Ptr CInt -> CInt
 
 
 -- | A parsed chunk header. @chunkSize == 0@ marks the last chunk.

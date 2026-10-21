@@ -335,6 +335,79 @@ static void scanners_random(void)
     }
 }
 
+/* Regression: the offset-taking scanners took (and returned) int, so a
+ * ByteString or scan range over 2 GiB was truncated: the kernel worked on
+ * a wrapped length and the position it returned was a bogus int. A sparse
+ * mapping just over 2 GiB is reserved and only the page holding the
+ * scanned window is touched, so the test costs one page of memory and
+ * never reads the middle of the range. Skipped if the mapping fails. */
+static void scanners_beyond_2gib(void)
+{
+    /* Sparse, so one page of memory; valgrind emulates it in minutes and
+     * skips. The widths are also pinned at compile time in api.h. */
+    if (wf_under_valgrind()) {
+        printf("    scanners_beyond_2gib: skipped (valgrind)\n");
+        return;
+    }
+    if (sizeof(ptrdiff_t) < 8 || sizeof(size_t) < 8) {
+        printf("    scanners_beyond_2gib: skipped (32-bit position width)\n");
+        return;
+    }
+    size_t pg = (size_t)sysconf(_SC_PAGESIZE);
+    size_t total = ((size_t)1 << 31) + 4 * pg; /* > INT_MAX */
+    uint8_t *big = mmap(NULL, total, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (big == MAP_FAILED) {
+        printf("    scanners_beyond_2gib: skipped (no >2 GiB of address space)\n");
+        return;
+    }
+    /* Window wholly past INT_MAX; len is the buffer length (> INT_MAX). */
+    ptrdiff_t len = (ptrdiff_t)total;
+    ptrdiff_t off = len - 128;
+    memset(big + off, 'a', 128);
+
+    /* find_nul: -1 on a miss, the position past INT_MAX on a hit. */
+    WF_CHECK_EQ(hs_proto_find_nul(big, off, len), -1);
+    WF_CHECK_EQ(ref_find_nul(big, off, len), -1);
+    big[off + 40] = 0;
+    WF_CHECK_EQ(hs_proto_find_nul(big, off, len), off + 40);
+    WF_CHECK_EQ(ref_find_nul(big, off, len), off + 40);
+    big[off + 40] = 'a';
+
+    /* skip_ws: a whitespace run past INT_MAX, then the position of the
+     * first other byte; and a fully skipped range reports len itself. */
+    memset(big + off, ' ', 100);
+    big[off + 100] = 'x';
+    WF_CHECK_EQ(hs_proto_skip_ws(big, off, len), off + 100);
+    WF_CHECK_EQ(ref_skip_ws(big, off, len), off + 100);
+    memset(big + off, '\n', 128);
+    WF_CHECK_EQ(hs_proto_skip_ws(big, off, len), len);
+    WF_CHECK_EQ(ref_skip_ws(big, off, len), len);
+
+    /* find_json_escape: len counts from offset; the miss is offset + len,
+     * so both the escape position and the miss pass INT_MAX. */
+    memset(big + off, 'a', 128);
+    WF_CHECK_EQ(hs_proto_find_json_escape(big, off, 128), off + 128);
+    WF_CHECK_EQ(ref_find_json_escape(big, off, 128), off + 128);
+    big[off + 77] = '"';
+    WF_CHECK_EQ(hs_proto_find_json_escape(big, off, 128), off + 77);
+    big[off + 77] = 'a';
+    big[off + 5] = 0x1f;
+    WF_CHECK_EQ(hs_proto_find_json_escape(big, off, 128), off + 5);
+    big[off + 5] = 'a';
+
+    /* is_ascii: an all-ASCII window past INT_MAX, then a non-ASCII byte at
+     * each end of it. */
+    WF_CHECK_EQ(hs_proto_is_ascii(big, off, 128), 1);
+    big[off + 127] = 0x80;
+    WF_CHECK_EQ(hs_proto_is_ascii(big, off, 128), 0);
+    big[off + 127] = 'a';
+    big[off] = 0xff;
+    WF_CHECK_EQ(hs_proto_is_ascii(big, off, 128), 0);
+
+    munmap(big, total);
+}
+
 /* ------------------------------------------------------------------ */
 /* Iceberg bounds                                                      */
 /* ------------------------------------------------------------------ */
@@ -492,6 +565,7 @@ int main(void)
     WF_RUN(scanners_null_empty);
     WF_RUN(skip_ws_comments);
     WF_RUN(scanners_random);
+    WF_RUN(scanners_beyond_2gib);
     WF_RUN(bounds_many);
     WF_RUN(bounds_random);
     WF_RUN(arrow_vectors);

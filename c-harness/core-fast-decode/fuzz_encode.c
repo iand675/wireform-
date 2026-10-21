@@ -24,7 +24,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     /* bare varint, padded to 8 bytes after it for the SWAR decoder */
     size_t sz = (size_t)off + (size_t)wn;
     uint8_t *o = wf_alloc(sz);
-    WF_FUZZ_ASSERT(hs_proto_encode_varint(o, off, v) == wn);
+    WF_FUZZ_ASSERT(hs_proto_encode_varint(o, off, v) == (size_t)wn);
     WF_FUZZ_ASSERT(memcmp(o + off, want, (size_t)wn) == 0);
     uint64_t d = 0;
     WF_FUZZ_ASSERT(hs_proto_decode_varint_fast(o, (int)sz, off, &d) == wn && d == v);
@@ -42,7 +42,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     /* varint field */
     sz = (size_t)off + 1 + (size_t)wn;
     o = wf_alloc(sz);
-    WF_FUZZ_ASSERT(hs_proto_encode_varint_field(o, off, tag, v) == 1 + wn);
+    WF_FUZZ_ASSERT(hs_proto_encode_varint_field(o, off, tag, v) == (size_t)(1 + wn));
     WF_FUZZ_ASSERT(o[off] == tag && memcmp(o + off + 1, want, (size_t)wn) == 0);
     WF_FUZZ_ASSERT(hs_proto_skip_field(o, (int)sz, off + 1, 0) == (int)sz);
     wf_free(o, sz);
@@ -50,7 +50,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     /* bool field */
     sz = (size_t)off + 2;
     o = wf_alloc(sz);
-    WF_FUZZ_ASSERT(hs_proto_encode_bool_field(o, off, tag, (int)(uint32_t)v) == 2);
+    WF_FUZZ_ASSERT(hs_proto_encode_bool_field(o, off, tag, (int)(uint32_t)v) == (size_t)2);
     WF_FUZZ_ASSERT(o[off] == tag && o[off + 1] == ((uint32_t)v != 0));
     wf_free(o, sz);
 
@@ -60,7 +60,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     sz = (size_t)off + 1 + (size_t)hn + (size_t)plen;
     o = wf_alloc(sz);
     WF_FUZZ_ASSERT(hs_proto_encode_length_delimited(o, off, tag, plen ? payload : NULL, plen)
-                   == 1 + hn + plen);
+                   == (size_t)(1 + hn + plen));
     WF_FUZZ_ASSERT(o[off] == tag);
     WF_FUZZ_ASSERT(memcmp(o + off + 1, hdr, (size_t)hn) == 0);
     if (plen) WF_FUZZ_ASSERT(memcmp(o + off + 1 + hn, payload, (size_t)plen) == 0);

@@ -226,6 +226,42 @@ static void scan_len_near_int_max(void)
     wf_guard_free(g);
 }
 
+/* Offsets and lengths above 2^31 used to be truncated to int on the Haskell
+ * side, and the block bound overflowed int at the same point. They are
+ * ptrdiff_t now. LEN is 3 GiB (> INT_MAX) but only the last few bytes are
+ * mapped: the base pointer is placed LEN - W bytes before a small
+ * guard-page buffer, and every scan starts within the last W bytes, so any
+ * access outside [offset, LEN) faults and a narrowed length would read the
+ * wrong window. No multi-GiB memory is mapped or touched. */
+static void scan_len_beyond_2gib(void)
+{
+    enum { W = 40 };
+    const ptrdiff_t LEN = (ptrdiff_t)3 << 30;
+    if (sizeof(ptrdiff_t) < 8) {
+        printf("scan_len_beyond_2gib: skipped (32-bit ptrdiff_t)\n");
+        return;
+    }
+    wf_guarded g = wf_guard_tail(W);
+    uintptr_t window = (uintptr_t)g.p;
+    if (window < (uintptr_t)LEN) {
+        printf("scan_len_beyond_2gib: skipped (address space)\n");
+        wf_guard_free(g);
+        return;
+    }
+    const uint8_t *base = (const uint8_t *)(window - ((uintptr_t)LEN - W));
+    for (int kind = 0; kind < SCAN_KINDS; kind++) {
+        memset(g.p, filler_of[kind], W);
+        for (int back = 0; back <= W; back++) {
+            WF_CHECK_EQ(scan_kernel(kind, base, LEN - (ptrdiff_t)back, LEN), LEN);
+        }
+        g.p[W - 1] = stopper_of[kind];
+        for (int back = 1; back <= W; back++) {
+            WF_CHECK_EQ(scan_kernel(kind, base, LEN - (ptrdiff_t)back, LEN), LEN - 1);
+        }
+    }
+    wf_guard_free(g);
+}
+
 /* ------------------------------------------------------------------ */
 /* Case folding                                                        */
 /* ------------------------------------------------------------------ */
@@ -270,10 +306,10 @@ static void lower_lengths(void)
                                         0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5 };
     wf_guarded gd = wf_guard_tail(MAXN + 16);
     wf_guarded gs = wf_guard_tail(MAXN);
-    for (int len = 0; len <= MAXN; len++) {
+    for (size_t len = 0; len <= MAXN; len++) {
         for (int skew = 0; skew < 16; skew++) {
             wf_rng_fill(&r, src, (size_t)len);
-            for (int i = 0; i < len; i += 3) src[i] = (uint8_t)('A' + i % 26);
+            for (size_t i = 0; i < len; i += 3) src[i] = (uint8_t)('A' + i % 26);
             ref_to_lower(src, want, len);
             uint8_t *s = gs.p + (gs.n - (size_t)len);
             memcpy(s, src, (size_t)len);
@@ -288,10 +324,10 @@ static void lower_lengths(void)
             WF_CHECK_MEM(s, want, (size_t)len);
         }
     }
-    /* len <= 0 writes nothing. */
+    /* len == 0 writes nothing. len is a byte count (size_t), so a negative
+     * length is not in the contract; the Haskell caller passes BS.length. */
     uint8_t one = 'A';
     hs_http1_to_lower_ascii(&one, &one, 0);
-    hs_http1_to_lower_ascii(&one, &one, -1);
     WF_CHECK_EQ(one, 'A');
     wf_guard_free(gd);
     wf_guard_free(gs);
@@ -327,10 +363,10 @@ static void ieq_lengths(void)
     uint8_t src[MAXN], alt[MAXN];
     wf_guarded ga = wf_guard_tail(MAXN), gb = wf_guard_tail(MAXN);
     static const uint8_t alpha[] = { 'a', 'A', 'z', 'Z', '@', '[', '`', '{', '-', 0xc1, 0xe1, 0 };
-    for (int len = 0; len <= MAXN; len++) {
+    for (size_t len = 0; len <= MAXN; len++) {
         wf_rng_fill_from(&r, src, (size_t)len, alpha, sizeof alpha);
         /* Flip the case of random letters: still equal. */
-        for (int i = 0; i < len; i++) {
+        for (size_t i = 0; i < len; i++) {
             uint8_t c = src[i];
             int letter = (c | 0x20) >= 'a' && (c | 0x20) <= 'z';
             alt[i] = (letter && (wf_rng_next(&r) & 1)) ? (uint8_t)(c ^ 0x20) : c;
@@ -341,7 +377,7 @@ static void ieq_lengths(void)
         WF_CHECK_EQ(hs_http1_ascii_ieq(a, b, len), 1);
         /* A mismatch at each position is seen; the 0x20 flip on a
          * non-letter must not be folded away. */
-        for (int pos = 0; pos < len; pos++) {
+        for (size_t pos = 0; pos < len; pos++) {
             uint8_t keep = b[pos];
             b[pos] = (uint8_t)(keep ^ 0x20);
             WF_CHECK_EQ(hs_http1_ascii_ieq(a, b, len), ref_ieq(a, b, len));
@@ -351,7 +387,7 @@ static void ieq_lengths(void)
         }
     }
     WF_CHECK_EQ(hs_http1_ascii_ieq(ga.p, gb.p, 0), 1);
-    WF_CHECK_EQ(hs_http1_ascii_ieq(ga.p, gb.p, -5), 1);
+    /* A negative length is not in the size_t contract (see api.h). */
     wf_guard_free(ga);
     wf_guard_free(gb);
     static const char *pairs[][2] = {
@@ -429,6 +465,42 @@ static void hex_random(void)
         WF_CHECK(o1 == o2);
         wf_free(b, (size_t)len);
     }
+}
+
+/* parse_hex offset/len are ptrdiff_t as well: hex digits at the end of a
+ * 3 GiB logical buffer are found at their real offset. Same sparse mapping
+ * trick as scan_len_beyond_2gib (only the last W bytes are readable). */
+static void hex_offsets_beyond_2gib(void)
+{
+    enum { W = 40 };
+    const ptrdiff_t LEN = (ptrdiff_t)3 << 30;
+    if (sizeof(ptrdiff_t) < 8) {
+        printf("hex_offsets_beyond_2gib: skipped (32-bit ptrdiff_t)\n");
+        return;
+    }
+    wf_guarded g = wf_guard_tail(W);
+    uintptr_t window = (uintptr_t)g.p;
+    if (window < (uintptr_t)LEN) {
+        printf("hex_offsets_beyond_2gib: skipped (address space)\n");
+        wf_guard_free(g);
+        return;
+    }
+    const uint8_t *base = (const uint8_t *)(window - ((uintptr_t)LEN - W));
+    memset(g.p, ';', W);
+    g.p[W - 2] = '1';
+    g.p[W - 1] = 'f';
+    uint64_t out = 0;
+    int consumed = -1;
+    WF_CHECK_EQ(hs_http1_parse_hex(base, LEN - 2, LEN, &out, &consumed), 1);
+    WF_CHECK_EQ(consumed, 2);
+    WF_CHECK(out == 0x1f);
+    /* offset == len past the end is still a clean "no digits". */
+    out = 7;
+    consumed = -1;
+    WF_CHECK_EQ(hs_http1_parse_hex(base, LEN, LEN, &out, &consumed), 0);
+    WF_CHECK_EQ(consumed, 0);
+    WF_CHECK(out == 0);
+    wf_guard_free(g);
 }
 
 /* ------------------------------------------------------------------ */
@@ -634,12 +706,14 @@ int main(void)
     WF_RUN(scan_head_guard);
     WF_RUN(scan_random);
     WF_RUN(scan_len_near_int_max);
+    WF_RUN(scan_len_beyond_2gib);
     WF_RUN(lower_all_bytes);
     WF_RUN(lower_lengths);
     WF_RUN(ieq_all_pairs);
     WF_RUN(ieq_lengths);
     WF_RUN(hex_vectors);
     WF_RUN(hex_random);
+    WF_RUN(hex_offsets_beyond_2gib);
     WF_RUN(head_real_messages);
     WF_RUN(head_malformed);
     WF_RUN(head_truncations);

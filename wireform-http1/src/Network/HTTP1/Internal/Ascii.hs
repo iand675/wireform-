@@ -12,18 +12,23 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Internal qualified as BSI
 import Data.ByteString.Unsafe qualified as BSU
-import Foreign.C.Types (CInt (..))
+import Foreign.C.Types (CInt (..), CSize (..))
 import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (Ptr, castPtr)
 import System.IO.Unsafe (unsafePerformIO)
 
 
+{- | @len@ is a byte count, passed as 'CSize' (the C kernel's @size_t@) so
+lengths above 2 GiB are not truncated. It is always @BS.length@ of a
+ByteString, hence non-negative.
+-}
 foreign import ccall unsafe "hs_http1_to_lower_ascii"
-  c_to_lower_ascii :: Ptr () -> Ptr () -> CInt -> IO ()
+  c_to_lower_ascii :: Ptr () -> Ptr () -> CSize -> IO ()
 
 
+-- | As 'c_to_lower_ascii': @len@ is a non-negative byte count in 'CSize'.
 foreign import ccall unsafe "hs_http1_ascii_ieq"
-  c_ascii_ieq :: Ptr () -> Ptr () -> CInt -> CInt
+  c_ascii_ieq :: Ptr () -> Ptr () -> CSize -> CInt
 
 
 -- | ASCII-lowercase a 'ByteString'. Non-ASCII bytes pass through.

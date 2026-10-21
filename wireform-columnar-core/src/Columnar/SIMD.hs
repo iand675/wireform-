@@ -28,6 +28,9 @@ Conventions:
   first failing element.
 * Index arrays (@'Ptr' 'Int'@) hold 64-bit indices and are trusted: gathers
   and takes perform no bounds checks.
+* Every length and element count crosses the FFI as a 'CSize' (C @size_t@),
+  never as a 32-bit 'CInt': a count is never negative, so it widens
+  exactly, and a buffer above 2 GiB is passed in full.
 
 Validators:
 
@@ -142,12 +145,12 @@ foreign import ccall unsafe "hs_columnar_bitmap_popcount"
 
 
 foreign import ccall safe "hs_columnar_unpack_bits_lsb"
-  c_unpack_bits_lsb :: Ptr Word8 -> Int32 -> Ptr Word8 -> IO ()
+  c_unpack_bits_lsb :: Ptr Word8 -> CSize -> Ptr Word8 -> IO ()
 
 
 -- | Arguments are @src, dst, len@.
 foreign import ccall unsafe "hs_columnar_memcpy_fast"
-  c_memcpy_fast :: Ptr Word8 -> Ptr Word8 -> CInt -> IO ()
+  c_memcpy_fast :: Ptr Word8 -> Ptr Word8 -> CSize -> IO ()
 
 
 foreign import ccall unsafe "hs_columnar_offsets_i32"
@@ -285,7 +288,7 @@ foreign import ccall safe "hs_columnar_bitmap_popcount"
   c_bitmap_popcount_safe :: Ptr Word8 -> CSize -> Int64
 
 foreign import ccall safe "hs_columnar_memcpy_fast"
-  c_memcpy_fast_safe :: Ptr Word8 -> Ptr Word8 -> CInt -> IO ()
+  c_memcpy_fast_safe :: Ptr Word8 -> Ptr Word8 -> CSize -> IO ()
 
 foreign import ccall safe "hs_columnar_offsets_i32"
   c_offsets_i32_safe :: Ptr Int32 -> CSize -> Int64 -> IO Int64
@@ -423,21 +426,30 @@ bitmapPopCount bs
 
 {- | Expand @n@ LSB-first packed bits (Arrow / Parquet bool layout) into a
 boxed 'Bool' vector.
+
+The bit count is a non-negative 'Int' and reaches C as a 'CSize', so a
+count above @maxBound :: Int32@ (2^31 bits, which is 256 MiB of output) is
+no longer truncated. A non-positive count expands to an empty vector.
 -}
 unpackBitsLsbUnsafe :: Int -> BS.ByteString -> V.Vector Bool
-unpackBitsLsbUnsafe !n bs = unsafeDupablePerformIO $ do
-  mvs <- VSM.unsafeNew n
-  VSM.unsafeWith mvs $ \dst ->
-    unsafeUseAsCStringLen bs $ \(src, _) ->
-      c_unpack_bits_lsb (castPtr src) (fromIntegral n) dst
-  sv <- VS.unsafeFreeze mvs
-  pure $! V.convert (VU.map (/= (0 :: Word8)) (VU.convert sv))
+unpackBitsLsbUnsafe !n bs
+  | n <= 0 = V.empty
+  | otherwise = unsafeDupablePerformIO $ do
+      mvs <- VSM.unsafeNew n
+      VSM.unsafeWith mvs $ \dst ->
+        unsafeUseAsCStringLen bs $ \(src, _) ->
+          c_unpack_bits_lsb (castPtr src) (fromIntegral n) dst
+      sv <- VS.unsafeFreeze mvs
+      pure $! V.convert (VU.map (/= (0 :: Word8)) (VU.convert sv))
 
 
 {- | Bulk copy (SIMDe 16-byte chunks inside C). @dst@ must be at least @len@
-bytes; only @len@ bytes are written.
+bytes; only @len@ bytes are written. @len@ is a byte count and reaches C as
+a 'CSize', so a copy above @maxBound :: Int32@ is no longer truncated; a
+non-positive @len@ copies nothing.
 -}
 memcpyFast :: Ptr Word8 -> Ptr Word8 -> Int -> IO ()
+memcpyFast _ _ len | len <= 0 = pure ()
 memcpyFast !dst !src !len
   | small len = c_memcpy_fast src dst (fromIntegral len)
   | otherwise = c_memcpy_fast_safe src dst (fromIntegral len)

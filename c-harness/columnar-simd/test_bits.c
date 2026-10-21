@@ -79,22 +79,22 @@ static void unpack_bits_boundaries(void)
     wf_guarded st = wf_guard_tail((MAXN + 7) / 8 + GAPS), sh = wf_guard_head((MAXN + 7) / 8);
     wf_guarded dt = wf_guard_tail(MAXN + GAPS);
     uint8_t want[MAXN];
-    for (int32_t n = 0; n <= MAXN; n++) {
-        size_t nb = ((size_t)n + 7) / 8;
+    for (size_t n = 0; n <= MAXN; n++) {
+        size_t nb = (n + 7) / 8;
         for (size_t gap = 0; gap < GAPS; gap += (n < 40 ? 1 : 7)) {
             uint8_t *src = gap_of(st, nb, gap, 0xFF);
             fill_bits(&r, src, nb);
-            uint8_t *dst = gap_of(dt, (size_t)n, gap, 0x5A);
+            uint8_t *dst = gap_of(dt, n, gap, 0x5A);
             ref_unpack_bits_lsb(src, n, want);
-            memset(dst, 0x77, (size_t)n);
+            memset(dst, 0x77, n);
             hs_columnar_unpack_bits_lsb(src, n, dst);
-            WF_CHECK_MEM(dst, want, (size_t)n);
-            WF_CHECK(gap_intact(dst, (size_t)n, gap, 0x5A));
+            WF_CHECK_MEM(dst, want, n);
+            WF_CHECK(gap_intact(dst, n, gap, 0x5A));
             if (gap == 0) {
                 memcpy(sh.p, src, nb);
-                memset(dst, 0x77, (size_t)n);
+                memset(dst, 0x77, n);
                 hs_columnar_unpack_bits_lsb(sh.p, n, dst);
-                WF_CHECK_MEM(dst, want, (size_t)n);
+                WF_CHECK_MEM(dst, want, n);
             }
         }
     }
@@ -122,27 +122,57 @@ static void memcpy_fast_boundaries(void)
     wf_rng r = wf_rng_from_env();
     wf_guarded s = wf_guard_tail(MAXN + GAPS), d = wf_guard_tail(MAXN + GAPS);
     wf_guarded sh = wf_guard_head(MAXN), dh = wf_guard_head(MAXN);
-    for (int32_t len = 0; len <= MAXN; len++) {
+    for (size_t len = 0; len <= MAXN; len++) {
         for (unsigned sg = 0; sg < GAPS; sg += (len % 3 ? 7 : 1)) {
             for (unsigned dg = 0; dg < GAPS; dg += (len % 3 ? 5 : 3)) {
-                uint8_t *src = gap_of(s, (size_t)len, sg, 0xEE);
-                uint8_t *dst = gap_of(d, (size_t)len, dg, 0x5A);
-                wf_rng_fill(&r, src, (size_t)len);
-                memset(dst, 0, (size_t)len);
+                uint8_t *src = gap_of(s, len, sg, 0xEE);
+                uint8_t *dst = gap_of(d, len, dg, 0x5A);
+                wf_rng_fill(&r, src, len);
+                memset(dst, 0, len);
                 hs_columnar_memcpy_fast(src, dst, len);
-                WF_CHECK_MEM(dst, src, (size_t)len);
-                WF_CHECK(gap_intact(dst, (size_t)len, dg, 0x5A));
+                WF_CHECK_MEM(dst, src, len);
+                WF_CHECK(gap_intact(dst, len, dg, 0x5A));
             }
         }
-        wf_rng_fill(&r, sh.p, (size_t)len);
+        wf_rng_fill(&r, sh.p, len);
         hs_columnar_memcpy_fast(sh.p, dh.p, len);
-        WF_CHECK_MEM(dh.p, sh.p, (size_t)len);
+        WF_CHECK_MEM(dh.p, sh.p, len);
     }
     hs_columnar_memcpy_fast(NULL, NULL, 0);
     wf_guard_free(s);
     wf_guard_free(d);
     wf_guard_free(sh);
     wf_guard_free(dh);
+}
+
+/* Both length parameters are size_t now (they were the last int32_t
+ * lengths in this file). A >2 GiB case cannot be run here: unlike the
+ * sparse-offset kernels, these two touch every byte they are given, so any
+ * such test would allocate and dirty the whole range. api.h asserts the
+ * widened parameter types at compile time instead; this test runs the same
+ * loops over megabytes of guarded data, far past the boundary sweeps
+ * above. */
+static void bulk_kernels_large(void)
+{
+    enum { N = 4 << 20 };
+    wf_rng r = wf_rng_from_env();
+    wf_guarded s = wf_guard_tail(N), d = wf_guard_tail(N);
+    wf_rng_fill(&r, s.p, N);
+
+    memset(d.p, 0, N);
+    hs_columnar_memcpy_fast(s.p, d.p, N);
+    WF_CHECK_MEM(d.p, s.p, N);
+
+    /* N bits (N / 8 source bytes) expand to N bytes. */
+    uint8_t *want = malloc(N);
+    ref_unpack_bits_lsb(s.p, N, want);
+    memset(d.p, 0x77, N);
+    hs_columnar_unpack_bits_lsb(s.p, N, d.p);
+    WF_CHECK_MEM(d.p, want, N);
+    free(want);
+
+    wf_guard_free(s);
+    wf_guard_free(d);
 }
 
 /* ------------------------------------------------------------------ */
@@ -581,6 +611,7 @@ int main(void)
     WF_RUN(bitmap_popcount_over_int32);
     WF_RUN(unpack_bits_boundaries);
     WF_RUN(memcpy_fast_boundaries);
+    WF_RUN(bulk_kernels_large);
     WF_RUN(popcount_bits_boundaries);
     WF_RUN(copy_bits_boundaries);
     WF_RUN(and_bits_boundaries);

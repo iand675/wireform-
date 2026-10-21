@@ -4,14 +4,14 @@
 
 #include <limits.h>
 
-typedef int (*scan_fn)(const uint8_t *, int, int);
+typedef ptrdiff_t (*scan_fn)(const uint8_t *, ptrdiff_t, ptrdiff_t);
 
 /* Thin wrappers so the target-byte scanners fit the (buf, offset, len)
  * table; the target is a global the sweeps set. */
 static uint8_t g_target;
-static int k_find_byte(const uint8_t *b, int o, int n) { return hs_xml_find_byte(b, o, n, g_target); }
-static int r_find_byte(const uint8_t *b, int o, int n) { return ref_xml_find_byte(b, o, n, g_target); }
-static int k_attr_end(const uint8_t *b, int o, int n) { return hs_xml_find_attr_end(b, o, n, g_target); }
+static ptrdiff_t k_find_byte(const uint8_t *b, ptrdiff_t o, ptrdiff_t n) { return hs_xml_find_byte(b, o, n, g_target); }
+static ptrdiff_t r_find_byte(const uint8_t *b, ptrdiff_t o, ptrdiff_t n) { return ref_xml_find_byte(b, o, n, g_target); }
+static ptrdiff_t k_attr_end(const uint8_t *b, ptrdiff_t o, ptrdiff_t n) { return hs_xml_find_attr_end(b, o, n, g_target); }
 
 typedef struct {
     const char *name;
@@ -45,12 +45,12 @@ static size_t g_ntargets = sizeof TARGETS;
  * rather than silently agreeing with the reference. */
 static const uint8_t POISON[] = "]]>--><&\0\r\"'/=>;\x80\xff]]>-->";
 
-static int check_scanner_at(const scanner *s, const uint8_t *b, int off, int len)
+static ptrdiff_t check_scanner_at(const scanner *s, const uint8_t *b, ptrdiff_t off, ptrdiff_t len)
 {
-    int got = s->kernel(b, off, len);
-    int want = s->ref(b, off, len);
+    ptrdiff_t got = s->kernel(b, off, len);
+    ptrdiff_t want = s->ref(b, off, len);
     if (got != want) {
-        fprintf(stderr, "    %s(off=%d, len=%d, target=0x%02x): got %d want %d\n", s->name,
+        fprintf(stderr, "    %s(off=%td, len=%td, target=0x%02x): got %td want %td\n", s->name,
                 off, len, g_target, got, want);
         if (len < 4096) wf_hexdump("buf", b, (size_t)len);
     }
@@ -211,16 +211,16 @@ static void empty_ranges(void)
         WF_CHECK_EQ(hs_xml_find_comment_end(g.p, off, 0), -1);
     }
     WF_CHECK_EQ(hs_xml_find_escape(g.p, 0, 0), 0);
-    uint32_t idx[1] = { 0xdeadbeef };
+    size_t idx[1] = { 0xdeadbeef };
     WF_CHECK_EQ(hs_xml_scan_structural(g.p, 0, idx, 1), 0);
     WF_CHECK_EQ(idx[0], 0xdeadbeef);
     wf_guard_free(g);
-    /* max_indices <= 0 writes nothing even when matches exist. */
+    /* max_indices == 0 writes nothing even when matches exist. */
     uint8_t lt[40];
     memset(lt, '<', sizeof lt);
     uint8_t *b = wf_dup(lt, sizeof lt);
-    WF_CHECK_EQ(hs_xml_scan_structural(b, (int)sizeof lt, idx, 0), 0);
-    WF_CHECK_EQ(hs_xml_scan_structural(b, (int)sizeof lt, idx, -5), 0);
+    WF_CHECK_EQ(hs_xml_scan_structural(b, sizeof lt, idx, 0), 0);
+    WF_CHECK_EQ(hs_xml_scan_structural(b, 0, idx, 1), 0);
     WF_CHECK_EQ(idx[0], 0xdeadbeef);
     wf_free(b, sizeof lt);
 }
@@ -234,7 +234,7 @@ static void structural_exhaustive(void)
     wf_rng r = wf_rng_from_env();
     static const uint8_t alpha[] = { '<', '>', '/', '=', '"', '\'', '&', 'a', ' ', 0x80, 0x00 };
     wf_guarded g = wf_guard_tail(MAXN + MAXSKEW);
-    uint32_t want[MAXN + 1];
+    size_t want[MAXN + 1];
     for (int skew = 0; skew < MAXSKEW; skew++) {
         for (int len = 0; len <= MAXN; len++) {
             uint8_t *b = g.p + g.n - (size_t)skew - (size_t)len;
@@ -243,17 +243,18 @@ static void structural_exhaustive(void)
                 if (rep == 0) memset(b, '<', (size_t)len);
                 else if (rep == 1) memset(b, 'a', (size_t)len);
                 else wf_rng_fill_from(&r, b, (size_t)len, alpha, sizeof alpha);
-                int total = ref_xml_scan_structural(b, len, want, MAXN + 1);
-                int maxes[] = { 0, 1, 2, total - 1, total, total + 1, len + 1, 15, 16, 17 };
+                size_t total = ref_xml_scan_structural(b, (size_t)len, want, MAXN + 1);
+                long maxes[] = { 0, 1, 2, (long)total - 1, (long)total, (long)total + 1,
+                                 (long)len + 1, 15, 16, 17 };
                 for (size_t mi = 0; mi < sizeof maxes / sizeof maxes[0]; mi++) {
-                    int max = maxes[mi];
+                    long max = maxes[mi];
                     if (max < 0) continue;
-                    idx_buf ib = idx_alloc(max);
-                    uint32_t *idx = ib.p;
-                    int got = hs_xml_scan_structural(b, len, idx, max);
-                    int exp = total < max ? total : max;
+                    idx_buf ib = idx_alloc((size_t)max);
+                    size_t *idx = ib.p;
+                    size_t got = hs_xml_scan_structural(b, (size_t)len, idx, (size_t)max);
+                    size_t exp = total < (size_t)max ? total : (size_t)max;
                     WF_CHECK_EQ(got, exp);
-                    WF_CHECK_MEM(idx, want, (size_t)exp * sizeof(uint32_t));
+                    WF_CHECK_MEM(idx, want, exp * sizeof(size_t));
                     idx_free(ib);
                 }
             }
@@ -272,24 +273,24 @@ static void walk_document(const uint8_t *src, int len)
         size_t nt = takes_target(s) ? sizeof TARGETS : 1;
         for (size_t ti = 0; ti < nt; ti++) {
             g_target = TARGETS[ti];
-            int off = 0;
+            ptrdiff_t off = 0;
             while (off <= len) {
-                int got = check_scanner_at(s, b, off, len);
+                ptrdiff_t got = check_scanner_at(s, b, off, len);
                 if (got < 0 || got >= len) break;
                 off = got + 1;
             }
         }
     }
-    for (int off = 0; off <= len;) {
-        int got = hs_xml_find_escape(b, off, len - off);
+    for (ptrdiff_t off = 0; off <= len;) {
+        ptrdiff_t got = hs_xml_find_escape(b, off, len - off);
         WF_CHECK_EQ(got, ref_xml_find_escape(b, off, len - off));
         off = got + 1;
     }
-    uint32_t *idx = malloc(((size_t)len + 1) * sizeof(uint32_t));
-    uint32_t *want = malloc(((size_t)len + 1) * sizeof(uint32_t));
-    int n = hs_xml_scan_structural(b, len, idx, len + 1);
-    WF_CHECK_EQ(n, ref_xml_scan_structural(b, len, want, len + 1));
-    WF_CHECK_MEM(idx, want, (size_t)n * sizeof(uint32_t));
+    size_t *idx = malloc(((size_t)len + 1) * sizeof(size_t));
+    size_t *want = malloc(((size_t)len + 1) * sizeof(size_t));
+    size_t n = hs_xml_scan_structural(b, (size_t)len, idx, (size_t)len + 1);
+    WF_CHECK_EQ(n, ref_xml_scan_structural(b, (size_t)len, want, (size_t)len + 1));
+    WF_CHECK_MEM(idx, want, n * sizeof(size_t));
     free(idx);
     free(want);
     wf_free(b, (size_t)len);
@@ -438,19 +439,80 @@ static void regression_structural_int_max(void)
         if (mmap(base + o, chunk, PROT_READ, MAP_SHARED | MAP_FIXED, fd, (off_t)0) != base + o) abort();
     }
     close(fd);
-    int nchunks = (int)(total / chunk);
-    int max = 2 * nchunks;
-    uint32_t *idx = malloc((size_t)max * sizeof(uint32_t));
-    int got = hs_xml_scan_structural(base, INT_MAX, idx, max);
+    size_t nchunks = total / chunk;
+    size_t max = 2 * nchunks;
+    size_t *idx = malloc(max * sizeof(size_t));
+    size_t got = hs_xml_scan_structural(base, INT_MAX, idx, max);
     WF_CHECK_EQ(got, 2 * nchunks - 1);
-    if (got > 0) WF_CHECK_EQ(idx[got - 1], (uint32_t)INT_MAX - 1);
+    if (got > 0) WF_CHECK_EQ(idx[got - 1], (size_t)INT_MAX - 1);
     free(idx);
-    int from = (int)(total - 2 * chunk);
+    ptrdiff_t from = (ptrdiff_t)(total - 2 * chunk);
     WF_CHECK_EQ(hs_xml_find_cdata_end(base, from, INT_MAX), -1);
     WF_CHECK_EQ(hs_xml_find_comment_end(base, from, INT_MAX), -1);
-    WF_CHECK_EQ(hs_xml_find_text_end(base, from, INT_MAX), (int)(total - chunk - 1));
+    WF_CHECK_EQ(hs_xml_find_text_end(base, from, INT_MAX), (ptrdiff_t)(total - chunk - 1));
     WF_CHECK_EQ(hs_xml_find_byte(base, from, INT_MAX, 'z'), -1);
     munmap(base, total);
+}
+
+/* Regression: positions and lengths above INT_MAX.
+ *
+ * The scanners used to take and return int, so any offset or document
+ * length past INT_MAX wrapped. A sparse mapping just over 2 GiB is
+ * reserved and only the last 200 bytes are touched, so every call below
+ * runs at an offset and with a len that do not fit in an int, and the
+ * expected results do not fit either. Skipped if the address space is
+ * unavailable (the mapping is PROT_READ|WRITE but never touched, so no
+ * memory is actually committed). */
+static void scanners_beyond_2gib(void)
+{
+    if (sizeof(ptrdiff_t) < 8) return;
+    long pg = sysconf(_SC_PAGESIZE);
+    if (pg <= 0) pg = 4096;
+    size_t total = ((size_t)1 << 31) + 4 * (size_t)pg;
+    uint8_t *big = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (big == MAP_FAILED) {
+        fprintf(stderr, "    scanners_beyond_2gib: mmap failed, skipped\n");
+        return;
+    }
+    ptrdiff_t len = (ptrdiff_t)total;
+    ptrdiff_t base = len - 200; /* > INT_MAX */
+    memset(big + base, 'a', 200);
+    big[base + 3] = '<';
+    big[base + 8] = '&';
+    big[base + 13] = '"';
+    big[base + 21] = ']';
+    big[base + 22] = ']';
+    big[base + 23] = '>';
+    big[base + 31] = '-';
+    big[base + 32] = '-';
+    big[base + 33] = '>';
+    big[base + 40] = '\r';
+
+    WF_CHECK(base > (ptrdiff_t)INT_MAX);
+    WF_CHECK_EQ(hs_xml_find_lt(big, base, len), base + 3);
+    WF_CHECK_EQ(hs_xml_find_byte(big, base, len, '"'), base + 13);
+    WF_CHECK_EQ(hs_xml_find_attr_end(big, base, len, '"'), base + 13);
+    WF_CHECK_EQ(hs_xml_find_text_end(big, base, len), base + 3);
+    WF_CHECK_EQ(hs_html_find_text_end(big, base, len), base + 3);
+    WF_CHECK_EQ(hs_xml_find_cdata_end(big, base, len), base + 21);
+    WF_CHECK_EQ(hs_xml_find_comment_end(big, base, len), base + 31);
+    /* find_escape takes a count: from just past the '&' up to len. */
+    WF_CHECK_EQ(hs_xml_find_escape(big, base + 9, len - (base + 9)), base + 13);
+    WF_CHECK_EQ(hs_xml_find_escape(big, base + 41, len - (base + 41)), len);
+    /* Everything after the last marker, and offset > len at EOF. */
+    WF_CHECK_EQ(hs_xml_find_lt(big, base + 42, len), -1);
+    WF_CHECK_EQ(hs_xml_find_cdata_end(big, base + 42, len), -1);
+    WF_CHECK_EQ(hs_xml_find_text_end(big, base + 42, len), len);
+    WF_CHECK_EQ(hs_xml_find_lt(big, len + 5, len), -1);
+    WF_CHECK_EQ(hs_xml_find_byte(big, len, len, '"'), -1);
+    /* Whole scanner table, differential, above 2 GiB. */
+    for (size_t si = 0; si < NSCANNERS; si++) {
+        g_target = '"';
+        for (ptrdiff_t off = base; off <= base + 45; off++) {
+            check_scanner_at(&SCANNERS[si], big, off, len);
+        }
+    }
+    munmap(big, total);
 }
 
 int main(void)
@@ -467,5 +529,6 @@ int main(void)
     WF_RUN(regression_int_max_offsets);
     WF_RUN(regression_int_max_tail);
     WF_RUN(regression_structural_int_max);
+    WF_RUN(scanners_beyond_2gib);
     return wf_finish("xml-fast");
 }
