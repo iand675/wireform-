@@ -275,6 +275,63 @@ static void huge_lengths_not_truncated(void)
     munmap(big, size);
 }
 
+/* The receive transport's wait loop (Wireform.Network.Transport.IOUring.
+ * doWait), modelled at the shim: ensure one recv is in flight while the
+ * ring has space, otherwise park on the eventfd and look again.
+ *
+ * The loop it mirrors used to hang when a completion found the ring full
+ * (nothing resubmitted, so the next wait parked on an eventfd nothing
+ * could signal). This test pins the shim half of the fix: submitting
+ * after the consumer drains a full ring does produce a completion and a
+ * drained eventfd that wakes exactly once per completion. The Haskell
+ * side of the loop is compile-checked only (no io_uring on macOS). */
+static uint64_t model_wait(struct hs_iouring *u, int efd, uint64_t pos,
+                           uint64_t tail, size_t ring)
+{
+    for (int spins = 0; spins < 100; spins++) {
+        uint64_t h = hs_iouring_get_head(u);
+        if (h > pos) return h;
+        size_t space = ring - (size_t)(h - tail);
+        if (space > 0) WF_CHECK(hs_iouring_submit_recv(u, space) >= 0);
+        struct pollfd p = { efd, POLLIN, 0 };
+        WF_CHECK_EQ(poll(&p, 1, 1000), 1);
+        uint64_t nh = 0;
+        int rc = hs_iouring_peek_cqe(u, &nh);
+        if (rc >= 0) return nh;
+    }
+    WF_CHECK(!"model_wait spun without progress");
+    return pos;
+}
+
+static void wait_loop_recovers_from_a_full_ring(void)
+{
+    rig r;
+    WF_CHECK_EQ(rig_open(&r, 4096, 4), 0);
+    int efd = hs_iouring_get_eventfd(r.u);
+    WF_CHECK(efd >= 0);
+    uint8_t first[4096], second[100];
+    for (size_t i = 0; i < sizeof first; i++) first[i] = (uint8_t)(i * 7 + 3);
+    for (size_t i = 0; i < sizeof second; i++) second[i] = (uint8_t)(i * 13 + 5);
+
+    /* Fill the whole ring, the way a fast peer would. */
+    WF_CHECK(hs_iouring_submit_recv(r.u, r.size) >= 0);
+    peer_send(&r, first, sizeof first);
+    uint64_t tail = 0;
+    WF_CHECK_EQ(model_wait(r.u, efd, 0, tail, r.size), r.size);
+    WF_CHECK_MEM(r.buf, first, sizeof first);
+
+    /* Head is a whole ring ahead of the consumer, so a completion-based
+     * resubmit would submit nothing. The consumer drains; the next wait
+     * must submit for itself and get the new bytes. */
+    tail = r.size;
+    peer_send(&r, second, sizeof second);
+    uint64_t head = model_wait(r.u, efd, r.size, tail, r.size);
+    WF_CHECK_EQ(head, r.size + sizeof second);
+    /* The second recv wrapped back to offset 0. */
+    WF_CHECK_MEM(r.buf, second, sizeof second);
+    rig_close(&r, 1);
+}
+
 /* SQPOLL needs privileges on older kernels: either it works or it fails
  * cleanly with a negative errno. */
 static void sqpoll_mode(void)
@@ -315,6 +372,7 @@ int main(void)
     WF_RUN(eof_and_errors);
     WF_RUN(destroy_idempotent_no_leaks);
     WF_RUN(huge_lengths_not_truncated);
+    WF_RUN(wait_loop_recovers_from_a_full_ring);
     WF_RUN(sqpoll_mode);
     return wf_finish("test_iouring");
 }
