@@ -37,10 +37,14 @@ static size_t next_pow2(size_t val) {
     return val;
 }
 
-/* Largest ring: a power of two whose 2N reservation still fits in size_t
- * (and in off_t and the Haskell Int that receives the size). Larger
- * requests would wrap the rounding arithmetic. */
-#define RING_MAX_SIZE ((size_t)1 << (sizeof(size_t) * 8 - 2))
+/* Largest ring. A ring is mapped twice, so 2N has to fit the address
+ * space, off_t and the Haskell Int that receives the size; 4 GiB (1 GiB
+ * on a 32-bit target) is already far beyond any use, since these are
+ * network buffers of KiB to MiB. Capping well below SIZE_MAX / 2 means
+ * an absurd request (including what a negative Haskell Int converts to)
+ * fails with ENOMEM before any mapping, rather than relying on mmap to
+ * reject a multi-exabyte reservation. */
+#define RING_MAX_SIZE ((size_t)1 << (sizeof(size_t) >= 8 ? 32 : 30))
 
 /* Close fd on an error path without clobbering the errno being reported. */
 static int fail_close(int fd) {

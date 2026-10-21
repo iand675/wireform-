@@ -72,18 +72,31 @@ foreign import ccall unsafe "hs_base64_decode"
 
 {- | Number of base64 characters produced for an input of @n@ bytes
 (including @=@ padding).
+
+The C kernel takes a 'CInt' length, so an input longer than
+'maxEncodeInput' raises the same error 'encodeBase64' does rather than
+silently returning a wrong length; @n < 0@ asks the kernel, which
+returns 0.
 -}
 encodeBase64Length :: Int -> Int
-encodeBase64Length = fromIntegral . c_base64_encoded_length . fromIntegral
+encodeBase64Length n
+  | n > maxEncodeInput = errorWithoutStackTrace encodeTooLong
+  | otherwise = fromIntegral (c_base64_encoded_length (fromIntegral n))
 {-# INLINE encodeBase64Length #-}
 
 
 {- | Upper bound on the number of bytes produced when decoding @n@
 input characters.  The actual decoded length is shorter by the
 number of trailing @=@ characters.
+
+Inputs longer than @maxBound :: CInt@ raise an error, like
+'encodeBase64Length' does above 'maxEncodeInput'; 'decodeBase64'
+returns 'Nothing' for such inputs instead.
 -}
 decodeBase64MaxLength :: Int -> Int
-decodeBase64MaxLength = fromIntegral . c_base64_decoded_max_length . fromIntegral
+decodeBase64MaxLength n
+  | n > fromIntegral (maxBound :: CInt) = errorWithoutStackTrace decodeTooLong
+  | otherwise = fromIntegral (c_base64_decoded_max_length (fromIntegral n))
 {-# INLINE decodeBase64MaxLength #-}
 
 
@@ -101,8 +114,7 @@ inputs raise an error instead of being silently truncated.
 -}
 encodeBase64 :: ByteString -> ByteString
 encodeBase64 bs
-  | BS.length bs > maxEncodeInput =
-      errorWithoutStackTrace "Wireform.Base64.encodeBase64: input longer than 3 * (2^31 - 1) / 4 bytes"
+  | BS.length bs > maxEncodeInput = errorWithoutStackTrace encodeTooLong
   | otherwise = unsafePerformIO $ do
       let !inLen = BS.length bs
           !outLen = encodeBase64Length inLen
@@ -116,6 +128,16 @@ encodeBase64 bs
 -- | Largest input whose padded encoding length fits in a 'CInt'.
 maxEncodeInput :: Int
 maxEncodeInput = 3 * (fromIntegral (maxBound :: CInt) `quot` 4)
+
+
+encodeTooLong :: String
+encodeTooLong =
+  "Wireform.Base64: input longer than 3 * (2^31 - 1) / 4 bytes"
+
+
+decodeTooLong :: String
+decodeTooLong =
+  "Wireform.Base64: input longer than 2^31 - 1 bytes"
 
 
 ------------------------------------------------------------------------

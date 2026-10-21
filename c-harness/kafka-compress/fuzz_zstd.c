@@ -31,16 +31,38 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     }
     if (sn == 0) goto out;
 
+    unsigned long long raw_fcs = ZSTD_getFrameContentSize(src, sn);
     size_t fcs = wf_zstd_get_frame_content_size(src, sn);
-    if (fcs != ZSTD_CONTENTSIZE_UNKNOWN && fcs != ZSTD_CONTENTSIZE_ERROR) {
-        WF_FUZZ_ASSERT(fcs / 131072 <= sn / 4 + 1);
-        WF_FUZZ_ASSERT(fcs < ((size_t)1 << 62));
+    /* zstd reports 0 for a skippable frame, which is not the size of the
+     * data frames after it; the shim answers UNKNOWN there. */
+    uint32_t magic = 0;
+    if (sn >= 4) {
+        magic = (uint32_t)src[0] | ((uint32_t)src[1] << 8)
+              | ((uint32_t)src[2] << 16) | ((uint32_t)src[3] << 24);
+    }
+    int skippable = sn >= 4 && (magic & 0xFFFFFFF0u) == 0x184D2A50u;
+    int have_raw = raw_fcs != ZSTD_CONTENTSIZE_UNKNOWN
+                && raw_fcs != ZSTD_CONTENTSIZE_ERROR;
+    int claim_absurd = have_raw && !skippable && raw_fcs / 131072 > sn / 4 + 1;
+    if (skippable) {
+        /* UNKNOWN when the skippable header parses (the real size is
+         * whatever data frames follow), ERROR when it does not. */
+        WF_FUZZ_ASSERT(fcs == (size_t)ZSTD_CONTENTSIZE_UNKNOWN
+                       || fcs == (size_t)ZSTD_CONTENTSIZE_ERROR);
+    } else if (claim_absurd) {
+        /* The header claims more than the input can regenerate. The gate
+         * must say so; zstd's streaming decoder still walks the blocks of
+         * such a frame, so it is no oracle here. */
+        WF_FUZZ_ASSERT(fcs == ZSTD_CONTENTSIZE_ERROR);
+    } else {
+        WF_FUZZ_ASSERT(fcs == (size_t)raw_fcs);
+        if (have_raw) WF_FUZZ_ASSERT(fcs < ((size_t)1 << 62));
     }
 
     cbuf ref = { 0 };
     int ref_ok = ref_zstd(src, sn, FUZZ_LIMIT, &ref);
     if (mode & 1) WF_FUZZ_ASSERT(ref_ok == 1 && ref.n == n && (n == 0 || memcmp(ref.p, in, n) == 0));
-    if (ref_ok == 1) WF_FUZZ_ASSERT(fcs != ZSTD_CONTENTSIZE_ERROR);
+
     size_t cap = fuzz_cap(sel, ref_ok, ref.n);
     if (cap > FUZZ_LIMIT) cap = FUZZ_LIMIT;
     uint8_t *dst = wf_alloc(cap);
@@ -49,7 +71,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     WF_FUZZ_ASSERT(rc == WF_DECOMPRESS_OK || rc == WF_DECOMPRESS_NEEDS_MORE_OUT || rc == WF_DECOMPRESS_BAD_INPUT);
     WF_FUZZ_ASSERT(prod <= cap);
     WF_FUZZ_ASSERT(rc == WF_DECOMPRESS_OK || prod == 0);
-    if (ref_ok == 1) {
+    /* A lying frame is not comparable with the streaming reference (it
+     * reports the blocks it walked, not the claim); the checks above only
+     * require the gate to reject the claim. */
+    if (ref_ok == 1 && !claim_absurd) {
         if (cap >= ref.n) {
             WF_FUZZ_ASSERT(rc == WF_DECOMPRESS_OK && prod == ref.n);
             WF_FUZZ_ASSERT(prod == 0 || memcmp(dst, ref.p, prod) == 0);

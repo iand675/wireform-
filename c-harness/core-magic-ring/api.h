@@ -44,7 +44,7 @@
 #include "magic_ring.h"
 
 /* Largest size the kernel will try to map (mirrors RING_MAX_SIZE). */
-#define REF_RING_MAX ((size_t)1 << (sizeof(size_t) * 8 - 2))
+#define REF_RING_MAX ((size_t)1 << (sizeof(size_t) >= 8 ? 32 : 30))
 
 /* Reference: the ring size a successful create must return. */
 static inline size_t ref_ring_size(size_t requested, size_t ps)
@@ -54,11 +54,44 @@ static inline size_t ref_ring_size(size_t requested, size_t ps)
     return s;
 }
 
-/* Is every page of [p, p + n) mapped (any protection)? msync fails with
- * ENOMEM on an unmapped range. */
+/* Is every page of [p, p + n) mapped (any protection)? On Linux the map
+ * is read from /proc/self/maps: probing a deliberately unmapped range
+ * with msync()/mincore() makes valgrind report it as a syscall on
+ * unaddressable bytes, and the harness has to stay clean there. Elsewhere
+ * msync answers it (it fails with ENOMEM on an unmapped range). */
 static inline int ref_is_mapped(const void *p, size_t n)
 {
+    /* -1 (unknown) under valgrind: it keeps freed mappings in its own
+     * pool, so /proc/self/maps still lists them. Callers treat unknown
+     * as "cannot tell" and skip; valgrind's memcheck is the authority
+     * there anyway. (Under Rosetta the map is the real kernel's, so the
+     * probe stays valid.) */
+    if (wf_under_valgrind()) return -1;
+#if defined(__linux__)
+    /* The two halves of a ring are separate VMAs when they come from
+     * MAP_SHARED file mappings, so walk the ascending map and require
+     * the lines to cover [lo, hi) contiguously. */
+    uintptr_t lo = (uintptr_t)p, hi = lo + n, cur = lo;
+    FILE *f = fopen("/proc/self/maps", "r");
+    if (!f) return 0;
+    int ok = 0;
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        unsigned long a, b;
+        if (sscanf(line, "%lx-%lx", &a, &b) != 2) continue;
+        if ((uintptr_t)a <= cur && cur < (uintptr_t)b) {
+            cur = (uintptr_t)b;
+            if (cur >= hi) {
+                ok = 1;
+                break;
+            }
+        }
+    }
+    fclose(f);
+    return ok;
+#else
     return msync((void *)p, n, MS_ASYNC) == 0;
+#endif
 }
 
 /* Ring bytes are accessed through volatile pointers: b[i] and b[i + size]
@@ -87,14 +120,25 @@ static inline size_t ring_cmp(const ring_byte *a, const uint8_t *b, size_t n)
     return n;
 }
 
-/* Number of open descriptors below a fixed bound; enough to see a leak. */
+/* Number of open descriptors below a fixed bound; enough to see a leak.
+ * -1 under valgrind, which opens descriptors of its own. */
 static inline int ref_open_fds(void)
 {
+    if (wf_under_valgrind() || wf_under_rosetta()) return -1;
     int n = 0;
     for (int fd = 0; fd < 1024; fd++) {
         if (fcntl(fd, F_GETFD) != -1) n++;
     }
     return n;
+}
+
+/* Did the descriptor count stay at `before`? Unknown counts pass: under
+ * valgrind the probe is unavailable and valgrind's own leak tracking
+ * covers the same ground. */
+static inline int ref_fds_unchanged(int before)
+{
+    int now = ref_open_fds();
+    return now < 0 || before < 0 || now == before;
 }
 
 #endif

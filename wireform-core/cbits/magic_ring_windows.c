@@ -21,9 +21,12 @@ long hs_page_size(void) {
     return (long)ps;
 }
 
-/* Largest ring: a power of two whose 2N reservation still fits in size_t.
- * Larger requests would wrap the rounding arithmetic below. */
-#define RING_MAX_SIZE ((size_t)1 << (sizeof(size_t) * 8 - 2))
+/* Largest ring. A ring is mapped twice, so 2N has to fit the address
+ * space; 4 GiB (1 GiB on a 32-bit target) is already far beyond any use,
+ * since these are network buffers of KiB to MiB. Capping well below
+ * SIZE_MAX / 2 means an absurd request fails with ENOMEM before any
+ * mapping (and before the size arithmetic below could wrap). */
+#define RING_MAX_SIZE ((size_t)1 << (sizeof(size_t) >= 8 ? 32 : 30))
 
 /* Round up to the next power of two >= val, for 1 <= val <= RING_MAX_SIZE. */
 static size_t next_pow2(size_t val) {

@@ -480,6 +480,8 @@
           pkgs.pkg-config
         ] ++ lib.optionals pkgs.stdenv.isLinux [
           pkgs.valgrind
+        ] ++ lib.optionals (pkgs.stdenv.isLinux && pkgs.stdenv.hostPlatform.isx86_64) [
+          # Only used by `make afl`, and unavailable on aarch64-linux.
           pkgs.aflplusplus
         ];
         cHarnessLibs = systemDeps
@@ -516,7 +518,11 @@
           dontConfigure = true;
           buildPhase = ''
             runHook preBuild
-            make -C c-harness -k -j$NIX_BUILD_CORES ci
+            # stdenv's setup re-exports CC (gcc), overriding the env attr
+            # above; a command-line assignment wins over the environment.
+            make -C c-harness -k -j$NIX_BUILD_CORES ci \
+              CC="${cHarnessLLVM.clang}/bin/clang" \
+              FUZZ_CC="${cHarnessLLVM.clang}/bin/clang"
             runHook postBuild
           '';
           installPhase = ''

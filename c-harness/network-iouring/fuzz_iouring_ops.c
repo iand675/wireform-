@@ -121,6 +121,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     close(fds[0]);
     close(fds[1]);
     wf_guard_free(g);
-    WF_FUZZ_ASSERT(ref_open_fds() == fds_before);
+    if (!ref_fds_unchanged(fds_before)) {
+        fprintf(stderr, "fd count %d -> %d\n", fds_before, ref_open_fds());
+    }
+    WF_FUZZ_ASSERT(ref_fds_unchanged(fds_before));
     return 0;
 }

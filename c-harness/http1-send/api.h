@@ -21,8 +21,11 @@
  *     by a failure, or -errno when the first send fails.
  *   - sendfile(sock, fd, offset, count): sendFileFd passes count in
  *     1 .. 1 MiB and offset = Word64 narrowed to Int64 (so offsets of 2^63
- *     and up arrive negative and must fail cleanly with -EINVAL). Returns
- *     bytes sent in 1..count, exactly 0 only at or past end of file (or for
+ *     and up arrive negative and must fail cleanly with -EINVAL). A count
+ *     above the platform's per-call transfer limit (Linux MAX_RW_COUNT,
+ *     Darwin INT64_MAX) is clamped, so a "send the rest" count of SIZE_MAX
+ *     transfers rather than failing with EINVAL. Returns bytes sent in
+ *     1..count, exactly 0 only at or past end of file (or for
  *     count == 0), else -errno. At EOF with a full non-blocking buffer
  *     Darwin may report -EAGAIN before 0 (the retry after writability then
  *     returns 0). EINTR before progress is retried; bytes

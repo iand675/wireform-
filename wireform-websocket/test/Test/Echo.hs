@@ -45,6 +45,7 @@ tests =
       , echoDeflateLargePayload
       , echoDeflateBackToBack
       , echoDeflateClientOffersServerDeclines
+      , echoDeflateInflateBombRejected
       ]
 
 
@@ -435,3 +436,42 @@ echoDeflateClientOffersServerDeclines =
     case r of
       Just () -> pure ()
       Nothing -> expectationFailure "fallback echo timed out"
+
+
+{- | A compressed message may inflate to far more than its wire size.
+The receiver must bound the inflation by the message limit while
+inflating (not after): a 1 MiB payload sent as ~1 KiB of deflate is
+rejected with a 1009 close, and the server-side error names the limit.
+-}
+echoDeflateInflateBombRejected :: Spec
+echoDeflateInflateBombRejected =
+  it "rejects a compressed message that inflates past the message limit" $ do
+    serverSaw <- newEmptyMVar
+    let cfg =
+          defaultWebSocketServerConfig
+            { wscHandler = \_req conn -> do
+                e <- try @SomeException $
+                  receiveMessage conn (MessageLimit (64 * 1024))
+                putMVar serverSaw (either show (const "accepted") e)
+            , wscPermessageDeflate = Just PMD.defaultPmdParams
+            }
+    r <- timeout 20_000_000 $ withServerCfgVariant cfg $ \port -> do
+      let ccfg =
+            (defaultWebSocketClientConfig "127.0.0.1" (show port) "/echo")
+              { wcPermessageDeflate = Just PMD.defaultPmdOffer
+              }
+          bomb = BS.replicate (1024 * 1024) 0x61
+      withWebSocketClient ccfg $ \conn -> do
+        sendBinaryMessage conn bomb
+        -- The server answers with close 1009; the next receive must fail
+        -- rather than deliver a message.
+        rr <- try @SomeException (receiveMessage conn defaultMessageLimit)
+        case rr of
+          Left _ -> pure ()
+          Right _ ->
+            expectationFailure "client received a message the server should have rejected"
+    case r of
+      Just () -> do
+        saw <- takeMVar serverSaw
+        saw `shouldContain` "message exceeds configured limit"
+      Nothing -> expectationFailure "inflate-bomb test timed out"

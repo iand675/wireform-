@@ -171,9 +171,13 @@ hs_ssize_t hs_http1_sendfile(int sock, int file_fd, int64_t offset, size_t count
 #elif defined(__linux__) && !defined(HS_HTTP1_SENDFILE_PREAD)
   /* ssize_t sendfile(int out_fd, int in_fd, off_t *offset, size_t count);
    * Linux reports partial progress as a short count, and fails with EINTR
-   * / EAGAIN only when nothing was transferred. */
+   * / EAGAIN only when nothing was transferred. A count above
+   * MAX_RW_COUNT is not clamped by the kernel but rejected with EINVAL,
+   * so "send the rest" (a huge count) is clamped here; the caller loops
+   * on the short count anyway. */
   off_t off = (off_t)offset;
   ssize_t n;
+  if (count > (size_t)0x7ffff000) count = (size_t)0x7ffff000;
   do {
     n = sendfile(sock, file_fd, &off, count);
   } while (n < 0 && errno == EINTR);

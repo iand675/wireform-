@@ -20,11 +20,13 @@ long hs_page_size(void);
 /*
  * Map a ring of at least `requested` bytes. The size is rounded up to a
  * page multiple and then to a power of two (minimum one page), so
- * `size - 1` is an index mask. Any `requested` is accepted: a request too
- * large to map, including the huge values a negative Haskell Int converts
- * to, fails with ENOMEM instead of wrapping. Returns 0 and fills *out on
- * success; returns -1 with errno set and leaves *out untouched on failure.
- * The memory starts zeroed. Thread-safe; leaks no descriptors.
+ * `size - 1` is an index mask. A ring is mapped twice, so 2 * size must
+ * fit the address space; a request above 4 GiB (1 GiB on a 32-bit
+ * target), which includes the huge values a negative Haskell Int
+ * converts to, fails with ENOMEM before anything is mapped. Returns 0
+ * and fills *out on success; returns -1 with errno set and leaves *out
+ * untouched on failure. The memory starts zeroed. Thread-safe; leaks no
+ * descriptors.
  */
 int  hs_ring_create(size_t requested, struct hs_ring *out);
 

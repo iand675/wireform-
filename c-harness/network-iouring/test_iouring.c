@@ -71,7 +71,7 @@ static void create_validation(void)
         hs_iouring_destroy(u); /* no-op after a failed create */
         free(u);
     }
-    WF_CHECK_EQ(ref_open_fds(), fds);
+    WF_CHECK(ref_fds_unchanged(fds));
 }
 
 static void basic_receive(void)
@@ -239,7 +239,7 @@ static void destroy_idempotent_no_leaks(void)
         hs_iouring_destroy(r.u); /* second destroy is a no-op */
         rig_close(&r, 0);
     }
-    WF_CHECK_EQ(ref_open_fds(), fds);
+    WF_CHECK(ref_fds_unchanged(fds));
 }
 
 /* A ring of 2^33 bytes (virtual only) and max_bytes = 2^32: the length

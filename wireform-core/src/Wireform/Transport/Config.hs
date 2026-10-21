@@ -84,7 +84,9 @@ profileConfig UltraLowLatency =
 data TransportConfig = TransportConfig
   { ringSizeHint :: !Int
   {- ^ Requested ring size in bytes.  Rounded up to page-size multiple
-  and power of two.  Default: 1 MiB.
+  and power of two.  Default: 1 MiB.  The ring is mapped twice, so the
+  ceiling is 4 GiB (1 GiB on a 32-bit target); a larger request fails
+  with @ENOMEM@ instead of being silently clamped.
   -}
   , waitPolicy :: !WaitPolicy
   , pinning :: !PinningPolicy

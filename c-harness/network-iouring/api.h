@@ -57,13 +57,22 @@ static inline int ref_iouring_available(void)
     return 1;
 }
 
+/* -1 under valgrind, which opens descriptors of its own. */
 static inline int ref_open_fds(void)
 {
+    if (wf_under_valgrind() || wf_under_rosetta()) return -1;
     int n = 0;
     for (int fd = 0; fd < 1024; fd++) {
         if (fcntl(fd, F_GETFD) != -1) n++;
     }
     return n;
+}
+
+/* Unknown counts pass (see 'ref_open_fds'). */
+static inline int ref_fds_unchanged(int before)
+{
+    int now = ref_open_fds();
+    return now < 0 || before < 0 || now == before;
 }
 
 #endif

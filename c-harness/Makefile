@@ -194,6 +194,13 @@ fuzz_bins = $(foreach m,$(2),$(foreach v,$(call variants,$(m)),$(foreach f,$($(m
 MSAN_MODULES := $(strip $(foreach m,$(ACTIVE),$(call msan_ok,$(m))))
 TSAN_MODULES := $(strip $(foreach m,$(ACTIVE),$(call tsan_ok,$(m))))
 
+# TSan requires a specific virtual-address layout and aborts with "memory
+# layout is incompatible" under Rosetta, which is how an Apple-silicon
+# Linux host runs x86-64 binaries.
+ifneq ($(wildcard /proc/sys/fs/binfmt_misc/rosetta /run/rosetta/rosetta),)
+TSAN_MODULES :=
+endif
+
 # Path helpers: a binary path build/<cfg>/<module>/<variant>/<name>.
 mod_of = $(word 1,$(subst /, ,$(patsubst $(BUILD)/%,%,$(1))))
 mod_of2 = $(word 2,$(subst /, ,$(patsubst $(BUILD)/%,%,$(1))))
@@ -228,7 +235,9 @@ $(1).replay: $(1)
 	@WF_RANDOM_RUNS=$(REPLAY_RANDOM_RUNS) $(2) $(1) $(call corpus_dirs,$(1))
 endef
 
-VALGRIND_CMD := $(VALGRIND) -q --error-exitcode=99 --leak-check=full --errors-for-leak-kinds=definite --track-origins=yes
+VALGRIND_CMD := $(VALGRIND) -q --error-exitcode=99 --leak-check=full \
+  --errors-for-leak-kinds=definite --track-origins=yes \
+  $(if $(wildcard $(HARNESS_DIR)/valgrind.supp),--suppressions=$(HARNESS_DIR)/valgrind.supp)
 
 $(foreach b,$(call tests_of,asan,$(ACTIVE)) $(call tests_of,release,$(ACTIVE)) \
             $(call tests_of,msan,$(MSAN_MODULES)) $(call tests_of,tsan,$(TSAN_MODULES)) \

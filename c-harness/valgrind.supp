@@ -1,0 +1,49 @@
+# Valgrind suppressions for the harness.
+#
+# OpenSSL's own code reads padding it never initialised: OBJ_obj2txt,
+# ERR_add_error_vdata and the ECDSA digest-setup helpers all reach
+# OPENSSL_strlcpy/strlcat with partially written buffers. Valgrind reports
+# it during initialisation and teardown of any program that links libcrypto.
+# The errors are inside libcrypto/libssl, never in the kernel under test, so
+# each suppressor matches by object: an error whose innermost frame is in
+# those libraries is OpenSSL's, and nothing in */cbits is hidden by it.
+{
+   openssl_libcrypto_cond
+   Memcheck:Cond
+   obj:*/libcrypto.so*
+}
+{
+   openssl_libssl_cond
+   Memcheck:Cond
+   obj:*/libssl.so*
+}
+{
+   openssl_libcrypto_value4
+   Memcheck:Value4
+   obj:*/libcrypto.so*
+}
+{
+   openssl_libssl_value4
+   Memcheck:Value4
+   obj:*/libssl.so*
+}
+{
+   openssl_libcrypto_value8
+   Memcheck:Value8
+   obj:*/libcrypto.so*
+}
+{
+   openssl_libssl_value8
+   Memcheck:Value8
+   obj:*/libssl.so*
+}
+{
+   openssl_libcrypto_value16
+   Memcheck:Value16
+   obj:*/libcrypto.so*
+}
+{
+   openssl_libssl_value16
+   Memcheck:Value16
+   obj:*/libssl.so*
+}

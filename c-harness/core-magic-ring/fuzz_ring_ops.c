@@ -104,7 +104,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 size_t sz = r.size;
                 hs_ring_destroy(&r);
                 WF_FUZZ_ASSERT(r.base == NULL && r.size == 0);
-                WF_FUZZ_ASSERT(!ref_is_mapped(base, 2 * sz));
+                WF_FUZZ_ASSERT(ref_is_mapped(base, 2 * sz) <= 0);
                 free(model);
                 free(tmp);
                 model = tmp = NULL;
@@ -151,6 +151,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         free(model);
         free(tmp);
     }
-    WF_FUZZ_ASSERT(ref_open_fds() == fds_at_start);
+    WF_FUZZ_ASSERT(ref_fds_unchanged(fds_at_start));
     return 0;
 }

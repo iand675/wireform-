@@ -253,6 +253,27 @@ static inline void wf_free(void *p, size_t n)
 #endif
 }
 
+/* Under valgrind (Linux): its preload shows up in LD_PRELOAD. Multi-GiB
+ * sparse mappings cost minutes of emulation there, so the runtime shape
+ * tests that map one skip themselves; the signatures are pinned at
+ * compile time in the module api.h either way. */
+static inline int wf_under_valgrind(void)
+{
+    const char *pre = getenv("LD_PRELOAD");
+    return pre != NULL && strstr(pre, "vgpreload") != NULL;
+}
+
+/* x86-64 binaries on an Apple-silicon Linux host run under Rosetta, which
+ * opens descriptors of its own and cannot run ThreadSanitizer. */
+static inline int wf_under_rosetta(void)
+{
+#if defined(__linux__)
+    return access("/run/rosetta/rosetta", F_OK) == 0;
+#else
+    return 0;
+#endif
+}
+
 /* ------------------------------------------------------------------ */
 /* Checks                                                              */
 /* ------------------------------------------------------------------ */
