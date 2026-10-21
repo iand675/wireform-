@@ -19,6 +19,7 @@ module Parquet.Compress (
 
 import Codec.Compression.GZip qualified as GZip
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 
 
@@ -74,7 +75,14 @@ compressPageBytes ZSTD _ =
 -- liblz4's @LZ4_compress_default@ — output is byte-identical
 -- to what arrow-cpp / parquet-mr / pyarrow emit, so any
 -- modern Parquet reader accepts it.
-compressPageBytes LZ4Raw bs = Right (LZ4.compress bs)
+-- A page above liblz4's raw-block limit cannot be compressed at all:
+-- 'LZ4.compress' would return an empty payload, which would be written
+-- as a valid but empty page. Reject it instead (Parquet pages are
+-- bounded by the page size, far below the limit).
+compressPageBytes LZ4Raw bs
+  | LZ4.compressBound (BS.length bs) < 0 =
+      Left "Parquet.Compress: LZ4_RAW input exceeds LZ4_MAX_INPUT_SIZE"
+  | otherwise = Right (LZ4.compress bs)
 #else
 compressPageBytes LZ4Raw _ =
   Left "Parquet.Compress: LZ4_RAW requires building wireform with -flz4"
