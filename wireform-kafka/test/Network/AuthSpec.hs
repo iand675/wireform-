@@ -514,7 +514,9 @@ awsMskIamTests =
           let creds = Iam.AwsCredentials "AKIASTATIC" "secret" (Just "session")
           resolved <- Iam.resolveAwsCredentials (Iam.AwsStaticCredentials creds)
           resolved `shouldBe` Right creds
-      , it "env provider requires access key and secret" $
+      , -- withAwsEnv mutates the process environment, so these two
+        -- must not overlap each other or any other test.
+        sequential $ it "env provider requires access key and secret" $
           withAwsEnv Nothing Nothing Nothing $ do
             resolved <- Iam.resolveAwsCredentials Iam.AwsEnvCredentials
             case resolved of
@@ -522,7 +524,7 @@ awsMskIamTests =
                 ("AWS_ACCESS_KEY_ID" `T.isInfixOf` T.pack err) `shouldBe` True
                 ("AWS_SECRET_ACCESS_KEY" `T.isInfixOf` T.pack err) `shouldBe` True
               Right _ -> expectationFailure "expected missing env credentials to fail"
-      , it "env provider includes optional session token" $
+      , sequential $ it "env provider includes optional session token" $
           withAwsEnv (Just "AKIAENV") (Just "env-secret") (Just "env-token") $ do
             resolved <- Iam.resolveAwsCredentials Iam.AwsEnvCredentials
             resolved

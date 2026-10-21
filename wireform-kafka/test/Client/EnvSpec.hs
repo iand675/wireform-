@@ -123,7 +123,8 @@ tests =
                 "consumer pulls connection-level env via embedded ConnectionConfig"
                 prop_consInheritsConnection
             ]
-      , describe "createProducer / createConsumer" $
+      , -- withTempEnv mutates the process environment: run these alone.
+        sequential $ describe "createProducer / createConsumer" $
           sequence_
             [ it
                 "createProducer reads KAFKA_BOOTSTRAP_SERVERS from the env"

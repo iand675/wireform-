@@ -2,10 +2,12 @@
 
 module Protocol.RecordBatchSpec (tests) where
 
-import Data.Bits (xor)
+import Data.Bits (shiftR, xor)
+import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.List qualified
 import Data.Vector qualified as V
+import Data.Word (Word64, Word8)
 import Hedgehog
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
@@ -16,11 +18,40 @@ import Test.Syd
 import Test.Syd.Hedgehog ()
 
 
+{- | Arbitrary bytes for record payloads, which add up to hundreds of
+KiB per batch. 'Gen.bytes' builds a shrink tree per byte, so a 400 KiB
+batch cost ~150 MB of allocation and each property here took ~10 s in a
+loaded suite. This draws the length, the alphabet and a seed through
+Hedgehog (the length still shrinks) and expands the seed with
+splitmix64. The alphabet split matches 'Gen.bytes': lowercase ASCII
+(compressible) or any byte (incompressible).
+-}
+genBulkBytes :: Range Int -> Gen ByteString
+genBulkBytes range = do
+  n <- Gen.int range
+  lowercase <- Gen.bool
+  seed <- Gen.word64 Range.constantBounded
+  pure (fst (BS.unfoldrN n (step lowercase) seed))
+  where
+    step :: Bool -> Word64 -> Maybe (Word8, Word64)
+    step lowercase s =
+      let s' = s + 0x9e3779b97f4a7c15
+          z = mix s'
+          b
+            | lowercase = 97 + fromIntegral (z `rem` 26)
+            | otherwise = fromIntegral (z `shiftR` 56)
+      in Just (b, s')
+    mix z0 =
+      let z1 = (z0 `xor` (z0 `shiftR` 30)) * 0xbf58476d1ce4e5b9
+          z2 = (z1 `xor` (z1 `shiftR` 27)) * 0x94d049bb133111eb
+      in z2 `xor` (z2 `shiftR` 31)
+
+
 -- | Generate a RecordHeader
 genRecordHeader :: Gen RB.RecordHeader
 genRecordHeader = do
   key <- Gen.bytes (Range.linear 0 100)
-  value <- Gen.maybe (Gen.bytes (Range.linear 0 1000))
+  value <- Gen.maybe (genBulkBytes (Range.linear 0 1000))
   return $ RB.RecordHeader key value
 
 
@@ -30,7 +61,7 @@ genRecord = do
   timestampDelta <- Gen.int64 (Range.linear 0 10000)
   offsetDelta <- Gen.int32 (Range.linear 0 1000)
   key <- Gen.maybe (Gen.bytes (Range.linear 0 100))
-  value <- Gen.bytes (Range.linear 0 10000)
+  value <- genBulkBytes (Range.linear 0 10000)
   headersCount <- Gen.int (Range.linear 0 10)
   headers <- Gen.list (Range.singleton headersCount) genRecordHeader
   return $ RB.Record timestampDelta offsetDelta key value headers

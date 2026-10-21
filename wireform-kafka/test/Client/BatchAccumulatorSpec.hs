@@ -21,6 +21,8 @@ import Hedgehog.Range qualified as Range
 import Kafka.Client.Internal.BatchAccumulator qualified as BA
 import Kafka.Compression.Types qualified as Compression
 import Kafka.Protocol.RecordBatch qualified as RB
+import Kafka.Time qualified as KafkaTime
+import System.Timeout (timeout)
 import Test.Syd
 import Test.Syd.Hedgehog ()
 
@@ -87,35 +89,45 @@ prop_batchReadyWhenFull = property $ do
   evalIO $ BA.closeBatchAccumulator accumulator
 
 
--- | Test that batches become ready after linger time
+{- | Test that batches become ready once the linger time has elapsed,
+and never before. Readiness is judged against the wall clock, so the
+test does not sleep and then hope: it polls (bounded by a timeout)
+until the batch is ready and checks that at least @lingerMs@ passed
+since before the append. The "not yet ready" side uses a linger long
+enough that no scheduling delay can reach it.
+-}
 prop_batchReadyAfterLingerTime :: Property
 prop_batchReadyAfterLingerTime = property $ do
-  -- Use a short linger time for testing
-  let lingerMs = 50
-  accumulator <- evalIO $ BA.createBatchAccumulator 16384 lingerMs Compression.NoCompression (Compression.defaultLevel Compression.NoCompression)
-
+  lingerMs <- forAll $ Gen.int (Range.linear 0 10)
   tp <- forAll genTopicPartition
   record <- forAll genRecord
+  let level = Compression.defaultLevel Compression.NoCompression
 
-  -- Append a single record
-  evalIO $ BA.appendRecord accumulator tp record
-
-  -- Initially should not be ready
-  hasReadyBefore <- evalIO $ BA.hasReadyBatches accumulator
+  -- A batch under a one-minute linger is not ready right after the append.
+  waiting <- evalIO $ BA.createBatchAccumulator 16384 60000 Compression.NoCompression level
+  evalIO $ BA.appendRecord waiting tp record
+  hasReadyBefore <- evalIO $ BA.hasReadyBatches waiting
   assert $ not hasReadyBefore
+  evalIO $ BA.closeBatchAccumulator waiting
 
-  -- Wait for linger time to expire (plus buffer)
-  evalIO $ threadDelay ((lingerMs + 20) * 1000)
-
-  -- Now should be ready
-  hasReadyAfter <- evalIO $ BA.hasReadyBatches accumulator
-  assert hasReadyAfter
+  accumulator <- evalIO $ BA.createBatchAccumulator 16384 lingerMs Compression.NoCompression level
+  beforeAppend <- evalIO KafkaTime.currentTimeMillis
+  evalIO $ BA.appendRecord accumulator tp record
+  ready <- evalIO $ timeout 10_000_000 (awaitReady accumulator)
+  readyObservedAt <- evalIO KafkaTime.currentTimeMillis
+  ready === Just ()
+  annotateShow (readyObservedAt - beforeAppend)
+  assert $ readyObservedAt - beforeAppend >= fromIntegral lingerMs
 
   -- Can drain the batch
   batches <- evalIO $ BA.drainReadyBatches accumulator
   assert $ not (null batches)
 
   evalIO $ BA.closeBatchAccumulator accumulator
+  where
+    awaitReady acc = do
+      r <- BA.hasReadyBatches acc
+      unless r $ threadDelay 200 >> awaitReady acc
 
 
 -- | Test that records are accumulated per partition
