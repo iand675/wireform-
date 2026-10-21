@@ -10,10 +10,10 @@ module Network.HTTP2.Server
   , runServerOnTransport
   ) where
 
-import Control.Concurrent (forkIO, killThread, threadDelay, ThreadId)
+import Control.Concurrent (forkIO, killThread, myThreadId, threadDelay, throwTo, ThreadId)
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
-import Control.Exception (bracket, catch, SomeException, finally)
+import Control.Exception (Exception, bracket, catch, handle, SomeException, finally)
 import Control.Monad (when)
 import GHC.Clock (getMonotonicTime)
 import System.Timeout (timeout)
@@ -214,12 +214,28 @@ handleTransport cfg transport = do
       -- arriving (HEADERS without END_HEADERS).  Reset to Nothing
       -- whenever END_HEADERS lands.  Slowloris guard #2.
       continuationStartRef <- newIORef Nothing
-      watchdog <- forkIO $ idleWatchdog cfg conn
+      loopTid <- myThreadId
+      watchdog <- forkIO $ idleWatchdog cfg conn loopTid
                              lastActivityRef continuationStartRef
-      connectionLoop cfg conn streamsRef lastPeerStreamRef continuationRef
-                     connRecvUnackedRef connRecvWindowRef rl
-                     lastActivityRef continuationStartRef
-        `finally` killThread watchdog
+      -- The loop decodes frames from zero-copy slices of the receive
+      -- ring, so the ring is released only here, after the loop (the
+      -- only reader) has stopped and the watchdog can no longer wake it.
+      -- A wake that was queued while the finalizer ran lands in the
+      -- outer handler.
+      handle (\IdleWatchdogFired -> pure ()) $
+        ( connectionLoop cfg conn streamsRef lastPeerStreamRef continuationRef
+                         connRecvUnackedRef connRecvWindowRef rl
+                         lastActivityRef continuationStartRef
+            `catch` (\IdleWatchdogFired -> pure ())
+        )
+          `finally` (killThread watchdog >> releaseConnection conn)
+
+-- | Thrown by 'idleWatchdog' to the connection-loop thread after it has
+-- closed the connection, so a loop parked in @recv@ wakes up and exits.
+data IdleWatchdogFired = IdleWatchdogFired
+  deriving stock (Show)
+
+instance Exception IdleWatchdogFired
 
 -- | Pending header-block continuation state: which stream we're
 -- continuing, what flags the initial HEADERS frame had (so we know
@@ -1164,10 +1180,11 @@ toMicros s
 idleWatchdog
   :: ServerConfig
   -> Connection
+  -> ThreadId               -- ^ the connection-loop thread to wake
   -> IORef Double           -- ^ monotonic time of last incoming frame
   -> IORef (Maybe Double)   -- ^ monotonic time when current header block began
   -> IO ()
-idleWatchdog cfg conn lastActivityRef continuationStartRef =
+idleWatchdog cfg conn loopTid lastActivityRef continuationStartRef =
   case (serverIdleTimeoutSeconds cfg, serverHeaderBlockTimeoutSeconds cfg) of
     (Nothing, Nothing) -> pure ()
     _ -> loop
@@ -1188,9 +1205,13 @@ idleWatchdog cfg conn lastActivityRef continuationStartRef =
             Nothing -> pure False
         Nothing -> pure False
       if idleTrip || contTrip
-        then closeConnection conn EnhanceYourCalm
-               (if idleTrip then "idle timeout" else "slow header block")
-               `catch` (\(_ :: SomeException) -> pure ())
+        then do
+          -- Closing never unmaps the receive ring, so this is safe while
+          -- the loop is mid-frame; the loop's owner releases it.
+          closeConnection conn EnhanceYourCalm
+            (if idleTrip then "idle timeout" else "slow header block")
+            `catch` (\(_ :: SomeException) -> pure ())
+          throwTo loopTid IdleWatchdogFired
         else loop
 
 -- | True when @hs@ exceeds the server's advertised

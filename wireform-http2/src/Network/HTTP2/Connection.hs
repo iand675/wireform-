@@ -17,6 +17,7 @@ module Network.HTTP2.Connection
   , recvFrame
   , recvFrameRaw
   , closeConnection
+  , releaseConnection
   , connectionSettings
     -- * Re-exports
   , module Network.HTTP2.Connection.Settings
@@ -28,6 +29,7 @@ module Network.HTTP2.Connection
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Control.Exception (Exception, catch, SomeException)
+import Control.Monad (when)
 import Data.Bits ((.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
@@ -37,7 +39,8 @@ import Network.Socket (Socket)
 
 import qualified Wireform.Transport as WT
 import Wireform.Transport.Send (SendTransport, sendByteString, sendByteStringMany, sendClose)
-import Wireform.Network (newReceiveBufTransport)
+import Wireform.Network.Transport.Receive (buildReceiveTransport)
+import Wireform.Ring.Internal (destroyMagicRing, newMagicRing)
 import Wireform.Network.Transport.Send (newSendBufTransport)
 import qualified Wireform.Transport.Config as WC
 import Wireform.Transport.Config (defaultTransportConfig)
@@ -93,10 +96,14 @@ data Connection = Connection
   , connHpackDecoder :: !(MVar DynamicTable)
   , connSendLock :: !(MVar ())
   , connRingTransport :: !WT.ReceiveTransport
-    -- ^ Magic-ring transport plumbed onto @tRecvBuf connTransport@.
-    -- Owns its own 'Wireform.Ring.Internal.MagicRing' (destroyed
-    -- on 'closeConnection') and is the sole receive side for the
-    -- recv loop.  Replaces the previous pinned 'RecvBuffer'.
+    -- ^ Magic-ring transport plumbed onto @tRecvBuf connTransport@,
+    -- and the sole receive side for the recv loop. Frames decoded
+    -- from it are zero-copy slices of the ring, so the ring is
+    -- unmapped only by 'releaseConnection', never by
+    -- 'closeConnection' (which other threads may call while the
+    -- recv loop is mid-frame).
+  , connReleaseRecvRing :: !(IO ())
+    -- ^ Unmaps the receive ring; runs at most once.
   , connRingCursor :: !(IORef Word64)
     -- ^ Position past the last byte consumed by 'recvFrame' /
     -- 'recvFrameRaw'.  Chained through the StreamingReader so we
@@ -150,7 +157,12 @@ mkConnection role settings onGoAway transport mSock = do
   decoder <- newDynamicTable 4096 >>= newMVar
   sendLock <- newMVar ()
   let !ringCfg = defaultTransportConfig { WC.ringSizeHint = 1024 * 1024 }
-  ringT <- newReceiveBufTransport ringCfg (tRecvBuf transport)
+  recvRing <- newMagicRing (WC.ringSizeHint ringCfg)
+  ringT <- buildReceiveTransport recvRing (tRecvBuf transport)
+  recvRingLive <- newIORef True
+  let releaseRecvRing = do
+        live <- atomicModifyIORef' recvRingLive (\l -> (False, l))
+        when live (destroyMagicRing recvRing)
   ringCursor <- newIORef 0
   sendT <- newSendBufTransport ringCfg (tSendFn transport) (tShutdownWrite transport)
   lastStreamId <- newIORef 0
@@ -168,6 +180,7 @@ mkConnection role settings onGoAway transport mSock = do
     , connHpackDecoder = decoder
     , connSendLock = sendLock
     , connRingTransport = ringT
+    , connReleaseRecvRing = releaseRecvRing
     , connRingCursor = ringCursor
     , connSendTransport = sendT
     , connLastStreamId = lastStreamId
@@ -394,6 +407,15 @@ recvFrameRaw conn = do
       pure (Just (hdr, bs))
     Left _ -> pure Nothing
 
+-- | Send GOAWAY and shut the connection: the send ring is drained and
+-- unmapped, and the receive side is marked closed so the recv loop sees
+-- end of input on its next wait. Idempotent, and safe to call from any
+-- thread, including while another thread is decoding a frame: the
+-- receive ring stays mapped until 'releaseConnection'.
+--
+-- The send side is torn down under 'connSendLock', so a sender either
+-- finishes before the unmap or finds the transport closed and throws;
+-- it can never write into the unmapped ring.
 closeConnection :: Connection -> ErrorCode -> ByteString -> IO ()
 closeConnection conn code msg = do
   alreadyClosed <- atomicModifyIORef' (connClosed conn) (\c -> (True, c))
@@ -404,17 +426,23 @@ closeConnection conn code msg = do
       let goaway = Frame
             (FrameHeader 0 FrameGoAway 0 0)
             (GoAwayFrame lastId code msg)
-      sendFrame conn goaway
-        `catch` (\(_ :: SomeException) -> pure ())
-      -- Tear down the send ring (flushes remaining bytes + unmaps).
-      sendClose (connSendTransport conn)
-        `catch` (\(_ :: SomeException) -> pure ())
-      -- Tear down the receive ring (frees its mmap).  Any frame
-      -- payload slices the caller still holds become dangling
-      -- pointers; they should have been 'BS.copy'd inside the
-      -- per-frame handler.
+      withMVar (connSendLock conn) $ \_ -> do
+        sendFrameUnlocked conn goaway
+          `catch` (\(_ :: SomeException) -> pure ())
+        sendClose (connSendTransport conn)
+          `catch` (\(_ :: SomeException) -> pure ())
       WT.receiveClose (connRingTransport conn)
         `catch` (\(_ :: SomeException) -> pure ())
+
+-- | 'closeConnection' (with 'NoError' if it was still open), then unmap
+-- the receive ring. Frames from 'recvFrame' / 'recvFrameRaw' are
+-- zero-copy slices of that ring, so call this only once no thread is
+-- reading from the connection or still holds an uncopied frame: the
+-- owner of the recv loop calls it after the loop has exited.
+releaseConnection :: Connection -> IO ()
+releaseConnection conn = do
+  closeConnection conn NoError ""
+  connReleaseRecvRing conn
 
 connectionSettings :: Connection -> IO (Settings, Settings)
 connectionSettings conn = do

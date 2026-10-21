@@ -25,12 +25,12 @@ module Network.HTTP2.Client
   , clientRecvLoop
   ) where
 
-import Control.Concurrent (forkIO, killThread)
+import Control.Concurrent (forkIO, forkIOWithUnmask, killThread)
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Control.Exception
-  (Exception, SomeException, bracket, catch, evaluate, finally, mask, throwIO, try)
-import Control.Monad (when)
+  (Exception, SomeException, bracket, catch, evaluate, finally, mask, mask_, throwIO, try)
+import Control.Monad (void, when)
 import Data.Bits ((.|.), (.&.), shiftL)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
@@ -348,17 +348,21 @@ withConnectionOnTransport cfg transport mSock action = do
   -- Mark the recv loop done *before* failing outstanding streams, so a
   -- concurrent 'registerAndSend' that inserts its inbox after this point
   -- observes the flag and fails its own stream (see 'chRecvDone').
-  recvTid <- forkIO $
-    clientRecvLoop handle
-      `finally` (atomicModifyIORef' (chRecvDone handle) (const (True, ())) >> failOutstanding handle)
-  -- Tear-down order matters: stop the recv loop *before* the
-  -- outer bracket closes the socket, otherwise the recv loop's
-  -- in-flight @threadWaitRead@ sees the fd disappear and prints
-  -- "threadWait: invalid argument (Bad file descriptor)" to
-  -- stderr.
+  recvExited <- newEmptyMVar
+  -- Forked masked so the finalizers are installed before 'killThread'
+  -- can reach the thread; teardown waits on 'recvExited'.
+  recvTid <- mask_ $ forkIOWithUnmask $ \unmask ->
+    ( unmask (clientRecvLoop handle)
+        `finally` (atomicModifyIORef' (chRecvDone handle) (const (True, ())) >> failOutstanding handle)
+    )
+      `finally` putMVar recvExited ()
+  -- Tear-down order matters. The recv loop decodes frames from
+  -- zero-copy slices of the connection's receive ring, so it must have
+  -- fully exited before 'releaseConnection' unmaps that ring. Stopping
+  -- it first also keeps it from seeing the outer bracket close the
+  -- socket under its @threadWaitRead@.
   action handle
-    `finally` closeConnection conn NoError ""
-    `finally` killThread recvTid
+    `finally` (killThread recvTid >> takeMVar recvExited >> releaseConnection conn)
 
 sendClientPreface :: Connection -> Settings -> IO ()
 sendClientPreface conn settings = do
@@ -787,6 +791,11 @@ failStream handle sid err = do
 -- The active-stream counter is reset to zero so any 'registerAndSend'
 -- waiters wake (they will then observe the closed connection and
 -- fail on their own).
+--
+-- Never blocks: connection teardown waits for this to finish. Every
+-- stream still registered here is incomplete (completed streams are
+-- removed on 'BodyEnd'), so if a consumer has stopped reading and its
+-- body queue is full, the unread chunks are replaced by the error.
 failOutstanding :: ClientHandle -> IO ()
 failOutstanding handle = do
   inboxes <- atomicModifyIORef' (chStreams handle) (\m -> (Map.empty, m))
@@ -796,7 +805,10 @@ failOutstanding handle = do
     failOne (_, inbox) = do
       _ <- tryPutMVar (siHeaders inbox) (Left ClientStreamConnectionClosed)
       _ <- tryPutMVar (siTrailers inbox) []
-      atomically $ writeTBQueue (siBody inbox) (BodyError ClientStreamConnectionClosed)
+      atomically $ do
+        full <- isFullTBQueue (siBody inbox)
+        when full (void (flushTBQueue (siBody inbox)))
+        writeTBQueue (siBody inbox) (BodyError ClientStreamConnectionClosed)
 
 ------------------------------------------------------------------------
 -- Sending

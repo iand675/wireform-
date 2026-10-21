@@ -50,6 +50,7 @@ import Network.HTTP2.Connection (
   connHpackDecoder,
   sendEncodedHeaders,
   newConnectionFromTransport,
+  releaseConnection,
   sendFrame,
  )
 import Network.HTTP2.Connection qualified as Conn
@@ -126,12 +127,12 @@ runServer env handler = do
       transport
   preface <- envReadN env (BS.length connectionPreface)
   if preface /= connectionPreface
-    then closeConnection conn Wire.ProtocolError "bad preface"
+    then closeConnection conn Wire.ProtocolError "bad preface" >> releaseConnection conn
     else do
       sendServerPrefaceFrames conn (envSettings env)
       streamsRef <- newIORef Map.empty
       connLoop env conn handler streamsRef
-        `finally` closeConnection conn Wire.NoError ""
+        `finally` releaseConnection conn
 
 
 -- | Transport adapter over the env's send/recv callbacks.

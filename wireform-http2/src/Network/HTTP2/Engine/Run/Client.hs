@@ -48,6 +48,7 @@ import Network.HTTP2.Connection (
   closeConnection,
   connHpackDecoder,
   newConnectionFromTransport,
+  releaseConnection,
   sendFrame,
   sendNewStreamHeaders,
  )
@@ -116,7 +117,7 @@ runClient env client = do
   let sendRequest req k = doSendRequest env conn streamsRef nextSidRef req k
       aux = EngineAux {engineAuxPossibleStreams = pure 100}
   client sendRequest aux `finally` do
-    closeConnection conn Wire.NoError ""
+    releaseConnection conn
     killThread recvTid
   where
     wireSettings =

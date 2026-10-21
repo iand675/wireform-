@@ -101,6 +101,7 @@ handleClient sock = do
         , ccOnGoAway = \_ _ _ -> pure ()
         }
       closeConnection conn ProtocolError ""
+      releaseConnection conn
       NS.close sock
     else do
       conn <- newConnection ConnectionConfig
@@ -125,7 +126,7 @@ handleClient sock = do
         , ssConnSendWindow = 65535
         , ssPendingSends = []
         }
-      serverLoop conn stRef `finally` NS.close sock
+      serverLoop conn stRef `finally` (releaseConnection conn >> NS.close sock)
 
 sendServerSettings :: Connection -> Settings -> IO ()
 sendServerSettings conn settings = do

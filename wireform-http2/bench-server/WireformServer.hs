@@ -88,7 +88,7 @@ handleClient sock = do
       sendFrame conn $ Frame
         (FrameHeader 4 FrameWindowUpdate 0 0)
         (WindowUpdateFrame 10485760)
-      serverLoop conn `finally` NS.close sock
+      serverLoop conn `finally` (releaseConnection conn >> NS.close sock)
 
 serverLoop :: Connection -> IO ()
 serverLoop conn = do
