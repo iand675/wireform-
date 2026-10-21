@@ -16,7 +16,7 @@
 --   produces.
 module Test.OpenAPI (tests) where
 
-import Control.Exception (SomeException, try)
+import Control.Exception (SomeException, evaluate, try)
 import Control.Monad (forM_, when)
 import Data.Aeson (Value (..), object, toJSON, (.=))
 import Data.Aeson qualified as Aeson
@@ -66,6 +66,13 @@ readFixture name = go ["wireform-connect/test/proto/" <> name, "test/proto/" <> 
 
 parseFixture :: FilePath -> Text -> ProtoFile
 parseFixture fp src = either (const (error ("Test.OpenAPI: parse failed for " <> fp))) id (parseProtoFile fp src)
+
+-- | 'parseFixture', fully evaluated now.
+parseFixtureIO :: FilePath -> Text -> IO ProtoFile
+parseFixtureIO fp src = do
+  let pf = parseFixture fp src
+  _ <- evaluate (length (show pf))
+  pure pf
 
 -- | The proto3-JSON message builders for the eliza fixture, paired with the
 -- fully-qualified name and the single JSON key each carries. The codec's
@@ -126,10 +133,15 @@ tests = describe "OpenAPI" $ do
   elizaSrc <- runIO (readFixture "eliza.proto")
   shapesSrc <- runIO (readFixture "shapes.proto")
   depSrc <- runIO (readFixture "deprecated.proto")
-  let elizaPf = parseFixture "eliza.proto" elizaSrc
-      shapesPf = parseFixture "shapes.proto" shapesSrc
-      depPf = parseFixture "deprecated.proto" depSrc
-      shapesEnv = buildSchemaEnv [shapesPf]
+  -- Parse the fixtures here, on the main thread, before sydtest starts its
+  -- workers. If several workers instead force these shared thunks (and the
+  -- parser's top-level CAFs) cold at the same moment, GHC 9.8.4 on aarch64
+  -- occasionally hands one of them a null closure and the process
+  -- segfaults (reproduced standalone: ~2% cold, 0% after a warm parse).
+  elizaPf <- runIO (parseFixtureIO "eliza.proto" elizaSrc)
+  shapesPf <- runIO (parseFixtureIO "shapes.proto" shapesSrc)
+  depPf <- runIO (parseFixtureIO "deprecated.proto" depSrc)
+  let shapesEnv = buildSchemaEnv [shapesPf]
       shapesDoc =
         connectOpenApi
           defaultOpenApiOptions {ooTitle = "Shapes API", ooVersion = "2.0.0"}
