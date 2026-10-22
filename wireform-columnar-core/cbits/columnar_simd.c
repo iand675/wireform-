@@ -267,11 +267,18 @@ void hs_columnar_memcpy_fast(const uint8_t *src, uint8_t *dst, size_t len)
                 bad |= (unsigned)(LD(offs, i + j) < LD(offs, i + j - 1));     \
             }                                                                 \
             if (bad) {                                                        \
+                /* The second pass records the first offender instead of      \
+                 * returning from the loop: bad was set by one of these same  \
+                 * tests, so a scan that could exit without a hit is a path   \
+                 * no input can take.                                        \
+                 */                                                           \
+                size_t hit = m;                                               \
                 for (size_t j = 0; j < m; j++) {                              \
                     if (LD(offs, i + j) < LD(offs, i + j - 1)) {              \
-                        return (int64_t)(i + j);                              \
+                        hit = min_sz(hit, j);                                 \
                     }                                                         \
                 }                                                             \
+                return (int64_t)(i + hit);                                    \
             }                                                                 \
         }                                                                     \
         if ((int64_t)LD(offs, n - 1) > limit) {                               \
@@ -303,11 +310,13 @@ DEF_OFFSETS(hs_columnar_offsets_i64, int64_t, ld_i64)
                 bad |= (unsigned)(LD(ends, i + j) <= LD(ends, i + j - 1));    \
             }                                                                 \
             if (bad) {                                                        \
+                size_t hit = m;                                               \
                 for (size_t j = 0; j < m; j++) {                              \
                     if (LD(ends, i + j) <= LD(ends, i + j - 1)) {             \
-                        return (int64_t)(i + j);                              \
+                        hit = min_sz(hit, j);                                 \
                     }                                                         \
                 }                                                             \
+                return (int64_t)(i + hit);                                    \
             }                                                                 \
         }                                                                     \
         if ((int64_t)LD(ends, n - 1) < minEnd) {                              \
@@ -341,12 +350,14 @@ DEF_RUN_ENDS(hs_columnar_run_ends_i64, int64_t, ld_i64)
                 bad |= in & (unsigned)((c & 0xC0) == 0x80);                   \
             }                                                                 \
             if (bad) {                                                        \
+                size_t hit = m;                                               \
                 for (size_t j = 0; j < m; j++) {                              \
                     int64_t o = (int64_t)LD(offs, i + j);                     \
                     if (o < len && (data[o] & 0xC0) == 0x80) {                \
-                        return (int64_t)(i + j);                              \
+                        hit = min_sz(hit, j);                                 \
                     }                                                         \
                 }                                                             \
+                return (int64_t)(i + hit);                                    \
             }                                                                 \
         }                                                                     \
         return -1;                                                            \
@@ -551,8 +562,33 @@ int64_t hs_columnar_gather_bits(uint8_t *dst, const uint8_t *src, size_t srcoff,
  * which the compiler vectorises (no validity, no per-row shift). Only a
  * block that contains an out-of-range value is rescanned exactly with its
  * validity mask, because null slots may hold any key.
+ *
+ * The limit setup is a macro argument rather than an IS_SIGNED flag so
+ * every generated check is a runtime compare: the types whose range can
+ * disagree with max get one, the 64-bit ones get none (an int64 max
+ * already fits either 64-bit key type).
  */
-#define DEF_KEYS(NAME, T, UT, IS_SIGNED)                                      \
+#define KEYS_LIMIT_CLAMP(T, UT, limv)                                       \
+    {                                                                        \
+        const uint64_t top = (uint64_t)1 << (sizeof(T) * 8 - 1);            \
+        if (limv > top) {                                                    \
+            limv = top;                                                      \
+        }                                                                    \
+    }
+
+#define KEYS_LIMIT_UNSIGNED(T, UT, limv)                                    \
+    {                                                                        \
+        if (limv > (uint64_t)(UT) ~(UT)0) {                                 \
+            return -1;                                                       \
+        }                                                                    \
+    }
+
+#define KEYS_LIMIT_NONE(T, UT, limv)                                        \
+    {                                                                        \
+        (void)(limv);                                                        \
+    }
+
+#define DEF_KEYS(NAME, T, UT, LIMIT_SETUP)                                  \
     static inline int NAME##_block_hit(const uint8_t *p, size_t m, UT lim)    \
     {                                                                         \
         UT hit = 0;                                                           \
@@ -570,16 +606,8 @@ int64_t hs_columnar_gather_bits(uint8_t *dst, const uint8_t *src, size_t srcoff,
         if (max <= 0) {                                                       \
             return first_valid(n, valid, validoff);                           \
         }                                                                     \
-        const unsigned bits = (unsigned)(sizeof(T) * 8);                      \
         uint64_t limv = (uint64_t)max;                                        \
-        if (IS_SIGNED) {                                                      \
-            const uint64_t top = (uint64_t)1 << (bits - 1);                   \
-            if (limv > top) {                                                 \
-                limv = top;                                                   \
-            }                                                                 \
-        } else if (bits < 64 && limv > (((uint64_t)1 << bits) - 1)) {         \
-            return -1;                                                        \
-        }                                                                     \
+        LIMIT_SETUP(T, UT, limv)                                              \
         const UT lim = (UT)limv;                                              \
         const uint8_t *p = (const uint8_t *)keys;                             \
         for (size_t i = 0; i < n; i += 64) {                                  \
@@ -602,14 +630,14 @@ int64_t hs_columnar_gather_bits(uint8_t *dst, const uint8_t *src, size_t srcoff,
         return -1;                                                            \
     }
 
-DEF_KEYS(hs_columnar_keys_in_range_i8, int8_t, uint8_t, 1)
-DEF_KEYS(hs_columnar_keys_in_range_i16, int16_t, uint16_t, 1)
-DEF_KEYS(hs_columnar_keys_in_range_i32, int32_t, uint32_t, 1)
-DEF_KEYS(hs_columnar_keys_in_range_i64, int64_t, uint64_t, 1)
-DEF_KEYS(hs_columnar_keys_in_range_u8, uint8_t, uint8_t, 0)
-DEF_KEYS(hs_columnar_keys_in_range_u16, uint16_t, uint16_t, 0)
-DEF_KEYS(hs_columnar_keys_in_range_u32, uint32_t, uint32_t, 0)
-DEF_KEYS(hs_columnar_keys_in_range_u64, uint64_t, uint64_t, 0)
+DEF_KEYS(hs_columnar_keys_in_range_i8, int8_t, uint8_t, KEYS_LIMIT_CLAMP)
+DEF_KEYS(hs_columnar_keys_in_range_i16, int16_t, uint16_t, KEYS_LIMIT_CLAMP)
+DEF_KEYS(hs_columnar_keys_in_range_i32, int32_t, uint32_t, KEYS_LIMIT_CLAMP)
+DEF_KEYS(hs_columnar_keys_in_range_i64, int64_t, uint64_t, KEYS_LIMIT_NONE)
+DEF_KEYS(hs_columnar_keys_in_range_u8, uint8_t, uint8_t, KEYS_LIMIT_UNSIGNED)
+DEF_KEYS(hs_columnar_keys_in_range_u16, uint16_t, uint16_t, KEYS_LIMIT_UNSIGNED)
+DEF_KEYS(hs_columnar_keys_in_range_u32, uint32_t, uint32_t, KEYS_LIMIT_UNSIGNED)
+DEF_KEYS(hs_columnar_keys_in_range_u64, uint64_t, uint64_t, KEYS_LIMIT_NONE)
 
 /*
  * List view: for every valid row, offs[i] >= 0, sizes[i] >= 0 and

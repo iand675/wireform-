@@ -270,39 +270,35 @@ int hs_base64_decode(const uint8_t *in, int in_len, uint8_t *out)
     }
 
     /* Tail quartet: may contain '=' padding. */
-    {
-        uint8_t a = b64_dec_table[in[i+0]];
-        uint8_t b = b64_dec_table[in[i+1]];
-        if (a >= 64 || b >= 64) return -1;
-        if (in[i+2] == (uint8_t)'=') {
-            if (in[i+3] != (uint8_t)'=') return -1;
-            uint32_t v = ((uint32_t)a << 18) | ((uint32_t)b << 12);
-            out[j+0] = (uint8_t)(v >> 16);
-            j += 1;
-        } else if (in[i+3] == (uint8_t)'=') {
-            uint8_t c = b64_dec_table[in[i+2]];
-            if (c >= 64) return -1;
-            uint32_t v = ((uint32_t)a << 18)
-                       | ((uint32_t)b << 12)
-                       | ((uint32_t)c <<  6);
-            out[j+0] = (uint8_t)(v >> 16);
-            out[j+1] = (uint8_t)(v >>  8);
-            j += 2;
-        } else {
-            uint8_t c = b64_dec_table[in[i+2]];
-            uint8_t d = b64_dec_table[in[i+3]];
-            if (c >= 64 || d >= 64) return -1;
-            uint32_t v = ((uint32_t)a << 18)
-                       | ((uint32_t)b << 12)
-                       | ((uint32_t)c <<  6)
-                       |  (uint32_t)d;
-            out[j+0] = (uint8_t)(v >> 16);
-            out[j+1] = (uint8_t)(v >>  8);
-            out[j+2] = (uint8_t) v;
-            j += 3;
-        }
-        i += 4;
+    uint8_t a = b64_dec_table[in[i+0]];
+    uint8_t b = b64_dec_table[in[i+1]];
+    if (a >= 64 || b >= 64) return -1;
+    if (in[i+2] == (uint8_t)'=') {
+        if (in[i+3] != (uint8_t)'=') return -1;
+        uint32_t v = ((uint32_t)a << 18) | ((uint32_t)b << 12);
+        out[j+0] = (uint8_t)(v >> 16);
+        j += 1;
+    } else if (in[i+3] == (uint8_t)'=') {
+        uint8_t c = b64_dec_table[in[i+2]];
+        if (c >= 64) return -1;
+        uint32_t v = ((uint32_t)a << 18)
+                   | ((uint32_t)b << 12)
+                   | ((uint32_t)c <<  6);
+        out[j+0] = (uint8_t)(v >> 16);
+        out[j+1] = (uint8_t)(v >>  8);
+        j += 2;
+    } else {
+        uint8_t c = b64_dec_table[in[i+2]];
+        uint8_t d = b64_dec_table[in[i+3]];
+        if (c >= 64 || d >= 64) return -1;
+        uint32_t v = ((uint32_t)a << 18)
+                   | ((uint32_t)b << 12)
+                   | ((uint32_t)c <<  6)
+                   |  (uint32_t)d;
+        out[j+0] = (uint8_t)(v >> 16);
+        out[j+1] = (uint8_t)(v >>  8);
+        out[j+2] = (uint8_t) v;
+        j += 3;
     }
-    (void)i;
     return j;
 }

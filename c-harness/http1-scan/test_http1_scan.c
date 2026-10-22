@@ -103,6 +103,34 @@ static void scan_exhaustive(void)
     wf_guard_free(g);
 }
 
+/* The 16-byte unrolled find_non_token block scan: the first non-token
+ * byte at every lane of a block at every block alignment, token bytes
+ * behind it so the inner search walks past the lanes in front of the
+ * hit; and the boundary where the token is exactly one block long (the
+ * block loop hands the rest to the scalar tail). */
+static void scan_token_block_lanes(void)
+{
+    enum { BLK = 16, END = 4 * BLK };
+    uint8_t *b = wf_alloc(END);
+    memset(b, 'a', END);
+    for (int off = 0; off < BLK; off++) {
+        for (int lane = 0; lane < BLK; lane++) {
+            int pos = off + BLK + lane;
+            b[pos] = ':';
+            WF_CHECK_EQ(hs_http1_find_non_token(b, off, END), pos);
+            b[pos] = 'a';
+        }
+        /* Exactly one block of tokens: the block loop ends and the
+         * (empty) scalar tail reports the end. */
+        WF_CHECK_EQ(hs_http1_find_non_token(b, off, off + BLK), off + BLK);
+        /* The first byte past the block is found in the scalar tail. */
+        b[off + BLK] = ':';
+        WF_CHECK_EQ(hs_http1_find_non_token(b, off, off + BLK + 1), off + BLK);
+        b[off + BLK] = 'a';
+    }
+    wf_free(b, END);
+}
+
 /* The buffer end at every distance 0..63 before the guard page, the gap
  * holding stop bytes: a read past len changes the answer (ASan, where the
  * gap is addressable) or faults (gap 0, guard page). */
@@ -701,6 +729,7 @@ int main(void)
     WF_RUN(scan_byte_classes);
     WF_RUN(scan_rfc_sets);
     WF_RUN(scan_exhaustive);
+    WF_RUN(scan_token_block_lanes);
     WF_RUN(scan_gaps);
     WF_RUN(scan_alignments);
     WF_RUN(scan_head_guard);

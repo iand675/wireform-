@@ -153,7 +153,16 @@ ptrdiff_t hs_http1_find_non_token(const void *buf, ptrdiff_t offset, ptrdiff_t l
     #pragma GCC unroll 16
     for (int j = 0; j < 16; j++) acc &= is_tchar[p[i + j]];
     if (!acc) {
-      for (int j = 0; j < 16; j++) if (!is_tchar[p[i + j]]) return i + j;
+      /* Re-scan for the first non-token byte; acc was cleared by one of
+       * these same tests, so the scan always finds one. Recording the
+       * minimum instead of returning early keeps every path live. */
+      int hit = 16;
+      for (int j = 0; j < 16; j++) {
+        if (!is_tchar[p[i + j]]) {
+          if (j < hit) hit = j;
+        }
+      }
+      return i + hit;
     }
   }
   return find_non_token_scalar(p, i, len);

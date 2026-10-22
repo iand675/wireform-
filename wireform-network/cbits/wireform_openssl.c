@@ -70,7 +70,13 @@ static int sys_cause(void) {
 }
 
 static int is_transient(int e) {
-    return e == EAGAIN || e == EWOULDBLOCK || e == EINTR;
+    /* EWOULDBLOCK is the same constant as EAGAIN on Darwin and Linux;
+     * the extra disjunct only exists where the platform separates them. */
+    return e == EAGAIN || e == EINTR
+#if EWOULDBLOCK != EAGAIN
+        || e == EWOULDBLOCK
+#endif
+        ;
 }
 
 /* A failure is a would-block retry when it is SSL_ERROR_SYSCALL with a

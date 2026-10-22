@@ -61,7 +61,15 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         WF_FUZZ_ASSERT(k == 0 || memcmp(dst, ref.p, k) == 0);
     }
     if (ref_ok == 1) {
-        if (cap >= ref.n) {
+        if (cap == 0 && ref.n == 0) {
+            /* Zero output space and a frame that writes nothing: liblz4
+             * needs a byte of capacity to finish even that, so
+             * NEEDS_MORE_OUT is the honest verdict. The kernel's caller
+             * contract is dst_cap >= 1 (api.h); cap 0 is modelled only
+             * to check the verdict stays honest. */
+            WF_FUZZ_ASSERT(rc == WF_DECOMPRESS_NEEDS_MORE_OUT
+                           || (rc == WF_DECOMPRESS_OK && prod == 0 && cons == ref_cons));
+        } else if (cap >= ref.n) {
             WF_FUZZ_ASSERT(rc == WF_DECOMPRESS_OK && prod == ref.n && cons == ref_cons);
         } else {
             WF_FUZZ_ASSERT(rc == WF_DECOMPRESS_NEEDS_MORE_OUT);

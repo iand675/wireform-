@@ -301,6 +301,18 @@ static void keys_vectors(void)
     WF_CHECK_EQ(hs_columnar_keys_in_range_u64(u64, 2, NULL, 0, INT64_MAX), 1);
     const int64_t i64[2] = { INT64_MAX - 1, INT64_MIN };
     WF_CHECK_EQ(hs_columnar_keys_in_range_i64(i64, 1, NULL, 0, INT64_MAX), -1);
+    /* max past the type's own range: signed types clamp to their top
+     * (a negative key still fails), unsigned types pass every key. */
+    const int16_t i16[2] = { 32767, -1 };
+    WF_CHECK_EQ(hs_columnar_keys_in_range_i16(i16, 1, NULL, 0, 100000), -1);
+    WF_CHECK_EQ(hs_columnar_keys_in_range_i16(i16, 2, NULL, 0, 100000), 1);
+    const int32_t i32[2] = { 2147483647, -5 };
+    WF_CHECK_EQ(hs_columnar_keys_in_range_i32(i32, 1, NULL, 0, 3000000000LL), -1);
+    WF_CHECK_EQ(hs_columnar_keys_in_range_i32(i32, 2, NULL, 0, 3000000000LL), 1);
+    const uint16_t u16[2] = { 65535, 0 };
+    WF_CHECK_EQ(hs_columnar_keys_in_range_u16(u16, 2, NULL, 0, 70000), -1);
+    const uint32_t u32[2] = { 4294967295u, 0 };
+    WF_CHECK_EQ(hs_columnar_keys_in_range_u32(u32, 2, NULL, 0, 5000000000LL), -1);
     WF_CHECK_EQ(hs_columnar_keys_in_range_i64(i64, 2, NULL, 0, INT64_MAX), 1);
     /* max <= 0: the first valid row fails, an all-null column passes. */
     const uint8_t none[1] = { 0 }, third[1] = { 0x04 };
@@ -629,10 +641,38 @@ static void view_refs_long_utf8(void)
     wf_guard_free(g);
 }
 
+/* Out-of-range and continuation offsets inside one recheck block: the
+ * out-of-range entry must not mask the continuation offender in either
+ * order, and the scan records the first offender across all of them. */
+static void utf8_mixed_block(void)
+{
+    static const uint8_t data[4] = { 0x41, 0x80, 0x42, 0x83 };
+    /* offender at index 1, out-of-range after it */
+    const int32_t a[3] = { 0, 1, 99 };
+    WF_CHECK_EQ(hs_columnar_utf8_boundaries_i32(a, 3, data, 4), 1);
+    /* out-of-range first, then two offenders: the first offender wins
+     * and the scan visits every entry. */
+    const int32_t b[3] = { 99, 1, 3 };
+    WF_CHECK_EQ(hs_columnar_utf8_boundaries_i32(b, 3, data, 4), 1);
+    const int32_t c[3] = { 99, 3, 1 };
+    WF_CHECK_EQ(hs_columnar_utf8_boundaries_i32(c, 3, data, 4), 1);
+    /* the 64-bit instantiation is separate code; drive it too */
+    const int64_t a64[3] = { 0, 1, 99 };
+    WF_CHECK_EQ(hs_columnar_utf8_boundaries_i64(a64, 3, data, 4), 1);
+    const int64_t b64[3] = { 99, 1, 3 };
+    WF_CHECK_EQ(hs_columnar_utf8_boundaries_i64(b64, 3, data, 4), 1);
+    const int64_t c64[3] = { 99, 3, 1 };
+    WF_CHECK_EQ(hs_columnar_utf8_boundaries_i64(c64, 3, data, 4), 1);
+    /* clean input still passes */
+    const int32_t ok[2] = { 0, 2 };
+    WF_CHECK_EQ(hs_columnar_utf8_boundaries_i32(ok, 2, data, 4), -1);
+}
+
 int main(void)
 {
     WF_RUN(offsets_sweep);
     WF_RUN(run_ends_sweep);
+    WF_RUN(utf8_mixed_block);
     WF_RUN(utf8_boundaries_sweep);
     WF_RUN(keys_vectors);
     WF_RUN(keys_sweep);

@@ -53,7 +53,15 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         WF_FUZZ_ASSERT(k == 0 || memcmp(dst, ref.p, k) == 0);
     }
     if (ref_ok == 1) {
-        if (cap >= ref.n) {
+        if (cap == 0 && ref.n == 0) {
+            /* Zero space and a member that writes nothing: the verdict
+             * is shape dependent (zlib may need a byte of capacity to
+             * finish even then). The kernel's caller contract is
+             * dst_cap >= 1; cap 0 is modelled only to keep the verdicts
+             * honest. */
+            WF_FUZZ_ASSERT(rc == WF_DECOMPRESS_OK || rc == WF_DECOMPRESS_NEEDS_MORE_OUT);
+            WF_FUZZ_ASSERT(prod == 0);
+        } else if (cap >= ref.n) {
             WF_FUZZ_ASSERT(rc == WF_DECOMPRESS_OK && prod == ref.n);
         } else {
             WF_FUZZ_ASSERT(rc == WF_DECOMPRESS_NEEDS_MORE_OUT);

@@ -48,9 +48,10 @@ Every kernel in `cbits/` is tested directly by
 tests plus libFuzzer targets, under ASan+UBSan (and MSan, valgrind,
 guard-page `-O3` builds and the clang static analyzer in `ci`) — not
 just through the FFI wrappers. Measured by `make -C c-harness coverage`:
-`fast_decode.c`, `fast_scan.c`, `base64.c` and `wireform_hash_simd.c`
-sit at 100% line and branch coverage, `magic_ring_posix.c` at 100%
-lines.
+every kernel here sits at 100% line coverage, and every branch except
+`fast_rng.c`'s kernel_random-failure arm — unreachable on Darwin, where
+`arc4random_buf` cannot fail, and covered by the Linux
+getrandom-failure tests in CI.
 
 ## License
 

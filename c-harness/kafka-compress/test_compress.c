@@ -431,6 +431,40 @@ static void lz4_edges(void)
     free(o);
 }
 
+/* A frame that decompresses to zero bytes: the ByteString wrapper
+ * reports it as 0 with nothing to free (documented), and the ring
+ * kernel completes it with any output space at all. With zero space
+ * the verdict is frame-shape dependent (liblz4 needs a byte of
+ * capacity to finish some empty frames), so both verdicts are honest
+ * there; a wrong success or a false BAD_INPUT is not. The kernel's
+ * caller contract is dst_cap >= 1, and fuzz_lz4f pins a concrete
+ * zero-space case as a regression. */
+static void lz4_zero_output_frame(void)
+{
+    char *c = NULL;
+    size_t cn = 0;
+    WF_CHECK(lz4_compress_wrapper("", 0, &c, &cn) > 0);
+
+    uint8_t dst[16];
+    size_t prod = 7, cons = 7;
+    WF_CHECK_EQ(wf_lz4f_decompress_into((const uint8_t *)c, cn, dst, sizeof dst, &prod, &cons),
+                WF_DECOMPRESS_OK);
+    WF_CHECK_EQ(prod, 0);
+    WF_CHECK_EQ(cons, cn);
+
+    prod = 7;
+    cons = 7;
+    int rc = wf_lz4f_decompress_into((const uint8_t *)c, cn, dst, 0, &prod, &cons);
+    WF_CHECK(rc == WF_DECOMPRESS_OK || rc == WF_DECOMPRESS_NEEDS_MORE_OUT);
+    WF_CHECK_EQ(prod, 0);
+
+    char *o = (char *)1;
+    size_t on = 1;
+    WF_CHECK_EQ(lz4_decompress_wrapper(c, cn, &o, &on), (size_t)0);
+    WF_CHECK(o == NULL);
+    free(c);
+}
+
 /* ------------------------------------------------------------------ */
 /* Gzip / zlib                                                         */
 /* ------------------------------------------------------------------ */
@@ -800,6 +834,7 @@ int main(void)
     WF_RUN(lz4_roundtrips);
     WF_RUN(lz4_wrapper_high_ratio_not_truncated);
     WF_RUN(lz4_truncated_frames);
+    WF_RUN(lz4_zero_output_frame);
     WF_RUN(lz4_linked_blocks_growth);
     WF_RUN(lz4_edges);
     WF_RUN(gzip_roundtrips);

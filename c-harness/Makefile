@@ -165,11 +165,11 @@ opt = $(if $(filter release valgrind,$(1)),$(or $($(2)_OPT),-O2))
 
 # $(1)=config $(2)=module $(3)=variant $(4)=program $(5)=extra sources
 define PROG_RULE
-$(BUILD)/$(1)/$(2)/$(3)/$(4): $(HARNESS_DIR)/$(2)/$(4).c $$($(2)_SRCS) $(5) $(COMMON_DEPS) $$(wildcard $(HARNESS_DIR)/$(2)/*.h) $$(foreach s,$$($(2)_SRCS),$$(wildcard $$(dir $$(s))*.h)) $(HARNESS_DIR)/$(2)/module.mk
+$(BUILD)/$(1)/$(2)/$(3)/$(4): $(HARNESS_DIR)/$(2)/$(4).c $$($(2)_SRCS) $(5) $(COMMON)/wf_fail.c $$($(2)_EXTRA) $(COMMON_DEPS) $$(wildcard $(HARNESS_DIR)/$(2)/*.h) $$(foreach s,$$($(2)_SRCS),$$(wildcard $$(dir $$(s))*.h)) $(HARNESS_DIR)/$(2)/module.mk
 	@mkdir -p $$(@D)
 	@$(if $(V),:,echo "  CC  $(1)/$(2)/$(3)/$(4)")
 	$$(Q)$$(CC_$(1)) $$(BASE_CFLAGS) $$(CFLAGS_$(1)) $$(call opt,$(1),$(2)) $$(call arch,$(1),$(2)) $$($(2)_CFLAGS) $$($(2)_VFLAGS_$(3)) -I$(HARNESS_DIR)/$(2) \
-	  -o $$@ $(HARNESS_DIR)/$(2)/$(4).c $$($(2)_SRCS) $(5) $$(WATCHDOG_$(1)) $$($(2)_LIBS) $$(LDFLAGS_$(1))
+	  -o $$@ $(HARNESS_DIR)/$(2)/$(4).c $$($(2)_SRCS) $(5) $$(WATCHDOG_$(1)) $(COMMON)/wf_fail.c $$($(2)_EXTRA) $$($(2)_LIBS) $$(LDFLAGS_$(1))
 endef
 
 # Tests and standalone replay binaries for the non-libFuzzer configs.

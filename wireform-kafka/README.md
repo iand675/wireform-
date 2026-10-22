@@ -167,8 +167,9 @@ The `cbits/` kernels (`crc32c.c`, the LZ4/snappy/zstd shims,
 directly by [`c-harness/`](../c-harness/README.md): unit, boundary and
 differential tests plus libFuzzer targets under ASan+UBSan (and MSan,
 valgrind and the clang static analyzer in `ci`). `make -C c-harness
-coverage` puts `crc32c.c` and `wireform_time.c` at 100% line coverage
-and the third-party codec shims at 86-96%.
+coverage` reports 100% line and branch coverage for every one of them;
+the out-of-memory and codec-constructor failure paths are driven by the
+harness's injected failures (`fail` build variants, see its README).
 
 ## Stream processing
 

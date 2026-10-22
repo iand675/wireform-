@@ -126,3 +126,41 @@ suite on both architectures; CI runs it on x86-64 Linux.
   `exit()`, and must not define `LLVMFuzzerInitialize`.
 - Every fixed bug gets its reproducer in `regressions/<fuzzer>/` (or a
   named unit test), so `replay` keeps it fixed in every config.
+
+## Failure injection (`fail` variants)
+
+The out-of-memory and library-failure error paths are unreachable
+through the public API: no input makes `malloc` return NULL or
+`inflateInit2` fail. A `fail` build variant makes them testable by
+compiling the kernels with selected libc and third-party entry points
+renamed to failpoint-aware fakes.
+
+Mechanics (see `kafka-compress/` for the worked example:
+`module.mk`'s `VFLAGS_fail`, `failfns.h`, `failfns.c`, `test_fail.c`):
+
+- `common/wf_fail.h` provides the failpoint core and the allocator
+  fakes (`-Dmalloc=wf_fail_malloc -Dcalloc=wf_fail_calloc`).
+  Failpoints arm through the environment: `setenv("WF_FAIL_<name>", "N", 1)`
+  fails the Nth subsequent call to that fake (a countdown, so the call
+  after it passes). The environment is the shared state, so arming from
+  the test translation unit reaches the kernels' fakes directly.
+- Third-party entry points are renamed with function-macros in the
+  variant's flags, e.g. `-D'inflateInit2_(a,b,c,d)=wf_fail_inflateInit2_(a,b,c,d)'`.
+  Their fakes live in the module's `failfns.c` (wired in via the
+  module's `_EXTRA`), which starts by `#undef`ing the renames and
+  declaring the real entry points explicitly: the force-included
+  headers saw the renames and declared the fakes instead. The fakes
+  pass through when unarmed, so a fail variant runs ordinary tests
+  too. (Asm labels do not bind on Mach-O; the `#undef` pattern is
+  portable.)
+- Fake modes beyond "fail" are fine where a caller's loop needs a
+  specific lie: `LZ4F_decompress`-style fakes that consume nothing,
+  claim a full buffer without writing it (`malloc_stub` hands out a
+  small real block for a huge request), or consume one byte and
+  produce nothing drive the no-progress, growth-guard and
+  mid-frame-iteration paths.
+- Failure tests live in the module's `test_fail.c` under
+  `#ifdef WF_FAIL_VARIANT`, so the binary passes trivially in the
+  other variants. Note `WF_SANITIZED_HEAP` is always defined (0 or 1),
+  so skip sanitizer-hostile cases with `#if !WF_SANITIZED_HEAP`, not
+  `#ifndef`.

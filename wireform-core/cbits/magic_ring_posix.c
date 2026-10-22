@@ -44,7 +44,23 @@ static size_t next_pow2(size_t val) {
  * an absurd request (including what a negative Haskell Int converts to)
  * fails with ENOMEM before any mapping, rather than relying on mmap to
  * reject a multi-exabyte reservation. */
-#define RING_MAX_SIZE ((size_t)1 << (sizeof(size_t) >= 8 ? 32 : 30))
+#if SIZE_MAX > 0xFFFFFFFFu
+#define RING_MAX_SIZE ((size_t)1 << 32)
+#else
+#define RING_MAX_SIZE ((size_t)1 << 30)
+#endif
+
+/* Digits of v appended to p (at most 20); returns the count. */
+static size_t wf_dec_u64(char *p, uint64_t v) {
+    char tmp[20];
+    size_t n = 0;
+    do {
+        tmp[n++] = (char)('0' + v % 10);
+        v /= 10;
+    } while (v);
+    for (size_t k = 0; k < n; k++) p[k] = tmp[n - 1 - k];
+    return n;
+}
 
 /* Close fd on an error path without clobbering the errno being reported. */
 static int fail_close(int fd) {
@@ -84,9 +100,16 @@ int hs_ring_create(size_t requested, struct hs_ring *out) {
     fd = shm_open(SHM_ANON, O_RDWR, 0600);
 #else
     for (int attempt = 0;; attempt++) {
+        /* "/wfring.<pid>.<counter>" built directly: the shape is fixed,
+         * and snprintf's fortified size check folds to a constant branch
+         * that coverage cannot account for. */
         char name[64];
-        snprintf(name, sizeof(name), "/wfring.%d.%ld",
-                 getpid(), atomic_fetch_add(&shm_counter, 1));
+        size_t k = 8;
+        memcpy(name, "/wfring.", 8);
+        k += wf_dec_u64(name + k, (uint64_t)getpid());
+        name[k++] = '.';
+        k += wf_dec_u64(name + k, (uint64_t)atomic_fetch_add(&shm_counter, 1));
+        name[k] = '\0';
         fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
         if (fd >= 0) {
             shm_unlink(name);

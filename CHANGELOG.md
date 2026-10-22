@@ -26,6 +26,22 @@
   `validateArrowBuffers` / `compareBounds` reject negative counts and
   widths instead of widening them into huge `CSize` values.
 
+* **C harness failure injection:** the kernels' out-of-memory and
+  library-failure error paths are now tested directly. A `fail` build
+  variant compiles kernels with selected libc and third-party entry
+  points renamed to failpoint-aware fakes (`common/wf_fail.h` plus a
+  per-module `failfns.c`), so tests can make `malloc` return NULL,
+  `inflateInit2` fail, or a decompressor stall mid-frame on demand and
+  drive every error path that no input could reach. Documented in
+  `c-harness/README.md`; `kafka-compress` is the worked example. With
+  that plus targeted tests and a few unreachable-arm removals, kernel
+  coverage is now 100% of functions, 99.9% of lines and 99.8% of
+  branches across all twenty kernel sources; the six uncovered branch
+  directions are documented, provably unreachable defensive arms. The
+  fuzzing this surfaced also pinned a zero-output LZ4 frame corner
+  (`wf_lz4f_decompress_into` with no output space) in
+  `kafka-compress/regressions/fuzz_lz4f/`.
+
 * **HTTP/2 cancellation and shutdown:** keep HPACK table updates masked
   through header publication so cancelling one stream cannot desynchronize
   later responses. The gRPC engine wakes requests reset before response

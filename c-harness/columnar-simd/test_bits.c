@@ -511,6 +511,17 @@ static void take_offsets_overflow(void)
         WF_CHECK_EQ(hs_columnar_take_offsets_i64(d64, o, both, 2), INT64_MAX);
         WF_CHECK_EQ(hs_columnar_take_offsets_i64(d64, o, first2, 2), -1);
     }
+    {
+        /* A row whose length itself overflows int64: the length is
+         * srcOffs[j+1] - srcOffs[j], so a large span from a negative base
+         * does not fit even before it is added to the accumulator. */
+        const int64_t o[2] = { INT64_MIN, INT64_MAX };
+        const int64_t one[1] = { 0 };
+        WF_CHECK_EQ(hs_columnar_take_offsets_i64(d64, o, one, 1), -1);
+        const int64_t o2[3] = { 0, -1, INT64_MAX };
+        const int64_t sel2[1] = { 1 };
+        WF_CHECK_EQ(hs_columnar_take_offsets_i64(d64, o2, sel2, 1), -1);
+    }
     /* n == 0 writes the single leading 0. */
     d32[0] = 7;
     d64[0] = 7;

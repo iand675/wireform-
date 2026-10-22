@@ -21,6 +21,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #if defined(__linux__)
 #include <sys/syscall.h>
@@ -43,6 +44,9 @@ typedef struct {
     int ret_zero;      /* nonzero: return 0 (sticky) */
     int overreport;    /* nonzero: claim one byte more than asked (sticky) */
     size_t chunk;      /* nonzero: serve at most this many bytes per call */
+    /* Nonzero: the next clock_gettime() on this thread fails, so the
+     * fallback seed runs without a monotonic timestamp. */
+    int clock_fail;
 } fake_entropy;
 
 static __thread fake_entropy fe;
@@ -128,5 +132,27 @@ void arc4random_buf(void *buf, size_t n)
 #else
 #error "core-rng harness: no entropy interposer for this platform"
 #endif
+
+/* clock_gettime is reached only by fast_rng.c's fallback seed. Forward to
+ * the real one unless fe.clock_fail is set, which makes the fallback skip
+ * the monotonic-time mix (fast_rng.c's "clock_gettime(...) == 0" false arm).
+ * Per thread, like the entropy fake above. */
+typedef int (*fe_clock_fn)(clockid_t, struct timespec *);
+
+int clock_gettime(clockid_t clk_id, struct timespec *tp)
+{
+    static fe_clock_fn real;
+    if (!fe.clock_fail) {
+        fe_clock_fn r = __atomic_load_n(&real, __ATOMIC_ACQUIRE);
+        if (!r) {
+            r = (fe_clock_fn)dlsym(RTLD_NEXT, "clock_gettime");
+            if (!r) abort();
+            __atomic_store_n(&real, r, __ATOMIC_RELEASE);
+        }
+        return r(clk_id, tp);
+    }
+    errno = EINTR;
+    return -1;
+}
 
 #endif

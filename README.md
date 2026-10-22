@@ -291,7 +291,13 @@ UndefinedBehaviorSanitizer (and MemorySanitizer, valgrind and guard-page
 `-O3` builds on Linux) plus the clang static analyzer.
 `nix develop .#c-harness -c make -C c-harness ci` runs the lot;
 `make -C c-harness coverage` measures it with llvm-cov: 100% of
-functions, 98% of lines and 95% of branches across the kernel sources.
+functions, 99.9% of lines and 99.8% of branches across the kernel
+sources. The few uncovered branch directions are documented,
+provably unreachable defensive arms (a zero-width bit read no caller
+can request, an entropy call that cannot fail on Darwin, and
+similar). The out-of-memory and library-failure error paths are
+covered too: `fail` build variants inject allocation and constructor
+failures on demand (see the harness README).
 
 ---
 

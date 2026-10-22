@@ -146,8 +146,10 @@ The `cbits/` kernels are additionally tested directly by
 [`c-harness/`](../c-harness/README.md): unit, boundary and differential
 tests plus libFuzzer targets under ASan+UBSan (and MSan, valgrind and
 the clang static analyzer in `ci`). `make -C c-harness coverage` reports
-100% function, 99.6% line and 92.5% branch coverage for
-`columnar_simd.c`.
+100% function, 99.6% line and 99.7% branch coverage for
+`columnar_simd.c`; the one uncovered branch is `load_bits`'s zero-width
+guard, kept for its "0 bits reads no bytes" contract beneath call sites
+that all guarantee 1..64 bits.
 
 ## Benchmarks
 

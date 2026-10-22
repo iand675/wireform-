@@ -113,6 +113,22 @@ static void zero_seed_fallback(void)
     check_stream(one, 100);
 }
 
+/* The fallback seed's clock-read failure arm: when clock_gettime fails the
+ * mix skips the monotonic timestamp but must still produce a non-degenerate
+ * stream (fast_rng.c's "clock_gettime(...) == 0" false branch). */
+static void fallback_seed_no_clock(void)
+{
+    static const uint64_t z[4] = { 0, 0, 0, 0 };
+    fe_set_seed(z);            /* all-zero entropy forces the fallback */
+    hs_xoshiro256pp_reseed();
+    fe.clock_fail = 1;         /* the monotonic clock read will fail */
+    check_fallback_stream();   /* the first draw seeds without a clock */
+    fe.clock_fail = 0;
+    /* With the clock working again, the fallback is unchanged in shape. */
+    kernel_seed(z);
+    check_fallback_stream();
+}
+
 /* Linux: getrandom fault handling. */
 static void linux_source_faults(void)
 {
@@ -360,6 +376,7 @@ int main(void)
     WF_RUN(random_seeds_differential);
     WF_RUN(reseed_consults_source);
     WF_RUN(zero_seed_fallback);
+    WF_RUN(fallback_seed_no_clock);
     WF_RUN(linux_source_faults);
     WF_RUN(threads_independent);
     WF_RUN(fork_child_reseeds);
