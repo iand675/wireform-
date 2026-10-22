@@ -125,6 +125,7 @@ test-suite wireform-http2-test
       Test.HPACKDejaFu
       Test.Connection
       Test.Defensive
+      Test.EngineClient
     hs-source-dirs:   test
     default-language: GHC2021
     default-extensions:

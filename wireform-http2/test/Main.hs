@@ -8,7 +8,7 @@
 -- HTTP test surface lives in @wireform-http@.
 module Main where
 
-import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar
 import Control.Exception (bracket)
 import qualified Data.ByteString.Char8 as BC
@@ -51,7 +51,6 @@ main = do
       _ <- forkIO $ withSocketServer portVar echoHandler
       port <- takeMVar portVar
       hPutStrLn stderr $ "Server listening on port " ++ show port
-      threadDelay 100000
       let args =
             [ "--host", "127.0.0.1"
             , "--port", show port

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+* **HTTP/2 cancellation and shutdown:** keep HPACK table updates masked
+  through header publication so cancelling one stream cannot desynchronize
+  later responses. The gRPC engine wakes requests reset before response
+  headers, propagates fatal header decoding failures, and delivers terminal
+  stream errors without blocking behind an abandoned full body queue.
+
+* **OpenSSL shutdown:** disable automatic process-global cleanup, which can
+  race GHC worker thread destructors and crash after the test suite succeeds.
+  A standalone C regression reproduces the exit race without the Haskell RTS.
+
+* **Kafka Streams tests:** verify balanced, disjoint partition ownership
+  independently of auto-generated member IDs. Lexical ordering of IDs such as
+  `consumer-9` and `consumer-10` does not preserve creation order.
+
 * **`wireform-lattice`** — an implementation of Lattice, a cache-native
   graph query protocol (GraphQL/JSON:API problem space; spec Draft 27 +
   GraphQL comparison corpus in the docs site under `/lattice/`): schema

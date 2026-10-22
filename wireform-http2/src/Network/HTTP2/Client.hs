@@ -1163,10 +1163,14 @@ registerAndSend handle req = do
             closeStream handle sid
             pure (Right sid)
           else do
-            block <- withMVar (connHpackEncoder conn) $ \encoder ->
-              encodeHeaderBlock defaultEncodeStrategy encoder allHeaders
-            sendFramesUnlocked conn
-              (headerBlockFrames sid endStreamOnHeaders 0 block maxFrame)
+            -- Masked so the HPACK table mutation and the frame reaching
+            -- the send ring cannot be split by an async exception (see
+            -- 'Network.HTTP2.Connection.sendEncodedHeaders').
+            mask_ $ do
+              block <- withMVar (connHpackEncoder conn) $ \encoder ->
+                encodeHeaderBlock defaultEncodeStrategy encoder allHeaders
+              sendFramesUnlocked conn
+                (headerBlockFrames sid endStreamOnHeaders 0 block maxFrame)
             pure (Right sid)
   sid <- case outcome of
     Left lastId -> do

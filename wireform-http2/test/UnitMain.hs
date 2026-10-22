@@ -10,6 +10,7 @@ import qualified Test.HPACKConcurrency
 import qualified Test.HPACKDejaFu
 import qualified Test.Connection
 import qualified Test.Defensive
+import qualified Test.EngineClient
 
 main :: IO ()
 main = sydTest $ describe "wireform-http2" $ sequence_
@@ -21,4 +22,5 @@ main = sydTest $ describe "wireform-http2" $ sequence_
   , Test.HPACKDejaFu.tests
   , Test.Connection.tests
   , Test.Defensive.tests
+  , Test.EngineClient.tests
   ]

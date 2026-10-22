@@ -107,12 +107,7 @@ runClient env client = do
         `catch` ( \(_ :: SomeException) -> do
                     streams <- readIORef streamsRef
                     let err = toException ClientStreamConnectionClosed
-                    mapM_
-                      ( \mb -> do
-                          _ <- tryPutMVar (smHeadersVar mb) (Left err)
-                          atomically $ writeTBQueue (smInputQueue mb) (InputError err)
-                      )
-                      (Map.elems streams)
+                    mapM_ (failStream err) (Map.elems streams)
                 )
   let sendRequest req k = doSendRequest env conn streamsRef nextSidRef req k
       aux = EngineAux {engineAuxPossibleStreams = pure 100}
@@ -188,6 +183,16 @@ data InputItem
   | InputFinal !ByteString
   | InputEnd
   | InputError !SomeException
+
+-- Failure delivery must not block the connection's sole reader behind
+-- a full body queue belonging to a consumer that has already stopped.
+failStream :: SomeException -> StreamMb -> IO ()
+failStream err mb = do
+  _ <- tryPutMVar (smHeadersVar mb) (Left err)
+  atomically $ do
+    full <- isFullTBQueue (smInputQueue mb)
+    when full (void (flushTBQueue (smInputQueue mb)))
+    writeTBQueue (smInputQueue mb) (InputError err)
 
 
 {- | Open a new stream, send the request headers/body, and call @k@
@@ -337,12 +342,7 @@ recvLoop env conn streamsRef = loop
         Nothing -> do
           streams <- readIORef streamsRef
           let err = toException ClientStreamConnectionClosed
-          mapM_
-            ( \mb -> do
-                _ <- tryPutMVar (smHeadersVar mb) (Left err)
-                atomically $ writeTBQueue (smInputQueue mb) (InputError err)
-            )
-            (Map.elems streams)
+          mapM_ (failStream err) (Map.elems streams)
         Just (Frame hdr payload) -> do
           handleClientFrame env conn streamsRef hdr payload
           loop
@@ -395,7 +395,9 @@ handleClientFrame _env conn streamsRef hdr payload = case fhType hdr of
           result <- withMVar (connHpackDecoder conn) $ \decoder ->
             decodeHeaderBlock decoder block
           case result of
-            Left _ -> closeConnection conn Wire.CompressionError "hpack decode"
+            Left _ -> do
+              closeConnection conn Wire.CompressionError "hpack decode"
+              throwIO ClientStreamConnectionClosed
             Right headers -> do
               streams <- readIORef streamsRef
               case Map.lookup (fhStreamId hdr) streams of
@@ -413,7 +415,9 @@ handleClientFrame _env conn streamsRef hdr payload = case fhType hdr of
                       atomically $ writeTBQueue (smInputQueue mb) InputEnd
                 Nothing -> pure ()
         _ -> pure ()
-    | otherwise -> closeConnection conn Wire.ProtocolError "fragmented HEADERS"
+    | otherwise -> do
+        closeConnection conn Wire.ProtocolError "fragmented HEADERS"
+        throwIO ClientStreamConnectionClosed
   FrameData -> case payload of
     DataFrame body -> do
       streams <- readIORef streamsRef
@@ -438,11 +442,14 @@ handleClientFrame _env conn streamsRef hdr payload = case fhType hdr of
   FrameRSTStream -> do
     streams <- readIORef streamsRef
     case Map.lookup (fhStreamId hdr) streams of
-      Just mb ->
-        atomically $
-          writeTBQueue
-            (smInputQueue mb)
-            (InputError (toException ClientStreamConnectionClosed))
+      Just mb -> do
+        let err = toException $ case payload of
+              RSTStreamFrame code -> ClientStreamReset code
+              _ -> ClientStreamConnectionClosed
+        -- A reset can arrive before any response HEADERS (the request
+        -- is still waiting in 'doSendRequest's takeMVar), or after them
+        -- (the body reader is waiting on the queue). Fail both.
+        failStream err mb
       Nothing -> pure ()
   _ -> pure ()
 

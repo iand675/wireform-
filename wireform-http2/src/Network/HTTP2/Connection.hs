@@ -227,6 +227,15 @@ sendFrames conn frames = do
 -- classic symptom is a dropped @:status@ / @PeerMissingPseudoHeaderStatus@).
 -- Holding the send lock for the whole encode+send makes the table
 -- mutation order identical to the wire order.
+--
+-- The encode and the send also run masked: 'withMVar' runs its body
+-- unmasked, so an async exception (a handler cancelled because its peer
+-- reset the stream) could otherwise land after the encode has mutated
+-- the table but before the frame is in the send ring, desyncing the
+-- peer's decoder for every later block on the connection. Neither step
+-- can be interrupted part-way: encoding does not block, and once the
+-- frame is published to the ring it is committed (an interrupted drain
+-- resumes from the ring's tail on the next send).
 sendEncodedHeaders
   :: Connection
   -> StreamId
@@ -234,7 +243,7 @@ sendEncodedHeaders
   -> [(ByteString, ByteString)]    -- ^ raw header list (incl. pseudo-headers)
   -> IO ()
 sendEncodedHeaders conn sid endStream headers =
-  withMVar (connSendLock conn) $ \_ -> do
+  withMVarMasked (connSendLock conn) $ \_ -> do
     block <- withMVar (connHpackEncoder conn) $ \enc ->
       encodeHeaderBlock defaultEncodeStrategy enc headers
     let !len   = BS.length block
@@ -271,7 +280,7 @@ sendNewStreamHeaders
   -> [(ByteString, ByteString)]    -- ^ raw header list (incl. pseudo-headers)
   -> IO StreamId
 sendNewStreamHeaders conn openStream endStream headers =
-  withMVar (connSendLock conn) $ \_ -> do
+  withMVarMasked (connSendLock conn) $ \_ -> do
     sid   <- openStream
     block <- withMVar (connHpackEncoder conn) $ \enc ->
       encodeHeaderBlock defaultEncodeStrategy enc headers
@@ -346,7 +355,8 @@ headerBlockFrames sid endStream extraFlags block maxFrame
 -- the send lock across /both/ the encode and the send. This atomicity is
 -- mandatory for the same reason as 'sendEncodedHeaders': HPACK is stateful,
 -- so the encoder's dynamic-table mutation order MUST match the order header
--- blocks reach the wire, or a concurrent sender desyncs the peer's decoder.
+-- blocks reach the wire, or a concurrent sender desyncs the peer's decoder;
+-- and it runs masked for the same reason too.
 -- Unlike 'sendEncodedHeaders' this splits oversized blocks into
 -- CONTINUATION frames at @maxFrame@.
 encodeAndSendHeaderBlock
@@ -358,7 +368,7 @@ encodeAndSendHeaderBlock
   -> Int                           -- ^ peer SETTINGS_MAX_FRAME_SIZE
   -> IO ()
 encodeAndSendHeaderBlock conn sid endStream extraFlags headers maxFrame =
-  withMVar (connSendLock conn) $ \_ -> do
+  withMVarMasked (connSendLock conn) $ \_ -> do
     block <- withMVar (connHpackEncoder conn) $ \enc ->
       encodeHeaderBlock defaultEncodeStrategy enc headers
     sendFramesUnlocked conn (headerBlockFrames sid endStream extraFlags block maxFrame)
