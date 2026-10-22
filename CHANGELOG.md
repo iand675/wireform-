@@ -18,6 +18,14 @@
   carries the Arrow budgets, and its Arrow file iteration now streams
   section by section.
 
+* **FFI boundary hardening (review follow-up on #91):** the Arrow
+  buffer validator's sign-bit mask now swaps with the platform byte
+  order (an int64's sign bit lands in movemask bits 7 and 15 only on
+  little-endian; big-endian uses bits 0 and 8), a negative
+  `body_length` is rejected before anything else, and `Wireform.FFI`'s
+  `validateArrowBuffers` / `compareBounds` reject negative counts and
+  widths instead of widening them into huge `CSize` values.
+
 * **HTTP/2 cancellation and shutdown:** keep HPACK table updates masked
   through header publication so cancelling one stream cannot desynchronize
   later responses. The gRPC engine wakes requests reset before response

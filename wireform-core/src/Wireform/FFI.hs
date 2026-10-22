@@ -582,13 +582,15 @@ Returns a bitmask where bit i is set if @bounds[i] <= search@.
 For 4-byte LE int32 bounds, uses SSE2 to compare 4 at a time.
 
 @count@ and @width@ are counts, not offsets, and must be non-negative:
-they cross the FFI as 'CSize', so a negative value is a caller bug (it
-becomes a huge count) rather than an empty mask. @width == 0@ means empty
-bounds, which compare equal to the search value.
+they cross the FFI as 'CSize', so a negative value would become a huge
+count; it is rejected here with an empty mask instead. @width == 0@
+means empty bounds, which compare equal to the search value.
 -}
 compareBounds :: Ptr Word8 -> Int -> Int -> Ptr Word8 -> Int
-compareBounds !boundsPtr !count !width !searchPtr =
-  fromIntegral (c_compare_bounds (castPtr boundsPtr) (fromIntegral count) (fromIntegral width) (castPtr searchPtr))
+compareBounds !boundsPtr !count !width !searchPtr
+  | count < 0 || width < 0 = 0
+  | otherwise =
+      fromIntegral (c_compare_bounds (castPtr boundsPtr) (fromIntegral count) (fromIntegral width) (castPtr searchPtr))
 {-# INLINE compareBounds #-}
 
 
@@ -632,11 +634,14 @@ The kernel is one linear pass over the pairs (16 bytes each). Like the
 input (4096 buffers, far more than a record batch normally has) and a
 @safe@ call above that, so a hostile buffer table cannot hold up the RTS.
 
-@count@ is the number of pairs (it crosses the FFI as 'CSize'), so it must
-be non-negative; the callers pass @VS.length@ of the buffer vector.
+@count@ is the number of pairs and crosses the FFI as 'CSize'; a negative
+@count@ or body length is a caller bug that would otherwise widen into a
+huge count, so both are rejected as invalid here instead of reaching the
+kernel.
 -}
 validateArrowBuffers :: Ptr Int64 -> Int -> Int64 -> Bool
 validateArrowBuffers !ptr !count !bodyLength
+  | count < 0 || bodyLength < 0 = False
   | count <= 4096 = c_validate_arrow_buffers (castPtr ptr) (fromIntegral count) bodyLength /= 0
   | otherwise = c_validate_arrow_buffers_safe (castPtr ptr) (fromIntegral count) bodyLength /= 0
 {-# INLINE validateArrowBuffers #-}

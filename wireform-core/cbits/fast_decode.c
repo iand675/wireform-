@@ -1017,10 +1017,25 @@ int hs_proto_compare_bounds(
  * `count` is the number of (offset, length) pairs and `buf_pairs` holds
  * 2 * count int64s, so it is size_t (a negative Int would be a caller
  * bug: it becomes a huge count rather than an empty table).
+ *
+ * `body_length` is signed like the offsets it is compared against; a
+ * negative one describes no body and is rejected outright, even with
+ * zero buffers.
  */
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+/* The two int64 sign bits in a movemask_epi8 result over one 16-byte
+ * pair: bit 7 of each lane's most-significant byte, which is lane byte
+ * 0 on big-endian. */
+#define WF_PAIR_SIGN_MASK 0x0101
+#else
+/* Lane byte 7 on little-endian (movemask bits 7 and 15). */
+#define WF_PAIR_SIGN_MASK 0x8080
+#endif
+
 int hs_proto_validate_arrow_buffers(
     const int64_t *buf_pairs, size_t count, int64_t body_length)
 {
+    if (body_length < 0) return 0;
     if (count == 0) return 1;
 
     int64_t prev_end = 0;
@@ -1033,10 +1048,12 @@ int hs_proto_validate_arrow_buffers(
         const int64_t *pp = buf_pairs + i * 2;
         simde__m128i pair0 = simde_mm_loadu_si128((const simde__m128i *)pp);
         simde__m128i pair1 = simde_mm_loadu_si128((const simde__m128i *)(pp + 2));
-        /* Check all 4 values are non-negative: the sign bit of each
-         * int64 lives in byte 7 of its 8-byte lane (movemask bits 7, 15). */
+        /* Check all 4 values are non-negative: each int64's sign bit
+         * is bit 7 of its most-significant byte (see WF_PAIR_SIGN_MASK,
+         * which names the movemask bits that byte lands in for the
+         * platform's byte order). */
         simde__m128i combined = simde_mm_or_si128(pair0, pair1);
-        if (simde_mm_movemask_epi8(combined) & 0x8080) return 0;
+        if (simde_mm_movemask_epi8(combined) & WF_PAIR_SIGN_MASK) return 0;
 
         /* Scalar bounds + overlap checks */
         for (int j = 0; j < 2; j++) {

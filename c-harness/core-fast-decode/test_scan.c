@@ -504,6 +504,9 @@ static int arrow(const int64_t *pairs, int count, int64_t body)
 static void arrow_vectors(void)
 {
     WF_CHECK_EQ(hs_proto_validate_arrow_buffers(NULL, 0, 0), 1);
+    /* body_length is checked for non-negativity before anything else:
+     * a negative body describes no body, even with zero buffers. */
+    WF_CHECK_EQ(hs_proto_validate_arrow_buffers(NULL, 0, -1), 0);
     WF_CHECK_EQ(arrow((int64_t[]){ 0, 8 }, 1, 8), 1);
     WF_CHECK_EQ(arrow((int64_t[]){ 0, 9 }, 1, 8), 0);
     WF_CHECK_EQ(arrow((int64_t[]){ 0, 1, 8, 12 }, 2, 20), 1);

@@ -492,6 +492,7 @@ static inline int ref_compare_bounds(const uint8_t *bounds, size_t count, size_t
 
 static inline int ref_validate_arrow(const int64_t *p, size_t count, int64_t body)
 {
+    if (body < 0) return 0;
     int64_t prev_end = 0;
     for (size_t i = 0; i < count; i++) {
         int64_t off = p[2 * i], len = p[2 * i + 1];
