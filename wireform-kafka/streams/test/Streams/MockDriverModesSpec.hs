@@ -234,17 +234,16 @@ two_drivers_split_partitions_same_group =
     runUntilQuiet a
     runUntilQuiet b
 
-    aAsg <- L.sort <$> assignedPartitions (driverConsumer a)
-    bAsg <- L.sort <$> assignedPartitions (driverConsumer b)
-    -- The deterministic round-robin assignor sorts members by id;
-    -- since both auto-generated ids are "consumer-N" with N
-    -- monotonically increasing, the lower-N driver gets even
-    -- partitions and the higher-N driver gets odd ones.
-    map snd aAsg `shouldBe` [0, 2]
-    map snd bAsg `shouldBe` [1, 3]
-    -- Together they cover every partition.
-    Set.fromList (aAsg ++ bAsg)
-      `shouldBe` Set.fromList [(topicName "in", p) | p <- [0, 1, 2, 3]]
+    aAsg <- Set.fromList <$> assignedPartitions (driverConsumer a)
+    bAsg <- Set.fromList <$> assignedPartitions (driverConsumer b)
+    -- Member ids are lexically ordered, not numerically ordered:
+    -- "consumer-10" precedes "consumer-9". Check ownership rather than
+    -- assuming which driver receives the even-numbered partitions.
+    Set.size aAsg `shouldBe` 2
+    Set.size bAsg `shouldBe` 2
+    Set.intersection aAsg bAsg `shouldBe` Set.empty
+    Set.union aAsg bAsg
+      `shouldBe` Set.fromList (map (\p -> (topicName "in", p)) [0, 1, 2, 3])
     closeMockDriver a
     closeMockDriver b
 
