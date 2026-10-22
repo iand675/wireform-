@@ -2373,8 +2373,33 @@ compareFloating x y = case (isNaN x, isNaN y) of
 -- Eq, Show, NFData
 -- ============================================================
 
+{- | Structural, O(columns): every child column and validity is forced,
+recursively. A column stores no lazy row thunks, so this is the whole
+normal form; row-level behaviour needs the accessors.
+-}
 instance NFData ColumnArray where
-  rnf = (`seq` ())
+  rnf = \case
+    I.ColNull n -> n `seq` ()
+    I.ColPrim t v xs -> withPrim t (rnf v `seq` xs `seq` ())
+    I.ColBool v b -> rnf v `seq` rnf b
+    I.ColUtf8 v o d -> rnf v `seq` rnf o `seq` rnf d
+    I.ColBinary v o d -> rnf v `seq` rnf o `seq` rnf d
+    I.ColLargeUtf8 v o d -> rnf v `seq` rnf o `seq` rnf d
+    I.ColLargeBinary v o d -> rnf v `seq` rnf o `seq` rnf d
+    I.ColFixedSizeBinary _ _ v d -> rnf v `seq` rnf d
+    I.ColUtf8View v views bufs -> rnf v `seq` rnf views `seq` rnf bufs
+    I.ColBinaryView v views bufs -> rnf v `seq` rnf views `seq` rnf bufs
+    I.ColStruct _ v cs -> rnf v `seq` V.foldl' (\() (n, c) -> rnf n `seq` rnf c) () cs
+    I.ColList v _ c -> rnf v `seq` rnf c
+    I.ColLargeList v _ c -> rnf v `seq` rnf c
+    I.ColListView v _ _ c -> rnf v `seq` rnf c
+    I.ColLargeListView v _ _ c -> rnf v `seq` rnf c
+    I.ColFixedSizeList _ _ v c -> rnf v `seq` rnf c
+    I.ColMap v _ k x -> rnf v `seq` rnf k `seq` rnf x
+    I.ColDenseUnion _ _ cs -> V.foldl' (\() c -> rnf c) () cs
+    I.ColSparseUnion _ cs -> V.foldl' (\() c -> rnf c) () cs
+    I.ColDictionary _ k x -> rnf k `seq` rnf x
+    I.ColRunEndEncoded _ _ re vals -> rnf re `seq` rnf vals
 
 
 -- | Logical, O(n); see the module header.

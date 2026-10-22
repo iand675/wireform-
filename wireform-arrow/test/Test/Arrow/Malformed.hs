@@ -13,11 +13,14 @@ allocate past 'allocationLimitBytes'.
 
 Decoded columns alias the input and their 'NFData' instance forces
 only the outer constructor, so "forced to normal form" means more for
-a column-producing decoder: every accessor is run over every row of
-every column (children, dictionary values and run ends included), the
-column must read back through the row model of "Test.Arrow.Gen"
-without an out-of-range reference, and it must equal itself and its
-'copyColumn'.
+a column-producing decoder: every accessor is run over the column's
+rows in bounded windows (children, dictionary values and run ends
+included), the column must read back through the row model of
+"Test.Arrow.Gen" without an out-of-range reference, and it must equal
+itself and its 'copyColumn'. Windows matter because an all-null,
+fieldless or run-end-encoded column can name billions of rows for a
+few hundred input bytes; walking all of them would measure the test,
+not the decoder.
 -}
 module Test.Arrow.Malformed (tests) where
 
@@ -409,52 +412,116 @@ containedColumns cols r = do
         _ -> Nothing
 
 
-{- | Every accessor over every row of a column and, recursively, of its
-children: typed element access, byte/text/list/dictionary/bool access,
-validity, the O(n) conversions, dictionary expansion, a slice, 'Show'
-(its first 64 KiB), reflexive 'Eq' and 'copyColumn'. 'Left' when the
-column does not read back through the row model or a copy differs
-from the original; the 'Int' only exists to force everything.
+{- | Every accessor over a column and, recursively, over its children:
+typed element access, byte/text/list/dictionary/bool access, validity,
+the O(n) conversions, dictionary expansion, a slice, 'Show' (its first
+64 KiB), reflexive 'Eq' and 'copyColumn'. 'Left' when the column does
+not read back through the row model or a copy differs from the
+original; the 'Int' only exists to force everything.
+
+Rows are walked in bounded windows ('columnWindows'): a run-end-encoded
+array names its rows in run ends and an all-null or fieldless column
+has nothing to read, so either can legitimately claim billions of rows
+for a few hundred input bytes. The decoder must accept those, and no
+per-row pass can walk them, so the head, middle and tail are exercised
+instead.
 -}
 exerciseColumn :: ColumnArray -> Either String Int
 exerciseColumn c = do
-  vs <- G.columnValues c
   kids <- traverse exerciseColumn (G.childColumns c)
-  let n = columnLength c
-      primScore i = case c of
-        ColPrim t v xs -> withPrim t (maybe 0 (const 1) (primAt (PrimArray v xs) i))
-        _ -> 0
-      rowScore i =
-        maybe 0 BS.length (anyBytesAt c i)
-          + maybe 0 T.length (anyTextAt c i)
-          + maybe 0 (\r -> childStart r + childLength r) (listRange c i)
-          + fromMaybe 0 (dictKeyAt c i)
-          + maybe 0 fromEnum (boolAt c i)
-          + fromEnum (isValidAt (validity c) i)
-          + primScore i
-      sized :: AV.Element a => (a -> Int) -> Either String (AV.Vector (Maybe a)) -> Int
-      sized f = either (const 0) (VG.foldl' (\acc x -> acc + maybe 1 f x) 0)
-      conversions =
-        sized T.length (toTextVector c)
-          + sized BS.length (toBytesVector c)
-          + sized fromEnum (toBoolVector c)
-  expanded <- either (const (Right 0)) (fmap valuesSize . G.columnValues) (expandDictionary c)
-  sliced <- valuesSize <$> G.columnValues (sliceColumnArray 1 (n - 2) c)
-  if c /= c
-    then Left "a decoded column is not equal to itself"
-    else
-      if copyColumn c /= c
-        then Left "copyColumn changed a decoded column"
+  windows <- traverse exerciseWindow (columnWindows c)
+  Right $!
+    sum windows
+      + length (take 65536 (show c))
+      + nullCount c
+      + sum kids
+
+
+{- | Rows one at a time in one column: how many rows 'columnWindows'
+walks one by one when a column is longer than that.
+-}
+exerciseWindowRows :: Int
+exerciseWindowRows = 3 * 4096
+
+
+{- | The rows 'exerciseColumn' walks: the column itself when it is that
+short, otherwise equally sized head, middle and tail slices, so every
+accessor still runs against both ends of each buffer and an interior
+run.
+-}
+columnWindows :: ColumnArray -> [ColumnArray]
+columnWindows c
+  | n <= exerciseWindowRows = [c]
+  | otherwise = map (\start -> sliceColumnArray start w c) [0, (n - w) `quot` 2, n - w]
+  where
+    !n = columnLength c
+    !w = exerciseWindowRows `quot` 3
+
+
+{- | Upper bound on the values the row model materializes for a column:
+its own logical length plus every child's cost. Lists and maps name
+child ranges without rebasing the child, so a short parent window can
+still reference a huge child; run-end columns and nulls shrink with a
+row slice. Cheap, O(columns).
+-}
+columnCost :: ColumnArray -> Integer
+columnCost c = toInteger (columnLength c) + sum (map columnCost (G.childColumns c))
+
+
+{- | Values one window may materialize through the row model. A window is
+a few thousand rows, so this leaves headroom for wide nested rows while
+keeping one accessor call to a few tens of megabytes.
+-}
+exerciseValueBudget :: Integer
+exerciseValueBudget = 262144
+
+
+{- | Every accessor over every row of one bounded window. The row model
+is only materialized when 'columnCost' says the window is small enough:
+a run-end column or a list over one can name billions of values in a few
+input bytes, and expanding those would measure the test's memory, not
+the decoder's behaviour. The per-row accessors still run over every row
+of the window either way.
+-}
+exerciseWindow :: ColumnArray -> Either String Int
+exerciseWindow c =
+  if columnCost c > exerciseValueBudget
+    then Right $! foldl' (\acc i -> acc + rowScore i) 0 [0 .. n - 1]
+    else do
+      vs <- G.columnValues c
+      expanded <- either (const (Right 0)) (fmap valuesSize . G.columnValues) (expandDictionary c)
+      sliced <- valuesSize <$> G.columnValues (sliceColumnArray 1 (n - 2) c)
+      if c /= c
+        then Left "a decoded column is not equal to itself"
         else
-          Right $!
-            foldl' (\acc i -> acc + rowScore i) 0 [0 .. n - 1]
-              + valuesSize vs
-              + length (take 65536 (show c))
-              + conversions
-              + expanded
-              + sliced
-              + nullCount c
-              + sum kids
+          if copyColumn c /= c
+            then Left "copyColumn changed a decoded column"
+            else
+              Right $!
+                foldl' (\acc i -> acc + rowScore i) 0 [0 .. n - 1]
+                  + valuesSize vs
+                  + conversions
+                  + expanded
+                  + sliced
+  where
+    !n = columnLength c
+    primScore i = case c of
+      ColPrim t v xs -> withPrim t (maybe 0 (const 1) (primAt (PrimArray v xs) i))
+      _ -> 0
+    rowScore i =
+      maybe 0 BS.length (anyBytesAt c i)
+        + maybe 0 T.length (anyTextAt c i)
+        + maybe 0 (\r -> childStart r + childLength r) (listRange c i)
+        + fromMaybe 0 (dictKeyAt c i)
+        + maybe 0 fromEnum (boolAt c i)
+        + fromEnum (isValidAt (validity c) i)
+        + primScore i
+    sized :: AV.Element a => (a -> Int) -> Either String (AV.Vector (Maybe a)) -> Int
+    sized f = either (const 0) (VG.foldl' (\acc x -> acc + maybe 1 f x) 0)
+    conversions =
+      sized T.length (toTextVector c)
+        + sized BS.length (toBytesVector c)
+        + sized fromEnum (toBoolVector c)
 
 
 -- | Force every row of the model, deeply.
@@ -518,7 +585,6 @@ noDecoderCrashes bs = mapM_ one decoders
         Just err -> do
           annotate (name ++ " " ++ err)
           failure
-
 
 -- * Byte-level mutations
 
