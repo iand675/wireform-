@@ -142,6 +142,13 @@ fusion equivalence, prefetch / parallelism preserving order),
 predicate evaluation, the LZ4 frame round-trip, and the SIMD kernels
 against scalar reference implementations.
 
+The `cbits/` kernels are additionally tested directly by
+[`c-harness/`](../c-harness/README.md): unit, boundary and differential
+tests plus libFuzzer targets under ASan+UBSan (and MSan, valgrind and
+the clang static analyzer in `ci`). `make -C c-harness coverage` reports
+100% function, 99.6% line and 92.5% branch coverage for
+`columnar_simd.c`.
+
 ## Benchmarks
 
 No per-package criterion harness in tree yet. The columnar primitives

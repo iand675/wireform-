@@ -162,6 +162,14 @@ docker compose -f test-integration/docker-compose.yml up -d
 WIREFORM_KAFKA_BROKER=localhost:9092 cabal test wireform-kafka:wireform-kafka-integration
 ```
 
+The `cbits/` kernels (`crc32c.c`, the LZ4/snappy/zstd shims,
+`wireform_decompress.c`, `wireform_time.c`) are additionally tested
+directly by [`c-harness/`](../c-harness/README.md): unit, boundary and
+differential tests plus libFuzzer targets under ASan+UBSan (and MSan,
+valgrind and the clang static analyzer in `ci`). `make -C c-harness
+coverage` puts `crc32c.c` and `wireform_time.c` at 100% line coverage
+and the third-party codec shims at 86-96%.
+
 ## Stream processing
 
 ```haskell

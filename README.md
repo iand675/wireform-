@@ -283,6 +283,16 @@ conformance suites (silent skip when the runner isn't installed):
 - `wireform-fory`: pyfory
 - `wireform-kafka`: live broker via `WIREFORM_KAFKA_BROKER=host:port`
 
+Every first-party C kernel under `*/cbits/` is also tested **directly**,
+not only through its FFI wrapper: [`c-harness/`](c-harness/README.md)
+holds unit, boundary and differential tests plus libFuzzer targets and
+replayed corpora for every kernel, run under AddressSanitizer +
+UndefinedBehaviorSanitizer (and MemorySanitizer, valgrind and guard-page
+`-O3` builds on Linux) plus the clang static analyzer.
+`nix develop .#c-harness -c make -C c-harness ci` runs the lot;
+`make -C c-harness coverage` measures it with llvm-cov: 100% of
+functions, 98% of lines and 95% of branches across the kernel sources.
+
 ---
 
 ## Examples

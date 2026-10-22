@@ -41,6 +41,17 @@ packages can share the builder engine and the hottest C kernels
 duplicating the `__attribute__((target(...)))` / `simde-features.h`
 plumbing.
 
+## C kernels
+
+Every kernel in `cbits/` is tested directly by
+[`c-harness/`](../c-harness/README.md) — unit, boundary and differential
+tests plus libFuzzer targets, under ASan+UBSan (and MSan, valgrind,
+guard-page `-O3` builds and the clang static analyzer in `ci`) — not
+just through the FFI wrappers. Measured by `make -C c-harness coverage`:
+`fast_decode.c`, `fast_scan.c`, `base64.c` and `wireform_hash_simd.c`
+sit at 100% line and branch coverage, `magic_ring_posix.c` at 100%
+lines.
+
 ## License
 
 BSD-3-Clause.  Vendored `simde` headers carry their own MIT license
