@@ -40,7 +40,7 @@ module Network.GRPC.Util.Session.Channel (
 ) where
 
 import Control.Concurrent.STM (STM, atomically, throwSTM)
-import Control.Concurrent.STM.TMVar (TMVar, newEmptyTMVarIO, putTMVar, readTMVar, takeTMVar)
+import Control.Concurrent.STM.TMVar (TMVar, isEmptyTMVar, newEmptyTMVarIO, putTMVar, readTMVar, takeTMVar)
 import Control.Concurrent.STM.TVar (TVar, newTVarIO, readTVar, writeTVar)
 import Data.ByteString.Lazy qualified as BS.Lazy
 import Network.GRPC.Common.StreamElem (StreamElem (..))
@@ -563,7 +563,23 @@ linkOutboundToInbound allowHalfClosed channel inbound = do
     (Right result, TerminateWhenInboundClosed f) ->
       void $ cancelThread (channelOutbound channel) (f result)
     (Left (exception :: SomeException), _) -> do
-      void $ cancelThread (channelOutbound channel) exception
+      -- A client can reset/close immediately after reading our trailers,
+      -- before the outbound worker records ThreadDone. Do not replace a
+      -- completed response with that late read-side error: its final body
+      -- has already drained, and its own final write still reports failure.
+      -- Earlier disconnects must continue to cancel an unfinished response.
+      finishing <- case allowHalfClosed of
+        ContinueWhenInboundClosed -> atomically $ do
+          st <- readTVar (channelOutbound channel)
+          case st of
+            ThreadRunning _ _ (FlowStateRegular regular) ->
+              not <$> isEmptyTMVar (flowTerminated regular)
+            ThreadRunning _ _ (FlowStateNoMessages _) -> return True
+            ThreadDone{} -> return True
+            _ -> return False
+        TerminateWhenInboundClosed _ -> return False
+      unless finishing $
+        void $ cancelThread (channelOutbound channel) exception
       throwIO exception
   where
     _ = addConstraint @(IsSession sess)

@@ -6,7 +6,7 @@ module Test.Sanity.StreamingType.NonStreaming (tests) where
 
 import Data.Word
 import Test.Syd
-import System.IO.Temp (getCanonicalTemporaryDirectory)
+import System.IO.Temp (getCanonicalTemporaryDirectory, withTempDirectory)
 import System.FilePath ((</>))
 
 import Network.GRPC.Client qualified as Client
@@ -27,8 +27,12 @@ tests = describe "Test.Sanity.StreamingType.NonStreaming" $ sequence_ [
           it "default" $
             test_increment def
         , it "unix socket" $ do
+            -- A fresh directory per run: a fixed path collides with any
+            -- other run of this suite (bind: address already in use, or a
+            -- client reaching the other run's server).
             tmpDir <- getCanonicalTemporaryDirectory
-            test_increment def { serverPort = Left (tmpDir </> "grapesy.sock") }
+            withTempDirectory tmpDir "grapesy" $ \dir ->
+              test_increment def { serverPort = Left (dir </> "grapesy.sock") }
         , describe "Content-Type" $ sequence_ [
               describe "ok" $ sequence_ [
                   -- Without the +format part
@@ -125,6 +129,8 @@ tests = describe "Test.Sanity.StreamingType.NonStreaming" $ sequence_ [
                     test_increment def {
                         isExpectedClientException =
                            isClientUnsupportedCompression
+                      , isExpectedServerException =
+                           isClientDisconnected
                       , clientCompr =
                           Compr.none
                       , serverCompr =

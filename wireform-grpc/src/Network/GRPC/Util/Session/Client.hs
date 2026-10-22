@@ -8,10 +8,9 @@ module Network.GRPC.Util.Session.Client (
 
 import Network.GRPC.Util.Imports
 
-import Control.Concurrent.MVar (MVar, newEmptyMVar, readMVar, putMVar)
+import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, tryReadMVar)
 import Control.Concurrent.STM (atomically, readTVarIO)
 import Control.Concurrent.STM.TVar (modifyTVar)
-import Control.Monad (join)
 import Data.ByteString qualified as BS.Strict
 import Data.ByteString qualified as Strict (ByteString)
 import Data.ByteString.Lazy qualified as BS.Lazy
@@ -113,8 +112,16 @@ setupRequestChannel sess
     let requestInfo = buildRequestInfo sess outboundStart
 
     cancelRequestVar <- newEmptyMVar
+    -- The outbound thread registers the engine's cancel action when it
+    -- starts. It may never get that far: the server can answer (and the
+    -- inbound side cancel the outbound thread) before the engine schedules
+    -- it, and the engine never runs it at all if sending HEADERS fails.
+    -- Blocking here then hung 'closeRPC' forever. If nothing is registered
+    -- there is nothing to cancel yet: 'Session.close' marks the outbound
+    -- thread cancelled, so if it does start it aborts, and the engine
+    -- resets the stream instead of ending it cleanly.
     let cancelRequest :: CancelRequest
-        cancelRequest e = join . (fmap ($ e)) $ readMVar cancelRequestVar
+        cancelRequest e = tryReadMVar cancelRequestVar >>= mapM_ ($ e)
 
     case outboundStart of
       FlowStartRegular headers -> do

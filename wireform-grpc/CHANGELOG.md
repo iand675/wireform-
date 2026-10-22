@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+* Avoid blocking RPC cancellation on an outbound worker that never registered
+  its engine cancel action. Unix-domain socket tests use per-run temporary
+  directories so concurrent test processes do not contend for one socket.
+
+* Preserve an already-finishing server response when its client resets or
+  disconnects immediately after reading trailers. An inbound error still
+  cancels unfinished responses, and final writes retain their own errors.
+  Cancellation tests synchronize on protocol events instead of a timed stream;
+  compression tests consume final trailers before closing the connection.
+
+* Classify client scope cancellation from the pre-reset worker state, so a
+  peer reacting to our reset cannot suppress the required `GrpcCancelled`
+  exception.
+
 * **Replace the handler-registration API.** The order-sensitive
   `Methods`/`Services` GADTs and their consumers (`fromMethods`,
   `fromServices`, `simpleMethods`, `hoistMethods`, `hoistServices`) and the

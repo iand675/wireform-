@@ -327,6 +327,18 @@ closeRPC callChannel cancelRequest exitCase = liftIO $ do
     -- that we can discard the connection.
     canDiscard <- checkCanDiscard
 
+    -- Our reset can make the peer abort its response immediately, and that
+    -- inbound failure can cancel the outbound worker before Session.close
+    -- inspects it. Capture whether it was active before causing that effect,
+    -- so our own cancellation cannot be mistaken for an earlier peer loss.
+    outboundActive <- atomically $ do
+      st <- Thread.getThreadState_
+        (Session.channelOutbound callChannel) (return ())
+      return $ case st of
+        Thread.ThreadNotYetRunning_ () -> True
+        Thread.ThreadRunning_ -> True
+        _ -> False
+
     -- Send the RST_STREAM frame /before/ closing the outbound thread.
     --
     -- When we call 'Session.close', we will terminate the
@@ -341,9 +353,11 @@ closeRPC callChannel cancelRequest exitCase = liftIO $ do
     -- details.
     mException <- liftIO $ Session.close callChannel exitCase
     case mException of
-      Nothing ->
-        -- The outbound thread had already terminated
-        return ()
+      Nothing -> case exitCase of
+        ExitCaseSuccess _ | outboundActive && not canDiscard -> do
+          backtrace <- collectBacktraces
+          throwCancelled (ChannelDiscarded backtrace)
+        _ -> return ()
       Just ex ->
         case fromException ex of
           Nothing ->

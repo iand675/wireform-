@@ -5,7 +5,6 @@
 -- | Test functionality required by the gRPC interop tests
 module Test.Sanity.Interop (tests) where
 
-import Control.Concurrent (threadDelay)
 import Control.Exception
 import Control.Monad
 import Data.ByteString qualified as BS.Strict
@@ -154,6 +153,10 @@ test_serverCompressedStreaming =
             output1 <- Client.recvOutputWithMeta call
             output2 <- Client.recvOutputWithMeta call
             verifyOutputs (StreamElem.value output1, StreamElem.value output2)
+            -- Receiving the two messages does not necessarily consume the
+            -- final trailers. Wait for the complete response before closing
+            -- the connection, rather than racing the server's last write.
+            void $ Client.recvTrailers call
       , server = [
             Server.someRpcHandler $
               Server.mkRpcHandler @StreamingOutputCall $ \call -> do
@@ -223,7 +226,9 @@ test_cancellation_client =
           -- We wait for the first input, but then cancel the request
           result :: Either GrpcException (Maybe Int) <- try $
             Client.withRPC conn def (Proxy @StreamNats) $ \call -> do
-              StreamElem.value <$> Client.Binary.recvOutput call
+              value <- StreamElem.value <$> Client.Binary.recvOutput call
+              value `shouldBe` Just 1
+              return value
 
           -- Since we did not tell the server that we have sent our final
           -- outbound message, the client should receive a CANCELLED exception.
@@ -235,10 +240,13 @@ test_cancellation_client =
       , server = [
           Server.someRpcHandler $
             Server.mkRpcHandler @StreamNats $ \call -> do
-              forM_ [1 .. 100] $ \(i :: Int) -> do
-                Server.Binary.sendNextOutput call i
-                threadDelay 100_000
-              Server.sendTrailers call NoMetadata
+              Server.Binary.sendNextOutput call (1 :: Int)
+              -- Keep the RPC open until the client's reset arrives. A timed
+              -- stream can finish before a loaded client gets scheduled.
+              unexpected <- Server.Binary.recvInput call
+                :: IO (StreamElem NoMetadata Int)
+              expectationFailure $
+                "Expected cancellation without input, got " ++ show unexpected
         ]
       }
 
