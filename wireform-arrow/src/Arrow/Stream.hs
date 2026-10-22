@@ -80,10 +80,24 @@ module Arrow.Stream (
   streamReaderProjected,
   streamReaderProjectedIter,
 
+  -- ** Files (incremental / iterator)
+  FileReader,
+  openFileReader,
+  fileReaderSchema,
+  fileReaderNext,
+  fileReaderToList,
+  fileReaderIter,
+
+  -- ** Handles (semi-streaming, one section live at a time)
+  fileBatchesHandle,
+  streamBatchesHandle,
+
   -- * Options
   WriteOptions (..),
   DictHandling (..),
   defaultWriteOptions,
+  ReadOptions (..),
+  defaultReadOptions,
   BodyCompressionCodec (..),
   bodyCompressionAvailable,
 ) where
@@ -98,7 +112,17 @@ import Arrow.Column (
  )
 import Arrow.Column.Internal (IntegralPrim (..), PrimType (..), SomePrimType (..), integralPrim, primTypeFor)
 import Arrow.Column.Internal qualified as I
-import Arrow.FlatBufferIPC (DictBatch (..), StreamFrame (..), readArrowFileFBWithDicts, readArrowStreamFBInterleaved)
+import Arrow.FlatBufferIPC (
+  ArrowBlock (..),
+  DictBatch (..),
+  FileIndex (..),
+  StreamFrame (..),
+  decodeMessageFrame,
+  parseFileIndex,
+  readArrowFileFBWithDicts,
+  readFileIndex,
+  readArrowStreamFBInterleaved,
+ )
 import Arrow.FlatBufferIPC.Write (
   Frame,
   bodyCompressionAvailable,
@@ -111,27 +135,32 @@ import Arrow.FlatBufferIPC.Write (
   renderStreamLazy,
   schemaFrame,
  )
-import Arrow.Read.Columns (decodeDictionaryBatch, decodeRecordBatch)
+import Arrow.Read.Columns (ReadOptions (..), decodeDictionaryBatch, decodeRecordBatch, defaultReadOptions)
 import Arrow.Types (
   ArrowType (..),
   BodyCompressionCodec (..),
   DictionaryEncoding (..),
   Field (..),
+  Message (..),
   RecordBatchDef,
   Schema (..),
  )
 import Arrow.Write.Columns (validateColumns)
 import Columnar.Stream qualified as IS
+import Data.Bits ((.&.), (.|.), complement, shiftL)
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
 import Data.ByteString.Lazy qualified as BL
 import Data.Foldable (foldlM)
-import Data.Int (Int64)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.Int (Int32, Int64)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Traversable (mapAccumM)
 import Data.Vector qualified as V
 import Data.Vector.Storable qualified as VS
+import System.IO (Handle, SeekMode (..), hFileSize, hSeek)
 
 
 -- ============================================================
@@ -279,11 +308,12 @@ transparently: the returned 'ColumnArray' values contain the
 actual dictionary values, not just keys. Columns alias the input.
 -}
 decodeArrowStream
-  :: ByteString
+  :: ReadOptions
+  -> ByteString
   -> Either String (Schema, [V.Vector ColumnArray])
-decodeArrowStream bs = do
+decodeArrowStream opts bs = do
   (sch, frames) <- readArrowStreamFBInterleaved bs
-  decodeInterleavedFrames sch frames
+  decodeInterleavedFrames opts sch frames
 
 
 -- ============================================================
@@ -325,11 +355,12 @@ encodeArrowFileLazy opts sch batches = do
 values are returned just like 'decodeArrowStream'.
 -}
 decodeArrowFile
-  :: ByteString
+  :: ReadOptions
+  -> ByteString
   -> Either String (Schema, [V.Vector ColumnArray])
-decodeArrowFile bs = do
+decodeArrowFile opts bs = do
   (sch, dicts, frames) <- readArrowFileFBWithDicts bs
-  decodeBatches sch dicts frames
+  decodeBatches opts sch dicts frames
 
 
 -- ============================================================
@@ -564,20 +595,21 @@ delta batches) and its record batches, resolving every dictionary
 column against the final dictionaries.
 -}
 decodeBatches
-  :: Schema
+  :: ReadOptions
+  -> Schema
   -> [DictBatch]
   -> [(RecordBatchDef, ByteString)]
   -> Either String (Schema, [V.Vector ColumnArray])
-decodeBatches sch dicts frames = do
-  dictMap <- foldlM (applyDictBatch sch) Map.empty dicts
-  resolved <- traverse (\(rb, body) -> decodeResolved sch dictMap rb body) frames
+decodeBatches opts sch dicts frames = do
+  dictMap <- foldlM (applyDictBatch opts sch) Map.empty dicts
+  resolved <- traverse (\(rb, body) -> decodeResolved opts sch dictMap rb body) frames
   Right (sch, resolved)
 
 
 -- | One record batch with its dictionary columns resolved against the dictionaries in force.
-decodeResolved :: Schema -> Map.Map Int64 ColumnArray -> RecordBatchDef -> ByteString -> Either String (V.Vector ColumnArray)
-decodeResolved sch dictMap rb body = do
-  cols <- decodeRecordBatch sch rb body
+decodeResolved :: ReadOptions -> Schema -> Map.Map Int64 ColumnArray -> RecordBatchDef -> ByteString -> Either String (V.Vector ColumnArray)
+decodeResolved opts sch dictMap rb body = do
+  cols <- decodeRecordBatch opts sch rb body
   V.mapM (resolveDictionaryColumn (`Map.lookup` dictMap)) cols
 
 
@@ -592,9 +624,9 @@ dictionaries in force when the batch arrives, as Arrow C++ does: a
 later replacement or delta of the inner dictionary affects the outer
 dictionaries sent after it, not the ones already received.
 -}
-applyDictBatch :: Schema -> Map.Map Int64 ColumnArray -> DictBatch -> Either String (Map.Map Int64 ColumnArray)
-applyDictBatch sch dictMap db = do
-  (did, raw) <- decodeDictionaryBatch sch db
+applyDictBatch :: ReadOptions -> Schema -> Map.Map Int64 ColumnArray -> DictBatch -> Either String (Map.Map Int64 ColumnArray)
+applyDictBatch opts sch dictMap db = do
+  (did, raw) <- decodeDictionaryBatch opts sch db
   vals <- resolveDictionaryColumn (`Map.lookup` dictMap) raw
   if dbIsDelta db
     then case Map.lookup did dictMap of
@@ -611,17 +643,18 @@ each record batch resolves against the dictionaries in force at its
 position in the stream.
 -}
 decodeInterleavedFrames
-  :: Schema
+  :: ReadOptions
+  -> Schema
   -> [StreamFrame]
   -> Either String (Schema, [V.Vector ColumnArray])
-decodeInterleavedFrames sch = go Map.empty []
+decodeInterleavedFrames opts sch = go Map.empty []
   where
     go _ acc [] = Right (sch, reverse acc)
     go !dictMap acc (SFDict db : rest) = do
-      newMap <- applyDictBatch sch dictMap db
+      newMap <- applyDictBatch opts sch dictMap db
       go newMap acc rest
     go !dictMap acc (SFBatch rb body : rest) = do
-      resolved <- decodeResolved sch dictMap rb body
+      resolved <- decodeResolved opts sch dictMap rb body
       go dictMap (resolved : acc) rest
 
 
@@ -654,6 +687,8 @@ processing later).
 -}
 data StreamReader = StreamReader
   { srSchema :: !Schema
+  , srOpts :: !ReadOptions
+  -- ^ Decode budgets applied to every batch 'streamReaderNext' decodes.
   , srDictMap :: !(Map.Map Int64 ColumnArray)
   -- ^ Dictionaries in force at the current stream position.
   , srFrames :: ![StreamFrame]
@@ -664,12 +699,13 @@ data StreamReader = StreamReader
 and splits the stream into frames; nothing is decoded until
 'streamReaderNext'.
 -}
-openStreamReader :: ByteString -> Either String StreamReader
-openStreamReader bs = do
+openStreamReader :: ReadOptions -> ByteString -> Either String StreamReader
+openStreamReader opts bs = do
   (sch, frames) <- readArrowStreamFBInterleaved bs
   Right
     StreamReader
       { srSchema = sch
+      , srOpts = opts
       , srDictMap = Map.empty
       , srFrames = frames
       }
@@ -695,10 +731,10 @@ streamReaderNext
 streamReaderNext rd = case srFrames rd of
   [] -> Right Nothing
   (SFDict db : rest) -> do
-    dictMap <- applyDictBatch (srSchema rd) (srDictMap rd) db
+    dictMap <- applyDictBatch (srOpts rd) (srSchema rd) (srDictMap rd) db
     streamReaderNext rd {srDictMap = dictMap, srFrames = rest}
   (SFBatch rb body : rest) -> do
-    resolved <- decodeResolved (srSchema rd) (srDictMap rd) rb body
+    resolved <- decodeResolved (srOpts rd) (srSchema rd) (srDictMap rd) rb body
     Right (Just (resolved, rd {srFrames = rest}))
 
 
@@ -724,6 +760,361 @@ the caller to thread the continuation reader by hand.
 -}
 streamReaderIter :: StreamReader -> IS.Iter (V.Vector ColumnArray)
 streamReaderIter rd0 = IS.iterUnfold rd0 streamReaderNext
+
+
+-- ============================================================
+-- File reader (footer-indexed sections)
+-- ============================================================
+
+{- | An iterator-style handle for reading an Arrow IPC /file/
+batch-by-batch through its 'FileIndex' (footer) sections: the file
+counterpart of 'StreamReader'. Opening parses the footer and decodes
+the dictionary batches (every record batch needs them); each
+'fileReaderNext' decodes exactly one record batch section and
+touches nothing else in the file.
+
+The input is the whole file in memory (columns alias it). For files
+too large for that, 'fileBatchesHandle' seeks and reads one section
+at a time.
+-}
+data FileReader = FileReader
+  { frSchema :: !Schema
+  , frOpts :: !ReadOptions
+  , frDictMap :: !(Map.Map Int64 ColumnArray)
+  , frBytes :: !ByteString
+  , frBlocks :: !(V.Vector ArrowBlock)
+  , frIx :: !Int
+  }
+
+
+{- | Open a whole in-memory Arrow IPC file for section-at-a-time
+decoding.
+-}
+openFileReader :: ReadOptions -> ByteString -> Either String FileReader
+openFileReader opts bs = do
+  idx <- readFileIndex bs
+  dictMap <- readDictBlocks opts idx bs
+  Right
+    FileReader
+      { frSchema = fiSchema idx
+      , frOpts = opts
+      , frDictMap = dictMap
+      , frBytes = bs
+      , frBlocks = fiRecordBatches idx
+      , frIx = 0
+      }
+
+
+-- | The schema the file's footer declares.
+fileReaderSchema :: FileReader -> Schema
+fileReaderSchema = frSchema
+
+
+{- | Pull the next record batch section: @Right (Just (cols, fr'))@
+for one decoded batch (dictionary references resolved), @Right
+Nothing@ past the last section, @Left@ for a parse / validation
+error. Only the section the next 'ArrowBlock' names is touched.
+-}
+fileReaderNext :: FileReader -> Either String (Maybe (V.Vector ColumnArray, FileReader))
+fileReaderNext fr
+  | frIx fr >= V.length (frBlocks fr) = Right Nothing
+  | otherwise = do
+      let !blk = V.unsafeIndex (frBlocks fr) (frIx fr)
+      (msg, body) <- blockMessage (frBytes fr) blk
+      rb <- case msg of
+        RecordBatch def -> Right def
+        _ -> Left "Arrow.Stream: file section is not a record batch"
+      resolved <- decodeResolved (frOpts fr) (frSchema fr) (frDictMap fr) rb body
+      Right (Just (resolved, fr {frIx = frIx fr + 1}))
+
+
+-- | 'fileReaderNext' as a cross-format 'IS.Iter'.
+fileReaderIter :: FileReader -> IS.Iter (V.Vector ColumnArray)
+fileReaderIter fr0 = IS.iterUnfold fr0 fileReaderNext
+
+
+-- | Drain a 'FileReader' into a list of batches.
+fileReaderToList :: FileReader -> Either String [V.Vector ColumnArray]
+fileReaderToList fr = IS.iterToList (fileReaderIter fr)
+
+
+-- | Decode the message and body one file section holds.
+blockMessage :: ByteString -> ArrowBlock -> Either String (Message, ByteString)
+blockMessage bs (ArrowBlock off metaLen bodyLen)
+  | off < 0 || metaLen <= 0 || bodyLen < 0 || off > n - fromIntegral metaLen =
+      Left "Arrow.Stream: file section runs past the end of the input"
+  | bodyLen > n - off - fromIntegral metaLen =
+      Left "Arrow.Stream: file section body runs past the end of the input"
+  | otherwise = do
+      (msg, declaredBody) <-
+        decodeMessageFrame (BS.take (fromIntegral metaLen) (BS.drop (fromIntegral off) bs))
+      if declaredBody > bodyLen
+        then Left "Arrow.Stream: file section body is shorter than its message declares"
+        else
+          let !body = BS.take (fromIntegral bodyLen) (BS.drop (fromIntegral (off + fromIntegral metaLen)) bs)
+          in Right (msg, body)
+  where
+    !n = fromIntegral (BS.length bs) :: Int64
+
+
+{- | The dictionary batches one file's dictionary sections hold,
+folded into the id-to-values map in file order (replacement and
+delta semantics as in 'applyDictBatch').
+-}
+readDictBlocks :: ReadOptions -> FileIndex -> ByteString -> Either String (Map.Map Int64 ColumnArray)
+readDictBlocks opts idx bs = go Map.empty 0
+  where
+    !n = V.length (fiDictBlocks idx)
+    go !m !i
+      | i >= n = Right m
+      | otherwise = do
+          (msg, body) <- blockMessage bs (V.unsafeIndex (fiDictBlocks idx) i)
+          db <- case msg of
+            DictionaryBatch did isDelta def ->
+              Right DictBatch {dbId = did, dbIsDelta = isDelta, dbData = def, dbBody = body}
+            _ -> Left "Arrow.Stream: file dictionary section is not a dictionary batch"
+          m' <- applyDictBatch opts (fiSchema idx) m db
+          go m' (i + 1)
+
+
+-- ============================================================
+-- Handle sources (semi-streaming)
+-- ============================================================
+
+{- | Read an Arrow IPC /file/ from a 'Handle' one section at a time:
+the footer is fetched (a few hundred bytes), the dictionary batches
+are read up front, and every 'IS.iterIOStep' seeks to the next
+record batch section, reads and decodes just that section, leaving
+the rest of the file untouched. Live memory is one section plus the
+dictionaries, however large the file. The caller owns the handle and
+must not use it concurrently with the iterator.
+-}
+fileBatchesHandle :: ReadOptions -> Handle -> IO (Either String (IS.IterIO (V.Vector ColumnArray)))
+fileBatchesHandle opts h = do
+  eidx <- readFileIndexHandle h
+  case eidx of
+    Left e -> pure (Left e)
+    Right idx -> do
+      edicts <- readDictBlocksHandle opts idx h
+      case edicts of
+        Left e -> pure (Left e)
+        Right dictMap -> do
+          ref <- newIORef 0
+          let !blocks = fiRecordBatches idx
+              !n = V.length blocks
+              step = do
+                i <- readIORef ref
+                if i >= n
+                  then pure (Right Nothing)
+                  else do
+                    writeIORef ref (i + 1)
+                    esec <- readSection h (V.unsafeIndex blocks i)
+                    case esec of
+                      Left e -> pure (Left e)
+                      Right (msg, body) -> case msg of
+                        RecordBatch rb ->
+                          pure $ case decodeResolved opts (fiSchema idx) dictMap rb body of
+                            Left e -> Left e
+                            Right cols -> Right (Just cols)
+                        _ -> pure (Left "Arrow.Stream: file section is not a record batch")
+          pure (Right (IS.iterIOFromAction step))
+
+
+{- | Read an Arrow IPC /stream/ from a 'Handle' one frame at a time:
+every 'IS.iterIOStep' reads one frame, applies dictionary frames to
+the dictionaries in force, and decodes one record batch. Live memory
+is one frame. The caller owns the handle and must not use it
+concurrently with the iterator.
+-}
+streamBatchesHandle :: ReadOptions -> Handle -> IO (Either String (IS.IterIO (V.Vector ColumnArray)))
+streamBatchesHandle opts h = do
+  efirst <- hReadFrame h
+  case efirst of
+    Left e -> pure (Left e)
+    Right Nothing -> pure (Left "Arrow.Stream: empty input, no schema message")
+    Right (Just (msg, _)) -> case msg of
+      SchemaMessage sch -> do
+        ref <- newIORef Map.empty
+        pure (Right (IS.iterIOFromAction (streamStep opts h sch ref)))
+      _ -> pure (Left "Arrow.Stream: first stream message is not a schema")
+
+
+-- | Pull stream frames until one record batch is decoded (or the stream ends).
+streamStep :: ReadOptions -> Handle -> Schema -> IORef (Map.Map Int64 ColumnArray) -> IO (Either String (Maybe (V.Vector ColumnArray)))
+streamStep opts h sch ref = do
+  ef <- hReadFrame h
+  case ef of
+    Left e -> pure (Left e)
+    Right Nothing -> pure (Right Nothing)
+    Right (Just (msg, body)) -> case msg of
+      RecordBatch rb -> do
+        dictMap <- readIORef ref
+        case decodeResolved opts sch dictMap rb body of
+          Left e -> pure (Left e)
+          Right cols -> pure (Right (Just cols))
+      DictionaryBatch did isDelta def -> do
+        dictMap <- readIORef ref
+        let db = DictBatch {dbId = did, dbIsDelta = isDelta, dbData = def, dbBody = body}
+        case applyDictBatch opts sch dictMap db of
+          Left e -> pure (Left e)
+          Right dictMap' -> do
+            writeIORef ref dictMap'
+            streamStep opts h sch ref
+      _ -> pure (Left "Arrow.Stream: unsupported message in stream")
+
+
+-- | Read the footer index of the file a handle points at.
+readFileIndexHandle :: Handle -> IO (Either String FileIndex)
+readFileIndexHandle h = do
+  size <- hFileSize h
+  if size < 14
+    then pure (Left "Arrow.Stream: input too small to be an Arrow file")
+    else do
+      hSeek h AbsoluteSeek 0
+      magic <- BS.hGet h 6
+      if magic /= "ARROW1"
+        then pure (Left "Arrow.Stream: missing leading ARROW1 magic")
+        else do
+          hSeek h AbsoluteSeek (size - 10)
+          trailer <- BS.hGet h 10
+          if BS.length trailer < 10 || BS.drop 4 trailer /= "ARROW1"
+            then pure (Left "Arrow.Stream: missing trailing ARROW1 magic")
+            else do
+              let !footerLen = leI32 trailer
+              if footerLen <= 0 || fromIntegral footerLen > size - 16
+                then pure (Left "Arrow.Stream: invalid footer length in file trailer")
+                else do
+                  hSeek h AbsoluteSeek (size - 10 - fromIntegral footerLen)
+                  footer <- BS.hGet h (fromIntegral footerLen)
+                  if BS.length footer < fromIntegral footerLen
+                    then pure (Left "Arrow.Stream: truncated file footer")
+                    else pure (parseFileIndex (fromIntegral size) footer)
+
+
+-- | Read one file section (message metadata + body) at its block.
+readSection :: Handle -> ArrowBlock -> IO (Either String (Message, ByteString))
+readSection h (ArrowBlock off metaLen bodyLen)
+  | metaLen <= 0 || fromIntegral metaLen > maxMessageMetadataBytes =
+      pure (Left "Arrow.Stream: file section metadata length is invalid or too large")
+  | bodyLen < 0 =
+      pure (Left "Arrow.Stream: file section body length is negative")
+  | otherwise = do
+      hSeek h AbsoluteSeek (fromIntegral off)
+      meta <- BS.hGet h (fromIntegral metaLen)
+      if BS.length meta < fromIntegral metaLen
+        then pure (Left "Arrow.Stream: truncated file section header")
+        else case decodeMessageFrame meta of
+          Left e -> pure (Left e)
+          Right (msg, declaredBody)
+            | declaredBody > bodyLen ->
+                pure (Left "Arrow.Stream: file section body is shorter than its message declares")
+            | otherwise -> do
+                body <- BS.hGet h (fromIntegral bodyLen)
+                if BS.length body < fromIntegral bodyLen
+                  then pure (Left "Arrow.Stream: truncated file section body")
+                  else pure (Right (msg, body))
+
+
+-- | The dictionary batches a file's dictionary sections hold, read one section at a time.
+readDictBlocksHandle :: ReadOptions -> FileIndex -> Handle -> IO (Either String (Map.Map Int64 ColumnArray))
+readDictBlocksHandle opts idx h = go Map.empty 0
+  where
+    !n = V.length (fiDictBlocks idx)
+    go !m !i
+      | i >= n = pure (Right m)
+      | otherwise = do
+          esec <- readSection h (V.unsafeIndex (fiDictBlocks idx) i)
+          case esec of
+            Left e -> pure (Left e)
+            Right (msg, body) -> case msg of
+              DictionaryBatch did isDelta def -> do
+                let db = DictBatch {dbId = did, dbIsDelta = isDelta, dbData = def, dbBody = body}
+                case applyDictBatch opts (fiSchema idx) m db of
+                  Left e -> pure (Left e)
+                  Right m' -> go m' (i + 1)
+              _ -> pure (Left "Arrow.Stream: file dictionary section is not a dictionary batch")
+
+
+{- | Read one encapsulated message frame from a handle:
+@Right (Just (message, body))@ for a frame, @Right Nothing@ at a
+clean end of stream or the EOS marker, @Left@ on truncation. The
+metadata length a frame may declare is capped at
+'maxMessageMetadataBytes' so a tiny input cannot name an
+out-of-memory buffer.
+-}
+hReadFrame :: Handle -> IO (Either String (Maybe (Message, ByteString)))
+hReadFrame h = do
+  pfx <- BS.hGet h 4
+  if BS.length pfx == 0
+    then pure (Right Nothing)
+    else
+      if BS.length pfx < 4
+        then pure (Left "Arrow.Stream: truncated stream frame header")
+        else do
+          let !first4 = leU32 pfx
+          if first4 == 0
+            then pure (Right Nothing)
+            else
+              if first4 == 0xFFFFFFFF
+                then do
+                  lp <- BS.hGet h 4
+                  if BS.length lp < 4
+                    then pure (Left "Arrow.Stream: truncated stream frame after continuation")
+                    else do
+                      let !mlen = leU32 lp
+                      if mlen == 0
+                        then pure (Right Nothing)
+                        else readMetaBody (pfx <> lp) mlen
+                else readMetaBody pfx first4
+  where
+    readMetaBody prefix mlen
+      | mlen > maxMessageMetadataBytes =
+          pure (Left "Arrow.Stream: stream message metadata length is too large")
+      | otherwise = do
+          meta <- BS.hGet h mlen
+          if BS.length meta < mlen
+            then pure (Left "Arrow.Stream: truncated stream message metadata")
+            else case decodeMessageFrame (prefix <> meta) of
+              Left e -> pure (Left e)
+              Right (msg, bodyLen)
+                | bodyLen < 0 -> pure (Left "Arrow.Stream: negative message body length")
+                | otherwise -> do
+                    let !want = (fromIntegral bodyLen + 7) .&. complement 7 :: Int
+                    body <- BS.hGet h want
+                    if BS.length body < fromIntegral bodyLen
+                      then pure (Left "Arrow.Stream: truncated stream message body")
+                      else pure (Right (Just (msg, BS.take (fromIntegral bodyLen) body)))
+
+
+{- | Largest message metadata a handle-based reader will buffer. IPC
+metadata (schema / dictionary / record batch headers) is small even
+for very wide schemas; anything larger is a framing error or a lie,
+and buffering it is what a hostile input would want.
+-}
+maxMessageMetadataBytes :: Int
+maxMessageMetadataBytes = 1 `shiftL` 28
+
+
+-- | Little-endian unsigned 32-bit int in the first 4 bytes.
+leU32 :: ByteString -> Int
+leU32 bs = case BS.unpack (BS.take 4 bs) of
+  [a, b, c, d] ->
+    fromIntegral a
+      .|. (fromIntegral b `shiftL` 8)
+      .|. (fromIntegral c `shiftL` 16)
+      .|. (fromIntegral d `shiftL` 24)
+  _ -> 0
+
+
+-- | Little-endian signed 32-bit int in the first 4 bytes.
+leI32 :: ByteString -> Int32
+leI32 bs = case BS.unpack (BS.take 4 bs) of
+  [a, b, c, d] ->
+    fromIntegral a
+      .|. (fromIntegral b `shiftL` 8)
+      .|. (fromIntegral c `shiftL` 16)
+      .|. (fromIntegral d `shiftL` 24)
+  _ -> 0
 
 
 -- ============================================================

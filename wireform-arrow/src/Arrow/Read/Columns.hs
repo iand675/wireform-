@@ -30,6 +30,10 @@ module Arrow.Read.Columns (
   decodeRecordBatch,
   decodeDictionaryBatch,
 
+  -- * Decode budgets
+  ReadOptions (..),
+  defaultReadOptions,
+
   -- * Body compression
   decompressBody,
 
@@ -63,6 +67,7 @@ import Arrow.Types (
   Schema (..),
   UnionMode (..),
  )
+import Control.DeepSeq (NFData)
 import Data.Bits (shiftL, (.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -75,6 +80,7 @@ import Data.Word (Word8)
 import Foreign.Marshal.Utils (copyBytes, fillBytes)
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
 import Foreign.Storable (Storable (..), peekByteOff, pokeByteOff)
+import GHC.Generics (Generic)
 import System.IO.Unsafe (unsafeDupablePerformIO)
 import Wireform.FFI (validateArrowBuffers)
 
@@ -90,6 +96,103 @@ import qualified Data.ByteString.Lazy as BL
 
 
 -- ============================================================
+-- Reader options
+-- ============================================================
+
+{- | Caller-supplied decode budgets. Every entry point that turns wire
+bytes into 'ColumnArray's takes one, mirroring arrow-cpp's
+@IpcReadOptions@: an application that reads untrusted input passes
+tight limits and gets a decode 'Left' instead of an oversized
+allocation or an absurd logical row count. A batch that fits its
+declared @length@ in real body bytes is still bounded by the input
+size (columns alias the body); the budgets cap what the wire
+/says/:
+
+  * 'roMaxRows' caps the record batch's declared row count.
+  * 'roMaxValues' caps the total declared length across every field
+    node of one batch, i.e. the logical values a consumer walking the
+    columns would visit (a run-end-encoded or list column can name
+    billions of rows from a few hundred bytes).
+  * 'roMaxUnbackedRows' caps rows claimed with no body bytes backing
+    them at all (nullable structs or fixed-size lists over null or
+    run-end-encoded children, zero-width fixed-size binary).
+  * 'roMaxDecompressedBytes' caps the total uncompressed bytes a
+    compressed body may expand to.
+
+'defaultReadOptions' is generous enough for any batch that can fit in
+memory while keeping every budget finite.
+-}
+data ReadOptions = ReadOptions
+  { roMaxRows :: !Int64
+  -- ^ Largest row count ('rbLength') one record batch may declare.
+  , roMaxValues :: !Int64
+  -- ^ Largest total declared length across the field nodes of one batch.
+  , roMaxUnbackedRows :: !Int64
+  -- ^ Largest number of rows a batch may claim with no buffer backing.
+  , roMaxDecompressedBytes :: !Int64
+  -- ^ Largest total uncompressed size a compressed body may expand to.
+  }
+  deriving stock (Show, Eq, Generic)
+  deriving anyclass (NFData)
+
+
+{- | The budgets used when a caller has no stricter policy: same row
+cap as 'maxArrayLength', @2^34@ total declared values (a batch
+claiming more than that cannot be backed by body bytes that fit in
+memory), @2^20@ unbacked rows, and @2^34@ decompressed bytes.
+-}
+defaultReadOptions :: ReadOptions
+defaultReadOptions =
+  ReadOptions
+    { roMaxRows = fromIntegral maxArrayLength
+    , roMaxValues = 1 `shiftL` 34
+    , roMaxUnbackedRows = 1 `shiftL` 20
+    , roMaxDecompressedBytes = 1 `shiftL` 34
+    }
+
+
+{- | Check the wire-claim budgets that apply before any buffer is
+touched: the declared row count and the total declared value count
+across all field nodes.
+-}
+checkBatchBudgets :: ReadOptions -> RecordBatchDef -> Either String ()
+checkBatchBudgets opts rb = do
+  let !rows = rbLength rb
+  if rows < 0 || rows > roMaxRows opts
+    then
+      Left
+        ( "Arrow.Read.Columns: record batch declares "
+            ++ show rows
+            ++ " rows (limit "
+            ++ show (roMaxRows opts)
+            ++ ")"
+        )
+    else Right ()
+  let !values = nodeLengthSum (rbNodes rb)
+  if values > roMaxValues opts
+    then
+      Left
+        ( "Arrow.Read.Columns: record batch field nodes declare "
+            ++ show values
+            ++ " values in total (limit "
+            ++ show (roMaxValues opts)
+            ++ ")"
+        )
+    else Right ()
+
+
+-- | Sum of the field node lengths, saturating at @maxBound@.
+nodeLengthSum :: VS.Vector FieldNode -> Int64
+nodeLengthSum = VS.foldl' step 0
+  where
+    step !acc fn
+      | acc >= maxBound = maxBound
+      | otherwise =
+          let !l = max 0 (fnLength fn)
+          in if acc > maxBound - l then maxBound else acc + l
+
+
+-- ============================================================
 -- Entry points
 -- ============================================================
 
@@ -102,10 +205,11 @@ placeholder@: the keys at their wire width with the row validity, and
 an empty placeholder for the values; resolve them with
 'Arrow.Column.resolveDictionaryColumn'.
 -}
-decodeRecordBatch :: Schema -> RecordBatchDef -> ByteString -> Either String (V.Vector ColumnArray)
-decodeRecordBatch schema rb body = do
-  src <- bodySource rb body
-  let !ctx = Ctx (arrowEndianness schema == Big) rb src
+decodeRecordBatch :: ReadOptions -> Schema -> RecordBatchDef -> ByteString -> Either String (V.Vector ColumnArray)
+decodeRecordBatch opts schema rb body = do
+  checkBatchBudgets opts rb
+  src <- bodySource opts rb body
+  let !ctx = Ctx (arrowEndianness schema == Big) rb src opts
   Outs cols _ <- fieldsN ctx (arrowFields schema) (Cur 0 0 0 0)
   case V.findIndex (\c -> fromIntegral (columnLength c) /= rbLength rb) cols of
     Nothing -> Right cols
@@ -126,8 +230,8 @@ batch's id, with the encoding removed. Returns the id and the values
 column; dictionaries nested inside the values stay unresolved
 placeholders.
 -}
-decodeDictionaryBatch :: Schema -> DictBatch -> Either String (Int64, ColumnArray)
-decodeDictionaryBatch sch db = do
+decodeDictionaryBatch :: ReadOptions -> Schema -> DictBatch -> Either String (Int64, ColumnArray)
+decodeDictionaryBatch opts sch db = do
   f <- case findDictField (dbId db) (arrowFields sch) of
     Just f -> Right f
     Nothing ->
@@ -138,7 +242,7 @@ decodeDictionaryBatch sch db = do
         )
   let !valuesField = f {fieldDictionary = Nothing}
       !inner = sch {arrowFields = V.singleton valuesField, arrowMetadata = V.empty, arrowFeatures = V.empty}
-  cols <- decodeRecordBatch inner (dbData db) (dbBody db)
+  cols <- decodeRecordBatch opts inner (dbData db) (dbBody db)
   if V.length cols == 1
     then Right (dbId db, V.unsafeHead cols)
     else Left "Arrow.Read.Columns: dictionary batch must hold exactly one column"
@@ -182,12 +286,12 @@ data Source
     Unpacked !(V.Vector ByteString)
 
 
-bodySource :: RecordBatchDef -> ByteString -> Either String Source
-bodySource rb body = case rbBodyCompression rb of
+bodySource :: ReadOptions -> RecordBatchDef -> ByteString -> Either String Source
+bodySource opts rb body = case rbBodyCompression rb of
   Nothing
     | validateRecordBatchBuffers rb (fromIntegral (BS.length body)) -> Right (Plain body)
     | otherwise -> Left "Arrow.Read.Columns: invalid buffer bounds in RecordBatchDef"
-  Just codec -> Unpacked <$> decompressBuffers codec (rbBuffers rb) body
+  Just codec -> Unpacked <$> decompressBuffers opts codec (rbBuffers rb) body
 
 
 -- ============================================================
@@ -199,6 +303,7 @@ data Ctx = Ctx
   -- ^ Big-endian body: multi-byte values are byte-swapped into fresh buffers.
   , ctxRb :: !RecordBatchDef
   , ctxSrc :: !Source
+  , ctxOpts :: !ReadOptions
   }
 
 
@@ -229,16 +334,6 @@ any batch that fits in memory, and small enough that @len * 32@ and
 -}
 maxArrayLength :: Int
 maxArrayLength = 1 `shiftL` 40
-
-
-{- | Rows a batch may claim without any body bytes backing them (nullable
-structs or fixed-size lists over null-typed or run-end-encoded
-children, zero-width fixed-size binary). Generous for real data, small
-enough that a hostile length cannot make every later per-row pass over
-the column run for hours.
--}
-maxUnbackedRows :: Int
-maxUnbackedRows = 1 `shiftL` 20
 
 
 -- | Field node @i@ with its length checked to lie in @[0, 'maxArrayLength']@.
@@ -299,14 +394,15 @@ field :: Ctx -> Field -> Cur -> Either String Out
 field ctx f cur = do
   fn <- nodeAt ctx (curNode cur)
   let !len = fromIntegral (fnLength fn) :: Int
+      !lim = roMaxUnbackedRows (ctxOpts ctx)
       !ub = if allocatesUnbacked f then curUnbacked cur + len else curUnbacked cur
-  if ub > maxUnbackedRows
+  if fromIntegral ub > lim
     then
       Left
         ( "Arrow.Read.Columns: record batch claims "
             ++ show ub
             ++ " rows with no buffer backing them (limit "
-            ++ show maxUnbackedRows
+            ++ show lim
             ++ ")"
         )
     else fieldAt ctx f fn len cur {curUnbacked = ub}
@@ -770,12 +866,45 @@ dictKeys ctx f de fn len cur = case primTypeFor (deIndexType de) of
 {- | Decompress every buffer of a compressed body (one envelope per
 buffer descriptor). Each result is a fresh buffer.
 -}
-decompressBuffers :: BodyCompressionCodec -> VS.Vector Buffer -> ByteString -> Either String (V.Vector ByteString)
-decompressBuffers codec bufs body =
+decompressBuffers :: ReadOptions -> BodyCompressionCodec -> VS.Vector Buffer -> ByteString -> Either String (V.Vector ByteString)
+decompressBuffers opts codec bufs body = do
+  checkDecompressedBudget opts bufs body
   V.generateM (VS.length bufs) $ \i -> do
     let Buffer o l = VS.unsafeIndex bufs i
     env <- sliceWire "compressed buffer" o l body
     decompressBufferEnvelope codec env
+
+
+{- | Sum the buffer envelopes' declared uncompressed sizes and reject
+the body /before/ anything is decompressed when the expansion the
+decoder would have to materialize exceeds 'roMaxDecompressedBytes'.
+Envelopes marked stored (@-1@) do not expand and are not charged. Each
+individual claim is still bounded by 'maxCompressionRatio' against its
+payload; this bounds the total.
+-}
+checkDecompressedBudget :: ReadOptions -> VS.Vector Buffer -> ByteString -> Either String ()
+checkDecompressedBudget opts bufs body = go 0 0
+  where
+    !n = VS.length bufs
+    go !i !acc
+      | acc > roMaxDecompressedBytes opts =
+          Left
+            ( "Arrow.Read.Columns: compressed body declares "
+                ++ show acc
+                ++ " decompressed bytes in total (limit "
+                ++ show (roMaxDecompressedBytes opts)
+                ++ ")"
+            )
+      | i >= n = Right ()
+      | otherwise = do
+          let Buffer o l = VS.unsafeIndex bufs i
+          env <- sliceWire "compressed buffer" o l body
+          let !claim
+                | BS.length env < 8 = 0
+                | otherwise = case leInt64 env of
+                    r | r > 0 -> r
+                    _ -> 0
+          go (i + 1) (if acc > maxBound - claim then maxBound else acc + claim)
 
 
 {- | Decode a body written with body compression into an uncompressed
@@ -784,9 +913,9 @@ body plus buffer descriptors that point into it (each buffer padded to
 the concatenation; this is for callers that need the uncompressed
 message body.
 -}
-decompressBody :: BodyCompressionCodec -> VS.Vector Buffer -> ByteString -> Either String (VS.Vector Buffer, ByteString)
-decompressBody codec bufs body = do
-  payloads <- decompressBuffers codec bufs body
+decompressBody :: ReadOptions -> BodyCompressionCodec -> VS.Vector Buffer -> ByteString -> Either String (VS.Vector Buffer, ByteString)
+decompressBody opts codec bufs body = do
+  payloads <- decompressBuffers opts codec bufs body
   let padded b = (BS.length b + 7) `quot` 8 * 8
       offsets = V.prescanl' (+) 0 (V.map padded payloads)
       !total = V.sum (V.map padded payloads)

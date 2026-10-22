@@ -5,17 +5,36 @@
 -- tensor / sparse-tensor message payloads.
 module Arrow.FlatBufferIPC.Common
   ( DictBatch (..)
+  , ArrowBlock (..)
   , Tensor (..)
   , TensorDim (..)
   , SparseTensor (..)
   ) where
 
 import Data.ByteString (ByteString)
-import Data.Int (Int64)
+import Data.Int (Int32, Int64)
 import qualified Data.Text as T
 import qualified Data.Vector as V
 
 import Arrow.Types (ArrowType, RecordBatchDef)
+
+-- ============================================================
+-- Footer blocks
+-- ============================================================
+
+{- | A @Block@ struct as emitted in the @Footer.dictionaries@ /
+@Footer.recordBatches@ vectors (@format/File.fbs@). Inline
+fixed-size struct (24 bytes total): @offset: i64@,
+@metaDataLength: i32@ + 4 bytes padding, @bodyLength: i64@. Each
+block points at its message's continuation marker, with the whole
+header length (marker, length, metadata, padding) and the padded
+body length.
+-}
+data ArrowBlock = ArrowBlock
+  { abOffset  :: !Int64
+  , abMetaLen :: !Int32
+  , abBodyLen :: !Int64
+  } deriving (Show, Eq)
 
 -- ============================================================
 -- Tensor / SparseTensor messages

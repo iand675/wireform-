@@ -57,6 +57,7 @@ import Arrow.Column (
  )
 import Arrow.Column.Internal qualified as I
 import Arrow.File (readArrowFileColumns)
+import Arrow.Read.Columns (defaultReadOptions)
 import Arrow.FlatBufferIPC (
   DictBatch (..),
   StreamFrame (..),
@@ -295,7 +296,7 @@ prop_streamRoundTrip = withTests 1000 . property $ do
   (sch, batches) <- forAll genTable
   coverShapes sch (concatMap V.toList batches)
   bytes <- evalEither (encodeArrowStream defaultWriteOptions sch batches)
-  (_, got) <- evalEither (decodeArrowStream bytes)
+  (_, got) <- evalEither (decodeArrowStream defaultReadOptions bytes)
   sameTable batches got
 
 
@@ -303,12 +304,12 @@ prop_fileRoundTrip :: Property
 prop_fileRoundTrip = withTests 200 . property $ do
   (sch, batches) <- forAll genTable
   file <- evalEither (encodeArrowFile defaultWriteOptions sch batches)
-  (_, got1) <- evalEither (decodeArrowFile file)
+  (_, got1) <- evalEither (decodeArrowFile defaultReadOptions file)
   sameTable batches got1
   written <- evalEither (writeArrowFile sch (V.fromList batches))
-  (_, got2) <- evalEither (readArrowFileColumns written)
+  (_, got2) <- evalEither (readArrowFileColumns defaultReadOptions written)
   sameTable batches (V.toList got2)
-  (_, got3) <- evalEither (readArrowFileColumns file)
+  (_, got3) <- evalEither (readArrowFileColumns defaultReadOptions file)
   sameTable batches (V.toList got3)
 
 
@@ -316,7 +317,7 @@ prop_writeStreamRoundTrip :: Property
 prop_writeStreamRoundTrip = withTests 100 . property $ do
   (sch, batches) <- forAll genTable
   bytes <- evalEither (writeArrowStream sch (V.fromList batches))
-  (_, got) <- evalEither (decodeArrowStream bytes)
+  (_, got) <- evalEither (decodeArrowStream defaultReadOptions bytes)
   sameTable batches got
 
 
@@ -324,9 +325,9 @@ prop_replaceDictsRoundTrip :: Property
 prop_replaceDictsRoundTrip = withTests 200 . property $ do
   (sch, batches) <- forAll genTable
   bytes <- evalEither (encodeArrowStream defaultWriteOptions {writeDictHandling = DictReplaceOnChange} sch batches)
-  (_, got) <- evalEither (decodeArrowStream bytes)
+  (_, got) <- evalEither (decodeArrowStream defaultReadOptions bytes)
   sameTable batches got
-  rd <- evalEither (openStreamReader bytes)
+  rd <- evalEither (openStreamReader defaultReadOptions bytes)
   got' <- evalEither (streamReaderToList rd)
   sameTable batches got'
 
@@ -340,7 +341,7 @@ prop_compressionRoundTrip = withTests 100 . property $ do
   codec <- forAll (Gen.element [LZ4Frame, BodyZstd])
   bytes <- evalEither (encodeArrowStream defaultWriteOptions {writeBodyCompression = Just codec} sch batches)
   let expected = if bodyCompressionAvailable codec then Just codec else Nothing
-  (_, got) <- evalEither (decodeArrowStream bytes)
+  (_, got) <- evalEither (decodeArrowStream defaultReadOptions bytes)
   sameTable batches got
   (_, dicts, frames) <- evalEither (readArrowStreamFBWithDicts bytes)
   map (rbBodyCompression . fst) frames === map (const expected) frames
@@ -350,8 +351,8 @@ prop_compressionRoundTrip = withTests 100 . property $ do
 prop_fingerprintStable :: Property
 prop_fingerprintStable = withTests 200 . property $ do
   (sch, batches) <- forAll genTable
-  (sch1, _) <- evalEither (encodeArrowStream defaultWriteOptions sch batches >>= decodeArrowStream)
-  (sch2, _) <- evalEither (encodeArrowFile defaultWriteOptions sch batches >>= decodeArrowFile)
+  (sch1, _) <- evalEither (encodeArrowStream defaultWriteOptions sch batches >>= decodeArrowStream defaultReadOptions)
+  (sch2, _) <- evalEither (encodeArrowFile defaultWriteOptions sch batches >>= decodeArrowFile defaultReadOptions)
   schemaFingerprint sch1 === schemaFingerprint sch
   schemaFingerprint sch2 === schemaFingerprint sch
   assert (schemaEquivalent sch1 sch)
@@ -363,9 +364,9 @@ prop_projection = withTests 200 . property $ do
   let names = V.toList (V.map fieldName (arrowFields sch))
   picked <- forAll (Gen.subsequence names >>= Gen.shuffle)
   bytes <- evalEither (encodeArrowStream defaultWriteOptions sch batches)
-  rd <- evalEither (openStreamReader bytes)
+  rd <- evalEither (openStreamReader defaultReadOptions bytes)
   (psch, got) <- evalEither (streamReaderProjected picked rd)
-  (_, full) <- evalEither (decodeArrowStream bytes)
+  (_, full) <- evalEither (decodeArrowStream defaultReadOptions bytes)
   let idx nm = V.findIndex ((== nm) . fieldName) (arrowFields sch)
       project cols = V.fromList (map (\nm -> maybe (error "missing") (cols V.!) (idx nm)) picked)
   map fieldName (V.toList (arrowFields psch)) === picked
@@ -443,8 +444,8 @@ prop_sliceCommutesWithRoundTrip = withTests 200 . property $ do
   let n = if V.null batch then 0 else columnLength (V.head batch)
   s <- forAll (Gen.int (Range.linear 0 n))
   l <- forAll (Gen.int (Range.linear 0 (n - s)))
-  (_, sliced) <- evalEither (encodeArrowStream defaultWriteOptions sch [V.map (sliceColumnArray s l) batch] >>= decodeArrowStream)
-  (_, whole) <- evalEither (encodeArrowStream defaultWriteOptions sch [batch] >>= decodeArrowStream)
+  (_, sliced) <- evalEither (encodeArrowStream defaultWriteOptions sch [V.map (sliceColumnArray s l) batch] >>= decodeArrowStream defaultReadOptions)
+  (_, whole) <- evalEither (encodeArrowStream defaultWriteOptions sch [batch] >>= decodeArrowStream defaultReadOptions)
   sameTable (map (V.map (sliceColumnArray s l)) whole) sliced
 
 
@@ -570,7 +571,7 @@ prop_deltaDictionary = withTests 300 . property $ do
           , encapsulateMessage (buildRecordBatchMessage rb (fromIntegral (BS.length body))) body
           , BS.pack [0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0]
           ]
-  (_, got) <- evalEither (decodeArrowStream bytes)
+  (_, got) <- evalEither (decodeArrowStream defaultReadOptions bytes)
   v1 <- values part1
   v2 <- values part2
   let allVals = v1 ++ v2
@@ -594,7 +595,7 @@ prop_dictionaryPlaceholder = withTests 200 . property $ do
   empty <- forAll (genColumnFor field 0)
   sample <- forAll (genColumnFor field {fieldDictionary = Nothing, fieldNullable = False} 0)
   let bytes = writeArrowStreamFBWithDicts sch [] [layoutBatch sch (V.singleton empty)]
-  (_, got) <- evalEither (decodeArrowStream bytes)
+  (_, got) <- evalEither (decodeArrowStream defaultReadOptions bytes)
   case got of
     [cols] | [c] <- V.toList cols -> case c of
       ColDictionary _ keys vals -> do
@@ -615,10 +616,10 @@ batch 2 = @i=[-7], s=[""], d=["y"], n=[null], l=[[9]]@, dictionary @["x","y"]@.
 prop_pyarrowFile :: Property
 prop_pyarrowFile = withTests 1 . property $ do
   bytes <- evalIO (BS.readFile "test/golden/pa_file.arrow")
-  (sch, batches) <- evalEither (readArrowFileColumns bytes)
+  (sch, batches) <- evalEither (readArrowFileColumns defaultReadOptions bytes)
   map fieldName (V.toList (arrowFields sch)) === ["i", "s", "d", "n", "l"]
   map fieldNullable (V.toList (arrowFields sch)) === replicate 5 True
-  (_, viaStream) <- evalEither (decodeArrowFile bytes)
+  (_, viaStream) <- evalEither (decodeArrowFile defaultReadOptions bytes)
   map (map tag . V.toList) viaStream
     === replicate 2 ["ColInt32", "ColUtf8", "ColDictionary", "ColDecimal128", "ColList"]
   map (map nullCount . V.toList) viaStream === [[0, 1, 1, 1, 1], [0, 0, 0, 1, 0]]
@@ -672,11 +673,11 @@ prop_zeroWidthRowCount = withTests 200 . property $ do
       nestedCol = fixture (mkList Nothing (VS.generate (n + 1) (fromIntegral . (* 2))) (fixture (mkStruct (2 * n) Nothing V.empty)))
       batch = V.fromList [structCol, listCol, nestedCol]
   stream <- evalEither (encodeArrowStream defaultWriteOptions sch [batch])
-  (_, got) <- evalEither (decodeArrowStream stream)
+  (_, got) <- evalEither (decodeArrowStream defaultReadOptions stream)
   sameTable [batch] got
   map (map columnLength . V.toList) got === [[n, n, n]]
   file <- evalEither (encodeArrowFile defaultWriteOptions sch [batch])
-  (_, gotFile) <- evalEither (decodeArrowFile file)
+  (_, gotFile) <- evalEither (decodeArrowFile defaultReadOptions file)
   sameTable [batch] gotFile
   k <- forAll (Gen.int (Range.linear 0 n))
   forM_ [structCol, listCol] $ \c -> do
@@ -712,13 +713,13 @@ prop_nestedDictionaries = withTests 200 . property $ do
   mode <- forAll (Gen.element [DictEmitOnce, DictReplaceOnChange])
   let opts = defaultWriteOptions {writeDictHandling = mode}
   bytes <- evalEither (encodeArrowStream opts sch batches)
-  (_, got) <- evalEither (decodeArrowStream bytes)
+  (_, got) <- evalEither (decodeArrowStream defaultReadOptions bytes)
   sameTable batches got
-  rd <- evalEither (openStreamReader bytes)
+  rd <- evalEither (openStreamReader defaultReadOptions bytes)
   got' <- evalEither (streamReaderToList rd)
   sameTable batches got'
   file <- evalEither (encodeArrowFile opts sch batches)
-  (_, gotFile) <- evalEither (decodeArrowFile file)
+  (_, gotFile) <- evalEither (decodeArrowFile defaultReadOptions file)
   sameTable batches gotFile
   (_, frames) <- evalEither (readArrowStreamFBInterleaved bytes)
   let groups = dictGroups frames
@@ -807,9 +808,9 @@ prop_nestedDictionaryDeltaReplace = withTests 200 . property $ do
         , [structRows r3 replaced]
         , [structRows r4 replaced]
         ]
-  (_, got) <- evalEither (decodeArrowStream bytes)
+  (_, got) <- evalEither (decodeArrowStream defaultReadOptions bytes)
   evalEither (traverse batchValues got) >>= (=== expected)
-  rd <- evalEither (openStreamReader bytes)
+  rd <- evalEither (openStreamReader defaultReadOptions bytes)
   got' <- evalEither (streamReaderToList rd)
   evalEither (traverse batchValues got') >>= (=== expected)
 
@@ -834,7 +835,7 @@ prop_emitOnceIndexOverflow = withTests 100 . property $ do
   isRight (encodeArrowFile defaultWriteOptions sch batches) === fits
   isRight (writeArrowStream sch (V.fromList batches)) === fits
   replaced <- evalEither (encodeArrowStream defaultWriteOptions {writeDictHandling = DictReplaceOnChange} sch batches)
-  (_, got) <- evalEither (decodeArrowStream replaced)
+  (_, got) <- evalEither (decodeArrowStream defaultReadOptions replaced)
   sameTable batches got
 
 
@@ -928,13 +929,13 @@ prop_zeroCopyDecode = withTests 300 . property $ do
   bytes <- evalEither (encodeArrowStream defaultWriteOptions sch batches)
   let aligned = placedAt 0 bytes
       misaligned = placedAt 1 bytes
-  (_, got) <- evalEither (decodeArrowStream aligned)
+  (_, got) <- evalEither (decodeArrowStream defaultReadOptions aligned)
   sameTable batches got
   let outside = filter (\b -> not (BS.null b) && not (regionWithin aligned b)) (concatMap I.columnBuffers (allColumns got))
   annotateShow (length outside)
   assert (null outside)
   cover 10 "has a validity bitmap" (any (any (\c -> nullCount c > 0) . V.toList) got)
-  (_, gotMis) <- evalEither (decodeArrowStream misaligned)
+  (_, gotMis) <- evalEither (decodeArrowStream defaultReadOptions misaligned)
   sameTable batches gotMis
 
 
@@ -945,7 +946,7 @@ prop_copyColumnDetaches :: Property
 prop_copyColumnDetaches = withTests 200 . property $ do
   (sch, batches) <- forAll genTable
   bytes <- evalEither (encodeArrowStream defaultWriteOptions sch batches)
-  (_, got) <- evalEither (decodeArrowStream bytes)
+  (_, got) <- evalEither (decodeArrowStream defaultReadOptions bytes)
   let copies = map (V.map copyColumn) got
   sameTable got copies
   let attached = filter (\b -> not (BS.null b) && regionWithin bytes b) (concatMap I.columnBuffers (allColumns copies))
@@ -964,11 +965,11 @@ prop_canonicalRoundTrip = withTests 300 . property $ do
   codec <- forAll (Gen.element [Nothing, Just LZ4Frame, Just BodyZstd])
   let opts = defaultWriteOptions {writeDictHandling = mode, writeBodyCompression = codec}
   stream <- evalEither (encodeArrowStream opts sch batches)
-  (sch1, got1) <- evalEither (decodeArrowStream stream)
+  (sch1, got1) <- evalEither (decodeArrowStream defaultReadOptions stream)
   again <- evalEither (encodeArrowStream opts sch1 got1)
   again === stream
   file <- evalEither (encodeArrowFile opts sch batches)
-  (sch2, got2) <- evalEither (decodeArrowFile file)
+  (sch2, got2) <- evalEither (decodeArrowFile defaultReadOptions file)
   againFile <- evalEither (encodeArrowFile opts sch2 got2)
   againFile === file
 

@@ -19,7 +19,7 @@ on slices of both.
 module Test.Arrow.Vector (tests) where
 
 import Arrow.Column
-import Arrow.Stream (decodeArrowStream, defaultWriteOptions, encodeArrowStream)
+import Arrow.Stream (decodeArrowStream, defaultReadOptions, defaultWriteOptions, encodeArrowStream)
 import Arrow.Types (ArrowType (..), DictionaryEncoding (..), Field (..), IntervalUnit (..), Precision (..), defaultField, defaultLeafField, defaultSchema)
 import Arrow.Vector (Element, Vector, maybeValues)
 import Control.Monad (forM_)
@@ -321,7 +321,7 @@ prop_conversions = withTests 400 . property $ do
     checkConversions f (sliceColumnArray i k col)
   where
     decodedFrom bs = do
-      (_, batches) <- evalEither (decodeArrowStream bs)
+      (_, batches) <- evalEither (decodeArrowStream defaultReadOptions bs)
       case batches of
         [batch] | V.length batch == 1 -> pure (V.head batch)
         _ -> annotate "expected one batch of one column" >> failure

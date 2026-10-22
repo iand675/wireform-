@@ -26,6 +26,10 @@ module Arrow.FlatBufferIPC.Read
   , readArrowStreamFBWithDicts
   , readArrowStreamFBInterleaved
   , StreamFrame (..)
+    -- * File footer index
+  , FileIndex (..)
+  , readFileIndex
+  , parseFileIndex
     -- * Tensor / SparseTensor
   , decodeTensorMessage
   , decodeTensorFrame
@@ -845,6 +849,100 @@ readArrowFileFBWithDicts bs = do
   when' (BS.takeEnd 6 bs /= "ARROW1") $
     Left "Arrow.FlatBufferIPC: missing trailing ARROW1 magic"
   readArrowStreamFBWithDicts (BS.drop 8 bs)
+
+-- ============================================================
+-- File footer index
+-- ============================================================
+
+{- | The @Footer@ of an Arrow IPC file (@format/File.fbs@): the
+schema plus the byte ranges of every dictionary and record batch.
+Each 'ArrowBlock' names one self-contained section of the file; a
+reader can seek to it, decode just that message and its body, and
+move on without parsing anything in between.
+-}
+data FileIndex = FileIndex
+  { fiSchema :: !Schema
+  , fiDictBlocks :: !(V.Vector ArrowBlock)
+  -- ^ Dictionary batches, in file order.
+  , fiRecordBatches :: !(V.Vector ArrowBlock)
+  -- ^ Record batches, in file order.
+  }
+  deriving (Show, Eq)
+
+
+{- | Read the 'FileIndex' out of whole file bytes: check the
+@ARROW1@ magics, peel the trailing @<i32 footer length> ARROW1@
+trailer, and parse the footer flatbuffer. Every block's offset and
+length is validated against the file size.
+-}
+readFileIndex :: ByteString -> Either String FileIndex
+readFileIndex bs = do
+  when' (BS.length bs < 14) $
+    Left "Arrow.FlatBufferIPC: input too small to be an Arrow file"
+  when' (BS.take 6 bs /= "ARROW1") $
+    Left "Arrow.FlatBufferIPC: missing leading ARROW1 magic"
+  when' (BS.takeEnd 6 bs /= "ARROW1") $
+    Left "Arrow.FlatBufferIPC: missing trailing ARROW1 magic"
+  let !n = BS.length bs
+      !trailer = BS.drop (n - 10) bs
+  footerLen <- peekI32 trailer 0
+  when' (footerLen <= 0 || fromIntegral footerLen > n - 16) $
+    Left "Arrow.FlatBufferIPC: invalid footer length in file trailer"
+  let !footer = BS.take (fromIntegral footerLen) (BS.drop (n - 10 - fromIntegral footerLen) bs)
+  parseFileIndex (fromIntegral n) footer
+
+
+{- | Parse a @Footer@ flatbuffer from its bytes alone, for readers
+that fetched only the footer region (seek-and-read streaming).
+@fileSize@ is the total file size the block ranges are validated
+against.
+-}
+parseFileIndex :: Int64 -> ByteString -> Either String FileIndex
+parseFileIndex fileSize footer = do
+  when' (BS.length footer < 8) $
+    Left "Arrow.FlatBufferIPC: footer too small"
+  rootPos <- fromIntegral <$> peekU32 footer 0
+  s <- resolveTable footer rootPos
+  schField <- case s 1 of
+    Nothing -> Left "Arrow.FlatBufferIPC: footer has no schema"
+    Just b -> Right b
+  sch <- followUOffset footer schField >>= readSchemaTable footer
+  dictBlocks <- readFooterBlocks fileSize footer (s 2)
+  rbBlocks <- readFooterBlocks fileSize footer (s 3)
+  Right
+    FileIndex
+      { fiSchema = sch
+      , fiDictBlocks = dictBlocks
+      , fiRecordBatches = rbBlocks
+      }
+
+
+-- | The @[Block]@ struct vector at a footer slot, range-validated.
+readFooterBlocks :: Int64 -> ByteString -> Maybe Pos -> Either String (V.Vector ArrowBlock)
+readFooterBlocks _ _ Nothing = Right V.empty
+readFooterBlocks fileSize footer (Just slotPos) = do
+  vecPos <- followUOffset footer slotPos
+  (n, elems) <- readVectorOfStructs footer vecPos 24
+  V.generateM n $ \i -> do
+    let !p = V.unsafeIndex elems i
+    off <- peekI64 footer p
+    metaLen <- peekI32 footer (p + 8)
+    bodyLen <- peekI64 footer (p + 16)
+    if off < 8 || metaLen <= 0 || bodyLen < 0
+      then Left "Arrow.FlatBufferIPC: footer block has an invalid offset or length"
+      else
+        if off > fileSize - fromIntegral metaLen
+          then Left "Arrow.FlatBufferIPC: footer block header runs past the end of the file"
+          else
+            if bodyLen > fileSize - off - fromIntegral metaLen
+              then Left "Arrow.FlatBufferIPC: footer block body runs past the end of the file"
+              else
+                Right
+                  ArrowBlock
+                    { abOffset = off
+                    , abMetaLen = metaLen
+                    , abBodyLen = bodyLen
+                    }
 
 -- | Strip one encapsulated-message frame:
 --

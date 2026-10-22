@@ -100,6 +100,7 @@ test-suite wireform-arrow-test
     Test.Arrow.Gen
     Test.Arrow.Malformed
     Test.Arrow.Props
+    Test.Arrow.Sections
     Test.Arrow.Vector
   build-depends:
     base >= 4.16 && < 5,
@@ -109,6 +110,7 @@ test-suite wireform-arrow-test
     bytestring >= 0.11 && < 0.13,
     containers >= 0.6 && < 0.9,
     deepseq >= 1.4 && < 1.6,
+    directory,
     hedgehog >= 1.2 && < 1.8,
     text >= 2.0 && < 2.2,
     vector >= 0.13 && < 0.14,

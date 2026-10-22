@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+* **Arrow decode budgets and semi-streaming section reads:** every
+  `wireform-arrow` decode entry point now takes a `ReadOptions` of
+  caller-supplied budgets, mirroring arrow-cpp's `IpcReadOptions`: the
+  declared rows per batch, the total declared values across a batch's
+  field nodes, the rows with no buffer backing, and the total
+  uncompressed size a compressed body may expand to. A batch claiming
+  past a budget is a decode error instead of an oversized allocation or
+  an absurd logical row count. The file footer's block index is now
+  parsed (`readFileIndex` / `FileIndex`), and `Arrow.Stream` grows a
+  footer-indexed `FileReader` plus handle-based iterators
+  (`fileBatchesHandle` / `streamBatchesHandle`) that read and decode one
+  section live at a time, so a huge file can be iterated without
+  materializing every batch. `Wireform.Columnar`'s unified `ReadOptions`
+  carries the Arrow budgets, and its Arrow file iteration now streams
+  section by section.
+
 * **HTTP/2 cancellation and shutdown:** keep HPACK table updates masked
   through header publication so cancelling one stream cannot desynchronize
   later responses. The gRPC engine wakes requests reset before response

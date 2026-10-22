@@ -31,6 +31,7 @@ module Main (main) where
 
 import Arrow.Column
 import Arrow.File qualified as AF
+import Arrow.Read.Columns (defaultReadOptions)
 import Arrow.Record (Table, decodeTable, encodeTable)
 import Arrow.Record.TH (deriveTable)
 import Arrow.Stream (
@@ -306,7 +307,7 @@ toOwned c = case c of
 
 decodeToVector :: ByteString -> Either String [V.Vector Owned]
 decodeToVector bs = do
-  (_, batches) <- decodeArrowStream bs
+  (_, batches) <- decodeArrowStream defaultReadOptions bs
   traverse (traverse toOwned) batches
 
 
@@ -344,7 +345,7 @@ trades n =
 
 
 typedDecode :: ByteString -> Either String (V.Vector Trade)
-typedDecode bs = case decodeArrowStream bs of
+typedDecode bs = case decodeArrowStream defaultReadOptions bs of
   Left err -> Left err
   Right (sch, [cols]) -> decodeTable tradeTable sch cols
   Right (_, batches) -> Left ("expected one batch, got " <> show (length batches))
@@ -391,7 +392,7 @@ codecGroups :: String -> Int -> [Benchmark]
 codecGroups suffix n =
   [ bgroup ("encode" <> suffix) (map (encodeBench encodeW) workloadNames)
   , bgroup ("encode lazy" <> suffix) (map (encodeBench encodeLazyW) workloadNames)
-  , bgroup ("decode" <> suffix) (map (decodeBench decodeArrowStream) workloadNames)
+  , bgroup ("decode" <> suffix) (map (decodeBench (decodeArrowStream defaultReadOptions)) workloadNames)
   , bgroup ("decode + toVector" <> suffix) (map (decodeBench decodeToVector) workloadNames)
   ]
  where
@@ -411,7 +412,7 @@ apiPaths =
       bench "stream encode (Arrow.Write)" $
         nf (AW.writeArrowStream (wlSchema w)) (V.singleton (wlBatch w))
   , env (checked "stream decode" (encodeW (mixed bigRows))) $ \bs ->
-      bench "stream decode (Arrow.Stream)" $ nf decodeArrowStream bs
+      bench "stream decode (Arrow.Stream)" $ nf (decodeArrowStream defaultReadOptions) bs
   , env mixedEnv $ \w ->
       bench "file encode (Arrow.Stream)" $
         nf (encodeArrowFile defaultWriteOptions (wlSchema w)) [wlBatch w]
@@ -419,10 +420,10 @@ apiPaths =
       bench "file encode lazy (Arrow.Stream)" $
         nf (encodeArrowFileLazy defaultWriteOptions (wlSchema w)) [wlBatch w]
   , env specFileBytes $ \bs ->
-      bench "file decode (Arrow.Stream)" $ nf decodeArrowFile bs
+      bench "file decode (Arrow.Stream)" $ nf (decodeArrowFile defaultReadOptions) bs
   , env specFileBytes $ \bs ->
       bench "file read (Arrow.File)" $
-        nf (either (error . ("file read: " <>)) id . AF.readArrowFileColumns) bs
+        nf (either (error . ("file read: " <>)) id . AF.readArrowFileColumns defaultReadOptions) bs
   , env (pure (trades bigRows)) $ \ts ->
       bench "typed encode (Arrow.Record)" $ nf typedEncode ts
   , env typedBytes $ \bs ->
@@ -433,7 +434,7 @@ apiPaths =
   specFileBytes = do
     w <- mixedEnv
     bs <- checked "file encode" (encodeArrowFile defaultWriteOptions (wlSchema w) [wlBatch w])
-    _ <- checked "file decode" (decodeArrowFile bs)
+    _ <- checked "file decode" (decodeArrowFile defaultReadOptions bs)
     pure bs
   typedBytes = do
     bs <- checked "typed encode" (typedEncode (trades bigRows))

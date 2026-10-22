@@ -21,6 +21,7 @@ module Main (main) where
 
 import Arrow.Column
 import Arrow.File (asBatches, asSchema, readArrowStream)
+import Arrow.Read.Columns (defaultReadOptions)
 import Arrow.FlatBufferIPC (
   SparseTensor (..),
   Tensor (..),
@@ -63,6 +64,7 @@ import Data.Word (Word16, Word32, Word64, Word8)
 import Test.Arrow.Core qualified as Core
 import Test.Arrow.Malformed qualified as Malformed
 import Test.Arrow.Props qualified as Props
+import Test.Arrow.Sections qualified as Sections
 import Test.Arrow.Vector qualified as Vector
 import System.Exit (exitFailure)
 
@@ -440,8 +442,9 @@ main = do
   coreOk <- Core.tests
   propsOk <- Props.tests
   malformedOk <- Malformed.tests
+  sectionsOk <- Sections.tests
   vectorOk <- Vector.tests
-  unless (coreOk && propsOk && malformedOk && vectorOk) $
+  unless (coreOk && propsOk && malformedOk && sectionsOk && vectorOk) $
     failTest "FAIL: wireform-arrow property suites"
 
   putStrLn "All wireform-arrow round-trip tests passed."
@@ -752,7 +755,7 @@ pyarrowGoldenRoundTrip = do
 goldenCheck :: FilePath -> V.Vector ColumnArray -> IO ()
 goldenCheck name expected = do
   bs <- BS.readFile ("test/golden/" <> name)
-  case decodeArrowStream bs of
+  case decodeArrowStream defaultReadOptions bs of
     Left e -> failTest $ "golden " <> name <> ": decode: " <> e
     Right (_sch, batches)
       | [b] <- batches
@@ -776,7 +779,7 @@ goldenDictCheck
   :: FilePath -> [Int] -> ColumnArray -> IO ()
 goldenDictCheck name expectedIndices expectedValues = do
   bs <- BS.readFile ("test/golden/" <> name)
-  case decodeArrowStream bs of
+  case decodeArrowStream defaultReadOptions bs of
     Left e -> failTest $ "golden " <> name <> ": decode: " <> e
     Right (_sch, batches) -> case batches of
       [b] | V.length b == 1 -> case V.head b of
@@ -965,7 +968,7 @@ dictReplacementRoundTrip = do
             (fromTexts (V.fromList ["x", "y"]))
       !opts = defaultWriteOptions {writeDictHandling = DictReplaceOnChange}
       !bytes = encodeArrowStream opts sch [batch1, batch2]
-  case bytes >>= decodeArrowStream of
+  case bytes >>= decodeArrowStream defaultReadOptions of
     Left e -> failTest $ "dict-replace round-trip: " ++ e
     Right (_, batches)
       | [b1, b2] <- batches
@@ -999,7 +1002,7 @@ bodyCompressionRoundTrip :: BodyCompressionCodec -> Schema -> V.Vector ColumnArr
 bodyCompressionRoundTrip codec sch cols = do
   let !opts = defaultWriteOptions {writeBodyCompression = Just codec}
       !encoded = encodeArrowStream opts sch [cols]
-  case encoded >>= \bytes -> (,) bytes <$> decodeArrowStream bytes of
+  case encoded >>= \bytes -> (,) bytes <$> decodeArrowStream defaultReadOptions bytes of
     Left e -> failTest $ "body-compression round-trip: " ++ e
     Right (bytes, (_sch', batches))
       | [got] <- batches
@@ -1019,7 +1022,7 @@ bodyCompressionRoundTrip codec sch cols = do
 streamingRoundTrip :: Schema -> [V.Vector ColumnArray] -> IO ()
 streamingRoundTrip sch batches = do
   let bytes = encodeArrowStream defaultWriteOptions sch batches
-  case bytes >>= openStreamReader of
+  case bytes >>= openStreamReader defaultReadOptions of
     Left e -> failTest $ "openStreamReader: " ++ e
     Right rd0 -> do
       when (streamReaderSchema rd0 /= sch) $
@@ -1047,8 +1050,8 @@ streamingRoundTrip sch batches = do
                       ++ "\n exp "
                       ++ show (drop 1 batches)
   -- Iter-shaped variant: the same drain via Columnar.Stream.
-  case bytes >>= openStreamReader of
-    Left e -> failTest $ "openStreamReader (iter): " ++ e
+  case bytes >>= openStreamReader defaultReadOptions of
+    Left e -> failTest $ "openStreamReader defaultReadOptions (iter): " ++ e
     Right rd0 ->
       case IS.iterToList (streamReaderIter rd0) of
         Left e -> failTest $ "streamReaderIter drain: " ++ e
@@ -1086,7 +1089,7 @@ customMetadataRoundTrip = do
           }
       !batch = V.singleton (primColumn PInt32 (VS.fromList ([1, 2, 3] :: [Int32])))
       !bytes = encodeArrowStream defaultWriteOptions sch [batch]
-  case bytes >>= decodeArrowStream of
+  case bytes >>= decodeArrowStream defaultReadOptions of
     Left e -> failTest $ "customMetadata roundtrip: " ++ e
     Right (sch', _batches) -> do
       expect
@@ -1130,7 +1133,7 @@ nestedStructRoundTrip = do
           ]
       (!sch, !cols) = AR.encodeTable tbl rows
       !bytes = encodeArrowStream defaultWriteOptions sch [cols]
-  case bytes >>= decodeArrowStream of
+  case bytes >>= decodeArrowStream defaultReadOptions of
     Left e -> failTest $ "nested struct decode: " ++ e
     Right (sch', batches) -> case batches of
       [batch] -> case AR.decodeTable tbl sch' batch of
@@ -1180,7 +1183,7 @@ nullableNestedStructRoundTrip = do
           ]
       (!sch, !cols) = AR.encodeTable tbl rows
       !bytes = encodeArrowStream defaultWriteOptions sch [cols]
-  case bytes >>= decodeArrowStream of
+  case bytes >>= decodeArrowStream defaultReadOptions of
     Left e -> failTest $ "nullable nested struct decode: " ++ e
     Right (sch', batches) -> case batches of
       [batch] -> case AR.decodeTable tbl sch' batch of
@@ -1412,7 +1415,7 @@ projectionRoundTrip = do
           , fromTexts (V.fromList ["x", "y", "z"])
           ]
       !bytes = encodeArrowStream defaultWriteOptions sch [batch]
-  case bytes >>= openStreamReader of
+  case bytes >>= openStreamReader defaultReadOptions of
     Left e -> failTest $ "projection openStreamReader: " ++ e
     Right rd0 ->
       -- Ask for c then a, in that order: should drop b and reorder.
@@ -1440,7 +1443,7 @@ projectionRoundTrip = do
 highLevelRoundTrip :: String -> Schema -> V.Vector ColumnArray -> IO ()
 highLevelRoundTrip label sch cols = do
   let bytes = encodeArrowStream defaultWriteOptions sch [cols]
-  case bytes >>= decodeArrowStream of
+  case bytes >>= decodeArrowStream defaultReadOptions of
     Left e -> failTest $ label ++ ": decodeArrowStream: " ++ e
     Right (sch', batches)
       | sch' /= sch ->
@@ -1490,7 +1493,7 @@ roundTripNested label field col = do
         (label ++ ": batch count == 1")
         (V.length (asBatches as) == 1)
       let (rb, body) = V.unsafeIndex (asBatches as) 0
-      case decodeRecordBatch (asSchema as) rb body of
+      case decodeRecordBatch defaultReadOptions (asSchema as) rb body of
         Left e -> failTest (label ++ ": materialize: " ++ e)
         Right cols -> do
           expect (label ++ ": column count == 1") (V.length cols == 1)
@@ -1543,7 +1546,7 @@ roundTripPrim label col = do
         (label ++ ": batch count == 1")
         (V.length (asBatches as) == 1)
       let (rb, body) = V.unsafeIndex (asBatches as) 0
-      case decodeRecordBatch (asSchema as) rb body of
+      case decodeRecordBatch defaultReadOptions (asSchema as) rb body of
         Left e -> failTest (label ++ ": materialize: " ++ e)
         Right cols -> do
           expect (label ++ ": column count == 1") (V.length cols == 1)

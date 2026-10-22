@@ -2,7 +2,7 @@ module Test.Arrow (arrowTests) where
 
 import Arrow.Column
 import Arrow.File
-import Arrow.Read.Columns (decodeRecordBatch)
+import Arrow.Read.Columns (decodeRecordBatch, defaultReadOptions)
 import Arrow.IPC
 import Arrow.Types
 import Arrow.Write
@@ -493,7 +493,7 @@ columnTests =
                   <> leI32 10
                   <> leI32 0
                   <> leI32 30
-          case decodeRecordBatch schema rb body of
+          case decodeRecordBatch defaultReadOptions schema rb body of
             Left e -> expectationFailure e
             Right cols -> V.head cols `shouldBe` fromMaybes PInt32 (V.fromList [Just 10, Nothing, Just 30])
       , it "Struct column" $ do
@@ -524,7 +524,7 @@ columnTests =
                   , rbBodyCompression = Nothing
                   }
               body = leI32 1 <> leI32 2 <> leI32 3 <> leI32 4
-          case decodeRecordBatch schema rb body of
+          case decodeRecordBatch defaultReadOptions schema rb body of
             Left e -> expectationFailure e
             Right cols ->
               V.head cols
@@ -573,7 +573,7 @@ columnTests =
                   <> leI32 3
                   <> leI32 4
                   <> leI32 5
-          case decodeRecordBatch schema rb body of
+          case decodeRecordBatch defaultReadOptions schema rb body of
             Left e -> expectationFailure e
             Right cols ->
               V.head cols
@@ -618,7 +618,7 @@ writeRoundtrips =
               case readIPCMessage streamBs next of
                 Left e -> expectationFailure e
                 Right (RecordBatch rb, body, _) ->
-                  case decodeRecordBatch schema rb body of
+                  case decodeRecordBatch defaultReadOptions schema rb body of
                     Left e2 -> expectationFailure e2
                     Right result -> V.head result `shouldBe` primColumn PInt32 vals
                 Right _ -> expectationFailure "Expected RecordBatch message"
@@ -646,7 +646,7 @@ writeRoundtrips =
               asSchema as `shouldBe` schema
               V.length (asBatches as) `shouldBe` 1
               let (rb, body) = V.head (asBatches as)
-              case decodeRecordBatch schema rb body of
+              case decodeRecordBatch defaultReadOptions schema rb body of
                 Left e2 -> expectationFailure e2
                 Right result -> do
                   result V.! 0 `shouldBe` primColumn PInt32 (VS.fromList [10, 20, 30])
@@ -669,7 +669,7 @@ writeRoundtrips =
                   , arrowFeatures = V.empty
                   }
               batch1 = V.singleton (primColumn PInt32 (VS.fromList [100, 200, 300]))
-          case writeArrowFile schema (V.singleton batch1) >>= readArrowFileColumns of
+          case writeArrowFile schema (V.singleton batch1) >>= readArrowFileColumns defaultReadOptions of
             Left e -> expectationFailure e
             Right (readSchema, readBatches) -> do
               readSchema `shouldBe` schema

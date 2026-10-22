@@ -99,6 +99,7 @@ import Arrow.Column (
   pattern ColUtf8,
   pattern ColUtf8View,
  )
+import Arrow.Read.Columns (defaultReadOptions)
 import Arrow.Stream (
   DictHandling (..),
   WriteOptions (..),
@@ -999,7 +1000,7 @@ directionB ref python script tmp = do
             Nothing -> report ref "B" name (Left ("no Haskell-side case named " ++ cn))
             Just c -> do
               bytes <- BS.readFile (dir </> name)
-              let decode = if ext == "arrow" then decodeArrowFile else decodeArrowStream
+              let decode = if ext == "arrow" then decodeArrowFile defaultReadOptions else decodeArrowStream defaultReadOptions
               r <- try (evaluate (force (decode bytes))) :: IO (Either SomeException (Either String (Schema, [V.Vector ColumnArray])))
               report ref "B" name $ case r of
                 Left e -> Left ("wireform-arrow decoder threw: " ++ show e)

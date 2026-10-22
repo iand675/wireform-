@@ -1034,15 +1034,6 @@ bodyCompressionAvailable = \case
   LZ4Frame -> False
 #endif
 
--- | A 'Block' struct as emitted in the @Footer.recordBatches@
--- vector. Inline fixed-size struct (24 bytes total): offset i64,
--- metaDataLength i32, bodyLength i64.
-data ArrowBlock = ArrowBlock
-  { abOffset  :: !Int64
-  , abMetaLen :: !Int32
-  , abBodyLen :: !Int64
-  }
-
 -- | Build the @Footer@ flatbuffer:
 --
 -- @

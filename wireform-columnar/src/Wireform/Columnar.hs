@@ -89,9 +89,11 @@ module Wireform.Columnar (
 import Arrow.Column qualified as AC
 import Arrow.Record qualified as ArR
 import Arrow.Stream hiding (
+  ReadOptions,
   WriteOptions,
   decodeArrowFile,
   decodeArrowStream,
+  defaultReadOptions,
   defaultWriteOptions,
   encodeArrowFile,
   encodeArrowStream,
@@ -207,22 +209,26 @@ defaultWriteOptions =
 -- Read options
 -- ============================================================
 
-{- | Unified reader configuration. Currently only Parquet has
-caller-visible read-time knobs (footer decryption); Arrow and
-ORC readers self-configure from the file header.
+{- | Unified reader configuration. Arrow carries the per-batch
+decode budgets of 'Arrow.Stream.ReadOptions' (the same record
+"Arrow.Stream" takes); Parquet has its own footer knobs; ORC
+readers self-configure from the file header.
 -}
-newtype ReadOptions = ReadOptions
-  { parquetRead :: Parquet.ReadOptions
+data ReadOptions = ReadOptions
+  { arrowRead :: Arrow.ReadOptions
+  -- ^ Decode budgets applied to every Arrow IPC record batch.
+  , parquetRead :: Parquet.ReadOptions
   }
 
 
-{- | Empty/default reader options (expects plaintext Parquet
-footers).
+{- | Default reader options: Arrow's 'Arrow.Stream.defaultReadOptions'
+budgets and a plaintext Parquet footer.
 -}
 defaultReadOptions :: ReadOptions
 defaultReadOptions =
   ReadOptions
-    { parquetRead = Parquet.defaultReadOptions
+    { arrowRead = Arrow.defaultReadOptions
+    , parquetRead = Parquet.defaultReadOptions
     }
 
 
@@ -288,8 +294,8 @@ decode
   -> ByteString
   -> Either String (AT.Schema, [V.Vector AC.ColumnArray])
 decode fmt opts bs = case fmt of
-  Arrow -> Arrow.decodeArrowStream bs
-  ArrowFile -> Arrow.decodeArrowFile bs
+  Arrow -> Arrow.decodeArrowStream (arrowRead opts) bs
+  ArrowFile -> Arrow.decodeArrowFile (arrowRead opts) bs
   Parquet -> do
     pf <- Parquet.decodeParquet (parquetRead opts) bs
     let !sch = PArrow.parquetFileArrowSchema pf
@@ -462,8 +468,8 @@ decodeSchema
   -> ByteString
   -> Either String AT.Schema
 decodeSchema fmt opts bs = case fmt of
-  Arrow -> fst <$> Arrow.decodeArrowStream bs
-  ArrowFile -> fst <$> Arrow.decodeArrowFile bs
+  Arrow -> fst <$> Arrow.decodeArrowStream (arrowRead opts) bs
+  ArrowFile -> fst <$> Arrow.decodeArrowFile (arrowRead opts) bs
   Parquet -> do
     pf <- Parquet.decodeParquet (parquetRead opts) bs
     Right (PArrow.parquetFileArrowSchema pf)
@@ -492,16 +498,13 @@ decodeIter
   -> Either String (AT.Schema, IS.Iter (V.Vector AC.ColumnArray))
 decodeIter fmt opts bs = case fmt of
   Arrow -> do
-    rd <- Arrow.openStreamReader bs
+    rd <- Arrow.openStreamReader (arrowRead opts) bs
     Right (Arrow.streamReaderSchema rd, Arrow.streamReaderIter rd)
   ArrowFile -> do
-    -- Arrow file uses the same record-batch shape; reuse the
-    -- streaming reader on the post-magic body. The current
-    -- 'Arrow.decodeArrowFile' eagerly reads everything, so the
-    -- iterator below shares the same per-batch decode but
-    -- avoids materialising the list spine.
-    (sch, batches) <- Arrow.decodeArrowFile bs
-    Right (sch, IS.iterFromList batches)
+    -- Decoded one footer-indexed section at a time, so the
+    -- iterator never materialises more than one batch.
+    rd <- Arrow.openFileReader (arrowRead opts) bs
+    Right (Arrow.fileReaderSchema rd, Arrow.fileReaderIter rd)
   Parquet -> do
     pf <- Parquet.decodeParquet (parquetRead opts) bs
     let !sch = PArrow.parquetFileArrowSchema pf
@@ -531,13 +534,13 @@ decodeProjectedIter fmt opts names bs = do
   narrow <- projectFieldsByName names fullSch
   case fmt of
     Arrow -> do
-      rd <- Arrow.openStreamReader bs
+      rd <- Arrow.openStreamReader (arrowRead opts) bs
       Right (narrow, Arrow.streamReaderProjectedIter names rd)
     ArrowFile -> do
-      (_, batches) <- Arrow.decodeArrowFile bs
+      rd <- Arrow.openFileReader (arrowRead opts) bs
       let projectIdxs = projectionIndices names fullSch
           pickCols cols = V.map (V.unsafeIndex cols) projectIdxs
-      Right (narrow, IS.iterMap pickCols (IS.iterFromList batches))
+      Right (narrow, IS.iterMap pickCols (Arrow.fileReaderIter rd))
     Parquet -> do
       pf <- Parquet.decodeParquet (parquetRead opts) bs
       Right (narrow, PArrow.streamRowGroupsProjectedIter fullSch names pf)

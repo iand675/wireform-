@@ -23,7 +23,7 @@ module Arrow.File (
 
 import Arrow.Column (ColumnArray)
 import Arrow.FlatBufferIPC (decodeMessageFrame, readArrowFileFBWithDicts, readArrowStreamFBWithDicts, readFrameHeader)
-import Arrow.Stream (decodeArrowFile)
+import Arrow.Stream (ReadOptions, decodeArrowFile)
 import Arrow.Types
 import Data.Bits (complement, (.&.))
 import Data.ByteString (ByteString)
@@ -84,7 +84,7 @@ readArrowFile bs = do
 {- | Read an Arrow IPC file and materialize every record batch
 (decompressed, dictionaries resolved).
 -}
-readArrowFileColumns :: ByteString -> Either String (Schema, V.Vector (V.Vector ColumnArray))
-readArrowFileColumns bs = do
-  (schema, batches) <- decodeArrowFile bs
+readArrowFileColumns :: ReadOptions -> ByteString -> Either String (Schema, V.Vector (V.Vector ColumnArray))
+readArrowFileColumns opts bs = do
+  (schema, batches) <- decodeArrowFile opts bs
   Right (schema, V.fromList batches)

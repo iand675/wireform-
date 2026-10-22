@@ -66,6 +66,11 @@ module Arrow.FlatBufferIPC
   , readArrowStreamFBInterleaved
   , StreamFrame (..)
   , buildDictionaryBatchMessage
+    -- * File footer index (sections)
+  , ArrowBlock (..)
+  , FileIndex (..)
+  , readFileIndex
+  , parseFileIndex
     -- * Tensor / SparseTensor
   , Tensor (..)
   , TensorDim (..)

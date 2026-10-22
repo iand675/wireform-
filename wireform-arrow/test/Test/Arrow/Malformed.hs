@@ -74,8 +74,11 @@ import Arrow.Column (
  )
 import Arrow.Column.Internal qualified as I
 import Arrow.File qualified as File
+import Arrow.Read.Columns (ReadOptions (..), defaultReadOptions)
 import Arrow.FlatBufferIPC (
+  ArrowBlock (..),
   DictBatch (..),
+  FileIndex (..),
   StreamFrame (..),
   buildDictionaryBatchMessage,
   buildRecordBatchMessage,
@@ -85,6 +88,7 @@ import Arrow.FlatBufferIPC (
   decodeTensorFrame,
   encapsulateMessage,
   readArrowFileFBWithDicts,
+  readFileIndex,
   readArrowStreamFBInterleaved,
   writeArrowFileFBWithDicts,
  )
@@ -96,6 +100,8 @@ import Arrow.Stream (
   defaultWriteOptions,
   encodeArrowFile,
   encodeArrowStream,
+  fileReaderToList,
+  openFileReader,
   openStreamReader,
   streamReaderSchema,
   streamReaderToList,
@@ -151,6 +157,7 @@ tests = do
       , ("unbacked rows from a tiny header", prop_unbackedRows)
       , ("buffer descriptor validation bounds", prop_bufferValidator)
       , ("compressed buffer length claims", prop_decompressionClaims)
+      , ("decode budgets bound rows, values, unbacked rows and decompression", prop_readerBudgets)
       , ("mutated writer output over zero-copy decode never throws from any accessor", prop_zeroCopyAccessorFuzz)
       ]
 
@@ -549,25 +556,33 @@ valuesSize = V.foldl' (\acc v -> acc + valueSize v) 0
 -- | Every public entry point that accepts untrusted bytes.
 decoders :: [(String, ByteString -> IO (Maybe String))]
 decoders =
-  [ ("Arrow.Stream.decodeArrowStream", containedColumns (concatMap V.toList . snd) . decodeArrowStream)
-  , ("Arrow.Stream.decodeArrowFile", containedColumns (concatMap V.toList . snd) . decodeArrowFile)
+  [ ("Arrow.Stream.decodeArrowStream", containedColumns (concatMap V.toList . snd) . decodeArrowStream defaultReadOptions)
+  , ("Arrow.Stream.decodeArrowFile", containedColumns (concatMap V.toList . snd) . decodeArrowFile defaultReadOptions)
   , ("Arrow.Stream.openStreamReader/streamReaderToList", containedColumns (concatMap V.toList . snd) . viaStreamReader)
+  , ("Arrow.Stream.openFileReader/fileReaderToList", containedColumns (concatMap V.toList) . viaFileReader)
   , ("Arrow.FlatBufferIPC.readArrowStreamFBInterleaved", contained . fmap (fmap (map frameNF)) . readArrowStreamFBInterleaved)
   , ("Arrow.FlatBufferIPC.readArrowFileFBWithDicts", contained . fmap (\(s, ds, bs) -> (s, map dictNF ds, bs)) . readArrowFileFBWithDicts)
   , ("Arrow.FlatBufferIPC.decodeTensorFrame", contained . fmap (\(t, rest) -> (show t, rest)) . decodeTensorFrame)
   , ("Arrow.FlatBufferIPC.decodeSparseTensorFrame", contained . fmap (\(t, rest) -> (show t, rest)) . decodeSparseTensorFrame)
   , ("Arrow.File.readArrowStream", contained . fmap (\a -> (File.asSchema a, File.asBatches a)) . File.readArrowStream)
   , ("Arrow.File.readArrowFile", contained . fmap (\a -> (File.afSchema a, File.afBatches a)) . File.readArrowFile)
-  , ("Arrow.File.readArrowFileColumns", containedColumns (concatMap V.toList . V.toList . snd) . File.readArrowFileColumns)
+  , ("Arrow.File.readArrowFileColumns", containedColumns (concatMap V.toList . V.toList . snd) . File.readArrowFileColumns defaultReadOptions)
   , ("Arrow.IPC.decodeIPCMessage", contained . decodeIPCMessage)
+  , ("Arrow.FlatBufferIPC.readFileIndex", contained . fmap indexNF . readFileIndex)
   , ("Arrow.File.readIPCMessage@0", \bs -> contained (File.readIPCMessage bs 0))
   , ("Arrow.File.readIPCMessage@8", \bs -> contained (File.readIPCMessage bs 8))
   ]
   where
     viaStreamReader bs = do
-      rd <- openStreamReader bs
+      rd <- openStreamReader defaultReadOptions bs
       batches <- streamReaderToList rd
       Right (streamReaderSchema rd, batches)
+    viaFileReader bs = do
+      rd <- openFileReader defaultReadOptions bs
+      batches <- fileReaderToList rd
+      Right (V.fromList batches)
+    indexNF idx = (show (fiSchema idx), map blockNF (V.toList (fiDictBlocks idx)), map blockNF (V.toList (fiRecordBatches idx)))
+    blockNF b = (abOffset b, abMetaLen b, abBodyLen b)
     frameNF = \case
       SFDict db -> Left (dictNF db)
       SFBatch rb body -> Right (rb, body)
@@ -905,7 +920,7 @@ never fail exercise nothing hostile.
 -}
 coverDepth :: CoverPercentage -> ByteString -> PropertyT IO ()
 coverDepth acceptPct bs = do
-  let accepted = case (decodeArrowStream bs, decodeArrowFile bs) of
+  let accepted = case (decodeArrowStream defaultReadOptions bs, decodeArrowFile defaultReadOptions bs) of
         (Left _, Left _) -> False
         _ -> True
   cover acceptPct "a decoder accepted the mutated input" accepted
@@ -989,7 +1004,7 @@ aliasedSchemaStream depth = do
 rejectsEverywhere :: ByteString -> PropertyT IO ()
 rejectsEverywhere bs = do
   noDecoderCrashes bs
-  case decodeArrowStream bs of
+  case decodeArrowStream defaultReadOptions bs of
     Left _ -> success
     Right _ -> do
       annotate "decodeArrowStream accepted a hostile schema"
@@ -1056,7 +1071,68 @@ prop_decompressionClaims = withTests 1 . property $ do
   mapM_ (\(codec, claim) -> rejectsEverywhere (compressedClaim codec claim)) $
     concatMap (\codec -> map ((,) codec) [2 ^ (40 :: Int), maxBound, 600, 65, 63, -2]) [BodyZstd, LZ4Frame]
   mapM_
-    (\codec -> fmap snd (decodeArrowStream (compressedClaim codec 64)) === Right [V.singleton (primColumn PInt64 (VS.replicate 8 0x0707070707070707))])
+    (\codec -> fmap snd (decodeArrowStream defaultReadOptions (compressedClaim codec 64)) === Right [V.singleton (primColumn PInt64 (VS.replicate 8 0x0707070707070707))])
+    [BodyZstd, LZ4Frame]
+
+
+{- | Two non-null int64 columns of 8 rows whose data buffers are
+compressed envelopes honestly claiming @64@ uncompressed bytes each;
+the payloads really hold 64 bytes of @0x07@.
+-}
+compressedTwo :: BodyCompressionCodec -> ByteString
+compressedTwo codec =
+  let payload = either (const BS.empty) id (compressBufferEither codec (BS.replicate 64 7))
+      env = le64 64 <> payload
+      envLen = fromIntegral (BS.length env)
+      body = env <> env
+      rb =
+        RecordBatchDef
+          8
+          (VS.fromList [FieldNode 8 0, FieldNode 8 0])
+          (VS.fromList [Buffer 0 0, Buffer 0 envLen, Buffer envLen 0, Buffer envLen envLen])
+          V.empty
+          (Just codec)
+  in serialize StreamEnc (schemaOf [plain "x" False (AInt 64 True), plain "y" False (AInt 64 True)]) [(SFBatch rb body, Nothing)]
+
+
+{- | Every 'ReadOptions' budget rejects a batch that claims past it and
+accepts the same batch at its exact boundary: the declared row count,
+the total declared values across the field nodes, the rows with no
+buffer backing (a zero-width fixed-size binary names them all), and
+the total uncompressed size a compressed body expands to.
+-}
+prop_readerBudgets :: Property
+prop_readerBudgets = withTests 1 . property $ do
+  let sch = schemaOf [plain "z" False (AFixedSizeBinary 0)]
+      rows = 600 :: Int64
+      rb = RecordBatchDef rows (VS.singleton (FieldNode rows 0)) (VS.fromList [Buffer 0 0, Buffer 0 0]) V.empty Nothing
+      bytes = serialize StreamEnc sch [(SFBatch rb BS.empty, Nothing)]
+      mustAccept what opts = case decodeArrowStream opts bytes of
+        Left e -> annotate (what ++ " at its boundary was rejected: " ++ e) >> failure
+        Right _ -> success
+      mustReject what opts = case decodeArrowStream opts bytes of
+        Left _ -> success
+        Right _ -> annotate (what ++ " over budget was accepted") >> failure
+      mustAcceptBytes what bs opts = case decodeArrowStream opts bs of
+        Left e -> annotate (what ++ " at its boundary was rejected: " ++ e) >> failure
+        Right _ -> success
+      mustRejectBytes what bs opts = case decodeArrowStream opts bs of
+        Left _ -> success
+        Right _ -> annotate (what ++ " over budget was accepted") >> failure
+  mustAccept "rows" defaultReadOptions
+  mustAccept "rows" defaultReadOptions {roMaxRows = rows}
+  mustReject "rows" defaultReadOptions {roMaxRows = rows - 1}
+  mustAccept "values" defaultReadOptions {roMaxValues = rows}
+  mustReject "values" defaultReadOptions {roMaxValues = rows - 1}
+  mustAccept "unbacked rows" defaultReadOptions {roMaxUnbackedRows = rows}
+  mustReject "unbacked rows" defaultReadOptions {roMaxUnbackedRows = rows - 1}
+  mapM_
+    ( \codec -> do
+        let compressed = compressedTwo codec
+        mustAcceptBytes "decompression" compressed defaultReadOptions
+        mustAcceptBytes "decompression" compressed defaultReadOptions {roMaxDecompressedBytes = 2 * 64}
+        mustRejectBytes "decompression" compressed defaultReadOptions {roMaxDecompressedBytes = 2 * 64 - 1}
+    )
     [BodyZstd, LZ4Frame]
 
 
@@ -1067,8 +1143,8 @@ prop_corpusDecodes corpus = withTests 1 . property $ mapM_ checkSeed corpus
   where
     checkSeed seed = do
       let decoded = case seedEncoding seed of
-            StreamEnc -> () <$ decodeArrowStream (seedBytes seed)
-            FileEnc -> () <$ decodeArrowFile (seedBytes seed)
+            StreamEnc -> () <$ decodeArrowStream defaultReadOptions (seedBytes seed)
+            FileEnc -> () <$ decodeArrowFile defaultReadOptions (seedBytes seed)
       case decoded of
         Right () -> noDecoderCrashes (seedBytes seed)
         Left e -> do
