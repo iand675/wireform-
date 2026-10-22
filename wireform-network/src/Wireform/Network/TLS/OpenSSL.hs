@@ -237,16 +237,19 @@ pattern WfSslFatal = -3
 ------------------------------------------------------------------------
 
 {- | Initialise OpenSSL (load algorithms + error strings).
-Idempotent on OpenSSL 1.1+; safe to call once at program start
-or before each context creation.
+Idempotent on OpenSSL 1.1+. Call before other OpenSSL users to disable
+automatic process cleanup: GHC may still have TLS-using worker pthreads
+exiting when C @atexit@ handlers run. Global OpenSSL state is left for
+OS reclamation; individual 'SslCtx' and 'SslConn' objects are still freed
+normally. An application that explicitly calls @OPENSSL_cleanup@ must
+first stop every thread using OpenSSL.
 -}
 sslInit :: IO ()
 sslInit = c_ssl_init
 
 
--- Init runs once at module load via 'unsafePerformIO'.  OpenSSL
--- 1.1+ guards its own internal init so this is safe to call
--- alongside any other library that initialises OpenSSL.
+-- Context constructors force this before their first OpenSSL call.
+-- OpenSSL 1.1+ also guards its own internal initialization.
 sslInitOnce :: ()
 sslInitOnce = unsafePerformIO sslInit
 {-# NOINLINE sslInitOnce #-}

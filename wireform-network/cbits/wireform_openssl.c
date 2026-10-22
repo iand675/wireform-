@@ -110,11 +110,14 @@ static int map_handshake(SSL *ssl, int rc) {
  * ---------------------------------------------------------------- */
 
 void wf_ssl_init(void) {
-    /* OpenSSL 1.1+ auto-initialises on first use; SSL_load_error_strings
-     * / OpenSSL_add_all_algorithms became no-ops.  We still call the
-     * modern init explicitly so the load happens here rather than on
-     * the first SSL_CTX_new call (deterministic startup cost). */
-    OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS
+    /* GHC can exit while worker pthreads are still running OpenSSL TLS
+     * destructors. Its automatic atexit cleanup would free the global
+     * thread registry under those destructors (pthread_rwlock_unlock on
+     * a freed/null lock). Keep process-global state until OS reclamation;
+     * SSL and SSL_CTX objects still have their ordinary explicit owners.
+     * This flag must precede the first OpenSSL operation in the process. */
+    OPENSSL_init_ssl(OPENSSL_INIT_NO_ATEXIT
+                       | OPENSSL_INIT_LOAD_SSL_STRINGS
                        | OPENSSL_INIT_LOAD_CRYPTO_STRINGS,
                      NULL);
 }
