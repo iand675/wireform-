@@ -561,6 +561,7 @@ suppressWindowedShedProc sn graceMs winMs shelf = do
                 , Kafka.Streams.Processor.seKey = keyBytes
                 , Kafka.Streams.Processor.seValue = valBytes
                 , Kafka.Streams.Processor.seTimestamp = ts
+                , Kafka.Streams.Processor.seHeaders = emptyHeaders
                 }
             )
           shedUntil ctx buf_ sizeRef cap rest

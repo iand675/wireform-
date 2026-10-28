@@ -81,6 +81,8 @@ module Kafka.Streams.Topology (
   SinkSpec (..),
   AnyProcessor (..),
   AnySerde (..),
+  AnyStreamPartitioner (..),
+  addSinkPartitioned,
   AnyTimestampExtractor (..),
   AnyStoreBuilder (..),
   storeBuilderName,
@@ -120,6 +122,7 @@ import Kafka.Streams.Processor (
   Processor,
   ProcessorName (..),
  )
+import Kafka.Streams.Produced (StreamPartitioner)
 import Kafka.Streams.Serde (Serde)
 import Kafka.Streams.State.Store (
   LoggingConfig (..),
@@ -144,6 +147,14 @@ import Kafka.Streams.Watermark qualified as Watermark
 -- | Type-erased serde used in the topology AST.
 data AnySerde where
   AnySerde :: !(Serde a) -> AnySerde
+
+
+{- | Type-erased 'StreamPartitioner' carried by a 'SinkSpec'. Its
+@k@ / @v@ match the sink's key / value serdes; the engine coerces
+it back the same way it does the serdes.
+-}
+data AnyStreamPartitioner where
+  AnyStreamPartitioner :: !(StreamPartitioner k v) -> AnyStreamPartitioner
 
 
 -- | Type-erased timestamp extractor.
@@ -229,6 +240,10 @@ data SinkSpec = SinkSpec
   , sinkTopic :: !TopicName
   , sinkKeySerde :: !AnySerde
   , sinkValueSerde :: !AnySerde
+  , sinkPartitioner :: !(Maybe AnyStreamPartitioner)
+  {- ^ Per-record partition choice (@Produced.withStreamPartitioner@).
+  'Nothing' leaves the partition to the producer's partitioner.
+  -}
   }
 
 
@@ -461,6 +476,33 @@ addSink nm tp ks vs parents =
       , sinkTopic = tp
       , sinkKeySerde = AnySerde ks
       , sinkValueSerde = AnySerde vs
+      , sinkPartitioner = Nothing
+      }
+
+
+{- | 'addSink' with a 'StreamPartitioner' that picks each record's
+partition (given the topic's partition count from producer
+metadata). A partitioner answering 'Nothing' for a record defers
+to the producer's partitioner for that record.
+-}
+addSinkPartitioned
+  :: NodeName
+  -> TopicName
+  -> Serde k
+  -> Serde v
+  -> StreamPartitioner k v
+  -> [NodeName]
+  -> Topology
+  -> Topology
+addSinkPartitioned nm tp ks vs sp parents =
+  addSinkWith
+    SinkSpec
+      { sinkName = nm
+      , sinkParents = parents
+      , sinkTopic = tp
+      , sinkKeySerde = AnySerde ks
+      , sinkValueSerde = AnySerde vs
+      , sinkPartitioner = Just (AnyStreamPartitioner sp)
       }
 
 

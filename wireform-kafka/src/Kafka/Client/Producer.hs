@@ -1527,19 +1527,14 @@ sendRecord p@Producer {..} pr0 = liftIO $ do
           if pid == RB.noProducerId && epoch == RB.noProducerEpoch
             then pure (Right (explicit, BA.noStamp))
             else do
-              -- Idempotent/transactional path: ask the full
-              -- pre-send check (it will redo the partition
-              -- selection though; we accept that here because
-              -- transactional callers rarely override partition).
-              r <- fullPreSendCheck p icTopic icKey mTxn
-              case r of
-                Left e -> pure (Left e)
-                Right (_, stamp) -> pure (Right (explicit, stamp))
-        Just _ -> do
-          r <- fullPreSendCheck p icTopic icKey mTxn
-          case r of
-            Left e -> pure (Left e)
-            Right (_, stamp) -> pure (Right (explicit, stamp))
+              -- Idempotent path: the sequence number must be
+              -- allocated against the explicit partition, not the
+              -- one the partitioner would have picked.
+              fullPreSendCheck p icTopic icKey (Just explicit) mTxn
+        Just _ ->
+          -- Transactional path: register + sequence the explicit
+          -- partition with the coordinator.
+          fullPreSendCheck p icTopic icKey (Just explicit) mTxn
 
   case preCheck of
     Left err -> do
@@ -1780,16 +1775,21 @@ producerPreSendCheck p@Producer {..} topic key = do
         else fullPath mTxn
     _ -> fullPath mTxn
   where
-    fullPath mTxn = fullPreSendCheck p topic key mTxn
+    fullPath mTxn = fullPreSendCheck p topic key Nothing mTxn
 
 
 fullPreSendCheck
   :: Producer
   -> Text
   -> Maybe ByteString
+  -> Maybe Int32
+  -- ^ Explicit partition ('ProducerRecord' @partition@); 'Nothing'
+  -- runs the configured partitioner. The txn registration and the
+  -- sequence number are both keyed on the partition chosen here, so
+  -- it must be the one the record is actually appended to.
   -> Maybe Txn.Transaction
   -> IO (Either String (Int32, BA.BatchStamp))
-fullPreSendCheck p@Producer {..} topic key mTxn = do
+fullPreSendCheck p@Producer {..} topic key mExplicit mTxn = do
   -- 1. Transactional state guard.
   txnGate <- case mTxn of
     Nothing -> return (Right Nothing)
@@ -1803,7 +1803,9 @@ fullPreSendCheck p@Producer {..} topic key mTxn = do
   case txnGate of
     Left err -> return (Left err)
     Right txnInfo -> do
-      realPartition <- selectPartition p topic key
+      realPartition <- case mExplicit of
+        Just explicit -> pure explicit
+        Nothing -> selectPartition p topic key
       let tp = BA.TopicPartition topic realPartition
 
       -- 2. For transactional sends, lazily register the partition

@@ -24,8 +24,8 @@ mirrors the JVM @KafkaStreams@ class. Each instance:
   * Runs an event loop:
 
       1. @poll@ for records via the driver.
-      2. For each batch, drive the engine by calling 'feedSource'
-         per record.
+      2. For each batch, drive the engine by calling 'feedSourceH'
+         per record (headers and offsets carried through).
       3. Drain the record collector through the driver's
          producer hook.
       4. Commit consumer offsets at the configured cadence,
@@ -130,7 +130,7 @@ import Control.Concurrent (yield)
 import Control.Concurrent.Async (Async, async, cancel, waitCatch)
 import Control.Concurrent.STM
 import Control.Exception (Exception, SomeException, throwIO, try)
-import Control.Monad (forM_, unless)
+import Control.Monad (forM_, unless, when)
 import Data.ByteString qualified as BS
 import Data.Foldable qualified as Foldable
 import Data.HashMap.Strict qualified as HashMap
@@ -154,6 +154,7 @@ import Kafka.Client.RebalanceListener (
  )
 import Kafka.Client.RebalanceListener qualified as RBL
 import Kafka.Client.Telemetry qualified as Telemetry
+import Kafka.Headers qualified as KH
 import Kafka.Streams.Config (
   ProcessingGuarantee (..),
   StreamsConfig (..),
@@ -177,8 +178,9 @@ import Kafka.Streams.Internal.Engine (
   buildEngine,
   closeEngine,
   commitEngine,
-  feedSource,
+  feedSourceH,
   reportPollCycle,
+  setPartitionCountLookup,
   syncWallClockToReal,
  )
 import Kafka.Streams.Internal.RecordCollector (
@@ -204,6 +206,10 @@ import Kafka.Streams.Runtime.RevocationGrace (
   RevocationOutcome (..),
   classifyRevocation,
  )
+import Kafka.Streams.Runtime.StateDir (
+  markCleanShutdown,
+  prepareStateDir,
+ )
 import Kafka.Streams.Runtime.StandbyTask (
   StandbyManager,
   newStandbyManager,
@@ -218,7 +224,8 @@ import Kafka.Streams.Runtime.WorkerPool (
   poolWorkerCount,
   poolWorkers,
   removePoolWorker,
-  submitRecordHashed,
+  setPoolPartitionCountLookup,
+  submitRecordHashedWith,
   waitForQuiescence,
   workerCollector,
   workerProcessedCount,
@@ -226,6 +233,8 @@ import Kafka.Streams.Runtime.WorkerPool (
 import Kafka.Streams.Time (Timestamp (..), nowMillis)
 import Kafka.Streams.Topology qualified as Topo
 import Kafka.Streams.Types (TopicName, topicName, unTopicName)
+import System.IO (hPutStrLn, stderr)
+import System.Timeout (timeout)
 
 
 -- | Lifecycle of the runtime.
@@ -311,6 +320,13 @@ data KafkaStreams = KafkaStreams
   -}
   , ksLastProbeAt :: !(TVar Int64)
   , ksStandbyManager :: !StandbyManager
+  , ksCleanStop :: !(IORef Bool)
+  {- ^ Whether local state still matches the last commit: set when
+  'startKafkaStreamsWith' has prepared @state.dir@, cleared by any
+  aborted / failed commit cycle or uncaught stream-thread
+  exception. 'closeKafkaStreamsWith' writes the clean-shutdown
+  marker only while this holds (see "Kafka.Streams.Runtime.StateDir").
+  -}
   }
 
 
@@ -341,6 +357,7 @@ newKafkaStreams cfg topo = do
   warmup <- newTVarIO Map.empty
   lastPr <- newTVarIO 0
   stbyMgr <- newStandbyManager
+  cleanStop <- newIORef False
   pure
     KafkaStreams
       { ksConfig = cfg
@@ -367,6 +384,7 @@ newKafkaStreams cfg topo = do
       , ksWarmupLag = warmup
       , ksLastProbeAt = lastPr
       , ksStandbyManager = stbyMgr
+      , ksCleanStop = cleanStop
       }
 
 
@@ -410,6 +428,17 @@ startKafkaStreamsWith ks driver = do
   let cfg = ksConfig ks
       topo = ksTopology ks
       n = max 1 (numStreamThreads cfg)
+  -- Before any store opens: under exactly-once, state left by a run
+  -- that didn't stop at a commit boundary holds writes from a
+  -- transaction the broker aborted, so it is wiped and restored from
+  -- the changelogs (the JVM's no-checkpoint-under-EOS rule).
+  wiped <- prepareStateDir (processingGuarantee cfg) (stateDir cfg)
+  when wiped $
+    hPutStrLn stderr $
+      "[streams] no clean shutdown recorded in "
+        <> stateDir cfg
+        <> " under exactly-once: wiped local state"
+  writeIORef (ksCleanStop ks) True
   if n <= 1
     then startSingleThreaded ks driver topo
     else startMultiThreaded ks driver topo n
@@ -424,6 +453,7 @@ startKafkaStreamsWith ks driver = do
           collector
           logAndContinue
       writeIORef (ksEngine ks_) (Just engine)
+      setPartitionCountLookup engine (sdPartitionsFor drv)
       -- We deliberately do NOT reset 'ksEosCoord' here: a caller
       -- that 'applyEOSCoordinator' before starting expects their
       -- coordinator to be the one driving commit cycles. The
@@ -442,6 +472,7 @@ startKafkaStreamsWith ks driver = do
 
     startMultiThreaded ks_ drv topo n = do
       pool <- newWorkerPoolHashed topo (applicationId (ksConfig ks_)) n
+      setPoolPartitionCountLookup pool (sdPartitionsFor drv)
       writeIORef (ksPool ks_) (Just pool)
       let topics = sourceTopics topo
       eSubs <- sdConsumerSubscribe drv (map unTopicName topics)
@@ -509,12 +540,7 @@ driverCollector ks drv = do
       , collectorFlush = do
           buf <- atomicModifyIORef' bufRef (\s -> (Seq.empty, s))
           Foldable.for_ buf $ \cr -> do
-            r <-
-              sdProducerSend
-                drv
-                (unTopicName (crTopic cr))
-                (crKey cr)
-                (crValue cr)
+            r <- sdProducerSend drv (toProducerRecord cr)
             case r of
               Right _ -> pure ()
               Left err -> handleProdFail ks (unTopicName (crTopic cr)) err
@@ -526,6 +552,26 @@ driverCollector ks drv = do
       , collectorPeek = pure Map.empty
       , collectorTake = \_ -> pure []
       }
+
+
+{- | The wire record for a sink emission: headers, timestamp and any
+'Kafka.Streams.Produced.StreamPartitioner' choice go out with it.
+A negative timestamp (a source record that had none) is left for
+the producer to stamp, as the broker rejects negative ones.
+-}
+toProducerRecord :: CollectedRecord -> KP.ProducerRecord
+toProducerRecord cr =
+  KP.ProducerRecord
+    { KP.topic = unTopicName (crTopic cr)
+    , KP.key = crKey cr
+    , KP.value = crValue cr
+    , KP.headers = KH.toList (crHeaders cr)
+    , KP.partition = fromIntegral <$> crPartition cr
+    , KP.timestamp = case crTimestamp cr of
+        Timestamp t
+          | t >= 0 -> Just t
+          | otherwise -> Nothing
+    }
 
 
 {- | Invoke the user's production handler. 'ProdFailFast' rethrows
@@ -630,11 +676,12 @@ eventLoop ks driver engine = go
             unless paused $
               forM_ recs $ \rec ->
                 feedWithHandler ks "<source>" rec $
-                  feedSource
+                  feedSourceH
                     engine
                     (topicName rec.topic)
                     rec.key
                     rec.value
+                    (KH.fromList rec.headers)
                     (Timestamp rec.timestamp)
                     (fromIntegral rec.partition)
                     rec.offset
@@ -692,14 +739,17 @@ eventLoop ks driver engine = go
               CommitAborted reason -> do
                 -- Aborted: the txn was rolled back; we keep running
                 -- but skip committing consumer offsets so the next
-                -- poll re-reads them.
+                -- poll re-reads them. The stores already applied the
+                -- aborted batch, so this run can no longer close clean.
+                writeIORef (ksCleanStop ks) False
                 putStrLn
                   ( "[streams] commit aborted: "
                       <> Text.unpack reason
                   )
                 bumpTick ks
                 go
-              CommitFatal reason ->
+              CommitFatal reason -> do
+                writeIORef (ksCleanStop ks) False
                 transitionTo ks (StreamsError reason)
 
 
@@ -743,13 +793,15 @@ multiEventLoop ks driver pool = go
             unless paused $
               forM_ recs $ \rec ->
                 feedWithHandler ks "<source>" rec $
-                  submitRecordHashed
+                  submitRecordHashedWith
                     pool
                     (topicName rec.topic)
                     rec.key
                     rec.value
+                    (KH.fromList rec.headers)
                     (Timestamp rec.timestamp)
                     (fromIntegral rec.partition)
+                    rec.offset
             -- Wait until every just-submitted record is processed.
             waitForQuiescence pool
 
@@ -793,13 +845,15 @@ multiEventLoop ks driver pool = go
                 bumpTick ks
                 go
               CommitAborted reason -> do
+                writeIORef (ksCleanStop ks) False
                 putStrLn
                   ( "[streams] commit aborted: "
                       <> Text.unpack reason
                   )
                 bumpTick ks
                 go
-              CommitFatal reason ->
+              CommitFatal reason -> do
+                writeIORef (ksCleanStop ks) False
                 transitionTo ks (StreamsError reason)
 
 
@@ -821,7 +875,7 @@ drainWorkersThroughDriver ks driver pool = do
     pairs <- drainCollector (workerCollector w)
     forM_ pairs $ \(t, rs) ->
       forM_ rs $ \cr -> do
-        r <- sdProducerSend driver (unTopicName t) (crKey cr) (crValue cr)
+        r <- sdProducerSend driver (toProducerRecord cr)
         case r of
           Right _ -> pure ()
           Left err -> handleProdFail ks (unTopicName t) err
@@ -1297,14 +1351,26 @@ leave-group ack.
 -}
 closeKafkaStreamsWith :: KafkaStreams -> CloseOptions -> IO ()
 closeKafkaStreamsWith ks opts = do
+  before <- readTVarIO (ksStatus ks)
   transitionTo ks StreamsClosing
+  let !tmoMs = maybe 30_000 id opts.timeoutMs
   mAh <- readIORef (ksThread ks)
-  case mAh of
+  -- The event loop re-reads the status at the top of every
+  -- poll / process / commit cycle, so after 'StreamsClosing' it
+  -- returns on its own at a commit boundary. It is only cancelled
+  -- (leaving state that may be ahead of the last commit) if that
+  -- takes longer than the close timeout.
+  atBoundary <- case mAh of
     Just ah -> do
-      cancel ah
-      _ <- waitCatch ah
-      pure ()
-    Nothing -> pure ()
+      r <- timeout (max 0 tmoMs * 1000) (waitCatch ah)
+      case r of
+        Just (Right ()) -> pure True
+        Just (Left _) -> pure False
+        Nothing -> do
+          cancel ah
+          _ <- waitCatch ah
+          pure False
+    Nothing -> pure True
   mE <- readIORef (ksEngine ks)
   forM_ mE closeEngine
   mPool <- readIORef (ksPool ks)
@@ -1314,8 +1380,16 @@ closeKafkaStreamsWith ks opts = do
     sdConsumerCloseWith
       drv
       opts.leaveGroup
-      (maybe 30_000 id opts.timeoutMs)
+      tmoMs
     sdProducerClose drv
+  -- Stores are closed; certify them for the next start only if
+  -- nothing since the last commit could have left them ahead of it.
+  cleanStop <- readIORef (ksCleanStop ks)
+  let !healthy = case before of
+        StreamsError _ -> False
+        _ -> True
+  when (cleanStop && atBoundary && healthy) $
+    markCleanShutdown (stateDir (ksConfig ks))
   transitionTo ks StreamsClosed
 
 
@@ -1621,6 +1695,9 @@ supervisedLoop ks _drv body = go
       case r of
         Right () -> pure ()
         Left e -> do
+          -- The thread died mid-cycle: whatever it fed the stores
+          -- since the last commit is not covered by one.
+          writeIORef (ksCleanStop ks) False
           h <- readIORef (ksUncaught ks)
           resp <- runStreamsUncaughtExceptionHandler h e
           case resp of

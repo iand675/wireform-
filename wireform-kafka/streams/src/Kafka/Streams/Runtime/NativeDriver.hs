@@ -51,6 +51,7 @@ module Kafka.Streams.Runtime.NativeDriver (
   mockDriverTxnLog,
   mockDriverCommittedOffsets,
   mockDriverCommitCount,
+  mockDriverSetPartitions,
   MockSend (..),
   MockTxnEvent (..),
   offsetResetForConsumer,
@@ -60,8 +61,9 @@ import Control.Concurrent.STM
 import Data.ByteString (ByteString)
 import Data.Foldable qualified as Foldable
 import Data.HashMap.Strict (HashMap)
+import Data.HashMap.Strict qualified as HashMap
 import Data.IORef
-import Data.Int (Int64)
+import Data.Int (Int32, Int64)
 import Data.Sequence (Seq, (|>))
 import Data.Sequence qualified as Seq
 import Data.Text (Text)
@@ -112,12 +114,19 @@ data StreamDriver
     for the leave-group ack before forcing the close.
     -}
     , sdProducerSend
-        :: !( Text
-              -> Maybe ByteString
-              -> ByteString
-              -> IO (Either String KP.RecordMetadata)
-            )
-    -- ^ Send a record. Returns Right metadata on success.
+        :: !(KP.ProducerRecord -> IO (Either String KP.RecordMetadata))
+    {- ^ Send a record. The runtime fills in the sink record's
+    headers, timestamp and (when a 'Kafka.Streams.Produced.StreamPartitioner'
+    chose one) its partition; 'Nothing' for @partition@ defers to
+    the producer's partitioner. Returns Right metadata on success.
+    -}
+    , sdPartitionsFor
+        :: !(Text -> IO (Either String Int))
+    {- ^ Partition count of a topic, from producer metadata.
+    Consulted only for sinks that carry a
+    'Kafka.Streams.Produced.StreamPartitioner' (mirrors the JVM
+    @RecordCollectorImpl@ calling @producer.partitionsFor@).
+    -}
     , sdProducerFlush
         :: !(IO (Either String ()))
     {- ^ Block until every previously sent record has been
@@ -193,8 +202,9 @@ newNativeDriver producer consumer mTxn = do
           if leaveGroup
             then KC.closeConsumerWithTimeout consumer tmoMs
             else KC.closeConsumerWithoutLeavingGroup consumer tmoMs
-      , sdProducerSend = \topic key value ->
-          KP.sendMessage producer topic key value
+      , sdProducerSend = KP.sendRecord producer
+      , sdPartitionsFor = \topic ->
+          fmap length <$> KP.partitionsFor producer topic
       , sdProducerFlush = KP.flushProducer producer
       , sdProducerClose = KP.closeProducer producer
       , sdProducerBeginTxn = case mTxn of
@@ -261,6 +271,9 @@ data MockSend = MockSend
   { mockSendTopic :: !Text
   , mockSendKey :: !(Maybe ByteString)
   , mockSendValue :: !ByteString
+  , mockSendHeaders :: ![(Text, ByteString)]
+  , mockSendPartition :: !(Maybe Int32)
+  , mockSendTimestamp :: !(Maybe Int64)
   }
   deriving stock (Eq, Show, Generic)
 
@@ -300,6 +313,10 @@ data MockDriverHandle = MockDriverHandle
   runtime has issued; used by tests to verify the
   probing cadence.
   -}
+  , partitionCounts :: !(TVar (HashMap Text Int))
+  {- ^ What 'sdPartitionsFor' reports per topic (set with
+  'mockDriverSetPartitions'); unknown topics fail the lookup.
+  -}
   }
 
 
@@ -318,7 +335,8 @@ newMockDriver = do
   offs <- newIORef Seq.empty
   reb <- newTQueueIO
   probes <- newTVarIO 0
-  let h = MockDriverHandle pollQ sends flushd closed subs cmts txn offs reb probes
+  parts <- newTVarIO HashMap.empty
+  let h = MockDriverHandle pollQ sends flushd closed subs cmts txn offs reb probes parts
       drv =
         StreamDriver
           { sdConsumerSubscribe = \topics -> do
@@ -340,20 +358,36 @@ newMockDriver = do
           , sdConsumerCloseWith = \_leaveGroup _tmoMs ->
               atomically $
                 modifyTVar' closed (\(_, p) -> (True, p))
-          , sdProducerSend = \topic key value -> do
+          , sdProducerSend = \pr -> do
               atomically $
                 modifyTVar'
                   sends
-                  (\s -> s |> MockSend topic key value)
+                  ( \s ->
+                      s
+                        |> MockSend
+                          { mockSendTopic = pr.topic
+                          , mockSendKey = pr.key
+                          , mockSendValue = pr.value
+                          , mockSendHeaders = pr.headers
+                          , mockSendPartition = pr.partition
+                          , mockSendTimestamp = pr.timestamp
+                          }
+                  )
               pure
                 ( Right
                     KP.RecordMetadata
-                      { topic = topic
-                      , partition = 0
+                      { topic = pr.topic
+                      , partition = maybe 0 id pr.partition
                       , offset = 0
-                      , timestamp = 0
+                      , timestamp = maybe 0 id pr.timestamp
                       }
                 )
+          , sdPartitionsFor = \topic -> do
+              m <- readTVarIO parts
+              pure $ case HashMap.lookup topic m of
+                Just n -> Right n
+                Nothing ->
+                  Left ("mock driver: no partition count for " <> show topic)
           , sdProducerFlush = do
               atomically $ modifyTVar' flushd (+ 1)
               pure (Right ())
@@ -451,3 +485,12 @@ mockDriverCommittedOffsets h =
 -- | Number of times 'sdConsumerCommit' fired (non-EOS path).
 mockDriverCommitCount :: MockDriverHandle -> IO Int
 mockDriverCommitCount h = atomically $ readTVar (h.commits)
+
+
+{- | Set the partition count 'sdPartitionsFor' reports for a topic.
+Topics never set fail the lookup, the same as a topic the broker
+has no metadata for.
+-}
+mockDriverSetPartitions :: MockDriverHandle -> Text -> Int -> IO ()
+mockDriverSetPartitions h topic n =
+  atomically $ modifyTVar' h.partitionCounts (HashMap.insert topic n)

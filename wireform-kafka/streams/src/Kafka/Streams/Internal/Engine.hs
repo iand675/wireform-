@@ -40,6 +40,7 @@ module Kafka.Streams.Internal.Engine (
   engineStreamTime,
   engineWallClock,
   attachWatermarkCoordinator,
+  setPartitionCountLookup,
   reportPollCycle,
   engineMetrics,
   buildEngine,
@@ -82,6 +83,7 @@ import Kafka.Streams.Errors (
   DeserializationException (..),
   DeserializationHandler (..),
   DeserializationResponse (..),
+  StreamsException (..),
  )
 import Kafka.Streams.Internal.RecordCollector (
   CollectedRecord (..),
@@ -102,6 +104,7 @@ import Kafka.Streams.Processor (
   TaskId (..),
  )
 import Kafka.Streams.Processor qualified
+import Kafka.Streams.Produced (StreamPartitioner (..))
 import Kafka.Streams.Serde (Serde (..))
 import Kafka.Streams.State.Store (
   AnyStateStore (..),
@@ -246,6 +249,13 @@ data Engine = Engine
   registration order. An exception from any drain
   propagates as a 'commitEngine' failure.
   -}
+  , enginePartitionCount :: !(IORef (Maybe (Text -> IO (Either String Int))))
+  {- ^ Topic partition-count lookup for sinks that carry a
+  'StreamPartitioner' (installed by the broker-backed runtime via
+  'setPartitionCountLookup'). 'Nothing' (in-process drivers with
+  no partition metadata) leaves every record's partition to the
+  producer.
+  -}
   , engineWatermarkCoord :: !(IORef (Maybe Watermark.WatermarkCoordinator))
   {- ^ Riffle \xc2\xa75: optional cross-source watermark coordinator.
   'Nothing' (the default) preserves per-task 'StreamTime'
@@ -294,6 +304,7 @@ buildEngine validated tid appId collector deserHandler = do
   commitReqRef <- newIORef False
   drainsRef <- newIORef []
   wmCoordRef <- newIORef Nothing
+  partCountRef <- newIORef Nothing
 
   let engine =
         Engine
@@ -314,6 +325,7 @@ buildEngine validated tid appId collector deserHandler = do
           , engineMetrics = metrics
           , engineCommitRequested = commitReqRef
           , engineAsyncDrains = drainsRef
+          , enginePartitionCount = partCountRef
           , engineWatermarkCoord = wmCoordRef
           }
 
@@ -444,32 +456,98 @@ instantiateSink engine nm spec = do
 
 
 sinkForwarder :: Engine -> Topo.SinkSpec -> NodeForwarder
-sinkForwarder engine spec = \rec ->
+sinkForwarder engine spec =
   case (Topo.sinkKeySerde spec, Topo.sinkValueSerde spec) of
-    (Topo.AnySerde ks, Topo.AnySerde vs) -> do
+    (Topo.AnySerde ks, Topo.AnySerde vs) ->
       let !erasedK = unsafeCoerce ks :: Serde Erased
           !erasedV = unsafeCoerce vs :: Serde Erased
-          !keyB = serialize erasedK <$> recordKey rec
-          !valB = serialize erasedV (recordValue rec)
-          -- Stamp the serdes' header contributions (e.g. schema-identity
-          -- headers) onto the outgoing record, mirroring the typed
-          -- producer path ('Kafka.Client.Producer.publish'). Headers
-          -- already on the record (carried from upstream, including any
-          -- trace-context headers) are preserved and the serde headers
-          -- appended; built-in serdes contribute 'mempty'.
-          !keyHdrs = maybe mempty (serializeHeaders erasedK) (recordKey rec)
-          !valHdrs = serializeHeaders erasedV (recordValue rec)
-          !outHdrs = recordHeaders rec <> keyHdrs <> valHdrs
-          out =
-            CollectedRecord
-              { crTopic = Topo.sinkTopic spec
-              , crKey = keyB
-              , crValue = valB
-              , crTimestamp = recordTimestamp rec
-              , crHeaders = outHdrs
-              , crPartition = Nothing
-              }
-      collectorSend (engineCollector engine) out
+          !topic = Topo.sinkTopic spec
+          -- Resolved once per sink, so a sink without a partitioner
+          -- never touches the partition-count lookup.
+          choosePartition :: Record Erased Erased -> IO (Maybe Int)
+          choosePartition = case Topo.sinkPartitioner spec of
+            Nothing -> \_ -> pure Nothing
+            Just (Topo.AnyStreamPartitioner sp) ->
+              sinkPartition
+                engine
+                (unTopicName topic)
+                (unsafeCoerce sp :: StreamPartitioner Erased Erased)
+      in \rec -> do
+           let !keyB = serialize erasedK <$> recordKey rec
+               !valB = serialize erasedV (recordValue rec)
+               -- Stamp the serdes' header contributions (e.g. schema-identity
+               -- headers) onto the outgoing record, mirroring the typed
+               -- producer path ('Kafka.Client.Producer.publish'). Headers
+               -- already on the record (carried from upstream, including any
+               -- trace-context headers) are preserved and the serde headers
+               -- appended; built-in serdes contribute 'mempty'.
+               !keyHdrs = maybe mempty (serializeHeaders erasedK) (recordKey rec)
+               !valHdrs = serializeHeaders erasedV (recordValue rec)
+               !outHdrs = recordHeaders rec <> keyHdrs <> valHdrs
+           !part <- choosePartition rec
+           collectorSend
+             (engineCollector engine)
+             CollectedRecord
+               { crTopic = topic
+               , crKey = keyB
+               , crValue = valB
+               , crTimestamp = recordTimestamp rec
+               , crHeaders = outHdrs
+               , crPartition = part
+               }
+
+
+{- | Run a sink's 'StreamPartitioner' against the topic's current
+partition count. Mirrors the JVM @RecordCollectorImpl.send@: no
+partition metadata for the topic, or a partition outside
+@[0, n)@, is a 'StreamsException' (routed through the
+processing-exception handler like any other processor failure).
+-}
+sinkPartition
+  :: Engine
+  -> Text
+  -> StreamPartitioner Erased Erased
+  -> Record Erased Erased
+  -> IO (Maybe Int)
+sinkPartition engine topic sp rec = do
+  mLookup <- readIORef (enginePartitionCount engine)
+  case mLookup of
+    Nothing -> pure Nothing
+    Just lookupCount -> do
+      eN <- lookupCount topic
+      case eN of
+        Left err ->
+          sinkFail ("could not get partition information: " <> T.pack err)
+        Right n
+          | n <= 0 -> sinkFail "topic reports no partitions"
+          | otherwise -> do
+              mp <- runStreamPartitioner sp topic (recordKey rec) (recordValue rec) n
+              case mp of
+                Just p
+                  | p < 0 || p >= n ->
+                      sinkFail
+                        ( "StreamPartitioner returned partition "
+                            <> T.pack (show p)
+                            <> " outside [0, "
+                            <> T.pack (show n)
+                            <> ")"
+                        )
+                _ -> pure mp
+  where
+    sinkFail msg =
+      throwIO
+        StreamsException
+          { streamsErrorMessage = msg
+          , streamsErrorContext = Just ("sink topic " <> topic)
+          }
+
+
+{- | Install the partition-count lookup sinks with a
+'StreamPartitioner' consult (see 'enginePartitionCount').
+-}
+setPartitionCountLookup :: Engine -> (Text -> IO (Either String Int)) -> IO ()
+setPartitionCountLookup engine f =
+  writeIORef (enginePartitionCount engine) (Just f)
 
 
 ----------------------------------------------------------------------
@@ -688,7 +766,7 @@ makeContext engine selfNm =
             , crKey = Kafka.Streams.Processor.seKey emit
             , crValue = Kafka.Streams.Processor.seValue emit
             , crTimestamp = Kafka.Streams.Processor.seTimestamp emit
-            , crHeaders = emptyHeaders
+            , crHeaders = Kafka.Streams.Processor.seHeaders emit
             , crPartition = Nothing
             }
     , ctxRecordHeaders = readIORef (engineCurrentHeaders engine)

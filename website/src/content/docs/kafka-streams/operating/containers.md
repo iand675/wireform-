@@ -43,6 +43,29 @@ sets `storeFlush = pure ()`: the WAL is the flush). The Kafka
 **changelog topic** behind every store is independent durability;
 the local copy is an optimisation.
 
+Under `processingGuarantee = ExactlyOnceV2`, WAL replay alone isn't
+enough: a store can hold writes from a transaction the broker aborted
+when the process died, and replaying the changelog tail on top of them
+applies those writes twice. So the runtime does what the JVM does.
+`closeKafkaStreams` writes a `.wireform-clean-shutdown` marker into
+`stateDir` once the stream thread has stopped at a commit boundary
+and every store is closed. `startKafkaStreams` consumes that marker
+before it opens any store, and if the marker is missing it deletes
+everything under `stateDir`. The stores then restore from their
+changelogs. A run that aborted a transaction, hit a fatal commit
+error, or lost its stream thread to an uncaught exception never
+writes the marker. Two things follow:
+
+- Keep every store **under** `stateDir`, and give each application
+  instance its own `stateDir`. The wipe covers only that directory,
+  and it removes the directory's entries, not the directory itself,
+  so a volume mount point is safe.
+- Allow `closeKafkaStreams` its `timeoutMs` (default 30 s). If the
+  loop doesn't reach a commit boundary in time, the close cancels it,
+  and the next start pays a full restore.
+
+At-least-once never wipes; duplicates are within its contract.
+
 You therefore have four strategies, in order of decreasing cost on
 restart:
 

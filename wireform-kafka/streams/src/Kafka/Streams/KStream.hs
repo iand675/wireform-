@@ -183,7 +183,7 @@ import Kafka.Streams.Produced (
   produced,
  )
 import Kafka.Streams.Repartitioned qualified as KafkaStreamsRepartitioned
-import Kafka.Streams.Serde (HasSerde (..), Serde, serialize)
+import Kafka.Streams.Serde (HasSerde (..), Serde, serialize, serializeHeaders)
 import Kafka.Streams.State.KeyValue.InMemory (
   inMemoryKeyValueStoreBuilder,
  )
@@ -1072,13 +1072,28 @@ toTopic topic p s = do
       (freshNodeName b "KSTREAM-SINK")
       (pure . Topo.NodeName)
       (producedName p)
-  withTopology_ b $
-    Topo.addSink
+  withTopology_ b $ producedSink nm topic p [kstreamParent s]
+
+
+-- | Add the sink node a 'Produced' describes, partitioner included.
+producedSink
+  :: Topo.NodeName
+  -> TopicName
+  -> Produced k v
+  -> [Topo.NodeName]
+  -> Topo.Topology
+  -> Topo.Topology
+producedSink nm topic p parents = case producedPartitioner p of
+  Nothing ->
+    Topo.addSink nm topic (producedKeySerde p) (producedValueSerde p) parents
+  Just sp ->
+    Topo.addSinkPartitioned
       nm
       topic
       (producedKeySerde p)
       (producedValueSerde p)
-      [kstreamParent s]
+      sp
+      parents
 
 
 {- | @through@ is a sink + a fresh source on the same topic. The
@@ -2054,13 +2069,7 @@ toTopicNamed
 toTopicNamed nm topic p s = do
   let b = kstreamBuilder s
   nodeNm <- Kafka.Streams.Named.namedOr b nm "KSTREAM-SINK"
-  withTopology_ b $
-    Topo.addSink
-      nodeNm
-      topic
-      (producedKeySerde p)
-      (producedValueSerde p)
-      [kstreamParent s]
+  withTopology_ b $ producedSink nodeNm topic p [kstreamParent s]
 
 
 ----------------------------------------------------------------------
@@ -2431,6 +2440,17 @@ toExtracted ext p s = do
                         serialize
                           (producedValueSerde p)
                           (recordValue r)
+                      -- Same header shape as a static sink: the
+                      -- record's own headers, then the serdes'.
+                      hdrs =
+                        recordHeaders r
+                          <> maybe
+                            mempty
+                            (serializeHeaders (producedKeySerde p))
+                            (recordKey r)
+                          <> serializeHeaders
+                            (producedValueSerde p)
+                            (recordValue r)
                   ctxEmitToTopic
                     ctx
                     Kafka.Streams.Processor.SinkEmit
@@ -2439,6 +2459,7 @@ toExtracted ext p s = do
                       , Kafka.Streams.Processor.seKey = kBytes
                       , Kafka.Streams.Processor.seValue = vBytes
                       , Kafka.Streams.Processor.seTimestamp = recordTimestamp r
+                      , Kafka.Streams.Processor.seHeaders = hdrs
                       }
           }
 

@@ -47,6 +47,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Kafka.Headers qualified as KH
 import Kafka.Streams.Errors (logAndContinue)
 import Kafka.Streams.Internal.Engine (
   Engine,
@@ -54,7 +55,8 @@ import Kafka.Streams.Internal.Engine (
   closeEngine,
   commitEngine,
   engineCollector,
-  feedSource,
+  feedSourceH,
+  setPartitionCountLookup,
   takeCommitRequested,
  )
 import Kafka.Streams.Internal.RecordCollector (
@@ -91,12 +93,12 @@ import Kafka.Streams.Mock.Producer (
   commitTxnMP,
   flushMock,
   newMockProducer,
-  sendMock,
+  sendMockH,
  )
 import Kafka.Streams.Processor (TaskId (..))
 import Kafka.Streams.Time (Timestamp (..))
 import Kafka.Streams.Topology qualified as Topo
-import Kafka.Streams.Types (TopicName, unTopicName)
+import Kafka.Streams.Types (TopicName, topicName, unTopicName)
 
 
 ----------------------------------------------------------------------
@@ -206,6 +208,10 @@ newMockStreamsDriver' mode cluster faults topo appId partsPerTopic = do
   subscribeMC cons sourceTopics
   collector <- inMemoryCollector
   engine <- buildEngine topo (TaskId 0 0) appId collector logAndContinue
+  -- Sinks with a StreamPartitioner see the cluster's partition counts.
+  setPartitionCountLookup engine $ \t -> do
+    m <- readIORef partRef
+    pure (Right (Map.findWithDefault 1 (topicName t) m))
   pure
     MockStreamsDriver
       { driverCluster = cluster
@@ -261,11 +267,12 @@ tickAtLeastOnce d = do
   PollResult {prRecords = recs, prErrors = errs} <- pollMC (driverConsumer d)
   when (not (null errs)) $ pure ()
   forM_ recs $ \(tp, p, sr) ->
-    feedSource
+    feedSourceH
       (driverEngine d)
       tp
       (srKey sr)
       (srValue sr)
+      (KH.fromList (srHeaders sr))
       (srTimestamp sr)
       (fromIntegral p)
       (srOffset sr)
@@ -293,11 +300,12 @@ tickExactlyOnce d = do
     Right () -> do
       PollResult {prRecords = recs} <- pollMC (driverConsumer d)
       forM_ recs $ \(tp, p, sr) ->
-        feedSource
+        feedSourceH
           (driverEngine d)
           tp
           (srKey sr)
           (srValue sr)
+          (KH.fromList (srHeaders sr))
           (srTimestamp sr)
           (fromIntegral p)
           (srOffset sr)
@@ -347,13 +355,14 @@ drainCollectedToMock d = do
             Just explicit -> fromIntegral explicit `mod` n
             Nothing -> hashKeyToPartition (crKey cr) n
       _ <-
-        sendMock
+        sendMockH
           (driverProducer d)
           (crTopic cr)
           (fromIntegral p)
           (crKey cr)
           (crValue cr)
           (crTimestamp cr)
+          (KH.toList (crHeaders cr))
       pure ()
 
 

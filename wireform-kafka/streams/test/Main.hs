@@ -77,6 +77,7 @@ import Streams.ReplaySpec qualified
 import Streams.RevocationGraceSpec qualified
 import Streams.RotatingFileSinkSpec qualified
 import Streams.RuntimeDriverSpec qualified
+import Streams.RuntimeRecordFidelitySpec qualified
 import Streams.SchemaRegistryCompatSpec qualified
 import Streams.SchemaRegistryFormatsSpec qualified
 import Streams.SchemaRegistryHttpSpec qualified
@@ -169,6 +170,7 @@ main = do
         , Streams.StreamsConfigSurfaceSpec.tests
         , Streams.ForeignKeyJoinDSLSpec.tests
         , Streams.RuntimeDriverSpec.tests
+        , Streams.RuntimeRecordFidelitySpec.tests
         , Streams.ExceptionHandlerSpec.tests
         , Streams.KGroupedTableSpec.tests
         , Streams.StoresExtraSpec.tests

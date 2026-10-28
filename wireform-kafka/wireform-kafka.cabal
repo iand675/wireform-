@@ -538,6 +538,7 @@ library wireform-kafka-streams
         Kafka.Streams.Runtime.StandbyDriver
         Kafka.Streams.Runtime.RevocationGrace
         Kafka.Streams.Runtime.NativeDriver
+        Kafka.Streams.Runtime.StateDir
         Kafka.Streams.Runtime.MultiInstanceHarness
         Kafka.Streams.Runtime.MultiInstanceMockHarness
         Kafka.Streams.State.Transactional
@@ -649,6 +650,7 @@ test-suite wireform-kafka-streams-test
         Streams.StreamsConfigSurfaceSpec
         Streams.ForeignKeyJoinDSLSpec
         Streams.RuntimeDriverSpec
+        Streams.RuntimeRecordFidelitySpec
         Streams.ExceptionHandlerSpec
         Streams.KGroupedTableSpec
         Streams.StoresExtraSpec
