@@ -12,11 +12,14 @@ module Client.FetchSelectionSpec (tests) where
 
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
+import Data.HashMap.Strict qualified as HashMap
 import Data.Int (Int16, Int64)
 import Data.Vector qualified as V
 import Kafka.Client.Consumer (
   ConsumerRecord (..),
   IsolationLevel (..),
+  TopicPartition (..),
+  advanceFetchPositions,
   decodeAllBatchesSliced,
   selectFetchedRecords,
  )
@@ -27,7 +30,7 @@ import Test.Syd
 
 
 tests :: Spec
-tests =
+tests = do
   describe "Consumer fetch selection" $ do
     it "read_committed drops the aborted transaction only" $ do
       offs <- selected ReadCommitted [(7, 0)] 0
@@ -44,6 +47,31 @@ tests =
       Right bs <- decodeAllBatchesSliced bytes
       let recs = selectFetchedRecords ReadCommitted [(7, 3)] 0 "t" 0 bs
       map (.offset) (V.toList recs) `shouldBe` [0, 1, 6]
+  describe "Consumer fetch positions" $ do
+    let tpA = TopicPartition "t" 0
+        tpB = TopicPartition "t" 1
+        rec_ tp o = ConsumerRecord tp.topic tp.partition o 0 Nothing Nothing []
+        start = HashMap.fromList [(tpA, 0), (tpB, 0)]
+    it "a partition whose fetch ends in a commit marker moves past it" $ do
+      -- records 3-4 then the marker at 5: next fetch starts at 6, not 5
+      let (out, advance) = advanceFetchPositions 500 [rec_ tpA 3, rec_ tpA 4] (HashMap.fromList [(tpA, 6)])
+      map (.offset) out `shouldBe` [3, 4]
+      HashMap.lookup tpA (advance start) `shouldBe` Just 6
+    it "a fetch of only an aborted transaction still moves on" $ do
+      let (out, advance) = advanceFetchPositions 500 [] (HashMap.fromList [(tpA, 3)])
+      out `shouldBe` []
+      HashMap.lookup tpA (advance start) `shouldBe` Just 3
+    it "a partition cut short by max.poll.records stops after its last delivered record" $ do
+      let recs = [rec_ tpA 0, rec_ tpA 1, rec_ tpA 2, rec_ tpB 0]
+          (out, advance) = advanceFetchPositions 2 recs (HashMap.fromList [(tpA, 4), (tpB, 2)])
+          after = advance start
+      map (.offset) out `shouldBe` [0, 1]
+      HashMap.lookup tpA after `shouldBe` Just 2
+      -- tp B had a record held back too: it stays where it was
+      HashMap.lookup tpB after `shouldBe` Just 0
+    it "never re-adds a partition revoked while its fetch was in flight" $ do
+      let (_, advance) = advanceFetchPositions 500 [rec_ tpB 5] (HashMap.fromList [(tpB, 6)])
+      HashMap.member tpB (advance (HashMap.fromList [(tpA, 0)])) `shouldBe` False
 
 
 -- | Offsets of the records selected from 'txnLog'.

@@ -1701,13 +1701,33 @@ deleteRecords
   -> m (Either String [DeleteRecordsResultEntry])
 deleteRecords _ [] = pure (Right [])
 deleteRecords client@AdminClient {..} entries = liftIO $ do
+  -- DeleteRecords is answered by each partition's leader only (any
+  -- other broker replies NOT_LEADER_OR_FOLLOWER): one request per leader.
+  eDesc <- describeTopics client (Map.keys (Map.fromList (map (\(t, _, _) -> (t, ())) entries)))
   brokersM <- atomically $ Meta.getAllBrokers adminMetadata
-  case brokersM of
-    Nothing -> return $ Left "No brokers available"
-    Just [] -> return $ Left "No brokers available"
-    Just (broker : _) -> do
-      let brokerAddr = Meta.brokerMetaAddress broker
-          apiKey = 21 -- DeleteRecords
+  case (eDesc, brokersM) of
+    (Left e, _) -> pure (Left ("DeleteRecords: leader lookup failed: " <> e))
+    (_, Nothing) -> pure (Left "No brokers available")
+    (Right descs, Just brokers) -> do
+      let leaders =
+            Map.fromList
+              (concatMap (\d -> map (\pinfo -> ((tdName d, piPartitionId pinfo), piLeader pinfo)) (tdPartitions d)) descs)
+          addrOf = Map.fromList (map (\b -> (Meta.brokerMetaNodeId b, Meta.brokerMetaAddress b)) brokers)
+          grouped =
+            Map.fromListWith
+              (flip (<>))
+              (map (\e@(t, p, _) -> (Map.lookup (t, p) leaders >>= (`Map.lookup` addrOf), [e])) entries)
+      results <- forM (Map.toList grouped) $ \(mAddr, es) -> case mAddr of
+        Nothing ->
+          pure (Left ("DeleteRecords: no known leader for " <> show (map (\(t, p, _) -> (t, p)) es)))
+        Just addr -> deleteRecordsOn client addr es
+      pure (concat <$> sequence results)
+
+
+-- | One DeleteRecords request to @brokerAddr@ (the leader of every entry).
+deleteRecordsOn :: AdminClient -> Conn.BrokerAddress -> [(Text, Int32, Int64)] -> IO (Either String [DeleteRecordsResultEntry])
+deleteRecordsOn client@AdminClient {..} brokerAddr entries = do
+      let apiKey = 21 -- DeleteRecords
           -- DeleteRecords: codegen handles up to v2 (v2 went flexible).
           -- Request shape unchanged — same (topic, partition, offset,
           -- timeout) tuples at every version.

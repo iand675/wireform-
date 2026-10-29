@@ -243,6 +243,7 @@ module Kafka.Client.Consumer (
 
   -- * Fetch internals (exposed for tests)
   selectFetchedRecords,
+  advanceFetchPositions,
   decodeAllBatchesSliced,
 ) where
 
@@ -1853,11 +1854,11 @@ poll consumer@Consumer {..} timeoutMs = liftIO $ do
 
           case result of
             Left err -> return $ Left err
-            Right FetchResult {frRecords = records, frErrors = errs} -> do
+            Right FetchResult {frRecords = records, frErrors = errs, frBatchEnds = ends} -> do
               handled <- handleFetchErrors consumer errs
               case handled of
                 Left err -> return (Left err)
-                Right () -> deliver records
+                Right () -> deliver records ends
 
     -- Cap at max.poll.records, then advance fetch positions past the
     -- records handed back only. Each partition's returned records
@@ -1865,24 +1866,40 @@ poll consumer@Consumer {..} timeoutMs = liftIO $ do
     -- by the next poll; advancing past them would let the next commit
     -- skip records the caller never saw. A single
     -- 'atomicModifyIORef\'' folds the advance over the whole map.
-    deliver records = do
-      let maxRecords = consumerMaxPollRecords consumerConfig
-          limitedRecords = take maxRecords records
+    deliver records ends = do
+      let (limitedRecords, advance) = advanceFetchPositions (consumerMaxPollRecords consumerConfig) records ends
       atomicModifyIORef' consumerAssignment $ \m0 ->
-        let !m1 = foldl' advanceOffset m0 limitedRecords
-        in (m1, ())
+        let !m1 = advance m0 in (m1, ())
       -- ConsumerInterceptor.onConsume (KIP-388 / JVM): an
       -- exception here propagates; tracing tools that just
       -- need to attach attributes shouldn't throw.
       iceptedRecords <- consumerInterceptor consumerConfig limitedRecords
       return $ Right iceptedRecords
 
-    -- 'adjust', not 'alter': a partition revoked while its fetch
-    -- was in flight must not be re-added to the assignment.
-    advanceOffset !m r =
-      let !tp = TopicPartition r.topic r.partition
-          !nextOffset = r.offset + 1
-      in HashMap.adjust (max nextOffset) tp m
+
+
+{- | What one poll hands back and how it moves the fetch positions:
+at most @maxRecords@ of the fetched @records@; each partition moves
+past its last delivered record, and a partition with nothing held
+back moves on to the end of its fetched batches (@ends@), past
+transaction markers and aborted batches.
+
+Only partitions already in the position map move ('HashMap.adjust':
+one revoked while its fetch was in flight is not re-added).
+-}
+advanceFetchPositions
+  :: Int
+  -> [ConsumerRecord]
+  -> HashMap.HashMap TopicPartition Int64
+  -> ([ConsumerRecord], HashMap.HashMap TopicPartition Int64 -> HashMap.HashMap TopicPartition Int64)
+advanceFetchPositions maxRecords records ends =
+  let (delivered, heldBack) = splitAt maxRecords records
+      partial = HashSet.fromList (map (\r -> TopicPartition r.topic r.partition) heldBack)
+      complete = HashMap.filterWithKey (\tp _ -> not (HashSet.member tp partial)) ends
+      pastRecord !m r = HashMap.adjust (max (r.offset + 1)) (TopicPartition r.topic r.partition) m
+      advance m0 =
+        HashMap.foldlWithKey' (\m tp end -> HashMap.adjust (max end) tp m) (foldl' pastRecord m0 delivered) complete
+  in (delivered, advance)
 
 
 {- | Wake the next 'poll' call. This is intentionally one-shot:
@@ -2302,6 +2319,7 @@ fetchRecords consumer@Consumer {..} partitions timeoutMs = do
                           FetchResult
                             { frRecords = concatMap frRecords frs
                             , frErrors = concatMap frErrors frs
+                            , frBatchEnds = foldl' (HashMap.unionWith max) HashMap.empty (map frBatchEnds frs)
                             }
 
 
@@ -2465,6 +2483,13 @@ data PartitionFetchError = PartitionFetchError
 data FetchResult = FetchResult
   { frRecords :: ![ConsumerRecord]
   , frErrors :: ![PartitionFetchError]
+  , frBatchEnds :: !(HashMap.HashMap TopicPartition Int64)
+  {- ^ Per partition, the offset after the last fetched batch. Once a
+  partition's records are all delivered its position moves here, past
+  trailing transaction markers and aborted batches that never become
+  records (otherwise a read_committed consumer would refetch them
+  forever and never reach the last stable offset).
+  -}
   }
 
 
@@ -2584,12 +2609,14 @@ extractRecordsFromFetchResponse isolationLevel fetchOffsets response = do
   -- Partition-level errors don't fail the fetch: 'poll' decides per
   -- error code (reset, retry next poll, or fail).
   errsRef <- newIORef []
+  endsRef <- newIORef HashMap.empty
   -- Walk topics with V.foldM' so we don't build an intermediate
   -- list of '[[ConsumerRecord]]' chunks; per-iteration work is
   -- in 'IO' because 'decodeAllBatches' may decompress.
-  r <- go errsRef (V.length topicsVec) topicsVec
+  r <- go (errsRef, endsRef) (V.length topicsVec) topicsVec
   errs <- readIORef errsRef
-  pure (fmap (\recs -> FetchResult {frRecords = recs, frErrors = errs}) r)
+  ends <- readIORef endsRef
+  pure (fmap (\recs -> FetchResult {frRecords = recs, frErrors = errs, frBatchEnds = ends}) r)
   where
     go _ 0 _ = pure (Right [])
     go errsRef _ topicsVec = do
@@ -2599,7 +2626,7 @@ extractRecordsFromFetchResponse isolationLevel fetchOffsets response = do
         Right vs -> pure (Right (V.toList (V.concat (reverse vs))))
 
     addTopic
-      :: IORef [PartitionFetchError]
+      :: (IORef [PartitionFetchError], IORef (HashMap.HashMap TopicPartition Int64))
       -> Either String [V.Vector ConsumerRecord]
       -> FResp.FetchableTopicResponse
       -> IO (Either String [V.Vector ConsumerRecord])
@@ -2617,12 +2644,12 @@ extractRecordsFromFetchResponse isolationLevel fetchOffsets response = do
           Right pv -> pure (Right (pv : chunks))
 
     addPartition
-      :: IORef [PartitionFetchError]
+      :: (IORef [PartitionFetchError], IORef (HashMap.HashMap TopicPartition Int64))
       -> Text
       -> Either String (V.Vector ConsumerRecord)
       -> FResp.PartitionData
       -> IO (Either String (V.Vector ConsumerRecord))
-    addPartition errsRef topicName acc partResp = case acc of
+    addPartition (errsRef, endsRef) topicName acc partResp = case acc of
       Left e -> pure (Left e)
       Right partial -> do
         let partId = FResp.partitionDataPartitionIndex partResp
@@ -2677,7 +2704,13 @@ extractRecordsFromFetchResponse isolationLevel fetchOffsets response = do
                 batches <- decodeAllBatchesSliced recordsBytes
                 case batches of
                   Left err -> pure (Left ("Failed to decode batches: " ++ err))
-                  Right bs ->
+                  Right bs -> do
+                    case bs of
+                      [] -> pure ()
+                      _ ->
+                        let lastB = last bs
+                            !end = RBW.sbBaseOffset lastB + fromIntegral (RBW.sbLastOffsetDelta lastB) + 1
+                        in modifyIORef' endsRef (HashMap.insertWith max (TopicPartition topicName partId) end)
                     let !v =
                           selectFetchedRecords
                             isolationLevel
@@ -2686,7 +2719,7 @@ extractRecordsFromFetchResponse isolationLevel fetchOffsets response = do
                             topicName
                             partId
                             bs
-                    in pure (Right (partial V.++ v))
+                    pure (Right (partial V.++ v))
 
 
 
