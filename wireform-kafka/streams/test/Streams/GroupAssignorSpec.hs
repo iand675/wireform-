@@ -22,6 +22,10 @@ import Kafka.Streams.Discovery (HostInfo (..))
 import Kafka.Streams.Processor (TaskId (..))
 import Kafka.Streams.Runtime.GroupAssignor
 import Test.Syd
+import Kafka.Client.AdminClient qualified as KA
+import Kafka.Client.Consumer qualified as KC
+import Kafka.Common (Cluster (..), Node (..), emptyCluster)
+import Kafka.Streams.Runtime.NativeDriver (partitionRacksFrom)
 import Test.Syd.Hedgehog ()
 
 
@@ -40,6 +44,7 @@ tests =
     it "rack-aware: same counts, no cold moves, never more cross-rack reads" $ H.withTests 200 prop_rack_aware
     it "balance_subtopology spreads each subtopology's tasks" unit_balance_subtopology
     it "standbys go to clients with tag values the other replicas lack (KIP-708)" unit_standby_tags
+    it "the native driver's partition racks: replicas' brokers' racks, gaps as no rack" unit_partition_racks
 
 
 data Group = Group
@@ -330,3 +335,27 @@ unit_standby_tags = do
       without = assignTasks cfg tasks clients
   Map.keys (Map.filter (Set.member t . ctStandby) withTags) `shouldBe` ["c2"]
   Map.keys (Map.filter (Set.member t . ctStandby) without) `shouldBe` ["c1"]
+
+
+unit_partition_racks :: IO ()
+unit_partition_racks = do
+  let node i rack = Node i "h" 9092 rack
+      cluster = emptyCluster {clusterNodes = [node 1 (Just "a"), node 2 (Just "b"), node 3 Nothing]}
+      part i replicas = KA.PartitionInfo i (head replicas) replicas replicas
+      topics =
+        [ KA.TopicDescription "t" False [part 0 [1, 2], part 1 [2, 3], part 2 [3], part 3 [1, 9]]
+        ]
+      tp = KC.TopicPartition "t"
+      racks = partitionRacksFrom cluster topics (map tp [0 .. 4] <> [KC.TopicPartition "other" 0])
+  racks
+    `shouldBe` Map.fromList
+      [ (tp 0, Set.fromList ["a", "b"])
+      , -- broker 3 has no rack
+        (tp 1, Set.singleton "b")
+      , (tp 2, Set.empty)
+      , -- broker 9 isn't in the cluster
+        (tp 3, Set.singleton "a")
+      , -- partitions the description lacks
+        (tp 4, Set.empty)
+      , (KC.TopicPartition "other" 0, Set.empty)
+      ]

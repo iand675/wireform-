@@ -6,6 +6,7 @@ the convention of the existing @wireform-kafka-integration@ suite.
 -}
 module Main (main) where
 
+import Streams.Integration.NativeDriver qualified as ND
 import Streams.Integration.RoundTrip qualified as RT
 import System.Environment (lookupEnv)
 import Test.Syd
@@ -26,4 +27,5 @@ main = do
         describe "kafka-streams-integration" $
           sequence_
             [ RT.tests bs
+            , ND.tests bs
             ]

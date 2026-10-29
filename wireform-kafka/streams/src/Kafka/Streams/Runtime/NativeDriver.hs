@@ -28,6 +28,7 @@ applied last.
 -}
 module Kafka.Streams.Runtime.NativeDriver (
   newNativeDriver,
+  partitionRacksFrom,
 ) where
 
 import Control.Exception (SomeException, try)
@@ -65,6 +66,32 @@ toDriverRecord r =
 
 showE :: Show e => Either e a -> Either String a
 showE = either (Left . show) Right
+
+
+{- | The racks of the brokers holding each of @tps@'s replicas, from a
+@DescribeCluster@ (brokers and their racks) and a topic description
+(partitions and their replicas). A broker without a rack, a replica on
+a broker the cluster doesn't list and a partition the description
+lacks all contribute no rack.
+-}
+partitionRacksFrom :: Cluster -> [KA.TopicDescription] -> [KC.TopicPartition] -> Map.Map KC.TopicPartition (Set.Set T.Text)
+partitionRacksFrom cluster topics tps =
+  let rackOf = Map.fromList (mapMaybe (\n -> (,) (fromIntegral (nodeId n)) <$> nodeRack n) (clusterNodes cluster))
+      replicas =
+        Map.fromList
+          ( concatMap
+              ( \d ->
+                  map
+                    (\p -> (KC.TopicPartition (KA.tdName d) (fromIntegral (KA.piPartitionId p)), KA.piReplicas p))
+                    (KA.tdPartitions d)
+              )
+              topics
+          )
+  in Map.fromList
+       ( map
+           (\tp -> (tp, Set.fromList (mapMaybe (`Map.lookup` rackOf) (Map.findWithDefault [] tp replicas))))
+           tps
+       )
 
 
 newNativeDriver :: StreamsConfig -> IO (Either String StreamDriver)
@@ -220,27 +247,7 @@ newNativeDriver cfg = do
               , sdPartitionRacks = \tps -> do
                   eCluster <- KA.describeCluster admin
                   eTopics <- KA.describeTopics admin (Set.toList (Set.fromList (map (.topic) tps)))
-                  pure $ do
-                    cluster <- eCluster
-                    topics <- eTopics
-                    let rackOf = Map.fromList (mapMaybe (\n -> (,) (fromIntegral (nodeId n)) <$> nodeRack n) (clusterNodes cluster))
-                        replicas =
-                          Map.fromList
-                            ( concatMap
-                                ( \d ->
-                                    map
-                                      (\p -> (KC.TopicPartition (KA.tdName d) (fromIntegral (KA.piPartitionId p)), KA.piReplicas p))
-                                      (KA.tdPartitions d)
-                                )
-                                topics
-                            )
-                    Right
-                      ( Map.fromList
-                          ( map
-                              (\tp -> (tp, Set.fromList (mapMaybe (`Map.lookup` rackOf) (Map.findWithDefault [] tp replicas))))
-                              tps
-                          )
-                      )
+                  pure (partitionRacksFrom <$> eCluster <*> eTopics <*> pure tps)
               , sdDeleteRecords = \offs ->
                   fmap (const ())
                     <$> KA.deleteRecords admin (map (\(tp, o) -> (tp.topic, tp.partition, o)) offs)
