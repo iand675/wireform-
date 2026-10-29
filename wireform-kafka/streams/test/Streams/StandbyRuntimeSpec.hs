@@ -45,6 +45,7 @@ tests =
     it "a warmup restores before its task moves, at a probing rebalance" warmup_then_probe
     it "a KIP-924 assignor deals the tasks; an invalid one falls back" user_assignor
     it "instances learn the hosts of partitions, stores and keys" discovery
+    it "rack-aware (min_traffic): each instance gets the partitions on its rack" rack_aware
 
 
 actives :: KafkaStreams -> IO Int
@@ -243,5 +244,30 @@ discovery = withStateDirs 2 $ \[d1, d2] -> do
       km.standbyHosts `shouldBe` filter (/= owner.host) [hostA, hostB]
       queryMetadataForKey b (storeName "counts") (textBytes "k3") `shouldReturn` Just km
       queryMetadataForKey a (storeName "no-such-store") (textBytes "k3") `shouldReturn` Nothing
+    )
+    `finally` closeAll [a, b]
+
+
+rack_aware :: IO ()
+rack_aware = withStateDirs 2 $ \[d1, d2] -> do
+  broker <- newMockBroker (Just 1)
+  mockCreateTopic broker "in" 4
+  -- partitions 0 and 1 live on rack a, 2 and 3 on rack b
+  mockSetPartitionRacks broker "in" (map Set.singleton ["a", "a", "b", "b"])
+  topo <- wordCount
+  let cfg d rack =
+        (testConfig "rk" d)
+          { clientRack = Just rack
+          , rackAwareAssignment = (rackAwareAssignment (testConfig "rk" d)) {PA.raStrategy = "min_traffic"}
+          }
+  -- b joins first, so the plain deal would not follow the racks by luck alone
+  b <- startOn broker (cfg d2 "b") topo
+  a <- startOn broker (cfg d1 "a") topo
+  ( do
+      let owned ks = Set.fromList . map (.partition) <$> ownedPartitions ks
+      eventually [a, b] "the racks' partitions" $
+        (\pa pb -> pa == Set.fromList [0, 1] && pb == Set.fromList [2, 3]) <$> owned a <*> owned b
+      produceWords broker 3
+      eventually [a, b] "counted to 3" (countsReach broker 3)
     )
     `finally` closeAll [a, b]

@@ -47,7 +47,7 @@ import Kafka.Streams.Errors (
   logAndFailProduction,
  )
 import Kafka.Streams.Discovery (HostInfo, parseHostInfo)
-import Kafka.Streams.Processor.Assignment (TaskAssignor)
+import Kafka.Streams.Processor.Assignment (RackAwareAssignmentConfigs (..), TaskAssignor, defaultRackAwareAssignmentConfigs)
 import Kafka.Streams.Topology.Optimization (OptimizationFlags, noOptimizations, parseOptimizationFlags)
 
 
@@ -84,14 +84,15 @@ dropped):
   * 'metadataMaxAgeMs'          — @metadata.max.age.ms@ (pattern sources)
   * 'statestoreCacheMaxBytes'   — @statestore.cache.max.bytes@ (record caches)
   * 'topologyOptimization'      — @topology.optimization@
+  * 'clientRack', 'clientTags', 'rackAwareAssignment' — @client.rack@,
+    @client.tag.*@ and the @rack.aware.assignment.*@ keys
 
 The embedded clients are configured from these; 'consumerOverrides',
 'producerOverrides' and 'adminOverrides' adjust anything else on them
 (the JVM's @consumer.@ / @producer.@ / @admin.@ prefixed properties).
 
-Not here, because the runtime has no such behaviour: rack-aware
-assignment. Its JVM keys are ignored by 'streamsConfigFromMap', like
-any unknown key.
+Keys the runtime has no behaviour for are ignored by
+'streamsConfigFromMap', like any unknown key.
 -}
 data StreamsConfig = StreamsConfig
   { applicationId :: !Text
@@ -123,6 +124,21 @@ data StreamsConfig = StreamsConfig
   , consumerOverrides :: !(KC.ConsumerConfig -> KC.ConsumerConfig)
   , producerOverrides :: !(KP.ProducerConfig -> KP.ProducerConfig)
   , adminOverrides :: !(KA.AdminClientConfig -> KA.AdminClientConfig)
+  , clientRack :: !(Maybe Text)
+  {- ^ @client.rack@ — this instance's rack, for rack-aware assignment
+  ('rackAwareAssignment') and the consumer's follower fetching (KIP-392)
+  -}
+  , clientTags :: !(Map.Map Text Text)
+  -- ^ @client.tag.\<key\>@ — this instance's tags, for spreading standbys (KIP-708)
+  , rackAwareAssignment :: !RackAwareAssignmentConfigs
+  {- ^ @rack.aware.assignment.strategy@ (@none@, @min_traffic@,
+  @balance_subtopology@), @.traffic_cost@, @.non_overlap_cost@ and
+  @.tags@ (KIP-925, KIP-708). With a strategy, and every instance
+  setting 'clientRack', the group leader moves active tasks to
+  instances on the racks their partitions' replicas are on
+  ("Kafka.Streams.Runtime.GroupAssignor"); with tags, a task's standbys
+  go to instances with tag values its other replicas lack.
+  -}
   , applicationServer :: !(Maybe HostInfo)
   {- ^ This instance's endpoint for interactive queries, shared with every
   instance through the assignment ('Kafka.Streams.Runtime.streamsMetadata',
@@ -224,6 +240,9 @@ defaultStreamsConfig =
     , probingRebalanceIntervalMs = 600_000
     , topologyOptimization = noOptimizations
     , metadataMaxAgeMs = 300_000
+    , clientRack = Nothing
+    , clientTags = Map.empty
+    , rackAwareAssignment = defaultRackAwareAssignmentConfigs
     , statestoreCacheMaxBytes = 10 * 1024 * 1024
     , taskAssignor = Nothing
       }
@@ -289,6 +308,17 @@ streamsConfigFromMap m = foldl' step defaultStreamsConfig (Map.toAscList m)
         maybe cfg (\n -> cfg {replicationFactor = n}) (readT v)
       "state.dir" -> cfg {stateDir = T.unpack v}
       "application.server" -> either (const cfg) (\h -> cfg {applicationServer = Just h}) (parseHostInfo v)
+      "client.rack" -> cfg {clientRack = if T.null v then Nothing else Just v}
+      "rack.aware.assignment.strategy" -> cfg {rackAwareAssignment = (rackAwareAssignment cfg) {raStrategy = v}}
+      "rack.aware.assignment.traffic_cost" ->
+        maybe cfg (\n -> cfg {rackAwareAssignment = (rackAwareAssignment cfg) {raTrafficCost = n}}) (readT v)
+      "rack.aware.assignment.non_overlap_cost" ->
+        maybe cfg (\n -> cfg {rackAwareAssignment = (rackAwareAssignment cfg) {raNonOverlapCost = n}}) (readT v)
+      "rack.aware.assignment.tags" ->
+        cfg {rackAwareAssignment = (rackAwareAssignment cfg) {raAssignmentTags = filter (not . T.null) (map T.strip (T.splitOn "," v))}}
+      _
+        | Just tag <- T.stripPrefix "client.tag." k ->
+            cfg {clientTags = Map.insert tag v (clientTags cfg)}
       "acceptable.recovery.lag" ->
         maybe cfg (\n -> cfg {acceptableRecoveryLag = n}) (readT v)
       "max.warmup.replicas" ->

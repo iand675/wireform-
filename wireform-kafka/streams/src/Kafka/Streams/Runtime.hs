@@ -126,7 +126,7 @@ import Data.ByteString.Char8 qualified as BS8
 import Data.IORef
 import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -479,6 +479,15 @@ startKafkaStreamsWith ks drv = do
               , lcTaskChangelogs = Map.map (map fst) cls
               , lcTaskStores = \(TaskId sid _) -> maybe Set.empty (Set.fromList . map unStoreName . Map.keys . subPlanChangelogs) (Map.lookup sid (rpSubtopologies plan))
               , lcEndOffsets = rdEndOffsets reader
+              , lcPartitionRacks = sdPartitionRacks drv
+              , lcRack =
+                  let ra = rackAwareAssignment cfg
+                  in noRackPlacement
+                       { rpStrategy = fromMaybe RackNone (parseRackStrategy (PA.raStrategy ra))
+                       , rpTrafficCost = PA.raTrafficCost ra
+                       , rpNonOverlapCost = PA.raNonOverlapCost ra
+                       , rpTagKeys = PA.raAssignmentTags ra
+                       }
               , lcConfig =
                   AssignConfig
                     { acStandbys = numStandbyReplicas cfg
@@ -491,7 +500,7 @@ startKafkaStreamsWith ks drv = do
                     , PA.acAcceptableRecoveryLag = fromIntegral (acceptableRecoveryLag cfg)
                     , PA.acMaxWarmupReplicas = maxWarmupReplicas cfg
                     , PA.acProbingRebalanceIntervalMs = probingRebalanceIntervalMs cfg
-                    , PA.acRackAware = PA.defaultRackAwareAssignmentConfigs
+                    , PA.acRackAware = rackAwareAssignment cfg
                     }
               , lcUserAssignor = taskAssignor cfg
               , lcLog = logLine
@@ -502,7 +511,7 @@ startKafkaStreamsWith ks drv = do
               sums <- tmOffsetSums tm
               standbys <- tmStandbyTasks tm
               threads <- readIORef (ksThreads ks)
-              pure (encodeSubscription (StreamsSubscription pid (applicationServer cfg) threads sums standbys))
+              pure (encodeSubscription (StreamsSubscription pid (applicationServer cfg) threads sums standbys (clientRack cfg) (clientTags cfg)))
           }
 
 

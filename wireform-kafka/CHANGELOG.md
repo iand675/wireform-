@@ -66,6 +66,15 @@ and this project adheres to the
   hold unmatched records until their window closes and emit them only
   then (KIP-633) instead of emitting `(v, Nothing)` at once. The
   `Joined` serdes and name are used for the join stores.
+- **Rack-aware assignment** (KIP-925, KIP-708): `clientRack`,
+  `clientTags` and `rackAwareAssignment` (`client.rack`, `client.tag.*`,
+  `rack.aware.assignment.*`). With `min_traffic` or
+  `balance_subtopology` the leader re-deals active tasks by a min-cost
+  flow (`Kafka.Streams.Runtime.MinCostFlow`) toward the racks of their
+  partitions' replicas (`sdPartitionRacks`), keeping task counts and
+  never moving a task cold; standbys prefer clients with tag values the
+  task's other replicas lack. User task assignors see the racks, tags
+  and costs. Default costs are the JVM's (traffic 10, non-overlap 1).
 - **Record caches** (`statestoreCacheMaxBytes`, JVM
   `statestore.cache.max.bytes`, default 10 MiB split over the active
   tasks): the DSL's table stores buffer writes per key, and the store,

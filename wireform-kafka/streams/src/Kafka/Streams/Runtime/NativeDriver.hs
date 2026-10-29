@@ -39,6 +39,9 @@ import Data.Text qualified as T
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID
 import Kafka.Client.AdminClient qualified as KA
+import Kafka.Common (Cluster (..), Node (..))
+import Data.Maybe (mapMaybe)
+import Data.Set qualified as Set
 import Kafka.Client.Consumer qualified as KC
 import Kafka.Client.Internal.TransactionCoordinator qualified as TC
 import Kafka.Client.Producer qualified as KP
@@ -78,6 +81,7 @@ newNativeDriver cfg = do
             , KC.consumerAutoOffsetReset = KC.Earliest
             , KC.consumerAutoCommit = False
             , KC.consumerAssignmentStrategy = KC.RangeAssignment
+            , KC.consumerRackId = clientRack cfg
             }
   pid <- UUID.nextRandom
   let txnId = applicationId cfg <> "-" <> UUID.toText pid
@@ -213,6 +217,30 @@ newNativeDriver cfg = do
                           . filter (not . null . KA.tdPartitions)
                           <$> r
               , sdListTopics = KA.listTopicsExcludeInternal admin
+              , sdPartitionRacks = \tps -> do
+                  eCluster <- KA.describeCluster admin
+                  eTopics <- KA.describeTopics admin (Set.toList (Set.fromList (map (.topic) tps)))
+                  pure $ do
+                    cluster <- eCluster
+                    topics <- eTopics
+                    let rackOf = Map.fromList (mapMaybe (\n -> (,) (fromIntegral (nodeId n)) <$> nodeRack n) (clusterNodes cluster))
+                        replicas =
+                          Map.fromList
+                            ( concatMap
+                                ( \d ->
+                                    map
+                                      (\p -> (KC.TopicPartition (KA.tdName d) (fromIntegral (KA.piPartitionId p)), KA.piReplicas p))
+                                      (KA.tdPartitions d)
+                                )
+                                topics
+                            )
+                    Right
+                      ( Map.fromList
+                          ( map
+                              (\tp -> (tp, Set.fromList (mapMaybe (`Map.lookup` rackOf) (Map.findWithDefault [] tp replicas))))
+                              tps
+                          )
+                      )
               , sdDeleteRecords = \offs ->
                   fmap (const ())
                     <$> KA.deleteRecords admin (map (\(tp, o) -> (tp.topic, tp.partition, o)) offs)

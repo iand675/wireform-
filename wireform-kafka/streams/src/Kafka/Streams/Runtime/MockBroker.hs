@@ -47,6 +47,7 @@ module Kafka.Streams.Runtime.MockBroker (
   mockGroupMembers,
   mockGeneration,
   mockTopics,
+  mockSetPartitionRacks,
 
   -- * Faults
   mockFailSends,
@@ -181,6 +182,8 @@ data St = St
   , stRoundRobin :: !Int
   , stLogStart :: !(Map KC.TopicPartition Int64)
   -- ^ Records before these offsets are deleted
+  , stRacks :: !(Map KC.TopicPartition (Set Text))
+  -- ^ The racks of each partition's replicas ('mockSetPartitionRacks')
   }
 
 
@@ -208,6 +211,7 @@ newMockBroker autoCreate =
         , stAutoCreatePartitions = autoCreate
         , stRoundRobin = 0
         , stLogStart = Map.empty
+        , stRacks = Map.empty
         }
 
 
@@ -233,6 +237,13 @@ createTopicSt t n s
 
 mockPartitionCount :: MockBroker -> Text -> IO (Maybe Int)
 mockPartitionCount (MockBroker v) t = fmap Map.size . Map.lookup t . stTopics <$> readTVarIO v
+
+
+-- | Place @topic@'s partitions' replicas: the racks of partition @p@ are the @p@-th set.
+mockSetPartitionRacks :: MockBroker -> Text -> [Set Text] -> IO ()
+mockSetPartitionRacks (MockBroker v) topic racks =
+  atomically $ modifyTVar' v $ \s ->
+    s {stRacks = Map.union (Map.fromList (zipWith (\p rs -> (KC.TopicPartition topic p, rs)) [0 ..] racks)) (stRacks s)}
 
 
 mockTopics :: MockBroker -> IO [Text]
@@ -920,6 +931,9 @@ newMockDriver (MockBroker v) opts = do
           s <- readTVarIO v
           pure (Right (Map.map Map.size (Map.restrictKeys (stTopics s) (Set.fromList ts))))
       , sdListTopics = Right . Map.keys . stTopics <$> readTVarIO v
+      , sdPartitionRacks = \tps -> do
+          s <- readTVarIO v
+          pure (Right (Map.fromList (map (\tp -> (tp, Map.findWithDefault Set.empty tp (stRacks s))) tps)))
       , sdDeleteRecords = \offs -> do
           atomically $ modifyTVar' v $ \s ->
             bump s {stLogStart = Map.unionWith max (Map.fromList offs) (stLogStart s)}

@@ -174,6 +174,26 @@ interval moves tasks sooner at the cost of more rebalances; a tight
 `acceptableRecoveryLag` keeps tasks off instances that would have to
 restore much.
 
+## Rack-aware assignment (KIP-925, KIP-708)
+
+Set `clientRack` (`client.rack`) on every instance and
+`rackAwareAssignment.raStrategy` (`rack.aware.assignment.strategy`) to
+`min_traffic`: the group leader then re-deals the active tasks so they
+run on the racks their source and changelog partitions' replicas are
+on. It keeps every instance's number of tasks, never moves a task to an
+instance that would have to restore it from scratch, and weighs each
+cross-rack partition (`traffic_cost`, default 10) against each moved
+task (`non_overlap_cost`, default 1). `balance_subtopology` also
+spreads each subtopology's tasks evenly. If an instance has no rack, or
+the partitions' racks can't be read, the rebalance uses the plain deal.
+The embedded consumers get the same `client.rack` for follower
+fetching (KIP-392).
+
+For standbys, tag instances (`client.tag.zone = z1`, …) and list the
+keys in `rack.aware.assignment.tags`: a task's standbys go first to the
+instances whose tag values its active and other standbys don't have,
+so a zone outage doesn't take every copy.
+
 ## Custom task assignment (KIP-924)
 
 Set `taskAssignor` (`Kafka.Streams.Processor.Assignment.TaskAssignor`)

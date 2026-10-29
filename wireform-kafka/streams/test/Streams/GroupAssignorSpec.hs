@@ -36,6 +36,10 @@ tests =
     it "running owners keep their tasks when the balance allows" $ H.withTests 200 prop_sticky
     it "a lagging owner hands over to a caught-up client and warms up" unit_warmup_scenario
     it "subscription and assignment round-trip their wire format" $ H.withTests 200 prop_codecs
+    it "min_traffic moves actives to their partitions' racks" unit_rack_local
+    it "rack-aware: same counts, no cold moves, never more cross-rack reads" $ H.withTests 200 prop_rack_aware
+    it "balance_subtopology spreads each subtopology's tasks" unit_balance_subtopology
+    it "standbys go to clients with tag values the other replicas lack (KIP-708)" unit_standby_tags
 
 
 data Group = Group
@@ -216,6 +220,8 @@ prop_codecs = H.property $ do
         <*> Gen.int (Range.linear 1 64)
         <*> (Map.fromList <$> Gen.list (Range.linear 0 20) ((,) <$> genTask <*> Gen.int64 (Range.linear (-2) 1_000_000)))
         <*> genTasks
+        <*> Gen.maybe (Gen.text (Range.linear 0 10) Gen.unicode)
+        <*> (Map.fromList <$> Gen.list (Range.linear 0 4) ((,) <$> Gen.text (Range.linear 0 8) Gen.alphaNum <*> Gen.text (Range.linear 0 8) Gen.unicode))
   decodeSubscription (encodeSubscription sub) H.=== Right sub
   asg <-
     H.forAll $
@@ -225,3 +231,102 @@ prop_codecs = H.property $ do
         <*> (Map.fromList <$> Gen.list (Range.linear 0 5) ((,) <$> genHost <*> (HostTasks <$> genTasks <*> genTasks)))
         <*> Gen.bool
   decodeAssignment (encodeAssignment asg) H.=== Right asg
+
+
+-- | The racks of a two-rack cluster, per task partition.
+rackA, rackB :: Set.Set Text
+rackA = Set.singleton "a"
+rackB = Set.singleton "b"
+
+
+unit_rack_local :: IO ()
+unit_rack_local = do
+  let ts = map (TaskId 0) [0 .. 3]
+      tasks = Map.fromList (map (\t -> (t, TaskSpec False 0)) ts)
+      -- tasks 0 and 1 read partitions on rack b, 2 and 3 on rack a
+      racks = Map.fromList (zip ts [[rackB], [rackB], [rackA], [rackA]])
+      clients = [ClientInfo "c0" 1 Map.empty, ClientInfo "c1" 1 Map.empty]
+      cfg = AssignConfig 0 0 0
+      rp = noRackPlacement {rpStrategy = RackMinTraffic, rpClientRacks = Map.fromList [("c0", "a"), ("c1", "b")], rpTaskRacks = racks}
+      d = assignTasksWith rp cfg tasks clients
+  Map.map ctActive d `shouldBe` Map.fromList [("c0", Set.fromList (drop 2 ts)), ("c1", Set.fromList (take 2 ts))]
+  -- without racks the plain deal is kept
+  assignTasksWith rp {rpClientRacks = Map.singleton "c0" "a"} cfg tasks clients `shouldBe` assignTasks cfg tasks clients
+
+
+crossTotal :: RackPlacement -> Map Text ClientTasks -> Int
+crossTotal rp d =
+  sum
+    ( concatMap
+        ( \(c, ct) ->
+            map (\t -> crossRackCost (Map.findWithDefault [] t (rpTaskRacks rp)) (Map.findWithDefault "" c (rpClientRacks rp))) (Set.toList (ctActive ct))
+        )
+        (Map.toList d)
+    )
+
+
+prop_rack_aware :: H.Property
+prop_rack_aware = H.property $ do
+  g <- H.forAll genGroup
+  strategy <- H.forAll (Gen.element [RackMinTraffic, RackBalanceSubtopology])
+  let racks = ["a", "b", "c"]
+  clientRacks <- H.forAll (Map.fromList <$> traverse (\c -> (,) (ciId c) <$> Gen.element racks) (gClients g))
+  taskRacks <-
+    H.forAll $
+      Map.fromList
+        <$> traverse
+          (\t -> (,) t <$> Gen.list (Range.linear 1 3) (Set.fromList <$> Gen.subsequence racks))
+          (Map.keys (gTasks g))
+  let rp = noRackPlacement {rpStrategy = strategy, rpClientRacks = clientRacks, rpTaskRacks = taskRacks}
+      base = deal g
+      d = assignTasksWith rp (gConfig g) (gTasks g) (gClients g)
+  -- every task active once, on as many tasks per client as the plain deal
+  Set.unions (map ctActive (Map.elems d)) H.=== Map.keysSet (gTasks g)
+  Map.map (Set.size . ctActive) d H.=== Map.map (Set.size . ctActive) base
+  forM_ (Map.keys (gTasks g)) $ \t -> length (activeOf d t) H.=== 1
+  -- a task only moves to a client that need not restore it
+  forM_ (Map.toList (gTasks g)) $ \(t, spec) -> do
+    let [now] = activeOf d t
+        [was] = activeOf base t
+    when (now /= was && tsStateful spec) $ H.assert (lagOn g now t <= acAcceptableLag (gConfig g))
+  -- min_traffic never reads more across racks than the plain deal
+  when (strategy == RackMinTraffic) $ H.assert (crossTotal rp d <= crossTotal rp base)
+  -- standbys never sit next to their active
+  forM_ (Map.keys (gTasks g)) $ \t ->
+    forM_ (activeOf d t) $ \a -> H.assert (Set.notMember t (ctStandby (d Map.! a)))
+
+
+unit_balance_subtopology :: IO ()
+unit_balance_subtopology = do
+  -- subtopology 0's two tasks both read rack a; balance puts one on each client
+  let ts0 = map (TaskId 0) [0, 1]
+      ts1 = map (TaskId 1) [0, 1]
+      tasks = Map.fromList (map (\t -> (t, TaskSpec False 0)) (ts0 <> ts1))
+      racks = Map.fromList (zip (ts0 <> ts1) [[rackA], [rackA], [rackB], [rackB]])
+      clients = [ClientInfo "c0" 1 Map.empty, ClientInfo "c1" 1 Map.empty]
+      cfg = AssignConfig 0 0 0
+      rp s = noRackPlacement {rpStrategy = s, rpClientRacks = Map.fromList [("c0", "a"), ("c1", "b")], rpTaskRacks = racks}
+      local = assignTasksWith (rp RackMinTraffic) cfg tasks clients
+      spread = assignTasksWith (rp RackBalanceSubtopology) cfg tasks clients
+  Map.map ctActive local `shouldBe` Map.fromList [("c0", Set.fromList ts0), ("c1", Set.fromList ts1)]
+  forM_ (Map.elems spread) $ \ct -> do
+    Set.size (Set.filter (\(TaskId s _) -> s == 0) (ctActive ct)) `shouldBe` 1
+    Set.size (Set.filter (\(TaskId s _) -> s == 1) (ctActive ct)) `shouldBe` 1
+
+
+unit_standby_tags :: IO ()
+unit_standby_tags = do
+  let t = TaskId 0 0
+      tasks = Map.singleton t (TaskSpec True 100)
+      -- c0 runs it; c1 has nearly all of its state but shares c0's zone
+      clients =
+        [ ClientInfo "c0" 1 (Map.singleton t runningActive)
+        , ClientInfo "c1" 1 (Map.singleton t 99)
+        , ClientInfo "c2" 1 Map.empty
+        ]
+      cfg = AssignConfig 1 0 0
+      tags = Map.fromList [("c0", Map.singleton "zone" "z1"), ("c1", Map.singleton "zone" "z1"), ("c2", Map.singleton "zone" "z2")]
+      withTags = assignTasksWith noRackPlacement {rpTagKeys = ["zone"], rpClientTags = tags} cfg tasks clients
+      without = assignTasks cfg tasks clients
+  Map.keys (Map.filter (Set.member t . ctStandby) withTags) `shouldBe` ["c2"]
+  Map.keys (Map.filter (Set.member t . ctStandby) without) `shouldBe` ["c1"]

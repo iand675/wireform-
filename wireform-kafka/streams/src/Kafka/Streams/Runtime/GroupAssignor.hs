@@ -54,6 +54,12 @@ module Kafka.Streams.Runtime.GroupAssignor (
   TaskSpec (..),
   ClientTasks (..),
   assignTasks,
+  assignTasksWith,
+  RackStrategy (..),
+  parseRackStrategy,
+  RackPlacement (..),
+  noRackPlacement,
+  crossRackCost,
   taskLag,
 
   -- * The group assignor
@@ -86,6 +92,7 @@ import Kafka.Client.Consumer qualified as KC
 import Kafka.Streams.Discovery (HostInfo (..))
 import Kafka.Streams.Processor (TaskId (..))
 import Kafka.Streams.Processor.Assignment qualified as PA
+import Kafka.Streams.Runtime.MinCostFlow (Edge (..), minCostFlow)
 
 
 ----------------------------------------------------------------------
@@ -111,6 +118,10 @@ data StreamsSubscription = StreamsSubscription
   -}
   , ssStandbys :: !(Set TaskId)
   -- ^ The standbys it holds
+  , ssRack :: !(Maybe Text)
+  -- ^ @client.rack@
+  , ssTags :: !(Map Text Text)
+  -- ^ @client.tag.*@
   }
   deriving stock (Eq, Show)
 
@@ -204,6 +215,8 @@ encodeSubscription s = BL.toStrict . P.runPut $ do
   P.putInt32be (fromIntegral s.ssCapacity)
   putList (\(t, o) -> putTaskId t >> P.putInt64be o) (Map.toList s.ssOffsetSums)
   putList putTaskId (Set.toList s.ssStandbys)
+  maybe (P.putWord8 0) (\rk -> P.putWord8 1 >> putText rk) s.ssRack
+  putList (\(k, v) -> putText k >> putText v) (Map.toList s.ssTags)
 
 
 decodeSubscription :: ByteString -> Either String StreamsSubscription
@@ -215,7 +228,10 @@ decodeSubscription = runGetStrict $ do
   cap <- fromIntegral <$> G.getInt32be
   sums <- Map.fromList <$> getList ((,) <$> getTaskId <*> G.getInt64be)
   sbs <- Set.fromList <$> getList getTaskId
-  pure (StreamsSubscription pid h cap sums sbs)
+  hasRack <- G.getWord8
+  rk <- if hasRack == 0 then pure Nothing else Just <$> getText
+  tags <- Map.fromList <$> getList ((,) <$> getText <*> getText)
+  pure (StreamsSubscription pid h cap sums sbs rk tags)
 
 
 encodeAssignment :: StreamsAssignment -> ByteString
@@ -293,13 +309,77 @@ taskLag spec = \case
   Nothing -> tsEndSum spec
 
 
+-- | @rack.aware.assignment.strategy@.
+data RackStrategy
+  = -- | Racks play no part
+    RackNone
+  | {- | Move active tasks to clients on the racks their partitions'
+    replicas are on, keeping every client's task count
+    -}
+    RackMinTraffic
+  | -- | As 'RackMinTraffic', also spreading each subtopology's tasks evenly
+    RackBalanceSubtopology
+  deriving stock (Eq, Show)
+
+
+parseRackStrategy :: Text -> Maybe RackStrategy
+parseRackStrategy = \case
+  "none" -> Just RackNone
+  "min_traffic" -> Just RackMinTraffic
+  "balance_subtopology" -> Just RackBalanceSubtopology
+  _ -> Nothing
+
+
+-- | What rack-aware placement knows of the clients and partitions.
+data RackPlacement = RackPlacement
+  { rpStrategy :: !RackStrategy
+  , rpTrafficCost :: !Int
+  -- ^ @rack.aware.assignment.traffic_cost@: per partition a task reads from another rack
+  , rpNonOverlapCost :: !Int
+  -- ^ @rack.aware.assignment.non_overlap_cost@: per task moved off the client the deal gave it
+  , rpClientRacks :: !(Map Text Text)
+  -- ^ Each client's @client.rack@
+  , rpTaskRacks :: !(Map TaskId [Set Text])
+  -- ^ Per task, the racks holding each of its partitions' replicas (sources and changelogs)
+  , rpTagKeys :: ![Text]
+  -- ^ @rack.aware.assignment.tags@ (KIP-708): spread a task's standbys over these tags' values
+  , rpClientTags :: !(Map Text (Map Text Text))
+  -- ^ Each client's @client.tag.*@
+  }
+  deriving stock (Eq, Show)
+
+
+noRackPlacement :: RackPlacement
+noRackPlacement = RackPlacement RackNone 10 1 Map.empty Map.empty [] Map.empty
+
+
+-- | How many of a task's partitions a client on @rack@ would read from another rack.
+crossRackCost :: [Set Text] -> Text -> Int
+crossRackCost partRacks rack = length (filter (Set.notMember rack) partRacks)
+
+
 {- | Deal @tasks@ over @clients@ (see the module header). Every task is
 active on exactly one client; a client never holds a standby of a
 task it runs; ties go to the lower client id.
 -}
 assignTasks :: AssignConfig -> Map TaskId TaskSpec -> [ClientInfo] -> Map Text ClientTasks
-assignTasks _ _ [] = Map.empty
-assignTasks cfg tasks clients =
+assignTasks = assignTasksWith noRackPlacement
+
+
+{- | 'assignTasks', then rack awareness: with a 'RackStrategy', the
+actives are re-dealt by a min-cost flow that keeps each client's
+number of tasks, only moves a task to a client that would not have to
+restore it (stateless, caught up, or its dealt owner), and weighs
+cross-rack partitions ('rpTrafficCost') against moves
+('rpNonOverlapCost'), as the JVM's @RackAwareTaskAssignor@ does. It
+applies when every client has a rack and every task's partitions'
+racks are known. With 'rpTagKeys', a task's standbys go first to the
+clients whose tags add the most values the task's other replicas
+don't have (KIP-708).
+-}
+assignTasksWith :: RackPlacement -> AssignConfig -> Map TaskId TaskSpec -> [ClientInfo] -> Map Text ClientTasks
+assignTasksWith _ _ _ [] = Map.empty
+assignTasksWith rp cfg tasks clients =
   let ids = map ciId clients
       capOf = Map.fromList (map (\c -> (ciId c, max 1 (ciCapacity c))) clients)
       cap c = Map.findWithDefault 1 c capOf
@@ -339,7 +419,11 @@ assignTasks cfg tasks clients =
               (p : _) | Map.findWithDefault 0 p load < quota nAll p -> p
               _ -> lightest load ids
         in (Map.insert t owner act, Map.insertWith (+) owner 1 load)
-      (actives, _) = foldl' placeStateless (act1, loadS) (Map.keys stateless)
+      (dealt, _) = foldl' placeStateless (act1, loadS) (Map.keys stateless)
+      movable c t = case Map.lookup t tasks of
+        Just spec -> not (tsStateful spec) || Map.lookup t dealt == Just c || lagOf c t spec <= acAcceptableLag cfg
+        Nothing -> False
+      actives = rackOptimize rp movable ids dealt
 
       warmups = take (max 0 (acMaxWarmups cfg)) (reverse warmWanted)
 
@@ -355,7 +439,8 @@ assignTasks cfg tasks clients =
               in case candidates of
                    [] -> acc
                    _ ->
-                     let c = minimumOn (\x -> (lagOf x t spec, (Map.findWithDefault 0 x sbLoad + 1) % cap x, x)) candidates
+                     let replicas = maybe id (:) owner (Set.toList taken)
+                         c = minimumOn (\x -> (negate (tagGain rp replicas x), lagOf x t spec, (Map.findWithDefault 0 x sbLoad + 1) % cap x, x)) candidates
                      in Map.insertWith Set.union t (Set.singleton c) acc
             withWarm = Map.insertWith Set.union t (Set.fromList warm) sb
         in foldl' pick withWarm (replicate (max 0 (acStandbys cfg - have)) ())
@@ -369,6 +454,104 @@ assignTasks cfg tasks clients =
           withActive
           standbys
   in foldr (\(t, c) -> Map.adjust (\ct -> ct {ctWarmup = Set.insert t (ctWarmup ct)}) c) withStandby warmups
+
+
+{- | How many of the standby tags a client would add a value for that
+the task's @replicas@ (its active and standbys so far) don't have.
+-}
+tagGain :: RackPlacement -> [Text] -> Text -> Int
+tagGain rp replicas c =
+  length
+    ( filter
+        ( \key -> case tagOf c key of
+            Nothing -> False
+            Just v -> all (\o -> tagOf o key /= Just v) replicas
+        )
+        (rpTagKeys rp)
+    )
+  where
+    tagOf x key = Map.lookup x (rpClientTags rp) >>= Map.lookup key
+
+
+{- | Re-deal @dealt@ for rack locality (see 'assignTasksWith'):
+@movable c t@ says whether task @t@ may go to client @c@.
+-}
+rackOptimize :: RackPlacement -> (Text -> TaskId -> Bool) -> [Text] -> Map TaskId Text -> Map TaskId Text
+rackOptimize rp movable ids dealt
+  | rpStrategy rp == RackNone = dealt
+  | any (`Map.notMember` rpClientRacks rp) ids = dealt
+  | any (`Map.notMember` rpTaskRacks rp) (Map.keys dealt) = dealt
+  | otherwise =
+      case solve (rpStrategy rp == RackBalanceSubtopology) of
+        Just better -> better
+        -- the subtopology spread can be unreachable: locality alone then
+        Nothing -> maybe dealt id (solve False)
+  where
+    taskList = Map.toList dealt
+    nT = length taskList
+    taskByIx = Map.fromList (zip [0 :: Int ..] (map fst taskList))
+    clientByIx = Map.fromList (zip [0 :: Int ..] ids)
+    clientIx = Map.fromList (zip ids [0 ..])
+    nC = length ids
+    counts = Map.fromListWith (+) (map (\(_, c) -> (c, 1 :: Int)) taskList)
+    rackOf c = Map.findWithDefault "" c (rpClientRacks rp)
+    cost t c =
+      rpTrafficCost rp * crossRackCost (Map.findWithDefault [] t (rpTaskRacks rp)) (rackOf c)
+        + (if Map.lookup t dealt == Just c then 0 else rpNonOverlapCost rp)
+    subs = Set.toList (Set.fromList (map (\(TaskId sid _, _) -> sid) taskList))
+    subIx = Map.fromList (zip subs [0 ..])
+    nS = length subs
+    perSub = Map.fromListWith (+) (map (\(TaskId sid _, _) -> (sid, 1 :: Int)) taskList)
+    -- nodes: source 0, tasks 1..nT, then (client, subtopology) groups, clients, sink
+    solve balance =
+      let src = 0
+          taskNode i = 1 + i
+          groupNode ci si = 1 + nT + ci * nS + si
+          clientNode ci = 1 + nT + nC * nS + ci
+          sink = 1 + nT + nC * nS + nC
+          nodes = sink + 1
+          candidates t =
+            filter (\c -> movable c t || Map.lookup t dealt == Just c) ids
+          taskEdges =
+            concatMap
+              ( \(i, (t@(TaskId sid _), _)) ->
+                  Edge src (taskNode i) 1 0
+                    : map
+                      (\c -> Edge (taskNode i) (groupNode (clientIx Map.! c) (subIx Map.! sid)) 1 (cost t c))
+                      (candidates t)
+              )
+              (zip [0 ..] taskList)
+          groupEdges =
+            concatMap
+              ( \(ci, _) ->
+                  map
+                    ( \(si, sid) ->
+                        let n = Map.findWithDefault 0 sid perSub
+                            share = if balance then (n + nC - 1) `quot` nC else n
+                        in Edge (groupNode ci si) (clientNode ci) share 0
+                    )
+                    (zip [0 ..] subs)
+              )
+              (zip [0 ..] ids)
+          clientEdges = map (\(ci, c) -> Edge (clientNode ci) sink (Map.findWithDefault 0 c counts) 0) (zip [0 ..] ids)
+          edges = taskEdges <> groupEdges <> clientEdges
+          flows = minCostFlow nodes src sink edges
+          used = map fst (filter ((> 0) . snd) (zip edges flows))
+          placed =
+            Map.fromList
+              ( mapMaybe
+                  ( \e -> do
+                      let i = eFrom e - 1
+                      if i >= 0 && i < nT && eTo e > nT
+                        then do
+                          t <- Map.lookup i taskByIx
+                          c <- Map.lookup ((eTo e - 1 - nT) `quot` nS) clientByIx
+                          Just (t, c)
+                        else Nothing
+                  )
+                  used
+              )
+      in if Map.size placed == nT then Just placed else Nothing
 
 
 minimumOn :: Ord b => (a -> b) -> [a] -> a
@@ -394,6 +577,10 @@ data LeaderContext = LeaderContext
   {- ^ From a reader of its own: the leader runs inside the main
   consumer's join, so it must not call back into that consumer
   -}
+  , lcPartitionRacks :: !([KC.TopicPartition] -> IO (Either String (Map KC.TopicPartition (Set Text))))
+  -- ^ The racks holding each partition's replicas (rack-aware assignment only)
+  , lcRack :: !RackPlacement
+  -- ^ The strategy, costs and tag keys; the leader fills in the clients' racks and tags and the partitions' racks
   , lcConfig :: !AssignConfig
   , lcAssignmentConfigs :: !PA.AssignmentConfigs
   , lcUserAssignor :: !(Maybe PA.TaskAssignor)
@@ -416,8 +603,9 @@ leaderAssign lc members =
     Left e -> pure (Left ("a member's streams subscription does not decode: " <> e))
     Right subs -> do
       specs <- taskSpecs lc (map snd subs)
+      rp <- rackPlacement lc subs
       let clients = map (\(mid, s) -> ClientInfo mid (ssCapacity s) (ssOffsetSums s)) subs
-          builtIn = assignTasks (lcConfig lc) specs clients
+          builtIn = assignTasksWith rp (lcConfig lc) specs clients
       dealt <- case lcUserAssignor lc of
         Nothing -> pure builtIn
         Just ua -> userAssign lc ua specs subs builtIn
@@ -441,6 +629,39 @@ leaderAssign lc members =
                  , maUserData = encodeAssignment (StreamsAssignment (ctActive ct) (ctStandby ct) hosts probe)
                  }
       pure (Right (Map.fromList (map (\(mid, _) -> (mid, forMember mid)) subs)))
+
+
+{- | The rack placement for this rebalance: the members' racks and
+tags, and (for a rack strategy) the racks of every task's partitions.
+A failed lookup turns rack awareness off for the rebalance.
+-}
+rackPlacement :: LeaderContext -> [(Text, StreamsSubscription)] -> IO RackPlacement
+rackPlacement lc subs = do
+  let base =
+        (lcRack lc)
+          { rpClientRacks = Map.fromList (mapMaybe (\(mid, s) -> (,) mid <$> ssRack s) subs)
+          , rpClientTags = Map.fromList (map (\(mid, s) -> (mid, ssTags s)) subs)
+          }
+      partsOf t = lcTaskPartitions lc t <> Map.findWithDefault [] t (lcTaskChangelogs lc)
+      tps = Set.toList (Set.fromList (concatMap partsOf (lcTasks lc)))
+  if rpStrategy base == RackNone || length (rpClientRacks base) < length subs || null tps
+    then pure base
+    else do
+      r <- lcPartitionRacks lc tps
+      case r of
+        Left e -> do
+          lcLog lc ("rack-aware assignment off for this rebalance: partition racks: " <> e)
+          pure base {rpStrategy = RackNone}
+        Right racks ->
+          pure
+            base
+              { rpTaskRacks =
+                  Map.fromList
+                    ( mapMaybe
+                        (\t -> (,) t <$> traverse (`Map.lookup` racks) (partsOf t))
+                        (lcTasks lc)
+                    )
+              }
 
 
 {- | Every task's spec. A changelog whose end can't be read counts the
@@ -484,10 +705,10 @@ userAssign lc ua specs subs builtIn = do
                   , PA.KafkaStreamsState
                       { PA.kssProcessId = pidOf s
                       , PA.kssNumProcessingThreads = ssCapacity s
-                      , PA.kssClientTags = Map.empty
+                      , PA.kssClientTags = ssTags s
                       , PA.kssPreviousActiveTasks = Map.keysSet (Map.filter (== runningActive) (ssOffsetSums s))
                       , PA.kssPreviousStandbyTasks = ssStandbys s
-                      , PA.kssRackId = Nothing
+                      , PA.kssRackId = ssRack s
                       , PA.kssTaskLags =
                           Map.mapWithKey (\t spec -> taskLag spec (Map.lookup t (ssOffsetSums s))) (Map.filter tsStateful specs)
                       }

@@ -38,6 +38,7 @@ module Kafka.Streams.Runtime.Driver (
 import Data.ByteString (ByteString)
 import Data.Int (Int32, Int64)
 import Data.Map.Strict (Map)
+import Data.Set (Set)
 import Data.Text (Text)
 import Kafka.Client.Assignor (CustomAssignor)
 import Kafka.Client.Consumer qualified as KC
@@ -178,6 +179,12 @@ data StreamDriver = StreamDriver
   , sdDescribeTopics :: !([Text] -> IO (Either String (Map Text Int)))
   -- ^ Partition counts of the topics that exist.
   , sdListTopics :: !(IO (Either String [Text]))
+  -- ^ Every topic in the cluster but Kafka's internal ones (for pattern sources).
+  , sdPartitionRacks :: !([KC.TopicPartition] -> IO (Either String (Map KC.TopicPartition (Set Text))))
+  {- ^ The racks of the brokers holding each partition's replicas (for
+  rack-aware assignment); a partition with no rack-tagged replica maps
+  to the empty set
+  -}
   -- ^ Every topic in the cluster but Kafka's internal ones (for pattern sources).
   , sdDeleteRecords :: !([(KC.TopicPartition, Int64)] -> IO (Either String ()))
   -- ^ Drop everything before these offsets (purging consumed repartition records).

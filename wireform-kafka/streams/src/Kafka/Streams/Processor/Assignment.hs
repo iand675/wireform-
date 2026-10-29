@@ -300,7 +300,7 @@ defaultRackAwareAssignmentConfigs :: RackAwareAssignmentConfigs
 defaultRackAwareAssignmentConfigs =
   RackAwareAssignmentConfigs
     { raStrategy = "none"
-    , raTrafficCost = 1
-    , raNonOverlapCost = 10
+    , raTrafficCost = 10
+    , raNonOverlapCost = 1
     , raAssignmentTags = []
     }
