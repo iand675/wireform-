@@ -146,4 +146,4 @@ Between `control0#` reifying the continuation and `prompt#` re-entering it, the 
 
 ## GHC version
 
-The delimited-continuation primops require **GHC ≥ 9.6** (wireform CI tests 9.6 and 9.8). The implementation uses `MagicHash`, `UnboxedSums`, `UnboxedTuples`, and `RankNTypes`. See `Wireform.Parser.Internal` and `Wireform.Parser.Driver` for the full source with extensive comments.
+The delimited-continuation primops require **GHC ≥ 9.6** (wireform itself supports GHC 9.10 and newer; CI tests 9.10, 9.12 and 9.14). The implementation uses `MagicHash`, `UnboxedSums`, `UnboxedTuples`, and `RankNTypes`. See `Wireform.Parser.Internal` and `Wireform.Parser.Driver` for the full source with extensive comments.

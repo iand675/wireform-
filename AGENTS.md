@@ -41,7 +41,7 @@ Subsequent builds reuse `~/.cabal/store` and are much faster.
 |---------|--------|--------|
 | Kafka (integration tests) | `docker compose -f wireform-kafka/test-integration/docker-compose.yml up -d` | Then `WIREFORM_KAFKA_BROKER=localhost:9092` for relevant `cabal test` targets |
 | Docs site | `cd website && npm install && npm run dev` | <http://localhost:4321/wireform-/> |
-| Nix dev shell | `nix develop` or `nix develop .#ghc98` | Alternative to ghcup; provides fourmolu, prek, native libs |
+| Nix dev shell | `nix develop` (GHC 9.10) or `nix develop .#ghc912` / `.#ghc914` | Alternative to ghcup; provides fourmolu, prek, native libs |
 
 ### Gotchas
 
@@ -370,9 +370,14 @@ the C through FFI wrappers, so they are not a substitute.
 
 ## Toolchain
 
-CI builds against GHC `9.6.4` and `9.8.4` (see
-`.github/workflows/ci.yml`). When working from a fresh VM that
-doesn't already have the Haskell toolchain installed:
+Supported compilers are GHC **9.10 and newer**: CI builds against
+`9.10.3`, `9.12.4` and `9.14.1` (the `ghcMatrix` in `flake.nix` /
+`allGhcVersions` in `nix/ci/packages.nix`, mirrored in
+`.github/workflows/ci.yml`). Older compilers are not built or tested,
+and every package's `base` lower bound is `>= 4.20` (GHC 9.10), so
+version-guard CPP for anything older can be deleted. Single-compiler
+CI steps run on the oldest supported version, 9.10. When working from
+a fresh VM that doesn't already have the Haskell toolchain installed:
 
 - **Apt packages** (Ubuntu 24.04, root):
 
@@ -388,8 +393,8 @@ doesn't already have the Haskell toolchain installed:
   curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | \
     BOOTSTRAP_HASKELL_NONINTERACTIVE=1 sh
   source /root/.ghcup/env
-  ghcup install ghc 9.6.4 --set
-  ghcup install cabal 3.10.3.0 --set
+  ghcup install ghc 9.10.3 --set
+  ghcup install cabal 3.16.1.0 --set   # 9.14 needs cabal >= 3.16
   cabal update
   ```
 

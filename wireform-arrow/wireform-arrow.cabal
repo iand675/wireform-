@@ -66,7 +66,7 @@ library
     Arrow.Write
     Arrow.Write.Columns
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-core,
     wireform-columnar-core,
     wireform-derive,
@@ -103,7 +103,7 @@ test-suite wireform-arrow-test
     Test.Arrow.Sections
     Test.Arrow.Vector
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-arrow,
     wireform-columnar-core,
     wireform-flatbuffers,
@@ -164,7 +164,7 @@ test-suite wireform-arrow-pyarrow-interop
   main-is: Main.hs
   hs-source-dirs: test-interop
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-arrow,
     bytestring >= 0.11 && < 0.13,
     containers >= 0.6 && < 0.9,

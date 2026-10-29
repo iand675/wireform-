@@ -39,16 +39,16 @@ jobs:
       - uses: haskell-actions/setup@v2
         id: setup
         with:
-          ghc-version: "9.8.4"
+          ghc-version: "9.10.3"
           cabal-version: "latest"
 
       - name: Cache cabal store
         uses: actions/cache@v4
         with:
           path: ${{ steps.setup.outputs.cabal-store }}
-          key: ${{ runner.os }}-ghc-9.8.4-cabal-stats-${{ hashFiles('wireform-stats/wireform-stats.cabal', 'wireform-xml/wireform-xml.cabal', 'wireform-core/wireform-core.cabal') }}
+          key: ${{ runner.os }}-ghc-9.10.3-cabal-stats-${{ hashFiles('wireform-stats/wireform-stats.cabal', 'wireform-xml/wireform-xml.cabal', 'wireform-core/wireform-core.cabal') }}
           restore-keys: |
-            ${{ runner.os }}-ghc-9.8.4-cabal-stats-
+            ${{ runner.os }}-ghc-9.10.3-cabal-stats-
 
       - name: Install system dependencies
         # liblz4 is needed by wireform-kafka, which the project-wide
@@ -96,16 +96,16 @@ jobs:
       - uses: haskell-actions/setup@v2
         id: setup
         with:
-          ghc-version: "9.8.4"
+          ghc-version: "9.10.3"
           cabal-version: "latest"
 
       - name: Cache cabal store
         uses: actions/cache@v4
         with:
           path: ${{ steps.setup.outputs.cabal-store }}
-          key: ${{ runner.os }}-ghc-9.8.4-cabal-statsfull-${{ hashFiles('cabal.project', '**/*.cabal') }}
+          key: ${{ runner.os }}-ghc-9.10.3-cabal-statsfull-${{ hashFiles('cabal.project', '**/*.cabal') }}
           restore-keys: |
-            ${{ runner.os }}-ghc-9.8.4-cabal-statsfull-
+            ${{ runner.os }}-ghc-9.10.3-cabal-statsfull-
 
       - name: Install system dependencies
         run: |
@@ -163,14 +163,14 @@ jobs:
       - uses: haskell-actions/setup@v2
         id: setup
         with:
-          ghc-version: "9.8.4"
+          ghc-version: "9.10.3"
           cabal-version: "latest"
 
       - name: Cache cabal store
         uses: actions/cache@v4
         with:
           path: ${{ steps.setup.outputs.cabal-store }}
-          key: ${{ runner.os }}-ghc-9.8.4-cabal-statsbench-${{ hashFiles('cabal.project', '**/*.cabal') }}
+          key: ${{ runner.os }}-ghc-9.10.3-cabal-statsbench-${{ hashFiles('cabal.project', '**/*.cabal') }}
 
       - name: Install system dependencies
         run: |

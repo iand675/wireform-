@@ -26,7 +26,7 @@ maintainer: ian@iankduncan.com
 copyright: 2026 Ian Duncan
 category: Testing, Simulation, Network
 build-type: Simple
-tested-with: GHC == 9.6.4, GHC == 9.8.4
+tested-with: GHC == 9.10.3, GHC == 9.12.4, GHC == 9.14.1
 
 source-repository head
   type:     git
@@ -57,7 +57,7 @@ library
     Sim.Net.Link
     Sim.Net.Explore
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     bytestring >= 0.11 && < 0.13,
     stm >= 2.5 && < 2.6,
     wireform-dst,
@@ -71,7 +71,7 @@ test-suite wireform-dst-net-test
   main-is: Main.hs
   ghc-options: -threaded -rtsopts "-with-rtsopts=-N"
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     bytestring >= 0.11 && < 0.13,
     async >= 2.2 && < 2.3,
     hedgehog >= 1.0 && < 1.8,
@@ -92,7 +92,7 @@ test-suite http2-fault-test
   main-is: Main.hs
   ghc-options: -threaded -rtsopts "-with-rtsopts=-N"
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     bytestring >= 0.11 && < 0.13,
     wireform-dst-net,
     wireform-http2,
@@ -108,7 +108,7 @@ test-suite http2-explore
   main-is: Main.hs
   ghc-options: -threaded -rtsopts "-with-rtsopts=-N"
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     bytestring >= 0.11 && < 0.13,
     wireform-dst-net,
     wireform-http2,
@@ -124,7 +124,7 @@ test-suite http1-explore
   main-is: Main.hs
   ghc-options: -threaded -rtsopts "-with-rtsopts=-N"
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     bytestring >= 0.11 && < 0.13,
     wireform-dst-net,
     wireform-http1,
@@ -140,7 +140,7 @@ test-suite websocket-explore
   main-is: Main.hs
   ghc-options: -threaded -rtsopts "-with-rtsopts=-N"
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     text >= 2.0 && < 2.2,
     wireform-dst-net,
     wireform-websocket,
@@ -159,7 +159,7 @@ test-suite grpc-explore
   main-is: Main.hs
   ghc-options: -threaded -rtsopts "-with-rtsopts=-N"
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     bytestring >= 0.11 && < 0.13,
     data-default >= 0.7 && < 0.9,
     wireform-dst-net,
@@ -188,7 +188,7 @@ test-suite connect-explore
   other-modules:
     Connect.EchoProto
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     bytestring >= 0.11 && < 0.13,
     text >= 2.0 && < 2.2,
     data-default >= 0.7 && < 0.9,
@@ -214,7 +214,7 @@ test-suite kafka-explore
   main-is: Main.hs
   ghc-options: -threaded -rtsopts "-with-rtsopts=-N"
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     bytestring >= 0.11 && < 0.13,
     containers >= 0.6 && < 0.9,
     vector >= 0.13 && < 0.14,

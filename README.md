@@ -254,9 +254,9 @@ cabal build all
 A Nix flake is provided:
 
 ```bash
-nix develop          # default (GHC 9.8)
-nix develop .#ghc96  # GHC 9.6
-nix develop .#ghc910 # GHC 9.10
+nix develop          # default (GHC 9.10)
+nix develop .#ghc912 # GHC 9.12
+nix develop .#ghc914 # GHC 9.14
 ```
 
 LLVM is off by default (`-fasm` in `cabal.project`). Production

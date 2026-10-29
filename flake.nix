@@ -22,19 +22,19 @@
 
         # GHC build matrix — add/remove entries to test against
         # different compilers. Shell names become `nix develop .#ghcXY`.
-        # Covers the released GHC 9.6–9.14 line (odd minors are
-        # unreleased dev snapshots and are intentionally omitted). GHC 9.4
-        # is excluded: wireform-core's parser uses the delimited-continuation
-        # primop PromptTag#, which only exists from GHC 9.6 onward.
+        # Supported compilers: the released GHC 9.10–9.14 line (odd
+        # minors are unreleased dev snapshots and are intentionally
+        # omitted). 9.10 is the floor; older compilers are not built or
+        # tested. Keep in sync with `allGhcVersions` in nix/ci/packages.nix.
         ghcMatrix = {
-          ghc96  = "ghc96";
-          ghc98  = "ghc98";
           ghc910 = "ghc910";
           ghc912 = "ghc912";
           ghc914 = "ghc914";
         };
 
-        defaultGHC = "ghc98";
+        # The oldest supported compiler, so the default shell and the
+        # single-compiler CI steps exercise the lower bound.
+        defaultGHC = "ghc910";
 
         systemDeps = [
           pkgs.zlib
@@ -549,8 +549,8 @@
         # output for downstream Nix consumers. The umbrella
         # `wireform` is the default.
         #
-        # Unsuffixed names use defaultGHC (ghc98). CI matrix jobs
-        # use <pkg>-<shell> (e.g. wireform-core-ghc96).
+        # Unsuffixed names use defaultGHC (ghc910). CI matrix jobs
+        # use <pkg>-<shell> (e.g. wireform-core-ghc912).
         packages =
           let
             defaultPkgs = packagesForGhc defaultGHC;

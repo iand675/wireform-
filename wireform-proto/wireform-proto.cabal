@@ -37,7 +37,7 @@ maintainer: ian@iankduncan.com
 copyright: 2026 Ian Duncan
 category: Data, Codec, Network, Serialization
 build-type: Simple
-tested-with: GHC == 9.6.4, GHC == 9.8.4
+tested-with: GHC == 9.10.3, GHC == 9.12.4, GHC == 9.14.1
 extra-doc-files:
   CHANGELOG.md
   README.md
@@ -171,7 +171,7 @@ library
     Proto.Internal.Either
     Proto.Internal.Maybe
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-core == 0.2.*,
     wireform-derive == 0.2.*,
     bytestring >= 0.11 && < 0.13,
@@ -275,7 +275,7 @@ benchmark loadproto-bench
   -- is fine here.
   ghc-options: -O2 -rtsopts -threaded
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-proto,
     aeson,
     bytestring,
@@ -300,7 +300,7 @@ executable wireform-conformance-runner
     Test.Conformance.Schema
     Test.Conformance.Handler
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-proto,
     aeson,
     bytestring,
@@ -324,7 +324,7 @@ test-suite protobuf-conformance-test
     Test.Conformance.Schema
     Test.Conformance.Handler
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-proto,
     aeson,
     bytestring,
@@ -410,7 +410,7 @@ benchmark compare-bench
     Proto.Bench
     Proto.Bench_Fields
   build-depends:
-      base               >= 4.16 && < 5
+      base               >= 4.20 && < 5
     , wireform-core
     , wireform-proto
     , bytestring

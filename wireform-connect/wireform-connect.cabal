@@ -26,7 +26,7 @@ maintainer: ian@iankduncan.com
 copyright: 2026 Ian Duncan
 category: Network, Web
 build-type: Simple
-tested-with: GHC == 9.6.4, GHC == 9.8.4
+tested-with: GHC == 9.10.3, GHC == 9.12.4, GHC == 9.14.1
 
 source-repository head
   type:     git
@@ -76,7 +76,7 @@ library
     Network.Connect.Client
     Network.Connect.OpenAPI
   build-depends:
-    base                 >= 4.16 && < 5,
+    base                 >= 4.20 && < 5,
     aeson                >= 2.1  && < 2.3,
     aeson-pretty         >= 0.8  && < 0.9,
     base64-bytestring    >= 1.2  && < 1.3,

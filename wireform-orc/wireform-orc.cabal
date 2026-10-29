@@ -71,7 +71,7 @@ library
   other-modules:
     ORC.RLE
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-core,
     wireform-arrow,
     wireform-columnar-core,
@@ -103,7 +103,7 @@ executable wireform-orc-interop-probe
   hs-source-dirs: probe
   main-is: Probe.hs
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-arrow,
     wireform-orc,
     bytestring >= 0.11 && < 0.13,
@@ -115,7 +115,7 @@ executable wireform-orc-reverse-probe
   hs-source-dirs: probe
   main-is: Reverse.hs
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-arrow,
     wireform-orc,
     bytestring >= 0.11 && < 0.13,
@@ -129,7 +129,7 @@ test-suite wireform-orc-test
   hs-source-dirs: test
   main-is: Main.hs
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-columnar-core,
     wireform-core,
     wireform-orc,

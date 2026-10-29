@@ -82,7 +82,7 @@ library
   other-modules:
     Parquet.RLE
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-core,
     wireform-columnar-core,
     wireform-arrow,
@@ -126,7 +126,7 @@ test-suite wireform-parquet-test
   other-modules:
     Aggregate
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-core,
     wireform-arrow,
     wireform-columnar-core,
@@ -168,7 +168,7 @@ executable wireform-parquet-interop-probe
   hs-source-dirs: probe
   main-is: Probe.hs
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-parquet,
     bytestring >= 0.11 && < 0.13,
     filepath >= 1.4 && < 1.6,
@@ -180,7 +180,7 @@ executable wireform-parquet-reverse-probe
   hs-source-dirs: probe
   main-is: Reverse.hs
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-arrow,
     wireform-parquet,
     bytestring >= 0.11 && < 0.13,
@@ -196,7 +196,7 @@ benchmark parquet-bench
   other-modules: XXH64Pure
   ghc-options: -O2
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-core,
     wireform-parquet,
     bytestring >= 0.11 && < 0.13,
@@ -209,7 +209,7 @@ benchmark parquet-throughput
   main-is: Throughput.hs
   ghc-options: -O2
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-arrow,
     wireform-parquet,
     bytestring >= 0.11 && < 0.13,

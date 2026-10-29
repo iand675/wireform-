@@ -39,7 +39,7 @@ library
     CSV.Encode
     CSV.Value
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     -- CSV.Decode uses Wireform.FFI.findByteBS for SIMD-accelerated
     -- delimiter / quote / newline scanning. The C primitive lives
     -- in wireform-core/cbits/fast_scan.c.

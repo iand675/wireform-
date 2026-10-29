@@ -40,7 +40,7 @@ library
     TOML.Encoding
     TOML.Value
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-derive,
     bytestring >= 0.11 && < 0.13,
     text >= 2.0 && < 2.2,

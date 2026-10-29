@@ -24,7 +24,7 @@ on the build path (they ship together in this monorepo):
 - [`wireform-http`](../../packages/http/) — the HTTP/1.1 + HTTP/2 transport
 
 Add `wireform-connect` (plus `wireform-grpc` and `wireform-proto`) to your
-cabal `build-depends`. It targets GHC 9.6 / 9.8.
+cabal `build-depends`. It targets GHC 9.10 and newer.
 
 ## Generate the service
 

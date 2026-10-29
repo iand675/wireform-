@@ -73,7 +73,7 @@ library
     Iceberg.View
     Iceberg.Write
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-core,
     wireform-avro,
     wireform-derive,
@@ -148,7 +148,7 @@ test-suite iceberg-test
     Test.Iceberg.View
     Test.Iceberg.Write
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-iceberg,
     wireform-avro,
     wireform-core,
@@ -191,7 +191,7 @@ executable wireform-iceberg-interop-probe
   hs-source-dirs: probe
   main-is: Probe.hs
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-core,
     wireform-iceberg,
     bytestring,
@@ -205,7 +205,7 @@ executable iceberg
   hs-source-dirs: app
   main-is: Main.hs
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-iceberg,
     bytestring,
     text,
@@ -227,7 +227,7 @@ benchmark iceberg-bench
   other-modules: PureRef
   ghc-options: -O2
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-iceberg,
     wireform-core,
     bytestring,

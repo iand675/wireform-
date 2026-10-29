@@ -27,7 +27,7 @@ jobs:
       - name: Set up Haskell toolchain
         uses: haskell-actions/setup@v2
         with:
-          ghc-version: 9.6.4
+          ghc-version: 9.10.3
           cabal-version: 3.10.3.0
 
       - name: Cabal cache

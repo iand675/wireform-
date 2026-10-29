@@ -65,7 +65,7 @@ library
     Lattice.Wire
   build-depends:
     aeson >= 2.1 && < 2.3,
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     base64-bytestring >= 1.2 && < 1.3,
     blake3 >= 0.3 && < 0.4,
     bytestring >= 0.11 && < 0.13,

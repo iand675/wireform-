@@ -43,7 +43,7 @@ library
     MsgPack.Stream
     MsgPack.Value
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-core,
     wireform-derive,
     template-haskell >= 2.18 && < 2.25,

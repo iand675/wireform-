@@ -29,7 +29,7 @@ The APIs rhyme across formats: `Format.Value`, `Format.Encode`,
 
 | You need | Notes |
 |----------|--------|
-| **GHC** | 9.6+ recommended; `GHC2021`. |
+| **GHC** | 9.10 or newer (CI: 9.10, 9.12, 9.14); `GHC2021`. |
 | **cabal-install** | 3.x |
 | **Optional: Nix** | `nix develop` gives pinned GHC + pre-built deps — see [README](../README.md#development). |
 

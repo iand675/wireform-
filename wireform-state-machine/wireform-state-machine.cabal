@@ -64,7 +64,7 @@ library
     StateMachine.Render.Dot
     StateMachine.Render.Html
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     aeson >= 2.1 && < 2.3,
     aeson-pretty >= 0.8 && < 0.9,
     async >= 2.2 && < 2.3,

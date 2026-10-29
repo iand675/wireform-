@@ -39,7 +39,7 @@ library
     default-extensions: Strict StrictData
     ghc-options:        -Wall
     build-depends:
-        base >=4.9 && <5,
+        base >=4.20 && <5,
         array,
         bytestring >=0.10,
         case-insensitive,

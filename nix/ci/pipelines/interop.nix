@@ -13,7 +13,7 @@ let
   changes  = import ../changes.nix { inherit lib packages; };
 
   affected = changes.affectedPackages changedFiles;
-  defaultGHC = "ghc98";
+  defaultGHC = "ghc910";
 
   inherit (ci) nixAgents;
   dockerAgents = nixAgents // { docker = "true"; };

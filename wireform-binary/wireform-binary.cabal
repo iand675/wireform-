@@ -11,7 +11,7 @@ library
   hs-source-dirs: src
   exposed-modules: Wireform.Parser.Adapter.Binary
   build-depends:
-    base >= 4.18 && < 5,
+    base >= 4.20 && < 5,
     bytestring,
     binary >= 0.8 && < 0.9,
     wireform-core

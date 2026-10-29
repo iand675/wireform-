@@ -37,7 +37,7 @@ library
     NDJSON.Derive
     NDJSON.Encode
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     -- NDJSON.Decode uses Wireform.FFI.findByteBS to locate
     -- newline boundaries via SIMD.
     wireform-core,
