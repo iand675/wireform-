@@ -119,7 +119,7 @@ library
     Network.HTTP.Internal.Validation
   build-depends:
     base                 >= 4.20 && < 5,
-    aeson                >= 2.1  && < 2.3,
+    aeson                >= 2.1  && < 2.4,
     base16-bytestring    >= 1.0  && < 1.1,
     base64-bytestring    >= 1.2  && < 1.3,
     crypton              >= 1.0  && < 1.2,

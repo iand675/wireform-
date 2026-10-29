@@ -58,7 +58,7 @@ library
     -- aeson directly because the lingua franca for stats interchange
     -- is JSON.
     wireform-xml,
-    aeson >= 2.1 && < 2.3,
+    aeson >= 2.1 && < 2.4,
     bytestring >= 0.11 && < 0.13,
     containers >= 0.6 && < 0.9,
     directory >= 1.3 && < 1.4,

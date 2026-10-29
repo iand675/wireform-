@@ -406,7 +406,7 @@ library
         Kafka.Time
     build-depends:
         base                      >= 4.20  && < 5,
-        aeson                     >= 2.0   && < 2.3,
+        aeson                     >= 2.0   && < 2.4,
         async                     >= 2.2   && < 3,
         atomic-primops            >= 0.8   && < 0.9,
         base64-bytestring         >= 1.2   && < 1.3,
@@ -564,7 +564,7 @@ library wireform-kafka-streams
         Kafka.Streams.Backfill
     build-depends:
         base                      >= 4.20  && < 5,
-        aeson                     >= 2.0   && < 2.3,
+        aeson                     >= 2.0   && < 2.4,
         hs-opentelemetry-api      >= 0.2   && < 1.1,
         async                     >= 2.2   && < 3,
         binary                    >= 0.8   && < 0.11,
@@ -707,7 +707,7 @@ test-suite wireform-kafka-streams-test
         base,
         wireform-kafka:wireform-kafka-streams,
         wireform-kafka,
-        aeson                     >= 2.0   && < 2.3,
+        aeson                     >= 2.0   && < 2.4,
         async                     >= 2.2   && < 3,
         bytestring,
         containers,
@@ -817,7 +817,7 @@ library wireform-kafka-codegen
         Kafka.Protocol.Codegen.WireGenerator
     build-depends:
         base                      >= 4.20  && < 5,
-        aeson                     >= 2.0   && < 2.3,
+        aeson                     >= 2.0   && < 2.4,
         bytestring                >= 0.11  && < 0.13,
         containers                >= 0.6   && < 0.9,
         directory                 >= 1.3   && < 1.4,

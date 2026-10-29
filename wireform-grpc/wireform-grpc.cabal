@@ -149,7 +149,7 @@ library
       Network.GRPC.Util.Backtrace
 
   build-depends:
-    , aeson                     >= 1.5     && < 2.3
+    , aeson                     >= 1.5     && < 2.4
     , async                     >= 2.2     && < 2.3
     , binary                    >= 0.8     && < 0.9
     , bytestring                >= 0.10.12 && < 0.13

@@ -82,7 +82,7 @@ test-suite wireform-toml-derive-test
     base,
     wireform-toml,
     wireform-derive,
-    aeson >= 2.1 && < 2.3,
+    aeson >= 2.1 && < 2.4,
     bytestring,
     text,
     vector,

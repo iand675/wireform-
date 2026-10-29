@@ -126,7 +126,7 @@ test-suite wireform-fory-interop
     containers    >= 0.6 && < 0.9,
     text,
     vector,
-    aeson         >= 2.1 && < 2.3,
+    aeson         >= 2.1 && < 2.4,
     scientific    >= 0.3 && < 0.4,
     process       >= 1.6 && < 1.8,
     directory     >= 1.3 && < 1.4

@@ -58,7 +58,7 @@ library
     unordered-containers >= 0.2.16 && < 0.3,
     deepseq >= 1.4 && < 1.6,
     scientific >= 0.3 && < 0.4,
-    aeson >= 2.1 && < 2.3
+    aeson >= 2.1 && < 2.4
 
 benchmark wireform-capnproto-bench
   import: defaults

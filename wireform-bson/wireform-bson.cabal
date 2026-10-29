@@ -51,7 +51,7 @@ library
     deepseq >= 1.4 && < 1.6,
     scientific >= 0.3 && < 0.4,
     template-haskell >= 2.18 && < 2.25,
-    aeson >= 2.1 && < 2.3
+    aeson >= 2.1 && < 2.4
 
 benchmark wireform-bson-bench
   import: defaults
