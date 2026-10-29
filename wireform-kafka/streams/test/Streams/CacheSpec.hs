@@ -16,6 +16,8 @@ import Kafka.Streams.Serde (Serde (..), int64Serde, textSerde)
 import Kafka.Streams.State.KeyValue.Caching
 import Kafka.Streams.State.KeyValue.InMemory (inMemoryKeyValueStore)
 import Kafka.Streams.State.Window.InMemory (inMemoryWindowStore)
+import Kafka.Streams.State.Session.InMemory (inMemorySessionStore)
+import Kafka.Streams.Serde.Windowed (sessionKeySerde)
 import Kafka.Streams.Serde.Windowed (windowedSerde)
 import Kafka.Streams.State.Store
 import Kafka.Streams.Time (Timestamp (..))
@@ -45,6 +47,8 @@ tests =
     it "at runtime: withCachingDisabled forwards every update" runtime_uncached
     it "a window cache folds a window's updates and reads through" window_cache
     it "at runtime: a hot window is forwarded once per commit" runtime_windowed
+    it "a session cache folds merges, and a merged-away unflushed session never surfaces" session_cache
+    it "at runtime: a growing session is forwarded once per commit" runtime_session
 
 
 data Fixture = Fixture
@@ -300,6 +304,63 @@ runtime_windowed = withStateDirs 1 $ \[d] -> do
       closeAll [ks]
       outs <- visible broker "out"
       map (fmap decodeI64 . (.drValue)) outs `shouldSatisfy` (\vs -> length vs < 10 && lastMaybe vs == Just (Just 100))
+    )
+    `finally` closeAll [ks]
+  where
+    lastMaybe = foldl (\_ x -> Just x) Nothing
+
+
+session_cache :: IO ()
+session_cache = do
+  inner <- inMemorySessionStore @Text @Int64 (storeName "s") 10_000
+  budget <- newCacheBudget (pure 1_000_000)
+  logRef <- newIORef []
+  cs <- cachedSessionStore budget (Just (StoreSerdes textSerde int64Serde, \k v -> modifyIORef' logRef (<> [(k, v)]))) inner
+  fwd <- newIORef []
+  let st = csStoreS cs
+      sess a b0 = SessionKey "k" (Timestamp a) (Timestamp b0)
+      w sk v = forM_ (ssCache st) $ \c -> scsWrite c sk v (skEnd sk) emptyHeaders
+  forM_ (ssCache st) $ \c -> scsOnFlush c (\sk new old _ _ -> modifyIORef' fwd (<> [(sk, new, old)]))
+  -- a session, then merged into a longer one before any flush
+  w (sess 0 0) (Just 1)
+  w (sess 0 0) Nothing
+  w (sess 0 50) (Just 2)
+  (ssFindSessions st "k" (Timestamp 0) (Timestamp 100) >>= kvIteratorToList) `shouldReturn` [(sess 0 50, 2)]
+  _ <- csFlushS cs
+  readIORef fwd `shouldReturn` [(sess 0 50, Just 2, Nothing)]
+  length <$> readIORef logRef `shouldReturn` 1
+  -- merging a flushed session retracts it
+  w (sess 0 50) Nothing
+  w (sess 0 90) (Just 3)
+  (ssFindSessions st "k" (Timestamp 0) (Timestamp 100) >>= kvIteratorToList) `shouldReturn` [(sess 0 90, 3)]
+  ssFetchSession st (sess 0 50) `shouldReturn` Nothing
+  _ <- csFlushS cs
+  drop 1 <$> readIORef fwd `shouldReturn` [(sess 0 50, Nothing, Just 2), (sess 0 90, Just 3, Nothing)]
+  drop 1 . map snd <$> readIORef logRef `shouldReturn` [Nothing, Just (serialize int64Serde 3)]
+  (ssFindAllSessions inner (Timestamp 0) (Timestamp 100) >>= kvIteratorToList) `shouldReturn` [(sess 0 90, 3)]
+  cacheBytesUsed budget `shouldReturn` 0
+
+
+-- | 100 records extending one session; what reached @out@.
+runtime_session :: IO ()
+runtime_session = withStateDirs 1 $ \[d] -> do
+  broker <- newMockBroker (Just 1)
+  mockCreateTopic broker "in" 1
+  b <- I.newStreamsBuilder
+  st0 <- I.streamFromTopic b (I.topicName "in") (I.consumed textSerde textSerde)
+  h <- I.countSessionWindowed (I.withValueSerde int64Serde I.materialized) (I.windowedBySession (I.sessionWindows (I.millis 1000)) (I.groupByKey (I.grouped textSerde textSerde) st0))
+  st <- I.streamFromSessionWindowedHandle h textSerde int64Serde
+  I.toTopicNullable (I.topicName "out") (I.produced (sessionKeySerde textSerde) int64Serde) st
+  topo <- I.buildTopology b >>= either (error . show) pure . I.validateTopology
+  ks <- startOn broker ((testConfig "scache" d) {I.commitIntervalMs = Just 60_000}) topo
+  ( do
+      eventually [ks] "assigned" (not . null <$> I.ownedPartitions ks)
+      forM_ [1 .. 100 :: Int] $ \i -> mockProduce broker "in" (Just (textBytes "k")) (Just "x") (fromIntegral i)
+      _ <- I.awaitTicks ks 50
+      closeAll [ks]
+      outs <- visible broker "out"
+      -- no retraction of a session that never left the cache, and the last count is 100
+      map (fmap decodeI64 . (.drValue)) outs `shouldSatisfy` (\vs -> length vs < 10 && all (/= Nothing) vs && lastMaybe vs == Just (Just 100))
     )
     `finally` closeAll [ks]
   where

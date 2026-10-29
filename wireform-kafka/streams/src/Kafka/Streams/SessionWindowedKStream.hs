@@ -35,6 +35,7 @@ import Kafka.Streams.State.Session.InMemory (
  )
 import Kafka.Streams.State.Store (
   AnyStateStore (..),
+  SessionCache (..),
   SessionKey (..),
   SessionStore (..),
   StoreBuilderS,
@@ -145,7 +146,12 @@ sessionAggProc sn sw initial agg merger = do
       , procInit = \ctx -> do
           st <- getStateStore ctx sn
           case st of
-            Just (AnySessionStore ss) -> writeIORef ref (Just (ctx, unsafeCastSS ss :: SessionStore k a))
+            Just (AnySessionStore ss) -> do
+              let store_ = unsafeCastSS ss :: SessionStore k a
+              -- a cached store hands its flushed sessions on here, each at its end
+              forM_ (ssCache store_) $ \c ->
+                scsOnFlush c $ \sk new _ _ hs -> forwardRecord ctx (Record (Just sk) new (skEnd sk) hs)
+              writeIORef ref (Just (ctx, store_))
             _ -> error $ "sessionAggProc: store not found: " <> show sn
       , procClose = pure ()
       , procProcess = \r -> do
@@ -168,13 +174,18 @@ sessionAggProc sn sw initial agg merger = do
                   (_, a0) : rest -> pure $! foldl (\a (_, a') -> merger k a a') a0 rest
                 -- (a session that is exactly [ts, ts] is just overwritten)
                 unless (lo == ts && hi == ts) $
-                  forM_ adjacents $ \(old, _) -> do
-                    ssRemove store_ old
-                    forward old (Nothing :: Maybe a) (skEnd old)
+                  forM_ adjacents $ \(old, _) -> case ssCache store_ of
+                    Just c -> scsWrite c old Nothing (skEnd old) (recordHeaders r)
+                    Nothing -> do
+                      ssRemove store_ old
+                      forward old (Nothing :: Maybe a) (skEnd old)
                 let !newAgg = agg k (recordValue r) base
                     !sk = SessionKey k lo hi
-                ssPut store_ sk newAgg
-                forward sk (Just newAgg) hi
+                case ssCache store_ of
+                  Just c -> scsWrite c sk (Just newAgg) hi (recordHeaders r)
+                  Nothing -> do
+                    ssPut store_ sk newAgg
+                    forward sk (Just newAgg) hi
             _ -> pure ()
       }
 

@@ -51,7 +51,8 @@ mkStore
   -> SessionStore k v
 mkStore nm retention ref =
   SessionStore
-    { ssBase =
+    { ssCache = Nothing
+    , ssBase =
         StateStore
           { storeStoreName = nm
           , storePersistent = False
@@ -121,7 +122,8 @@ inMemorySessionStoreBuilder
   -> StoreBuilderS k v
 inMemorySessionStoreBuilder nm retention =
   StoreBuilderS
-    { sbSName = nm
+    { sbSCaching = Nothing
+    , sbSName = nm
     , sbSLogging = defaultLoggingConfig
     , sbSSerdes = Nothing
     , sbSBuild = \_ -> inMemorySessionStore nm retention

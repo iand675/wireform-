@@ -616,7 +616,7 @@ store, its changelog and the operators downstream see only the latest,
 as one `Change new old`. A cache flushes at every commit, and early
 when its task's share is used up. `withCachingDisabled` on a
 `Materialized`, or `statestoreCacheMaxBytes = 0`, forwards every
-update at once. Windowed aggregations are cached per window the same way; session stores are not cached.
+update at once. Windowed and session aggregations are cached per window and per session the same way (a session merged away before a flush never surfaces).
 
 ### Rebalance
 

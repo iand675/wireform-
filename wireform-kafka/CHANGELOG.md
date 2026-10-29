@@ -77,7 +77,10 @@ and this project adheres to the
   before; `withCachingEnabledKV` caches a Processor API store.
   Replaces the free-standing `cachingKeyValueStore`. Windowed
   aggregations' stores are cached per window the same way
-  (`withCachingEnabledW` for a Processor API window store).
+  (`withCachingEnabledW` for a Processor API window store), and session
+  aggregations' per session (`withCachingEnabledS`): a session created
+  and merged away between two flushes is neither stored, logged nor
+  retracted downstream.
 - **Pattern sources at runtime**: `streamFromPattern` /
   `sourcePattern` topics are resolved against the cluster when the
   instance starts (whole-name match, internal topics left out) and again

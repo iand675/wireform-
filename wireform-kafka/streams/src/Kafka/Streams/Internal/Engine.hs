@@ -517,13 +517,21 @@ realiseStore ctx mBudget mSink = \case
         }
   Topo.AsSessionBuilder b -> do
     s <- sbSBuild b ctx
+    (store, flushCache) <- case (mBudget, sbSCaching b) of
+      (Just budget, Just KeyOrder) -> do
+        let logTo = case (mSink, sbSSerdes b) of
+              (Just sink, Just sd) | loggingEnabled (sbSLogging b) -> Just (sd, sink)
+              _ -> Nothing
+        cs <- Cache.cachedSessionStore budget logTo s
+        pure (Cache.csStoreS cs, Cache.csFlushS cs)
+      _ -> pure (logged (sbSLogging b) (sbSSerdes b) CL.logSessionStore s, pure False)
     pure
       StoreEntry
         { storeEntryName = sbSName b
-        , storeEntryAny = AnySessionStore (logged (sbSLogging b) (sbSSerdes b) CL.logSessionStore s)
+        , storeEntryAny = AnySessionStore store
         , storeEntryClose = storeClose (ssBase s)
         , storeEntryFlush = storeFlush (ssBase s)
-        , storeEntryFlushCache = pure False
+        , storeEntryFlushCache = flushCache
         , storeEntryRestore = (\sd -> CL.restoreSession sd s) <$> sbSSerdes b
         }
   Topo.AsRawBuilder b -> do

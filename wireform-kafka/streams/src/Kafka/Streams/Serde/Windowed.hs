@@ -16,11 +16,9 @@ module Kafka.Streams.Serde.Windowed (
   sessionKeySerde,
 ) where
 
-import Data.Bits (shiftL, shiftR, (.|.))
-import Data.ByteString (ByteString)
+import Data.Bits (shiftL, (.|.))
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
-import Data.Int (Int64)
 import Data.Text qualified as T
 import Data.Word (Word32)
 import Kafka.Streams.Serde (

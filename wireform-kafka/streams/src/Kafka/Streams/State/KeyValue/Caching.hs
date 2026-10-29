@@ -28,7 +28,10 @@ commit instead of one per record.
 
 Window stores ('cachedWindowStore') cache the same way, per key and
 window start: a flush writes each dirty window and hands it to the
-aggregation processor, which forwards it under its window.
+aggregation processor, which forwards it under its window. Session
+stores ('cachedSessionStore') cache per session, removals included: a
+session created and merged away between two flushes never reaches
+the store, its changelog or downstream.
 
 Sizes are the serialised key and value of a logged store's entries,
 plus 'entryOverhead'; an unlogged store's entries are counted at
@@ -42,6 +45,8 @@ module Kafka.Streams.State.KeyValue.Caching (
   cachedKeyValueStore,
   CachedWindowStore (..),
   cachedWindowStore,
+  CachedSessionStore (..),
+  cachedSessionStore,
   entryOverhead,
   unloggedEntrySize,
 ) where
@@ -65,6 +70,9 @@ import Kafka.Streams.State.Store (
   StoreSerdes (..),
   WindowCache (..),
   WindowStore (..),
+  SessionCache (..),
+  SessionKey (..),
+  SessionStore (..),
   WindowedKey (..),
   kvIteratorFromList,
   kvIteratorToList,
@@ -409,6 +417,128 @@ cachedWindowStore budget logged inner = do
                   WindowCache
                     { wcWrite = write
                     , wcOnFlush = writeIORef listenerRef
+                    }
+            }
+      }
+
+
+-- | A cached session store and what the engine drives it with.
+data CachedSessionStore k v = CachedSessionStore
+  { csStoreS :: !(SessionStore k v)
+  -- ^ The store as processors and queries see it ('ssCache' set)
+  , csFlushS :: !(IO Bool)
+  }
+
+
+{- | Put a cache in front of @inner@, an unlogged session store; with
+@logged@, flushed sessions are also logged (key bytes, then the
+session's end and start, as the changelog of an uncached session
+store).
+-}
+cachedSessionStore
+  :: forall k v
+   . Ord k
+  => CacheBudget
+  -> Maybe (StoreSerdes k v, ByteString -> Maybe ByteString -> IO ())
+  -> SessionStore k v
+  -> IO (CachedSessionStore k v)
+cachedSessionStore budget logged inner = do
+  ref <- newIORef (emptyCache :: Cache (SessionKey k) v)
+  listenerRef <- newIORef (\_ _ _ _ _ -> pure () :: IO ())
+  let
+    keyBytes sd (SessionKey k (Timestamp st) (Timestamp en)) =
+      serialize (storeKeySerde sd) k <> int64BE en <> int64BE st
+
+    write :: SessionKey k -> Maybe v -> Timestamp -> Headers -> IO ()
+    write sk mv ts hs = do
+      c0 <- readIORef ref
+      let prev = Map.lookup sk (cEntries c0)
+          (!kb, !vb, !size) = case logged of
+            Nothing -> (BS.empty, Nothing, unloggedEntrySize)
+            Just (sd, _) ->
+              let !kb' = maybe (keyBytes sd sk) eKey prev
+                  !vb' = serialize (storeValueSerde sd) <$> mv
+              in (kb', vb', BS.length kb' + maybe 0 BS.length vb' + entryOverhead)
+      delta <- atomicModifyIORef' ref $ \c ->
+        let old = Map.lookup sk (cEntries c)
+            !sq = cNext c
+            !e = Entry mv kb vb size ts hs sq
+        in ( Cache
+              { cEntries = Map.insert sk e (cEntries c)
+              , cOrder = IntMap.insert sq sk (maybe id (IntMap.delete . eSeq) old (cOrder c))
+              , cNext = sq + 1
+              }
+           , size - maybe 0 eSize old
+           )
+      used <- atomicModifyIORef' (cbUsed budget) (\u -> let !u' = u + delta in (u', u'))
+      limit <- cbLimit budget
+      when (used > limit) (void flush)
+
+    flush :: IO Bool
+    flush = do
+      c <- readIORef ref
+      if Map.null (cEntries c)
+        then pure False
+        else do
+          listener <- readIORef listenerRef
+          forM_ (IntMap.elems (cOrder c)) $ \sk ->
+            forM_ (Map.lookup sk (cEntries c)) $ \e -> do
+              old <- ssFetchSession inner sk
+              case (eValue e, old) of
+                (Nothing, Nothing) -> pure ()
+                (new, _) -> do
+                  maybe (ssRemove inner sk) (ssPut inner sk) new
+                  forM_ logged $ \(_, emit) -> emit (eKey e) (eBytes e)
+                  listener sk new old (eTs e) (eHeaders e)
+          freed <- atomicModifyIORef' ref $ \c' ->
+            let (gone, kept) = IntMap.spanAntitone (< cNext c) (cOrder c')
+                goneKeys = IntMap.elems gone
+                !bytes = sum (map (\k -> maybe 0 eSize (Map.lookup k (cEntries c'))) goneKeys)
+            in (c' {cEntries = foldr Map.delete (cEntries c') goneKeys, cOrder = kept}, bytes)
+          atomicModifyIORef' (cbUsed budget) (\u -> (u - freed, ()))
+          pure True
+
+    -- the sessions @keep@ selects, the cache applied, by end then key then start
+    merged :: (SessionKey k -> Bool) -> [(SessionKey k, v)] -> IO [(SessionKey k, v)]
+    merged keep base = do
+      c <- readIORef ref
+      let order (SessionKey k s e) = (e, k, s)
+          cached = Map.filterWithKey (\sk _ -> keep sk) (cEntries c)
+          applied =
+            Map.mergeWithKey
+              (\_ _ e -> eValue e)
+              id
+              (Map.mapMaybe eValue)
+              (Map.fromList base)
+              cached
+      pure (map snd (Map.toAscList (Map.fromList (map (\(sk, v) -> (order sk, (sk, v))) (Map.toList applied)))))
+
+    within earliestEnd latestStart (SessionKey _ s e) = e >= earliestEnd && s <= latestStart
+
+  pure
+    CachedSessionStore
+      { csFlushS = flush
+      , csStoreS =
+          inner
+            { ssBase = (ssBase inner) {storeFlush = flush >> storeFlush (ssBase inner)}
+            , ssPut = \sk v -> write sk (Just v) (skEnd sk) emptyHeaders
+            , ssRemove = \sk -> write sk Nothing (skEnd sk) emptyHeaders
+            , ssFetchSession = \sk -> do
+                c <- readIORef ref
+                case Map.lookup sk (cEntries c) of
+                  Just e -> pure (eValue e)
+                  Nothing -> ssFetchSession inner sk
+            , ssFindSessions = \k earliestEnd latestStart -> do
+                base <- ssFindSessions inner k earliestEnd latestStart >>= kvIteratorToList
+                merged (\sk -> skKey sk == k && within earliestEnd latestStart sk) base >>= kvIteratorFromList
+            , ssFindAllSessions = \earliestEnd latestStart -> do
+                base <- ssFindAllSessions inner earliestEnd latestStart >>= kvIteratorToList
+                merged (within earliestEnd latestStart) base >>= kvIteratorFromList
+            , ssCache =
+                Just
+                  SessionCache
+                    { scsWrite = write
+                    , scsOnFlush = writeIORef listenerRef
                     }
             }
       }

@@ -36,6 +36,7 @@ module Kafka.Streams.State.Store (
   StoreCache (..),
   FlushListener,
   WindowCache (..),
+  SessionCache (..),
   KeyValueIterator (..),
   kvIteratorFromList,
   kvIteratorToList,
@@ -76,6 +77,7 @@ module Kafka.Streams.State.Store (
   withCachingEnabledKV,
   withCachingDisabledKV,
   withCachingEnabledW,
+  withCachingEnabledS,
 
   -- * KIP-295 source-changelog reuse
   withSourceTopicChangelogKV,
@@ -301,6 +303,17 @@ data SessionStore k v = SessionStore
   , ssFetchSession :: !(SessionKey k -> IO (Maybe v))
   , ssFindSessions :: !(k -> Timestamp -> Timestamp -> IO (KeyValueIterator (SessionKey k) v))
   , ssFindAllSessions :: !(Timestamp -> Timestamp -> IO (KeyValueIterator (SessionKey k) v))
+  , ssCache :: !(Maybe (SessionCache k v))
+  -- ^ The record cache in front of the store, when it has one (as 'kvsCache')
+  }
+
+
+-- | A session store's record cache, as its aggregation processor sees it.
+data SessionCache k v = SessionCache
+  { scsWrite :: !(SessionKey k -> Maybe v -> Timestamp -> Headers -> IO ())
+  -- ^ Buffer a session's new aggregate ('Nothing': the session is removed)
+  , scsOnFlush :: !((SessionKey k -> Maybe v -> Maybe v -> Timestamp -> Headers -> IO ()) -> IO ())
+  -- ^ Install what each flushed session (new, and old as the store held it) is handed to
   }
 
 
@@ -436,7 +449,14 @@ data StoreBuilderS k v = StoreBuilderS
   , sbSLogging :: !LoggingConfig
   , sbSSerdes :: !(Maybe (StoreSerdes k v))
   , sbSBuild :: !(StoreContext -> IO (SessionStore k v))
+  , sbSCaching :: !(Maybe (KeyOrder k))
+  -- ^ Put a record cache in front of the store (as 'sbKvCaching')
   }
+
+
+-- | Front the session store with a record cache.
+withCachingEnabledS :: Ord k => StoreBuilderS k v -> StoreBuilderS k v
+withCachingEnabledS b = b {sbSCaching = Just KeyOrder}
 
 
 -- | Attach changelog serdes to a key-value store builder.
