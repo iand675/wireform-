@@ -35,6 +35,7 @@ mkTxn = do
   Txn.createTransaction
     (Txn.TransactionalId "wireform-conformance-0144")
     connMgr
+    Conn.defaultConnectionConfig
     versionCache
     "wireform-kafka"
     (Conn.BrokerAddress "127.0.0.1" 1)

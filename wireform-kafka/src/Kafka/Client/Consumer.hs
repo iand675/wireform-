@@ -121,6 +121,9 @@ module Kafka.Client.Consumer (
   ConsumerGroupMetadata (..),
   newConsumerGroupMetadata,
   groupMetadata,
+  groupCoordinator,
+  setPreRejoinHook,
+  rebalancePending,
 
   -- * Subscription
 
@@ -632,7 +635,8 @@ data ConsumerRecord = ConsumerRecord
   , offset :: !Int64
   , timestamp :: !Int64
   , key :: !(Maybe ByteString)
-  , value :: !ByteString
+  , value :: !(Maybe ByteString)
+  -- ^ 'Nothing' is a null value: a tombstone on a compacted topic
   , headers :: ![(Text, ByteString)]
   }
   deriving (Eq, Show, Generic)
@@ -686,6 +690,14 @@ data Consumer = Consumer
   , consumerOnAssigned :: !(TVar ([TopicPartition] -> IO ()))
   , consumerOnRevoked :: !(TVar ([TopicPartition] -> IO ()))
   , consumerOnLost :: !(TVar ([TopicPartition] -> IO ()))
+  , consumerPreRejoin :: !(TVar (IO ()))
+  {- ^ Run by 'poll' just before it re-joins the group after the
+  coordinator signalled a rebalance, while this member still holds
+  its current generation and partitions (and only when the member
+  was not fenced). The JVM eager protocol's @onPartitionsRevoked@
+  slot: the last moment offsets for the current assignment can be
+  committed. Set with 'setPreRejoinHook'.
+  -}
   {- ^ Per-event callbacks fired on assigned / revoked / lost
   transitions. Default is the no-op; replace via
   'setRebalanceListener'.
@@ -1056,6 +1068,7 @@ createConsumer' brokers groupId config = do
               onA <- newTVarIO (\_ -> pure () :: IO ())
               onR <- newTVarIO (\_ -> pure () :: IO ())
               onL <- newTVarIO (\_ -> pure () :: IO ())
+              preRejoin <- newTVarIO (pure () :: IO ())
               lastAsgn <- newTVarIO []
               subUD <- newTVarIO (pure BS.empty :: IO ByteString)
               wakeup <- newTVarIO False
@@ -1074,6 +1087,7 @@ createConsumer' brokers groupId config = do
                       , consumerOnAssigned = onA
                       , consumerOnRevoked = onR
                       , consumerOnLost = onL
+                      , consumerPreRejoin = preRejoin
                       , consumerLastAssignment = lastAsgn
                       , consumerSubscriptionUserData = subUD
                       , consumerWakeupPending = wakeup
@@ -1598,6 +1612,23 @@ setRebalanceListener Consumer {..} onA onR onL = atomically $ do
   writeTVar consumerOnLost onL
 
 
+{- | Install the hook 'poll' runs just before re-joining the group
+(see 'consumerPreRejoin'). Exceptions from the hook propagate out
+of 'poll'.
+-}
+setPreRejoinHook :: Consumer -> IO () -> IO ()
+setPreRejoinHook Consumer {..} hook = atomically (writeTVar consumerPreRejoin hook)
+
+
+{- | Whether the coordinator has asked this member to re-join (the
+next 'poll' will run the pre-rejoin hook and re-join first).
+-}
+rebalancePending :: Consumer -> IO Bool
+rebalancePending Consumer {..} = case consumerHeartbeat of
+  Nothing -> pure False
+  Just (hbSt, _) -> readTVarIO (HB.hbNeedsRebalance hbSt)
+
+
 {- | Current partition assignment, in deterministic order
 (sorted by topic then partition).
 -}
@@ -1774,7 +1805,17 @@ poll consumer@Consumer {..} timeoutMs = liftIO $ do
           then do
             topicsM <- readIORef consumerSubscription
             case topicsM of
-              Just ts -> subscribe consumer ts
+              Just ts -> do
+                -- Still in the old generation: give the owner its
+                -- last chance to commit, unless the coordinator
+                -- already fenced it (a commit would be rejected).
+                lost <- case consumerHeartbeat of
+                  Just (hbSt, _) -> readTVarIO (HB.hbLost hbSt)
+                  Nothing -> pure False
+                unless lost $ do
+                  hook <- readTVarIO consumerPreRejoin
+                  hook
+                subscribe consumer ts
               Nothing -> pure (Right ())
           else pure (Right ())
       case rejoinR of
@@ -3821,14 +3862,32 @@ newConsumerGroupMetadata g gen mid inst =
 groupMetadata :: Consumer -> IO ConsumerGroupMetadata
 groupMetadata c = do
   let !cfg = effectiveConsumerSnapshot (consumerConfigOf c)
-  mb <- currentStaticMembershipState c
+  -- The live generation and member id come from the heartbeat
+  -- state, which every JoinGroup / SyncGroup updates; they are what
+  -- the group coordinator checks a transactional offset commit
+  -- against (KIP-447 fencing).
+  (gen, mid) <- case consumerHeartbeat c of
+    Just (hbSt, _) -> do
+      g <- readIORef (HB.hbGenerationId hbSt)
+      m <- readIORef (HB.hbMemberId hbSt)
+      pure (g, m)
+    Nothing -> pure (-1, T.empty)
   pure
     ConsumerGroupMetadata
       { cgmGroupId = cfg.ecsGroupId
-      , cgmGenerationId = maybe 0 staticGenerationId mb
-      , cgmMemberId = maybe T.empty staticMemberId mb
+      , cgmGenerationId = gen
+      , cgmMemberId = mid
       , cgmGroupInstanceId = cfg.ecsGroupInstanceId
       }
+
+
+{- | The group coordinator this consumer last found, if any
+(where a transactional offset commit for its group goes).
+-}
+groupCoordinator :: Consumer -> IO (Maybe Conn.BrokerAddress)
+groupCoordinator c = case consumerHeartbeat c of
+  Just (hbSt, _) -> readIORef (HB.hbCoordinatorAddr hbSt)
+  Nothing -> pure Nothing
 
 
 ----------------------------------------------------------------------

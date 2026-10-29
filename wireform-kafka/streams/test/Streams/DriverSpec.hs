@@ -67,7 +67,7 @@ source_to_sink_passthrough = it "source -> sink passthrough" $ do
   pipeInput driver (topicName "in") (Just (bytes "k2")) (bytes "v2") t0 0
   out <- readOutput driver (topicName "out")
   map (fmap unbytes . crKey) out `shouldBe` [Just "k1", Just "k2"]
-  map (unbytes . crValue) out `shouldBe` ["v1", "v2"]
+  map (unbytes . crValueBytes) out `shouldBe` ["v1", "v2"]
   closeDriver driver
 
 
@@ -93,7 +93,7 @@ filter_then_sink = it "filter drops records" $ do
   pipeInput driver (topicName "in") Nothing (bytes "keep2") t0 0
 
   out <- readOutput driver (topicName "out")
-  map (unbytes . crValue) out `shouldBe` ["keep1", "keep2"]
+  map (unbytes . crValueBytes) out `shouldBe` ["keep1", "keep2"]
   closeDriver driver
 
 
@@ -118,7 +118,7 @@ map_values = it "mapValues transforms each value" $ do
   pipeInput driver (topicName "in") Nothing (bytes "world") t0 0
 
   out <- readOutput driver (topicName "out")
-  map (unbytes . crValue) out `shouldBe` ["HELLO", "WORLD"]
+  map (unbytes . crValueBytes) out `shouldBe` ["HELLO", "WORLD"]
   closeDriver driver
 
 
@@ -143,7 +143,7 @@ flatmap_values = it "concatMapValues splits each record" $ do
   pipeInput driver (topicName "in") Nothing (bytes "are you") t0 0
 
   out <- readOutput driver (topicName "out")
-  map (unbytes . crValue) out `shouldBe` ["hello", "world", "how", "are", "you"]
+  map (unbytes . crValueBytes) out `shouldBe` ["hello", "world", "how", "are", "you"]
   closeDriver driver
 
 
@@ -166,7 +166,7 @@ merge_two_streams = it "merge interleaves both streams" $ do
   pipeInput driver (topicName "in1") Nothing (bytes "from-1b") t0 0
 
   out <- readOutput driver (topicName "out")
-  map (unbytes . crValue) out `shouldBe` ["from-1a", "from-2a", "from-1b"]
+  map (unbytes . crValueBytes) out `shouldBe` ["from-1a", "from-2a", "from-1b"]
   closeDriver driver
 
 
@@ -202,9 +202,9 @@ branch_three_ways = it "branch routes by predicate" $ do
   outB <- readOutput driver (topicName "out-b")
   outO <- readOutput driver (topicName "out-other")
 
-  map (unbytes . crValue) outA `shouldBe` ["alpha", "able"]
-  map (unbytes . crValue) outB `shouldBe` ["bravo", "banana"]
-  map (unbytes . crValue) outO `shouldBe` ["charlie", "delta"]
+  map (unbytes . crValueBytes) outA `shouldBe` ["alpha", "able"]
+  map (unbytes . crValueBytes) outB `shouldBe` ["bravo", "banana"]
+  map (unbytes . crValueBytes) outO `shouldBe` ["charlie", "delta"]
   closeDriver driver
 
 
@@ -230,7 +230,7 @@ peek_observes_records = it "peek runs side-effect, passes through" $ do
     ["a", "b", "c"]
 
   out <- readOutput driver (topicName "out")
-  map (unbytes . crValue) out `shouldBe` ["a", "b", "c"]
+  map (unbytes . crValueBytes) out `shouldBe` ["a", "b", "c"]
   obs <- readIORef observed
   reverse obs `shouldBe` ["a", "b", "c"]
   closeDriver driver
@@ -268,7 +268,7 @@ map_keys_then_sink = it "mapKeyValue rewrites both" $ do
   pipeInput driver (topicName "in") (Just (bytes "xy")) (bytes "hi") t0 0
 
   out <- readOutput driver (topicName "out")
-  let kvs = map (\cr -> (fmap unbytes (crKey cr), crValue cr)) out
+  let kvs = map (\cr -> (fmap unbytes (crKey cr), crValueBytes cr)) out
   map fst kvs `shouldBe` [Just "cba", Just "yx"]
   -- Output value is Int64 big-endian; just check length matches.
   map (BSC.length . snd) kvs `shouldBe` [8, 8]

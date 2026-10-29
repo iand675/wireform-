@@ -44,7 +44,7 @@ tests =
                   { RB.recordTimestampDelta = 0
                   , RB.recordOffsetDelta = 0
                   , RB.recordKey = Nothing
-                  , RB.recordValue = payload
+                  , RB.recordValue = Just payload
                   , RB.recordHeaders = []
                   }
           ok <- BA.appendRecord acc tp rec
@@ -53,13 +53,13 @@ tests =
           acc <- BA.createBatchAccumulator 16384 5 Compression.NoCompression 0
           BA.closeBatchAccumulator acc
           let tp = BA.TopicPartition "purge-test" 0
-              rec = RB.Record 0 0 Nothing (BS.replicate 32 0x42) []
+              rec = RB.Record 0 0 Nothing (Just (BS.replicate 32 0x42)) []
           ok <- BA.appendRecord acc tp rec
           ok `shouldBe` False
       , it "drainReadyBatches after close returns the buffered batch" $ do
           acc <- BA.createBatchAccumulator 16384 5 Compression.NoCompression 0
           let tp = BA.TopicPartition "purge-test" 0
-              rec = RB.Record 0 0 Nothing (BS.replicate 64 0x43) []
+              rec = RB.Record 0 0 Nothing (Just (BS.replicate 64 0x43)) []
           _ <- BA.appendRecord acc tp rec
           BA.closeBatchAccumulator acc
           drained <- BA.drainReadyBatches acc
@@ -68,7 +68,7 @@ tests =
           acc <- BA.createBatchAccumulator 16384 5000 Compression.NoCompression 0
           events <- newIORef []
           let tp = BA.TopicPartition "purge-test" 0
-              rec = RB.Record 0 0 Nothing (BS.replicate 64 0x44) []
+              rec = RB.Record 0 0 Nothing (Just (BS.replicate 64 0x44)) []
               reason = "local purge" :: Text
               callback result = modifyIORef' events (result :)
           ok <- BA.appendRecordWithCallback acc tp rec (BA.RecordCallback callback)
@@ -84,7 +84,7 @@ tests =
           acc <- BA.createBatchAccumulator 96 5000 Compression.NoCompression 0
           let tp0 = BA.TopicPartition "purge-test" 0
               tp1 = BA.TopicPartition "purge-test" 1
-              rec = RB.Record 0 0 Nothing (BS.replicate 80 0x45) []
+              rec = RB.Record 0 0 Nothing (Just (BS.replicate 80 0x45)) []
           _ <- BA.appendRecord acc tp0 rec
           _ <- BA.appendRecord acc tp0 rec
           _ <- BA.appendRecord acc tp1 rec

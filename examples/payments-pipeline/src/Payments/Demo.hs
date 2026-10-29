@@ -29,7 +29,7 @@ import Kafka.Streams (
   CollectedRecord,
   Timestamp (..),
   closeDriver,
-  crValue,
+  crValueBytes,
   newDriver,
   pipeInput,
   readOutput,
@@ -149,7 +149,7 @@ showType = \case
 
 
 printRisk :: CollectedRecord -> IO ()
-printRisk cr = case decodeProto (crValue cr) :: Either String RiskFeature of
+printRisk cr = case decodeProto (crValueBytes cr) :: Either String RiskFeature of
   Left err -> putStrLn ("  <undecodable risk feature: " <> err <> ">")
   Right rf ->
     putStrLn $
@@ -164,7 +164,7 @@ printRisk cr = case decodeProto (crValue cr) :: Either String RiskFeature of
 
 
 printEntry :: CollectedRecord -> IO ()
-printEntry cr = case decodeProto (crValue cr) :: Either String BookkeepingEntry of
+printEntry cr = case decodeProto (crValueBytes cr) :: Either String BookkeepingEntry of
   Left err -> putStrLn ("  <undecodable bookkeeping entry: " <> err <> ">")
   Right be ->
     putStrLn $

@@ -502,7 +502,7 @@ fromWireformRecord WF.ConsumerRecord {..} =
     , crTimestamp = CreateTime (Millis timestamp)
     , crHeaders = headersFromList (map convertHeader headers)
     , crKey = key
-    , crValue = Just value
+    , crValue = value
     }
 
 

@@ -124,7 +124,7 @@ mkRec t p o =
     , C.offset = fromIntegral o
     , C.timestamp = 0
     , C.key = Nothing
-    , C.value = ""
+    , C.value = Just ""
     , C.headers = []
     }
 

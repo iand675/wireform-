@@ -66,6 +66,7 @@ module Kafka.Streams.Driver (
 
   -- * Re-export of the raw collected record shape
   CollectedRecord (..),
+  crValueBytes,
 
   -- * Typed input / output topic helpers (streams-test-utils)
   TestInputTopic,
@@ -116,6 +117,7 @@ import Kafka.Streams.Internal.Engine (
  )
 import Kafka.Streams.Internal.RecordCollector (
   CollectedRecord (..),
+  crValueBytes,
   RecordCollector,
   collectorPeek,
   collectorTake,
@@ -435,7 +437,7 @@ drainInternalLoop d = go (8 :: Int)
         (driverEngine d)
         (crTopic cr)
         (crKey cr)
-        (crValue cr)
+        (crValueBytes cr)
         (crHeaders cr)
         (crTimestamp cr)
         0
@@ -470,7 +472,7 @@ decodeOutput
   -> Either Text (OutputRecord k v)
 decodeOutput ks vs cr = do
   k <- maybe (Right Nothing) (fmap Just . deserialize ks) (crKey cr)
-  v <- deserialize vs (crValue cr)
+  v <- deserialize vs (crValueBytes cr)
   pure
     OutputRecord
       { orKey = k
@@ -575,7 +577,7 @@ readKeyValuesToList TestOutputTopic {..} = do
       mk <- case crKey cr of
         Nothing -> Right Nothing
         Just kb -> Just <$> Kafka.Streams.Serde.deserialize totKeySerde kb
-      v <- Kafka.Streams.Serde.deserialize totValSerde (crValue cr)
+      v <- Kafka.Streams.Serde.deserialize totValSerde (crValueBytes cr)
       Right (mk, v)
 
 
@@ -627,7 +629,7 @@ toTestRecord
   -> Either Text (TestRecord k v)
 toTestRecord ks vs cr = do
   k <- maybe (Right Nothing) (fmap Just . deserialize ks) (crKey cr)
-  v <- deserialize vs (crValue cr)
+  v <- deserialize vs (crValueBytes cr)
   pure
     TestRecord
       { trKey = k

@@ -111,7 +111,7 @@ ktable_toStream_emits_changes =
     pipeInput driver (topicName "in") (Just (bytes "k1")) (bytes "v2") (t 1) 0
     pipeInput driver (topicName "in") (Just (bytes "k2")) (bytes "v3") (t 2) 0
     out <- readOutput driver (topicName "out")
-    map (unbytes . crValue) out `shouldBe` ["v1", "v2", "v3"]
+    map (unbytes . crValueBytes) out `shouldBe` ["v1", "v2", "v3"]
     closeDriver driver
 
 

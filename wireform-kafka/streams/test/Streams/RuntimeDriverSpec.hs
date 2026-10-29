@@ -100,7 +100,7 @@ consumerRecord topic k v off ts =
     , offset = fromIntegral (unI64 off)
     , timestamp = fromIntegral (unI64 ts)
     , key = Just (bytes k)
-    , value = bytes v
+    , value = Just (bytes v)
     , headers = []
     }
 
@@ -427,7 +427,7 @@ consumerRecordPart topic part k v off ts =
     , offset = fromIntegral (unI64 off)
     , timestamp = fromIntegral (unI64 ts)
     , key = Just (bytes k)
-    , value = bytes v
+    , value = Just (bytes v)
     , headers = []
     }
 

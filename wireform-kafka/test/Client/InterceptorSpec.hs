@@ -52,7 +52,7 @@ defaultProducerInterceptorIsIdentity = do
         Producer.ProducerRecord
           { topic = "t"
           , key = Just "k"
-          , value = "v"
+          , value = Just "v"
           , headers = []
           , partition = Nothing
           , timestamp = Nothing
@@ -64,7 +64,7 @@ defaultProducerInterceptorIsIdentity = do
 defaultProducerOnAckIsNoOp :: IO ()
 defaultProducerOnAckIsNoOp = do
   let cfg = Producer.defaultProducerConfig
-      rec_ = Producer.ProducerRecord "t" Nothing "v" [] Nothing Nothing
+      rec_ = Producer.ProducerRecord "t" Nothing (Just "v") [] Nothing Nothing
   -- Has to not throw and to return ()
   Producer.producerOnAcknowledgement cfg rec_ (Left "broker timeout")
 
@@ -93,7 +93,7 @@ interceptorCanRewriteRecord = do
         Producer.ProducerRecord
           { Producer.topic = "events"
           , Producer.key = Just "k"
-          , Producer.value = "v"
+          , Producer.value = Just "v"
           , Producer.headers = []
           , Producer.partition = Nothing
           , Producer.timestamp = Nothing
@@ -164,7 +164,7 @@ sampleRec k v =
     , offset = 0
     , timestamp = 0
     , key = Just (toBs k)
-    , value = toBs v
+    , value = Just (toBs v)
     , headers = []
     }
   where

@@ -1414,7 +1414,7 @@ This is a rough estimate for batch size tracking
 approximateRecordSize :: RB.Record -> Int
 approximateRecordSize RB.Record {..} =
   let keySize = maybe 0 BS.length recordKey
-      valueSize = BS.length recordValue
+      valueSize = maybe 0 BS.length recordValue
       headerSize = sum $ map (\h -> BS.length (RB.headerKey h) + maybe 0 BS.length (RB.headerValue h)) recordHeaders
       -- Add overhead for VarInt encoding and metadata
       overhead = 20

@@ -35,7 +35,7 @@ mkBatch isTxn n =
     { BA.batchTopicPartition = BA.TopicPartition "t" 0
     , BA.batchRecords =
         V.fromList
-          [ RB.Record 0 (fromIntegral i) Nothing "v" []
+          [ RB.Record 0 (fromIntegral i) Nothing (Just "v") []
           | i <- [0 .. n - 1]
           ]
     , BA.batchSizeBytes = n * 50

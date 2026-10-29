@@ -131,7 +131,7 @@ decodeWindowed r = do
         Right (Just k, fromIntegral ts)
       Left e -> Left e
     Nothing -> Right (Nothing, 0)
-  let v = readD (crValue r)
+  let v = readD (crValueBytes r)
       (mk, ts) = k
   pure (mk, ts, v)
 
@@ -404,7 +404,7 @@ suppress_until_time_limit_flushes_on_stream_time_advance =
     map
       ( \r ->
           ( fmap (T.pack . BSC.unpack) (crKey r)
-          , T.pack (BSC.unpack (crValue r))
+          , T.pack (BSC.unpack (crValueBytes r))
           )
       )
       post

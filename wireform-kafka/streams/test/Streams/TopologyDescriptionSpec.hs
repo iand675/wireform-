@@ -102,5 +102,5 @@ through_topic_round_trips_in_driver =
     pipeInput driver (topicName "in") Nothing (BSC.pack "hello") (Timestamp 0) 0
     pipeInput driver (topicName "in") Nothing (BSC.pack "world") (Timestamp 0) 0
     out <- readOutput driver (topicName "out")
-    map crValue out `shouldBe` [BSC.pack "HELLO", BSC.pack "WORLD"]
+    map crValueBytes out `shouldBe` [BSC.pack "HELLO", BSC.pack "WORLD"]
     closeDriver driver

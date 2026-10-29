@@ -92,7 +92,7 @@ inRecord off k hdrs =
     , offset = off
     , timestamp = 1_700_000_000_000 + off
     , key = Just (bytes k)
-    , value = bytes "v"
+    , value = Just (bytes "v")
     , headers = hdrs
     }
 

@@ -31,6 +31,8 @@ the operator's job.
 -}
 module Integration.TransactionalSpec (tests) where
 
+import Data.Maybe (mapMaybe)
+import Kafka.Client.Internal.TransactionCoordinator qualified as TC
 import Control.Concurrent (threadDelay)
 import Data.ByteString.Char8 qualified as BSC
 import Data.HashMap.Strict qualified as Map
@@ -114,6 +116,7 @@ withTxnProducer txId action = do
         Txn.createTransaction
           (Txn.TransactionalId txId)
           connMgr
+          Conn.defaultConnectionConfig
           vCache
           (Producer.producerClientId pcfg)
           bootstrap
@@ -157,7 +160,7 @@ drainValues c maxAttempts = go [] maxAttempts
       case r of
         Left _ -> pure acc
         Right [] -> go acc (k - 1)
-        Right rs -> go (acc ++ map (.value) rs) (k - 1)
+        Right rs -> go (acc ++ mapMaybe (.value) rs) (k - 1)
 
 
 ----------------------------------------------------------------------
@@ -258,7 +261,20 @@ txn_send_offsets_atomically = do
         let offs =
               Map.fromList
                 [(Consumer.TopicPartition sourceTopic 0, 1)]
-        _ <- Txn.commitOffsetsInTransaction txn groupId offs
+        -- Single-broker fixture: the bootstrap broker is the group
+        -- coordinator, and the source consumer was assigned (not
+        -- joined), so the member identity is the standalone one.
+        _ <-
+          Txn.sendOffsetsToTransaction
+            txn
+            (Conn.BrokerAddress "127.0.0.1" 9092)
+            TC.TxnGroupMember
+              { TC.tgmGroupId = groupId
+              , TC.tgmGenerationId = -1
+              , TC.tgmMemberId = ""
+              , TC.tgmGroupInstanceId = Nothing
+              }
+            (Map.toList offs)
         _ <- Txn.commitTransaction txn
         pure ()
       Consumer.closeConsumer src

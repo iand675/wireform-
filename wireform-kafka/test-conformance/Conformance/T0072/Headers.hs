@@ -39,7 +39,7 @@ tests =
                   { RB.recordOffsetDelta = 0
                   , RB.recordTimestampDelta = 0
                   , RB.recordKey = Nothing
-                  , RB.recordValue = "payload"
+                  , RB.recordValue = Just "payload"
                   , RB.recordHeaders = []
                   }
           length (RB.recordHeaders r) `shouldBe` 0
@@ -49,7 +49,7 @@ tests =
                 , RB.RecordHeader "b" Nothing
                 , RB.RecordHeader "c" (Just "3")
                 ]
-              r = RB.Record 0 0 Nothing BS.empty hs
+              r = RB.Record 0 0 Nothing (Just BS.empty) hs
           map RB.headerKey (RB.recordHeaders r) `shouldBe` ["a", "b", "c"]
           map RB.headerValue (RB.recordHeaders r) `shouldBe` [Just "1", Nothing, Just "3"]
       ]

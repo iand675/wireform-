@@ -51,7 +51,7 @@ suppress_time_limit_debounces =
 
     out0 <- readOutput driver (topicName "out")
     -- Within the 100ms window from t=0, no emission.
-    map (T.pack . BSC.unpack . crValue) out0 `shouldBe` []
+    map (T.pack . BSC.unpack . crValueBytes) out0 `shouldBe` []
     closeDriver driver
 
 
@@ -76,7 +76,7 @@ suppress_time_limit_emits_after_limit =
     pipeInput driver (topicName "in") (Just (bytes "k")) (bytes "third") (t 200) 0
 
     out <- readOutput driver (topicName "out")
-    map (T.pack . BSC.unpack . crValue) out `shouldBe` ["second"]
+    map (T.pack . BSC.unpack . crValueBytes) out `shouldBe` ["second"]
     closeDriver driver
 
 
@@ -104,10 +104,10 @@ suppress_time_limit_first_seen_is_sticky =
     -- Trigger evaluation at t=210: A should flush "a2", B not yet.
     pipeInput driver (topicName "in") (Just (bytes "A")) (bytes "a3") (t 210) 0
     out1 <- readOutput driver (topicName "out")
-    map (T.pack . BSC.unpack . crValue) out1 `shouldBe` ["a2"]
+    map (T.pack . BSC.unpack . crValueBytes) out1 `shouldBe` ["a2"]
 
     -- Trigger at t=300: B flushes "b2", A's new debounce holds "a3".
     pipeInput driver (topicName "in") (Just (bytes "B")) (bytes "b3") (t 300) 0
     out2 <- readOutput driver (topicName "out")
-    map (T.pack . BSC.unpack . crValue) out2 `shouldBe` ["b2"]
+    map (T.pack . BSC.unpack . crValueBytes) out2 `shouldBe` ["b2"]
     closeDriver driver

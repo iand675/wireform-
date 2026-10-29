@@ -47,7 +47,7 @@ mkRec t k v hdrs =
     , offset = 0
     , timestamp = 0
     , key = fmap TE.encodeUtf8 (Just k)
-    , value = maybe "" TE.encodeUtf8 v
+    , value = TE.encodeUtf8 <$> v
     , headers = [(hk, TE.encodeUtf8 hv) | (hk, hv) <- hdrs]
     }
 

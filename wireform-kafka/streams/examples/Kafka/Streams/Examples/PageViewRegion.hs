@@ -98,4 +98,4 @@ runDemo = do
       let u = case crKey cr of
             Just k -> BSC.unpack k
             Nothing -> "<no-user>"
-      in putStrLn ("  " <> u <> " -> " <> BSC.unpack (crValue cr))
+      in putStrLn ("  " <> u <> " -> " <> BSC.unpack (crValueBytes cr))

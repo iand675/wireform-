@@ -229,7 +229,7 @@ test_source_sink_passthrough =
 
     out <- readOutput driver (topicName "out")
     map (fmap unbytes . crKey) out `shouldBe` [Just "k1", Just "k2"]
-    map (unbytes . crValue) out `shouldBe` ["v1", "v2"]
+    map (unbytes . crValueBytes) out `shouldBe` ["v1", "v2"]
     closeDriver driver
 
 
@@ -257,7 +257,7 @@ test_chain_of_stateless_transforms =
     pipeInput driver (topicName "in") Nothing (bytes "kafka streams") t0 0
 
     out <- readOutput driver (topicName "out")
-    map (unbytes . crValue) out `shouldBe` ["HELLO", "WORLD", "KAFKA", "STREAMS"]
+    map (unbytes . crValueBytes) out `shouldBe` ["HELLO", "WORLD", "KAFKA", "STREAMS"]
     closeDriver driver
 
 
@@ -292,8 +292,8 @@ test_fanout_two_sinks =
 
     upperOut <- readOutput driver (topicName "upper")
     lowerOut <- readOutput driver (topicName "lower")
-    map (unbytes . crValue) upperOut `shouldBe` ["MIXED", "CASE"]
-    map (unbytes . crValue) lowerOut `shouldBe` ["mixed", "case"]
+    map (unbytes . crValueBytes) upperOut `shouldBe` ["MIXED", "CASE"]
+    map (unbytes . crValueBytes) lowerOut `shouldBe` ["mixed", "case"]
     closeDriver driver
 
 
@@ -330,8 +330,8 @@ test_parallel_two_independent_pipelines =
 
     lOut <- readOutput driver (topicName "left-out")
     rOut <- readOutput driver (topicName "right-out")
-    map (unbytes . crValue) lOut `shouldBe` ["L:1", "L:3"]
-    map (unbytes . crValue) rOut `shouldBe` ["R:2"]
+    map (unbytes . crValueBytes) lOut `shouldBe` ["L:1", "L:3"]
+    map (unbytes . crValueBytes) rOut `shouldBe` ["R:2"]
     closeDriver driver
 
 
@@ -366,7 +366,7 @@ test_stream_table_join =
     pipeInput driver (topicName "stream-in") (Just (bytes "k3")) (bytes "miss") t0 0
 
     out <- readOutput driver (topicName "joined-out")
-    map (unbytes . crValue) out `shouldBe` ["S1|T1", "S2|T2"]
+    map (unbytes . crValueBytes) out `shouldBe` ["S1|T1", "S2|T2"]
     closeDriver driver
 
 
@@ -482,9 +482,9 @@ test_tap_passes_wire_through =
     main_ <- readOutput driver (topicName "main")
 
     -- Tap branch only receives audit-prefixed values.
-    map (unbytes . crValue) audit `shouldBe` ["audit:login", "audit:logout"]
+    map (unbytes . crValueBytes) audit `shouldBe` ["audit:login", "audit:logout"]
     -- Main branch sees all records, uppercased.
-    map (unbytes . crValue) main_
+    map (unbytes . crValueBytes) main_
       `shouldBe` ["AUDIT:LOGIN", "REGULAR", "AUDIT:LOGOUT"]
     closeDriver driver
 
@@ -525,9 +525,9 @@ test_forkn_three_branches =
     upper <- readOutput driver (topicName "upper")
     lower <- readOutput driver (topicName "lower")
     len_ <- readOutput driver (topicName "len")
-    map (unbytes . crValue) upper `shouldBe` ["HELLO", "WORLD"]
-    map (unbytes . crValue) lower `shouldBe` ["hello", "world"]
-    map (unbytes . crValue) len_ `shouldBe` ["5", "5"]
+    map (unbytes . crValueBytes) upper `shouldBe` ["HELLO", "WORLD"]
+    map (unbytes . crValueBytes) lower `shouldBe` ["hello", "world"]
+    map (unbytes . crValueBytes) len_ `shouldBe` ["5", "5"]
     closeDriver driver
 
 
@@ -579,8 +579,8 @@ test_split_named_branches =
 
     shorts <- readOutput driver (topicName "short")
     longs <- readOutput driver (topicName "long")
-    map (unbytes . crValue) shorts `shouldBe` ["ab", "xy"]
-    map (unbytes . crValue) longs `shouldBe` ["abcde"]
+    map (unbytes . crValueBytes) shorts `shouldBe` ["ab", "xy"]
+    map (unbytes . crValueBytes) longs `shouldBe` ["abcde"]
     closeDriver driver
 
 
@@ -613,8 +613,8 @@ test_fork_explicit_duplicator =
 
     upper <- readOutput driver (topicName "upper")
     lower <- readOutput driver (topicName "lower")
-    map (unbytes . crValue) upper `shouldBe` ["MIX", "CASE"]
-    map (unbytes . crValue) lower `shouldBe` ["mix", "case"]
+    map (unbytes . crValueBytes) upper `shouldBe` ["MIX", "CASE"]
+    map (unbytes . crValueBytes) lower `shouldBe` ["mix", "case"]
     closeDriver driver
   where
     -- Local alias to the Arrow combinator from Control.Arrow re-exported
@@ -643,7 +643,7 @@ test_sources_multi_topic =
     pipeInput driver (topicName "in-a") Nothing (bytes "a2") t0 0
 
     out <- readOutput driver (topicName "merged")
-    map (unbytes . crValue) out `shouldBe` ["*a1", "*b1", "*a2"]
+    map (unbytes . crValueBytes) out `shouldBe` ["*a1", "*b1", "*a2"]
     closeDriver driver
 
 
@@ -940,7 +940,7 @@ test_suppress_until_time_limit =
     -- that 'v1' is suppressed by 'v2' and only the latest value
     -- per-key surfaces once the debounce window passes.
     let kvalues =
-          [ unbytes (crValue cr)
+          [ unbytes (crValueBytes cr)
           | cr <- out
           , fmap unbytes (crKey cr) == Just "k"
           ]
@@ -1061,7 +1061,7 @@ test_optimize_fuses_map_chains =
     driver <- newDriver topo "free-opt-mapfuse"
     pipeInput driver (topicName "in") Nothing (bytes "x") t0 0
     out <- readOutput driver (topicName "out")
-    map (unbytes . crValue) out `shouldBe` ["dcbax"]
+    map (unbytes . crValueBytes) out `shouldBe` ["dcbax"]
     closeDriver driver
 
 
@@ -1092,7 +1092,7 @@ test_optimize_fuses_filter_chains =
     pipeInput driver (topicName "in") Nothing (bytes "keep") t0 0 -- passes all 3
     pipeInput driver (topicName "in") Nothing (bytes "ok") t0 0 -- passes all 3
     out <- readOutput driver (topicName "out")
-    map (unbytes . crValue) out `shouldBe` ["keep", "ok"]
+    map (unbytes . crValueBytes) out `shouldBe` ["keep", "ok"]
     closeDriver driver
 
 
@@ -1135,7 +1135,7 @@ test_optimize_collapses_identity_combinators =
     driver <- newDriver topo "free-opt-identity"
     pipeInput driver (topicName "in") Nothing (bytes "hello") t0 0
     out <- readOutput driver (topicName "out")
-    map (unbytes . crValue) out `shouldBe` ["OLLEH"]
+    map (unbytes . crValueBytes) out `shouldBe` ["OLLEH"]
     closeDriver driver
 
 
@@ -1176,7 +1176,7 @@ test_optimize_preserves_observable_behaviour =
           mapM_ (\(k, v) -> pipeInput driver (topicName "in") k v t0 0) inputs
           out <- readOutput driver (topicName "out")
           closeDriver driver
-          pure (map (unbytes . crValue) out)
+          pure (map (unbytes . crValueBytes) out)
 
     optimised <- runWith F.compile
     unoptimised <- runWith F.compileNoOptimize
@@ -1208,7 +1208,7 @@ test_optimize_noOptimization_is_a_no_op =
     driver <- newDriver topo "free-noopt"
     pipeInput driver (topicName "in") Nothing (bytes "abc") t0 0
     out <- readOutput driver (topicName "out")
-    map (unbytes . crValue) out `shouldBe` ["CBA"]
+    map (unbytes . crValueBytes) out `shouldBe` ["CBA"]
     closeDriver driver
 
 
@@ -1603,8 +1603,8 @@ test_fork_topology_is_eos_atomic =
 
     upperOut <- readOutput driver (topicName "fork-upper")
     lowerOut <- readOutput driver (topicName "fork-lower")
-    map (unbytes . crValue) upperOut `shouldBe` ["HELLO", "WORLD"]
-    map (unbytes . crValue) lowerOut `shouldBe` ["hello", "world"]
+    map (unbytes . crValueBytes) upperOut `shouldBe` ["HELLO", "WORLD"]
+    map (unbytes . crValueBytes) lowerOut `shouldBe` ["hello", "world"]
 
     -- The commit cycle ran the canonical EOS sequence, with /all/
     -- branch outputs captured between 'begin' and 'commit'.
@@ -1648,9 +1648,9 @@ test_forkN_topology_is_eos_atomic =
     u <- readOutput driver (topicName "fn-upper")
     l <- readOutput driver (topicName "fn-lower")
     r <- readOutput driver (topicName "fn-rev")
-    map (unbytes . crValue) u `shouldBe` ["ABC"]
-    map (unbytes . crValue) l `shouldBe` ["abc"]
-    map (unbytes . crValue) r `shouldBe` ["cba"]
+    map (unbytes . crValueBytes) u `shouldBe` ["ABC"]
+    map (unbytes . crValueBytes) l `shouldBe` ["abc"]
+    map (unbytes . crValueBytes) r `shouldBe` ["cba"]
 
     log_ <- drain
     log_ `shouldBe` ["begin", "commitOffsets", "commit", "storeCommit"]
@@ -1691,8 +1691,8 @@ test_tap_topology_is_eos_atomic =
     main_ <- readOutput driver (topicName "tap-main")
     -- The audit log gets the /original/ values; the main sink
     -- gets the transformed ones. Both within one transaction.
-    map (unbytes . crValue) audit `shouldBe` ["ping", "pong"]
-    map (unbytes . crValue) main_ `shouldBe` ["PING", "PONG"]
+    map (unbytes . crValueBytes) audit `shouldBe` ["ping", "pong"]
+    map (unbytes . crValueBytes) main_ `shouldBe` ["PING", "PONG"]
 
     log_ <- drain
     log_ `shouldBe` ["begin", "commitOffsets", "commit", "storeCommit"]
@@ -1740,7 +1740,7 @@ test_applicative_liftA2_combines_two_topologies =
     pipeInput driver (topicName "ap-in1") Nothing (bytes "a2") t0 0
 
     out <- readOutput driver (topicName "ap-out")
-    map (unbytes . crValue) out `shouldBe` ["a1", "b1", "a2"]
+    map (unbytes . crValueBytes) out `shouldBe` ["a1", "b1", "a2"]
     closeDriver driver
 
 
@@ -1773,7 +1773,7 @@ test_monad_do_notation_for_multi_source =
     -- The merged stream sees mapped values from both upstreams.
     -- The exact interleaving is the test driver's record-arrival
     -- order; both records must appear.
-    map (unbytes . crValue) out `shouldBe` ["HI", "B:ya"]
+    map (unbytes . crValueBytes) out `shouldBe` ["HI", "B:ya"]
     closeDriver driver
 
 
@@ -1806,8 +1806,8 @@ test_semigroup_runs_both_pipelines_on_one_input =
 
     u <- readOutput driver (topicName "sg-upper")
     l <- readOutput driver (topicName "sg-lower")
-    map (unbytes . crValue) u `shouldBe` ["MIXED", "CASE"]
-    map (unbytes . crValue) l `shouldBe` ["mixed", "case"]
+    map (unbytes . crValueBytes) u `shouldBe` ["MIXED", "CASE"]
+    map (unbytes . crValueBytes) l `shouldBe` ["mixed", "case"]
     closeDriver driver
 
 
@@ -1925,7 +1925,7 @@ test_mergeSourced_two_sources_share_one_task_under_eos =
     outcome `shouldBe` CommitSucceeded
 
     out <- readOutput driver (topicName "ms-out")
-    map (unbytes . crValue) out `shouldBe` ["HELLO", "WORLD"]
+    map (unbytes . crValueBytes) out `shouldBe` ["HELLO", "WORLD"]
 
     log_ <- drain
     log_ `shouldBe` ["begin", "commitOffsets", "commit", "storeCommit"]
@@ -2192,7 +2192,7 @@ test_noFuse_is_runtime_identity =
     pipeInput driver (topicName "nf-in") Nothing (bytes "hello") t0 0
     pipeInput driver (topicName "nf-in") Nothing (bytes "world") t0 0
     out <- readOutput driver (topicName "nf-out")
-    Prelude.map (unbytes . crValue) out `shouldBe` ["HELLO!", "WORLD!"]
+    Prelude.map (unbytes . crValueBytes) out `shouldBe` ["HELLO!", "WORLD!"]
     closeDriver driver
 
 
@@ -2239,7 +2239,7 @@ test_noFuse_left_alone_in_isolation =
     driver <- newDriver topo "free-nofuse-lone"
     pipeInput driver (topicName "lone-in") Nothing (bytes "x") t0 0
     out <- readOutput driver (topicName "lone-out")
-    Prelude.map (unbytes . crValue) out `shouldBe` ["x"]
+    Prelude.map (unbytes . crValueBytes) out `shouldBe` ["x"]
     closeDriver driver
 
 
@@ -2272,7 +2272,7 @@ test_mapRecord_full_record_transform =
     driver <- newDriver topo "free-mapRecord"
     pipeInput driver (topicName "mr-in") Nothing (bytes "hello") t0 0
     out <- readOutput driver (topicName "mr-out")
-    Prelude.map (unbytes . crValue) out `shouldBe` ["hello!"]
+    Prelude.map (unbytes . crValueBytes) out `shouldBe` ["hello!"]
     closeDriver driver
 
 
@@ -2306,7 +2306,7 @@ test_mapRecordM_io_full_record_transform =
     pipeInput driver (topicName "mrm-in") Nothing (bytes "b") t0 0
     pipeInput driver (topicName "mrm-in") Nothing (bytes "c") t0 0
     out <- readOutput driver (topicName "mrm-out")
-    Prelude.map (unbytes . crValue) out `shouldBe` ["a#1", "b#2", "c#3"]
+    Prelude.map (unbytes . crValueBytes) out `shouldBe` ["a#1", "b#2", "c#3"]
     closeDriver driver
 
 
@@ -2335,7 +2335,7 @@ test_mapRecord_chains_fuse =
     driver <- newDriver topo "free-mapRecord-fuse"
     pipeInput driver (topicName "mrf-in") Nothing (bytes "x") t0 0
     out <- readOutput driver (topicName "mrf-out")
-    Prelude.map (unbytes . crValue) out `shouldBe` ["x123"]
+    Prelude.map (unbytes . crValueBytes) out `shouldBe` ["x123"]
     closeDriver driver
 
 
@@ -2367,7 +2367,7 @@ test_mapRecord_chain_blocked_by_noFuse =
     driver <- newDriver topo "free-mapRecord-nofuse"
     pipeInput driver (topicName "mrnf-in") Nothing (bytes "x") t0 0
     out <- readOutput driver (topicName "mrnf-out")
-    Prelude.map (unbytes . crValue) out `shouldBe` ["x123"]
+    Prelude.map (unbytes . crValueBytes) out `shouldBe` ["x123"]
     closeDriver driver
 
 
@@ -2579,7 +2579,7 @@ test_repartition_rewrites_preserve_semantics =
     pipeInput driver (topicName "rp-in") (Just (bytes "k")) (bytes "hello") t0 0
     pipeInput driver (topicName "rp-in") (Just (bytes "k")) (bytes "world") t0 0
     out <- readOutput driver (topicName "rp-out")
-    Prelude.map (unbytes . crValue) out `shouldBe` ["HELLO", "WORLD"]
+    Prelude.map (unbytes . crValueBytes) out `shouldBe` ["HELLO", "WORLD"]
     closeDriver driver
 
 
@@ -3092,7 +3092,7 @@ test_transformStream_can_change_key_and_value =
     closeDriver driver
     n <- readIORef counter
     n `shouldBe` 2
-    Prelude.map (unbytes . crValue) out `shouldBe` ["cba", "fed"]
+    Prelude.map (unbytes . crValueBytes) out `shouldBe` ["cba", "fed"]
     Prelude.map (fmap unbytes . crKey) out `shouldBe` [Just "abc", Just "def"]
 
 
@@ -3237,7 +3237,7 @@ test_join_grace_drops_late_records =
     out <- readOutput driver (topicName "join-grace-out")
     -- The first L1/R1 join matches normally. The L-stale record
     -- is past grace and dropped — it contributes no extra match.
-    let outVals = Prelude.map (unbytes . crValue) out
+    let outVals = Prelude.map (unbytes . crValueBytes) out
     (if ("L1+R1" `elem` outVals) then pure () else expectationFailure ("L1+R1 join should appear: " <> show outVals))
     (if (not (any ("L-stale" `T.isInfixOf`) outVals)) then pure () else expectationFailure ("L-stale must not produce a join: " <> show outVals))
     closeDriver driver

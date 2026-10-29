@@ -42,7 +42,7 @@ mkRec k v =
     , offset = 0
     , timestamp = 0
     , key = Just (BSC.pack (T.unpack k))
-    , value = BSC.pack (T.unpack v)
+    , value = Just (BSC.pack (T.unpack v))
     , headers = []
     }
 

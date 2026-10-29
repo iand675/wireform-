@@ -29,6 +29,6 @@ runDemo =
     $ \c -> do
       Right recs <- Consumer.poll c 5000
       forM_ recs $ \rec ->
-        putStrLn $ "  " <> show rec.offset <> " " <> BS8.unpack rec.value
+        putStrLn $ "  " <> show rec.offset <> " " <> maybe "<null>" BS8.unpack rec.value
       _ <- Consumer.commitSync c
       pure ()

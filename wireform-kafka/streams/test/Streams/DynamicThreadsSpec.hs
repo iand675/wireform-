@@ -41,7 +41,7 @@ mkRec topic k v =
     , offset = 0
     , timestamp = 100
     , key = Just (bytes k)
-    , value = bytes v
+    , value = Just (bytes v)
     , headers = []
     }
 

@@ -47,7 +47,7 @@ unit_batchTimeoutDetection = it "Batch timeout detection" $ do
 
   -- Create a mock batch
   let tp = BA.TopicPartition "test-topic" 0
-      record = RB.Record 0 0 Nothing "value" []
+      record = RB.Record 0 0 Nothing (Just "value") []
       batch =
         BA.ProducerBatch
           { BA.batchTopicPartition = tp
@@ -93,7 +93,7 @@ unit_batchNotTimedOut = it "Batch not timed out when within timeout" $ do
 
   -- Create a mock batch
   let tp = BA.TopicPartition "test-topic" 0
-      record = RB.Record 0 0 Nothing "value" []
+      record = RB.Record 0 0 Nothing (Just "value") []
       batch =
         BA.ProducerBatch
           { BA.batchTopicPartition = tp
@@ -140,7 +140,7 @@ prop_timeoutDetectionCorrectness = property $ do
       shouldBeTimedOut = elapsed > fromIntegral deliveryTimeoutMs
 
       tp = BA.TopicPartition "test-topic" 0
-      record = RB.Record 0 0 Nothing "value" []
+      record = RB.Record 0 0 Nothing (Just "value") []
       batch =
         BA.ProducerBatch
           { BA.batchTopicPartition = tp
@@ -181,7 +181,7 @@ prop_veryOldBatchesTimeout = property $ do
   let batchCreateTime = currentTime - (fromIntegral deliveryTimeoutMs * 10)
 
       tp = BA.TopicPartition "test-topic" 0
-      record = RB.Record 0 0 Nothing "value" []
+      record = RB.Record 0 0 Nothing (Just "value") []
       batch =
         BA.ProducerBatch
           { BA.batchTopicPartition = tp
@@ -217,7 +217,7 @@ prop_freshBatchesNeverTimeout = property $ do
   batchCreateTime <- forAll $ Gen.int64 (Range.linear (currentTime - recentDelta) currentTime)
 
   let tp = BA.TopicPartition "test-topic" 0
-      record = RB.Record 0 0 Nothing "value" []
+      record = RB.Record 0 0 Nothing (Just "value") []
       batch =
         BA.ProducerBatch
           { BA.batchTopicPartition = tp

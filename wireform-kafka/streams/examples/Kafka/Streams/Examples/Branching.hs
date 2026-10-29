@@ -107,6 +107,6 @@ runDemo = do
               <> show (length rs)
               <> "):"
           )
-        mapM_ (\cr -> putStrLn ("    " <> BSC.unpack (crValue cr))) rs
+        mapM_ (\cr -> putStrLn ("    " <> BSC.unpack (crValueBytes cr))) rs
   mapM_ tap ["logs-errors", "logs-warns", "logs-info"]
   closeDriver driver

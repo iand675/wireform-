@@ -218,7 +218,7 @@ ordered_preserves_input_order =
     fireDrainPunctuator driver
 
     out <- readOutput driver "out"
-    map (unbytes . crValue) out `shouldBe` map T.toUpper inputs
+    map (unbytes . crValueBytes) out `shouldBe` map T.toUpper inputs
     closeDriver driver
 
 
@@ -248,7 +248,7 @@ drain_via_punctuator =
     fireDrainPunctuator driver
 
     out <- readOutput driver "out"
-    map (unbytes . crValue) out `shouldBe` ["ONCE"]
+    map (unbytes . crValueBytes) out `shouldBe` ["ONCE"]
     closeDriver driver
 
 
@@ -289,7 +289,7 @@ drop_and_continue_skips_failure =
 
     out <- readOutput driver "out"
     -- "boom" drops, the surviving three preserve input order.
-    map (unbytes . crValue) out `shouldBe` ["A", "B", "C"]
+    map (unbytes . crValueBytes) out `shouldBe` ["A", "B", "C"]
     closeDriver driver
 
 
@@ -327,7 +327,7 @@ log_and_continue_skips_failure =
     fireDrainPunctuator driver
 
     out <- readOutput driver "out"
-    map (unbytes . crValue) out `shouldBe` ["K", "Q"]
+    map (unbytes . crValueBytes) out `shouldBe` ["K", "Q"]
     closeDriver driver
 
 
@@ -425,7 +425,7 @@ unordered_emits_in_completion_order =
     fireDrainPunctuator driver
 
     out <- readOutput driver "out"
-    map (unbytes . crValue) out `shouldBe` ["C", "A", "B"]
+    map (unbytes . crValueBytes) out `shouldBe` ["C", "A", "B"]
     closeDriver driver
 
 
@@ -471,7 +471,7 @@ topology_free_async_map_values_smoke =
     advanceWallClockTime driver 250
 
     out <- readOutput driver "out"
-    map (unbytes . crValue) out `shouldBe` ["X", "Y", "Z"]
+    map (unbytes . crValueBytes) out `shouldBe` ["X", "Y", "Z"]
     closeDriver driver
 
 
@@ -536,7 +536,7 @@ fusion_hoists_pure_into_async =
       if n >= 2 then pure () else retry
     advanceWallClockTime driver 250
     out <- readOutput driver "out"
-    map (unbytes . crValue) out `shouldBe` ["ALPHA", "BRAVO"]
+    map (unbytes . crValueBytes) out `shouldBe` ["ALPHA", "BRAVO"]
     closeDriver driver
 
 
@@ -580,7 +580,7 @@ commit_drains_in_flight_work =
     commitDriver driver
 
     out <- readOutput driver "out"
-    map (unbytes . crValue) out `shouldBe` map T.toUpper inputs
+    map (unbytes . crValueBytes) out `shouldBe` map T.toUpper inputs
     closeDriver driver
 
 
@@ -649,7 +649,7 @@ commit_waits_for_slow_user_io =
     atomically (takeTMVar commitDone)
 
     out <- readOutput driver "out"
-    map (unbytes . crValue) out `shouldBe` ["A", "B"]
+    map (unbytes . crValueBytes) out `shouldBe` ["A", "B"]
     closeDriver driver
 
 
@@ -687,7 +687,7 @@ commit_drains_unordered =
     out <- readOutput driver "out"
     -- Unordered: assert membership, not order. The drain
     -- guarantees all submitted records show up.
-    map (unbytes . crValue) out
+    map (unbytes . crValueBytes) out
       `shouldContainAll` ["X", "Y", "Z"]
     closeDriver driver
   where
@@ -814,7 +814,7 @@ prop_ordered_under_completion_permutation =
           records <- readOutput driver "out"
           closeDriver driver
           pure records
-        let observed = map (unbytes . crValue) out
+        let observed = map (unbytes . crValueBytes) out
             expected = map (T.toUpper . T.pack . show) [0 .. n - 1]
         observed H.=== expected
 
@@ -864,7 +864,7 @@ prop_unordered_is_permutation_of_input =
           records <- readOutput driver "out"
           closeDriver driver
           pure records
-        let observed = List.sort (map (unbytes . crValue) out)
+        let observed = List.sort (map (unbytes . crValueBytes) out)
             expected =
               List.sort
                 (map (T.toUpper . T.pack . show) [0 .. n - 1])
@@ -922,7 +922,7 @@ prop_per_key_ordering_preserved =
               map
                 ( \r ->
                     ( fmap unbytes (crKey r)
-                    , unbytes (crValue r)
+                    , unbytes (crValueBytes r)
                     )
                 )
                 out
@@ -975,7 +975,7 @@ prop_identical_drivers_produce_identical_output =
           ra <- runOnce
           rb <- runOnce
           pure (ra, rb)
-        map (unbytes . crValue) a H.=== map (unbytes . crValue) b
+        map (unbytes . crValueBytes) a H.=== map (unbytes . crValueBytes) b
 
 
 ----------------------------------------------------------------------
@@ -1031,7 +1031,7 @@ prop_drop_and_continue_keeps_survivors_in_order =
           records <- readOutput driver "out"
           closeDriver driver
           pure records
-        let observed = map (unbytes . crValue) out
+        let observed = map (unbytes . crValueBytes) out
             expected =
               [ T.toUpper (T.pack (show i))
               | i <- [0 .. n - 1]
@@ -1169,7 +1169,7 @@ custom_failure_handler_throwing_doesnt_lose_other_records =
     -- wall-clock trigger.
     commitDriver driver
     out <- readOutput driver "out"
-    let observed = map (unbytes . crValue) out
+    let observed = map (unbytes . crValueBytes) out
     -- Order-preserving: "A" then "B". The failing "bang" slot
     -- became a skip, so it doesn't show up.
     observed `shouldBe` ["A", "B"]
@@ -1206,7 +1206,7 @@ retry_fixed_eventually_succeeds =
     waitDeposits depositsTV 1
     commitDriver driver
     out <- readOutput driver "out"
-    map (unbytes . crValue) out `shouldBe` ["OK"]
+    map (unbytes . crValueBytes) out `shouldBe` ["OK"]
     -- The work fired 3 times: 2 failures + 1 success.
     readTVarIO attempts >>= (`shouldBe` 3)
     closeDriver driver
@@ -1237,7 +1237,7 @@ retry_fixed_exhausts_then_applies_policy =
     waitDeposits depositsTV 1
     commitDriver driver
     out <- readOutput driver "out"
-    map (unbytes . crValue) out `shouldBe` []
+    map (unbytes . crValueBytes) out `shouldBe` []
     -- Initial attempt + 2 retries.
     readTVarIO attempts >>= (`shouldBe` 3)
     closeDriver driver
@@ -1272,7 +1272,7 @@ retry_backoff_recovers =
     waitDeposits depositsTV 1
     commitDriver driver
     out <- readOutput driver "out"
-    map (unbytes . crValue) out `shouldBe` ["v"]
+    map (unbytes . crValueBytes) out `shouldBe` ["v"]
     closeDriver driver
 
 
@@ -1305,7 +1305,7 @@ timeout_fires_for_blocked_io =
     waitDeposits depositsTV 1
     commitDriver driver
     out <- readOutput driver "out"
-    map (unbytes . crValue) out `shouldBe` []
+    map (unbytes . crValueBytes) out `shouldBe` []
     -- Release the gate so closeDriver doesn't have to send a
     -- cancellation through the racy timeout / shutdown
     -- interleaving. The runner async inside 'runOnce' has
@@ -1352,7 +1352,7 @@ backpressure_no_deadlock_buffer_one =
     waitDeposits depositsTV n
     commitDriver driver
     out <- readOutput driver "out"
-    map (unbytes . crValue) out
+    map (unbytes . crValueBytes) out
       `shouldBe` map (T.toUpper . T.pack . show) [0 .. n - 1]
     closeDriver driver
 
@@ -1405,7 +1405,7 @@ backpressure_blocks_pipe_when_buffer_full =
 
     commitDriver driver
     out <- readOutput driver "out"
-    map (unbytes . crValue) out `shouldBe` ["A", "B", "C", "D"]
+    map (unbytes . crValueBytes) out `shouldBe` ["A", "B", "C", "D"]
     closeDriver driver
 
 
@@ -1441,7 +1441,7 @@ pipe_then_commit_pipe_then_commit_preserves_all =
       commitDriver driver
 
     out <- readOutput driver "out"
-    map (unbytes . crValue) out
+    map (unbytes . crValueBytes) out
       `shouldBe` map T.toUpper (concat batches)
     closeDriver driver
 
@@ -1480,7 +1480,7 @@ drain_during_active_workload =
     commitDriver driver
 
     out <- readOutput driver "out"
-    map (unbytes . crValue) out
+    map (unbytes . crValueBytes) out
       `shouldBe` map (T.toUpper . T.pack . show) [0 .. total - 1]
     closeDriver driver
 
@@ -1515,7 +1515,7 @@ buffer_capacity_one_serialises_records =
     commitDriver driver
 
     out <- readOutput driver "out"
-    map (unbytes . crValue) out
+    map (unbytes . crValueBytes) out
       `shouldBe` map (T.toUpper . T.pack . show) [0 .. n - 1]
     closeDriver driver
 
@@ -1636,7 +1636,7 @@ double_commit_after_drain_idempotent =
     commitDriver driver
     commitDriver driver -- second commit: nothing in flight
     out <- readOutput driver "out"
-    map (unbytes . crValue) out `shouldBe` ["P"]
+    map (unbytes . crValueBytes) out `shouldBe` ["P"]
     closeDriver driver
 
 
@@ -1710,7 +1710,7 @@ observer_hook_failure_surfaces_but_other_records_continue =
     -- The worker kept running, so at least the first deposit ("X")
     -- still flows downstream.
     out <- readOutput driver "out"
-    let observed = map (unbytes . crValue) out
+    let observed = map (unbytes . crValueBytes) out
     ( if (not (null observed))
         then pure ()
         else
@@ -1754,7 +1754,7 @@ stress_many_records_few_workers_ordered =
     waitDeposits depositsTV n
     commitDriver driver
     out <- readOutput driver "out"
-    map (unbytes . crValue) out
+    map (unbytes . crValueBytes) out
       `shouldBe` map (T.toUpper . T.pack . show) [0 .. n - 1]
     closeDriver driver
 
@@ -1787,7 +1787,7 @@ stress_many_workers_few_records =
     waitDeposits depositsTV n
     commitDriver driver
     out <- readOutput driver "out"
-    map (unbytes . crValue) out
+    map (unbytes . crValueBytes) out
       `shouldBe` map (T.toUpper . T.pack . show) [0 .. n - 1]
     closeDriver driver
 
@@ -1826,6 +1826,6 @@ stress_mixed_success_and_failure =
     waitDeposits depositsTV n
     commitDriver driver
     out <- readOutput driver "out"
-    map (unbytes . crValue) out
+    map (unbytes . crValueBytes) out
       `shouldBe` [T.pack (show i) | i <- [0 .. n - 1], odd i]
     closeDriver driver

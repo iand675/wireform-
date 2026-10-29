@@ -113,8 +113,8 @@ multi_task_routes_records_to_owners =
     -- Drain each task's collector independently.
     out0 <- collectorTake coll0 (topicName "out")
     out1 <- collectorTake coll1 (topicName "out")
-    map (unbytes . crValue) out0 `shouldBe` ["v0", "v1"]
-    map (unbytes . crValue) out1 `shouldBe` ["v2", "v3"]
+    map (unbytes . crValueBytes) out0 `shouldBe` ["v0", "v1"]
+    map (unbytes . crValueBytes) out1 `shouldBe` ["v2", "v3"]
 
     closeAllTasks tm
 
@@ -181,5 +181,5 @@ multi_task_ignores_records_for_unowned_partition =
     feedTask t0 (topicName "in") (Just (bytes "k")) (bytes "owned") (t 0) 0 0
     feedTask t0 (topicName "in") (Just (bytes "k")) (bytes "stranger") (t 0) 1 0
     out <- collectorTake coll (topicName "out")
-    map (unbytes . crValue) out `shouldBe` ["owned"]
+    map (unbytes . crValueBytes) out `shouldBe` ["owned"]
     closeTask t0

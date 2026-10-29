@@ -34,7 +34,7 @@ genRecord = do
   offsetDelta <- Gen.int32 (Range.linear 0 100)
   key <- Gen.maybe (Gen.bytes (Range.linear 0 100))
   value <- Gen.bytes (Range.linear 0 1000)
-  return $ RB.Record timestampDelta offsetDelta key value []
+  return $ RB.Record timestampDelta offsetDelta key (Just value) []
 
 
 -- | Generate a topic-partition
@@ -72,7 +72,7 @@ prop_batchReadyWhenFull = property $ do
 
   -- Create records that will fill the batch
   let largeValue = BS.replicate 50 42 -- 50 bytes
-      largeRecord = RB.Record 0 0 Nothing largeValue []
+      largeRecord = RB.Record 0 0 Nothing (Just largeValue) []
 
   -- Append enough records to fill a batch (with overhead, 3 records should do it)
   evalIO $ replicateM_ 3 $ BA.appendRecord accumulator tp largeRecord
@@ -173,7 +173,7 @@ prop_concurrentAppends = property $ do
   evalIO $ do
     threads <- replicateM numThreads $ async $ do
       replicateM_ recordsPerThread $ do
-        let record = RB.Record 0 0 Nothing "test" []
+        let record = RB.Record 0 0 Nothing (Just "test") []
         BA.appendRecord accumulator tp record
 
     -- Wait for all threads to complete
@@ -239,7 +239,7 @@ prop_batchStateTransitions = property $ do
   tp <- forAll genTopicPartition
 
   -- Create large records to fill batch quickly
-  let largeRecord = RB.Record 0 0 Nothing (BS.replicate 50 42) []
+  let largeRecord = RB.Record 0 0 Nothing (Just (BS.replicate 50 42)) []
 
   -- Append records to fill batch
   evalIO $ replicateM_ 3 $ BA.appendRecord accumulator tp largeRecord
@@ -337,7 +337,7 @@ prop_appendAndSealRaceIsLossless = withTests 50 . property $ do
                     { RB.recordTimestampDelta = 0
                     , RB.recordOffsetDelta = fromIntegral i
                     , RB.recordKey = Nothing
-                    , RB.recordValue = payloadFor i
+                    , RB.recordValue = Just (payloadFor i)
                     , RB.recordHeaders = []
                     }
             ok <- BA.appendRecordStampedUnsafe acc tp record BA.NoRecordCallback BA.noStamp

@@ -110,7 +110,7 @@ runDemo = do
       let k = case crKey cr of
             Just b -> BSC.unpack b
             Nothing -> "<no-key>"
-          v = case deserialize doubleSerde (crValue cr) of
+          v = case deserialize doubleSerde (crValueBytes cr) of
             Right d -> show d
             Left err -> "?(" <> T.unpack err <> ")"
       in putStrLn ("  " <> k <> " = " <> v)

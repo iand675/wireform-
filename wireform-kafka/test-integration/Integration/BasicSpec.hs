@@ -349,7 +349,7 @@ testProduceConsumeIntegration = do
               case pollResult of
                 Left err -> expectationFailure $ "Failed to poll: " ++ err
                 Right records -> do
-                  let ours = filter (\r -> r.value == payload) records
+                  let ours = filter (\r -> r.value == Just payload) records
                   when (null ours) $
                     putStrLn $
                       "Polled " ++ show (length records) ++ " unrelated record(s)"

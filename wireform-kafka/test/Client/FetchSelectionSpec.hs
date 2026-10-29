@@ -101,7 +101,7 @@ dataBatch txn pid base n =
                   { RB.recordTimestampDelta = 0
                   , RB.recordOffsetDelta = fromIntegral i
                   , RB.recordKey = Nothing
-                  , RB.recordValue = BSC.pack (show (base + fromIntegral i))
+                  , RB.recordValue = Just (BSC.pack (show (base + fromIntegral i)))
                   , RB.recordHeaders = []
                   }
             )
@@ -125,7 +125,7 @@ marker pid off kind =
           { RB.recordTimestampDelta = 0
           , RB.recordOffsetDelta = 0
           , RB.recordKey = Just (BS.pack [0, 0, 0, fromIntegral kind])
-          , RB.recordValue = BS.pack [0, 0, 0, 0, 0, 0]
+          , RB.recordValue = Just (BS.pack [0, 0, 0, 0, 0, 0])
           , RB.recordHeaders = []
           }
     )

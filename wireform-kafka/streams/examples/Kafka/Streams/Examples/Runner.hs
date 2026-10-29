@@ -308,7 +308,7 @@ withBrokerDriver brokers mkTopo appId inTopics outTopics action = do
                     KP.ProducerRecord
                       { KP.topic = unTopicName topic
                       , KP.key = key
-                      , KP.value = val
+                      , KP.value = Just val
                       , KP.headers = []
                       , KP.partition = Just part
                       , KP.timestamp = Just ts

@@ -185,6 +185,7 @@ import Kafka.Streams.Internal.Engine (
  )
 import Kafka.Streams.Internal.RecordCollector (
   CollectedRecord (..),
+  crValueBytes,
   RecordCollector (..),
   drainCollector,
  )
@@ -680,7 +681,7 @@ eventLoop ks driver engine = go
                     engine
                     (topicName rec.topic)
                     rec.key
-                    rec.value
+                    (maybe BS.empty id rec.value)
                     (KH.fromList rec.headers)
                     (Timestamp rec.timestamp)
                     (fromIntegral rec.partition)
@@ -797,7 +798,7 @@ multiEventLoop ks driver pool = go
                     pool
                     (topicName rec.topic)
                     rec.key
-                    rec.value
+                    (maybe BS.empty id rec.value)
                     (KH.fromList rec.headers)
                     (Timestamp rec.timestamp)
                     (fromIntegral rec.partition)

@@ -80,7 +80,7 @@ module Kafka.Client.Transaction (
 
   -- * Transactional sends
   sendInTransaction,
-  commitOffsetsInTransaction,
+  sendOffsetsToTransaction,
 
   -- * Types
   Transaction (..),
@@ -137,7 +137,7 @@ import Kafka.Client.Consumer (TopicPartition (..))
 import Kafka.Client.Internal.TransactionCoordinator (TransactionCoordinator)
 import Kafka.Client.Internal.TransactionCoordinator qualified as TC
 import Kafka.Client.RetryClassifier qualified as RC
-import Kafka.Network.Connection (BrokerAddress, ConnectionManager)
+import Kafka.Network.Connection (BrokerAddress, ConnectionConfig, ConnectionManager)
 import Kafka.Network.Connection qualified as Conn
 import Kafka.Protocol.ApiVersions (ApiVersionCache)
 import Kafka.Protocol.ApiVersions qualified as AV
@@ -203,6 +203,8 @@ data Transaction = Transaction
   , txnCoordinator :: !(IORef (Maybe TransactionCoordinator))
   -- ^ Cached transaction coordinator
   , txnConnectionManager :: !ConnectionManager
+  , txnConnConfig :: !ConnectionConfig
+  -- ^ TLS / SASL settings for coordinator connections
   -- ^ Connection manager for network operations
   , txnVersionCache :: !ApiVersionCache
   -- ^ API version cache for version negotiation
@@ -232,7 +234,31 @@ data TransactionError
   | TransactionAborted Text
   | TransactionTimeout Text
   | UnknownTransactionError Text
+  | ConsumerGroupFenced Text
+  {- ^ The group coordinator rejected a transactional offset commit
+  because the member's generation is stale or it is no longer a
+  member (@ILLEGAL_GENERATION@, @UNKNOWN_MEMBER_ID@,
+  @FENCED_INSTANCE_ID@): a rebalance moved its partitions. The
+  transaction must be aborted.
+  -}
   deriving (Show, Eq)
+
+
+{- | Classify a coordinator-level error for callers of the public
+'Transaction' API.
+-}
+coordinatorErrorToTxn :: TC.TransactionCoordinatorError -> TransactionError
+coordinatorErrorToTxn = \case
+  TC.ProducerFenced m -> ProducerFenced m
+  TC.TransactionCoordinatorFenced m -> ProducerFenced m
+  TC.InvalidProducerEpoch m -> ProducerFenced m
+  TC.CoordinatorNotAvailable m -> CoordinatorNotAvailable m
+  TC.CoordinatorLoadInProgress m -> CoordinatorNotAvailable m
+  TC.NotCoordinator m -> CoordinatorNotAvailable m
+  TC.ConcurrentTransactions m -> CoordinatorNotAvailable m
+  TC.UnknownCoordinatorError code m
+    | code `elem` [22, 25, 82] -> ConsumerGroupFenced m
+  e -> UnknownTransactionError (T.pack (show e))
 
 
 instance Exception TransactionError
@@ -243,6 +269,8 @@ createTransaction
   :: MonadIO m
   => TransactionalId
   -> ConnectionManager
+  -> ConnectionConfig
+  -- ^ TLS / SASL settings for coordinator connections (the producer's)
   -> ApiVersionCache
   -> Text
   -- ^ Client ID
@@ -251,7 +279,7 @@ createTransaction
   -> Int32
   -- ^ Transaction timeout (ms)
   -> m Transaction
-createTransaction transactionalId connMgr versionCache clientId bootstrapBroker timeoutMs = liftIO $ do
+createTransaction transactionalId connMgr connConfig versionCache clientId bootstrapBroker timeoutMs = liftIO $ do
   producerId <- newIORef Nothing
   producerEpoch <- newIORef Nothing
   state <- newIORef Uninitialized
@@ -269,6 +297,7 @@ createTransaction transactionalId connMgr versionCache clientId bootstrapBroker 
       , txnSequenceNumbers = sequences
       , txnCoordinator = coordinator
       , txnConnectionManager = connMgr
+      , txnConnConfig = connConfig
       , txnVersionCache = versionCache
       , txnCorrelationId = correlationId
       , txnClientId = clientId
@@ -328,6 +357,7 @@ initTransactions txn = liftIO $ do
       coordResult <-
         TC.findTransactionCoordinator
           (txnConnectionManager txn)
+          (txnConnConfig txn)
           (txnVersionCache txn)
           (txnCorrelationId txn)
           (txnBootstrapBroker txn)
@@ -411,6 +441,7 @@ initProducerIdWithRetry txn coordinator transactionalId attemptsLeft = do
   pidResult <-
     TC.initProducerId
       (txnConnectionManager txn)
+      (txnConnConfig txn)
       (txnVersionCache txn)
       (txnCorrelationId txn)
       (txnClientId txn)
@@ -484,6 +515,7 @@ commitTransaction txn = liftIO $ do
                 _ <-
                   TC.addPartitionsToTxn
                     (txnConnectionManager txn)
+                    (txnConnConfig txn)
                     (txnVersionCache txn)
                     (txnCorrelationId txn)
                     (txnClientId txn)
@@ -495,21 +527,9 @@ commitTransaction txn = liftIO $ do
                 return ()
 
               -- End transaction with commit=true
-              endResult <-
-                TC.endTransaction
-                  (txnConnectionManager txn)
-                  (txnVersionCache txn)
-                  (txnCorrelationId txn)
-                  (txnClientId txn)
-                  coordinator
-                  transactionalId
-                  pid
-                  epoch
-                  True -- commit
+              endResult <- endTransactionWithRetry txn coordinator transactionalId pid epoch True 8
               case endResult of
-                Left err -> do
-                  writeIORef (txnState txn) (Error $ T.pack $ show err)
-                  return $ Left $ UnknownTransactionError $ T.pack $ show err
+                Left err -> failEnd txn InTransaction err
                 Right () -> do
                   writeIORef (txnState txn) Ready
                   return $ Right ()
@@ -549,6 +569,7 @@ abortTransaction txn = liftIO $ do
                 _ <-
                   TC.addPartitionsToTxn
                     (txnConnectionManager txn)
+                    (txnConnConfig txn)
                     (txnVersionCache txn)
                     (txnCorrelationId txn)
                     (txnClientId txn)
@@ -560,21 +581,9 @@ abortTransaction txn = liftIO $ do
                 return ()
 
               -- End transaction with commit=false (abort)
-              endResult <-
-                TC.endTransaction
-                  (txnConnectionManager txn)
-                  (txnVersionCache txn)
-                  (txnCorrelationId txn)
-                  (txnClientId txn)
-                  coordinator
-                  transactionalId
-                  pid
-                  epoch
-                  False -- abort
+              endResult <- endTransactionWithRetry txn coordinator transactionalId pid epoch False 8
               case endResult of
-                Left err -> do
-                  writeIORef (txnState txn) (Error $ T.pack $ show err)
-                  return $ Left $ UnknownTransactionError $ T.pack $ show err
+                Left err -> failEnd txn InTransaction err
                 Right () -> do
                   writeIORef (txnState txn) Aborted
                   writeIORef (txnState txn) Ready
@@ -589,6 +598,86 @@ abortTransaction txn = liftIO $ do
     Error msg -> return $ Left $ UnknownTransactionError msg
     Fenced -> return $ Left $ ProducerFenced "Producer has been fenced"
     _ -> return $ Left $ InvalidStateTransition state Aborting
+
+
+{- | @EndTxn@ with the JVM @TransactionManager@'s retry policy: the
+coordinator answers @CONCURRENT_TRANSACTIONS@ while a previous
+marker is still being written, and @COORDINATOR_LOAD_IN_PROGRESS@ /
+@NOT_COORDINATOR@ / @COORDINATOR_NOT_AVAILABLE@ while the
+transaction-log partition moves; all clear up, so they are retried
+with exponential backoff (re-discovering the coordinator after a
+move) before being reported.
+-}
+endTransactionWithRetry
+  :: Transaction
+  -> TC.TransactionCoordinator
+  -> Text
+  -> Int64
+  -> Int16
+  -> Bool
+  -- ^ commit (True) or abort (False)
+  -> Int
+  -- ^ remaining attempts
+  -> IO (Either TC.TransactionCoordinatorError ())
+endTransactionWithRetry txn coordinator transactionalId pid epoch commit attemptsLeft = do
+  r <-
+    TC.endTransaction
+      (txnConnectionManager txn)
+      (txnConnConfig txn)
+      (txnVersionCache txn)
+      (txnCorrelationId txn)
+      (txnClientId txn)
+      coordinator
+      transactionalId
+      pid
+      epoch
+      commit
+  case r of
+    Left err
+      | attemptsLeft > 1 && retriableEnd err -> do
+          let !attempt = 8 - attemptsLeft
+          threadDelay (50_000 * (2 ^ min 5 (max 0 attempt)))
+          coordinator' <- case err of
+            TC.ConcurrentTransactions _ -> pure coordinator
+            _ -> do
+              found <-
+                TC.findTransactionCoordinator
+                  (txnConnectionManager txn)
+                  (txnConnConfig txn)
+                  (txnVersionCache txn)
+                  (txnCorrelationId txn)
+                  (txnBootstrapBroker txn)
+                  (txnClientId txn)
+                  transactionalId
+              case found of
+                Right c -> do
+                  writeIORef (txnCoordinator txn) (Just c)
+                  pure c
+                Left _ -> pure coordinator
+          endTransactionWithRetry txn coordinator' transactionalId pid epoch commit (attemptsLeft - 1)
+    _ -> pure r
+  where
+    retriableEnd e = case e of
+      TC.ConcurrentTransactions _ -> True
+      TC.CoordinatorLoadInProgress _ -> True
+      TC.CoordinatorNotAvailable _ -> True
+      TC.NotCoordinator _ -> True
+      _ -> False
+
+
+{- | Record a failed @EndTxn@. Fencing errors make the producer
+permanently 'Fenced' (another instance owns the transactional id);
+anything retriable leaves the transaction in @back@ so the caller
+can retry or abort; the rest is a fatal 'Error'.
+-}
+failEnd :: Transaction -> TransactionState -> TC.TransactionCoordinatorError -> IO (Either TransactionError ())
+failEnd txn back err = do
+  let !e = coordinatorErrorToTxn err
+  writeIORef (txnState txn) $ case e of
+    ProducerFenced _ -> Fenced
+    CoordinatorNotAvailable _ -> back
+    _ -> Error (T.pack (show err))
+  pure (Left e)
 
 
 {- | Execute an action within a transaction, automatically
@@ -656,30 +745,67 @@ sendInTransaction txn tp = liftIO $ do
     _ -> return $ Left $ TransactionNotInProgress "Must be in a transaction to send records"
 
 
--- | Commit consumer offsets within a transaction (KIP-447)
-commitOffsetsInTransaction
-  :: Transaction
-  -> Text
-  -- ^ Consumer group ID
-  -> HashMap TopicPartition Int64
-  -- ^ Offsets to commit
-  -> IO (Either TransactionError ())
-commitOffsetsInTransaction txn groupId offsets = do
+{- | Commit consumer-group offsets as part of the open transaction
+(the JVM's @KafkaProducer.sendOffsetsToTransaction@, KIP-98 /
+KIP-447): @AddOffsetsToTxn@ to the transaction coordinator, then
+@TxnOffsetCommit@ to the group coordinator. The offsets become
+visible only if the transaction commits, so consumed input and
+produced output move together.
+
+The member's generation and member id make the group coordinator
+reject the commit from a member a rebalance has already replaced.
+-}
+sendOffsetsToTransaction
+  :: MonadIO m
+  => Transaction
+  -> BrokerAddress
+  -- ^ The consumer group's coordinator
+  -> TC.TxnGroupMember
+  -> [(TopicPartition, Int64)]
+  -- ^ Next offset to consume, per partition
+  -> m (Either TransactionError ())
+sendOffsetsToTransaction _ _ _ [] = liftIO (pure (Right ()))
+sendOffsetsToTransaction txn groupCoord member offsets = liftIO $ do
   state <- getTransactionState txn
   case state of
     InTransaction -> do
-      -- The coordinator-side wire calls (AddOffsetsToTxnRequest,
-      -- TxnOffsetCommitRequest) live in
-      -- 'Kafka.Client.Internal.TransactionCoordinator'; this
-      -- helper keeps the public surface stable and validates the
-      -- caller is actually inside an open transaction. The
-      -- internal coordinator routine is invoked from
-      -- 'commitTransaction' as part of the commit envelope, so
-      -- callers that need pre-commit registration of consumer
-      -- offsets should use 'sendOffsetsToTransaction' (the
-      -- KIP-447 equivalent), wired through the coordinator.
-      pure (Right ())
-    _ -> return $ Left $ TransactionNotInProgress "Must be in a transaction to commit offsets"
+      coordM <- readIORef (txnCoordinator txn)
+      pidM <- readIORef (txnProducerId txn)
+      epochM <- readIORef (txnProducerEpoch txn)
+      case (coordM, pidM, epochM) of
+        (Just coordinator, Just (ProducerId pid), Just (ProducerEpoch epoch)) -> do
+          let transactionalId = unTransactionalId (txnTransactionalId txn)
+          addR <-
+            TC.addOffsetsToTxn
+              (txnConnectionManager txn)
+              (txnConnConfig txn)
+              (txnVersionCache txn)
+              (txnCorrelationId txn)
+              (txnClientId txn)
+              coordinator
+              transactionalId
+              pid
+              epoch
+              (TC.tgmGroupId member)
+          case addR of
+            Left e -> pure (Left (coordinatorErrorToTxn e))
+            Right () -> do
+              r <-
+                TC.txnOffsetCommitWith
+                  (txnConnectionManager txn)
+                  (txnConnConfig txn)
+                  (txnVersionCache txn)
+                  (txnCorrelationId txn)
+                  (txnClientId txn)
+                  groupCoord
+                  transactionalId
+                  member
+                  pid
+                  epoch
+                  offsets
+              pure (either (Left . coordinatorErrorToTxn) Right r)
+        _ -> pure (Left (TransactionNotInitialized "Missing producer ID or coordinator"))
+    _ -> pure (Left (TransactionNotInProgress "Must be in a transaction to commit offsets"))
 
 
 ----------------------------------------------------------------------
@@ -762,7 +888,7 @@ effectiveTxnDeadlineMs now defaultMs = \case
 ----------------------------------------------------------------------
 
 {-# INLINEABLE createTransaction #-}
-{-# SPECIALIZE createTransaction :: TransactionalId -> ConnectionManager -> ApiVersionCache -> Text -> BrokerAddress -> Int32 -> IO Transaction #-}
+{-# SPECIALIZE createTransaction :: TransactionalId -> ConnectionManager -> ConnectionConfig -> ApiVersionCache -> Text -> BrokerAddress -> Int32 -> IO Transaction #-}
 
 
 {-# INLINEABLE initTransactions #-}

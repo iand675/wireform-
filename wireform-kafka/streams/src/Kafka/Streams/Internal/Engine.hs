@@ -490,7 +490,7 @@ sinkForwarder engine spec =
              CollectedRecord
                { crTopic = topic
                , crKey = keyB
-               , crValue = valB
+               , crValue = Just valB
                , crTimestamp = recordTimestamp rec
                , crHeaders = outHdrs
                , crPartition = part
@@ -764,7 +764,7 @@ makeContext engine selfNm =
                 Kafka.Streams.Types.topicName
                   (Kafka.Streams.Processor.seTopic emit)
             , crKey = Kafka.Streams.Processor.seKey emit
-            , crValue = Kafka.Streams.Processor.seValue emit
+            , crValue = Just (Kafka.Streams.Processor.seValue emit)
             , crTimestamp = Kafka.Streams.Processor.seTimestamp emit
             , crHeaders = Kafka.Streams.Processor.seHeaders emit
             , crPartition = Nothing

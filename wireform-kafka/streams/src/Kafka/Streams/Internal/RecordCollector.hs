@@ -27,6 +27,7 @@ module Kafka.Streams.Internal.RecordCollector (
   recordsForTopic,
   collectorHasPending,
   CollectedRecord (..),
+  crValueBytes,
 ) where
 
 import Control.Concurrent.STM
@@ -46,7 +47,8 @@ import Kafka.Streams.Types (
 data CollectedRecord = CollectedRecord
   { crTopic :: !TopicName
   , crKey :: !(Maybe ByteString)
-  , crValue :: !ByteString
+  , crValue :: !(Maybe ByteString)
+  -- ^ 'Nothing' is a null value (a tombstone on a compacted topic)
   , crTimestamp :: !Timestamp
   , crHeaders :: !Headers
   , crPartition :: !(Maybe Int)
@@ -54,6 +56,11 @@ data CollectedRecord = CollectedRecord
   "let the producer pick".
   -}
   }
+
+
+-- | The value's bytes, with a tombstone read as empty.
+crValueBytes :: CollectedRecord -> ByteString
+crValueBytes = maybe mempty id . crValue
 
 
 {- | Sink-side collector. The runtime calls 'collectorSend' from

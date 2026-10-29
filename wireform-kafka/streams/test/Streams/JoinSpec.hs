@@ -87,7 +87,7 @@ kstream_ktable_inner =
     pipeInput driver (topicName "events") (Just (bytes "u2")) (bytes "scroll") (t 2) 0
 
     out <- readOutput driver (topicName "out")
-    map (unbytes . crValue) out `shouldBe` ["alice:click", "bob:scroll"]
+    map (unbytes . crValueBytes) out `shouldBe` ["alice:click", "bob:scroll"]
     closeDriver driver
 
 
@@ -124,7 +124,7 @@ kstream_ktable_left =
     pipeInput driver (topicName "events") (Just (bytes "u2")) (bytes "y") (t 1) 0
 
     out <- readOutput driver (topicName "out")
-    map (unbytes . crValue) out `shouldBe` ["alice:x", "<unknown>:y"]
+    map (unbytes . crValueBytes) out `shouldBe` ["alice:x", "<unknown>:y"]
     closeDriver driver
 
 
@@ -159,7 +159,7 @@ kstream_ktable_table_updates_propagate =
     pipeInput driver (topicName "events") (Just (bytes "u1")) (bytes "y") (t 3) 0
 
     out <- readOutput driver (topicName "out")
-    map (unbytes . crValue) out `shouldBe` ["alice:x", "ALICE:y"]
+    map (unbytes . crValueBytes) out `shouldBe` ["alice:x", "ALICE:y"]
     closeDriver driver
 
 
@@ -202,7 +202,7 @@ kstream_kstream_inner_within_window =
     out <- readOutput driver (topicName "out")
     -- Order: L1 buffers left-side; R1 arrives, scans left, finds L1
     -- → "L1+R1"; L2 arrives, scans right, finds R1 → "L2+R1".
-    map (unbytes . crValue) out `shouldBe` ["L1+R1", "L2+R1"]
+    map (unbytes . crValueBytes) out `shouldBe` ["L1+R1", "L2+R1"]
     closeDriver driver
 
 
@@ -279,7 +279,7 @@ kstream_kstream_left_unmatched_emits_nothing =
     pipeInput driver (topicName "left") (Just (bytes "k")) (bytes "L3") (t 200) 0
 
     out <- readOutput driver (topicName "out")
-    map (unbytes . crValue) out
+    map (unbytes . crValueBytes) out
       `shouldBe` ["L1+<none>", "L1+R1", "L2+R1", "L3+<none>"]
     closeDriver driver
 
@@ -318,7 +318,7 @@ kstream_kstream_outer_emits_both_sides =
     pipeInput driver (topicName "right") (Just (bytes "k")) (bytes "R1") (t 200) 0
 
     out <- readOutput driver (topicName "out")
-    map (unbytes . crValue) out `shouldBe` ["L1/<>", "<>/R1"]
+    map (unbytes . crValueBytes) out `shouldBe` ["L1/<>", "<>/R1"]
     closeDriver driver
 
 
@@ -505,7 +505,7 @@ kstream_global_ktable_inner =
     pipeInput driver (topicName "events") (Just (bytes "e3")) (bytes "u2|scroll") (t 3) 0
 
     out <- readOutput driver (topicName "out")
-    map (unbytes . crValue) out `shouldBe` ["alice:click", "bob:scroll"]
+    map (unbytes . crValueBytes) out `shouldBe` ["alice:click", "bob:scroll"]
     closeDriver driver
 
 
@@ -543,7 +543,7 @@ kstream_global_ktable_left_no_match_emits_nothing =
     pipeInput driver (topicName "events") (Just (bytes "e2")) (bytes "u9|y") (t 2) 0
 
     out <- readOutput driver (topicName "out")
-    map (unbytes . crValue) out `shouldBe` ["alice:x", "<unknown>:y"]
+    map (unbytes . crValueBytes) out `shouldBe` ["alice:x", "<unknown>:y"]
     closeDriver driver
 
 

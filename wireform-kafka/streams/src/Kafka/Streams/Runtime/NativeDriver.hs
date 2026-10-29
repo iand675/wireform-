@@ -59,6 +59,8 @@ module Kafka.Streams.Runtime.NativeDriver (
 
 import Control.Concurrent.STM
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
+import Kafka.Client.Internal.TransactionCoordinator qualified as TC
 import Data.Foldable qualified as Foldable
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HashMap
@@ -231,10 +233,26 @@ newNativeDriver producer consumer mTxn = do
       , sdProducerSendOffsetsToTxn = \groupId offsets -> case mTxn of
           Nothing -> pure (Left "EOS not configured: producer has no bound Transaction")
           Just t -> do
-            r <- KT.commitOffsetsInTransaction t groupId offsets
-            pure $ case r of
-              Left e -> Left (show e)
-              Right () -> Right ()
+            _ <- pure groupId
+            mCoord <- KC.groupCoordinator consumer
+            meta <- KC.groupMetadata consumer
+            case mCoord of
+              Nothing -> pure (Left "no group coordinator known")
+              Just coord -> do
+                r <-
+                  KT.sendOffsetsToTransaction
+                    t
+                    coord
+                    TC.TxnGroupMember
+                      { TC.tgmGroupId = meta.cgmGroupId
+                      , TC.tgmGenerationId = meta.cgmGenerationId
+                      , TC.tgmMemberId = meta.cgmMemberId
+                      , TC.tgmGroupInstanceId = meta.cgmGroupInstanceId
+                      }
+                    (HashMap.toList offsets)
+                pure $ case r of
+                  Left e -> Left (show e)
+                  Right () -> Right ()
       , sdRebalanceEvent = atomically (tryReadTQueue rebalanceQ)
       , sdRequestProbingRebalance = do
           -- KIP-441: trigger a fresh JoinGroup so the leader
@@ -367,7 +385,7 @@ newMockDriver = do
                         |> MockSend
                           { mockSendTopic = pr.topic
                           , mockSendKey = pr.key
-                          , mockSendValue = pr.value
+                          , mockSendValue = maybe BS.empty id pr.value
                           , mockSendHeaders = pr.headers
                           , mockSendPartition = pr.partition
                           , mockSendTimestamp = pr.timestamp

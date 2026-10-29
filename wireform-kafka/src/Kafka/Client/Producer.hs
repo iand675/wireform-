@@ -211,6 +211,7 @@ module Kafka.Client.Producer (
   -}
   sendMessage_,
   sendRecord,
+  sendRecordAsync,
   sendMessageUnsafe_,
   sendMessageFastest_,
   sendMessages_,
@@ -531,8 +532,8 @@ data ProducerRecord = ProducerRecord
   -- ^ Target topic
   , key :: !(Maybe ByteString)
   -- ^ Optional message key (for partitioning and compaction)
-  , value :: !ByteString
-  -- ^ Message value
+  , value :: !(Maybe ByteString)
+  -- ^ Message value; 'Nothing' sends a null value (a tombstone)
   , headers :: ![(Text, ByteString)]
   -- ^ Optional headers
   , partition :: !(Maybe Int32)
@@ -1399,7 +1400,7 @@ sendMessage p@Producer {..} topic key value = liftIO $ do
         ProducerRecord
           { topic = topic
           , key = key
-          , value = value
+          , value = Just value
           , headers = []
           , partition = Nothing
           , timestamp = Nothing
@@ -1502,6 +1503,46 @@ sendRecord
   -> ProducerRecord
   -> m (Either String RecordMetadata)
 sendRecord p@Producer {..} pr0 = liftIO $ do
+  resultVar <- newEmptyTMVarIO
+  appended <- sendRecordWith p pr0 (atomically . putTMVar resultVar)
+  case appended of
+    Left err -> pure (Left err)
+    Right () -> do
+      let timeoutMicros = producerDeliveryTimeoutMs producerConfig * 1000
+      result <- timeout timeoutMicros (atomically (readTMVar resultVar))
+      pure $ case result of
+        Nothing ->
+          Left
+            ( "Delivery timeout exceeded ("
+                <> show (producerDeliveryTimeoutMs producerConfig)
+                <> "ms)"
+            )
+        Just r -> r
+
+
+{- | Append a 'ProducerRecord' to the accumulator and return without
+waiting for the broker: @onAck@ runs (on the sender thread) once
+the record is acknowledged or fails, after the ack interceptor.
+'Left' means the record was never appended (pre-send check or a
+full / closed accumulator); @onAck@ is then not called. Pair with
+'flushProducer' to wait for everything sent so far (the JVM's
+@send(record, callback)@ + @flush()@).
+-}
+sendRecordAsync
+  :: MonadIO m
+  => Producer
+  -> ProducerRecord
+  -> (Either String RecordMetadata -> IO ())
+  -> m (Either String ())
+sendRecordAsync p pr onAck = liftIO (sendRecordWith p pr onAck)
+
+
+sendRecordWith
+  :: Producer
+  -> ProducerRecord
+  -> (Either String RecordMetadata -> IO ())
+  -> IO (Either String ())
+sendRecordWith p@Producer {..} pr0 onAck = do
   -- 1. Interceptor — the JVM contract lets it rewrite every
   --    field, including 'partition' and 'timestamp', so we run
   --    it before we look at any of them.
@@ -1552,18 +1593,19 @@ sendRecord p@Producer {..} pr0 = liftIO $ do
               }
           topicPartition = BA.TopicPartition icTopic partition
 
-      resultVar <- newEmptyTMVarIO
-      let callback result =
-            atomically $ putTMVar resultVar $ case result of
-              Left e -> Left (T.unpack e)
-              Right ack ->
-                Right
-                  RecordMetadata
-                    { topic = BA.ackTopic ack
-                    , partition = BA.ackPartition ack
-                    , offset = BA.ackOffset ack
-                    , timestamp = BA.ackTimestamp ack
-                    }
+      let callback result = do
+            let !r = case result of
+                  Left e -> Left (T.unpack e)
+                  Right ack ->
+                    Right
+                      RecordMetadata
+                        { topic = BA.ackTopic ack
+                        , partition = BA.ackPartition ack
+                        , offset = BA.ackOffset ack
+                        , timestamp = BA.ackTimestamp ack
+                        }
+            runAckInterceptor producerConfig iceptedRecord r
+            onAck r
 
       success <-
         BA.appendRecordStampedAt
@@ -1575,22 +1617,7 @@ sendRecord p@Producer {..} pr0 = liftIO $ do
           icTs
 
       if success
-        then do
-          let timeoutMicros = producerDeliveryTimeoutMs producerConfig * 1000
-          result <-
-            timeout timeoutMicros $
-              atomically (readTMVar resultVar)
-          case result of
-            Nothing -> do
-              let err =
-                    "Delivery timeout exceeded ("
-                      <> show (producerDeliveryTimeoutMs producerConfig)
-                      <> "ms)"
-              runAckInterceptor producerConfig iceptedRecord (Left err)
-              pure (Left err)
-            Just r -> do
-              runAckInterceptor producerConfig iceptedRecord r
-              pure r
+        then pure (Right ())
         else do
           let err = "Failed to append record (accumulator closed or full)"
           runAckInterceptor producerConfig iceptedRecord (Left err)
@@ -1631,7 +1658,7 @@ publish p t mk v =
        ProducerRecord
          { topic = Topic.topicName t
          , key = Serde.serialize ks <$> mk
-         , value = Serde.serialize vs v
+         , value = Just (Serde.serialize vs v)
          , headers = hdrs
          , partition = Nothing
          , timestamp = Nothing
@@ -1844,6 +1871,7 @@ fullPreSendCheck p@Producer {..} topic key mExplicit mTxn = do
                   r <-
                     TC.addPartitionsToTxn
                       (Txn.txnConnectionManager txn)
+                      (Txn.txnConnConfig txn)
                       (Txn.txnVersionCache txn)
                       (Txn.txnCorrelationId txn)
                       (Txn.txnClientId txn)
@@ -1989,7 +2017,7 @@ sendMessageAsync p@Producer {..} topic key value = liftIO $ do
         ProducerRecord
           { topic = topic
           , key = key
-          , value = value
+          , value = Just value
           , headers = []
           , partition = Nothing
           , timestamp = Nothing
@@ -2092,7 +2120,7 @@ sendMessage_ p@Producer {..} topic key value = liftIO $ do
           { RB.recordTimestampDelta = 0
           , RB.recordOffsetDelta = 0
           , RB.recordKey = key
-          , RB.recordValue = value
+          , RB.recordValue = Just value
           , RB.recordHeaders = []
           }
       !tp = BA.TopicPartition topic partition
@@ -2155,7 +2183,7 @@ sendMessageFastest_ p@Producer {..} topic key value = liftIO $ do
                   { RB.recordTimestampDelta = 0
                   , RB.recordOffsetDelta = 0
                   , RB.recordKey = key
-                  , RB.recordValue = value
+                  , RB.recordValue = Just value
                   , RB.recordHeaders = []
                   }
           stillCurrent <-
@@ -2229,7 +2257,7 @@ sendMessageUnsafe_ p@Producer {..} topic key value = liftIO $ do
           { RB.recordTimestampDelta = 0
           , RB.recordOffsetDelta = 0
           , RB.recordKey = key
-          , RB.recordValue = value
+          , RB.recordValue = Just value
           , RB.recordHeaders = []
           }
       !tp = BA.TopicPartition topic partition
@@ -2289,7 +2317,7 @@ sendMessages_ p@Producer {..} topic kvs = liftIO $ do
               { RB.recordTimestampDelta = 0
               , RB.recordOffsetDelta = 0
               , RB.recordKey = k
-              , RB.recordValue = v
+              , RB.recordValue = Just v
               , RB.recordHeaders = []
               }
           | (k, v) <- kvs

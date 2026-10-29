@@ -99,7 +99,7 @@ unit_flushWaitsForBatches = do
           { RB.recordTimestampDelta = 0
           , RB.recordOffsetDelta = 0
           , RB.recordKey = Nothing
-          , RB.recordValue = "test-value"
+          , RB.recordValue = Just "test-value"
           , RB.recordHeaders = []
           }
   added <- appendRecord accumulator tp record
@@ -165,7 +165,7 @@ unit_flushRepeatable = do
           { RB.recordTimestampDelta = 0
           , RB.recordOffsetDelta = 0
           , RB.recordKey = Nothing
-          , RB.recordValue = "test-value"
+          , RB.recordValue = Just "test-value"
           , RB.recordHeaders = []
           }
   added <- appendRecord accumulator tp record
@@ -241,7 +241,7 @@ unit_closeWaitsForPendingBatches = do
           { RB.recordTimestampDelta = 0
           , RB.recordOffsetDelta = 0
           , RB.recordKey = Nothing
-          , RB.recordValue = "test-value"
+          , RB.recordValue = Just "test-value"
           , RB.recordHeaders = []
           }
   replicateM_ 10 $ appendRecord accumulator tp record
@@ -434,7 +434,7 @@ unit_producerCloseAfterFlush = do
           { RB.recordTimestampDelta = 0
           , RB.recordOffsetDelta = 0
           , RB.recordKey = Nothing
-          , RB.recordValue = "test-value"
+          , RB.recordValue = Just "test-value"
           , RB.recordHeaders = []
           }
   replicateM_ 5 $ appendRecord accumulator tp record
@@ -465,7 +465,7 @@ unit_doubleCloseIsIdempotent = do
           { RB.recordTimestampDelta = 0
           , RB.recordOffsetDelta = 0
           , RB.recordKey = Nothing
-          , RB.recordValue = "test-value"
+          , RB.recordValue = Just "test-value"
           , RB.recordHeaders = []
           }
   _ <- appendRecord accumulator tp record
@@ -506,7 +506,7 @@ prop_lifecycleThreadSafety = H.property $ do
           { RB.recordTimestampDelta = 0
           , RB.recordOffsetDelta = 0
           , RB.recordKey = Nothing
-          , RB.recordValue = "test-value"
+          , RB.recordValue = Just "test-value"
           , RB.recordHeaders = []
           }
 

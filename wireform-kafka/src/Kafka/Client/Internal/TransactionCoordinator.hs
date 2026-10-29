@@ -23,8 +23,8 @@ module Kafka.Client.Internal.TransactionCoordinator (
   addPartitionsToTxn,
   endTransaction,
   addOffsetsToTxn,
-  txnOffsetCommit,
   txnOffsetCommitWith,
+  TxnGroupMember (..),
 
   -- * Pure request builders (exposed for testing)
   buildAddOffsetsToTxnRequest,
@@ -141,6 +141,8 @@ Uses FindCoordinatorRequest (API key 10) with coordinator type TRANSACTION (1)
 -}
 findTransactionCoordinator
   :: Conn.ConnectionManager
+  -> Conn.ConnectionConfig
+  -- ^ TLS / SASL settings for coordinator connections
   -> AV.ApiVersionCache
   -> IORef Int32
   -- ^ Correlation ID source
@@ -151,9 +153,9 @@ findTransactionCoordinator
   -> Text
   -- ^ Transactional ID
   -> IO (Either TransactionCoordinatorError TransactionCoordinator)
-findTransactionCoordinator connMgr versionCache corrIdVar bootstrapBroker clientId transactionalId = do
+findTransactionCoordinator connMgr connCfg versionCache corrIdVar bootstrapBroker clientId transactionalId = do
   -- Get connection to bootstrap broker
-  connResult <- Conn.getOrCreateConnection connMgr bootstrapBroker Conn.defaultConnectionConfig
+  connResult <- Conn.getOrCreateConnection connMgr bootstrapBroker connCfg
 
   case connResult of
     Left err ->
@@ -258,6 +260,8 @@ Uses InitProducerIdRequest (API key 22)
 -}
 initProducerId
   :: Conn.ConnectionManager
+  -> Conn.ConnectionConfig
+  -- ^ TLS / SASL settings for coordinator connections
   -> AV.ApiVersionCache
   -> IORef Int32
   -- ^ Correlation ID source
@@ -275,11 +279,11 @@ initProducerId
   -- ^ Producer epoch (for fencing)
   -> IO (Either TransactionCoordinatorError (Int64, Int16))
   -- ^ Returns (ProducerId, ProducerEpoch)
-initProducerId connMgr versionCache corrIdVar clientId coordinator transactionalId timeoutMs maybeProducerId maybeEpoch = do
+initProducerId connMgr connCfg versionCache corrIdVar clientId coordinator transactionalId timeoutMs maybeProducerId maybeEpoch = do
   let coordAddr = BrokerAddress (T.unpack $ tcHost coordinator) (fromIntegral $ tcPort coordinator)
 
   -- Get connection to coordinator
-  connResult <- Conn.getOrCreateConnection connMgr coordAddr Conn.defaultConnectionConfig
+  connResult <- Conn.getOrCreateConnection connMgr coordAddr connCfg
 
   case connResult of
     Left err ->
@@ -354,6 +358,8 @@ Uses AddPartitionsToTxnRequest (API key 24)
 -}
 addPartitionsToTxn
   :: Conn.ConnectionManager
+  -> Conn.ConnectionConfig
+  -- ^ TLS / SASL settings for coordinator connections
   -> AV.ApiVersionCache
   -> IORef Int32
   -- ^ Correlation ID source
@@ -370,7 +376,7 @@ addPartitionsToTxn
   -> [TopicPartition]
   -- ^ Partitions to add
   -> IO (Either TransactionCoordinatorError ())
-addPartitionsToTxn connMgr versionCache corrIdVar clientId coordinator transactionalId producerId epoch partitions = do
+addPartitionsToTxn connMgr connCfg versionCache corrIdVar clientId coordinator transactionalId producerId epoch partitions = do
   let coordAddr = BrokerAddress (T.unpack $ tcHost coordinator) (fromIntegral $ tcPort coordinator)
 
   -- Group partitions by topic
@@ -389,7 +395,7 @@ addPartitionsToTxn connMgr versionCache corrIdVar clientId coordinator transacti
           ]
 
   -- Get connection to coordinator
-  connResult <- Conn.getOrCreateConnection connMgr coordAddr Conn.defaultConnectionConfig
+  connResult <- Conn.getOrCreateConnection connMgr coordAddr connCfg
 
   case connResult of
     Left err ->
@@ -474,6 +480,8 @@ Uses EndTxnRequest (API key 26)
 -}
 endTransaction
   :: Conn.ConnectionManager
+  -> Conn.ConnectionConfig
+  -- ^ TLS / SASL settings for coordinator connections
   -> AV.ApiVersionCache
   -> IORef Int32
   -- ^ Correlation ID source
@@ -490,11 +498,11 @@ endTransaction
   -> Bool
   -- ^ True = commit, False = abort
   -> IO (Either TransactionCoordinatorError ())
-endTransaction connMgr versionCache corrIdVar clientId coordinator transactionalId producerId epoch committed = do
+endTransaction connMgr connCfg versionCache corrIdVar clientId coordinator transactionalId producerId epoch committed = do
   let coordAddr = BrokerAddress (T.unpack $ tcHost coordinator) (fromIntegral $ tcPort coordinator)
 
   -- Get connection to coordinator
-  connResult <- Conn.getOrCreateConnection connMgr coordAddr Conn.defaultConnectionConfig
+  connResult <- Conn.getOrCreateConnection connMgr coordAddr connCfg
 
   case connResult of
     Left err ->
@@ -561,6 +569,8 @@ envelope.
 -}
 addOffsetsToTxn
   :: Conn.ConnectionManager
+  -> Conn.ConnectionConfig
+  -- ^ TLS / SASL settings for coordinator connections
   -> AV.ApiVersionCache
   -> IORef Int32
   -- ^ Correlation ID source
@@ -577,7 +587,7 @@ addOffsetsToTxn
   -> Text
   -- ^ Consumer group ID
   -> IO (Either TransactionCoordinatorError ())
-addOffsetsToTxn connMgr versionCache corrIdVar clientId coordinator transactionalId producerId epoch groupId = do
+addOffsetsToTxn connMgr connCfg versionCache corrIdVar clientId coordinator transactionalId producerId epoch groupId = do
   let coordAddr =
         BrokerAddress
           (T.unpack (tcHost coordinator))
@@ -586,7 +596,7 @@ addOffsetsToTxn connMgr versionCache corrIdVar clientId coordinator transactiona
     Conn.getOrCreateConnection
       connMgr
       coordAddr
-      Conn.defaultConnectionConfig
+      connCfg
   case connResult of
     Left err ->
       return $
@@ -638,73 +648,30 @@ addOffsetsToTxn connMgr versionCache corrIdVar clientId coordinator transactiona
                 else return $ Right ()
 
 
-{- | Commit consumer group offsets as part of a transaction
-Uses TxnOffsetCommitRequest (API key 28)
-This is sent to the consumer group coordinator, not the transaction coordinator
--}
-txnOffsetCommit
-  :: BrokerAddress
-  -- ^ Consumer group coordinator
-  -> Text
-  -- ^ Transactional ID
-  -> Text
-  -- ^ Consumer group ID
-  -> Int64
-  -- ^ Producer ID
-  -> Int16
-  -- ^ Producer epoch
-  -> [(TopicPartition, Int64)]
-  -- ^ Offsets to commit
-  -> IO (Either TransactionCoordinatorError ())
-txnOffsetCommit = txnOffsetCommitImpl
-
-
-{- | Concrete implementation; signature matches 'txnOffsetCommit'
-with the additional shared connection / version-cache /
-correlation-id source. Threaded through callers via the
-richer 'txnOffsetCommitWith' wrapper below; the legacy
-4-argument version above is kept as a thin re-export so the
-public surface doesn't churn.
--}
-txnOffsetCommitImpl
-  :: BrokerAddress
-  -> Text
-  -> Text
-  -> Int64
-  -> Int16
-  -> [(TopicPartition, Int64)]
-  -> IO (Either TransactionCoordinatorError ())
-txnOffsetCommitImpl _coord _txnId _groupId _pid _epoch _offsets =
-  -- Caller-side path: this 6-arg variant is preserved for
-  -- backward-compatibility with the existing 'commitTransaction'
-  -- machinery, which invokes the richer 'txnOffsetCommitWith'
-  -- below when it has the connection manager + version cache
-  -- threaded through. See 'txnOffsetCommitWith' for the actual
-  -- protocol call site.
-  pure (Right ())
-
-
 {- | Send a TxnOffsetCommitRequest (API key 28). Mirrors what the
 JVM client does inside @KafkaProducer.commitTransaction@ when
 'sendOffsetsToTransaction' staged consumer-group offsets.
 -}
 txnOffsetCommitWith
   :: Conn.ConnectionManager
+  -> Conn.ConnectionConfig
+  -- ^ TLS / SASL settings for coordinator connections
   -> AV.ApiVersionCache
   -> IORef Int32
   -> Text -- client id
   -> BrokerAddress -- consumer group coordinator
-  -> Text -- consumer group id
+  -> Text -- transactional id
+  -> TxnGroupMember
   -> Int64 -- producer id
   -> Int16 -- producer epoch
   -> [(TopicPartition, Int64)]
   -> IO (Either TransactionCoordinatorError ())
-txnOffsetCommitWith connMgr versionCache corrIdVar clientId groupCoordinator groupId producerId epoch offsets = do
+txnOffsetCommitWith connMgr connCfg versionCache corrIdVar clientId groupCoordinator transactionalId member producerId epoch offsets = do
   connResult <-
     Conn.getOrCreateConnection
       connMgr
       groupCoordinator
-      Conn.defaultConnectionConfig
+      connCfg
   case connResult of
     Left err ->
       return $
@@ -730,7 +697,7 @@ txnOffsetCommitWith connMgr versionCache corrIdVar clientId groupCoordinator gro
               Nothing -> 0
               Just v -> v
 
-      let request = buildTxnOffsetCommitRequest groupId producerId epoch offsets
+      let request = buildTxnOffsetCommitRequest transactionalId member producerId epoch offsets
           requestBody = WC.runEncodeVer @TOCReq.TxnOffsetCommitRequest apiVersion request
           clientIdKafka = P.mkKafkaString clientId
       result <-
@@ -785,17 +752,6 @@ txnOffsetCommitWith connMgr versionCache corrIdVar clientId groupCoordinator gro
                 Just ec -> return (Left (interpretCoordinatorError ec))
 
 
-{- | The coordinator's TxnOffsetCommit request format requires the
-/transactional id/ string, but the legacy callers only have
-producer-id + epoch. We synthesise a placeholder transactional
-id from those: callers wired through 'commitTransaction' supply
-the real id (via 'txnOffsetCommitWith' below), so this fallback
-only ever fires from the legacy 6-arg path which short-circuits
-to 'Right ()'.
--}
-txnIdFromTxn :: Int16 -> Int64 -> Text
-txnIdFromTxn epoch pid =
-  T.pack ("txn-" <> show pid <> "-" <> show epoch)
 
 
 ----------------------------------------------------------------------
@@ -836,9 +792,22 @@ transactional-id derived from (epoch, producer-id), and emits
 empty leader-epoch / metadata fields. Mirrors what
 'txnOffsetCommitWith' constructs internally.
 -}
+{- | The consumer-group member a transactional offset commit is made
+on behalf of (the JVM's @ConsumerGroupMetadata@).
+-}
+data TxnGroupMember = TxnGroupMember
+  { tgmGroupId :: !Text
+  , tgmGenerationId :: !Int32
+  , tgmMemberId :: !Text
+  , tgmGroupInstanceId :: !(Maybe Text)
+  }
+  deriving stock (Eq, Show)
+
+
 buildTxnOffsetCommitRequest
   :: Text
-  -- ^ consumer group id
+  -- ^ transactional id
+  -> TxnGroupMember
   -> Int64
   -- ^ producer id
   -> Int16
@@ -846,7 +815,7 @@ buildTxnOffsetCommitRequest
   -> [(TopicPartition, Int64)]
   -- ^ offsets to commit
   -> TOCReq.TxnOffsetCommitRequest
-buildTxnOffsetCommitRequest groupId producerId epoch offsets =
+buildTxnOffsetCommitRequest transactionalId member producerId epoch offsets =
   let !byTopic =
         Map.fromListWith
           (++)
@@ -872,12 +841,16 @@ buildTxnOffsetCommitRequest groupId producerId epoch offsets =
           | (topic, parts) <- Map.toList byTopic
           ]
   in TOCReq.TxnOffsetCommitRequest
-       { TOCReq.txnOffsetCommitRequestTransactionalId = P.mkKafkaString (txnIdFromTxn epoch producerId)
-       , TOCReq.txnOffsetCommitRequestGroupId = P.mkKafkaString groupId
+       { TOCReq.txnOffsetCommitRequestTransactionalId = P.mkKafkaString transactionalId
+       , TOCReq.txnOffsetCommitRequestGroupId = P.mkKafkaString (tgmGroupId member)
        , TOCReq.txnOffsetCommitRequestProducerId = producerId
        , TOCReq.txnOffsetCommitRequestProducerEpoch = epoch
-       , TOCReq.txnOffsetCommitRequestGenerationId = -1
-       , TOCReq.txnOffsetCommitRequestMemberId = P.KafkaString P.Null
-       , TOCReq.txnOffsetCommitRequestGroupInstanceId = P.KafkaString P.Null
+       , -- KIP-447: the coordinator fences a commit from a member whose
+         -- generation is stale, so a zombie that lost its partitions
+         -- in a rebalance cannot commit offsets for them.
+         TOCReq.txnOffsetCommitRequestGenerationId = tgmGenerationId member
+       , TOCReq.txnOffsetCommitRequestMemberId = P.mkKafkaString (tgmMemberId member)
+       , TOCReq.txnOffsetCommitRequestGroupInstanceId =
+           maybe (P.KafkaString P.Null) P.mkKafkaString (tgmGroupInstanceId member)
        , TOCReq.txnOffsetCommitRequestTopics = P.mkKafkaArray topicVec
        }

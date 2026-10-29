@@ -164,7 +164,7 @@ stamped_records_carry_stamp_into_new_batch = it
             , BA.stampBaseSequence = 17
             , BA.stampIsTransactional = True
             }
-        rec_ = RB.Record 0 0 Nothing "value" []
+        rec_ = RB.Record 0 0 Nothing (Just "value") []
     ok <- BA.appendRecordStamped acc tp rec_ BA.NoRecordCallback stamp
     ok `shouldBe` True
     BA.closeBatchAccumulator acc
@@ -190,7 +190,7 @@ stamped_records_share_existing_batch_stamp = it
         stampA = BA.BatchStamp 999 3 17 True
         stampB = BA.BatchStamp 999 3 18 True -- next per-producer seq
         stampC = BA.BatchStamp 999 3 19 True
-        rec_ = RB.Record 0 0 Nothing "v" []
+        rec_ = RB.Record 0 0 Nothing (Just "v") []
     _ <- BA.appendRecordStamped acc tp rec_ BA.NoRecordCallback stampA
     _ <- BA.appendRecordStamped acc tp rec_ BA.NoRecordCallback stampB
     _ <- BA.appendRecordStamped acc tp rec_ BA.NoRecordCallback stampC
@@ -228,7 +228,7 @@ distinct_partitions_get_distinct_stamps = it
         tp2 = BA.TopicPartition "t" 1
         stamp1 = BA.BatchStamp 999 3 0 True
         stamp2 = BA.BatchStamp 999 3 17 True
-        rec_ = RB.Record 0 0 Nothing "v" []
+        rec_ = RB.Record 0 0 Nothing (Just "v") []
     _ <- BA.appendRecordStamped acc tp1 rec_ BA.NoRecordCallback stamp1
     _ <- BA.appendRecordStamped acc tp2 rec_ BA.NoRecordCallback stamp2
     BA.closeBatchAccumulator acc
@@ -252,7 +252,7 @@ mkBatchWith isTxn =
     { BA.batchTopicPartition = BA.TopicPartition "t" 0
     , BA.batchRecords =
         V.fromList
-          [RB.Record 0 0 Nothing "v" []]
+          [RB.Record 0 0 Nothing (Just "v") []]
     , BA.batchSizeBytes = 1
     , BA.batchCreateTime = 0
     , BA.batchBaseTimestamp = 0

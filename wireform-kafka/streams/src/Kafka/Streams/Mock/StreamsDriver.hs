@@ -61,6 +61,7 @@ import Kafka.Streams.Internal.Engine (
  )
 import Kafka.Streams.Internal.RecordCollector (
   CollectedRecord (..),
+  crValueBytes,
   collectorTake,
   inMemoryCollector,
  )
@@ -360,7 +361,7 @@ drainCollectedToMock d = do
           (crTopic cr)
           (fromIntegral p)
           (crKey cr)
-          (crValue cr)
+          (crValueBytes cr)
           (crTimestamp cr)
           (KH.toList (crHeaders cr))
       pure ()

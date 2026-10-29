@@ -14,6 +14,7 @@ import Hedgehog qualified as H
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import Kafka.Client.Consumer (TopicPartition (..))
+import Kafka.Client.Internal.TransactionCoordinator (TxnGroupMember (..))
 import Kafka.Client.Transaction
 import Kafka.Network.Connection (BrokerAddress (..), ConnectionManager)
 import Kafka.Network.Connection qualified as Conn
@@ -38,6 +39,7 @@ createTestTransaction txnId = do
   createTransaction
     txnId
     connMgr
+    Conn.defaultConnectionConfig
     versionCache
     "test-client"
     (BrokerAddress "localhost" 9092)
@@ -82,7 +84,7 @@ transactionSpec =
             ]
       , describe "Offset Commits (requires broker)" $
           sequence_
-            [ brokerCase "unit_commitOffsetsInTransaction" unit_commitOffsetsInTransaction
+            [ brokerCase "unit_sendOffsetsToTransaction" unit_commitOffsetsInTransaction
             , brokerCase "unit_cannotCommitOffsetsOutsideTransaction" unit_cannotCommitOffsetsOutsideTransaction
             ]
       , describe "Idempotency (requires broker)" $
@@ -453,10 +455,10 @@ unit_commitOffsetsInTransaction = do
           , (TopicPartition "topic2" 0, 50)
           ]
 
-  result <- commitOffsetsInTransaction txn "consumer-group-1" offsets
+  result <- sendOffsetsToTransaction txn (BrokerAddress "localhost" 9092) standaloneMember (Map.toList offsets)
 
   case result of
-    Left err -> expectationFailure $ "commitOffsetsInTransaction failed: " ++ show err
+    Left err -> expectationFailure $ "sendOffsetsToTransaction failed: " ++ show err
     Right () -> return ()
 
 
@@ -466,7 +468,7 @@ unit_cannotCommitOffsetsOutsideTransaction = do
   _ <- initTransactions txn
 
   let offsets = Map.fromList [(TopicPartition "topic1" 0, 100)]
-  result <- commitOffsetsInTransaction txn "consumer-group-1" offsets
+  result <- sendOffsetsToTransaction txn (BrokerAddress "localhost" 9092) standaloneMember (Map.toList offsets)
 
   case result of
     Left (TransactionNotInProgress _) -> return ()
@@ -546,3 +548,16 @@ prop_sequenceNumbersMonotonic = H.property $ do
 
   -- Should be monotonically increasing from 1 to numSends
   H.assert (values == [1 .. fromIntegral numSends])
+
+
+{- | A member outside any consumer group (generation -1, no member id),
+which the coordinator accepts for a plain transactional offset commit.
+-}
+standaloneMember :: TxnGroupMember
+standaloneMember =
+  TxnGroupMember
+    { tgmGroupId = "consumer-group-1"
+    , tgmGenerationId = -1
+    , tgmMemberId = ""
+    , tgmGroupInstanceId = Nothing
+    }

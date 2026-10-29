@@ -42,6 +42,8 @@ module Kafka.Streams.Runtime.EOS (
 
 import Control.Exception (SomeException, try)
 import Data.HashMap.Strict (HashMap)
+import Data.HashMap.Strict qualified as HashMap
+import Kafka.Client.Internal.TransactionCoordinator qualified as TC
 import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -241,15 +243,25 @@ runCommitCycle coord groupId getOffsets flushBody = do
 transaction client's 'TransactionError' into 'Text' for the
 orchestrator.
 -}
-newRealEOSCoordinator :: KT.Transaction -> EOSCoordinator
-newRealEOSCoordinator txn =
+newRealEOSCoordinator :: KT.Transaction -> KC.Consumer -> EOSCoordinator
+newRealEOSCoordinator txn consumer =
   EOSCoordinator
     { initTxn = wrapTE <$> KT.initTransactions txn
     , beginTxn = wrapTE <$> KT.beginTransaction txn
     , commitTxn = wrapTE <$> KT.commitTransaction txn
     , abortTxn = wrapTE <$> KT.abortTransaction txn
-    , commitOffsets = \gid offs ->
-        wrapTE <$> KT.commitOffsetsInTransaction txn gid offs
+    , commitOffsets = \_gid offs -> do
+        mCoord <- KC.groupCoordinator consumer
+        meta <- KC.groupMetadata consumer
+        case mCoord of
+          Nothing -> pure (Left "no group coordinator known")
+          Just coord ->
+            wrapTE
+              <$> KT.sendOffsetsToTransaction
+                txn
+                coord
+                (toTxnMember meta)
+                (HashMap.toList offs)
     , storeCommit = pure (Right ())
     , -- No transactional stores registered with this coordinator
       -- by default. Callers that materialise stores wrap the
@@ -261,6 +273,13 @@ newRealEOSCoordinator txn =
     }
   where
     wrapTE = either (Left . T.pack . show) Right
+    toTxnMember meta =
+      TC.TxnGroupMember
+        { TC.tgmGroupId = meta.cgmGroupId
+        , TC.tgmGenerationId = meta.cgmGenerationId
+        , TC.tgmMemberId = meta.cgmMemberId
+        , TC.tgmGroupInstanceId = meta.cgmGroupInstanceId
+        }
 
 
 {- | Transactional-store wiring helper: take an existing coordinator and a

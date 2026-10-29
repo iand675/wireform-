@@ -289,7 +289,7 @@ runDemo = do
 
   enriched <- readOutput driver (topicName "enriched-orders")
   putStrLn ("Enriched orders (sink): " <> show (length enriched))
-  mapM_ (\cr -> putStrLn ("  -> " <> BSC.unpack (crValue cr))) enriched
+  mapM_ (\cr -> putStrLn ("  -> " <> BSC.unpack (crValueBytes cr))) enriched
 
   putStrLn ""
   logLines <- readIORef (extLog ext)
