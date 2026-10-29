@@ -44,10 +44,6 @@ The DSL mirrors the Java methods on
 -}
 module Kafka.Streams.KStream (
   KStream (..),
-  kstreamParent,
-  kstreamBuilder,
-  kstreamKeySerde,
-  kstreamValueSerde,
 
   -- * Sources
   streamFromTopic,
@@ -155,6 +151,8 @@ module Kafka.Streams.KStream (
 
 import Control.Concurrent.Async qualified
 import Data.IORef
+import Data.Int (Int64)
+import Data.Maybe (isJust)
 import Control.Exception (throwIO)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as T
@@ -162,6 +160,8 @@ import Kafka.Streams.Consumed (
   Consumed (..),
   consumed,
  )
+import Kafka.Streams.Internal.Serdes (eitherSerde, listSerde)
+import Kafka.Streams.Internal.WindowJoin qualified as WJ
 import Kafka.Streams.Joined (
   JoinWindows (..),
   Joined (..),
@@ -189,7 +189,6 @@ import Kafka.Streams.Processor qualified
 import Kafka.Streams.Produced (
   Produced (..),
   StreamPartitioner,
-  produced,
  )
 import Kafka.Streams.Repartitioned qualified as KafkaStreamsRepartitioned
 import Kafka.Streams.Serde (HasSerde (..), Serde, serialize, serializeHeaders)
@@ -203,8 +202,6 @@ import Kafka.Streams.State.Store (
   KeyValueStore (..),
   StoreBuilderW,
   StoreName,
-  WindowStore (..),
-  kvIteratorToList,
  )
 import Kafka.Streams.State.Store qualified
 import Kafka.Streams.State.Window.InMemory (
@@ -218,12 +215,10 @@ import Kafka.Streams.StreamsBuilder (
   sharedRepartitionNode,
   withTopology_,
  )
-import Kafka.Streams.Time (Timestamp (..))
 import Kafka.Streams.Topology qualified as Topo
 import Kafka.Streams.Types (
   Record (..),
   TopicName,
-  mapValue,
  )
 import Kafka.Streams.Types qualified
 import Unsafe.Coerce qualified as Unsafe
@@ -400,28 +395,6 @@ attachProcessorKeyed keyChanged parent prefix supplier ks' vs' = do
       , kstreamKeyChanged = keyChanged
       , kstreamKeySerde = ks'
       , kstreamValueSerde = vs'
-      }
-
-
-{- | Build a stateless 'Processor' that runs @f@ on each record and
-forwards the result via 'ProcessorContext.forward'.
--}
-statelessProcessorM
-  :: T.Text
-  -> (Record k v -> Record k' v')
-  -> IO (Processor k v)
-statelessProcessorM nm f = do
-  ctxRef <- newIORef Nothing
-  pure
-    Processor
-      { procName = processorName nm
-      , procInit = \ctx -> writeIORef ctxRef (Just ctx)
-      , procClose = pure ()
-      , procProcess = \r -> do
-          mctx <- readIORef ctxRef
-          case mctx of
-            Nothing -> pure ()
-            Just ctx -> forwardRecord ctx (f r)
       }
 
 
@@ -1381,29 +1354,14 @@ joinKStreamKTableProcL storeNm joiner = do
 
 
 ----------------------------------------------------------------------
--- KStream-KStream window join
---
--- Architecture:
---
---   Stream-A --> JoinSideProc-A --\
---                                  +--> MergePass --> downstream
---   Stream-B --> JoinSideProc-B --/
---
--- Each side processor:
---   1. Stores its incoming record in its /own/ window store, keyed
---      by record key, indexed by record timestamp.
---   2. Range-scans the /other/ store over
---      @[ts - (\j -> j.beforeMs), ts + (\j -> j.afterMs)]@ for matches.
---   3. For each match, calls the joiner with both values in the
---      canonical (left, right) order and forwards the result to the
---      MergePass node.
---   4. For LEFT and OUTER joins, when /this/ side finds no matches
---      and the side's emission rule for "no match" is non-empty, it
---      emits a single record with @Nothing@ on the other side.
+-- KStream-KStream window join ("Kafka.Streams.Internal.WindowJoin")
 ----------------------------------------------------------------------
 
 {- | Inner KStream-KStream window join. Mirrors
-@KStream.join(other, ValueJoiner, JoinWindows)@.
+@KStream.join(other, ValueJoiner, JoinWindows)@: a left record at @t@
+joins the right records in @[t - before, t + after]@ (and so a right
+record joins the left ones in the mirror range); the result carries
+the later timestamp. See "Kafka.Streams.Internal.WindowJoin".
 -}
 joinKStreamKStream
   :: forall k v1 v2 v'
@@ -1414,19 +1372,14 @@ joinKStreamKStream
   -> KStream k v1
   -> KStream k v2
   -> IO (KStream k v')
-joinKStreamKStream joiner jw _j sl sr =
-  buildWindowJoin
-    sl
-    sr
-    jw
-    "KSTREAM-WINDOWJOIN"
-    (mkSideProc @k @v1 @v2 @v' jw (\v1 v2 -> joiner v1 v2) Inner)
-    (mkSideProc @k @v2 @v1 @v' jw (\v2 v1 -> joiner v1 v2) Inner)
+joinKStreamKStream joiner jw j sl sr =
+  buildWindowJoin sl sr jw j "KSTREAM-WINDOWJOIN" (WindowJoinSpec joiner Nothing Nothing)
 
 
-{- | Left KStream-KStream window join. Every left record emits at
-least once: with @Just v2@ for each match, or with @Nothing@ if no
-match. Right records only contribute matches.
+{- | Left KStream-KStream window join. Every left record is joined with
+its matches, or, if none arrives before its window closes (plus
+grace), emitted once with @Nothing@ then. Right records only
+contribute matches.
 -}
 leftJoinKStreamKStream
   :: forall k v1 v2 v'
@@ -1437,26 +1390,18 @@ leftJoinKStreamKStream
   -> KStream k v1
   -> KStream k v2
   -> IO (KStream k v')
-leftJoinKStreamKStream joiner jw _j sl sr =
+leftJoinKStreamKStream joiner jw j sl sr =
   buildWindowJoin
     sl
     sr
     jw
+    j
     "KSTREAM-WINDOWLEFTJOIN"
-    ( mkSideProc @k @v1 @v2 @v'
-        jw
-        (\v1 v2 -> joiner v1 (Just v2))
-        (LeftEmitNothing (\v1 -> joiner v1 Nothing))
-    )
-    ( mkSideProc @k @v2 @v1 @v'
-        jw
-        (\v2 v1 -> joiner v1 (Just v2))
-        Inner
-    )
+    (WindowJoinSpec (\v1 v2 -> joiner v1 (Just v2)) (Just (\v1 -> joiner v1 Nothing)) Nothing)
 
 
-{- | Outer KStream-KStream window join. Both sides emit at least
-once. The joiner takes Maybes on both sides.
+{- | Outer KStream-KStream window join: as 'leftJoinKStreamKStream' for
+both sides.
 -}
 outerJoinKStreamKStream
   :: forall k v1 v2 v'
@@ -1467,32 +1412,42 @@ outerJoinKStreamKStream
   -> KStream k v1
   -> KStream k v2
   -> IO (KStream k v')
-outerJoinKStreamKStream joiner jw _j sl sr =
+outerJoinKStreamKStream joiner jw j sl sr =
   buildWindowJoin
     sl
     sr
     jw
+    j
     "KSTREAM-WINDOWOUTERJOIN"
-    ( mkSideProc @k @v1 @v2 @v'
-        jw
+    ( WindowJoinSpec
         (\v1 v2 -> joiner (Just v1) (Just v2))
-        (LeftEmitNothing (\v1 -> joiner (Just v1) Nothing))
-    )
-    ( mkSideProc @k @v2 @v1 @v'
-        jw
-        (\v2 v1 -> joiner (Just v1) (Just v2))
-        (LeftEmitNothing (\v2 -> joiner Nothing (Just v2)))
+        (Just (\v1 -> joiner (Just v1) Nothing))
+        (Just (\v2 -> joiner Nothing (Just v2)))
     )
 
 
--- | The "what to do when this side finds no matches" mode.
-data JoinMode vSelf vOut
-  = Inner
-  | LeftEmitNothing (vSelf -> vOut)
+-- | What a window join emits: matches, and (left / outer) unmatched records.
+data WindowJoinSpec v1 v2 v' = WindowJoinSpec
+  { wjsJoin :: v1 -> v2 -> v'
+  , wjsLeftOnly :: Maybe (v1 -> v')
+  , wjsRightOnly :: Maybe (v2 -> v')
+  }
 
 
-{- | Internal: build the topology for a window join given the two
-pre-typed side processors.
+{- | The topology of a window join:
+
+@
+left  --> LEFT  (left store, reads right store) --\
+                                                   +--> MERGE --> downstream
+right --> RIGHT (right store, reads left store) --/
+@
+
+Left and outer joins add an outer store both sides share
+("Kafka.Streams.Internal.WindowJoin"). The stores keep a record until
+no record still in grace can join it: @before + after + 1 + grace@.
+The 'Joined' serdes are the stores' serdes, and its name names the
+nodes and stores (the JVM's @-this-join@ / @-other-join@ /
+@-outer-shared-join-store@).
 -}
 buildWindowJoin
   :: forall k v1 v2 v'
@@ -1500,36 +1455,59 @@ buildWindowJoin
   => KStream k v1
   -> KStream k v2
   -> JoinWindows
+  -> Joined k v1 v2
   -> T.Text
   -- ^ prefix
-  -> (StoreName -> StoreName -> Topo.NodeName -> IO (Processor k v1))
-  -> (StoreName -> StoreName -> Topo.NodeName -> IO (Processor k v2))
+  -> WindowJoinSpec v1 v2 v'
   -> IO (KStream k v')
-buildWindowJoin sl0 sr0 jw prefix mkLeftProc mkRightProc = do
+buildWindowJoin sl0 sr0 jw j prefix spec = do
   -- Both sides must be partitioned by the join key.
   sl <- repartitionIfKeyChanged Nothing sl0
   sr <- repartitionIfKeyChanged Nothing sr0
   let b = kstreamBuilder sl
-  leftStoreNm <- freshStoreName b (prefix <> "-LEFT-STORE")
-  rightStoreNm <- freshStoreName b (prefix <> "-RIGHT-STORE")
-  leftNm <- freshNodeName b (prefix <> "-LEFT")
-  rightNm <- freshNodeName b (prefix <> "-RIGHT")
-  mergeNm <- freshNodeName b (prefix <> "-MERGE")
-
+      named suffix fresh = maybe fresh (\n -> pure (n <> suffix)) j.name
+  leftStoreNm <- Kafka.Streams.State.Store.storeName <$> named "-this-join-store" (Kafka.Streams.State.Store.unStoreName <$> freshStoreName b (prefix <> "-LEFT-STORE"))
+  rightStoreNm <- Kafka.Streams.State.Store.storeName <$> named "-other-join-store" (Kafka.Streams.State.Store.unStoreName <$> freshStoreName b (prefix <> "-RIGHT-STORE"))
+  outerNm <- Kafka.Streams.State.Store.storeName <$> named "-outer-shared-join-store" (Kafka.Streams.State.Store.unStoreName <$> freshStoreName b (prefix <> "-OUTER-STORE"))
+  leftNm <- Topo.NodeName <$> named "-this-join" (Topo.unNodeName <$> freshNodeName b (prefix <> "-LEFT"))
+  rightNm <- Topo.NodeName <$> named "-other-join" (Topo.unNodeName <$> freshNodeName b (prefix <> "-RIGHT"))
+  mergeNm <- Topo.NodeName <$> named "-merge" (Topo.unNodeName <$> freshNodeName b (prefix <> "-MERGE"))
+  times <- WJ.newTimeTrackers
   let !sz = jw.beforeMs + jw.afterMs + 1
-      !ret = sz * 2
-      lsb =
-        withStoreSerdesW
-          (kstreamKeySerde sl)
-          (kstreamValueSerde sl)
-          (inMemoryWindowStoreBuilder leftStoreNm sz ret)
-          :: StoreBuilderW k v1
-      rsb =
-        withStoreSerdesW
-          (kstreamKeySerde sr)
-          (kstreamValueSerde sr)
-          (inMemoryWindowStoreBuilder rightStoreNm sz ret)
-          :: StoreBuilderW k v2
+      !ret = sz + jw.gracePeriodMs
+      hasOuter = isJust spec.wjsLeftOnly || isJust spec.wjsRightOnly
+      outerStore = if hasOuter then Just outerNm else Nothing
+      lsb = withStoreSerdesW j.keySerde (listSerde j.v1Serde) (inMemoryWindowStoreBuilder leftStoreNm sz ret) :: StoreBuilderW k [v1]
+      rsb = withStoreSerdesW j.keySerde (listSerde j.v2Serde) (inMemoryWindowStoreBuilder rightStoreNm sz ret) :: StoreBuilderW k [v2]
+      osb =
+        withStoreSerdesKV
+          (WJ.outerKeySerde j.keySerde)
+          (listSerde (eitherSerde j.v1Serde j.v2Serde))
+          (inMemoryKeyValueStoreBuilder outerNm)
+      render = \case
+        Left v1 -> ($ v1) <$> spec.wjsLeftOnly
+        Right v2 -> ($ v2) <$> spec.wjsRightOnly
+      side :: forall vs vo. WJ.Side -> Int64 -> Int64 -> StoreName -> StoreName -> (vs -> vo -> v') -> Maybe (vs -> v') -> (vs -> Either v1 v2) -> T.Text -> IO (Processor k vs)
+      side s back ahead self_ other jn unmatched hold nm =
+        WJ.sideProcessor
+          WJ.SideConfig
+            { WJ.scSide = s
+            , WJ.scBack = back
+            , WJ.scAhead = ahead
+            , WJ.scBefore = jw.beforeMs
+            , WJ.scAfter = jw.afterMs
+            , WJ.scGrace = jw.gracePeriodMs
+            , WJ.scJoin = jn
+            , WJ.scUnmatched = unmatched
+            , WJ.scHold = hold
+            , WJ.scRender = render
+            , WJ.scSelfStore = self_
+            , WJ.scOtherStore = other
+            , WJ.scOuterStore = outerStore
+            , WJ.scTimes = times
+            , WJ.scName = nm
+            }
+      stores = [leftStoreNm, rightStoreNm] <> maybe [] pure outerStore
 
   withTopology_ b $ \t ->
     let !t1 =
@@ -1539,8 +1517,8 @@ buildWindowJoin sl0 sr0 jw prefix mkLeftProc mkRightProc = do
               , Topo.processorSpecParents = [kstreamParent sl]
               , Topo.processorSpecSupplier =
                   Topo.AnyProcessor
-                    (mkLeftProc leftStoreNm rightStoreNm mergeNm)
-              , Topo.processorSpecStores = [leftStoreNm, rightStoreNm]
+                    (side WJ.LeftSide jw.beforeMs jw.afterMs leftStoreNm rightStoreNm spec.wjsJoin spec.wjsLeftOnly Left (prefix <> "-LEFT"))
+              , Topo.processorSpecStores = stores
               }
             t
         !t2 =
@@ -1550,8 +1528,8 @@ buildWindowJoin sl0 sr0 jw prefix mkLeftProc mkRightProc = do
               , Topo.processorSpecParents = [kstreamParent sr]
               , Topo.processorSpecSupplier =
                   Topo.AnyProcessor
-                    (mkRightProc rightStoreNm leftStoreNm mergeNm)
-              , Topo.processorSpecStores = [leftStoreNm, rightStoreNm]
+                    (side WJ.RightSide jw.afterMs jw.beforeMs rightStoreNm leftStoreNm (flip spec.wjsJoin) spec.wjsRightOnly Right (prefix <> "-RIGHT"))
+              , Topo.processorSpecStores = stores
               }
             t1
         !t3 =
@@ -1566,130 +1544,17 @@ buildWindowJoin sl0 sr0 jw prefix mkLeftProc mkRightProc = do
             t2
         !t4 = Topo.addStateStoreW lsb [leftNm, rightNm] t3
         !t5 = Topo.addStateStoreW rsb [leftNm, rightNm] t4
-    in t5
+    in if hasOuter then Topo.addStateStoreKV osb [leftNm, rightNm] t5 else t5
 
   pure
     KStream
       { kstreamBuilder = b
       , kstreamParent = mergeNm
       , kstreamKeyChanged = False
-      , kstreamKeySerde = kstreamKeySerde sl
+      , kstreamKeySerde = j.keySerde
       , kstreamValueSerde =
           error
             "KStream-KStream join: downstream value Serde unset; supply via to/through"
-      }
-
-
-{- | Build a single side's join processor.
-
-@selfStore@: where this side puts its incoming records.
-@otherStore@: where this side scans for matches.
-@merge@: downstream node that aggregates both sides' emissions.
-@joiner@: takes (this-side-value, other-side-value) and returns the
-  joined output value.
-@mode@: what to do when this record finds /no/ match on the other
-  side. 'Inner' drops; 'LeftEmitNothing f' emits @f thisValue@.
-@side@: only used to suppress unused warnings; the joiner is
-  already in canonical (left,right) order.
--}
-mkSideProc
-  :: forall k vSelf vOther vOut
-   . Ord k
-  => JoinWindows
-  -> (vSelf -> vOther -> vOut)
-  -> JoinMode vSelf vOut
-  -> StoreName
-  -> StoreName
-  -> Topo.NodeName
-  -> IO (Processor k vSelf)
-mkSideProc jw joiner mode selfStoreNm otherStoreNm mergeNm = do
-  ctxRef <- newIORef Nothing
-  selfRef <- newIORef (Nothing :: Maybe (WindowStore k vSelf))
-  otherRef <- newIORef (Nothing :: Maybe (WindowStore k vOther))
-  -- Track the max timestamp observed across both join inputs so
-  -- we can drop late records past the configured grace period.
-  -- JVM semantics: a record at @t@ joins a window
-  -- @[t - beforeMs, t + afterMs]@; it's considered too late
-  -- once @streamTime > t + afterMs + gracePeriodMs@ and is
-  -- dropped at the input.
-  streamTime <- newIORef (Timestamp 0)
-  pure
-    Processor
-      { procName = processorName "WINDOW-JOIN-SIDE"
-      , procInit = \ctx -> do
-          writeIORef ctxRef (Just ctx)
-          getStateStore ctx selfStoreNm >>= \case
-            Just (AnyWindowStore ws) ->
-              writeIORef selfRef (Just (Unsafe.unsafeCoerce ws))
-            _ -> error $ "join: self store not found: " <> show selfStoreNm
-          getStateStore ctx otherStoreNm >>= \case
-            Just (AnyWindowStore ws) ->
-              writeIORef otherRef (Just (Unsafe.unsafeCoerce ws))
-            _ -> error $ "join: other store not found: " <> show otherStoreNm
-      , procClose = pure ()
-      , procProcess = \r ->
-          case recordKey r of
-            Nothing -> pure ()
-            Just k -> do
-              mctx <- readIORef ctxRef
-              mself <- readIORef selfRef
-              mother <- readIORef otherRef
-              case (mctx, mself, mother) of
-                (Just ctx, Just self_, Just other_) -> do
-                  let !ts@(Timestamp tsMs) = recordTimestamp r
-                  -- Late-record drop (KIP-633 / JoinWindows.grace).
-                  -- If the record's window has already closed past
-                  -- the configured grace period, skip the join
-                  -- entirely — it doesn't contribute to any open
-                  -- window's matches.
-                  Timestamp streamMs <- readIORef streamTime
-                  let !grace = jw.gracePeriodMs
-                      !windowCloseMs = tsMs + jw.afterMs
-                      !pastGrace = streamMs > windowCloseMs + grace
-                  if pastGrace
-                    then pure ()
-                    else do
-                      -- Advance stream-time monotonically.
-                      if tsMs > streamMs
-                        then writeIORef streamTime ts
-                        else pure ()
-                      wsPut self_ k (recordValue r) ts
-                      let !lo = Timestamp (tsMs - jw.beforeMs)
-                          !hi = Timestamp (tsMs + jw.afterMs)
-                      it <- wsFetchRange other_ k lo hi
-                      matches <- kvIteratorToList it
-                      if null matches
-                        then case mode of
-                          Inner -> pure ()
-                          LeftEmitNothing f ->
-                            forwardTo
-                              ctx
-                              mergeNm
-                              ( Record
-                                  { recordKey = Just k
-                                  , recordValue = f (recordValue r)
-                                  , recordTimestamp = ts
-                                  , recordHeaders = recordHeaders r
-                                  }
-                                  :: Record k vOut
-                              )
-                        else
-                          mapM_
-                            ( \(_otherTs, otherV) ->
-                                forwardTo
-                                  ctx
-                                  mergeNm
-                                  ( Record
-                                      { recordKey = Just k
-                                      , recordValue = joiner (recordValue r) otherV
-                                      , recordTimestamp = ts
-                                      , recordHeaders = recordHeaders r
-                                      }
-                                      :: Record k vOut
-                                  )
-                            )
-                            matches
-                _ -> pure ()
       }
 
 
@@ -1774,8 +1639,7 @@ mkKTableFromStream nm sn b ks vs =
 
 toTableProc
   :: forall k v
-   . Ord k
-  => Kafka.Streams.State.Store.StoreName
+   . Kafka.Streams.State.Store.StoreName
   -> IO (Processor k v)
 toTableProc sn = do
   ctxRef <- newIORef Nothing

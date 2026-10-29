@@ -140,6 +140,26 @@ Each has a Haskell function with a predictable name:
 | Stream-Global | `joinKStreamGlobalKTable` | `leftJoinKStreamGlobalKTable` | n/a |
 | Foreign-key | `foreignKeyJoinKTable` | `leftForeignKeyJoinKTable` | n/a |
 
+### Stream-stream windows
+
+A `JoinWindows` of `before` / `after` / `gracePeriodMs`: a left record
+at `t` meets the right records in `[t - before, t + after]` (so a
+right record at `t` meets the left ones in `[t - after, t + before]`),
+and a joined record carries the later of the two timestamps. Both
+sides keep every record (including several with the same key and
+timestamp) until no record still within grace can reach it.
+
+A left (or outer) join holds a record that found no match until its
+window closes (`t + after + gracePeriodMs`, measured in stream time,
+which both inputs advance), and only then emits it with `Nothing` on
+the other side, if nothing matched it meanwhile. This is the JVM's
+behaviour since KIP-633: no `(v, Nothing)` followed shortly by the
+real match. A record arriving after its window closed but within
+grace is joined and, unmatched, emitted at once; past grace it is
+dropped. The `Joined` serdes are the join stores' serdes, and its
+name names them (`<name>-this-join-store`, `<name>-other-join-store`,
+`<name>-outer-shared-join-store`).
+
 The example above used `joinStreamTable`, the Free DSL helper for
 stream-table joins. The imperative builder uses
 `joinKStreamKTable`; the Free helpers re-skin the names for the

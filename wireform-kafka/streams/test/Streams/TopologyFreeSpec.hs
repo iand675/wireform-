@@ -3131,7 +3131,8 @@ test_join_grace_drops_late_records =
             >>> F.sink "join-grace-out"
     (_, topo) <- F.compile topology
     driver <- newDriver topo "free-join-grace"
-    -- A pair of well-timed matching records produces a join.
+    -- A pair of well-timed matching records produces a join: a left
+    -- record at 1000 joins right records in [900, 1000].
     pipeInput
       driver
       (topicName "join-grace-l")
@@ -3144,7 +3145,7 @@ test_join_grace_drops_late_records =
       (topicName "join-grace-r")
       (Just (bytes "k"))
       (bytes "R1")
-      (t 1010)
+      (t 990)
       0
     -- Advance stream time well past windowEnd (1100) + grace (50).
     pipeInput

@@ -13,6 +13,8 @@ module Kafka.Streams.Internal.Serdes (
   lengthPrefixed,
   splitLengthPrefixed,
   mapSerde,
+  listSerde,
+  eitherSerde,
 ) where
 
 import Data.ByteString (ByteString)
@@ -80,3 +82,35 @@ mapSerde ks vs =
           k <- deserialize ks kb
           v <- deserialize vs vb
           go (Map.insert k v acc) r2
+
+
+-- | A list as a sequence of length-prefixed elements.
+listSerde :: Serde v -> Serde [v]
+listSerde vs =
+  Serde
+    { serialize = \xs -> BSL.toStrict (BB.toLazyByteString (foldMap (lengthPrefixed . serialize vs) xs))
+    , deserialize = go []
+    , serializeHeaders = const mempty
+    }
+  where
+    go acc bs
+      | BS.null bs = Right (reverse acc)
+      | otherwise = do
+          (vb, rest) <- splitLengthPrefixed bs
+          v <- deserialize vs vb
+          go (v : acc) rest
+
+
+-- | A tag byte (0: 'Left', 1: 'Right') before the value.
+eitherSerde :: Serde a -> Serde b -> Serde (Either a b)
+eitherSerde as bs =
+  Serde
+    { serialize = \case
+        Left a -> BS.cons 0 (serialize as a)
+        Right b -> BS.cons 1 (serialize bs b)
+    , deserialize = \x -> case BS.uncons x of
+        Just (0, rest) -> Left <$> deserialize as rest
+        Just (1, rest) -> Right <$> deserialize bs rest
+        _ -> Left "either: bad tag"
+    , serializeHeaders = const mempty
+    }

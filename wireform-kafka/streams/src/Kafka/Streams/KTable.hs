@@ -19,11 +19,6 @@ module Kafka.Streams.KTable (
   KTable (..),
   Change (..),
   changeSerde,
-  ktableNode,
-  ktableStore,
-  ktableBuilder,
-  ktableKeySerde,
-  ktableValueSerde,
 
   -- * Source
   tableFromTopic,

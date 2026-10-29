@@ -29,6 +29,15 @@ and this project adheres to the
   `queryMetadataForKey`, stale IQ reads from standbys). On the client:
   `Kafka.Client.Assignor` custom assignors with assignment user data,
   `Consumer.setAssignmentStrategy` / `setAssignmentHook`.
+- **Stream-stream joins follow the JVM**: the right side matches the
+  mirror of the left side's window (asymmetric `before` / `after` were
+  applied the same way on both sides); records with the same key and
+  timestamp are all kept (they overwrote each other); a joined record
+  carries the later timestamp; stores keep records for the grace
+  period too; both sides share one stream time; left and outer joins
+  hold unmatched records until their window closes and emit them only
+  then (KIP-633) instead of emitting `(v, Nothing)` at once. The
+  `Joined` serdes and name are used for the join stores.
 - **Record caches** (`statestoreCacheMaxBytes`, JVM
   `statestore.cache.max.bytes`, default 10 MiB split over the active
   tasks): the DSL's table stores buffer writes per key, and the store,

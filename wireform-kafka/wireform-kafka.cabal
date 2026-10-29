@@ -505,6 +505,7 @@ library wireform-kafka-streams
         Kafka.Streams.Internal.Text
         Kafka.Streams.Internal.Serdes
         Kafka.Streams.Internal.Changelog
+        Kafka.Streams.Internal.WindowJoin
         Kafka.Streams.Driver
         Kafka.Streams.Materialized
         Kafka.Streams.Consumed
