@@ -65,7 +65,9 @@ and this project adheres to the
   queries see the buffered writes. `withCachingDisabled` (and
   `statestoreCacheMaxBytes = 0`) forwards every update at once, as
   before; `withCachingEnabledKV` caches a Processor API store.
-  Replaces the free-standing `cachingKeyValueStore`.
+  Replaces the free-standing `cachingKeyValueStore`. Windowed
+  aggregations' stores are cached per window the same way
+  (`withCachingEnabledW` for a Processor API window store).
 - **Pattern sources at runtime**: `streamFromPattern` /
   `sourcePattern` topics are resolved against the cluster when the
   instance starts (whole-name match, internal topics left out) and again

@@ -35,6 +35,7 @@ module Kafka.Streams.State.Store (
   kvsPutAll,
   StoreCache (..),
   FlushListener,
+  WindowCache (..),
   KeyValueIterator (..),
   kvIteratorFromList,
   kvIteratorToList,
@@ -74,6 +75,7 @@ module Kafka.Streams.State.Store (
   -- * Record cache
   withCachingEnabledKV,
   withCachingDisabledKV,
+  withCachingEnabledW,
 
   -- * KIP-295 source-changelog reuse
   withSourceTopicChangelogKV,
@@ -261,6 +263,20 @@ data WindowStore k v = WindowStore
   , wsFetchRange :: !(k -> Timestamp -> Timestamp -> IO (WindowStoreIterator v))
   , wsFetchAllRange :: !(Timestamp -> Timestamp -> IO (KeyValueIterator (WindowedKey k) v))
   , wsAll :: !(IO (KeyValueIterator (WindowedKey k) v))
+  , wsCache :: !(Maybe (WindowCache k v))
+  -- ^ The record cache in front of the store, when it has one (as 'kvsCache')
+  }
+
+
+-- | A window store's record cache, as its aggregation processor sees it.
+data WindowCache k v = WindowCache
+  { wcWrite :: !(k -> v -> Timestamp -> Timestamp -> Headers -> IO ())
+  {- ^ Buffer the aggregate of @k@'s window starting at the first
+  timestamp, written for a record with the second timestamp and these
+  headers
+  -}
+  , wcOnFlush :: !((k -> Timestamp -> v -> Timestamp -> Headers -> IO ()) -> IO ())
+  -- ^ Install what each flushed window (key, start, value, timestamp, headers) is handed to
   }
 
 
@@ -404,7 +420,14 @@ data StoreBuilderW k v = StoreBuilderW
   , sbWLogging :: !LoggingConfig
   , sbWSerdes :: !(Maybe (StoreSerdes k v))
   , sbWBuild :: !(StoreContext -> IO (WindowStore k v))
+  , sbWCaching :: !(Maybe (KeyOrder k))
+  -- ^ Put a record cache in front of the store (as 'sbKvCaching')
   }
+
+
+-- | Front the window store with a record cache.
+withCachingEnabledW :: Ord k => StoreBuilderW k v -> StoreBuilderW k v
+withCachingEnabledW b = b {sbWCaching = Just KeyOrder}
 
 
 -- | Typed session-store builder.

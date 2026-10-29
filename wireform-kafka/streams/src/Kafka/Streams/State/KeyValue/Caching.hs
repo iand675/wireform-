@@ -26,6 +26,10 @@ commit instead of one per record.
     flushes) before a clean close, and restores from the changelog
     after anything else.
 
+Window stores ('cachedWindowStore') cache the same way, per key and
+window start: a flush writes each dirty window and hands it to the
+aggregation processor, which forwards it under its window.
+
 Sizes are the serialised key and value of a logged store's entries,
 plus 'entryOverhead'; an unlogged store's entries are counted at
 'unloggedEntrySize', since nothing else serialises them.
@@ -36,6 +40,8 @@ module Kafka.Streams.State.KeyValue.Caching (
   cacheBytesUsed,
   CachedStore (..),
   cachedKeyValueStore,
+  CachedWindowStore (..),
+  cachedWindowStore,
   entryOverhead,
   unloggedEntrySize,
 ) where
@@ -48,6 +54,7 @@ import Data.IntMap.Strict (IntMap)
 import Data.IntMap.Strict qualified as IntMap
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Kafka.Streams.Internal.Serdes (int64BE)
 import Kafka.Streams.Serde (Serde (..))
 import Kafka.Streams.State.Store (
   FlushListener,
@@ -56,6 +63,9 @@ import Kafka.Streams.State.Store (
   StateStore (..),
   StoreCache (..),
   StoreSerdes (..),
+  WindowCache (..),
+  WindowStore (..),
+  WindowedKey (..),
   kvIteratorFromList,
   kvIteratorToList,
  )
@@ -260,6 +270,145 @@ cachedKeyValueStore budget logged inner = do
                   StoreCache
                     { scWrite = write
                     , scOnFlush = writeIORef listenerRef
+                    }
+            }
+      }
+
+
+data WEntry v = WEntry
+  { weValue :: !v
+  , weKey :: !ByteString
+  , weBytes :: !ByteString
+  , weSize :: {-# UNPACK #-} !Int
+  , weTs :: !Timestamp
+  , weHeaders :: !Headers
+  , weSeq :: {-# UNPACK #-} !Int
+  }
+
+
+data WCache k v = WCache
+  { wcEntries :: !(Map (k, Timestamp) (WEntry v))
+  , wcOrder :: !(IntMap (k, Timestamp))
+  , wcNext :: {-# UNPACK #-} !Int
+  }
+
+
+-- | A cached window store and what the engine drives it with.
+data CachedWindowStore k v = CachedWindowStore
+  { cwStore :: !(WindowStore k v)
+  -- ^ The store as processors and queries see it ('wsCache' set)
+  , cwFlush :: !(IO Bool)
+  }
+
+
+{- | Put a cache in front of @inner@, an unlogged window store; with
+@logged@, flushed windows are also logged (key bytes then the window
+start, as the changelog of an uncached window store).
+-}
+cachedWindowStore
+  :: forall k v
+   . Ord k
+  => CacheBudget
+  -> Maybe (StoreSerdes k v, ByteString -> Maybe ByteString -> IO ())
+  -> WindowStore k v
+  -> IO (CachedWindowStore k v)
+cachedWindowStore budget logged inner = do
+  ref <- newIORef (WCache Map.empty IntMap.empty 0 :: WCache k v)
+  listenerRef <- newIORef (\_ _ _ _ _ -> pure () :: IO ())
+  let
+    write :: k -> v -> Timestamp -> Timestamp -> Headers -> IO ()
+    write k v start@(Timestamp st) ts hs = do
+      c0 <- readIORef ref
+      let key = (k, start)
+          prev = Map.lookup key (wcEntries c0)
+          (!kb, !vb, !size) = case logged of
+            Nothing -> (BS.empty, BS.empty, unloggedEntrySize)
+            Just (sd, _) ->
+              let !kb' = maybe (serialize (storeKeySerde sd) k <> int64BE st) weKey prev
+                  !vb' = serialize (storeValueSerde sd) v
+              in (kb', vb', BS.length kb' + BS.length vb' + entryOverhead)
+      delta <- atomicModifyIORef' ref $ \c ->
+        let old = Map.lookup key (wcEntries c)
+            !sq = wcNext c
+            !e = WEntry v kb vb size ts hs sq
+            !c' =
+              WCache
+                { wcEntries = Map.insert key e (wcEntries c)
+                , wcOrder = IntMap.insert sq key (maybe id (IntMap.delete . weSeq) old (wcOrder c))
+                , wcNext = sq + 1
+                }
+        in (c', size - maybe 0 weSize old)
+      used <- atomicModifyIORef' (cbUsed budget) (\u -> let !u' = u + delta in (u', u'))
+      limit <- cbLimit budget
+      when (used > limit) (void flush)
+
+    flush :: IO Bool
+    flush = do
+      c <- readIORef ref
+      if Map.null (wcEntries c)
+        then pure False
+        else do
+          listener <- readIORef listenerRef
+          forM_ (IntMap.elems (wcOrder c)) $ \key@(k, start) ->
+            forM_ (Map.lookup key (wcEntries c)) $ \e -> do
+              wsPut inner k (weValue e) start
+              forM_ logged $ \(_, emit) -> emit (weKey e) (Just (weBytes e))
+              listener k start (weValue e) (weTs e) (weHeaders e)
+          freed <- atomicModifyIORef' ref $ \c' ->
+            let (gone, kept) = IntMap.spanAntitone (< wcNext c) (wcOrder c')
+                goneKeys = IntMap.elems gone
+                !bytes = sum (map (\key -> maybe 0 weSize (Map.lookup key (wcEntries c'))) goneKeys)
+            in (c' {wcEntries = foldr Map.delete (wcEntries c') goneKeys, wcOrder = kept}, bytes)
+          atomicModifyIORef' (cbUsed budget) (\u -> (u - freed, ()))
+          pure True
+
+    cachedOf :: WCache k v -> Map (Timestamp, k) v
+    cachedOf c = Map.fromList (map (\((k, t), e) -> ((t, k), weValue e)) (Map.toList (wcEntries c)))
+
+    -- every window in [from, to] across keys, the cache applied, by start then key
+    allIn :: Maybe (Timestamp, Timestamp) -> IO [(WindowedKey k, v)]
+    allIn bounds = do
+      c <- readIORef ref
+      base <- maybe (wsAll inner) (uncurry (wsFetchAllRange inner)) bounds >>= kvIteratorToList
+      let inRange t = maybe True (\(lo, hi) -> t >= lo && t <= hi) bounds
+          merged =
+            Map.union
+              (Map.filterWithKey (\(t, _) _ -> inRange t) (cachedOf c))
+              (Map.fromList (map (\(WindowedKey k t, v) -> ((t, k), v)) base))
+      pure (map (\((t, k), v) -> (WindowedKey k t, v)) (Map.toAscList merged))
+
+    base_ = wsBase inner
+
+  pure
+    CachedWindowStore
+      { cwFlush = flush
+      , cwStore =
+          inner
+            { wsBase = base_ {storeFlush = flush >> storeFlush base_}
+            , wsPut = \k v t -> write k v t (Timestamp 0) emptyHeaders
+            , wsFetch = \k t -> do
+                c <- readIORef ref
+                case Map.lookup (k, t) (wcEntries c) of
+                  Just e -> pure (Just (weValue e))
+                  Nothing -> wsFetch inner k t
+            , wsFetchRange = \k from to -> do
+                c <- readIORef ref
+                base <- wsFetchRange inner k from to >>= kvIteratorToList
+                let cached =
+                      Map.fromList
+                        ( map
+                            (\((_, t), e) -> (t, weValue e))
+                            -- the key's windows in [from, to]: one slice of the (key, start) order
+                            (Map.toList (Map.takeWhileAntitone (<= (k, to)) (Map.dropWhileAntitone (< (k, from)) (wcEntries c))))
+                        )
+                kvIteratorFromList (Map.toAscList (Map.union cached (Map.fromList base)))
+            , wsFetchAllRange = \from to -> allIn (Just (from, to)) >>= kvIteratorFromList
+            , wsAll = allIn Nothing >>= kvIteratorFromList
+            , wsCache =
+                Just
+                  WindowCache
+                    { wcWrite = write
+                    , wcOnFlush = writeIORef listenerRef
                     }
             }
       }

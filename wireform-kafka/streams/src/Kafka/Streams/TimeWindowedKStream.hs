@@ -42,6 +42,7 @@ import Kafka.Streams.State.Store (
   AnyStateStore (..),
   StoreBuilderW,
   StoreName,
+  WindowCache (..),
   WindowStore (..),
   WindowedKey (..),
  )
@@ -264,7 +265,12 @@ windowedUpdateProc sn ws step = do
       , procInit = \ctx -> do
           st <- getStateStore ctx sn
           case st of
-            Just (AnyWindowStore wstore) -> writeIORef ref (Just (ctx, unsafeCastWS wstore :: WindowStore k a))
+            Just (AnyWindowStore wstore) -> do
+              let store_ = unsafeCastWS wstore :: WindowStore k a
+              -- a cached store hands its flushed windows on here
+              forM_ (wsCache store_) $ \c ->
+                wcOnFlush c $ \k start v ts hs -> forwardRecord ctx (Record (Just (WindowedKey k start)) v ts hs)
+              writeIORef ref (Just (ctx, store_))
             _ -> error $ "windowed aggregation: store not found: " <> show sn
       , procClose = pure ()
       , procProcess = \r -> do
@@ -278,8 +284,11 @@ windowedUpdateProc sn ws step = do
                 when (end > closeTime) $ do
                   prev <- wsFetch store_ k start
                   !next <- step k (recordValue r) prev
-                  wsPut store_ k next start
-                  forwardRecord ctx (Record (Just (WindowedKey k start)) next (recordTimestamp r) (recordHeaders r))
+                  case wsCache store_ of
+                    Just c -> wcWrite c k next start (recordTimestamp r) (recordHeaders r)
+                    Nothing -> do
+                      wsPut store_ k next start
+                      forwardRecord ctx (Record (Just (WindowedKey k start)) next (recordTimestamp r) (recordHeaders r))
             _ -> pure ()
       }
 

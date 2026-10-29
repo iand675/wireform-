@@ -15,6 +15,8 @@ import Hedgehog.Range qualified as Range
 import Kafka.Streams.Serde (Serde (..), int64Serde, textSerde)
 import Kafka.Streams.State.KeyValue.Caching
 import Kafka.Streams.State.KeyValue.InMemory (inMemoryKeyValueStore)
+import Kafka.Streams.State.Window.InMemory (inMemoryWindowStore)
+import Kafka.Streams.Serde.Windowed (windowedSerde)
 import Kafka.Streams.State.Store
 import Kafka.Streams.Time (Timestamp (..))
 import Kafka.Streams.Types (emptyHeaders)
@@ -41,6 +43,8 @@ tests =
     it "is the store plus one change per flushed key (model)" prop_model
     it "at runtime: a hot key is forwarded and logged once per commit" runtime_dedups
     it "at runtime: withCachingDisabled forwards every update" runtime_uncached
+    it "a window cache folds a window's updates and reads through" window_cache
+    it "at runtime: a hot window is forwarded once per commit" runtime_windowed
 
 
 data Fixture = Fixture
@@ -247,3 +251,56 @@ runtime_dedups = do
 
 runtime_uncached :: IO ()
 runtime_uncached = hotKeys True `shouldReturn` (200, 200)
+
+
+window_cache :: IO ()
+window_cache = do
+  inner <- inMemoryWindowStore @Text @Int64 (storeName "w") 100 1000
+  budget <- newCacheBudget (pure 1_000_000)
+  logRef <- newIORef []
+  cw <- cachedWindowStore budget (Just (StoreSerdes textSerde int64Serde, \k v -> modifyIORef' logRef (<> [(k, v)]))) inner
+  fwd <- newIORef []
+  let st = cwStore cw
+  forM_ (wsCache st) $ \c -> wcOnFlush c (\k start v ts _ -> modifyIORef' fwd (<> [(k, start, v, ts)]))
+  let w k start v ts = forM_ (wsCache st) $ \c -> wcWrite c k v (Timestamp start) (Timestamp ts) emptyHeaders
+  w "a" 0 1 5
+  w "a" 0 2 7
+  w "a" 100 9 150
+  w "b" 0 4 8
+  -- reads see the buffered windows
+  wsFetch st "a" (Timestamp 0) `shouldReturn` Just 2
+  (wsFetchRange st "a" (Timestamp 0) (Timestamp 100) >>= kvIteratorToList) `shouldReturn` [(Timestamp 0, 2), (Timestamp 100, 9)]
+  (wsFetchAllRange st (Timestamp 0) (Timestamp 0) >>= kvIteratorToList) `shouldReturn` [(WindowedKey "a" (Timestamp 0), 2), (WindowedKey "b" (Timestamp 0), 4)]
+  wsFetch inner "a" (Timestamp 0) `shouldReturn` Nothing
+  readIORef fwd `shouldReturn` []
+  cwFlush cw `shouldReturn` True
+  -- one update per window, in last-write order, at the last write's timestamp
+  readIORef fwd `shouldReturn` [("a", Timestamp 0, 2, Timestamp 7), ("a", Timestamp 100, 9, Timestamp 150), ("b", Timestamp 0, 4, Timestamp 8)]
+  length <$> readIORef logRef `shouldReturn` 3
+  wsFetch inner "a" (Timestamp 0) `shouldReturn` Just 2
+  cacheBytesUsed budget `shouldReturn` 0
+
+
+-- | 100 records in one window of one key; how many reached @out@.
+runtime_windowed :: IO ()
+runtime_windowed = withStateDirs 1 $ \[d] -> do
+  broker <- newMockBroker (Just 1)
+  mockCreateTopic broker "in" 1
+  b <- I.newStreamsBuilder
+  st0 <- I.streamFromTopic b (I.topicName "in") (I.consumed textSerde textSerde)
+  h <- I.countWindowed (I.withValueSerde int64Serde I.materialized) (I.windowedByTime (I.tumblingWindows (I.millis 1000)) (I.groupByKey (I.grouped textSerde textSerde) st0))
+  st <- I.streamFromWindowedHandle h textSerde int64Serde
+  I.toTopic (I.topicName "out") (I.produced (windowedSerde textSerde) int64Serde) st
+  topo <- I.buildTopology b >>= either (error . show) pure . I.validateTopology
+  ks <- startOn broker ((testConfig "wcache" d) {I.commitIntervalMs = Just 60_000}) topo
+  ( do
+      eventually [ks] "assigned" (not . null <$> I.ownedPartitions ks)
+      forM_ [1 .. 100 :: Int] $ \i -> mockProduce broker "in" (Just (textBytes "k")) (Just "x") (fromIntegral i)
+      _ <- I.awaitTicks ks 50
+      closeAll [ks]
+      outs <- visible broker "out"
+      map (fmap decodeI64 . (.drValue)) outs `shouldSatisfy` (\vs -> length vs < 10 && lastMaybe vs == Just (Just 100))
+    )
+    `finally` closeAll [ks]
+  where
+    lastMaybe = foldl (\_ x -> Just x) Nothing

@@ -42,6 +42,7 @@ import Kafka.Streams.State.Store (
   StoreName,
   defaultLoggingConfig,
   withCachingEnabledKV,
+  withCachingEnabledW,
   withLoggingDisabledKV,
   withLoggingDisabledS,
   withLoggingDisabledW,
@@ -126,8 +127,9 @@ withStoreSupplier f m = m {matStoreSupplier = Just f}
 
 {- | No record cache: every update to the store is forwarded and
 logged at once (as with @statestore.cache.max.bytes = 0@). Key-value
-stores are cached by default ("Kafka.Streams.State.KeyValue.Caching");
-window and session stores are not cached.
+and window stores are cached by default
+("Kafka.Streams.State.KeyValue.Caching"); session stores are not
+cached.
 -}
 withCachingDisabled :: Materialized k v -> Materialized k v
 withCachingDisabled m = m {matCachingEnabled = False}
@@ -197,7 +199,8 @@ materializedW
 materializedW m nm size retention defK defV =
   let base = inMemoryWindowStoreBuilder nm size (fromMaybe retention (matRetentionMs m))
       logged = if matLoggingEnabled m then base else withLoggingDisabledW base
-  in withStoreSerdesW (fromMaybe defK (matKeySerde m)) (fromMaybe defV (matValueSerde m)) logged
+      cached = if matCachingEnabled m then withCachingEnabledW logged else logged
+  in withStoreSerdesW (fromMaybe defK (matKeySerde m)) (fromMaybe defV (matValueSerde m)) cached
 
 
 -- | 'materializedW' for session stores.
