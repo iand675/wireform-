@@ -34,6 +34,7 @@ import Test.Syd
 tests :: Spec
 tests =
   describe "Task runtime" $ do
+    it "aggregations of one grouping share its repartition topic" shared_repartition
     it "splits tasks across instances and hands state over through changelogs" two_instances_share_counts
     it "restores state from the changelog after a restart with empty local state" restores_after_restart
     it "repartitions a re-keyed aggregation through an internal topic" repartitions_rekeyed
@@ -42,6 +43,39 @@ tests =
     it "a table tombstone deletes the key from the store" table_tombstone
     it "refuses a stateful subtopology over non-co-partitioned topics" not_copartitioned
     it "processing failures follow the processing and uncaught-exception handlers" processing_handlers
+
+
+shared_repartition :: IO ()
+shared_repartition = withStateDirs 1 $ \[d] -> do
+  broker <- newMockBroker (Just 1)
+  mockCreateTopic broker "in" 2
+  b <- newStreamsBuilder
+  s <- streamFromTopic b (topicName "in") (consumed textSerde textSerde)
+  -- re-keyed by value, so both aggregations need a repartition
+  byValue <- selectKey (\r -> recordValue r) s
+  let g = groupByKey (grouped textSerde textSerde) {groupedName = Just "by-value"} byValue
+  c1 <- countStream (materializedAs (storeName "count-a")) g
+  c2 <- countStream (materializedAs (storeName "count-b")) g
+  out1 <- toKStreamFromKTable c1
+  out2 <- toKStreamFromKTable c2
+  toTopic (topicName "out-a") (produced textSerde int64Serde) out1
+  toTopic (topicName "out-b") (produced textSerde int64Serde) out2
+  topo <- buildTopology b >>= either (error . show) pure . validateTopology
+  ks <- startOn broker (testConfig "shared" d) topo
+  ( do
+      forM_ [1 .. 10 :: Int] $ \i -> mockProduce broker "in" (Just (textBytes (T.pack (show i)))) (Just (if even i then "x" else "y")) 0
+      let both n = do
+            a <- latestBy <$> visible broker "out-a"
+            bb <- latestBy <$> visible broker "out-b"
+            pure (all (\m -> Map.lookup "x" m == Just (Just (i64 n)) && Map.lookup "y" m == Just (Just (i64 n))) [a, bb])
+      eventually [ks] "both counts at 5" (both 5)
+      _ <- awaitTicks ks 30
+      both 5 `shouldReturn` True
+      -- one repartition topic, read once
+      topics <- mockTopics broker
+      filter ("-repartition" `T.isSuffixOf`) topics `shouldBe` ["shared-by-value-repartition"]
+    )
+    `finally` closeAll [ks]
 
 
 two_instances_share_counts :: IO ()

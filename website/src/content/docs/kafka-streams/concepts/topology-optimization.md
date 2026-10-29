@@ -87,26 +87,29 @@ source >>> mapValues extractKey >>> repartition >>> count
 
 This prevents silent wrong answers from distributed counting bugs.
 
-## Graph-level optimizations (opt-in)
+## Graph-level optimizations
 
-These changes affect the internal topic layout on your Kafka brokers. They are disabled by default because they require coordination with deployment.
+These change the internal topic layout on your Kafka brokers.
 
-| Rewrite | Effect | When to enable |
-|---------|--------|----------------|
-| `REUSE_KTABLE_SOURCE_TOPICS` | Skip repartition when source topic already has right key | New topologies with KTable sources |
-| `MERGE_REPARTITION_TOPICS` | Combine adjacent repartitions into one | Complex topologies with many shuffles |
-| `SINGLE_STORE_SELF_JOIN` | Use one store instead of two for self-joins | Stream-stream self-joins |
+| Rewrite | Effect | How |
+|---------|--------|-----|
+| `REUSE_KTABLE_SOURCE_TOPICS` | A table read straight off a source topic uses that topic as its changelog (no `-changelog` topic) | `optimizeTopology`; the Free DSL's `compile` applies it |
+| `MERGE_REPARTITION_TOPICS` | The groupings and joins of one re-keyed stream share one repartition topic | Always on: the builder shares the repartition by construction |
+| `SINGLE_STORE_SELF_JOIN` | Use one store instead of two for self-joins | Not implemented (the flag is accepted and ignored) |
 
-They change which internal topics exist. Rolling out a topology with different optimization settings than before can orphan topics or require state migration.
+Reusing source topics changes which internal topics exist: rolling out a
+topology with a different setting than before can orphan topics or
+require state migration.
 
-To enable:
+With the imperative builder, optimise before validating:
 
 ```haskell
+import Kafka.Streams.Topology (fromOptimizationFlags, optimizeTopology, validateTopology)
 import qualified Kafka.Streams.Topology.Optimization as Opt
 
-let cfg = Opt.defaultStreamsConfig
-      { Opt.topologyOptimization = Opt.OptimizeAll
-      }
+topo <- buildTopology builder
+let optimised = optimizeTopology (fromOptimizationFlags (Opt.optimizationFlags Opt.OptimizeAll)) topo
+valid <- either (fail . show) pure (validateTopology optimised)
 ```
 
 ## Inspecting optimizations

@@ -55,8 +55,7 @@ import Kafka.Streams.KTable (Change (..), KTable (..))
 import Data.Text qualified as T
 import Kafka.Streams.KStream (
   KStream (..),
-  repartitionThrough,
-  selectKey,
+  sharedRepartition,
   selectKeyWith,
  )
 import Kafka.Streams.Materialized (
@@ -70,12 +69,7 @@ import Kafka.Streams.Processor (
   processorName,
  )
 import Kafka.Streams.Serde (Serde, int64Serde)
-import Kafka.Streams.State.KeyValue.InMemory (
-  inMemoryKeyValueStoreBuilder,
- )
 import Kafka.Streams.State.Store (
-  withStoreSerdesKV,
-  withStoreSerdesW,
   AnyStateStore (..),
   KeyValueStore (..),
   StoreBuilderKV,
@@ -170,12 +164,8 @@ groupedInputOf
 groupedInputOf _ parent _ _ Nothing = pure parent
 groupedInputOf b parent ks vs (Just mName) = do
   s' <-
-    repartitionThrough
+    sharedRepartition
       mName
-      Nothing
-      ks
-      vs
-      Nothing
       KStream
         { kstreamBuilder = b
         , kstreamParent = parent

@@ -550,6 +550,7 @@ import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
 import Data.Profunctor (rmap)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void)
@@ -832,7 +833,7 @@ data Prim i o where
 
   ToTableT :: Ord k => !(Materialized k v) -> Prim (KStream k v) (KTable k v)
   ToStream :: Prim (KTable k v) (KStream k v)
-  Repartition :: !Text -> Prim (KStream k v) (KStream k v)
+  Repartition :: !(Maybe Text) -> Prim (KStream k v) (KStream k v)
   RepartitionWith :: !(Rep.Repartitioned k v) -> Prim (KStream k v) (KStream k v)
   -- ------------------------------------------------------------------
   -- Grouping + aggregation
@@ -1229,7 +1230,9 @@ runPrim b = go
     -- Conversions
     go (ToTableT m) = KS.toTable m
     go ToStream = KS.toKStreamFromKTable
-    go (Repartition prefix) = KS.repartition prefix
+    go (Repartition (Just prefix)) = KS.repartition prefix
+    -- auto-inserted: one topic per re-keyed stream, shared by everything downstream of it
+    go (Repartition Nothing) = KS.sharedRepartition Nothing
     go (RepartitionWith cfg) = KS.repartitionWith cfg
     -- Grouping + aggregation
     go (GroupByKey g) = pure . KGS.groupByKey g
@@ -1561,20 +1564,9 @@ compileWithOptimization cfg t = do
   topo <- buildTopology b
   -- After the AST-level rewrites have collapsed adjacent
   -- operators in the 'Topology' GADT, hand the resulting Kafka
-  -- 'Topo.Topology' graph to the graph-level optimiser. Today
-  -- 'Topo.optimizeTopology' is a no-op placeholder (it returns
-  -- its input unchanged), but as of the KIP-295 implementation
-  -- it now performs:
-  --
-  --   * 'optReuseSourceKTable' — for table-source-style
-  --     processors (one source parent + one owned store), point
-  --     the store's changelog at the source topic.
-  --   * 'optMergeRepartitionTopics' — collapse sibling
-  --     @KSTREAM-REPARTITION-\<prefix\>-…@ processors sharing
-  --     a single parent and prefix into one shared node.
-  --
-  -- Both rewrites are toggleable via 'Topo.OptimizationConfig';
-  -- the default config enables both. Callers that want the
+  -- 'Topo.Topology' graph to the graph-level optimiser
+  -- ('optReuseSourceKTable': a table-source-style processor's store
+  -- uses the source topic as its changelog). Callers that want the
   -- un-optimised graph can substitute @'Topo.optimizeTopology'
   -- 'Topo.noOptimisations'@ here.
   let !topo' = Topo.optimizeTopology Topo.defaultOptimizationConfig topo
@@ -2600,7 +2592,7 @@ would otherwise pay for the extra topic round-trip with
 no benefit.
 -}
 repartition :: Text -> Topology (KStream k v) (KStream k v)
-repartition = liftPrim . Repartition
+repartition = liftPrim . Repartition . Just
 
 
 {- | 'repartition' with a fully-specified 'Rep.Repartitioned'
@@ -4418,7 +4410,7 @@ labelPrim p0 = case p0 of
   Branch ps -> "Branch(" <> T.pack (show (length ps)) <> ")"
   ToTableT _ -> "ToTable"
   ToStream -> "ToStream"
-  Repartition pfx -> "Repartition(" <> pfx <> ")"
+  Repartition pfx -> "Repartition(" <> fromMaybe "auto" pfx <> ")"
   RepartitionWith _ -> "RepartitionWith"
   GroupByKey _ -> "GroupByKey"
   GroupBy _ _ -> "GroupBy"
@@ -4632,13 +4624,10 @@ Java's Kafka Streams ships two formal optimisations, both at the
     instead of creating a separate internal one. See
     'Kafka.Streams.Topology.optReuseSourceKTable' /
     'Kafka.Streams.State.Store.loggingSourceTopic'.
-  * @MERGE_REPARTITION_TOPICS@ — sibling
-    @KSTREAM-REPARTITION-\<prefix\>-…@ processors that share
-    the same single parent /and/ the same repartition prefix
-    are merged into one. Two downstream stateful ops that both
-    called 'repartition' on the same upstream therefore share
-    one physical repartition node instead of duplicating the
-    shuffle. See 'Kafka.Streams.Topology.optMergeRepartitionTopics'.
+  * @MERGE_REPARTITION_TOPICS@ needs no pass: the groupings and joins
+    of a re-keyed stream (and auto-inserted repartitions) share one
+    repartition topic by construction
+    ('Kafka.Streams.StreamsBuilder.sharedRepartitionNode').
 
 The chained AST-level rewrites this module ships are /additional/
 to those: they fuse adjacent operators (saving processor nodes /
@@ -4761,10 +4750,9 @@ data OptimizeConfig = OptimizeConfig
     using do-notation should insert 'repartition'
     explicitly.
 
-  The inserted prefix is @\"auto-rep\"@; downstream graph-level
-  merging ('Kafka.Streams.Topology.optMergeRepartitionTopics')
-  collapses sibling inserts so two stateful ops downstream
-  of the same key-change share one physical repartition.
+  An inserted repartition is named after the stream it re-keys and
+  shared ('Kafka.Streams.KStream.sharedRepartition'), so two stateful
+  ops downstream of the same key change read one topic.
   -}
   , optCollapseValues :: !Bool
   {- ^ @'Values' '.' 'Values' = 'Values'@ — idempotent key
@@ -5059,11 +5047,11 @@ autoInsertRepartitionPass cfg t0
     -- before. Stays dirty=False afterwards (the inserted
     -- Repartition restored partitioning by the current key).
     walkPrim True p@(GroupByKey _) =
-      (False, Compose (liftPrim p) (liftPrim (Repartition "auto-rep")))
+      (False, Compose (liftPrim p) (liftPrim (Repartition Nothing)))
     walkPrim True p@(GroupBy _ _) =
-      (False, Compose (liftPrim p) (liftPrim (Repartition "auto-rep")))
+      (False, Compose (liftPrim p) (liftPrim (Repartition Nothing)))
     walkPrim True p@(ToTableT _) =
-      (False, Compose (liftPrim p) (liftPrim (Repartition "auto-rep")))
+      (False, Compose (liftPrim p) (liftPrim (Repartition Nothing)))
     walkPrim d p = (d, liftPrim p)
 
     -- Insertion helpers operating on the immediate-Fanout tuple
@@ -5079,7 +5067,7 @@ autoInsertRepartitionPass cfg t0
       -> Topology a (KStream k vL, KTable k vT)
     insertOnLeftST (Fanout l r)
       | endsKeyDirty l =
-          Fanout (Compose (liftPrim (Repartition "auto-rep")) l) r
+          Fanout (Compose (liftPrim (Repartition Nothing)) l) r
     insertOnLeftST t = t
 
     insertOnBothSS
@@ -5089,8 +5077,8 @@ autoInsertRepartitionPass cfg t0
     insertOnBothSS (Fanout l r)
       | dl || dr =
           Fanout
-            (if dl then Compose (liftPrim (Repartition "auto-rep")) l else l)
-            (if dr then Compose (liftPrim (Repartition "auto-rep")) r else r)
+            (if dl then Compose (liftPrim (Repartition Nothing)) l else l)
+            (if dr then Compose (liftPrim (Repartition Nothing)) r else r)
       where
         dl = endsKeyDirty l
         dr = endsKeyDirty r

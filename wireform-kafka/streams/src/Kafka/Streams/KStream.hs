@@ -116,6 +116,7 @@ module Kafka.Streams.KStream (
   repartitionWith,
   repartitionThrough,
   repartitionIfKeyChanged,
+  sharedRepartition,
   toKStreamFromKTable,
   toChangelogStream,
 
@@ -154,6 +155,7 @@ module Kafka.Streams.KStream (
 
 import Control.Concurrent.Async qualified
 import Data.IORef
+import Control.Exception (throwIO)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as T
 import Kafka.Streams.Consumed (
@@ -208,10 +210,12 @@ import Kafka.Streams.State.Store qualified
 import Kafka.Streams.State.Window.InMemory (
   inMemoryWindowStoreBuilder,
  )
+import Kafka.Streams.Errors (TopologyException (..))
 import Kafka.Streams.StreamsBuilder (
   StreamsBuilder,
   freshNodeName,
   freshStoreName,
+  sharedRepartitionNode,
   withTopology_,
  )
 import Kafka.Streams.Time (Timestamp (..))
@@ -867,11 +871,13 @@ peekStream act s =
     (kstreamValueSerde s)
 
 
-{- | Non-blocking 'foreachStream': forks each callback into a
-detached 'Control.Concurrent.async' so a slow handler can't
-back-pressure the worker thread. Use when the side-effect
-is best-effort (logging, metrics emission, etc.) and you can
-tolerate ordering loss across records.
+{- | 'foreachStream' with each callback run concurrently, so a slow
+one doesn't hold the task up (no order between records). Every commit
+first waits for the callbacks started since the last one, so a commit
+never covers a record whose side effect hasn't happened (at least
+once: after a crash the unfinished ones run again); a callback that
+throws fails the commit, and the stream thread then follows the
+uncaught-exception handler.
 
 For ordered effects use 'foreachStream' instead.
 -}
@@ -879,13 +885,22 @@ foreachStreamAsync
   :: (Record k v -> IO ())
   -> KStream k v
   -> IO ()
-foreachStreamAsync act s =
-  foreachStream
-    ( \r -> do
-        _ <- Control.Concurrent.Async.async (act r)
-        pure ()
-    )
-    s
+foreachStreamAsync act s = do
+  let b = kstreamBuilder s
+  nm <- freshNodeName b "KSTREAM-FOREACH-ASYNC"
+  withTopology_ b $
+    Topo.addProcessor nm [kstreamParent s] $ do
+      pending <- newIORef ([] :: [Control.Concurrent.Async.Async ()])
+      let takeAll = atomicModifyIORef' pending (\as -> ([], reverse as))
+      pure
+        Processor
+          { procName = processorName "KSTREAM-FOREACH-ASYNC"
+          , procInit = \ctx -> ctxRegisterPreCommitDrain ctx (takeAll >>= mapM_ Control.Concurrent.Async.wait)
+          , procClose = takeAll >>= mapM_ Control.Concurrent.Async.waitCatch
+          , procProcess = \r -> do
+              a <- Control.Concurrent.Async.async (act r)
+              atomicModifyIORef' pending (\as -> (a : as, ()))
+          }
 
 
 {- | Terminal sink for side effects: every record runs through
@@ -1876,9 +1891,22 @@ itself.
 -}
 repartitionIfKeyChanged :: Maybe T.Text -> KStream k v -> IO (KStream k v)
 repartitionIfKeyChanged mName s
-  | kstreamKeyChanged s =
-      repartitionThrough mName Nothing (kstreamKeySerde s) (kstreamValueSerde s) Nothing s
+  | kstreamKeyChanged s = sharedRepartition mName s
   | otherwise = pure s
+
+
+{- | @s@ through its repartition topic named @mName@, made once per
+stream and name ('sharedRepartitionNode'): every later grouping or join
+of @s@ reads the same topic.
+-}
+sharedRepartition :: Maybe T.Text -> KStream k v -> IO (KStream k v)
+sharedRepartition mName s = do
+  r <-
+    sharedRepartitionNode (kstreamBuilder s) (kstreamParent s) mName $
+      kstreamParent <$> repartitionThrough mName Nothing (kstreamKeySerde s) (kstreamValueSerde s) Nothing s
+  case r of
+    Left e -> throwIO (TopologyException e)
+    Right src -> pure s {kstreamParent = src, kstreamKeyChanged = False}
 
 
 ----------------------------------------------------------------------

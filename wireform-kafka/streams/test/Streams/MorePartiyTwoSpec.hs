@@ -35,8 +35,7 @@ optimize_topology_is_identity_when_off =
     topo <- mkSimpleTopo
     let cfg =
           OptimizationConfig
-            { optMergeRepartitionTopics = False
-            , optReuseSourceKTable = False
+            { optReuseSourceKTable = False
             }
         topo' = optimizeTopology cfg topo
     -- Same node count after optimisation (currently a no-op).
