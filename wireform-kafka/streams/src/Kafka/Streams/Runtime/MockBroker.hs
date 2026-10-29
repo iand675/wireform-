@@ -12,13 +12,15 @@ Enough of a broker to run the streams runtime end to end in a test:
 
   * topics with partitions holding append-only logs (null values
     included, so changelog tombstones and table deletes work);
-  * consumer groups with the range assignor (which keeps equal
-    partition numbers of equally partitioned topics together, as
-    co-partitioned joins need) and a real rejoin barrier: once a
-    member joins or leaves, every member must rejoin before anyone
-    gets a new assignment, and until then the old generation can
-    still commit, exactly like a group coordinator in
-    @PreparingRebalance@;
+  * consumer groups with a real rejoin barrier: once a member joins
+    or leaves, every member must rejoin (with fresh subscription user
+    data) before anyone gets a new assignment, and until then the old
+    generation can still commit, exactly like a group coordinator in
+    @PreparingRebalance@. The first member to find the barrier
+    complete is the leader: it runs its assignor (the
+    'GroupAssignor' it subscribed with) over every member's
+    subscription, and the result is installed unless the group moved
+    on meanwhile;
   * transactions: records written in a transaction are invisible to
     read_committed readers until it commits and are skipped forever if
     it aborts; commits and aborts leave a control marker that takes an
@@ -59,8 +61,10 @@ module Kafka.Streams.Runtime.MockBroker (
 ) where
 
 import Control.Concurrent.STM
+import Control.Exception (SomeException, try)
 import Control.Monad (forM_, unless)
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
 import Data.Foldable (toList)
 import Data.IORef
 import Data.Int (Int32, Int64)
@@ -75,6 +79,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Kafka.Streams.Internal.Text (decimalText)
 import Data.Time.Clock.POSIX (getPOSIXTime)
+import Kafka.Client.Assignor (CustomAssignor (..), MemberAssignment (..), MemberSubscription (..))
 import Kafka.Client.Consumer qualified as KC
 import Kafka.Client.Internal.Murmur2 qualified as Murmur2
 import Kafka.Client.Producer qualified as KP
@@ -122,6 +127,11 @@ data Member = Member
   , mPositions :: !(Map KC.TopicPartition Int64)
   , mPaused :: !(Set KC.TopicPartition)
   , mRejoinRequested :: !Bool
+  , mAssignor :: !CustomAssignor
+  , mUserData :: !ByteString
+  -- ^ Its subscription user data, as of its last join
+  , mTargetUserData :: !ByteString
+  -- ^ The assignment user data the leader attached to 'mTarget'
   }
 
 
@@ -131,7 +141,15 @@ data Group = Group
   -- ^ A rebalance has been triggered and not every member has rejoined
   , gMembers :: !(Map Text Member)
   , gOffsets :: !(Map KC.TopicPartition Int64)
+  , gAssigning :: !Bool
+  -- ^ Every member has rejoined and a leader is running the assignor
+  , gEpoch :: !Int
+  -- ^ Bumped by every trigger: a leader's result for an older epoch is dropped
   }
+
+
+emptyGroup :: Group
+emptyGroup = Group 0 False Map.empty Map.empty False 0
 
 
 data Producer = Producer
@@ -402,55 +420,51 @@ waitForChange v seen ms
 -- Groups
 ----------------------------------------------------------------------
 
-{- | The range assignor: for each topic, its partitions split into
-contiguous ranges over the (sorted) members subscribed to it.
--}
-rangeAssign :: St -> Map Text Member -> Map Text (Set KC.TopicPartition)
-rangeAssign s members =
-  let topics = Set.toList (Set.fromList (concatMap mTopics (Map.elems members)))
-      perTopic t =
-        let subs = Map.keys (Map.filter (\m -> t `elem` mTopics m) members)
-            nParts = maybe 0 Map.size (Map.lookup t (stTopics s))
-            nm = length subs
-        in if nm == 0
-             then []
-             else
-               let (q, r) = nParts `quotRem` nm
-                   ranges = go 0 (zip [0 ..] subs)
-                   go _ [] = []
-                   go start ((i, mid) : rest) =
-                     let len = q + (if i < r then 1 else 0)
-                     in (mid, map (KC.TopicPartition t . fromIntegral) [start .. start + len - 1]) : go (start + len) rest
-               in ranges
-  in Map.unionWith
-       Set.union
-       (Map.map (const Set.empty) members)
-       (Map.fromListWith Set.union (map (fmap Set.fromList) (concatMap perTopic topics)))
-
-
 triggerRebalance :: Group -> Group
-triggerRebalance g = g {gPending = True, gMembers = Map.map (\m -> m {mRejoined = False}) (gMembers g)}
+triggerRebalance g =
+  g
+    { gPending = True
+    , gAssigning = False
+    , gEpoch = gEpoch g + 1
+    , gMembers = Map.map (\m -> m {mRejoined = False}) (gMembers g)
+    }
 
 
--- | If every member has rejoined, complete the pending rebalance.
-completeIfReady :: St -> Group -> Group
-completeIfReady s g
-  | gPending g && all mRejoined (Map.elems (gMembers g)) =
-      let asg = rangeAssign s (gMembers g)
-      in g
-           { gGeneration = gGeneration g + 1
-           , gPending = False
-           , gMembers =
-               Map.mapWithKey
-                 (\mid m -> m {mRejoinRequested = False, mTarget = Map.findWithDefault Set.empty mid asg})
-                 (gMembers g)
-           }
-  | otherwise = g
+{- | Every member has rejoined: the member that sees it first claims the
+leadership and runs the assignor (outside STM), over this snapshot.
+-}
+claimLeadership :: Group -> Maybe Group
+claimLeadership g
+  | gPending g && not (gAssigning g) && all mRejoined (Map.elems (gMembers g)) = Just g {gAssigning = True}
+  | otherwise = Nothing
+
+
+-- | Install the leader's assignment, unless the group moved on meanwhile.
+installAssignment :: Int -> Map Text MemberAssignment -> Group -> Group
+installAssignment epoch asg g
+  | gEpoch g /= epoch || not (gAssigning g) = g
+  | otherwise =
+      g
+        { gGeneration = gGeneration g + 1
+        , gPending = False
+        , gAssigning = False
+        , gMembers =
+            Map.mapWithKey
+              ( \mid m ->
+                  let ma = Map.findWithDefault (MemberAssignment [] BS.empty) mid asg
+                  in m
+                       { mRejoinRequested = False
+                       , mTarget = Set.fromList (concatMap (\(t, ps) -> map (KC.TopicPartition t) ps) (maPartitions ma))
+                       , mTargetUserData = maUserData ma
+                       }
+              )
+              (gMembers g)
+        }
 
 
 modifyGroup :: Text -> (Group -> Group) -> St -> St
 modifyGroup gid f s =
-  let g0 = Map.findWithDefault (Group 0 False Map.empty Map.empty) gid (stGroups s)
+  let g0 = Map.findWithDefault emptyGroup gid (stGroups s)
   in bump s {stGroups = Map.insert gid (f g0) (stGroups s)}
 
 
@@ -483,8 +497,9 @@ defaultMockDriverOptions =
 
 data PollStep
   = NeedRejoin
+  | Lead !Int !CustomAssignor ![MemberSubscription] !(Map Text Int32)
   | Waiting !Int
-  | Synced ![KC.TopicPartition] ![KC.TopicPartition]
+  | Synced ![KC.TopicPartition] ![KC.TopicPartition] ![KC.TopicPartition] !ByteString
   | Fetched ![DriverRecord]
   | NothingNew !Int
   | Fenced
@@ -501,6 +516,7 @@ newMockDriver :: MockBroker -> MockDriverOptions -> IO StreamDriver
 newMockDriver (MockBroker v) opts = do
   memberRef <- newIORef (Nothing :: Maybe Text)
   cbRef <- newIORef noRebalanceCallbacks
+  udRef <- newIORef (pure BS.empty)
   epochRef <- newIORef (-1 :: Int)
   let gid = mdoGroupId opts
       iso = mdoIsolation opts
@@ -532,6 +548,15 @@ newMockDriver (MockBroker v) opts = do
             Nothing -> pure Fenced
             Just m
               | gPending g && not (mRejoined m) -> pure NeedRejoin
+              | Just g' <- claimLeadership g -> do
+                  writeTVar v s {stGroups = Map.insert gid g' (stGroups s)}
+                  let subs =
+                        map
+                          (\(i, mem) -> MemberSubscription i (mTopics mem) (mUserData mem) [])
+                          (Map.toList (gMembers g))
+                      topics = Set.toList (Set.fromList (concatMap mTopics (Map.elems (gMembers g))))
+                      counts = Map.fromList (map (\t -> (t, maybe 0 (fromIntegral . Map.size) (Map.lookup t (stTopics s)))) topics)
+                  pure (Lead (gEpoch g) (mAssignor m) subs counts)
               | gPending g -> pure (Waiting (stVersion s))
               | mGeneration m < gGeneration g -> do
                   let new = mTarget m
@@ -550,7 +575,7 @@ newMockDriver (MockBroker v) opts = do
                           , mPaused = Set.intersection (mPaused m) new
                           }
                   writeTVar v (modifyGroup gid (\g' -> g' {gMembers = Map.insert mid m' (gMembers g')}) s)
-                  pure (Synced (Set.toList revoked) (Set.toList added))
+                  pure (Synced (Set.toList revoked) (Set.toList added) (Set.toList new) (mTargetUserData m))
               | mRejoinRequested m -> do
                   writeTVar v (modifyGroup gid triggerRebalance s)
                   pure NeedRejoin
@@ -578,15 +603,26 @@ newMockDriver (MockBroker v) opts = do
                 Fenced -> pure (Left "member is no longer in the group")
                 NeedRejoin -> do
                   rcBeforeRejoin cbs
-                  atomically $ modifyTVar' v $ \s ->
-                    modifyGroup
-                      gid
-                      (\g -> completeIfReady s g {gMembers = Map.adjust (\m -> m {mRejoined = True}) mid (gMembers g)})
-                      s
+                  ud <- readIORef udRef >>= id
+                  atomically $ modifyTVar' v $
+                    modifyGroup gid (\g -> g {gMembers = Map.adjust (\m -> m {mRejoined = True, mUserData = ud}) mid (gMembers g)})
                   loop waited
-                Synced revoked added -> do
+                Lead epoch ca subs counts -> do
+                  r <- try (caAssign ca counts subs) :: IO (Either SomeException (Either String (Map Text MemberAssignment)))
+                  let retry e = do
+                        -- everyone joins again, and a leader retries
+                        atomically $ modifyTVar' v $ modifyGroup gid triggerRebalance
+                        pure (Left ("assignor: " <> e))
+                  case r of
+                    Right (Right asg) -> do
+                      atomically $ modifyTVar' v $ modifyGroup gid (installAssignment epoch asg)
+                      loop waited
+                    Right (Left e) -> retry e
+                    Left e -> retry (show e)
+                Synced revoked added whole ud -> do
                   unless (null revoked) (rcRevoked cbs revoked)
                   unless (null added) (rcAssigned cbs added)
+                  rcAssignment cbs whole ud
                   loop waited
                 Fetched rs -> pure (Right rs)
                 Waiting ver -> wait ver waited
@@ -652,8 +688,10 @@ newMockDriver (MockBroker v) opts = do
 
   pure
     StreamDriver
-      { sdSubscribe = \topics cbs -> do
+      { sdSubscribe = \topics ga cbs -> do
           writeIORef cbRef cbs
+          writeIORef udRef (gaSubscriptionUserData ga)
+          ud <- gaSubscriptionUserData ga
           mid <- atomically $ do
             s <- readTVar v
             let !n = stNextMember s
@@ -668,13 +706,16 @@ newMockDriver (MockBroker v) opts = do
                     , mPositions = Map.empty
                     , mPaused = Set.empty
                     , mRejoinRequested = False
+                    , mAssignor = gaAssignor ga
+                    , mUserData = ud
+                    , mTargetUserData = BS.empty
                     }
                 s1 = s {stNextMember = n + 1}
             writeTVar v $
               modifyGroup
                 gid
                 ( \g ->
-                    completeIfReady s1 ((triggerRebalance g) {gMembers = Map.insert mid member (gMembers (triggerRebalance g))})
+                    let g' = triggerRebalance g in g' {gMembers = Map.insert mid member (gMembers g')}
                 )
                 s1
             pure mid
@@ -683,7 +724,7 @@ newMockDriver (MockBroker v) opts = do
       , sdPoll = poll
       , sdCommitOffsets = \offs -> withMember $ \mid -> atomically $ do
           s <- readTVar v
-          let g = Map.findWithDefault (Group 0 False Map.empty Map.empty) gid (stGroups s)
+          let g = Map.findWithDefault emptyGroup gid (stGroups s)
           if stFailOffsetCommits s > 0
             then do
               writeTVar v s {stFailOffsetCommits = stFailOffsetCommits s - 1}
@@ -711,7 +752,7 @@ newMockDriver (MockBroker v) opts = do
               gid
               ( \g ->
                   let g' = g {gMembers = Map.delete mid (gMembers g)}
-                  in if Map.null (gMembers g') then g' else completeIfReady s (triggerRebalance g')
+                  in if Map.null (gMembers g') then g' else triggerRebalance g'
               )
               s
           writeIORef memberRef Nothing
@@ -831,7 +872,7 @@ newMockDriver (MockBroker v) opts = do
           myEpoch <- readIORef epochRef
           atomically $ do
             s <- readTVar v
-            let g = Map.findWithDefault (Group 0 False Map.empty Map.empty) gid (stGroups s)
+            let g = Map.findWithDefault emptyGroup gid (stGroups s)
                 current = maybe False ((== gGeneration g) . mGeneration) (Map.lookup mid (gMembers g))
             case fencedUnless myEpoch s of
               Left e -> pure (Left e)

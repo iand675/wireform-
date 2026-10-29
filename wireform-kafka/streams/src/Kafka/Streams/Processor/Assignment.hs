@@ -7,9 +7,8 @@
 Module      : Kafka.Streams.Processor.Assignment
 Description : User-pluggable task assignor (KIP-924)
 
-The streams runtime ships
-@Kafka.Streams.Runtime.Assignor@ as a /closed/ implementation of
-the task-assignment algorithm. Java 4.0 exposes
+The streams runtime deals tasks with its own lag-aware assignor
+("Kafka.Streams.Runtime.GroupAssignor"). Java 4.0 exposes
 @org.apache.kafka.streams.processor.assignment.TaskAssignor@ as
 a /pluggable/ interface so applications can supply their own
 placement policy.
@@ -29,11 +28,12 @@ This module is the Haskell mirror of that pluggable surface:
   * 'AssignmentError' / 'AssignmentConfigs' — surface error codes
     and tunables matching Java's enum / record.
 
-Today this is /declarative/: the streams runtime still uses its
-own closed assignor. Wiring 'TaskAssignor' into
-'Kafka.Streams.Runtime' so user-supplied assignors take effect
-is follow-up work; the value types are in tree so the wiring is
-mechanical when it lands.
+Set 'Kafka.Streams.Config.taskAssignor' and the group leader calls
+'taAssign' at every rebalance instead of the built-in dealing. The
+result is validated ('AssignmentError'; every task active exactly
+once, no standby next to its active, only known processes and tasks)
+and reported through 'taOnAssignmentComputed'; an invalid result, or
+an exception, falls back to the built-in assignment.
 -}
 module Kafka.Streams.Processor.Assignment (
   -- * Input metadata
@@ -62,7 +62,7 @@ module Kafka.Streams.Processor.Assignment (
 ) where
 
 import Data.Hashable (Hashable)
-import Data.Int (Int32)
+import Data.Int (Int32, Int64)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
@@ -131,6 +131,11 @@ data KafkaStreamsState = KafkaStreamsState
   , kssPreviousActiveTasks :: !(Set TaskId)
   , kssPreviousStandbyTasks :: !(Set TaskId)
   , kssRackId :: !(Maybe Text)
+  , kssTaskLags :: !(Map TaskId Int64)
+  {- ^ Per stateful task: how many changelog records this client's
+  state is behind (0 for the running owner; the whole changelog
+  without local state). JVM: @KafkaStreamsState.lagFor@
+  -}
   }
   deriving stock (Eq, Show, Generic)
 
@@ -186,6 +191,9 @@ data AssignmentError
   | ActiveTaskAssignedMultipleTimes
   | InvalidStandbyTask
   | MissingProcessId
+  -- ^ A client of the group got no entry
+  | MissingActiveTask
+  -- ^ A task has no active anywhere
   | UnknownProcessId
   | UnknownTaskId
   deriving stock (Eq, Show, Generic)

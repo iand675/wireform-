@@ -16,7 +16,7 @@ Kafka, Streams, and Riffle terminology is defined in the [Glossary](../glossary/
 - Five kinds of topology diff each have a different operational story; the table below classifies them.
 - Name every stateful operator explicitly (`Named` + `materializedAs`): auto-generated names shift when you reshuffle the topology, which renames their changelog topics.
 - Run the [topology-JSON golden-file diff](../observability/#topology-json) in CI and the [orphan-topic detector](../observability/#orphan-topic-detection) on startup.
-- There are no standby replicas: a task that moves restores its stores from the changelogs before processing. Keep that short with persistent stores on stable volumes and compacted changelogs.
+- A task that moves restores its stores before processing: little on an instance with its standby (`numStandbyReplicas`), the changelog otherwise. Keep it short with standbys, persistent stores on stable volumes and compacted changelogs; a tight `acceptableRecoveryLag` keeps tasks on caught-up instances while warmups restore.
 - Each member commits before it rejoins, closes revoked tasks before the new owner builds them, and the new owner restores first: no double processing within a generation.
 
 :::
@@ -201,8 +201,9 @@ about it".
 ## The consumer-group side of a rolling deploy
 
 The runtime joins a Kafka consumer group keyed on `applicationId`,
-with the classic group protocol and the range assignor. Each new
-instance is a new group member. The rules:
+with the classic group protocol and the runtime's
+[group assignor](../glossary/#group-assignor). Each new instance is a
+new group member. The rules:
 
 - **Before rejoining**, every member commits what its tasks have
   processed (the consumer's pre-rejoin hook, while the old generation
@@ -213,26 +214,29 @@ instance is a new group member. The rules:
   **assigned** partitions' tasks are built with their sources paused
   while every logged store restores from its changelog, then resume
   from the committed offsets.
-- **Probing rebalances** (`Kafka.Streams.Runtime.ProbingRebalance`)
-  fire every `probingRebalanceIntervalMs` (default 10 minutes) when a
-  warmup reported through `reportWarmupLag` is within
-  `acceptableRecoveryLag`. Nothing reports warmups on its own, since
-  there are no standby replicas.
+- **Standbys and warmups** follow the assignment: no longer wanted
+  ones are checkpointed and closed, new ones built from their
+  checkpoints. An assignment with warmups makes every member rejoin
+  after `probingRebalanceIntervalMs` (default 10 minutes), when the
+  tasks whose warmups caught up move.
 
 ### Restore time is the difference between a tolerable deploy and a bad one
 
-Each task's state lives on exactly one instance, plus its changelog.
-When that instance drains, the next instance to inherit the task
-restores from its checkpoint, if it has one for that task (it owned
-the task before, on the same volume), else the **entire** changelog,
-before processing. For a 1 TB store at 100 MB/s, that is ~3 hours of
+Each task's state lives on one instance, its standbys, and its
+changelog. When that instance drains, the next instance to inherit the
+task restores from its standby's position if it held one, else from
+its checkpoint if it has one for that task (it owned the task before,
+on the same volume), else the **entire** changelog, before
+processing. For a 1 TB store at 100 MB/s, that is ~3 hours of
 blackhole on any query against that task.
 
 To keep it short:
 
+- Run standbys (`numStandbyReplicas = 1`): a drain then moves each
+  task to the instance that has been keeping it current.
 - Use persistent stores (`persistentKeyValueStoreBuilder`) on a
-  persistent volume, with a stable `clientId` per instance so a
-  restarted instance gets its own partitions back (see
+  persistent volume: the assignor sees a restarted instance's
+  checkpoints and gives it those tasks back (see
   [Running in containers](./containers/#2-stable-identity-across-restarts)).
 - Keep changelogs compacted (the runtime creates them with
   `cleanup.policy=compact`).

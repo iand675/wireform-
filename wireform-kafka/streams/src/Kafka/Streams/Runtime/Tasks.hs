@@ -43,6 +43,13 @@ Lifecycle:
      to the last committed offsets.
   5. /Revoked/: committed (before the rebalance), closed and
      checkpointed. /Lost/: closed dirty.
+
+Standbys ('tmSetStandbys', from the assignment): the task's engine
+built with its stores only, kept current from the changelogs by the
+same reader that restores (after each commit their persistent stores
+are checkpointed). A standby that becomes active is not rebuilt: its
+processors are wired onto it ('activateEngine') and it restores only
+what it hasn't applied yet.
 -}
 module Kafka.Streams.Runtime.Tasks (
   TaskManager,
@@ -63,12 +70,19 @@ module Kafka.Streams.Runtime.Tasks (
   tmCloseAll,
   tmSetPaused,
   tmEngines,
+  tmSetStandbys,
+  tmStandbyTasks,
+  tmStandbyEngines,
+  tmOffsetSums,
+  StateLag (..),
+  tmStateLags,
   tmTaskSnapshot,
   TaskSnapshot (..),
   tmTakeCommitRequest,
   tmSetThreads,
   tmThreads,
   tmAssigned,
+  tmPlanOf,
 
   -- * Restore listener
   StateRestoreListener (..),
@@ -91,7 +105,7 @@ import Data.Int (Int64)
 import Data.List (sortOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, isJust, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust, mapMaybe)
 import Data.Sequence (Seq)
 import Data.Sequence qualified as Seq
 import Data.Set (Set)
@@ -121,6 +135,7 @@ import Kafka.Streams.Internal.Engine (
   Engine,
   EngineOptions (..),
   StoreEntry (..),
+  activateEngine,
   buildEngineWith,
   closeEngine,
   commitEngine,
@@ -138,6 +153,7 @@ import Kafka.Streams.Internal.RecordCollector (
 import Kafka.Streams.Processor (TaskId (..))
 import Kafka.Streams.Runtime.Commit
 import Kafka.Streams.Runtime.Driver
+import Kafka.Streams.Runtime.GroupAssignor (runningActive)
 import Kafka.Streams.Runtime.Plan
 import Kafka.Streams.Runtime.StateDir (readCheckpoint, writeCheckpoint)
 import Kafka.Streams.State.Store (StateStore (..), AnyStateStore (..), KeyValueStore (..), SessionStore (..), StoreName, WindowStore (..), unStoreName)
@@ -238,6 +254,27 @@ data RestoreTarget = RestoreTarget
   }
 
 
+-- | A standby: a task's stores, kept current from its changelogs.
+data Standby = Standby
+  { sbTask :: !TaskId
+  , sbDir :: !FilePath
+  , sbEngine :: !Engine
+  , sbPos :: !(IORef (Map KC.TopicPartition Int64))
+  -- ^ The next changelog offset to apply, per partition (@-2@: the log start)
+  , sbFeeds :: !(Map KC.TopicPartition (StoreName, Maybe (KC.TopicPartition -> DriverRecord -> IO (Either Text ()))))
+  }
+
+
+-- | Where a rebuilt task's restore starts.
+data RestoreFrom
+  = -- | Its checkpoint (persistent stores), else the log start
+    FromCheckpoint
+  | -- | The log start: the local state was wiped
+    FromScratch
+  | -- | Where its standby got to: the stores already hold everything before
+    FromPositions !(Map KC.TopicPartition Int64)
+
+
 data TaskManager = TaskManager
   { tmCfg :: !TaskManagerConfig
   , tmDriver :: !StreamDriver
@@ -255,6 +292,7 @@ data TaskManager = TaskManager
   , tmLastPurge :: !(IORef Int64)
   , tmThreadsRef :: !(IORef Int)
   , tmCycle :: !(IORef Int64)
+  , tmStandbys :: !(IORef (Map TaskId Standby))
   , tmCounters :: !(UMV.IOVector Int)
   -- ^ 'InstanceCounts', written by the stream loop's thread
   }
@@ -280,6 +318,7 @@ newTaskManager cfg drv plan = do
       threads <- newIORef (max 1 (tmcThreads cfg))
       cycleRef <- newIORef 0
       counters <- UMV.replicate countersSize 0
+      standbys <- newIORef Map.empty
       pure . Right $
         TaskManager
           { tmCfg = cfg
@@ -299,6 +338,7 @@ newTaskManager cfg drv plan = do
           , tmThreadsRef = threads
           , tmCycle = cycleRef
           , tmCounters = counters
+          , tmStandbys = standbys
           }
 
 
@@ -312,6 +352,10 @@ logLine = hPutStrLn stderr . ("[streams] " <>)
 
 taskName :: TaskId -> Text
 taskName (TaskId s p) = decimalText s <> "_" <> decimalText p
+
+
+tmPlanOf :: TaskManager -> RuntimePlan
+tmPlanOf = tmPlan
 
 
 tmAssigned :: TaskManager -> IO (Set KC.TopicPartition)
@@ -381,8 +425,8 @@ toProducerRecord cr =
     }
 
 
-buildTaskEngine :: TaskManager -> SubPlan -> TaskId -> FilePath -> IORef (Map KC.TopicPartition Int64) -> IO Engine
-buildTaskEngine tm sub tid dir clPos = do
+buildTaskEngine :: TaskManager -> SubPlan -> TaskId -> FilePath -> IORef (Map KC.TopicPartition Int64) -> Bool -> IO Engine
+buildTaskEngine tm sub tid dir clPos storesOnly = do
   createDirectoryIfMissing True dir
   let TaskId _ p = tid
       cfg = tmCfg tm
@@ -393,6 +437,7 @@ buildTaskEngine tm sub tid dir clPos = do
               _ -> Nothing
           , eoTaskDirectory = Just dir
           , eoSharedStores = tmcSharedStores cfg
+          , eoStoresOnly = storesOnly
           }
   e <- buildEngineWith opts (subPlanTopology sub) tid (tmcAppId cfg) (taskCollector tm clPos) (tmcDeserHandler cfg)
   setPartitionCountLookup e (sdPartitionsFor (tmDriver tm))
@@ -410,11 +455,13 @@ isPersistent se = case storeEntryAny se of
 {- | Register the restores a freshly built task needs; 'True' if there
 is any (its partitions then stay paused until they finish).
 -}
-scheduleRestore :: TaskManager -> Task -> Bool -> IO (Either String Bool)
-scheduleRestore tm t useCheckpoint = do
+scheduleRestore :: TaskManager -> Task -> RestoreFrom -> IO (Either String Bool)
+scheduleRestore tm t from = do
   engine <- readIORef (taskEngine t)
   stores <- engineOwnStores engine
-  saved <- if useCheckpoint then readCheckpoint (taskDir t) else pure Map.empty
+  saved <- case from of
+    FromCheckpoint -> readCheckpoint (taskDir t)
+    _ -> pure Map.empty
   let TaskId _ p = taskId t
       changelogs = Map.toList (subPlanChangelogs (taskSub t))
       clTp cl = KC.TopicPartition (unTopicName (clTopic cl)) p
@@ -434,9 +481,13 @@ scheduleRestore tm t useCheckpoint = do
               | otherwise = Map.findWithDefault 0 tp committed
             se = Map.lookup sn stores
             -- @-2@: the log start (whatever survived retention / purging)
-            checkpointed = case Map.lookup (tp.topic, tp.partition) saved of
-              Just off | maybe False isPersistent se -> Just off
-              _ -> Nothing
+            checkpointed = case from of
+              FromPositions pos -> case Map.lookup tp pos of
+                Just off | off >= 0 -> Just off
+                _ -> Nothing
+              _ -> case Map.lookup (tp.topic, tp.partition) saved of
+                Just off | maybe False isPersistent se -> Just off
+                _ -> Nothing
             start = fromMaybe 0 checkpointed
         -- remember where the stores stand, for the next checkpoint
         atomicModifyIORef' (taskChangelogPos t) (\m -> (Map.insert tp (max start end) m, ()))
@@ -508,22 +559,27 @@ resetPolicy plan tp =
 
 
 createTask :: TaskManager -> TaskId -> Map KC.TopicPartition Int64 -> IO (Either String ())
-createTask tm tid@(TaskId sid p) committed =
+createTask tm tid@(TaskId sid _) committed =
   case Map.lookup sid (rpSubtopologies (tmPlan tm)) of
     Nothing -> pure (Right ())
     Just sub -> do
-      let counts = rpPartitionCounts (tmPlan tm)
-          parts =
-            map
-              (`KC.TopicPartition` p)
-              (filter (\t -> fromIntegral p < Map.findWithDefault 1 t counts) (subPlanSourceTopics sub))
+      let parts = taskSourcePartitions (tmPlan tm) tid
           dir = tmcAppDir (tmCfg tm) </> taskDirName tid
       tasks <- readIORef (tmTasks tm)
       threads <- readIORef (tmThreadsRef tm)
       let load w = length (filter ((== w) . (`mod` threads) . taskWorker) (Map.elems tasks))
           worker = snd (minimum (map (\w -> (load w, w)) [0 .. threads - 1]))
-      clPos <- newIORef Map.empty
-      engine <- buildTaskEngine tm sub tid dir clPos
+      standby <- atomicModifyIORef' (tmStandbys tm) (\m -> (Map.delete tid m, Map.lookup tid m))
+      (engine, clPos, from) <- case standby of
+        Just sb -> do
+          -- a warm standby: keep its stores, wire up the processors
+          activateEngine (sbEngine sb)
+          pos <- readIORef (sbPos sb)
+          pure (sbEngine sb, sbPos sb, FromPositions pos)
+        Nothing -> do
+          ref <- newIORef Map.empty
+          e <- buildTaskEngine tm sub tid dir ref False
+          pure (e, ref, FromCheckpoint)
       engineRef <- newIORef engine
       queues <- newIORef Map.empty
       consumed <- newIORef (Map.restrictKeys committed (Set.fromList parts))
@@ -548,7 +604,7 @@ createTask tm tid@(TaskId sid p) committed =
               , taskProcessed = processed
               }
       atomicModifyIORef' (tmTasks tm) (\m -> (Map.insert tid t m, ()))
-      eRestore <- scheduleRestore tm t True
+      eRestore <- scheduleRestore tm t from
       case eRestore of
         Left e -> pure (Left e)
         Right True -> Right <$> sdPause (tmDriver tm) parts
@@ -563,27 +619,35 @@ tmRestoring :: TaskManager -> IO Bool
 tmRestoring tm = not . Map.null <$> readIORef (tmRestore tm)
 
 
--- | One batch of restoration; finished tasks start running.
+{- | One batch of restoration (finished tasks start running), and of
+keeping the standbys current.
+-}
 tmRestoreStep :: TaskManager -> IO (Either String ())
 tmRestoreStep tm = do
   targets <- readIORef (tmRestore tm)
-  if Map.null targets
+  standbys <- readIORef (tmStandbys tm)
+  let feeds = Map.unions (map (\sb -> Map.map ((,) sb) (sbFeeds sb)) (Map.elems standbys))
+      wanted = Set.union (Map.keysSet targets) (Map.keysSet feeds)
+  if Set.null wanted
     then pure (Right ())
     else do
       assigned <- readIORef (tmReaderAssigned tm)
       reassign <-
-        if Map.keysSet targets == assigned
+        if wanted == assigned
           then pure (Right ())
           else do
-            writeIORef (tmReaderAssigned tm) (Map.keysSet targets)
-            rdAssign (tmReader tm) (map (\(tp, rt) -> (tp, rtNext rt)) (Map.toList targets))
+            writeIORef (tmReaderAssigned tm) wanted
+            feedPos <- forM (Map.toList feeds) $ \(tp, (sb, _)) -> (,) tp . Map.findWithDefault (-2) tp <$> readIORef (sbPos sb)
+            rdAssign (tmReader tm) (map (\(tp, rt) -> (tp, rtNext rt)) (Map.toList targets) <> feedPos)
       case reassign of
         Left e -> pure (Left ("assign restore reader: " <> e))
         Right () -> do
           eRecs <- rdPoll (tmReader tm) 0
           case eRecs of
             Left e -> pure (Left ("restore poll: " <> e))
-            Right recs -> do
+            Right recs -> feedStandbys tm feeds recs >>= either (pure . Left) (const (restoreBatch targets recs))
+  where
+    restoreBatch targets recs = do
               listener <- tmcRestoreListener (tmCfg tm)
               -- apply, in order, per partition
               applied <- foldM (applyOne targets) Map.empty recs
@@ -608,7 +672,6 @@ tmRestoreStep tm = do
                   atomicModifyIORef' (tmRestore tm) (\m -> (foldr Map.delete m finished, ()))
                   promoteRestored tm
                   pure (Right ())
-  where
     applyOne targets acc r = do
       let tp = KC.TopicPartition r.drTopic r.drPartition
       case acc of
@@ -627,6 +690,193 @@ tmRestoreStep tm = do
                     tp
                     (Right (1, r.drOffset))
                     acc
+
+
+-- | Apply the standbys' changelog records, and move their positions on.
+feedStandbys
+  :: TaskManager
+  -> Map KC.TopicPartition (Standby, (StoreName, Maybe (KC.TopicPartition -> DriverRecord -> IO (Either Text ()))))
+  -> [DriverRecord]
+  -> IO (Either String ())
+feedStandbys tm feeds recs
+  | Map.null feeds = pure (Right ())
+  | otherwise = do
+      let go [] = pure (Right ())
+          go (r : rest) = case Map.lookup (KC.TopicPartition r.drTopic r.drPartition) feeds of
+            Nothing -> go rest
+            Just (sb, (sn, mApply)) -> case mApply of
+              Nothing -> pure (Left ("standby " <> T.unpack (taskName (sbTask sb)) <> ": store " <> T.unpack (unStoreName sn) <> " cannot be restored"))
+              Just apply -> do
+                res <- apply (KC.TopicPartition r.drTopic r.drPartition) r
+                case res of
+                  Left e -> pure (Left ("standby " <> T.unpack (taskName (sbTask sb)) <> ": " <> T.unpack e))
+                  Right () -> go rest
+      applied <- go recs
+      case applied of
+        Left e -> pure (Left e)
+        Right () -> do
+          forM_ (Map.toList feeds) $ \(tp, (sb, _)) -> do
+            ePos <- rdPosition (tmReader tm) tp
+            either (const (pure ())) (\pos -> atomicModifyIORef' (sbPos sb) (\m -> (Map.insert tp pos m, ()))) ePos
+          addCount tm ixStandbyRecords (length (filter (\r -> Map.member (KC.TopicPartition r.drTopic r.drPartition) feeds) recs))
+          pure (Right ())
+
+
+----------------------------------------------------------------------
+-- Standbys
+----------------------------------------------------------------------
+
+{- | Hold standbys for exactly @wanted@ (less the tasks running here):
+close the others (checkpointed), build the new ones from their
+checkpoints.
+-}
+tmSetStandbys :: TaskManager -> Set TaskId -> IO ()
+tmSetStandbys tm wanted0 = do
+  active <- Map.keysSet <$> readIORef (tmTasks tm)
+  existing <- readIORef (tmStandbys tm)
+  let wanted = Set.difference wanted0 active
+  forM_ (Map.elems (Map.withoutKeys existing wanted)) $ \sb -> do
+    atomicModifyIORef' (tmStandbys tm) (\m -> (Map.delete (sbTask sb) m, ()))
+    closeStandby tm sb
+  forM_ (Set.toList (Set.difference wanted (Map.keysSet existing))) (createStandby tm)
+
+
+tmStandbyTasks :: TaskManager -> IO (Set TaskId)
+tmStandbyTasks tm = Map.keysSet <$> readIORef (tmStandbys tm)
+
+
+tmStandbyEngines :: TaskManager -> IO [(TaskId, Engine)]
+tmStandbyEngines tm = map (\sb -> (sbTask sb, sbEngine sb)) . Map.elems <$> readIORef (tmStandbys tm)
+
+
+createStandby :: TaskManager -> TaskId -> IO ()
+createStandby tm tid@(TaskId sid p) =
+  case Map.lookup sid (rpSubtopologies (tmPlan tm)) of
+    Just sub | not (Map.null (subPlanChangelogs sub)) -> do
+      let dir = tmcAppDir (tmCfg tm) </> taskDirName tid
+      pos <- newIORef Map.empty
+      engine <- buildTaskEngine tm sub tid dir pos True
+      stores <- engineOwnStores engine
+      saved <- readCheckpoint dir
+      let feeds =
+            Map.fromList
+              ( map
+                  ( \(sn, cl) ->
+                      ( KC.TopicPartition (unTopicName (clTopic cl)) p
+                      , (sn, (\apply _ r -> maybe (pure (Right ())) (\k -> apply k (drValue r)) (drKey r)) <$> (Map.lookup sn stores >>= storeEntryRestore))
+                      )
+                  )
+                  (Map.toList (subPlanChangelogs sub))
+              )
+          start (tp, (sn, _)) = case Map.lookup (tp.topic, tp.partition) saved of
+            Just off | maybe False isPersistent (Map.lookup sn stores) -> (tp, off)
+            _ -> (tp, -2)
+      writeIORef pos (Map.fromList (map start (Map.toList feeds)))
+      atomicModifyIORef' (tmStandbys tm) (\m -> (Map.insert tid (Standby tid dir engine pos feeds) m, ()))
+    _ -> pure ()
+
+
+-- | Flush the standby's stores and checkpoint its persistent ones.
+checkpointStandby :: Standby -> IO ()
+checkpointStandby sb = do
+  stores <- engineOwnStores (sbEngine sb)
+  forM_ (Map.elems stores) storeEntryFlush
+  pos <- readIORef (sbPos sb)
+  let persistentTps =
+        Set.fromList
+          ( map
+              fst
+              (filter (\(_, (sn, _)) -> maybe False isPersistent (Map.lookup sn stores)) (Map.toList (sbFeeds sb)))
+          )
+      offs = Map.filter (>= 0) (Map.restrictKeys pos persistentTps)
+  unless (Map.null offs) $
+    writeCheckpoint (sbDir sb) (Map.mapKeys (\tp -> (tp.topic, tp.partition)) offs)
+
+
+closeStandby :: TaskManager -> Standby -> IO ()
+closeStandby _tm sb = do
+  r <- try (checkpointStandby sb >> closeEngine (sbEngine sb)) :: IO (Either SomeException ())
+  either (\e -> logLine ("closing standby " <> T.unpack (taskName (sbTask sb)) <> ": " <> show e)) pure r
+
+
+-- | A task's local state against its changelogs.
+data StateLag = StateLag
+  { slTask :: !TaskId
+  , slStandby :: !Bool
+  , slPosition :: !Int64
+  -- ^ Summed changelog offsets the state covers (the end, for a running task)
+  , slEnd :: !Int64
+  }
+  deriving stock (Eq, Show)
+
+
+{- | Every task with state here (running, restoring or standby) against
+the current end of its changelogs.
+-}
+tmStateLags :: TaskManager -> IO (Either String [StateLag])
+tmStateLags tm = do
+  tasks <- readIORef (tmTasks tm)
+  restore <- readIORef (tmRestore tm)
+  standbys <- readIORef (tmStandbys tm)
+  let cls = planTaskChangelogs (tmPlan tm)
+      clsOf tid = Map.findWithDefault [] tid cls
+      wanted = Map.keys (Map.filter (not . null) (Map.restrictKeys cls (Set.union (Map.keysSet tasks) (Map.keysSet standbys))))
+      allTps = concatMap clsOf wanted
+      internal = map fst (filter (clInternal . snd) allTps)
+      reused = map fst (filter (not . clInternal . snd) allTps)
+  eEnds <- if null internal then pure (Right Map.empty) else rdEndOffsets (tmReader tm) internal
+  eCommitted <- if null reused then pure (Right Map.empty) else sdCommitted (tmDriver tm) reused
+  case (eEnds, eCommitted) of
+    (Left e, _) -> pure (Left ("changelog end offsets: " <> e))
+    (_, Left e) -> pure (Left ("committed offsets: " <> e))
+    (Right ends, Right committed) -> do
+      let endOf (tp, cl) = Map.findWithDefault 0 tp (if clInternal cl then ends else committed)
+          endSum tid = sum (map endOf (clsOf tid))
+      fmap Right . forM wanted $ \tid -> case (Map.lookup tid tasks, Map.lookup tid standbys) of
+        (Just t, _) -> do
+          st <- readIORef (taskState t)
+          pos <- readIORef (taskChangelogPos t)
+          let at (tp, _) = case Map.lookup tp restore of
+                Just rt -> max 0 (rtNext rt)
+                Nothing -> max 0 (Map.findWithDefault 0 tp pos)
+              current = if st == Running then endSum tid else sum (map at (clsOf tid))
+          pure (StateLag tid False current (endSum tid))
+        (Nothing, Just sb) -> do
+          pos <- readIORef (sbPos sb)
+          pure (StateLag tid True (sum (map (\(tp, _) -> max 0 (Map.findWithDefault 0 tp pos)) (clsOf tid))) (endSum tid))
+        _ -> pure (StateLag tid False 0 (endSum tid))
+
+
+{- | For the assignor: per task this instance holds state for, the
+summed changelog offsets the state covers, or 'runningActive' for a
+running task. Tasks not open here count by their checkpoints.
+-}
+tmOffsetSums :: TaskManager -> IO (Map TaskId Int64)
+tmOffsetSums tm = do
+  tasks <- readIORef (tmTasks tm)
+  restore <- readIORef (tmRestore tm)
+  standbys <- readIORef (tmStandbys tm)
+  let plan = tmPlan tm
+      clTps tid = maybe [] (map fst) (Map.lookup tid (planTaskChangelogs plan))
+  activeSums <- forM (Map.elems tasks) $ \t -> do
+    st <- readIORef (taskState t)
+    case st of
+      Running -> pure (taskId t, runningActive)
+      Restoring -> do
+        pos <- readIORef (taskChangelogPos t)
+        let at tp = case Map.lookup tp restore of
+              Just rt -> max 0 (rtNext rt)
+              Nothing -> max 0 (Map.findWithDefault 0 tp pos)
+        pure (taskId t, sum (map at (clTps (taskId t))))
+  standbySums <- forM (Map.elems standbys) $ \sb -> do
+    pos <- readIORef (sbPos sb)
+    pure (sbTask sb, sum (map (max 0) (Map.elems pos)))
+  let live = Set.union (Map.keysSet tasks) (Map.keysSet standbys)
+      onDisk = filter (`Set.notMember` live) (Map.keys (planTaskChangelogs plan))
+  diskSums <- forM onDisk $ \tid -> do
+    saved <- readCheckpoint (tmcAppDir (tmCfg tm) </> taskDirName tid)
+    pure (if Map.null saved then Nothing else Just (tid, sum (Map.elems saved)))
+  pure (Map.fromList (activeSums <> standbySums <> catMaybes diskSums))
 
 
 -- | Tasks without pending restores start running and resume their partitions.
@@ -831,7 +1081,9 @@ commitOnce tm = do
   let drv = tmDriver tm
       done = do
         markCommitted running offsets
-        unless (eos tm) (forM_ running (checkpoint tm))
+        unless (eos tm) $ do
+          forM_ running (checkpoint tm)
+          readIORef (tmStandbys tm) >>= mapM_ checkpointStandby . Map.elems
         purgeRepartitions tm running
         pure Committed
   if eos tm
@@ -917,18 +1169,21 @@ data InstanceCounts = InstanceCounts
   -- ^ Assignments received
   , icRestoredRecords :: {-# UNPACK #-} !Int
   -- ^ Changelog records applied while restoring
+  , icStandbyRecords :: {-# UNPACK #-} !Int
+  -- ^ Changelog records applied to standbys
   }
   deriving stock (Eq, Show)
 
 
-ixCommits, ixCommitsFailed, ixCommitsAborted, ixRecoveries, ixRebalances, ixRestored, countersSize :: Int
+ixCommits, ixCommitsFailed, ixCommitsAborted, ixRecoveries, ixRebalances, ixRestored, ixStandbyRecords, countersSize :: Int
 ixCommits = 0
 ixCommitsFailed = 1
 ixCommitsAborted = 2
 ixRecoveries = 3
 ixRebalances = 4
 ixRestored = 5
-countersSize = 6
+ixStandbyRecords = 6
+countersSize = 7
 
 
 bump :: TaskManager -> Int -> IO ()
@@ -945,7 +1200,14 @@ tmCounts :: TaskManager -> IO InstanceCounts
 tmCounts tm = do
   let c = tmCounters tm
       at = UMV.unsafeRead c
-  InstanceCounts <$> at ixCommits <*> at ixCommitsFailed <*> at ixCommitsAborted <*> at ixRecoveries <*> at ixRebalances <*> at ixRestored
+  InstanceCounts
+    <$> at ixCommits
+    <*> at ixCommitsFailed
+    <*> at ixCommitsAborted
+    <*> at ixRecoveries
+    <*> at ixRebalances
+    <*> at ixRestored
+    <*> at ixStandbyRecords
 
 
 -- | The internal topic holding each instance's last committed cycle.
@@ -1099,7 +1361,7 @@ tmRecoverAll tm = do
     _ <- try (closeEngine old) :: IO (Either SomeException ())
     removePathForcibly (taskDir t)
     writeIORef (taskChangelogPos t) Map.empty
-    engine <- buildTaskEngine tm (taskSub t) (taskId t) (taskDir t) (taskChangelogPos t)
+    engine <- buildTaskEngine tm (taskSub t) (taskId t) (taskDir t) (taskChangelogPos t) False
     writeIORef (taskEngine t) engine
     writeIORef (taskQueues t) Map.empty
     committed <- readIORef (taskCommitted t)
@@ -1111,7 +1373,7 @@ tmRecoverAll tm = do
         (Nothing, _) -> -2
     writeIORef (taskState t) Restoring
     sdPause drv (taskPartitions t)
-    r <- scheduleRestore tm t False
+    r <- scheduleRestore tm t FromScratch
     case r of
       Left e -> throwIO (StreamsException ("recovering task " <> taskName (taskId t) <> ": " <> T.pack e) (Just "restore"))
       Right _ -> pure ()
@@ -1166,6 +1428,8 @@ tmCloseAll :: TaskManager -> Bool -> IO ()
 tmCloseAll tm clean = do
   tasks <- Map.elems <$> readIORef (tmTasks tm)
   forM_ tasks (closeTask tm clean)
+  standbys <- atomicModifyIORef' (tmStandbys tm) (\m -> (Map.empty, Map.elems m))
+  forM_ standbys (closeStandby tm)
   rdClose (tmReader tm)
 
 

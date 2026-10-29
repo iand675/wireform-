@@ -41,10 +41,10 @@ deploy, not a rollout. See
 
 The component that decides which member of a [consumer
 group](#consumer-group) owns which [partition](#partition) (and,
-in Streams, which [task](#task)). The runtime's main consumer uses
-the classic group protocol with the **range** assignor: partition
-`p` of equally partitioned topics lands on the same member, which
-[co-partitioned](#co-partitioning) tasks need. See
+in Streams, which [task](#task)). The runtime's main consumer runs
+the application's own [group assignor](#group-assignor) over the
+classic group protocol: it deals whole tasks, so the partitions a
+[co-partitioned](#co-partitioning) task reads land together. See
 [Scaling](./operating/scaling/#processes-across-the-group).
 
 ### Async I/O operator
@@ -162,8 +162,9 @@ owned by at most one member at a time.
 
 ### Cooperative-sticky
 
-The JVM consumer's default assignor. This runtime's consumer uses
-the range assignor instead; see [Assignor](#assignor).
+The JVM consumer's default assignor. A streams application's
+consumer uses the [group assignor](#group-assignor) instead; see
+[Assignor](#assignor).
 
 ### CQRS (Command Query Responsibility Segregation)
 
@@ -291,6 +292,18 @@ records past its end. A 1-hour tumbling window with a 10-minute
 grace closes 70 minutes after the window's start in event time.
 Configured via `withGracePeriod` / `withSessionGracePeriod`.
 
+### Group assignor
+
+The application's consumer-group protocol (`streams`,
+`Kafka.Streams.Runtime.GroupAssignor`): the elected leader deals whole
+[tasks](#task) using every member's [subscription
+metadata](#subscription-metadata). Stateful tasks go to instances whose
+state is caught up (within `acceptableRecoveryLag`), balanced in
+proportion to threads and sticky; an instance that should own a task
+but isn't caught up gets a [warmup](#warmup-replica); `numStandbyReplicas`
+[standbys](#standby-task) go to other instances. A
+[`TaskAssignor`](#taskassignor) replaces the dealing.
+
 ---
 
 ## H
@@ -400,14 +413,14 @@ docs:
 | **KIP-295** | `topology.optimization` config knob (reuse-source-topics, merge-repartitions, single-store-self-join) |
 | **KIP-307** | Stable, deterministic processor names |
 | **KIP-418** | Named branches (`Branched.*`) |
-| **KIP-441** | Probing rebalances (`probingRebalanceIntervalMs`) |
+| **KIP-441** | Warmup replicas and probing rebalances (`acceptableRecoveryLag`, `maxWarmupReplicas`, `probingRebalanceIntervalMs`) |
 | **KIP-447** | EOS-V2 producer-per-instance with `TxnOffsetCommit` |
-| **KIP-535** | Cross-instance IQ discovery (`StreamsMetadata`, `KeyQueryMetadata`) |
+| **KIP-535** | Cross-instance IQ discovery (`applicationServer`, `streamsMetadata`, `queryMetadataForKey`) |
 | **KIP-591** | DSL store backend selection (`DslStoreSuppliers` on the builder) |
 | **KIP-825** | First-class `EmitStrategy` |
 | **KIP-848** | Next-gen consumer-group protocol: broker-side incremental reconciliation |
 | **KIP-892** | EOS-V3 transactional state stores |
-| **KIP-924** | In-process `TaskAssignor` plug-in |
+| **KIP-924** | `TaskAssignor` plug-in for the group assignor |
 | **KIP-925** | Rack-aware assignment strategy |
 | **KIP-1033** | First-class processing-exception handler with DLQ disposition |
 
@@ -556,12 +569,10 @@ represents one operator in the typed AST. Every DSL combinator
 
 ### Probing rebalance
 
-The cadence at which the runtime asks for a rebalance when a warmup
-reported through `reportWarmupLag` is within
-`acceptableRecoveryLag` (nothing reports one on its own, since
-there are no [standby](#standby-task) tasks). Interval `0` disables it. Lives in
-`Kafka.Streams.Runtime.ProbingRebalance`. Default cadence: 10
-minutes (`probingRebalanceIntervalMs`).
+When an assignment includes [warmups](#warmup-replica), every member
+rejoins after `probingRebalanceIntervalMs` (default 10 minutes; `0`
+disables it) so the leader can move the tasks whose warmups have
+caught up (within `acceptableRecoveryLag`). KIP-441.
 
 ### Processing guarantee
 
@@ -698,12 +709,13 @@ topics](#internal-topic) inherit from it. Lives in
 
 ### Standby task
 
-In the JVM, a warm replica of an active [task's](#task) state,
-maintained by tailing its [changelog](#changelog-topic). The runtime
-doesn't run standbys (`numStandbyReplicas > 0` only logs a warning):
-a task that moves restores from the changelog. The
-`Kafka.Streams.Runtime.Standby*` modules are standalone building
-blocks.
+A warm replica of an active [task's](#task) stores on another
+instance (`numStandbyReplicas` per stateful task), kept current by
+tailing their [changelogs](#changelog-topic) (`read_committed` under
+exactly-once). It runs no processors. When the task moves to it, its
+processors are wired onto those stores and it restores only what it
+hadn't applied. Placed by the [group assignor](#group-assignor);
+`localTaskLags` shows how far each is behind.
 
 ### State store
 
@@ -720,11 +732,11 @@ The top-level runtime configuration record. Mirrors the Java
 
 ### `StreamsMetadata`
 
-KIP-535 record: what each instance in the group looks like to its
-peers (host:port, owned partitions per store, standby partitions
-per store), in `Kafka.Streams.Discovery`. The runtime doesn't
-publish it (there is no `application.server`); it's there for an
-external IQ proxy that collects it itself.
+KIP-535 record: what an instance looks like to its peers (its
+`applicationServer`, stores, active and standby partitions), in
+`Kafka.Streams.Discovery`. `streamsMetadata` lists every advertising
+instance as of the last assignment; `queryMetadataForKey` finds the
+instance (and standbys) holding a key.
 
 ### `StreamTime`
 
@@ -745,10 +757,11 @@ nothing in user code should block one for long.
 ### Subscription metadata
 
 Bytes a [consumer group](#consumer-group) member attaches to its
-JoinGroup request. The JVM's Streams assignor uses it to advertise
-`application.server`, owned standby tasks, and per-member state;
-this runtime's consumer runs the plain range assignor and sends
-none of that.
+JoinGroup request. The [group assignor](#group-assignor)'s carries
+the member's process id, `applicationServer`, thread count, standbys,
+and per task it has state for, how far that state reaches into the
+changelogs. The leader's reply carries, per member, its active and
+standby tasks, every instance's tasks by host, and whether to probe.
 
 ### Subtopology
 
@@ -780,11 +793,12 @@ own [state stores](#state-store), and partition `p` of their
 
 ### `TaskAssignor`
 
-KIP-924 in-process plug-in (`StreamsConfig.taskAssignor`).
-`streamsRunUserAssignor` builds an `ApplicationState` from the
-instance's local view and invokes `taAssign` on it. The result
-doesn't drive the consumer, whose assignment comes from the range
-assignor.
+KIP-924 plug-in (`StreamsConfig.taskAssignor`): the
+[group assignor](#group-assignor)'s leader calls `taAssign` with every
+task and every instance (threads, previous tasks, per-task lag)
+instead of dealing the tasks itself. The result is validated
+(`AssignmentError`) and reported to `taOnAssignmentComputed`; an
+invalid one falls back to the built-in dealing.
 
 ### Tiered KV
 
@@ -846,6 +860,15 @@ A durable log of intended changes written before the changes are
 applied to the underlying store. Under Riffle [snapshot
 stores](#snapshot-store) the [changelog topic](#changelog-topic) is
 the WAL between snapshots: not the sole source of truth.
+
+### Warmup replica
+
+A [standby](#standby-task) placed on the instance the
+[group assignor](#group-assignor) wants a task to move to, while the
+task stays on an instance that is caught up (at most
+`maxWarmupReplicas` at a time). It restores in the background; at the
+next [probing rebalance](#probing-rebalance) the task moves if it has
+caught up. KIP-441.
 
 ### Watermark
 

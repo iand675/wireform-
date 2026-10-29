@@ -57,20 +57,18 @@ module Kafka.Streams.Runtime (
   resumeKafkaStreams,
   isPausedKafkaStreams,
 
-  -- * Task lag
+  -- * State lag
   LagInfo (..),
-  LagListener,
-  setLagListener,
-  publishLag,
+  localTaskLags,
 
   -- * Rebalance
   setRebalanceListener,
   ownedPartitions,
 
-  -- * Probing rebalance
-  reportWarmupLag,
-  clearWarmupLag,
-  warmupSnapshot,
+  -- * Discovery (KIP-535)
+  streamsMetadata,
+  queryMetadataForKey,
+  currentAssignment,
 
   -- * Two-phase commit participants
   addCommitParticipant,
@@ -109,10 +107,6 @@ module Kafka.Streams.Runtime (
   -- * KIP-714 client telemetry id
   kafkaStreamsClientInstanceId,
 
-  -- * KIP-924 user-pluggable task assignor
-  streamsRunUserAssignor,
-  streamsApplicationState,
-
   -- * Progress signal (used by tests to coordinate without threadDelay)
   ksTickCount,
   awaitTicks,
@@ -125,9 +119,10 @@ module Kafka.Streams.Runtime (
 import Control.Concurrent (yield)
 import Control.Concurrent.Async (Async, async, cancel, waitCatch)
 import Control.Concurrent.STM
-import Control.Exception (SomeAsyncException, SomeException, fromException, throwIO, try)
+import Control.Exception (IOException, SomeAsyncException, SomeException, fromException, throwIO, try)
 import Control.Monad (forM, forM_, unless, when)
 import Data.ByteString qualified as BS
+import Data.ByteString.Char8 qualified as BS8
 import Data.IORef
 import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
@@ -141,6 +136,9 @@ import Data.Text.Read qualified as TR
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID
 import Kafka.Client.Consumer qualified as KC
+import Kafka.Client.Internal.Murmur2 qualified as Murmur2
+import Kafka.Streams.Discovery (KeyQueryMetadata (..), StreamsMetadata (..))
+import Kafka.Streams.Discovery qualified as Discovery
 import Kafka.Client.RebalanceListener (
   RebalanceListener,
   noopRebalanceListener,
@@ -170,13 +168,14 @@ import Kafka.Streams.Runtime.Driver
 import Kafka.Streams.Runtime.GlobalStore
 import Kafka.Streams.Runtime.NativeDriver (newNativeDriver)
 import Kafka.Streams.Runtime.Plan
-import Kafka.Streams.Runtime.ProbingRebalance qualified as ProbingRebalance
+import Kafka.Streams.Runtime.GroupAssignor
 import Kafka.Streams.Runtime.StateDir (markCleanShutdown, prepareStateDir)
 import Kafka.Streams.Runtime.Tasks
-import Kafka.Streams.State.Store (StoreName)
+import Kafka.Streams.State.Store (StoreName, unStoreName)
+import Kafka.Streams.Topology.Subtopology (ChangelogTopic (..))
 import Kafka.Streams.Time (nowMillis)
 import Kafka.Streams.Topology qualified as Topo
-import System.Directory (doesDirectoryExist, removePathForcibly)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, removePathForcibly)
 import System.FilePath ((</>))
 import System.IO (hPutStrLn, stderr)
 import System.Timeout (timeout)
@@ -222,7 +221,6 @@ data KafkaStreams = KafkaStreams
   , ksRunning :: !(IORef (Maybe Running))
   , ksListener :: !(IORef StateListener)
   , ksPaused :: !(TVar Bool)
-  , ksLagLis :: !(IORef LagListener)
   , ksRebLis :: !(IORef RebalanceListener)
   , ksTicks :: !(TVar Int)
   {- ^ Bumped at the bottom of every loop iteration. Tests block on
@@ -233,8 +231,10 @@ data KafkaStreams = KafkaStreams
   , ksUncaught :: !(IORef StreamsUncaughtExceptionHandler)
   , ksGlobalRestoreLis :: !(IORef GlobalStateRestoreListener)
   , ksRestoreListener :: !(IORef StateRestoreListener)
-  , ksWarmupLag :: !(TVar (Map.Map TaskId Int64))
-  , ksLastProbeAt :: !(TVar Int64)
+  , ksAssignment :: !(TVar (Maybe StreamsAssignment))
+  -- ^ The last assignment this instance received
+  , ksProbeAt :: !(IORef (Maybe Int64))
+  -- ^ When to rejoin for a probing rebalance (warmups are restoring)
   , ksThreads :: !(IORef Int)
   , ksParticipants :: !(IORef [CommitParticipant])
   , ksCleanStop :: !(IORef Bool)
@@ -251,7 +251,6 @@ newKafkaStreams cfg topo = do
   running <- newIORef Nothing
   lis <- newIORef (\_ _ -> pure ())
   pa <- newTVarIO False
-  lagL <- newIORef (\_ -> pure ())
   reb <- newIORef noopRebalanceListener
   ticks <- newTVarIO 0
   prodH <- newIORef (defaultProductionHandler cfg)
@@ -259,8 +258,8 @@ newKafkaStreams cfg topo = do
   uncH <- newIORef replaceThreadOnException
   grLis <- newIORef (\_ _ -> pure ())
   rLis <- newIORef defaultStateRestoreListener
-  warmup <- newTVarIO Map.empty
-  lastPr <- newTVarIO 0
+  asg <- newTVarIO Nothing
+  probeAt <- newIORef Nothing
   threads <- newIORef (max 1 (numStreamThreads cfg))
   cleanStop <- newIORef False
   participants <- newIORef []
@@ -272,7 +271,6 @@ newKafkaStreams cfg topo = do
       , ksRunning = running
       , ksListener = lis
       , ksPaused = pa
-      , ksLagLis = lagL
       , ksRebLis = reb
       , ksTicks = ticks
       , ksProdHand = prodH
@@ -280,8 +278,8 @@ newKafkaStreams cfg topo = do
       , ksUncaught = uncH
       , ksGlobalRestoreLis = grLis
       , ksRestoreListener = rLis
-      , ksWarmupLag = warmup
-      , ksLastProbeAt = lastPr
+      , ksAssignment = asg
+      , ksProbeAt = probeAt
       , ksThreads = threads
       , ksCleanStop = cleanStop
       , ksParticipants = participants
@@ -315,8 +313,6 @@ startKafkaStreamsWith ks drv = do
   wiped <- prepareStateDir (processingGuarantee cfg) dir
   when wiped $
     logLine ("no clean shutdown recorded in " <> dir <> " under exactly-once: wiped local state")
-  when (numStandbyReplicas cfg > 0) $
-    logLine "num.standby.replicas > 0: standby replicas are not supported yet; tasks restore from changelogs on failover"
   transitionTo ks StreamsRebalancing
   r <- try (setUp dir)
   case r of
@@ -389,7 +385,9 @@ startKafkaStreamsWith ks drv = do
                       mapM_ stopGlobalStore mGlobal
                       pure (Left ("task manager: " <> Text.pack e))
                     Right tm -> do
-                      eSub <- sdSubscribe drv (rpSubscription plan) (callbacks tm)
+                      pid <- loadProcessId dir
+                      ga <- groupAssignor plan tm pid
+                      eSub <- sdSubscribe drv (rpSubscription plan) ga (callbacks tm)
                       case eSub of
                         Left e -> do
                           mapM_ stopGlobalStore mGlobal
@@ -423,7 +421,55 @@ startKafkaStreamsWith ks drv = do
         , rcLost = \tps -> do
             tmOnLost tm tps
             readIORef (ksRebLis ks) >>= \l -> RBL.dispatchLost l tps
+        , rcAssignment = \_ ud -> case decodeAssignment ud of
+            Left e -> throwIO (StreamsException ("assignment user data: " <> Text.pack e) (Just "assignment"))
+            Right sa -> do
+              tmSetStandbys tm (saStandby sa)
+              atomically (writeTVar (ksAssignment ks) (Just sa))
+              let interval = probingRebalanceIntervalMs (ksConfig ks)
+              now <- nowMillis
+              writeIORef (ksProbeAt ks) (if saProbe sa && interval > 0 then Just (now + fromIntegral interval) else Nothing)
         }
+
+    groupAssignor plan tm pid = do
+      let cfg = ksConfig ks
+      eReader <- sdNewReader drv
+      reader <- either (\e -> throwIO (StreamsException ("assignor reader: " <> Text.pack e) Nothing)) pure eReader
+      let cls = planTaskChangelogs plan
+          lc =
+            LeaderContext
+              { lcTasks = planTasks plan
+              , lcTaskPartitions = taskSourcePartitions plan
+              , lcTaskChangelogs = Map.map (\tps -> (map fst (filter (clInternal . snd) tps), map fst (filter (not . clInternal . snd) tps))) cls
+              , lcTaskStores = \(TaskId sid _) -> maybe Set.empty (Set.fromList . map unStoreName . Map.keys . subPlanChangelogs) (Map.lookup sid (rpSubtopologies plan))
+              , lcEndOffsets = rdEndOffsets reader
+              , lcCommitted = sdCommitted drv
+              , lcConfig =
+                  AssignConfig
+                    { acStandbys = numStandbyReplicas cfg
+                    , acAcceptableLag = acceptableRecoveryLag cfg
+                    , acMaxWarmups = maxWarmupReplicas cfg
+                    }
+              , lcAssignmentConfigs =
+                  PA.AssignmentConfigs
+                    { PA.acNumStandbyReplicas = numStandbyReplicas cfg
+                    , PA.acAcceptableRecoveryLag = fromIntegral (acceptableRecoveryLag cfg)
+                    , PA.acMaxWarmupReplicas = maxWarmupReplicas cfg
+                    , PA.acProbingRebalanceIntervalMs = probingRebalanceIntervalMs cfg
+                    , PA.acRackAware = PA.defaultRackAwareAssignmentConfigs
+                    }
+              , lcUserAssignor = taskAssignor cfg
+              , lcLog = logLine
+              }
+      pure
+        GroupAssignor
+          { gaAssignor = streamsAssignor lc
+          , gaSubscriptionUserData = do
+              sums <- tmOffsetSums tm
+              standbys <- tmStandbyTasks tm
+              threads <- readIORef (ksThreads ks)
+              pure (encodeSubscription (StreamsSubscription pid (applicationServer cfg) threads sums standbys))
+          }
 
 
 {- | Register an external system that commits with every cycle (see
@@ -546,8 +592,9 @@ streamLoop ks drv tm mGlobal = do
             paused <- readTVarIO (ksPaused ks)
             tmSetPaused tm paused
             readIORef (ksThreads ks) >>= tmSetThreads tm
+            -- restores, and the standbys' changelog reads
+            tmRestoreStep tm >>= either (\e -> throwIO (StreamsException (Text.pack e) (Just "restore"))) pure
             restoring <- tmRestoring tm
-            when restoring $ tmRestoreStep tm >>= either (\e -> throwIO (StreamsException (Text.pack e) (Just "restore"))) pure
             eRecs <- sdPoll drv (if restoring then 0 else pollMs cfg)
             recs <- either (\e -> throwIO (StreamsException ("poll: " <> Text.pack e) (Just "poll"))) pure eRecs
             tmRoute tm recs
@@ -557,8 +604,11 @@ streamLoop ks drv tm mGlobal = do
             let target = if stillRestoring || Set.null assigned then StreamsRebalancing else StreamsRunning
             cur <- readTVarIO (ksStatus ks)
             when (cur /= target && (cur == StreamsRunning || cur == StreamsRebalancing)) (transitionTo ks target)
-            maybeIssueProbingRebalance ks drv
             now <- nowMillis
+            probe <- readIORef (ksProbeAt ks)
+            forM_ probe $ \at -> when (now >= at) $ do
+              writeIORef (ksProbeAt ks) Nothing
+              sdRequestRejoin drv
             before <- readIORef lastCommit
             asked <- tmTakeCommitRequest tm
             when (asked || now - before >= interval) $ do
@@ -642,27 +692,31 @@ isPausedKafkaStreams :: KafkaStreams -> IO Bool
 isPausedKafkaStreams = readTVarIO . ksPaused
 
 
--- | One task's position against its input. Mirrors @org.apache.kafka.streams.LagInfo@.
+{- | A task's local state against its changelogs, summed over its
+stores' changelog partitions (the JVM's @LagInfo@, per task). A
+running task is current.
+-}
 data LagInfo = LagInfo
   { lagTaskId :: !TaskId
   , lagCurrentOffset :: !Int64
   , lagEndOffset :: !Int64
+  , lagStandby :: !Bool
+  -- ^ Held as a standby (or warmup) rather than running here
   }
   deriving stock (Eq, Show)
 
 
-type LagListener = [LagInfo] -> IO ()
-
-
-setLagListener :: KafkaStreams -> LagListener -> IO ()
-setLagListener ks lis = writeIORef (ksLagLis ks) lis
-
-
--- | Hand a lag snapshot to the registered listener.
-publishLag :: KafkaStreams -> [LagInfo] -> IO ()
-publishLag ks lags = do
-  lis <- readIORef (ksLagLis ks)
-  lis lags
+{- | Every task this instance holds state for, running, restoring or
+standby (the JVM's @allLocalStorePartitionLags@), read against the
+changelogs' current end. Empty when not running.
+-}
+localTaskLags :: KafkaStreams -> IO (Either Text [LagInfo])
+localTaskLags ks =
+  readIORef (ksRunning ks) >>= \case
+    Nothing -> pure (Right [])
+    Just r ->
+      either (Left . Text.pack) (Right . map (\l -> LagInfo (slTask l) (slPosition l) (slEnd l) (slStandby l)))
+        <$> tmStateLags (rTasks r)
 
 
 ----------------------------------------------------------------------
@@ -714,41 +768,25 @@ setUncaughtExceptionHandler ks h = writeIORef (ksUncaught ks) h
 
 
 ----------------------------------------------------------------------
--- KIP-441 probing rebalance
+-- Process id
 ----------------------------------------------------------------------
 
--- | Report a warmup replica's changelog lag (0: caught up).
-reportWarmupLag :: KafkaStreams -> TaskId -> Int64 -> IO ()
-reportWarmupLag ks tid !lag =
-  atomically $ modifyTVar' (ksWarmupLag ks) (Map.insert tid lag)
-
-
-clearWarmupLag :: KafkaStreams -> TaskId -> IO ()
-clearWarmupLag ks tid =
-  atomically $ modifyTVar' (ksWarmupLag ks) (Map.delete tid)
-
-
-warmupSnapshot :: KafkaStreams -> IO (Map.Map TaskId Int64)
-warmupSnapshot = readTVarIO . ksWarmupLag
-
-
-{- | Ask the group for a rebalance when a warmup is ready and the
-probing interval has passed ('ProbingRebalance.shouldProbe').
+{- | The instance's process id, kept in its state directory so a
+restarted instance is recognised by the assignor's KIP-924 view.
 -}
-maybeIssueProbingRebalance :: KafkaStreams -> StreamDriver -> IO ()
-maybeIssueProbingRebalance ks drv = do
-  let cfg = ksConfig ks
-  warmups <- readTVarIO (ksWarmupLag ks)
-  unless (Map.null warmups) $ do
-    now <- nowMillis
-    lastAt <- readTVarIO (ksLastProbeAt ks)
-    let ws =
-          map
-            (\(t, lag) -> ProbingRebalance.WarmupProgress {ProbingRebalance.task = t, ProbingRebalance.lag = lag})
-            (Map.toList warmups)
-    when (ProbingRebalance.shouldProbe now lastAt (probingRebalanceIntervalMs cfg) ws (acceptableRecoveryLag cfg)) $ do
-      atomically $ writeTVar (ksLastProbeAt ks) now
-      sdRequestRejoin drv
+loadProcessId :: FilePath -> IO Text
+loadProcessId dir = do
+  let path = dir </> "process-id"
+  existing <- try (BS.readFile path) :: IO (Either IOException BS.ByteString)
+  case existing >>= first' . UUID.fromASCIIBytes . BS8.strip of
+    Right u -> pure (UUID.toText u)
+    Left _ -> do
+      u <- UUID.nextRandom
+      createDirectoryIfMissing True dir
+      BS.writeFile path (UUID.toASCIIBytes u)
+      pure (UUID.toText u)
+  where
+    first' = maybe (Left (userError "bad process id")) Right
 
 
 ----------------------------------------------------------------------
@@ -934,6 +972,7 @@ streamsMetrics ks =
             , (Met.taskRecoveriesTotal, icRecoveries ic)
             , (Met.rebalanceTotal, icRebalances ic)
             , (Met.restoredRecordsTotal, icRestoredRecords ic)
+            , (Met.standbyRecordsTotal, icStandbyRecords ic)
             ]
           counter = MVCounter . fromIntegral
       pure . Map.map counter $
@@ -952,65 +991,76 @@ kafkaStreamsClientInstanceId ks =
   pure (Telemetry.clientInstanceIdFromText (applicationId (ksConfig ks)))
 
 
-{- | This instance's view as the 'PA.ApplicationState' a KIP-924
-@TaskAssignor@ receives: its tasks, their partitions and stores.
+----------------------------------------------------------------------
+-- Discovery (KIP-535)
+----------------------------------------------------------------------
+
+-- | The last assignment this instance received ('Nothing' before the first).
+currentAssignment :: KafkaStreams -> IO (Maybe StreamsAssignment)
+currentAssignment = readTVarIO . ksAssignment
+
+
+{- | Every instance of the application that advertises an
+@application.server@ ('applicationServer'), with its stores and its
+active and standby partitions, as of this instance's last assignment.
 -}
-streamsApplicationState :: KafkaStreams -> IO PA.ApplicationState
-streamsApplicationState ks = do
-  snaps <- localTasks ks
-  standbys <- Map.keysSet <$> readTVarIO (ksWarmupLag ks)
-  let cfg = ksConfig ks
-      pid = PA.ProcessId (UUID.fromWords 0 0 0 (fromIntegral (Text.length (applicationId cfg))))
-      tasks =
-        Map.fromList
-          ( map
-              ( \s ->
-                  ( tsTask s
-                  , PA.TaskInfo
-                      { PA.tiTaskId = tsTask s
-                      , PA.tiTopicPartitions =
-                          Set.fromList
-                            ( map
-                                (\tp -> PA.TaskTopicPartition {PA.ttpTopic = tp.topic, PA.ttpPartition = tp.partition, PA.ttpIsChangelog = False})
-                                (tsPartitions s)
-                            )
-                      , PA.tiIsStateful = False
-                      , PA.tiStores = Set.empty
-                      }
-                  )
+streamsMetadata :: KafkaStreams -> IO [StreamsMetadata]
+streamsMetadata ks = do
+  mSa <- readTVarIO (ksAssignment ks)
+  mRun <- readIORef (ksRunning ks)
+  pure $ case (mSa, mRun) of
+    (Just sa, Just r) ->
+      let plan = tmPlanOf (rTasks r)
+          partsOf = Set.fromList . concatMap (taskSourcePartitions plan) . Set.toList
+          storesOf ts =
+            Set.fromList
+              ( concatMap
+                  (\(TaskId sid _) -> maybe [] (map unStoreName . Map.keys . subPlanChangelogs) (Map.lookup sid (rpSubtopologies plan)))
+                  (Set.toList ts)
               )
-              snaps
-          )
-      kss =
-        PA.KafkaStreamsState
-          { PA.kssProcessId = pid
-          , PA.kssNumProcessingThreads = numStreamThreads cfg
-          , PA.kssClientTags = Map.empty
-          , PA.kssPreviousActiveTasks = Map.keysSet tasks
-          , PA.kssPreviousStandbyTasks = standbys
-          , PA.kssRackId = Nothing
-          }
-  pure
-    PA.ApplicationState
-      { PA.asAllTasks = tasks
-      , PA.asKafkaStreamsStates = Map.singleton pid kss
-      , PA.asAssignmentConfigs =
-          PA.AssignmentConfigs
-            { PA.acNumStandbyReplicas = numStandbyReplicas cfg
-            , PA.acAcceptableRecoveryLag = fromIntegral (acceptableRecoveryLag cfg)
-            , PA.acMaxWarmupReplicas = maxWarmupReplicas cfg
-            , PA.acProbingRebalanceIntervalMs = probingRebalanceIntervalMs cfg
-            , PA.acRackAware = PA.defaultRackAwareAssignmentConfigs
-            }
-      }
+      in map
+           ( \(h, ht) ->
+               StreamsMetadata
+                 { Discovery.host = h
+                 , Discovery.stateStores = storesOf (Set.union (htActive ht) (htStandby ht))
+                 , Discovery.topicPartitions = partsOf (htActive ht)
+                 , Discovery.standbyPartitions = partsOf (htStandby ht)
+                 }
+           )
+           (Map.toList (saHosts sa))
+    _ -> []
 
 
--- | Run the configured KIP-924 'PA.TaskAssignor' over 'streamsApplicationState'.
-streamsRunUserAssignor :: KafkaStreams -> IO (Maybe PA.TaskAssignment)
-streamsRunUserAssignor ks =
-  case taskAssignor (ksConfig ks) of
-    Nothing -> pure Nothing
-    Just ta_ -> Just <$> (streamsApplicationState ks >>= PA.taAssign ta_)
+{- | Which instance holds @key@ of store @sn@ (and its standbys): the
+key's partition under the default partitioner, over the partitions of
+the store's tasks. 'Nothing' before an assignment, for a store no
+task holds, or when no instance advertising a host runs the task.
+-}
+queryMetadataForKey :: KafkaStreams -> StoreName -> BS.ByteString -> IO (Maybe KeyQueryMetadata)
+queryMetadataForKey ks sn keyBytes = do
+  mSa <- readTVarIO (ksAssignment ks)
+  mRun <- readIORef (ksRunning ks)
+  pure $ do
+    sa <- mSa
+    r <- mRun
+    let plan = tmPlanOf (rTasks r)
+    sub <- findSub plan
+    let p = Murmur2.partitionForKey keyBytes (fromIntegral (subPlanTasks sub))
+        tid = TaskId (subPlanId sub) p
+        hosts = Map.toList (saHosts sa)
+    (active, _) <- case filter (Set.member tid . htActive . snd) hosts of
+      (h : _) -> Just h
+      [] -> Nothing
+    pure
+      KeyQueryMetadata
+        { Discovery.activeHost = active
+        , Discovery.standbyHosts = map fst (filter (Set.member tid . htStandby . snd) hosts)
+        , Discovery.partition = p
+        }
+  where
+    findSub plan = case filter (Map.member sn . subPlanChangelogs) (Map.elems (rpSubtopologies plan)) of
+      (sub : _) -> Just sub
+      [] -> Nothing
 
 
 ----------------------------------------------------------------------
@@ -1023,10 +1073,14 @@ data StoreInstance = StoreInstance
   -- ^ 'Nothing' for a global store
   , siEngine :: !(Maybe Engine)
   , siEntry :: !StoreEntry
+  , siStandby :: !Bool
+  -- ^ A standby's copy (current only as far as the standby has read)
   }
 
 
--- | Every local instance of @sn@ (one per task holding it, or the global one).
+{- | Every local instance of @sn@: one per task holding it (running,
+restoring or standby), or the global one.
+-}
 localStoreInstances :: KafkaStreams -> StoreName -> IO [StoreInstance]
 localStoreInstances ks sn =
   readIORef (ksRunning ks) >>= \case
@@ -1035,11 +1089,15 @@ localStoreInstances ks sn =
       engines <- tmEngines (rTasks r)
       taskOnes <- forM engines $ \(tid, e) -> do
         own <- engineOwnStores e
-        pure ((\se -> StoreInstance (Just tid) (Just e) se) <$> Map.lookup sn own)
+        pure ((\se -> StoreInstance (Just tid) (Just e) se False) <$> Map.lookup sn own)
+      standbys <- tmStandbyEngines (rTasks r)
+      standbyOnes <- forM standbys $ \(tid, e) -> do
+        own <- engineOwnStores e
+        pure ((\se -> StoreInstance (Just tid) (Just e) se True) <$> Map.lookup sn own)
       global <- case rGlobal r of
         Nothing -> pure []
-        Just g -> maybe [] (\se -> [StoreInstance Nothing Nothing se]) . Map.lookup sn <$> globalStores g
-      pure (catMaybes taskOnes <> global)
+        Just g -> maybe [] (\se -> [StoreInstance Nothing Nothing se False]) . Map.lookup sn <$> globalStores g
+      pure (catMaybes taskOnes <> catMaybes standbyOnes <> global)
 
 
 ----------------------------------------------------------------------

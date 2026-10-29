@@ -65,6 +65,7 @@ module Kafka.Streams.Metrics (
   taskRecoveriesTotal,
   rebalanceTotal,
   restoredRecordsTotal,
+  standbyRecordsTotal,
 
   -- * Sources
   MetricsSource,
@@ -237,10 +238,11 @@ threadCommitFailedTotal = "stream-thread-metrics:commit-failed-total"
 threadCommitAbortedTotal = "stream-thread-metrics:commit-aborted-total"
 
 
-taskRecoveriesTotal, rebalanceTotal, restoredRecordsTotal :: Text
+taskRecoveriesTotal, rebalanceTotal, restoredRecordsTotal, standbyRecordsTotal :: Text
 taskRecoveriesTotal = "stream-thread-metrics:task-recoveries-total"
 rebalanceTotal = "stream-thread-metrics:rebalance-total"
 restoredRecordsTotal = "stream-state-metrics:restore-total"
+standbyRecordsTotal = "stream-state-metrics:standby-update-total"
 
 
 ----------------------------------------------------------------------

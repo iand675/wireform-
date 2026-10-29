@@ -46,6 +46,7 @@ module Kafka.Streams.Internal.Engine (
   readEngineCounts,
   buildEngine,
   buildEngineWith,
+  activateEngine,
   EngineOptions (..),
   defaultEngineOptions,
   ChangelogTarget (..),
@@ -73,7 +74,7 @@ module Kafka.Streams.Internal.Engine (
 ) where
 
 import Control.Exception (SomeException, throwIO, try)
-import Control.Monad (forM, forM_)
+import Control.Monad (forM, forM_, unless)
 import Data.ByteString (ByteString)
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HashSet
@@ -221,6 +222,11 @@ data EngineOptions = EngineOptions
   to its processors by name. The engine never flushes or closes
   them.
   -}
+  , eoStoresOnly :: !Bool
+  {- ^ Build the stores and nothing else: no processor is initialised
+  and no source or sink is wired (a standby task, which only keeps its
+  stores current from the changelogs)
+  -}
   }
 
 
@@ -231,6 +237,7 @@ defaultEngineOptions =
     { eoChangelog = const Nothing
     , eoTaskDirectory = Nothing
     , eoSharedStores = Map.empty
+    , eoStoresOnly = False
     }
 
 
@@ -426,6 +433,17 @@ buildEngineWith opts validated tid appId collector deserHandler = do
           , engineWatermarkCoord = wmCoordRef
           }
 
+  unless (eoStoresOnly opts) (activateEngine engine)
+  pure engine
+
+
+{- | Instantiate the processors, sinks and sources of an engine built
+with 'eoStoresOnly' (a standby becoming active): its stores, and
+what they hold, are kept.
+-}
+activateEngine :: Engine -> IO ()
+activateEngine engine = do
+  let topo = engineTopology engine
   -- Wire processors first so children-of references resolve.
   forM_ (Map.toList (Topo.topoProcessors topo)) $ \(nm, spec) ->
     instantiateProcessor engine nm spec
@@ -433,7 +451,6 @@ buildEngineWith opts validated tid appId collector deserHandler = do
     instantiateSink engine nm spec
   forM_ (Map.toList (Topo.topoSources topo)) $ \(nm, spec) ->
     instantiateSource engine nm spec
-  pure engine
 
 
 ----------------------------------------------------------------------

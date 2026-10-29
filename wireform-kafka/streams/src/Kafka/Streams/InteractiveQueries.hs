@@ -183,7 +183,8 @@ data StoreQueryParameters = StoreQueryParameters
   { storeName :: !StoreName
   , staleStoresEnabled :: !Bool
   {- ^ When 'True', answer even while the instance is rebalancing or
-  restoring (possibly stale). Mirrors @enableStaleStores()@.
+  restoring, and from standby replicas too (possibly stale). Mirrors
+  @enableStaleStores()@.
   -}
   , partition :: !(Maybe Int)
   -- ^ Only the instance of the task for this partition. Mirrors @withPartition(int)@.
@@ -201,12 +202,13 @@ storeQueryParameters n =
 
 
 {- | Every local instance of the store: one per task (a key lives in
-exactly one, its partition's), or the single global copy.
+exactly one, its partition's), or the single global copy. Standbys'
+copies only with @stale@.
 -}
-instancesOf :: KafkaStreams -> StoreName -> Maybe Int -> IO [AnyStateStore]
-instancesOf ks sn mPart = do
+instancesOf :: KafkaStreams -> StoreName -> Bool -> Maybe Int -> IO [AnyStateStore]
+instancesOf ks sn stale mPart = do
   insts <- localStoreInstances ks sn
-  let keep i = case (mPart, i.siTask) of
+  let keep i = (stale || not i.siStandby) && case (mPart, i.siTask) of
         (Nothing, _) -> True
         (Just _, Nothing) -> True
         (Just p, Just (TaskId _ tp)) -> fromIntegral tp == p
@@ -225,7 +227,7 @@ queryKVStoreWithParameters ks p = do
   st <- streamsStatus ks
   if st /= StreamsRunning && not p.staleStoresEnabled
     then pure Nothing
-    else compositeKV <$> instancesOf ks p.storeName p.partition
+    else compositeKV <$> instancesOf ks p.storeName p.staleStoresEnabled p.partition
 
 
 {- | A key-value store across every local task (the JVM's
@@ -238,7 +240,7 @@ queryKVStore
    . KafkaStreams
   -> StoreName
   -> IO (Maybe (ReadOnlyKeyValueStore k v))
-queryKVStore ks sn = compositeKV <$> instancesOf ks sn Nothing
+queryKVStore ks sn = compositeKV <$> instancesOf ks sn False Nothing
 
 
 compositeKV :: forall k v. [AnyStateStore] -> Maybe (ReadOnlyKeyValueStore k v)
@@ -302,7 +304,7 @@ queryWindowStore
   -> StoreName
   -> IO (Maybe (ReadOnlyWindowStore k v))
 queryWindowStore ks sn = do
-  insts <- instancesOf ks sn Nothing
+  insts <- instancesOf ks sn False Nothing
   pure $ case mapMaybe (\case AnyWindowStore ws -> Just (readOnlyWindow (Unsafe.unsafeCoerce ws)); _ -> Nothing) insts of
     [] -> Nothing
     [one] -> Just one
@@ -323,7 +325,7 @@ querySessionStore
   -> StoreName
   -> IO (Maybe (ReadOnlySessionStore k v))
 querySessionStore ks sn = do
-  insts <- instancesOf ks sn Nothing
+  insts <- instancesOf ks sn False Nothing
   pure $ case mapMaybe (\case AnySessionStore ss -> Just (readOnlySession (Unsafe.unsafeCoerce ss)); _ -> Nothing) insts of
     [] -> Nothing
     [one] -> Just one

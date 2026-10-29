@@ -10,11 +10,11 @@ What a Kafka Streams instance runs against a cluster, configured from
 its 'StreamsConfig' like the JVM client configures its embedded
 clients:
 
-  * the main consumer joins group @application.id@ with the range
-    assignor (equal partition numbers of equally partitioned topics land
-    on the same member, which co-partitioned tasks need), never
-    auto-commits, starts unseen partitions at the earliest offset, and
-    reads committed data only under exactly-once;
+  * the main consumer joins group @application.id@ with the runtime's
+    assignor (the streams protocol: whole tasks, so co-partitioned
+    partitions land together), never auto-commits, starts unseen
+    partitions at the earliest offset, and reads committed data only
+    under exactly-once;
   * readers (restore, global stores) are group-less consumers with the
     same isolation level;
   * under exactly-once the producer is transactional with
@@ -111,9 +111,12 @@ newNativeDriver cfg = do
               withTxn k = maybe (pure (Left "not transactional (processing.guarantee is at least once)")) k mTxn
           pure . Right $
             StreamDriver
-              { sdSubscribe = \topics cbs -> do
+              { sdSubscribe = \topics ga cbs -> do
+                  KC.setAssignmentStrategy consumer (KC.CustomAssignment (gaAssignor ga))
+                  KC.setSubscriptionUserDataHook consumer (gaSubscriptionUserData ga)
                   KC.setRebalanceListener consumer (rcAssigned cbs) (rcRevoked cbs) (rcLost cbs)
                   KC.setPreRejoinHook consumer (rcBeforeRejoin cbs)
+                  KC.setAssignmentHook consumer (rcAssignment cbs)
                   KC.subscribe consumer topics
               , sdPoll = \ms -> fmap (map toDriverRecord) <$> KC.poll consumer ms
               , sdCommitOffsets = \offs ->

@@ -5,7 +5,7 @@
 {- | Operational behaviour of the broker-backed runtime, on the
 in-memory broker: stream-thread count, pause / resume, close and
 leaving the group, the production and uncaught-exception handlers,
-the handler defaults, rebalance listeners and probing rebalances.
+the handler defaults, and rebalance listeners.
 -}
 module Streams.RuntimeBehaviourSpec (tests) where
 
@@ -40,7 +40,6 @@ tests =
       it "replace-thread recovers from a transient processing failure" replace_thread_recovers
     describe "rebalance" $ do
       it "the rebalance listener hears assignments" rebalance_listener
-      it "a ready warmup triggers a probing rebalance; interval 0 disables it" probing_rebalance
 
 
 upcase :: IO TopologyValid
@@ -240,29 +239,3 @@ rebalance_listener = withStateDirs 1 $ \[d] -> do
       ownedPartitions ks >>= (`shouldBe` 3) . length
     )
     `finally` closeIt ks
-
-
-probing_rebalance :: IO ()
-probing_rebalance = withStateDirs 2 $ \[d1, d2] -> do
-  broker <- newMockBroker (Just 1)
-  mockCreateTopic broker "in" 1
-  topo <- upcase
-  -- interval 0: never
-  off <- startOn broker ((testConfig "probe-off" d1) {probingRebalanceIntervalMs = 0}) topo
-  ( do
-      awaitState off StreamsRunning
-      g0 <- mockGeneration broker "probe-off"
-      reportWarmupLag off (TaskId 0 0) 0
-      _ <- awaitTicks off 30
-      mockGeneration broker "probe-off" `shouldReturn` g0
-    )
-    `finally` closeIt off
-  -- a short interval and a ready warmup: the group rebalances
-  on <- startOn broker ((testConfig "probe-on" d2) {probingRebalanceIntervalMs = 1}) topo
-  ( do
-      awaitState on StreamsRunning
-      g0 <- mockGeneration broker "probe-on"
-      reportWarmupLag on (TaskId 0 0) 0
-      eventually [on] "a new generation" ((> g0) <$> mockGeneration broker "probe-on")
-    )
-    `finally` closeIt on

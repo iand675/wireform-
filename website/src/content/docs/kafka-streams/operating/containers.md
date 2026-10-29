@@ -27,7 +27,7 @@ Kafka, Streams, and Riffle terminology is defined in the [Glossary](../glossary/
 
 :::note[TL;DR]
 - Mount a persistent volume at `stateDir` (default `/tmp/kafka-streams`) or pay the changelog-replay cost on every restart.
-- One pod = one stable identity: `StatefulSet`-style ordinals + a stable `clientId` and a volume that follows the ordinal, so a restarted pod restores only the changelog tail after its checkpoints. There are no standby replicas: failover time is restore time.
+- One pod = one stable volume: `StatefulSet`-style ordinals with a volume that follows the ordinal. The assignor gives a restarted pod back the tasks its checkpoints cover, so it restores only their changelog tail. Standbys (`numStandbyReplicas`) keep failovers short while it is away.
 - RocksDB block cache and write buffers are **off-heap**. The container memory limit must cover heap + RocksDB + page-cache headroom, or the OOM-killer takes you mid-compaction.
 - Give `closeKafkaStreams` enough wall-clock time to reach its final commit (`terminationGracePeriodSeconds` above its 30 s `timeoutMs`).
 - Without persistent volumes, every restart restores every store from its changelog; keep changelogs compacted and size rollouts around restore time.
@@ -126,12 +126,12 @@ Three identities matter:
 | Identity | Set by | Survival requirement |
 | -------- | ------ | -------------------- |
 | Consumer-group member | `applicationId` + member metadata | Stable across the group's lifetime; one per process |
-| Task assignment | The range assignor, over the members ordered by member id | The same members (by `clientId`, which prefixes the broker-generated member id) get the same partitions |
-| RocksDB directory | `stateDir` mount | Stable iff the volume is reattached to the same pod |
+| Task assignment | The streams assignor, from the state each member reports | A member gets back the tasks its local state covers, as long as the volume (with its checkpoints) comes back |
+| RocksDB directory and process id | `stateDir` mount | Stable iff the volume is reattached to the same pod |
 
-For a restarted pod to get its old partitions back (and find their
-checkpoints on its volume), its `clientId` needs to be stable across
-restarts:
+For a restarted pod to get its old tasks back it needs its volume
+back; a stable `clientId` makes it recognisable in broker logs and
+metrics:
 
 ```haskell
 import qualified Kafka.Streams.Config as C
@@ -160,13 +160,14 @@ restart. Use a `StatefulSet` whenever the topology has state.
 
 ### Why this matters for restore time
 
-The runtime's consumer uses the classic group protocol with the
-range assignor, which orders members by member id. The broker builds
-a member id from the `clientId` plus a random suffix, so members with
-stable, distinct `clientId`s keep their order, and the same set of
-members gets the same partitions back. A pod that comes back under a
-new `clientId` can land on different partitions: its checkpoints are
-for the wrong tasks, and those tasks restore their whole changelog.
+Every member tells the group's leader how far its local state reaches
+into each task's changelogs (from its checkpoints when it has just
+started). The leader keeps tasks where that state is caught up
+(within `acceptableRecoveryLag`), so a pod that comes back with its
+volume gets its own tasks back and restores only their tail. A pod that
+comes back without it (a `Deployment`, an ephemeral disk) has no state:
+its tasks stay on instances that are caught up while it warms up, and
+move to it at a probing rebalance.
 
 The full rebalance walk is in
 [Scaling and rebalancing → Processes across the group](./scaling/#processes-across-the-group).
@@ -307,7 +308,7 @@ deployments converge to looks like:
 | -------- | --- |
 | `StatefulSet` | Stable pod hostnames (`app-0`, `app-1`, …) and stable PVC binding per ordinal |
 | `volumeClaimTemplates` on a local-SSD `StorageClass` | Mount at `stateDir`; survives pod restarts |
-| `clientId = "<app>-$HOSTNAME"` | Stable member order for the range assignor; the pod gets its partitions (and checkpoints) back |
+| `clientId = "<app>-$HOSTNAME"` | A recognisable member in broker logs and metrics (the volume is what brings a pod's tasks back) |
 | `terminationGracePeriodSeconds` above the 30 s close timeout | Enough wall-clock to commit, close, and leave cleanly |
 | `resources.limits.memory` covers heap + RocksDB + headroom | Avoids OOM during compaction spikes |
 | `readinessProbe` distinguishes `StreamsRunning` from `StreamsRebalancing` | Don't take a pod out of rotation during a normal rebalance |

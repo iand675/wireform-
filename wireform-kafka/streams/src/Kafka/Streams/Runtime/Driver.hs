@@ -8,7 +8,9 @@ performs against the cluster:
 
   * the /main consumer/: a member of the application's consumer group
     (@group.id = application.id@), subscribed to every source and
-    repartition topic. Its rebalance callbacks run synchronously
+    repartition topic, whose assignor is the application's (a
+    'GroupAssignor': "Kafka.Streams.Runtime.GroupAssignor" deals the
+    tasks). Its rebalance callbacks run synchronously
     inside 'sdPoll' (so the runtime can commit and hand tasks over at
     exactly the right moment), and it commits explicit offsets.
   * /readers/: group-less consumers assigned to explicit partitions,
@@ -27,6 +29,7 @@ module Kafka.Streams.Runtime.Driver (
   StreamDriver (..),
   RebalanceCallbacks (..),
   noRebalanceCallbacks,
+  GroupAssignor (..),
   Reader (..),
   NewInternalTopic (..),
   DriverRecord (..),
@@ -36,6 +39,7 @@ import Data.ByteString (ByteString)
 import Data.Int (Int32, Int64)
 import Data.Map.Strict (Map)
 import Data.Text (Text)
+import Kafka.Client.Assignor (CustomAssignor)
 import Kafka.Client.Consumer qualified as KC
 import Kafka.Client.Producer qualified as KP
 
@@ -55,6 +59,19 @@ data RebalanceCallbacks = RebalanceCallbacks
   -- ^ Partitions newly assigned; their positions are the committed offsets
   , rcLost :: !([KC.TopicPartition] -> IO ())
   -- ^ Partitions taken away while fenced: nothing may be committed for them
+  , rcAssignment :: !([KC.TopicPartition] -> ByteString -> IO ())
+  {- ^ After every completed rebalance (after the callbacks above, also
+  when the partitions didn't change): the whole assignment and the
+  user data the leader's assignor attached for this member
+  -}
+  }
+
+
+-- | How the group's leader deals partitions, and what each member tells it.
+data GroupAssignor = GroupAssignor
+  { gaAssignor :: !CustomAssignor
+  , gaSubscriptionUserData :: !(IO ByteString)
+  -- ^ Read at every join
   }
 
 
@@ -65,6 +82,7 @@ noRebalanceCallbacks =
     , rcRevoked = \_ -> pure ()
     , rcAssigned = \_ -> pure ()
     , rcLost = \_ -> pure ()
+    , rcAssignment = \_ _ -> pure ()
     }
 
 
@@ -115,7 +133,7 @@ data NewInternalTopic = NewInternalTopic
 
 data StreamDriver = StreamDriver
   { -- Main consumer ------------------------------------------------------
-    sdSubscribe :: !([Text] -> RebalanceCallbacks -> IO (Either String ()))
+    sdSubscribe :: !([Text] -> GroupAssignor -> RebalanceCallbacks -> IO (Either String ()))
   -- ^ Join the group, subscribed to these topics.
   , sdPoll :: !(Int -> IO (Either String [DriverRecord]))
   {- ^ Fetch records, waiting up to the given milliseconds. Rebalances

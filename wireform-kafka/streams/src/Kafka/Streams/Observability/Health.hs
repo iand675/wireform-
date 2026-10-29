@@ -58,7 +58,8 @@ import Kafka.Streams.Observability.Lag (
  )
 import Kafka.Streams.Runtime (
   KafkaStreams,
-  LagInfo,
+  LagInfo (..),
+  localTaskLags,
   LocalThreadMetadata (..),
   StreamsStatus (..),
   metadataForLocalThreads,
@@ -175,15 +176,18 @@ kafkaStreamsHealth cfg ks = do
   pure (healthReportFrom cfg st threads Nothing)
 
 
-{- | Read live runtime state plus a caller-supplied lag snapshot
-(e.g. from a lag listener) and build a full health report.
+{- | Read live runtime state and the active tasks' lag
+('Kafka.Streams.Runtime.localTaskLags': restoring tasks lag, running
+ones don't, standbys don't count) and build a full health report.
+When the lag can't be read the report has none.
 -}
 kafkaStreamsHealthWithLag
-  :: HealthConfig -> KafkaStreams -> [LagInfo] -> IO HealthReport
-kafkaStreamsHealthWithLag cfg ks infos = do
+  :: HealthConfig -> KafkaStreams -> IO HealthReport
+kafkaStreamsHealthWithLag cfg ks = do
   st <- streamsStatus ks
   threads <- metadataForLocalThreads ks
-  pure (healthReportFrom cfg st threads (Just (lagReport infos)))
+  lags <- localTaskLags ks
+  pure (healthReportFrom cfg st threads (either (const Nothing) (Just . lagReport . filter (not . lagStandby)) lags))
 
 
 ----------------------------------------------------------------------

@@ -10,9 +10,10 @@ import Streams.CacheSpec qualified
 import Streams.ChangelogSpec qualified
 import Streams.TaskRuntimeSpec qualified
 import Streams.TwoPhaseRuntimeSpec qualified
+import Streams.GroupAssignorSpec qualified
+import Streams.StandbyRuntimeSpec qualified
 import Streams.TableChangeSpec qualified
 import Streams.ParityBatchSpec qualified
-import Streams.StandbyTaskSpec qualified
 import Streams.RuntimeBehaviourSpec qualified
 import Streams.RuntimeRecordFidelitySpec qualified
 import Streams.CogroupSpec qualified
@@ -39,11 +40,9 @@ import Streams.MoreParityThreeSpec qualified
 import Streams.MorePartiyTwoSpec qualified
 import Streams.MultiInstanceHarnessSpec qualified
 import Streams.MultiInstanceRebalanceSpec qualified
-import Streams.MultiTaskSpec qualified
 import Streams.NamedSpec qualified
 import Streams.ObservabilityOTelSpec qualified
 import Streams.PersistentStoreSpec qualified
-import Streams.ProbingRebalanceSpec qualified
 import Streams.ProcessorAndStoreExtrasSpec qualified
 import Streams.Properties.AtLeastOnceRedeliverySpec qualified
 import Streams.Properties.CDCSourceSpec qualified
@@ -84,7 +83,6 @@ import Streams.SchemaRegistrySerdeSpec qualified
 import Streams.SdkParitySpec qualified
 import Streams.SerdeSpec qualified
 import Streams.StableNamesSpec qualified
-import Streams.StandbyDriverSpec qualified
 import Streams.StandbySpec qualified
 import Streams.StateListenerSpec qualified
 import Streams.StateStoreSpec qualified
@@ -135,12 +133,12 @@ main = do
         , Streams.ChangelogSpec.tests
         , Streams.TaskRuntimeSpec.tests
         , Streams.TwoPhaseRuntimeSpec.tests
+        , Streams.GroupAssignorSpec.tests
+        , Streams.StandbyRuntimeSpec.tests
         , Streams.TableChangeSpec.tests
         , Streams.ParityBatchSpec.tests
-        , Streams.StandbyTaskSpec.tests
         , Streams.RuntimeBehaviourSpec.tests
         , Streams.RuntimeRecordFidelitySpec.tests
-        , Streams.MultiTaskSpec.tests
         , Streams.StandbySpec.tests
         , Streams.AssignorSpec.tests
         , Streams.StreamConvSpec.tests
@@ -164,7 +162,6 @@ main = do
         , Streams.MockFailureModesSpec.tests
         , Streams.MockAdvancedSpec.tests
         , Streams.MockDriverModesSpec.tests
-        , Streams.ProbingRebalanceSpec.tests
         , Streams.RevocationGraceSpec.tests
         , Streams.StableNamesSpec.tests
         , Streams.TopologyOptimizationSpec.tests
@@ -180,7 +177,6 @@ main = do
         , Streams.WindowedSuppressIntegrationSpec.tests
         , Streams.IdleHeartbeatSpec.tests
         , Streams.RackAwareAssignorSpec.tests
-        , Streams.StandbyDriverSpec.tests
         , Streams.RemoteIQSpec.tests
         , Streams.IdiomaticDSLSpec.tests
         , Streams.DSLFacadeSpec.tests

@@ -17,7 +17,7 @@ Kafka, Streams, and Riffle terminology is defined in the [Glossary](../glossary/
 
 - Commit boundary is `commitIntervalMs` (default 30 s at least once, 100 ms under exactly-once), not a `COMMIT` statement. Downstream `read_committed` consumers see up to that much staleness.
 - IQ reads see the live store, including writes an EOS abort will roll back.
-- State partitions across instances. `StreamsMetadata` + `KeyQueryMetadata` model query routing, but the runtime doesn't publish them: the routing is yours.
+- State partitions across instances. Set `applicationServer` and every instance learns who hosts what: `queryMetadataForKey` names the instance (and the standbys) holding a key, `streamsMetadata` every instance's partitions and stores. Forwarding the query is your code.
 - Event time and processing time differ. Windowed aggregations use event-time; rate metrics use wall-clock.
 - Side effects in `peek` / `foreach` / `mapValuesM` replay on rewind. Use two-phase commit sinks or idempotency tokens for exactly-once external effects.
 
@@ -94,16 +94,27 @@ For **committed-only** reads, consume the store's output topic (or its changelog
 A SQL database is a logical singleton. You connect to it, and you read whatever the latest committed value is, regardless of which backend was the writer.
 
 A Kafka Streams state store is **partitioned**, with its changelog
-as the replica. A key lives on exactly one instance's task (there
-are no standby replicas). A query for that key must route to that
-instance.
+as the replica. A key lives on exactly one instance's task (and on its
+standbys, `numStandbyReplicas`, which trail it). A query for that key
+must route to that instance.
 
-The routing vocabulary lives in `Kafka.Streams.Discovery`
-(`StreamsMetadata`, `KeyQueryMetadata`, `HostInfo`), but the runtime
-doesn't advertise a host or exchange metadata with its peers. Each
-instance knows its own partitions (`ownedPartitions`); collecting
-them across instances, and mapping a key to a partition with the
-producer's partitioner, is your query layer's job.
+Every instance that sets `applicationServer` (its query endpoint,
+`HostInfo`) advertises it when it joins the group, and the assignment
+tells every instance which host runs and which holds a standby of
+each task:
+
+```haskell
+-- where does key k of store "counts" live?
+mk <- queryMetadataForKey streams (storeName "counts") (serialize textSerde k)
+case mk of
+  Just km -> forwardTo (activeHost km) -- or a standby: standbyHosts km
+  Nothing -> retryLater                -- no assignment yet, or nobody runs the task
+```
+
+`queryMetadataForKey` hashes the key with the default partitioner over
+the store's tasks; `streamsMetadata` lists every advertising instance
+with its stores and active and standby partitions. Both reflect this
+instance's last assignment (`currentAssignment`).
 
 A query against the wrong instance returns `StoreNotFound`. There
 is no automatic redirect within the library: the query proxy is

@@ -144,6 +144,7 @@ library
         Kafka.Client.ConsumerGroupV2
         Kafka.Client.Filter
         Kafka.Client.Future
+        Kafka.Client.Assignor
         Kafka.Client.Group
         Kafka.Client.MetadataCacheControl
         Kafka.Client.RackAware
@@ -532,13 +533,10 @@ library wireform-kafka-streams
         Kafka.Streams.Suppress
         Kafka.Streams.DslStoreSuppliers
         Kafka.Streams.Runtime
-        Kafka.Streams.Runtime.Task
         Kafka.Streams.Runtime.Standby
         Kafka.Streams.Runtime.Assignor
+        Kafka.Streams.Runtime.GroupAssignor
         Kafka.Streams.Runtime.WorkerPool
-        Kafka.Streams.Runtime.ProbingRebalance
-        Kafka.Streams.Runtime.StandbyTask
-        Kafka.Streams.Runtime.StandbyDriver
         Kafka.Streams.Runtime.RevocationGrace
         Kafka.Streams.Runtime.NativeDriver
         Kafka.Streams.Runtime.Driver
@@ -615,8 +613,9 @@ test-suite wireform-kafka-streams-test
         Streams.RuntimeHarness
         Streams.TaskRuntimeSpec
         Streams.TwoPhaseRuntimeSpec
+        Streams.GroupAssignorSpec
+        Streams.StandbyRuntimeSpec
         Streams.TableChangeSpec
-        Streams.StandbyTaskSpec
         Streams.ParityBatchSpec
         Streams.RuntimeBehaviourSpec
         Streams.RuntimeRecordFidelitySpec
@@ -632,7 +631,6 @@ test-suite wireform-kafka-streams-test
         Streams.AggregationSpec
         Streams.InteractiveQueriesSpec
         Streams.CacheSpec
-        Streams.MultiTaskSpec
         Streams.StandbySpec
         Streams.AssignorSpec
         Streams.StreamConvSpec
@@ -656,7 +654,6 @@ test-suite wireform-kafka-streams-test
         Streams.MockFailureModesSpec
         Streams.MockAdvancedSpec
         Streams.MockDriverModesSpec
-        Streams.ProbingRebalanceSpec
         Streams.RevocationGraceSpec
         Streams.StableNamesSpec
         Streams.TopologyOptimizationSpec
@@ -672,7 +669,6 @@ test-suite wireform-kafka-streams-test
         Streams.WindowedSuppressIntegrationSpec
         Streams.IdleHeartbeatSpec
         Streams.RackAwareAssignorSpec
-        Streams.StandbyDriverSpec
         Streams.RemoteIQSpec
         Streams.IdiomaticDSLSpec
         Streams.DSLFacadeSpec

@@ -16,8 +16,17 @@ module Streams.RuntimeHarness (
   i64,
   decodeI64,
   withStateDirs,
+
+  -- * A word count
+  wordCount,
+  keys,
+  produceWords,
+  countsReach,
+  closeAll,
+  counter,
 ) where
 
+import Control.Monad (forM_)
 import Data.ByteString (ByteString)
 import Data.Int (Int64)
 import Data.Map.Strict (Map)
@@ -26,6 +35,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Kafka.Streams.Imperative
+import Kafka.Streams.Metrics (MetricValue (..))
 import Kafka.Streams.Runtime.Driver (DriverRecord (..))
 import Kafka.Streams.Runtime.MockBroker
 import System.FilePath ((</>))
@@ -106,3 +116,44 @@ withStateDirs :: Int -> ([FilePath] -> IO a) -> IO a
 withStateDirs n k = withSystemTempDirectory "streams-rt" $ \root ->
   k (map (\i -> root </> show i) [1 .. n])
 
+
+-- | Counts per key from @in@ (store @counts@) to @out@.
+wordCount :: IO TopologyValid
+wordCount = do
+  b <- newStreamsBuilder
+  s <- streamFromTopic b (topicName "in") (consumed textSerde textSerde)
+  counts <- countStream (materializedAs (storeName "counts")) (groupByKey (grouped textSerde textSerde) s)
+  out <- toKStreamFromKTable counts
+  toTopic (topicName "out") (produced textSerde int64Serde) out
+  topo <- buildTopology b
+  either (error . show) pure (validateTopology topo)
+
+
+keys :: [Text]
+keys = map (\i -> "k" <> T.pack (show i)) [0 .. 9 :: Int]
+
+
+produceWords :: MockBroker -> Int -> IO ()
+produceWords broker rounds =
+  forM_ [1 .. rounds] $ \r ->
+    forM_ keys $ \k -> mockProduce broker "in" (Just (textBytes k)) (Just "x") (fromIntegral r)
+
+
+-- | The output says every key has been counted @n@ times.
+countsReach :: MockBroker -> Int64 -> IO Bool
+countsReach broker n = do
+  latest <- latestBy <$> visible broker "out"
+  pure (all (\k -> fmap (fmap decodeI64) (Map.lookup (textBytes k) latest) == Just (Just n)) keys)
+
+
+closeAll :: [KafkaStreams] -> IO ()
+closeAll = mapM_ (\ks -> closeKafkaStreams ks >> awaitState ks StreamsClosed)
+
+
+-- | A counter of 'streamsMetrics' (0 when absent).
+counter :: KafkaStreams -> Text -> IO Int64
+counter ks nm = do
+  m <- streamsMetrics ks
+  pure $ case Map.lookup nm m of
+    Just (MVCounter n) -> n
+    _ -> 0

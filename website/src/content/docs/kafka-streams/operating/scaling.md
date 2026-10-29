@@ -18,12 +18,17 @@ Kafka, Streams, and Riffle terminology is defined in the [Glossary](../glossary/
 
 - A task is one subtopology on one partition number. Parallelism is
   capped by the number of tasks, i.e. by partition counts.
-- One consumer per instance (range assignor); its tasks are processed
-  in parallel over `numStreamThreads` workers between polls.
+- One consumer per instance; the group's assignor deals whole tasks
+  (lag-aware and sticky, in proportion to each instance's threads), and
+  an instance's tasks are processed in parallel over `numStreamThreads`
+  workers between polls.
 - Stateful subtopologies must read co-partitioned topics (same
   partition count); the runtime refuses to start otherwise.
-- Failover restores state from changelogs. Standby replicas are not
-  supported (`numStandbyReplicas > 0` only logs a warning).
+- `numStandbyReplicas` standbys per stateful task keep its stores
+  current on other instances, so failover restores only their small
+  tail. Without them failover restores from the changelogs.
+- A task whose balanced owner has no state stays where it is caught up
+  while a warmup restores it, and moves at a probing rebalance.
 - `addStreamThread` / `removeStreamThread` change the worker count in
   place; they never trigger a rebalance.
 
@@ -75,10 +80,28 @@ the instance. A process with 4 tasks gains nothing from an 8th thread.
 ## Processes across the group
 
 More instances with the same `applicationId` join the group and share
-the partitions. The consumer uses the range assignor, which hands out
-contiguous partition ranges per topic, so partition `p` of
-equally-partitioned topics lands on the same member: what a task that
-reads several co-partitioned topics needs.
+the tasks. The group's protocol is the runtime's own assignor
+(`Kafka.Streams.Runtime.GroupAssignor`, protocol name `streams`): it
+deals whole tasks, so the partitions of a task that reads several
+co-partitioned topics always land together. Every member's join
+carries, per task it has state for, how far that state reaches into
+the changelogs; the leader compares that with the changelogs' end and:
+
+1. keeps a stateful task with its owner, or moves it where the load is
+   balanced (in proportion to `numStreamThreads`), as long as the new
+   owner is **caught up** (within `acceptableRecoveryLag` records);
+2. otherwise leaves it on a caught-up instance and gives the instance
+   that should own it a **warmup**: a standby that restores in the
+   background (at most `maxWarmupReplicas` at a time). Every member
+   then rejoins after `probingRebalanceIntervalMs`, and the task moves
+   once the warmup has caught up. With nobody caught up, the balance
+   decides (the task has to restore either way);
+3. places `numStandbyReplicas` standbys per stateful task on other
+   instances, preferring the ones with the most state;
+4. balances stateless tasks, sticky where the balance allows.
+
+A `taskAssignor` (KIP-924) replaces steps 1–4: see
+[below](#custom-task-assignment-kip-924).
 
 A rebalance (an instance joins or leaves, or a probing rebalance) runs
 like this on each member, inside `poll`:
@@ -91,10 +114,15 @@ like this on each member, inside `poll`:
    tasks are closed dirty, with nothing committed.
 3. **Assigned** partitions: new tasks are built; their source
    partitions are paused while every logged store restores from its
-   changelog (from a checkpoint for persistent stores, else from the
-   log start; under exactly-once only committed data). Then they
-   resume. Partitions with no committed offset start at their source's
-   offset-reset policy (earliest by default).
+   changelog (from where its standby got to, else from a checkpoint for
+   persistent stores, else from the log start; under exactly-once only
+   committed data). Then they resume. Partitions with no committed
+   offset start at their source's offset-reset policy (earliest by
+   default).
+4. **The assignment**: standbys and warmups that are no longer wanted
+   are checkpointed and closed, new ones are built from their
+   checkpoints, and the hosts of every task are recorded for
+   [discovery](../visibility/).
 
 `setRebalanceListener` fires after each of these steps, with the
 partitions involved. `ownedPartitions` shows the current assignment.
@@ -107,10 +135,19 @@ creates an idle member. Repartition up front (more partitions on the
 input, or `repartitionWith` an explicit partition count) to scale
 further.
 
-### Restore time is the failover time
+### Standbys bound the failover time
 
-There are no standby replicas: a task that moves restores its stores
-from their changelogs before processing. Keep that bounded:
+A task that moves restores its stores before processing. Where it lands
+on a standby, that's only the records the standby hadn't applied yet;
+elsewhere it is the changelog from a checkpoint or from the start. A
+standby is the task's stores and nothing else (no processors run),
+kept current from the changelogs by the instance's restore reader
+(`read_committed` under exactly-once, so aborted writes never reach
+it); `stream-state-metrics:standby-update-total` counts what standbys
+apply and `localTaskLags` shows how far each one is behind. Promoting
+one wires the task's processors onto those same stores.
+
+Without standbys, keep restores bounded:
 
 - Changelog topics are compacted (`cleanup.policy=compact`), so a
   restore replays roughly one record per live key.
@@ -130,11 +167,24 @@ parallelism is tasks.
 
 ## Probing rebalances
 
-`probingRebalanceIntervalMs` (default 10 minutes) is the cadence at
-which the runtime asks for a rebalance when a warmup reported through
-`reportWarmupLag` is within `acceptableRecoveryLag`. With interval `0`
-it never does. Without standby replicas nothing reports warmup lag on
-its own; the hook is there for callers that track it themselves.
+When an assignment includes warmups, every member rejoins after
+`probingRebalanceIntervalMs` (default 10 minutes; `0` never probes)
+so the leader can move the tasks whose warmups have caught up. A short
+interval moves tasks sooner at the cost of more rebalances; a tight
+`acceptableRecoveryLag` keeps tasks off instances that would have to
+restore much.
+
+## Custom task assignment (KIP-924)
+
+Set `taskAssignor` (`Kafka.Streams.Processor.Assignment.TaskAssignor`)
+on every instance and the leader calls `taAssign` at each rebalance
+with every task (its partitions, changelogs, stores, whether it is
+stateful) and every instance (process id, threads, previous active and
+standby tasks, per-task lag). The result is validated (every task
+active exactly once, no standby next to its active, only known
+processes and tasks, an entry for every process) and reported through
+`taOnAssignmentComputed`; an invalid result or an exception falls back
+to the built-in assignment.
 
 ## `addStreamThread` / `removeStreamThread`
 

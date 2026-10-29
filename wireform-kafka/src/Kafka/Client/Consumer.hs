@@ -187,6 +187,9 @@ module Kafka.Client.Consumer (
   enforceRebalance,
   enforceRebalanceWithReason,
   setSubscriptionUserDataHook,
+  setAssignmentHook,
+  assignmentUserData,
+  setAssignmentStrategy,
   StaticMembershipState (..),
   currentStaticMembershipState,
 
@@ -272,6 +275,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Vector qualified as V
 import GHC.Generics (Generic)
+import Kafka.Client.Assignor (CustomAssignor)
 import Kafka.Client.ConfigValidation (
   ConfigError,
   renderConfigErrors,
@@ -319,6 +323,8 @@ data AssignmentStrategy
     RoundRobinAssignment
   | -- | Sticky assignment (minimizes rebalance)
     StickyAssignment
+  | -- | An application assignor ("Kafka.Client.Assignor")
+    CustomAssignment !CustomAssignor
   deriving (Eq, Show, Generic)
 
 
@@ -714,6 +720,12 @@ data Consumer = Consumer
   {- ^ The assignment as of the last fired callback. Used to
   compute revoked / assigned deltas on the next rebalance.
   -}
+  , consumerStrategy :: !(TVar AssignmentStrategy)
+  -- ^ The assignor advertised at the next join ('setAssignmentStrategy'); starts as the config's
+  , consumerAssignmentUserData :: !(TVar ByteString)
+  -- ^ The user data the leader's assignor attached to this member's last assignment
+  , consumerOnAssignment :: !(TVar ([TopicPartition] -> ByteString -> IO ()))
+  -- ^ Fired after every successful join ('setAssignmentHook')
   , consumerSubscriptionUserData :: !(TVar (IO ByteString))
   {- ^ Hook for cross-instance IQ: when 'subscribe' issues a
   JoinGroup, the consumer calls this 'IO ByteString' and
@@ -1079,6 +1091,9 @@ createConsumer' brokers groupId config = do
               preRejoin <- newTVarIO (pure () :: IO ())
               lastAsgn <- newTVarIO []
               subUD <- newTVarIO (pure BS.empty :: IO ByteString)
+              asgUD <- newTVarIO BS.empty
+              strategyV <- newTVarIO (consumerAssignmentStrategy config)
+              onAsg <- newTVarIO (\_ _ -> pure () :: IO ())
               wakeup <- newTVarIO False
 
               let consumer =
@@ -1098,6 +1113,9 @@ createConsumer' brokers groupId config = do
                       , consumerPreRejoin = preRejoin
                       , consumerLastAssignment = lastAsgn
                       , consumerSubscriptionUserData = subUD
+                      , consumerAssignmentUserData = asgUD
+                      , consumerStrategy = strategyV
+                      , consumerOnAssignment = onAsg
                       , consumerWakeupPending = wakeup
                       }
 
@@ -1324,6 +1342,26 @@ setSubscriptionUserDataHook Consumer {..} f =
   atomically (writeTVar consumerSubscriptionUserData f)
 
 
+{- | Run @f@ after every successful join with the whole new assignment
+and the user data the leader's assignor attached for this member
+(empty for the built-in assignors). It runs after the rebalance
+listener's callbacks, also when the partitions did not change; an
+exception propagates out of the 'subscribe' / 'poll' that joined.
+-}
+setAssignmentHook :: Consumer -> ([TopicPartition] -> ByteString -> IO ()) -> IO ()
+setAssignmentHook Consumer {..} f = atomically (writeTVar consumerOnAssignment f)
+
+
+-- | The assignor to advertise from the next join on.
+setAssignmentStrategy :: Consumer -> AssignmentStrategy -> IO ()
+setAssignmentStrategy Consumer {..} st = atomically (writeTVar consumerStrategy st)
+
+
+-- | The user data of this member's last assignment.
+assignmentUserData :: Consumer -> IO ByteString
+assignmentUserData Consumer {..} = readTVarIO consumerAssignmentUserData
+
+
 {- | Shared implementation. @doLeaveGroup = False@ skips the
 @LeaveGroup@ RPC but still:
 
@@ -1514,10 +1552,12 @@ subscribe Consumer {..} topics = liftIO $ do
             Earliest -> Sub.ResetEarliest
             Latest -> Sub.ResetLatest
             None -> Sub.ResetNone
-          assignor = case consumerAssignmentStrategy consumerConfig of
+      strategy <- readTVarIO consumerStrategy
+      let assignor = case strategy of
             RangeAssignment -> Sub.AssignorRange
             RoundRobinAssignment -> Sub.AssignorRoundRobin
             StickyAssignment -> Sub.AssignorSticky
+            CustomAssignment ca -> Sub.AssignorCustom ca
           sessionTimeout = fromIntegral (consumerSessionTimeoutMs consumerConfig)
           rebalanceTimeout = fromIntegral (consumerMaxPollIntervalMs consumerConfig)
       fetchUD <- readTVarIO consumerSubscriptionUserData
@@ -1539,7 +1579,7 @@ subscribe Consumer {..} topics = liftIO $ do
           fetchUD
       case result of
         Left err -> return $ Left ("subscribe: " ++ show err)
-        Right tps -> do
+        Right (tps, assignmentUD) -> do
           let !newAssignment =
                 [ TopicPartition (Sub.tpTopic stp) (Sub.tpPartition stp)
                 | (stp, _) <- tps
@@ -1580,8 +1620,11 @@ subscribe Consumer {..} topics = liftIO $ do
           -- check below reads it via 'readIORef' independently
           -- of the assignment-table swap above.
           writeIORef consumerSubscription (Just topics)
+          atomically $ writeTVar consumerAssignmentUserData assignmentUD
           -- Fire the user listener with the new assignment.
           dispatchAssignmentDelta Consumer {..} newAssignmentSorted asLost
+          onAssignment <- readTVarIO consumerOnAssignment
+          onAssignment newAssignmentSorted assignmentUD
           return $ Right ()
 
 

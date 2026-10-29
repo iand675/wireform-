@@ -52,9 +52,10 @@ settle, usually within minutes of each other. Common causes:
    blips, or saturated CPU. Its heartbeats time out, the group
    kicks it, it rejoins, repeat.
 2. **Probing-rebalance loop.** `probingRebalanceIntervalMs` is
-   set short and `acceptableRecoveryLag` is set tight; warmups
-   pass the threshold, the probing rebalance fires, the new
-   ownership is fragile and triggers another probe immediately.
+   short while warmups keep being assigned (an assignment with
+   warmups makes every member rejoin after the interval); a
+   `maxWarmupReplicas` far below the number of tasks that want to
+   move stretches that over many probes.
 3. **Memory pressure.** RocksDB compaction stalling the instance
    long enough to miss heartbeats.
 4. **Misconfigured `session.timeout.ms` on the consumer side**
@@ -146,10 +147,10 @@ rebalance; `onRestoreStart` / `onRestoreEnd` (from
 
 ### Diagnosis
 
-There are no standby replicas: a task that moves (or starts after a
-wipe) restores every logged store from its changelog before it
-processes anything, with its source partitions paused. Restore reads
-from the task's checkpoint (persistent stores only) or the log start,
+A task that moves (or starts after a wipe) restores every logged store
+before it processes anything, with its source partitions paused.
+Restore reads from where the task's standby got to (if it lands on
+one), else its checkpoint (persistent stores only), else the log start,
 up to the end offset (the last stable offset under exactly-once).
 Common causes of slow restores:
 
@@ -161,6 +162,9 @@ Common causes of slow restores:
 3. **Unclean exactly-once stops** wipe `<state.dir>/<application.id>`
    on the next start, so everything restores.
 4. **Network or disk throughput** of the restoring instance.
+5. **No standbys** (`numStandbyReplicas = 0`), or the task landed on an
+   instance without one: `localTaskLags` on each instance shows which
+   standbys exist and how far behind they are.
 
 ### Resolve
 
@@ -174,11 +178,17 @@ Common causes of slow restores:
 4. **For (3):** stop instances with `closeKafkaStreams` (which
    commits and leaves the clean-shutdown marker) instead of killing
    them.
+5. **For (5):** set `numStandbyReplicas = 1`; a failover then restores
+   only what the standby hadn't applied. Keep `acceptableRecoveryLag`
+   tight so tasks only move to instances that are caught up (the others
+   warm up first).
 
 ### Prevent
 
-- Budget failover time as restore time: changelog size divided by
-  restore throughput.
+- With standbys, failover time is the standby's lag (watch
+  `localTaskLags` and `stream-state-metrics:standby-update-total`);
+  without them, budget it as changelog size divided by restore
+  throughput.
 - Give instances stable state directories (persistent volumes) so
   checkpoints survive restarts.
 
@@ -471,9 +481,10 @@ until the instance is `StreamsRunning` again.
 ### Resolve
 
 1. **In the query layer, retry with backoff and refresh
-   metadata.** `Kafka.Streams.Discovery.StreamsMetadata` updates
-   as the rebalance completes; a retry after `~1s` usually
-   succeeds.
+   metadata.** `streamsMetadata` / `queryMetadataForKey` reflect the
+   new assignment as soon as the rebalance completes; a retry after
+   `~1s` usually succeeds. With standbys, `queryMetadataForKey` also
+   names the standby hosts, which can answer stale reads meanwhile.
 2. **If a stale read beats a 404**, query with `staleStoresEnabled`
    (it answers from whatever the local tasks hold, restoring or not).
 3. **If the rebalance is taking minutes**, see "Restores take too

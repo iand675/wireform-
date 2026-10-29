@@ -46,6 +46,7 @@ import Kafka.Streams.Errors (
   logAndFailProcessing,
   logAndFailProduction,
  )
+import Kafka.Streams.Discovery (HostInfo, parseHostInfo)
 import Kafka.Streams.Processor.Assignment (TaskAssignor)
 
 
@@ -76,6 +77,9 @@ dropped):
   * 'defaultProductionHandler'  — @default.production.exception.handler@
   * 'defaultProcessingHandler'  — @processing.exception.handler@
   * 'bufferedRecordsPerPartition' — @buffered.records.per.partition@
+  * 'applicationServer'         — @application.server@
+  * 'acceptableRecoveryLag', 'maxWarmupReplicas',
+    'probingRebalanceIntervalMs' — the KIP-441 keys
 
 The embedded clients are configured from these; 'consumerOverrides',
 'producerOverrides' and 'adminOverrides' adjust anything else on them
@@ -83,11 +87,8 @@ The embedded clients are configured from these; 'consumerOverrides',
 
 Not here, because the runtime has no such behaviour: record caches
 (every update is forwarded and logged, the JVM's behaviour with
-@statestore.cache.max.bytes = 0@), standby replicas
-('numStandbyReplicas' is accepted but restoring from the changelog is
-the only failover path), rack-aware assignment and
-@application.server@ discovery. Their JVM keys are ignored by
-'streamsConfigFromMap', like any unknown key.
+@statestore.cache.max.bytes = 0@) and rack-aware assignment. Their
+JVM keys are ignored by 'streamsConfigFromMap', like any unknown key.
 -}
 data StreamsConfig = StreamsConfig
   { applicationId :: !Text
@@ -95,6 +96,10 @@ data StreamsConfig = StreamsConfig
   , clientId :: !Text
   , numStreamThreads :: !Int
   , numStandbyReplicas :: !Int
+  {- ^ Standby replicas per stateful task, on other instances: stores
+  kept current from the changelogs, so a failover restores only what
+  they haven't applied yet
+  -}
   , commitIntervalMs :: !(Maybe Int)
   {- ^ 'Nothing': 30 s at least once, 100 ms exactly once (the JVM
   defaults); see 'effectiveCommitIntervalMs'.
@@ -115,6 +120,11 @@ data StreamsConfig = StreamsConfig
   , consumerOverrides :: !(KC.ConsumerConfig -> KC.ConsumerConfig)
   , producerOverrides :: !(KP.ProducerConfig -> KP.ProducerConfig)
   , adminOverrides :: !(KA.AdminClientConfig -> KA.AdminClientConfig)
+  , applicationServer :: !(Maybe HostInfo)
+  {- ^ This instance's endpoint for interactive queries, shared with every
+  instance through the assignment ('Kafka.Streams.Runtime.streamsMetadata',
+  'Kafka.Streams.Runtime.queryMetadataForKey')
+  -}
   , -- KIP-441 probing rebalances ---------------------------------
     acceptableRecoveryLag :: !Int64
   {- ^ @acceptable.recovery.lag@ — maximum changelog lag (in
@@ -131,15 +141,11 @@ data StreamsConfig = StreamsConfig
   ready. Default 600_000 (10 minutes).
   -}
   , taskAssignor :: !(Maybe TaskAssignor)
-  {- ^ KIP-924 in-process 'TaskAssignor' plug-in. When set,
-  the streams runtime's leader-side assignment path
-  invokes this plug-in instead of the built-in
-  cooperative-sticky assignor. 'Nothing' (the default)
-  keeps the built-in assignor. The streams runtime
-  reaches into this via
-  'Kafka.Streams.Runtime.streamsRunUserAssignor', which
-  constructs the 'ApplicationState' from the live
-  runtime view and invokes 'taAssign' on the plug-in.
+  {- ^ KIP-924: the group leader deals the tasks with this instead of
+  the built-in assignor ("Kafka.Streams.Runtime.GroupAssignor"); an
+  invalid result (see 'Kafka.Streams.Processor.Assignment') falls
+  back to the built-in one. Every instance should set the same one:
+  whichever is the leader decides.
   -}
   }
 
@@ -188,6 +194,7 @@ defaultStreamsConfig =
     , consumerOverrides = id
     , producerOverrides = id
     , adminOverrides = id
+    , applicationServer = Nothing
     , acceptableRecoveryLag = 10_000
     , maxWarmupReplicas = 2
     , probingRebalanceIntervalMs = 600_000
@@ -254,6 +261,7 @@ streamsConfigFromMap m = foldl' step defaultStreamsConfig (Map.toAscList m)
       "replication.factor" ->
         maybe cfg (\n -> cfg {replicationFactor = n}) (readT v)
       "state.dir" -> cfg {stateDir = T.unpack v}
+      "application.server" -> either (const cfg) (\h -> cfg {applicationServer = Just h}) (parseHostInfo v)
       "acceptable.recovery.lag" ->
         maybe cfg (\n -> cfg {acceptableRecoveryLag = n}) (readT v)
       "max.warmup.replicas" ->

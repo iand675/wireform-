@@ -44,38 +44,6 @@ tests =
     it "processing failures follow the processing and uncaught-exception handlers" processing_handlers
 
 
-wordCount :: IO TopologyValid
-wordCount = do
-  b <- newStreamsBuilder
-  s <- streamFromTopic b (topicName "in") (consumed textSerde textSerde)
-  counts <- countStream (materializedAs (storeName "counts")) (groupByKey (grouped textSerde textSerde) s)
-  out <- toKStreamFromKTable counts
-  toTopic (topicName "out") (produced textSerde int64Serde) out
-  topo <- buildTopology b
-  either (error . show) pure (validateTopology topo)
-
-
-keys :: [Text]
-keys = map (\i -> "k" <> T.pack (show i)) [0 .. 9 :: Int]
-
-
-produceWords :: MockBroker -> Int -> IO ()
-produceWords broker rounds =
-  forM_ [1 .. rounds] $ \r ->
-    forM_ keys $ \k -> mockProduce broker "in" (Just (textBytes k)) (Just "x") (fromIntegral r)
-
-
--- | The output says every key has been counted @n@ times.
-countsReach :: MockBroker -> Int64 -> IO Bool
-countsReach broker n = do
-  latest <- latestBy <$> visible broker "out"
-  pure (all (\k -> fmap (fmap decodeI64) (Map.lookup (textBytes k) latest) == Just (Just n)) keys)
-
-
-closeAll :: [KafkaStreams] -> IO ()
-closeAll = mapM_ (\ks -> closeKafkaStreams ks >> awaitState ks StreamsClosed)
-
-
 two_instances_share_counts :: IO ()
 two_instances_share_counts = withStateDirs 2 $ \[d1, d2] -> do
   broker <- newMockBroker (Just 1)

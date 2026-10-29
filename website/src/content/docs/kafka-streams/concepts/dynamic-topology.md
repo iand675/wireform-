@@ -103,7 +103,7 @@ Stop a process cleanly:
 R.closeKafkaStreams streams  -- Clean shutdown
 ```
 
-The instance leaves the consumer group, remaining instances get reassigned its partitions and restore their state from the changelogs (there are no standby replicas). The group must rebalance to redistribute work, which is why this is warm, not hot.
+The instance leaves the consumer group, remaining instances get reassigned its tasks and restore their state (from their standbys' positions where they hold one, else from the changelogs). The group must rebalance to redistribute work, which is why this is warm, not hot.
 
 ## Restart tier: change configuration
 

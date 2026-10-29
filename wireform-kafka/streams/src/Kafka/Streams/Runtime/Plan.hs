@@ -33,6 +33,9 @@ module Kafka.Streams.Runtime.Plan (
   GlobalPlan (..),
   buildRuntimePlan,
   taskDirName,
+  taskSourcePartitions,
+  planTasks,
+  planTaskChangelogs,
 ) where
 
 import Data.Map.Strict (Map)
@@ -41,6 +44,7 @@ import Data.Maybe (mapMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
+import Kafka.Client.Consumer qualified as KC
 import Kafka.Streams.Internal.Text (decimalText)
 import Kafka.Streams.Consumed (AutoOffsetReset)
 import Kafka.Streams.Processor (TaskId (..))
@@ -84,6 +88,44 @@ data RuntimePlan = RuntimePlan
   -- ^ Every source, repartition and global topic's partition count
   , rpGlobal :: !(Maybe GlobalPlan)
   }
+
+
+-- | A task's source partitions: partition @p@ of each source topic that has one.
+taskSourcePartitions :: RuntimePlan -> TaskId -> [KC.TopicPartition]
+taskSourcePartitions plan (TaskId sid p) = case Map.lookup sid (rpSubtopologies plan) of
+  Nothing -> []
+  Just sub ->
+    map
+      (`KC.TopicPartition` p)
+      (filter (\t -> fromIntegral p < Map.findWithDefault 1 t (rpPartitionCounts plan)) (subPlanSourceTopics sub))
+
+
+-- | Every task of the plan.
+planTasks :: RuntimePlan -> [TaskId]
+planTasks plan =
+  concatMap
+    (\sub -> map (TaskId (subPlanId sub) . fromIntegral) [0 .. subPlanTasks sub - 1])
+    (Map.elems (rpSubtopologies plan))
+
+
+{- | The changelog partitions of every task with logged stores: what a
+task's state is measured against (an internal changelog, or the
+source topic a store reuses, 'clInternal').
+-}
+planTaskChangelogs :: RuntimePlan -> Map TaskId [(KC.TopicPartition, ChangelogTopic)]
+planTaskChangelogs plan =
+  Map.fromList
+    . filter (not . null . snd)
+    . map
+      ( \tid@(TaskId sid p) ->
+          ( tid
+          , maybe
+              []
+              (map (\cl -> (KC.TopicPartition (unTopicName (clTopic cl)) p, cl)) . Map.elems . subPlanChangelogs)
+              (Map.lookup sid (rpSubtopologies plan))
+          )
+      )
+    $ planTasks plan
 
 
 -- | A task's directory name under @\<state.dir\>/\<application.id\>@.

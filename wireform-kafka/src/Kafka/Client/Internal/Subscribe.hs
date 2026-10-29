@@ -47,6 +47,8 @@ module Kafka.Client.Internal.Subscribe (
   encodeSubscriptionWithOwned,
   decodeSubscription,
   decodeSubscriptionFull,
+  decodeAssignment,
+  decodeAssignmentFull,
 ) where
 
 import Control.Concurrent.STM
@@ -62,6 +64,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Vector qualified as V
 import Data.Word (Word8)
+import Kafka.Client.Assignor (CustomAssignor (..), MemberAssignment (..), MemberSubscription (..))
 import Kafka.Client.Internal.ConsumerGroup qualified as CG
 import Kafka.Client.Internal.Heartbeat qualified as HB
 import Kafka.Client.Internal.Request qualified as Req
@@ -115,6 +118,10 @@ We support all three of the JVM client's defaults:
                            exhausted. Better balance than range when
                            consumers subscribe to different topic
                            sets.
+  * 'AssignorCustom'     - an application's own assignor (its name,
+                           and a function from every member's
+                           subscription to its partitions and an
+                           assignment user-data blob).
   * 'AssignorSticky'     - JVM "sticky". Tries to (a) balance the
                            count per consumer and (b) preserve the
                            previous generation's assignment so few
@@ -127,6 +134,8 @@ data Assignor
   = AssignorRange
   | AssignorRoundRobin
   | AssignorSticky
+  | -- | An application assignor ("Kafka.Client.Assignor")
+    AssignorCustom !CustomAssignor
   deriving (Eq, Show)
 
 
@@ -137,6 +146,7 @@ assignorName :: Assignor -> Text
 assignorName AssignorRange = "range"
 assignorName AssignorRoundRobin = "roundrobin"
 assignorName AssignorSticky = "cooperative-sticky"
+assignorName (AssignorCustom ca) = caName ca
 
 
 {- | Topic + partition pair (mirror of the one in 'Kafka.Client.Consumer'
@@ -192,7 +202,10 @@ subscribeFlow
   instance IQ discovery).
   'pure BS.empty' disables.
   -}
-  -> IO (Either SubscribeError [(TopicPartition, Int64)])
+  -> IO (Either SubscribeError ([(TopicPartition, Int64)], BS.ByteString))
+  {- ^ Assigned partitions with their fetch positions, and the
+  assignment user data the leader's assignor attached for this member
+  -}
 subscribeFlow
   connMgr
   connConfig
@@ -307,11 +320,14 @@ subscribeFlow
                 --    assignments. Followers send empty assignments.
                 assignments <-
                   if CG.jgrMemberId join == CG.jgrLeaderId join
-                    then do
-                      perMember <- buildLeaderAssignments (CG.jgrMembers join)
-                      pure perMember
-                    else pure []
+                    then buildLeaderAssignments (CG.jgrMembers join)
+                    else pure (Right [])
 
+                case assignments of
+                  Left err -> pure (Left (SubscribeOther ("assignor: " <> err)))
+                  Right asg -> syncWith coordConn coordAddr join asg
+
+      syncWith coordConn coordAddr join assignments = do
                 cid2 <- nextCorrId
                 -- 'protocolType' is fixed by the caller ("consumer"); the
                 -- 'protocolName' is whatever the broker picked from our
@@ -333,9 +349,9 @@ subscribeFlow
                 case syncR of
                   Left err -> pure (Left (SubscribeSync err))
                   Right myAssignmentBytes -> do
-                    case decodeAssignment myAssignmentBytes of
+                    case decodeAssignmentFull myAssignmentBytes of
                       Left err -> pure (Left (SubscribeSync ("decode assignment: " <> err)))
-                      Right myParts -> resolveOffsets coordConn coordAddr myParts
+                      Right (myParts, ud) -> fmap (\tps -> (tps, ud)) <$> resolveOffsets coordConn coordAddr myParts
 
       -- Compute per-member assignment when we're the leader. We walk the
       -- raw subscription bytes published by every joined member, take the
@@ -373,7 +389,21 @@ subscribeFlow
               ]
             mPrev = if null prevGen then Nothing else Just prevGen
 
-        let perMember =
+        ePerMember <- case assignor of
+          AssignorCustom ca ->
+            fmap (map (\(mid, ma) -> (mid, (maPartitions ma, maUserData ma))) . Map.toList)
+              <$> caAssign
+                ca
+                (Map.fromList (map (fmap (fromIntegral . length)) topicParts))
+                ( map
+                    ( \(mid, d) -> case d of
+                        Right (ts, ud, owned) -> MemberSubscription mid ts ud owned
+                        Left _ -> MemberSubscription mid [] BS.empty []
+                    )
+                    memberSubs
+                )
+          _ ->
+            pure . Right . map (fmap (\byTopic -> (byTopic, BS.empty))) $
               runAssignor
                 assignor
                 [ (mid, topicsOf m)
@@ -391,7 +421,7 @@ subscribeFlow
         -- has to be present even when there's only one member in
         -- the group.
         let assignmentVersion = 0 :: Int16
-            assignmentBytes byTopic =
+            assignmentBytes (byTopic, userData) =
               let !msg =
                     CPA.ConsumerProtocolAssignment
                       { CPA.consumerProtocolAssignmentAssignedPartitions =
@@ -404,13 +434,13 @@ subscribeFlow
                                   }
                               | (t, ps) <- byTopic
                               ]
-                      , CPA.consumerProtocolAssignmentUserData = P.mkKafkaBytes BS.empty
+                      , CPA.consumerProtocolAssignmentUserData = P.mkKafkaBytes userData
                       }
                   !body = WC.runEncodeVer @CPA.ConsumerProtocolAssignment assignmentVersion msg
                   !vHi = fromIntegral (assignmentVersion `shiftR` 8) :: Word8
                   !vLo = fromIntegral (assignmentVersion .&. 0xff) :: Word8
               in BS.cons vHi (BS.cons vLo body)
-        pure [(mid, assignmentBytes byTopic) | (mid, byTopic) <- perMember]
+        pure (map (fmap assignmentBytes) <$> ePerMember)
 
       -- After SyncGroup we know the partitions assigned to *us*. For
       -- each one, look up its committed offset; if missing, resolve the
@@ -586,6 +616,8 @@ runAssignor
 runAssignor AssignorRange members topicParts _ = rangeAssign members topicParts
 runAssignor AssignorRoundRobin members topicParts _ = roundRobinAssign members topicParts
 runAssignor AssignorSticky members topicParts prev = stickyAssign members topicParts prev
+-- run by the leader before it gets here ('subscribeFlow')
+runAssignor (AssignorCustom _) members topicParts _ = rangeAssign members topicParts
 
 
 {- | Naive range assignment, in the spirit of the JVM client's
@@ -1003,7 +1035,12 @@ decodeSubscriptionFull rawBs =
 
 -- | Decode the per-member SyncGroup assignment payload.
 decodeAssignment :: BS.ByteString -> Either String [(Text, [Int32])]
-decodeAssignment rawBs =
+decodeAssignment = fmap fst . decodeAssignmentFull
+
+
+-- | The assignment payload's partitions and user data.
+decodeAssignmentFull :: BS.ByteString -> Either String ([(Text, [Int32])], BS.ByteString)
+decodeAssignmentFull rawBs =
   -- Symmetric to 'assignmentBytes' above: skip the two-byte
   -- version header, then decode the body at the embedded
   -- version.
@@ -1020,14 +1057,21 @@ decodeAssignment rawBs =
          let parts = case P.unKafkaArray (CPA.consumerProtocolAssignmentAssignedPartitions a) of
                P.NotNull v -> V.toList v
                P.Null -> []
+             ud = case P.unKafkaBytes (CPA.consumerProtocolAssignmentUserData a) of
+               P.NotNull b -> b
+               P.Null -> BS.empty
          in Right
-              [ ( kafkaStringToText (CPA.topicPartitionTopic tp)
-                , case P.unKafkaArray (CPA.topicPartitionPartitions tp) of
-                    P.NotNull v -> V.toList v
-                    P.Null -> []
-                )
-              | tp <- parts
-              ]
+              ( map
+                  ( \tp ->
+                      ( kafkaStringToText (CPA.topicPartitionTopic tp)
+                      , case P.unKafkaArray (CPA.topicPartitionPartitions tp) of
+                          P.NotNull v -> V.toList v
+                          P.Null -> []
+                      )
+                  )
+                  parts
+              , ud
+              )
 
 
 {- | OffsetFetch for a list of TopicPartitions; returns a map from

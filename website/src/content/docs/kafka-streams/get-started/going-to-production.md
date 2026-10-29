@@ -78,12 +78,14 @@ Full discussion in
 
 ## 3. Keep restores short
 
-There are no standby replicas: when an instance restarts (deploy, failure, or scale-up), the new owner of each task restores its stores from their changelogs before it processes anything. Without a local checkpoint that is the entire changelog: for a 1 TB store at 100 MB/s, three hours during which that task's partitions don't move and interactive queries against it find nothing.
+When an instance restarts (deploy, failure, or scale-up), the new owner of each task restores its stores before it processes anything. Without a standby or a local checkpoint that is the entire changelog: for a 1 TB store at 100 MB/s, three hours during which that task's partitions don't move and interactive queries against it find nothing.
 
 What shortens it:
 
+- **Standby replicas** (`numStandbyReplicas = 1`): another instance keeps each stateful task's stores current, and a failover restores only the tail it hadn't applied.
 - **Persistent stores** (`persistentKeyValueStoreBuilder`) checkpoint their changelog position; a task that comes back to the same machine restores only the tail after the checkpoint.
-- **A stable `stateDir`** (a persistent volume) and a **stable `clientId`** per instance, so a restarted instance gets its own partitions back and finds its checkpoints. See [Running in containers](../../operating/containers/).
+- **A stable `stateDir`** (a persistent volume) per instance: the assignor sees the checkpoints a restarted instance still has and gives it those tasks back. See [Running in containers](../../operating/containers/).
+- **Warmups instead of cold moves**: with `acceptableRecoveryLag` tight, a task only moves to an instance that is caught up; a new or empty instance warms up first and takes over at a probing rebalance (`probingRebalanceIntervalMs`).
 - **Clean shutdowns** (`closeKafkaStreams`): under exactly-once, a start after an unclean stop wipes local state and restores everything.
 - **More partitions**: restore is per task, so smaller tasks restore faster and in parallel across instances.
 
@@ -94,14 +96,15 @@ cfg :: C.StreamsConfig
 cfg = C.defaultStreamsConfig
   { C.applicationId       = "my-app"
   , C.bootstrapServers    = ["broker:9092"]
-  , C.clientId            = "my-app-instance-1"   -- stable per instance
+  , C.clientId            = "my-app-instance-1"
   , C.stateDir            = "/var/lib/my-app/state" -- on a persistent volume
   , C.numStreamThreads    = 4
+  , C.numStandbyReplicas  = 1
   , C.processingGuarantee = C.ExactlyOnceV2
   }
 ```
 
-Details: [Scaling: restore time is the failover time](../../operating/scaling/#restore-time-is-the-failover-time).
+Details: [Scaling: standbys bound the failover time](../../operating/scaling/#standbys-bound-the-failover-time).
 
 ## 4. Listeners and progress
 
@@ -228,6 +231,7 @@ prodCfg = C.defaultStreamsConfig
   , C.bootstrapServers          = ["broker-1:9092", "broker-2:9092"]
   , C.clientId                  = "my-app-instance-1"
   , C.numStreamThreads          = 4
+  , C.numStandbyReplicas        = 1
   , C.processingGuarantee       = C.ExactlyOnceV2
   , C.commitIntervalMs          = Nothing            -- 100 ms under EOS
   , C.replicationFactor         = 3                  -- match your broker

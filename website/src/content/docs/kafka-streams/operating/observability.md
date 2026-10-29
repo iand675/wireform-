@@ -183,10 +183,11 @@ The detector only warns. It never deletes. Make deletion a manual, audited opera
 
 ## Runtime listeners
 
-There are no standby replicas, so failover time is restore time: a
-task that moves replays its stores' changelogs before it processes
-anything, and the instance reports `StreamsRebalancing` meanwhile.
-Three listeners show what's happening:
+Failover time is restore time: a task that moves restores its stores
+before it processes anything (from its standby's position when it
+lands on one, else from a checkpoint or the changelog start), and the
+instance reports `StreamsRebalancing` meanwhile. Three listeners show
+what's happening:
 
 ```haskell
 import Kafka.Client.RebalanceListener (RebalanceListener (..), noopRebalanceListener)
@@ -216,9 +217,12 @@ R.setStateRestoreListener streams R.defaultStateRestoreListener
 - Track the restore duration per store over time: it's the failover
   time, and it grows with the changelog.
 
-`setLagListener` / `publishLag` and `reportWarmupLag` exist for
-callers that track warmup lag themselves (they feed the probing
-rebalance); the runtime reports nothing through them.
+`localTaskLags` reads, on demand, every task the instance holds state
+for (running, restoring, standby) against its changelogs' end: a
+standby that falls behind there makes its failover slower.
+`Kafka.Streams.Observability.Lag` summarises the rows and
+`Kafka.Streams.Observability.Health.kafkaStreamsHealthWithLag` turns
+the active ones into readiness.
 
 ## Interactive queries for debugging
 
