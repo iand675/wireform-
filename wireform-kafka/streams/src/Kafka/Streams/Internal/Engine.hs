@@ -59,6 +59,7 @@ module Kafka.Streams.Internal.Engine (
   drainPreCommit,
   closeEngine,
   storeByName,
+  engineOwnStores,
   streamTimeOfEngine,
   wallClockTimeOfEngine,
   takeCommitRequested,
@@ -88,6 +89,7 @@ import Kafka.Streams.Errors (
   DeserializationException (..),
   DeserializationHandler (..),
   DeserializationResponse (..),
+  InvalidPartitionsException (..),
   StreamsException (..),
  )
 import Kafka.Streams.Internal.Changelog qualified as CL
@@ -122,6 +124,7 @@ import Kafka.Streams.State.Store (
   StoreBuilderS (..),
   StoreBuilderW (..),
   LoggingConfig (..),
+  StoreContext (..),
   StoreName,
   StoreSerdes,
   WindowStore (..),
@@ -146,6 +149,8 @@ import Kafka.Streams.Types (
  )
 import Kafka.Streams.Types qualified
 import Kafka.Streams.Watermark qualified as Watermark
+import System.Directory (getTemporaryDirectory)
+import System.FilePath ((</>))
 import Unsafe.Coerce (unsafeCoerce)
 
 
@@ -208,6 +213,11 @@ data EngineOptions = EngineOptions
   {- ^ The changelog each store logs its writes to. 'Nothing' (and
   any store whose 'LoggingConfig' disables logging) is not logged.
   -}
+  , eoTaskDirectory :: !(Maybe FilePath)
+  {- ^ The task's state directory, handed to every store builder
+  ('StoreContext'). 'Nothing': a fresh place under the system temp
+  directory, as the in-process test drivers want.
+  -}
   , eoSharedStores :: !(Map StoreName StoreEntry)
   {- ^ Stores owned outside this engine (the global stores), visible
   to its processors by name. The engine never flushes or closes
@@ -221,6 +231,7 @@ defaultEngineOptions :: EngineOptions
 defaultEngineOptions =
   EngineOptions
     { eoChangelog = const Nothing
+    , eoTaskDirectory = Nothing
     , eoSharedStores = Map.empty
     }
 
@@ -362,8 +373,14 @@ buildEngineWith opts validated tid appId collector deserHandler = do
               , crHeaders = emptyHeaders
               , crPartition = Just (ctPartition ct)
               }
+  dir <- case eoTaskDirectory opts of
+    Just d -> pure d
+    Nothing -> do
+      tmp <- getTemporaryDirectory
+      pure (tmp </> "wireform-streams" </> T.unpack appId </> T.unpack (taskIdToText tid))
+  let ctx = StoreContext {scDirectory = dir, scTaskName = taskIdToText tid}
   storeEntries <- forM (Map.toList (Topo.topoStores topo)) $ \(nm, ab) ->
-    realiseStore (changelogSink nm) ab
+    realiseStore ctx (changelogSink nm) ab
   storesRef <-
     newIORef
       ( Map.union
@@ -426,10 +443,10 @@ buildEngineWith opts validated tid appId collector deserHandler = do
 left on, every write is also logged ('CL.logKeyValueStore' and
 friends); restore always goes to the unlogged store.
 -}
-realiseStore :: Maybe CL.ChangelogSink -> Topo.AnyStoreBuilder -> IO StoreEntry
-realiseStore mSink = \case
+realiseStore :: StoreContext -> Maybe CL.ChangelogSink -> Topo.AnyStoreBuilder -> IO StoreEntry
+realiseStore ctx mSink = \case
   Topo.AsKeyValueBuilder b -> do
-    s <- sbKvBuild b
+    s <- sbKvBuild b ctx
     pure
       StoreEntry
         { storeEntryName = sbKvName b
@@ -439,7 +456,7 @@ realiseStore mSink = \case
         , storeEntryRestore = (\sd -> CL.restoreKeyValue sd s) <$> sbKvSerdes b
         }
   Topo.AsWindowBuilder b -> do
-    s <- sbWBuild b
+    s <- sbWBuild b ctx
     pure
       StoreEntry
         { storeEntryName = sbWName b
@@ -449,7 +466,7 @@ realiseStore mSink = \case
         , storeEntryRestore = (\sd -> CL.restoreWindow sd s) <$> sbWSerdes b
         }
   Topo.AsSessionBuilder b -> do
-    s <- sbSBuild b
+    s <- sbSBuild b ctx
     pure
       StoreEntry
         { storeEntryName = sbSName b
@@ -459,7 +476,7 @@ realiseStore mSink = \case
         , storeEntryRestore = (\sd -> CL.restoreSession sd s) <$> sbSSerdes b
         }
   Topo.AsRawBuilder b -> do
-    s <- sbBuild b
+    s <- sbBuild b ctx
     pure
       StoreEntry
         { storeEntryName = sbName b
@@ -596,9 +613,10 @@ sinkForwarder engine spec =
 
 {- | Run a sink's 'StreamPartitioner' against the topic's current
 partition count. Mirrors the JVM @RecordCollectorImpl.send@: no
-partition metadata for the topic, or a partition outside
-@[0, n)@, is a 'StreamsException' (routed through the
-processing-exception handler like any other processor failure).
+partition metadata for the topic is a 'StreamsException'; a partition
+outside @[0, n)@ is an 'InvalidPartitionsException', a failure of the
+record (the runtime routes it through the processing-exception
+handler like any other processor failure).
 -}
 sinkPartition
   :: Engine
@@ -622,8 +640,8 @@ sinkPartition engine topic sp rec = do
               case mp of
                 Just p
                   | p < 0 || p >= n ->
-                      sinkFail
-                        ( "StreamPartitioner returned partition "
+                      throwIO . InvalidPartitionsException $
+                        ( "sink topic " <> topic <> ": StreamPartitioner returned partition "
                             <> T.pack (show p)
                             <> " outside [0, "
                             <> T.pack (show n)
@@ -820,7 +838,19 @@ handleDeserError engine si keyR valR = do
   case resp of
     DeserContinueProcessing -> pure ()
     DeserFailFast ->
-      error $ "Kafka.Streams: deserialization failure: " <> T.unpack reason
+      throwIO
+        StreamsException
+          { streamsErrorMessage =
+              "deserialization failure on "
+                <> unTopicName (siTopic si)
+                <> "-"
+                <> T.pack (show (siPartition si))
+                <> "@"
+                <> T.pack (show (siOffset si))
+                <> ": "
+                <> reason
+          , streamsErrorContext = Just "deserialization"
+          }
 
 
 ----------------------------------------------------------------------
@@ -1241,6 +1271,11 @@ closeEngine engine = do
             <> show e
       _ -> pure ()
   collectorClose (engineCollector engine)
+
+
+-- | The stores this engine built (not the shared ones).
+engineOwnStores :: Engine -> IO (Map StoreName StoreEntry)
+engineOwnStores engine = (`Map.withoutKeys` engineShared engine) <$> readIORef (engineStores engine)
 
 
 storeByName :: Engine -> StoreName -> IO (Maybe StoreEntry)

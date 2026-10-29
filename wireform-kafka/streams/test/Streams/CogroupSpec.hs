@@ -51,7 +51,7 @@ cogroup_two_sources_share_state =
     pipeInput driver (topicName "in2") (Just (bytes "k")) (bytes "b") (t 1) 0
     pipeInput driver (topicName "in1") (Just (bytes "k")) (bytes "c") (t 2) 0
 
-    Just kvs <- getKeyValueStore @Text @Text driver (ctlStore table)
+    Just kvs <- getKeyValueStore @Text @Text driver (ktableStore table)
     -- Expected: "" -> /a -> /a+b -> /a+b/c
     kvsGet kvs "k" >>= (`shouldBe` Just "/a+b/c")
     closeDriver driver
@@ -86,7 +86,7 @@ cogroup_three_sources =
     pipeInput driver (topicName "z") (Just (bytes "k")) (i64Bytes 3) (t 2) 0
     pipeInput driver (topicName "x") (Just (bytes "k")) (i64Bytes 4) (t 3) 0
 
-    Just kvs <- getKeyValueStore @Text @Int64 driver (ctlStore table)
+    Just kvs <- getKeyValueStore @Text @Int64 driver (ktableStore table)
     -- 0 + 1 (x) + 20 (y) + 300 (z) + 4 (x) = 325
     kvsGet kvs "k" >>= (`shouldBe` Just 325)
     closeDriver driver

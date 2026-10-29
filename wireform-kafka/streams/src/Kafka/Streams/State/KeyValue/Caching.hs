@@ -235,7 +235,7 @@ cachingKeyValueStoreBuilder cfg emit base =
     { sbKvName = sbKvName base
     , sbKvLogging = sbKvLogging base
     , sbKvSerdes = sbKvSerdes base
-    , sbKvBuild = do
-        under <- sbKvBuild base
+    , sbKvBuild = \ctx -> do
+        under <- sbKvBuild base ctx
         cachingKeyValueStore under cfg emit
     }

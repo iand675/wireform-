@@ -334,6 +334,13 @@ data IsolationLevel
   deriving (Eq, Show, Generic)
 
 
+-- | The wire code of an 'IsolationLevel' (Fetch and ListOffsets).
+isolationLevelCode :: IsolationLevel -> Int8
+isolationLevelCode = \case
+  ReadUncommitted -> 0
+  ReadCommitted -> 1
+
+
 {- | Consumer configuration. Field names + defaults map onto
 librdkafka's @CONFIGURATION.md@ entries; the librdkafka name
 is given inline next to the Haskell field.
@@ -1147,9 +1154,8 @@ queryPartitionOffsets consumer@Consumer {..} partitions timestamp = do
           let apiKey = 2 -- ListOffsets
           -- ListOffsets: codegen handles up to v10. Schema
           -- changes by version:
-          --   v2  KIP-98  IsolationLevel (we always send 0 here;
-          --               'fetchFromBroker' honours the consumer's
-          --               own isolation-level config)
+          --   v2  KIP-98  IsolationLevel (the consumer's own, so
+          --               a read_committed "latest" is the LSO)
           --   v4  KIP-320 LeaderEpoch in request + response
           --   v6  flexible (compact + tagged fields)
           --   v7  KIP-734 LeaderEpoch becomes mandatory in
@@ -1199,7 +1205,9 @@ queryPartitionOffsets consumer@Consumer {..} partitions timestamp = do
               request =
                 LOReq.ListOffsetsRequest
                   { LOReq.listOffsetsRequestReplicaId = -1 -- Consumer
-                  , LOReq.listOffsetsRequestIsolationLevel = 0 -- Read uncommitted
+                  , -- A read_committed consumer's "latest" is the last
+                    -- stable offset, not the high watermark (v2+).
+                    LOReq.listOffsetsRequestIsolationLevel = isolationLevelCode (consumerIsolationLevel consumerConfig)
                   , LOReq.listOffsetsRequestTopics = P.mkKafkaArray topics
                   , LOReq.listOffsetsRequestTimeoutMs = 30000 -- v10+; ignored otherwise
                   }
@@ -2413,9 +2421,7 @@ fetchFromBroker connMgr versionCache broker requests timeoutMs corrIdVar rackIdM
               , FR.fetchRequestMaxWaitMs = fromIntegral timeoutMs
               , FR.fetchRequestMinBytes = 1
               , FR.fetchRequestMaxBytes = 52428800 -- 50MB total
-              , FR.fetchRequestIsolationLevel = case isolationLevel of
-                  ReadUncommitted -> 0
-                  ReadCommitted -> 1
+              , FR.fetchRequestIsolationLevel = isolationLevelCode isolationLevel
               , FR.fetchRequestSessionId = 0
               , FR.fetchRequestSessionEpoch = -1
               , FR.fetchRequestTopics = P.mkKafkaArray fetchTopics
@@ -3329,7 +3335,7 @@ queryPartitionOffsetsByTimestampFull consumer@Consumer {..} pts = do
               request =
                 LOReq.ListOffsetsRequest
                   { LOReq.listOffsetsRequestReplicaId = -1
-                  , LOReq.listOffsetsRequestIsolationLevel = 0
+                  , LOReq.listOffsetsRequestIsolationLevel = isolationLevelCode (consumerIsolationLevel consumerConfig)
                   , LOReq.listOffsetsRequestTopics = P.mkKafkaArray topics
                   , LOReq.listOffsetsRequestTimeoutMs = 30000 -- v10+; ignored otherwise
                   }

@@ -52,9 +52,7 @@ module Kafka.Streams.KGroupedTable (
 import Data.IORef
 import Data.Int (Int64)
 import Kafka.Streams.Grouped (Grouped (..), grouped)
-import Kafka.Streams.KGroupedStream (
-  CountedTableLocal (..),
- )
+import Kafka.Streams.KGroupedStream (aggregateSerde)
 import Kafka.Streams.KTable (
   KTable (..),
   ktableBuilder,
@@ -72,7 +70,8 @@ import Kafka.Streams.Processor (
   getStateStore,
   processorName,
  )
-import Kafka.Streams.Serde (Serde)
+import Data.Maybe (fromMaybe)
+import Kafka.Streams.Serde (Serde, int64Serde)
 import Kafka.Streams.State.KeyValue.InMemory (
   inMemoryKeyValueStoreBuilder,
  )
@@ -159,12 +158,13 @@ countKGroupedTable
    . Ord k
   => Materialized k Int64
   -> KGroupedTable k v
-  -> IO (CountedTableLocal k Int64)
-countKGroupedTable =
+  -> IO (KTable k Int64)
+countKGroupedTable m =
   aggregateKGroupedTable
     (pure 0)
     (\_ _ acc -> acc + 1) -- add a record
     (\_ _ acc -> acc - 1) -- subtract the prior version
+    m {matValueSerde = Just (fromMaybe int64Serde (matValueSerde m))}
 
 
 {- | @KTable.groupBy(...).reduce(adder, subtractor, Materialized)@.
@@ -183,7 +183,7 @@ reduceKGroupedTable
   -- ^ subtractor (oldAgg old -> partial)
   -> Materialized k v
   -> KGroupedTable k v
-  -> IO (CountedTableLocal k v)
+  -> IO (KTable k v)
 reduceKGroupedTable add sub m kgt = do
   let b = kgt.builder
   storeNm <-
@@ -221,10 +221,12 @@ reduceKGroupedTable add sub m kgt = do
         !t3 = Topo.addStateStoreKV prevBuilder [procNm] t2
     in t3
   pure
-    CountedTableLocal
-      { ctlNode = procNm
-      , ctlStore = storeNm
-      , ctlBuilder = b
+    KTable
+      { ktableNode = procNm
+      , ktableStore = storeNm
+      , ktableBuilder = b
+      , ktableKeySerde = kgt.key
+      , ktableValueSerde = kgt.value
       }
 
 
@@ -346,7 +348,7 @@ aggregateKGroupedTable
   -- ^ subtractor
   -> Materialized k a
   -> KGroupedTable k v
-  -> IO (CountedTableLocal k a)
+  -> IO (KTable k a)
 aggregateKGroupedTable initial add sub m kgt = do
   let b = kgt.builder
   storeNm <-
@@ -360,7 +362,7 @@ aggregateKGroupedTable initial add sub m kgt = do
   -- update).
   prevNm <- freshStoreName b "KTABLE-AGGREGATE-PREV"
   let outBuilder =
-        materializedKV m storeNm kgt.key (error "aggregate: pass Materialized with a value serde for the aggregate type")
+        materializedKV m storeNm kgt.key (aggregateSerde m)
           :: StoreBuilderKV k a
       prevBuilder =
         withStoreSerdesKV kgt.key kgt.value (inMemoryKeyValueStoreBuilder prevNm)
@@ -389,10 +391,12 @@ aggregateKGroupedTable initial add sub m kgt = do
         !t3 = Topo.addStateStoreKV prevBuilder [procNm] t2
     in t3
   pure
-    CountedTableLocal
-      { ctlNode = procNm
-      , ctlStore = storeNm
-      , ctlBuilder = b
+    KTable
+      { ktableNode = procNm
+      , ktableStore = storeNm
+      , ktableBuilder = b
+      , ktableKeySerde = kgt.key
+      , ktableValueSerde = aggregateSerde m
       }
 
 

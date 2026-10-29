@@ -1491,11 +1491,7 @@ test_optimize_pushes_arr_through_fork =
 
 test_missing_serde_throws_typed_exception :: Spec
 test_missing_serde_throws_typed_exception =
-  it "forcing an aggregation KTable's missing serde raises TopologyFreeError" $ do
-    -- A Materialized with no serdes set. The aggregation succeeds at
-    -- compile time, but the resulting KTable's serde fields are
-    -- deferred 'TopologyFreeError' thunks. Forcing one of them
-    -- should yield a catchable exception, not an opaque 'error'.
+  it "a count's KTable carries its Int64 value serde without a Materialized serde" $ do
     let unset :: Materialized Text Int64
         unset = Mat.materializedAs (storeName "missing-serde-store")
 
@@ -1506,17 +1502,7 @@ test_missing_serde_throws_typed_exception =
             >>> F.count unset
 
     (kt, _topo) <- F.compile topology
-    -- Force the value-serde field; expect TopologyFreeError.
-    result <- try (evaluate (ktableValueSerde kt))
-    case result of
-      Left (F.MissingMaterializedSerde F.ValueSide) -> pure ()
-      Left other ->
-        error
-          ( "expected MissingMaterializedSerde ValueSide, got: "
-              <> show other
-          )
-      Right _ ->
-        error "expected the missing value serde to raise an exception"
+    deserialize (ktableValueSerde kt) (serialize (ktableValueSerde kt) 42) `shouldBe` Right 42
 
 
 ----------------------------------------------------------------------

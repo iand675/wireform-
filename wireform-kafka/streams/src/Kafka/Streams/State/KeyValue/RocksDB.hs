@@ -46,6 +46,7 @@ import Kafka.Streams.State.Store (
   KeyValueStore (..),
   StateStore (..),
   StoreBuilderKV (..),
+  StoreContext (..),
   StoreSerdes (..),
   StoreName,
   defaultLoggingConfig,
@@ -150,7 +151,7 @@ rocksDBKeyValueStoreBuilder nm cfg =
     { sbKvName = nm
     , sbKvLogging = defaultLoggingConfig
     , sbKvSerdes = Just (StoreSerdes byteStringSerde byteStringSerde)
-    , sbKvBuild = rocksDBKeyValueStore nm cfg
+    , sbKvBuild = \ctx -> rocksDBKeyValueStore nm cfg {rdbDirectory = scDirectory ctx}
     }
 
 

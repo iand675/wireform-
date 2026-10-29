@@ -8,15 +8,17 @@ import Streams.BackfillSpec qualified
 import Streams.BoundedSuppressSpec qualified
 import Streams.CacheSpec qualified
 import Streams.ChangelogSpec qualified
+import Streams.TaskRuntimeSpec qualified
+import Streams.ParityBatchSpec qualified
+import Streams.StandbyTaskSpec qualified
+import Streams.RuntimeBehaviourSpec qualified
+import Streams.RuntimeRecordFidelitySpec qualified
 import Streams.CogroupSpec qualified
 import Streams.DSLFacadeSpec qualified
 import Streams.DSLSpec qualified
 import Streams.DriverSpec qualified
-import Streams.DynamicThreadsSpec qualified
-import Streams.EOSRuntimeSpec qualified
 import Streams.EOSSpec qualified
 import Streams.EndToEndChainSpec qualified
-import Streams.ExceptionHandlerSpec qualified
 import Streams.ExtensionsSpec qualified
 import Streams.ForeignKeyJoinDSLSpec qualified
 import Streams.HealthSpec qualified
@@ -39,9 +41,7 @@ import Streams.MultiInstanceRebalanceSpec qualified
 import Streams.MultiTaskSpec qualified
 import Streams.NamedSpec qualified
 import Streams.ObservabilityOTelSpec qualified
-import Streams.ParityBatchSpec qualified
 import Streams.PersistentStoreSpec qualified
-import Streams.ProbingRebalanceRuntimeSpec qualified
 import Streams.ProbingRebalanceSpec qualified
 import Streams.ProcessorAndStoreExtrasSpec qualified
 import Streams.Properties.AtLeastOnceRedeliverySpec qualified
@@ -77,8 +77,6 @@ import Streams.RemoteIQSpec qualified
 import Streams.ReplaySpec qualified
 import Streams.RevocationGraceSpec qualified
 import Streams.RotatingFileSinkSpec qualified
-import Streams.RuntimeDriverSpec qualified
-import Streams.RuntimeRecordFidelitySpec qualified
 import Streams.SchemaRegistryCompatSpec qualified
 import Streams.SchemaRegistryFormatsSpec qualified
 import Streams.SchemaRegistryHttpSpec qualified
@@ -88,7 +86,6 @@ import Streams.SerdeSpec qualified
 import Streams.StableNamesSpec qualified
 import Streams.StandbyDriverSpec qualified
 import Streams.StandbySpec qualified
-import Streams.StandbyTaskSpec qualified
 import Streams.StateListenerSpec qualified
 import Streams.StateStoreSpec qualified
 import Streams.StoresExtraSpec qualified
@@ -136,6 +133,11 @@ main = do
         , Streams.InteractiveQueriesSpec.tests
         , Streams.CacheSpec.tests
         , Streams.ChangelogSpec.tests
+        , Streams.TaskRuntimeSpec.tests
+        , Streams.ParityBatchSpec.tests
+        , Streams.StandbyTaskSpec.tests
+        , Streams.RuntimeBehaviourSpec.tests
+        , Streams.RuntimeRecordFidelitySpec.tests
         , Streams.EOSSpec.tests
         , Streams.MultiTaskSpec.tests
         , Streams.StandbySpec.tests
@@ -149,12 +151,10 @@ main = do
         , Streams.MetricsSpec.tests
         , Streams.NamedSpec.tests
         , Streams.WorkerPoolSpec.tests
-        , Streams.EOSRuntimeSpec.tests
         , Streams.ExtensionsSpec.tests
         , Streams.TestUtilsSpec.tests
         , Streams.StateListenerSpec.tests
         , Streams.QuerySpec.tests
-        , Streams.ParityBatchSpec.tests
         , Streams.MoreParitySpec.tests
         , Streams.EndToEndChainSpec.tests
         , Streams.MorePartiyTwoSpec.tests
@@ -171,20 +171,14 @@ main = do
         , Streams.TransactionalStoreSpec.tests
         , Streams.StreamsConfigSurfaceSpec.tests
         , Streams.ForeignKeyJoinDSLSpec.tests
-        , Streams.RuntimeDriverSpec.tests
-        , Streams.RuntimeRecordFidelitySpec.tests
-        , Streams.ExceptionHandlerSpec.tests
         , Streams.KGroupedTableSpec.tests
         , Streams.StoresExtraSpec.tests
         , Streams.QueryAndDiscoverySpec.tests
         , Streams.ProcessorAndStoreExtrasSpec.tests
-        , Streams.DynamicThreadsSpec.tests
         , Streams.BoundedSuppressSpec.tests
         , Streams.WindowedSuppressIntegrationSpec.tests
         , Streams.IdleHeartbeatSpec.tests
         , Streams.RackAwareAssignorSpec.tests
-        , Streams.ProbingRebalanceRuntimeSpec.tests
-        , Streams.StandbyTaskSpec.tests
         , Streams.StandbyDriverSpec.tests
         , Streams.RemoteIQSpec.tests
         , Streams.IdiomaticDSLSpec.tests

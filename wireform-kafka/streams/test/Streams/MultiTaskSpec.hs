@@ -72,7 +72,7 @@ buildCounterTopo = do
   topo <- buildTopology b
   case validateTopology topo of
     Left err -> error (show err)
-    Right v -> pure (v, ctlStore table)
+    Right v -> pure (v, ktableStore table)
 
 
 multi_task_routes_records_to_owners :: Spec

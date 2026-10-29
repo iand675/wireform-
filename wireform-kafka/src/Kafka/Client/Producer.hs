@@ -152,6 +152,7 @@ module Kafka.Client.Producer (
     their @attrIsTransactional@ bit set.
   -}
   bindTransaction,
+  newBoundTransaction,
   producerBoundTransaction,
   producerTxnGate,
 
@@ -1356,6 +1357,33 @@ bindTransaction Producer {..} txn = liftIO $ do
     -- 'beginTransaction' lifecycle should also clear this, but we
     -- do it on bind so a freshly bound transaction starts clean.
     resetStmMap producerRegisteredPartitions
+
+
+{- | A transaction coordinator handle for this producer's
+@transactional.id@ ('producerTransactional'), sharing its connections
+and TLS / SASL settings, already bound to it ('bindTransaction'). The
+caller still runs 'Txn.initTransactions' before the first send.
+@bootstrap@ (\"host:port\") is where the coordinator is looked up.
+-}
+newBoundTransaction :: Producer -> Text -> IO (Either String Txn.Transaction)
+newBoundTransaction p bootstrap =
+  case producerTransactional (producerConfig p) of
+    Nothing -> pure (Left "newBoundTransaction: the producer has no transactional.id")
+    Just tid -> case parseBrokerAddress bootstrap of
+      Left e -> pure (Left e)
+      Right addr -> do
+        vc <- AV.createVersionCache
+        txn <-
+          Txn.createTransaction
+            (Txn.TransactionalId tid)
+            (producerConnManager p)
+            (producerConnConfig p)
+            vc
+            (producerClientId (producerConfig p))
+            addr
+            (fromIntegral (producerTransactionTimeoutMs (producerConfig p)))
+        bindTransaction p txn
+        pure (Right txn)
 
 
 {- | The currently bound transaction, if any. Mostly useful for

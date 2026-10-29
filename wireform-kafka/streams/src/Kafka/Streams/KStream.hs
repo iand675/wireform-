@@ -98,6 +98,7 @@ module Kafka.Streams.KStream (
   mergeStreams,
   mergeStreamsNamed,
   mergeStreamsN,
+  mkPassThrough,
   branchStream,
 
   -- * Sinks

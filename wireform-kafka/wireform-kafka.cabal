@@ -541,6 +541,11 @@ library wireform-kafka-streams
         Kafka.Streams.Runtime.StandbyDriver
         Kafka.Streams.Runtime.RevocationGrace
         Kafka.Streams.Runtime.NativeDriver
+        Kafka.Streams.Runtime.Driver
+        Kafka.Streams.Runtime.MockBroker
+        Kafka.Streams.Runtime.Plan
+        Kafka.Streams.Runtime.Tasks
+        Kafka.Streams.Runtime.GlobalStore
         Kafka.Streams.Runtime.StateDir
         Kafka.Streams.Runtime.MultiInstanceHarness
         Kafka.Streams.Runtime.MultiInstanceMockHarness
@@ -606,6 +611,12 @@ test-suite wireform-kafka-streams-test
     other-modules:
         Streams.SerdeSpec
         Streams.ChangelogSpec
+        Streams.RuntimeHarness
+        Streams.TaskRuntimeSpec
+        Streams.StandbyTaskSpec
+        Streams.ParityBatchSpec
+        Streams.RuntimeBehaviourSpec
+        Streams.RuntimeRecordFidelitySpec
         Streams.TimeSpec
         Streams.StateStoreSpec
         Streams.WindowSpec
@@ -631,12 +642,10 @@ test-suite wireform-kafka-streams-test
         Streams.MetricsSpec
         Streams.NamedSpec
         Streams.WorkerPoolSpec
-        Streams.EOSRuntimeSpec
         Streams.ExtensionsSpec
         Streams.TestUtilsSpec
         Streams.StateListenerSpec
         Streams.QuerySpec
-        Streams.ParityBatchSpec
         Streams.MoreParitySpec
         Streams.EndToEndChainSpec
         Streams.MorePartiyTwoSpec
@@ -653,20 +662,14 @@ test-suite wireform-kafka-streams-test
         Streams.TransactionalStoreSpec
         Streams.StreamsConfigSurfaceSpec
         Streams.ForeignKeyJoinDSLSpec
-        Streams.RuntimeDriverSpec
-        Streams.RuntimeRecordFidelitySpec
-        Streams.ExceptionHandlerSpec
         Streams.KGroupedTableSpec
         Streams.StoresExtraSpec
         Streams.QueryAndDiscoverySpec
         Streams.ProcessorAndStoreExtrasSpec
-        Streams.DynamicThreadsSpec
         Streams.BoundedSuppressSpec
         Streams.WindowedSuppressIntegrationSpec
         Streams.IdleHeartbeatSpec
         Streams.RackAwareAssignorSpec
-        Streams.ProbingRebalanceRuntimeSpec
-        Streams.StandbyTaskSpec
         Streams.StandbyDriverSpec
         Streams.RemoteIQSpec
         Streams.IdiomaticDSLSpec

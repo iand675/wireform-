@@ -124,5 +124,5 @@ inMemorySessionStoreBuilder nm retention =
     { sbSName = nm
     , sbSLogging = defaultLoggingConfig
     , sbSSerdes = Nothing
-    , sbSBuild = inMemorySessionStore nm retention
+    , sbSBuild = \_ -> inMemorySessionStore nm retention
     }

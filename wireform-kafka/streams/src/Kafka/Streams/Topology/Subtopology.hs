@@ -94,6 +94,7 @@ planSubtopologies t =
       !rank = Map.fromList (zip order [0 :: Int ..])
       !globalStores = Set.toList (topoGlobalStores t)
       ownersOf sn = Map.findWithDefault [] sn (topoStoreOwners t)
+      usersOf = storeUsers t
       -- The global part: owners of global stores and everything
       -- upstream of them.
       ancestors = go Set.empty
@@ -109,11 +110,11 @@ planSubtopologies t =
       edges =
         concatMap (\n -> map (\p -> (n, p)) (parentsOf t n)) regular
           <> concatMap
-            ( \sn -> case filter (`Set.notMember` globalNodes) (ownersOf sn) of
+            ( \sn -> case filter (`Set.notMember` globalNodes) (usersOf sn) of
                 (o : os) -> map (\o' -> (o, o')) os
                 [] -> []
             )
-            (Map.keys (topoStores t))
+            (filter (`notElem` globalStores) (Map.keys (topoStores t)))
       reps0 = Map.fromList (map (\n -> (n, n)) regular)
       find reps n = case Map.lookup n reps of
         Just p | p /= n -> find reps p
@@ -154,7 +155,7 @@ planSubtopologies t =
                    (map sinkTopic (Map.elems (Map.restrictKeys (topoSinks t) nodeSet)))
              , subStores =
                  filter
-                   (\sn -> any (`Set.member` nodeSet) (ownersOf sn))
+                   (\sn -> notElem sn globalStores && any (`Set.member` nodeSet) (usersOf sn))
                    (Map.keys (topoStores t))
              }
   in SubtopologyPlan
@@ -168,6 +169,15 @@ planSubtopologies t =
              )
        , spGlobalStores = globalStores
        }
+
+
+{- | The nodes that touch a store: its owners and every processor that
+declares it ('processorSpecStores'), all of which must share a task.
+-}
+storeUsers :: Topology -> StoreName -> [NodeName]
+storeUsers t sn =
+  Map.findWithDefault [] sn (topoStoreOwners t)
+    <> Map.keys (Map.filter (elem sn . processorSpecStores) (topoProcessors t))
 
 
 dedup :: Ord a => [a] -> [a]
@@ -184,8 +194,11 @@ the shape one task's engine is built from.
 -}
 restrictTopology :: Set NodeName -> Topology -> Topology
 restrictTopology keep t =
-  let ownersOf sn = Map.findWithDefault [] sn (topoStoreOwners t)
-      keptStore sn = any (`Set.member` keep) (ownersOf sn)
+  let -- a global store belongs with its owners (the global part); a
+      -- task processor reading it sees the shared copy
+      keptStore sn
+        | Set.member sn (topoGlobalStores t) = any (`Set.member` keep) (Map.findWithDefault [] sn (topoStoreOwners t))
+        | otherwise = any (`Set.member` keep) (storeUsers t sn)
       !stores = Map.filterWithKey (\sn _ -> keptStore sn) (topoStores t)
   in t
        { topoSources = Map.restrictKeys (topoSources t) keep

@@ -52,7 +52,7 @@ count_per_key = it "count per key writes monotone counts" $ do
   pipeInput driver (topicName "in") (Just (bytes "b")) (bytes "1") (t 2) 0
   pipeInput driver (topicName "in") (Just (bytes "a")) (bytes "3") (t 3) 0
 
-  mStore <- getKeyValueStore @Text @Int64 driver (ctlStore table)
+  mStore <- getKeyValueStore @Text @Int64 driver (ktableStore table)
   case mStore of
     Nothing -> error "store missing"
     Just kvs -> do
@@ -83,7 +83,7 @@ reduce_per_key = it "reduce sums values per key" $ do
   pipeInput driver (topicName "in") (Just (bytes "a")) (i64Bytes 2) (t 3) 0
   pipeInput driver (topicName "in") (Just (bytes "b")) (i64Bytes 100) (t 4) 0
 
-  mStore <- getKeyValueStore @Text @Int64 driver (ctlStore table)
+  mStore <- getKeyValueStore @Text @Int64 driver (ktableStore table)
   case mStore of
     Nothing -> error "store missing"
     Just kvs -> do
@@ -115,7 +115,7 @@ aggregate_with_init = it "aggregate with non-trivial init" $ do
   pipeInput driver (topicName "in") (Just (bytes "x")) (i64Bytes 3) (t 1) 0
   pipeInput driver (topicName "in") (Just (bytes "x")) (i64Bytes 5) (t 2) 0
 
-  mStore <- getKeyValueStore @Text @Int64 driver (ctlStore table)
+  mStore <- getKeyValueStore @Text @Int64 driver (ktableStore table)
   case mStore of
     Nothing -> error "store missing"
     Just kvs -> kvsGet kvs "x" >>= (`shouldBe` Just 30)

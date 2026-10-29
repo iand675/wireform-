@@ -49,6 +49,7 @@ module Kafka.Streams.State.Store (
 
   -- * Builders
   StoreBuilder (..),
+  StoreContext (..),
   StoreBuilderKV (..),
   StoreBuilderW (..),
   StoreBuilderS (..),
@@ -298,15 +299,28 @@ defaultLoggingConfig =
     }
 
 
+{- | Where a store instance lives: what a builder is given each time
+the runtime builds one for a task.
+-}
+data StoreContext = StoreContext
+  { scDirectory :: !FilePath
+  {- ^ The task's own state directory
+  (@\<state.dir\>/\<application.id\>/\<task\>@). A persistent store keeps
+  its files here, so tasks never share them.
+  -}
+  , scTaskName :: !Text
+  -- ^ The task, as @\<subtopology\>_\<partition\>@
+  }
+
+
 {- | Builder for a generic state store. The builder is what the
 'StreamsBuilder' / 'Topology' carries; the runtime calls
-'sbBuild' once per partition assignment to obtain a private store
-instance.
+'sbBuild' once per task to obtain a private store instance.
 -}
 data StoreBuilder = StoreBuilder
   { sbName :: !StoreName
   , sbLogging :: !LoggingConfig
-  , sbBuild :: !(IO StateStore)
+  , sbBuild :: !(StoreContext -> IO StateStore)
   }
 
 
@@ -330,7 +344,7 @@ data StoreBuilderKV k v = StoreBuilderKV
   { sbKvName :: !StoreName
   , sbKvLogging :: !LoggingConfig
   , sbKvSerdes :: !(Maybe (StoreSerdes k v))
-  , sbKvBuild :: !(IO (KeyValueStore k v))
+  , sbKvBuild :: !(StoreContext -> IO (KeyValueStore k v))
   }
 
 
@@ -339,7 +353,7 @@ data StoreBuilderW k v = StoreBuilderW
   { sbWName :: !StoreName
   , sbWLogging :: !LoggingConfig
   , sbWSerdes :: !(Maybe (StoreSerdes k v))
-  , sbWBuild :: !(IO (WindowStore k v))
+  , sbWBuild :: !(StoreContext -> IO (WindowStore k v))
   }
 
 
@@ -348,7 +362,7 @@ data StoreBuilderS k v = StoreBuilderS
   { sbSName :: !StoreName
   , sbSLogging :: !LoggingConfig
   , sbSSerdes :: !(Maybe (StoreSerdes k v))
-  , sbSBuild :: !(IO (SessionStore k v))
+  , sbSBuild :: !(StoreContext -> IO (SessionStore k v))
   }
 
 

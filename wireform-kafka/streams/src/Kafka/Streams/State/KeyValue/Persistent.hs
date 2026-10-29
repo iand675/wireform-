@@ -54,6 +54,7 @@ import Kafka.Streams.State.Store (
   KeyValueStore (..),
   StateStore (..),
   StoreBuilderKV (..),
+  StoreContext (..),
   StoreSerdes (..),
   StoreName,
   defaultLoggingConfig,
@@ -203,7 +204,7 @@ persistentKeyValueStoreBuilder nm cfg =
     { sbKvName = nm
     , sbKvLogging = defaultLoggingConfig
     , sbKvSerdes = Just (StoreSerdes byteStringSerde byteStringSerde)
-    , sbKvBuild = persistentKeyValueStore nm cfg
+    , sbKvBuild = \ctx -> persistentKeyValueStore nm cfg {pcDirectory = scDirectory ctx}
     }
 
 

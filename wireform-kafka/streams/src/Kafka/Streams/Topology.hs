@@ -72,6 +72,8 @@ module Kafka.Streams.Topology (
   fromOptimizationFlags,
   optimizeTopology,
   effectiveChangelogReuse,
+  storeBuilderLogging,
+  storeBuilderHasSerdes,
 
   -- * Validation
   validateTopology,
@@ -118,6 +120,7 @@ import Data.Sequence (Seq, (|>))
 import Data.Sequence qualified as Seq
 import Data.Set (Set)
 import Data.Set qualified as Set
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text qualified as Text
@@ -857,6 +860,15 @@ storeBuilderLogging = \case
   AsWindowBuilder b -> Just (sbWLogging b)
   AsSessionBuilder b -> Just (sbSLogging b)
   AsRawBuilder b -> Just (sbLogging b)
+
+
+-- | Whether the builder carries the serdes its changelog needs.
+storeBuilderHasSerdes :: AnyStoreBuilder -> Bool
+storeBuilderHasSerdes = \case
+  AsKeyValueBuilder b -> isJust (sbKvSerdes b)
+  AsWindowBuilder b -> isJust (sbWSerdes b)
+  AsSessionBuilder b -> isJust (sbSSerdes b)
+  AsRawBuilder _ -> False
 
 
 {- | The effective KIP-295 changelog-reuse target for @store@, if

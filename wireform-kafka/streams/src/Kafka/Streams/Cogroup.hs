@@ -37,12 +37,14 @@ module Kafka.Streams.Cogroup (
 import Data.IORef
 import Data.Int (Int64)
 import Kafka.Streams.KGroupedStream (
-  CountedTableLocal (..),
   KGroupedStream,
+  aggregateSerde,
   kgsBuilder,
   kgsKey,
   groupedInput,
  )
+import Kafka.Streams.KStream (mkPassThrough)
+import Kafka.Streams.KTable (KTable (..))
 import Kafka.Streams.Serde (Serde)
 import Kafka.Streams.Materialized (
   Materialized (..),
@@ -147,7 +149,7 @@ aggregateCogrouped
   => IO a -- initialiser
   -> Materialized k a
   -> CogroupedStream k a
-  -> IO (CountedTableLocal k a)
+  -> IO (KTable k a)
 aggregateCogrouped initial m cgs = do
   let b = cgs.builder
   storeNm <-
@@ -156,7 +158,7 @@ aggregateCogrouped initial m cgs = do
       pure
       (matName m)
   let supplier =
-        materializedKV m storeNm (cogroupKeySerde cgs) (error "aggregate: pass Materialized with a value serde for the aggregate type")
+        materializedKV m storeNm (cogroupKeySerde cgs) (aggregateSerde m)
           :: StoreBuilderKV k a
   -- For each source we register the per-side processor immediately,
   -- and only export the side's NODE NAME outside the existential.
@@ -169,15 +171,24 @@ aggregateCogrouped initial m cgs = do
           pure nm
       )
       cgs.sources
+  -- every side's updates are the table's: merge them
+  mergeNm <- freshNodeName b "KSTREAM-COGROUP-MERGE"
   withTopology_ b $ \t ->
-    Topo.addStateStoreKV supplier ownerNms t
+    Topo.addProcessorWith
+      Topo.ProcessorSpec
+        { Topo.processorSpecName = mergeNm
+        , Topo.processorSpecParents = ownerNms
+        , Topo.processorSpecSupplier = Topo.AnyProcessor (mkPassThrough @k @a "KSTREAM-COGROUP-MERGE")
+        , Topo.processorSpecStores = []
+        }
+      (Topo.addStateStoreKV supplier ownerNms t)
   pure
-    CountedTableLocal
-      { ctlNode = case ownerNms of
-          [] -> error "aggregateCogrouped: no sources"
-          (nm : _) -> nm
-      , ctlStore = storeNm
-      , ctlBuilder = b
+    KTable
+      { ktableNode = mergeNm
+      , ktableStore = storeNm
+      , ktableBuilder = b
+      , ktableKeySerde = cogroupKeySerde cgs
+      , ktableValueSerde = aggregateSerde m
       }
 
 

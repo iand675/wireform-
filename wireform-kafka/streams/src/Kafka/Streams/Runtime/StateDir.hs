@@ -28,16 +28,35 @@ module Kafka.Streams.Runtime.StateDir (
   cleanShutdownMarker,
   prepareStateDir,
   markCleanShutdown,
+
+  -- * Task checkpoints
+  checkpointFile,
+  readCheckpoint,
+  writeCheckpoint,
+  deleteCheckpoint,
 ) where
 
+import Control.Exception (IOException, try)
 import Control.Monad (when)
+import Data.ByteString qualified as BS
+import Data.ByteString.Builder qualified as BB
+import Data.ByteString.Lazy qualified as BSL
+import Data.Int (Int32, Int64)
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
+import Data.Text (Text)
+import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
+import Data.Text.Read qualified as TR
 import Kafka.Streams.Config (ProcessingGuarantee (..))
 import System.Directory (
+  createDirectoryIfMissing,
   doesDirectoryExist,
   doesFileExist,
   listDirectory,
   removeFile,
   removePathForcibly,
+  renameFile,
  )
 import System.FilePath ((</>))
 
@@ -78,3 +97,62 @@ markCleanShutdown :: FilePath -> IO ()
 markCleanShutdown dir = do
   exists <- doesDirectoryExist dir
   when exists (writeFile (dir </> cleanShutdownMarker) "")
+
+
+----------------------------------------------------------------------
+-- Checkpoints
+----------------------------------------------------------------------
+
+{- | A task's @.checkpoint@: for each changelog partition, the offset
+its persistent stores are known to hold everything before. Restore
+starts there instead of at the log start. Written after a commit (at
+least once) or a clean close (both guarantees); a task whose state
+may be ahead of or behind it deletes it.
+-}
+checkpointFile :: FilePath -> FilePath
+checkpointFile taskDir = taskDir </> ".checkpoint"
+
+
+{- | The checkpoint in @taskDir@; empty when there is none or it does
+not parse (restoring from the log start is always safe).
+-}
+readCheckpoint :: FilePath -> IO (Map (Text, Int32) Int64)
+readCheckpoint taskDir = do
+  r <- try (BS.readFile (checkpointFile taskDir)) :: IO (Either IOException BS.ByteString)
+  pure $ case r of
+    Left _ -> Map.empty
+    Right bs -> case T.lines (TE.decodeUtf8Lenient bs) of
+      ("0" : _count : entries) -> maybe Map.empty Map.fromList (traverse entry entries)
+      _ -> Map.empty
+  where
+    entry ln = case T.words ln of
+      [t, p, o] -> case (TR.decimal p, TR.signed TR.decimal o) of
+        (Right (p', ""), Right (o', "")) -> Just ((t, p'), o')
+        _ -> Nothing
+      _ -> Nothing
+
+
+-- | Replace the checkpoint in @taskDir@ (write, then rename).
+writeCheckpoint :: FilePath -> Map (Text, Int32) Int64 -> IO ()
+writeCheckpoint taskDir offs = do
+  createDirectoryIfMissing True taskDir
+  let path = checkpointFile taskDir
+      tmp = path <> ".tmp"
+      body =
+        BB.string7 "0\n"
+          <> BB.intDec (Map.size offs)
+          <> BB.char7 '\n'
+          <> Map.foldMapWithKey
+            ( \(t, p) o ->
+                BB.byteString (TE.encodeUtf8 t) <> BB.char7 ' ' <> BB.int32Dec p <> BB.char7 ' ' <> BB.int64Dec o <> BB.char7 '\n'
+            )
+            offs
+  BSL.writeFile tmp (BB.toLazyByteString body)
+  renameFile tmp path
+
+
+deleteCheckpoint :: FilePath -> IO ()
+deleteCheckpoint taskDir = do
+  let path = checkpointFile taskDir
+  exists <- doesFileExist path
+  when exists (removeFile path)

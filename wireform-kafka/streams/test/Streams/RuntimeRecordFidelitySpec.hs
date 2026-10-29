@@ -2,45 +2,37 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 {- | What the broker-backed runtime carries between the wire and the
-topology, driven through 'newMockDriver':
+topology, on the in-memory broker:
 
   * Record headers survive the trip in (consumer record -> topology)
-    and out (sink -> 'sdProducerSend'), on the single-thread and the
-    worker-pool loop, along with the record timestamp.
-  * A sink's 'StreamPartitioner' sees the topic's partition count from
-    'sdPartitionsFor' and its answer becomes the sent record's
-    partition; an answer outside @[0, n)@ is a processing exception.
-  * Under exactly-once, @state.dir@ is wiped on start unless the
-    previous run closed cleanly, and a clean close leaves the marker
-    that keeps it.
+    and out (sink -> producer record), along with the record
+    timestamp, with one and several stream threads.
+  * A sink's 'StreamPartitioner' sees the topic's partition count and
+    its answer becomes the sent record's partition; an answer outside
+    @[0, n)@ is a processing exception.
+  * Under exactly-once, the application's state directory is wiped on
+    start unless the previous run closed cleanly, and a clean close
+    leaves the marker that keeps it.
 -}
 module Streams.RuntimeRecordFidelitySpec (tests) where
 
 import Control.Exception (finally)
 import Data.ByteString.Char8 qualified as BSC
 import Data.IORef
-import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Kafka.Client.Consumer qualified as KC
+import Data.Text.Read qualified as TR
 import Kafka.Streams.Imperative
-import Kafka.Streams.Runtime.NativeDriver (
-  MockDriverHandle,
-  MockSend (..),
-  StreamDriver,
-  mockDriverDrainSends,
-  mockDriverInjectPoll,
-  mockDriverSetPartitions,
-  newMockDriver,
- )
+import Kafka.Streams.Runtime.Driver (DriverRecord (..))
+import Kafka.Streams.Runtime.MockBroker
 import Kafka.Streams.Runtime.StateDir (
   cleanShutdownMarker,
   prepareStateDir,
  )
+import Streams.RuntimeHarness
 import System.Directory (
   createDirectoryIfMissing,
   doesFileExist,
-  listDirectory,
  )
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
@@ -84,51 +76,21 @@ upcaseTopo p = do
     Right v -> pure v
 
 
-inRecord :: Int64 -> Text -> [(Text, BSC.ByteString)] -> KC.ConsumerRecord
-inRecord off k hdrs =
-  KC.ConsumerRecord
-    { topic = "in"
-    , partition = 0
-    , offset = off
-    , timestamp = 1_700_000_000_000 + off
-    , key = Just (bytes k)
-    , value = Just (bytes "v")
-    , headers = hdrs
-    }
+cfgFor :: Int -> FilePath -> StreamsConfig
+cfgFor threads dir = (testConfig "fidelity-app" dir) {numStreamThreads = threads}
 
 
-testCfg :: Int -> FilePath -> StreamsConfig
-testCfg threads dir =
-  defaultStreamsConfig
-    { applicationId = "fidelity-app"
-    , bootstrapServers = ["mock:0"]
-    , numStreamThreads = threads
-    , pollMs = 0
-    , stateDir = dir
-    }
-
-
--- | Start @ks@ on @drv@, run @act@, and always close it.
-withRunning :: KafkaStreams -> StreamDriver -> IO a -> IO a
-withRunning ks drv act = do
-  startKafkaStreamsWith ks drv
-  awaitState ks StreamsRunning
-  act `finally` (closeKafkaStreams ks >> awaitState ks StreamsClosed)
-
-
--- | Collect sends until @n@ have arrived.
-awaitSends :: KafkaStreams -> MockDriverHandle -> Int -> IO [MockSend]
-awaitSends ks h n = do
-  acc <- newIORef []
-  let loop :: Int -> IO ()
-      loop 0 = expectationFailure ("timed out waiting for " <> show n <> " sends")
-      loop k = do
-        ss <- mockDriverDrainSends h
-        modifyIORef' acc (++ ss)
-        got <- length <$> readIORef acc
-        if got >= n then pure () else awaitTicks ks 1 >> loop (k - 1)
-  loop 5000
-  readIORef acc
+-- | Run @topo@ until @n@ records reach @out@; return them.
+runUntil :: MockBroker -> StreamsConfig -> TopologyValid -> (KafkaStreams -> IO ()) -> Int -> IO [DriverRecord]
+runUntil broker cfg topo setUp n = do
+  ks <- newKafkaStreams cfg topo
+  setUp ks
+  mockDriverFor broker cfg >>= startKafkaStreamsWith ks
+  ( do
+      eventually [ks] (show n <> " output records") ((>= n) . length <$> mockRecords broker "out")
+      mockRecords broker "out"
+    )
+    `finally` (closeKafkaStreams ks >> awaitState ks StreamsClosed)
 
 
 ----------------------------------------------------------------------
@@ -139,15 +101,15 @@ headers_round_trip :: Int -> Spec
 headers_round_trip threads =
   it ("source headers and timestamp reach the produced record (threads=" <> show threads <> ")") $
     withSystemTempDirectory "fidelity" $ \dir -> do
+      broker <- newMockBroker (Just 1)
+      mockCreateTopic broker "in" 2
       topo <- upcaseTopo (produced textSerde textSerde)
-      ks <- newKafkaStreams (testCfg threads dir) topo
-      (drv, h) <- newMockDriver
       let hdrs = [("commit-ts", bytes "42"), ("source", bytes "mbe"), ("source", bytes "dup")]
-      mockDriverInjectPoll h [inRecord 7 "k" hdrs]
-      sends <- withRunning ks drv (awaitSends ks h 1)
-      map mockSendHeaders sends `shouldBe` [hdrs]
-      map mockSendTimestamp sends `shouldBe` [Just 1_700_000_000_007]
-      map mockSendValue sends `shouldBe` [bytes "V"]
+      _ <- mockProduceTo broker "in" (Just 1) (Just (bytes "k")) (Just (bytes "v")) 1_700_000_000_007 hdrs
+      sends <- runUntil broker (cfgFor threads dir) topo (\_ -> pure ()) 1
+      map (.drHeaders) sends `shouldBe` [hdrs]
+      map (.drTimestamp) sends `shouldBe` [1_700_000_000_007]
+      map (.drValue) sends `shouldBe` [Just (bytes "V")]
 
 
 ----------------------------------------------------------------------
@@ -157,8 +119,8 @@ headers_round_trip threads =
 -- | Routes key @"pN"@ to partition @N@; anything else to the last one.
 byKeySuffix :: StreamPartitioner Text Text
 byKeySuffix = StreamPartitioner $ \_topic mk _v n ->
-  pure $ case T.stripPrefix "p" =<< mk of
-    Just d | [(i, "")] <- reads (T.unpack d) -> Just i
+  pure $ case TR.decimal <$> (T.stripPrefix "p" =<< mk) of
+    Just (Right (i, "")) -> Just i
     _ -> Just (n - 1)
 
 
@@ -166,16 +128,16 @@ partitioner_picks_partition :: Int -> Spec
 partitioner_picks_partition threads =
   it ("the sink sends each record to the partition its StreamPartitioner picks (threads=" <> show threads <> ")") $
     withSystemTempDirectory "fidelity" $ \dir -> do
+      broker <- newMockBroker (Just 1)
+      mockCreateTopic broker "in" 2
+      mockCreateTopic broker "out" 6
       topo <- upcaseTopo (withStreamPartitioner byKeySuffix (produced textSerde textSerde))
-      ks <- newKafkaStreams (testCfg threads dir) topo
-      (drv, h) <- newMockDriver
-      mockDriverSetPartitions h "out" 6
-      mockDriverInjectPoll h [inRecord 0 "p2" [], inRecord 1 "p4" [], inRecord 2 "other" []]
-      sends <- withRunning ks drv (awaitSends ks h 3)
-      map (\s -> (s.mockSendKey, s.mockSendPartition)) sends
-        `shouldMatchList` [ (Just (bytes "p2"), Just 2)
-                          , (Just (bytes "p4"), Just 4)
-                          , (Just (bytes "other"), Just 5)
+      mapM_ (\k -> mockProduce broker "in" (Just (bytes k)) (Just "v") 0) ["p2", "p4", "other"]
+      sends <- runUntil broker (cfgFor threads dir) topo (\_ -> pure ()) 3
+      map (\r -> (r.drKey, r.drPartition)) sends
+        `shouldMatchList` [ (Just (bytes "p2"), 2)
+                          , (Just (bytes "p4"), 4)
+                          , (Just (bytes "other"), 5)
                           ]
 
 
@@ -183,43 +145,52 @@ partitioner_out_of_range_is_processing_error :: Spec
 partitioner_out_of_range_is_processing_error =
   it "a partition outside [0, n) goes to the processing-exception handler and is not sent" $
     withSystemTempDirectory "fidelity" $ \dir -> do
+      broker <- newMockBroker (Just 1)
+      mockCreateTopic broker "in" 1
+      mockCreateTopic broker "out" 3
       topo <- upcaseTopo (withStreamPartitioner byKeySuffix (produced textSerde textSerde))
-      ks <- newKafkaStreams (testCfg 1 dir) topo
       seen <- newIORef []
-      setProcessingExceptionHandler ks $
-        ProcessingExceptionHandler $ \e -> do
-          modifyIORef' seen (e.offset :)
-          pure ProcessingContinue
-      (drv, h) <- newMockDriver
-      mockDriverSetPartitions h "out" 3
       -- offset 0 asks for partition 9 of 3; offset 1 is fine.
-      mockDriverInjectPoll h [inRecord 0 "p9" [], inRecord 1 "p1" []]
-      sends <- withRunning ks drv (awaitSends ks h 1)
-      map mockSendPartition sends `shouldBe` [Just 1]
+      mapM_ (\k -> mockProduce broker "in" (Just (bytes k)) (Just "v") 0) ["p9", "p1"]
+      let handler ks =
+            setProcessingExceptionHandler ks $
+              ProcessingExceptionHandler $ \e -> do
+                modifyIORef' seen (e.offset :)
+                pure ProcessingContinue
+      sends <- runUntil broker (cfgFor 1 dir) topo handler 1
+      map (.drPartition) sends `shouldBe` [1]
       readIORef seen `shouldReturn` [0]
 
 
 no_partitioner_leaves_partition_to_producer :: Spec
 no_partitioner_leaves_partition_to_producer =
-  it "without a StreamPartitioner no partition is set and no metadata is needed" $
+  it "without a StreamPartitioner the producer partitions by key" $
     withSystemTempDirectory "fidelity" $ \dir -> do
+      broker <- newMockBroker (Just 1)
+      mockCreateTopic broker "in" 1
+      mockCreateTopic broker "out" 4
       topo <- upcaseTopo (produced textSerde textSerde)
-      ks <- newKafkaStreams (testCfg 1 dir) topo
-      -- No 'mockDriverSetPartitions': a lookup would fail.
-      (drv, h) <- newMockDriver
-      mockDriverInjectPoll h [inRecord 0 "p1" []]
-      sends <- withRunning ks drv (awaitSends ks h 1)
-      map mockSendPartition sends `shouldBe` [Nothing]
+      mapM_ (\k -> mockProduce broker "in" (Just (bytes k)) (Just "v") 0) ["a", "b", "c", "d"]
+      sends <- runUntil broker (cfgFor 1 dir) topo (\_ -> pure ()) 4
+      -- the same key lands where the producer's own partitioner puts it
+      mockCreateTopic broker "check" 4
+      mapM_ (\k -> mockProduce broker "check" (Just (bytes k)) (Just "v") 0) ["a", "b", "c", "d"]
+      expected <- mockRecords broker "check"
+      map (\r -> (r.drKey, r.drPartition)) sends `shouldMatchList` map (\r -> (r.drKey, r.drPartition)) expected
 
 
 ----------------------------------------------------------------------
 -- state.dir
 ----------------------------------------------------------------------
 
+appDirOf :: FilePath -> FilePath
+appDirOf dir = dir </> "fidelity-app"
+
+
 -- | A stand-in for a store directory left by a previous run.
 seedStore :: FilePath -> IO FilePath
 seedStore dir = do
-  let store = dir </> "counts" </> "0_0"
+  let store = appDirOf dir </> "0_0"
   createDirectoryIfMissing True store
   writeFile (store </> "000001.sst") "stale"
   pure (store </> "000001.sst")
@@ -227,14 +198,11 @@ seedStore dir = do
 
 eosRun :: FilePath -> IO ()
 eosRun dir = do
+  broker <- newMockBroker (Just 1)
+  mockCreateTopic broker "in" 1
   topo <- upcaseTopo (produced textSerde textSerde)
-  ks <-
-    newKafkaStreams
-      ((testCfg 1 dir) {processingGuarantee = ExactlyOnceV2})
-      topo
-  (drv, h) <- newMockDriver
-  mockDriverInjectPoll h [inRecord 0 "k" []]
-  _ <- withRunning ks drv (awaitSends ks h 1)
+  mockProduce broker "in" (Just "k") (Just "v") 0
+  _ <- runUntil broker ((cfgFor 1 dir) {processingGuarantee = ExactlyOnceV2}) topo (\_ -> pure ()) 1
   pure ()
 
 
@@ -245,8 +213,8 @@ unclean_eos_start_wipes =
       sst <- seedStore dir
       eosRun dir
       doesFileExist sst `shouldReturn` False
-      -- Only the marker from this run's clean close remains.
-      listDirectory dir `shouldReturn` [cleanShutdownMarker]
+      -- and this run's clean close left the marker
+      doesFileExist (appDirOf dir </> cleanShutdownMarker) `shouldReturn` True
 
 
 clean_close_keeps_state :: Spec
@@ -255,16 +223,16 @@ clean_close_keeps_state =
     withSystemTempDirectory "fidelity" $ \dir -> do
       -- First run: nothing on disk yet, closes cleanly.
       eosRun dir
-      doesFileExist (dir </> cleanShutdownMarker) `shouldReturn` True
+      doesFileExist (appDirOf dir </> cleanShutdownMarker) `shouldReturn` True
       -- State written between runs (as a store would) must survive
       -- the second start, and the marker is consumed by it.
       sst <- seedStore dir
-      prepareStateDir ExactlyOnceV2 dir `shouldReturn` False
+      prepareStateDir ExactlyOnceV2 (appDirOf dir) `shouldReturn` False
       doesFileExist sst `shouldReturn` True
-      doesFileExist (dir </> cleanShutdownMarker) `shouldReturn` False
+      doesFileExist (appDirOf dir </> cleanShutdownMarker) `shouldReturn` False
       -- A start that is never followed by a clean close (a crash)
       -- leaves no marker, so the start after it wipes.
-      prepareStateDir ExactlyOnceV2 dir `shouldReturn` True
+      prepareStateDir ExactlyOnceV2 (appDirOf dir) `shouldReturn` True
       doesFileExist sst `shouldReturn` False
 
 
@@ -273,5 +241,5 @@ at_least_once_never_wipes =
   it "at-least-once keeps state.dir even without a marker" $
     withSystemTempDirectory "fidelity" $ \dir -> do
       sst <- seedStore dir
-      prepareStateDir AtLeastOnceP dir `shouldReturn` False
+      prepareStateDir AtLeastOnceP (appDirOf dir) `shouldReturn` False
       doesFileExist sst `shouldReturn` True

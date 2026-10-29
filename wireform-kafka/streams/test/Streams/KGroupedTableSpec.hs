@@ -99,7 +99,7 @@ count_updates_subtract_prior =
       (ts 2)
       0
 
-    mStore <- getKeyValueStore @Text @Int64 driver (ctlStore counts)
+    mStore <- getKeyValueStore @Text @Int64 driver (ktableStore counts)
     case mStore of
       Just kvs -> do
         kvsGet kvs "A" >>= (`shouldBe` Just 0)
@@ -165,7 +165,7 @@ reduce_subtracts_then_adds =
       (ts 3)
       0
 
-    mStore <- getKeyValueStore @Text @Int64 driver (ctlStore totals)
+    mStore <- getKeyValueStore @Text @Int64 driver (ktableStore totals)
     case mStore of
       Just kvs -> do
         kvsGet kvs "TOTAL" >>= (`shouldBe` Just 101)
@@ -225,7 +225,7 @@ aggregate_handles_first_record_specially =
       (ts 2)
       0
 
-    mStore <- getKeyValueStore @Text @Int64 driver (ctlStore highs)
+    mStore <- getKeyValueStore @Text @Int64 driver (ktableStore highs)
     case mStore of
       Just kvs -> do
         kvsGet kvs "HIGH" >>= (`shouldBe` Just 12)

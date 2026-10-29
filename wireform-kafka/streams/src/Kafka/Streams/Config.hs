@@ -14,8 +14,8 @@ module Kafka.Streams.Config (
   StreamsConfig (..),
   DslStore (..),
   RackAwareStrategy (..),
-  DispatchMode (..),
   defaultStreamsConfig,
+  effectiveCommitIntervalMs,
 
   -- * Processing semantics
   ProcessingGuarantee (..),
@@ -35,11 +35,18 @@ import Data.List (foldl')
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Read qualified as TR
 import GHC.Generics (Generic)
+import Kafka.Client.AdminClient qualified as KA
+import Kafka.Client.Consumer qualified as KC
+import Kafka.Client.Producer qualified as KP
 import Kafka.Streams.Errors (
   DeserializationHandler,
+  ProcessingExceptionHandler,
   ProductionHandler,
-  logAndContinue,
+  logAndFail,
+  logAndFailProcessing,
+  logAndFailProduction,
  )
 import Kafka.Streams.Processor.Assignment (TaskAssignor)
 
@@ -70,6 +77,12 @@ dropped):
   * 'stateDir'                  — @state.dir@
   * 'defaultDeserHandler'       — @default.deserialization.exception.handler@
   * 'defaultProductionHandler'  — @default.production.exception.handler@
+  * 'defaultProcessingHandler'  — @processing.exception.handler@
+  * 'bufferedRecordsPerPartition' — @buffered.records.per.partition@
+
+The embedded clients are configured from these; 'consumerOverrides',
+'producerOverrides' and 'adminOverrides' adjust anything else on them
+(the JVM's @consumer.@ / @producer.@ / @admin.@ prefixed properties).
 -}
 data StreamsConfig = StreamsConfig
   { applicationId :: !Text
@@ -77,7 +90,10 @@ data StreamsConfig = StreamsConfig
   , clientId :: !Text
   , numStreamThreads :: !Int
   , numStandbyReplicas :: !Int
-  , commitIntervalMs :: !Int
+  , commitIntervalMs :: !(Maybe Int)
+  {- ^ 'Nothing': 30 s at least once, 100 ms exactly once (the JVM
+  defaults); see 'effectiveCommitIntervalMs'.
+  -}
   , pollMs :: !Int
   , cacheMaxBytesBuffering :: !Int64
   , maxTaskIdleMs :: !Int
@@ -85,7 +101,16 @@ data StreamsConfig = StreamsConfig
   , replicationFactor :: !Int
   , stateDir :: !FilePath
   , defaultDeserHandler :: !DeserializationHandler
-  , defaultProductionHandler :: !(Maybe ProductionHandler)
+  -- ^ Default: fail (the JVM's @LogAndFailExceptionHandler@)
+  , defaultProductionHandler :: !ProductionHandler
+  -- ^ Default: fail. Only consulted at least once; under exactly-once a failed send aborts the transaction.
+  , defaultProcessingHandler :: !ProcessingExceptionHandler
+  -- ^ Default: fail (KIP-1033's @LogAndFailProcessingExceptionHandler@)
+  , bufferedRecordsPerPartition :: !Int
+  -- ^ A partition is paused once this many of its records wait unprocessed
+  , consumerOverrides :: !(KC.ConsumerConfig -> KC.ConsumerConfig)
+  , producerOverrides :: !(KP.ProducerConfig -> KP.ProducerConfig)
+  , adminOverrides :: !(KA.AdminClientConfig -> KA.AdminClientConfig)
   , -- KIP-892 / Streams full-config-surface additions ------------
     taskTimeoutMs :: !Int
   {- ^ @task.timeout.ms@ — how long a task may stall on a
@@ -150,35 +175,15 @@ data StreamsConfig = StreamsConfig
   {- ^ @upgrade.from@ — multi-version upgrade compatibility
   knob (read by the assignor on a rolling upgrade).
   -}
-  , dispatchMode :: !DispatchMode
-  {- ^ Riffle \xc2\xa72 — pick which 'Kafka.Streams.Runtime.WorkerPool'
-  constructor the runtime uses. Default
-  'DispatchPartition' preserves today's behaviour.
-  -}
   }
 
 
-{- | Riffle \xc2\xa72 worker-pool dispatch mode. Picked at startup; the
-pool is built once and routes records by this scheme for its
-lifetime.
--}
-data DispatchMode
-  = {- | Current behaviour: 'newWorkerPool' with explicit
-    per-worker @(topic, partition)@ ownership.
-    -}
-    DispatchPartition
-  | {- | Current behaviour: 'newWorkerPoolHashed', routes by
-    @hash (topic, partition) mod workerCount@.
-    -}
-    DispatchHashed
-  | {- | Riffle behaviour: 'newWorkerPoolKeyGrouped' with a
-    'Kafka.Streams.Runtime.KeyGroup.KeyGroupConfig'. The
-    runtime hashes record keys to key-groups and dispatches
-    by the live 'KeyGroupAssignment'. Decouples parallelism
-    from partition count.
-    -}
-    DispatchKeyGroup
-  deriving stock (Eq, Show)
+-- | The commit interval in effect ('commitIntervalMs' or its guarantee's default).
+effectiveCommitIntervalMs :: StreamsConfig -> Int
+effectiveCommitIntervalMs cfg = case (commitIntervalMs cfg, processingGuarantee cfg) of
+  (Just ms, _) -> ms
+  (Nothing, ExactlyOnceV2) -> 100
+  (Nothing, AtLeastOnceP) -> defaultCommitIntervalMs
 
 
 -- | KIP-591 @default.dsl.store@ enum.
@@ -219,15 +224,20 @@ defaultStreamsConfig =
     , clientId = "kafka-streams-client"
     , numStreamThreads = 1
     , numStandbyReplicas = 0
-    , commitIntervalMs = defaultCommitIntervalMs
+    , commitIntervalMs = Nothing
     , pollMs = defaultPollMs
     , cacheMaxBytesBuffering = 10 * 1024 * 1024
     , maxTaskIdleMs = 0
     , processingGuarantee = AtLeastOnceP
     , replicationFactor = 1
     , stateDir = defaultStateDir
-    , defaultDeserHandler = logAndContinue
-    , defaultProductionHandler = Nothing
+    , defaultDeserHandler = logAndFail
+    , defaultProductionHandler = logAndFailProduction
+    , defaultProcessingHandler = logAndFailProcessing
+    , bufferedRecordsPerPartition = 1000
+    , consumerOverrides = id
+    , producerOverrides = id
+    , adminOverrides = id
     , taskTimeoutMs = 300_000
     , acceptableRecoveryLag = 10_000
     , maxWarmupReplicas = 2
@@ -241,7 +251,6 @@ defaultStreamsConfig =
     , rackAwareNonOverlapCost = 10
     , windowSizeMs = Nothing
     , upgradeFrom = Nothing
-    , dispatchMode = DispatchPartition
     }
 
 
@@ -290,7 +299,7 @@ streamsConfigFromMap m = foldl' step defaultStreamsConfig (Map.toAscList m)
       "num.standby.replicas" ->
         maybe cfg (\n -> cfg {numStandbyReplicas = n}) (readT v)
       "commit.interval.ms" ->
-        maybe cfg (\n -> cfg {commitIntervalMs = n}) (readT v)
+        maybe cfg (\n -> cfg {commitIntervalMs = Just n}) (readT v)
       "poll.ms" ->
         maybe cfg (\n -> cfg {pollMs = n}) (readT v)
       "cache.max.bytes.buffering" ->
@@ -338,7 +347,7 @@ streamsConfigFromMap m = foldl' step defaultStreamsConfig (Map.toAscList m)
       _ -> cfg
 
 
-readT :: Read a => T.Text -> Maybe a
-readT t = case reads (T.unpack t) of
-  [(n, "")] -> Just n
+readT :: Integral a => T.Text -> Maybe a
+readT t = case TR.signed TR.decimal (T.strip t) of
+  Right (n, rest) | T.null rest -> Just n
   _ -> Nothing

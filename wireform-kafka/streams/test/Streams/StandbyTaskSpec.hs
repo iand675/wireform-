@@ -142,7 +142,6 @@ replay_feeds_warmup_lag_map =
 
     let tid = TaskId 0 0
     st <- newStandbyTask tid "cl" 0 (storeName "standby-store")
-    addStandbyTask (ksStandbyManager ks) st
 
     kvs <-
       KVInMem.inMemoryKeyValueStore @BSC.ByteString @(Maybe BSC.ByteString)

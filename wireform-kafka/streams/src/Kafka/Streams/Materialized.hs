@@ -34,6 +34,7 @@ import Kafka.Streams.State.Session.InMemory (inMemorySessionStoreBuilder)
 import Kafka.Streams.State.Window.InMemory (inMemoryWindowStoreBuilder)
 import Kafka.Streams.State.Store (
   KeyValueStore,
+  StoreContext,
   StoreBuilderKV (..),
   StoreBuilderS,
   StoreBuilderW,
@@ -60,7 +61,7 @@ data Materialized k v = Materialized
   , matCachingEnabled :: !Bool
   , matLoggingEnabled :: !Bool
   , matRetentionMs :: !(Maybe Int64)
-  , matStoreSupplier :: !(Maybe (StoreName -> IO (KeyValueStore k v)))
+  , matStoreSupplier :: !(Maybe (StoreName -> StoreContext -> IO (KeyValueStore k v)))
   {- ^ User-supplied store builder. When set, DSL operators that
   materialise this 'Materialized' will use the supplied
   function instead of the default in-memory builder. This is
@@ -96,7 +97,7 @@ factory is given the store's chosen name (whether explicit via
 backing 'KeyValueStore'.
 -}
 materializedWithSupplier
-  :: (StoreName -> IO (KeyValueStore k v))
+  :: (StoreName -> StoreContext -> IO (KeyValueStore k v))
   -> Materialized k v
 materializedWithSupplier f = materialized {matStoreSupplier = Just f}
 
@@ -115,7 +116,7 @@ withValueSerde s m = m {matValueSerde = Just s}
 'Materialized' value.
 -}
 withStoreSupplier
-  :: (StoreName -> IO (KeyValueStore k v))
+  :: (StoreName -> StoreContext -> IO (KeyValueStore k v))
   -> Materialized k v
   -> Materialized k v
 withStoreSupplier f m = m {matStoreSupplier = Just f}

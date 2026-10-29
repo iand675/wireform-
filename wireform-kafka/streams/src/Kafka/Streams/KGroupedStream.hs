@@ -38,18 +38,20 @@ module Kafka.Streams.KGroupedStream (
   countStream,
   reduceStream,
   aggregateStream,
+  aggregateSerde,
 
   -- * Windowed
   windowedByTime,
   windowedBySession,
   TimeWindowedKStream (..),
   SessionWindowedKStream (..),
-  CountedTableLocal (..),
 ) where
 
 import Data.IORef
 import Data.Int (Int64)
+import Data.Maybe (fromMaybe)
 import Kafka.Streams.Grouped (Grouped (..))
+import Kafka.Streams.KTable (KTable (..))
 import Data.Text qualified as T
 import Kafka.Streams.KStream (
   KStream (..),
@@ -200,7 +202,7 @@ countStream
    . Ord k
   => Materialized k Int64
   -> KGroupedStream k v
-  -> IO (CountedTableLocal k Int64)
+  -> IO (KTable k Int64)
 countStream m kgs = do
   storeNm <-
     maybe
@@ -225,12 +227,7 @@ countStream m kgs = do
             t
         !t2 = Topo.addStateStoreKV supplier [nodeNm] t1
     in t2
-  pure
-    CountedTableLocal
-      { ctlNode = nodeNm
-      , ctlStore = storeNm
-      , ctlBuilder = kgsBuilder kgs
-      }
+  pure (aggregateTable kgs nodeNm storeNm int64Serde)
 
 
 {- | Combine values for the same key with a binary reducer.
@@ -243,7 +240,7 @@ reduceStream
   => (v -> v -> v)
   -> Materialized k v
   -> KGroupedStream k v
-  -> IO (CountedTableLocal k v)
+  -> IO (KTable k v)
 reduceStream combine m kgs = do
   storeNm <-
     maybe
@@ -267,12 +264,7 @@ reduceStream combine m kgs = do
             t
         !t2 = Topo.addStateStoreKV supplier [nodeNm] t1
     in t2
-  pure
-    CountedTableLocal
-      { ctlNode = nodeNm
-      , ctlStore = storeNm
-      , ctlBuilder = kgsBuilder kgs
-      }
+  pure (aggregateTable kgs nodeNm storeNm (kgsValue kgs))
 
 
 {- | Stateful fold: seed an accumulator and update it per
@@ -289,7 +281,7 @@ aggregateStream
   -- ^ aggregator (Java @Aggregator<K,V,A>@)
   -> Materialized k a
   -> KGroupedStream k v
-  -> IO (CountedTableLocal k a)
+  -> IO (KTable k a)
 aggregateStream initial agg m kgs = do
   storeNm <-
     maybe
@@ -297,7 +289,7 @@ aggregateStream initial agg m kgs = do
       pure
       (matName m)
   let supplier =
-        materializedKV m storeNm (kgsKey kgs) (error "aggregate: pass Materialized with a value serde for the aggregate type")
+        materializedKV m storeNm (kgsKey kgs) (aggregateSerde m)
           :: StoreBuilderKV k a
   nodeNm <- freshNodeName (kgsBuilder kgs) "KSTREAM-AGGREGATE"
   input <- groupedInput kgs
@@ -315,12 +307,7 @@ aggregateStream initial agg m kgs = do
             t
         !t2 = Topo.addStateStoreKV supplier [nodeNm] t1
     in t2
-  pure
-    CountedTableLocal
-      { ctlNode = nodeNm
-      , ctlStore = storeNm
-      , ctlBuilder = kgsBuilder kgs
-      }
+  pure (aggregateTable kgs nodeNm storeNm (aggregateSerde m))
 
 
 ----------------------------------------------------------------------
@@ -494,15 +481,23 @@ data SessionWindowedKStream k v = SessionWindowedKStream
 -- Returned aggregate handle
 ----------------------------------------------------------------------
 
-{- | Result of an aggregation. Carries the materialised store name so
-callers can later 'queryKeyValueStore' or convert to a 'KStream'.
--}
-data CountedTableLocal k v = CountedTableLocal
-  { ctlNode :: !Topo.NodeName
-  , ctlStore :: !StoreName
-  , ctlBuilder :: !StreamsBuilder
-  }
+-- | The table an aggregation of @kgs@ produces: keyed like @kgs@, valued by @vs@.
+aggregateTable :: KGroupedStream k v -> Topo.NodeName -> StoreName -> Serde a -> KTable k a
+aggregateTable kgs nodeNm storeNm vs =
+  KTable
+    { ktableNode = nodeNm
+    , ktableStore = storeNm
+    , ktableBuilder = kgsBuilder kgs
+    , ktableKeySerde = kgsKey kgs
+    , ktableValueSerde = vs
+    }
 
--- We re-export the aggregation result as 'KTable' from the
--- 'Kafka.Streams.KTable' module; here we keep the local name so
--- the test driver can introspect.
+
+{- | An aggregate's value serde: the 'Materialized' one. Lazy: only a
+changelog write or a sink that needs the bytes forces the error.
+-}
+aggregateSerde :: Materialized k a -> Serde a
+aggregateSerde m =
+  fromMaybe
+    (error "aggregate: give the Materialized a value serde (withValueSerde) for the aggregate type")
+    (matValueSerde m)

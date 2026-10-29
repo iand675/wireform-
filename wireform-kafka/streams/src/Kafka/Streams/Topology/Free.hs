@@ -1238,13 +1238,13 @@ runPrim b = go
     go (GroupBy f g) = KGS.groupByStream f g
     go (Count m) = \g -> do
       h <- KGS.countStream m g
-      pure (handleToKTable m h)
+      pure h
     go (Reduce f m) = \g -> do
       h <- KGS.reduceStream f m g
-      pure (handleToKTable m h)
+      pure h
     go (Aggregate seed step m) = \g -> do
       h <- KGS.aggregateStream seed step m g
-      pure (handleToKTable m h)
+      pure h
 
     -- Windowed aggregation
     go (WindowedByTime ws) = pure . KGS.windowedByTime ws
@@ -1261,20 +1261,20 @@ runPrim b = go
     go (GroupTableBy f g) = pure . KGT.groupTableBy f g
     go (CountKGroupedTable m) = \kgt -> do
       h <- KGT.countKGroupedTable m kgt
-      pure (handleToKTable m h)
+      pure h
     go (ReduceKGroupedTable add sub m) = \kgt -> do
       h <- KGT.reduceKGroupedTable add sub m kgt
-      pure (handleToKTable m h)
+      pure h
     go (AggregateKGroupedTable seed add sub m) = \kgt -> do
       h <- KGT.aggregateKGroupedTable seed add sub m kgt
-      pure (handleToKTable m h)
+      pure h
 
     -- Cogroup
     go (Cogroup step) = pure . (\g -> Cog.cogroup g step)
     go (AddCogrouped step) = \(cs, g) -> pure (Cog.addCogrouped cs g step)
     go (AggregateCogrouped seed m) = \cs -> do
       h <- Cog.aggregateCogrouped seed m cs
-      pure (handleToKTable m h)
+      pure h
 
     -- Joins
     go (StreamTableJoin j jo) =
@@ -1437,43 +1437,6 @@ sourceMultiCompile b ts c = do
         , KS.kstreamValueSerde = consumedValueSerde c
         }
     )
-
-
-{- | Promote an aggregation handle to a real 'KTable'.
-
-The 'CountedTableLocal' handle the existing DSL returns from
-aggregations is a thin wrapper around a 'KTable' — it just
-doesn't carry the serdes. We extract the serdes from the
-supplied 'Materialized'. If they're absent the corresponding
-'KTable' field becomes a /deferred/ 'TopologyFreeError' —
-matching the existing 'KTable' lazy-serde behaviour after
-@mapValues@ etc. Downstream @to@\/@join@ that forces the
-serde will raise the exception at the actual use site.
-
-Unlike a bare 'error', the deferred thunk uses
-'TopologyFreeError' so callers who want to surface friendlier
-diagnostics can catch it (via 'Control.Exception.evaluate' on
-the thunk, or by wrapping the downstream operation in
-'Control.Exception.try').
--}
-handleToKTable
-  :: Materialized k v
-  -> KGS.CountedTableLocal k v
-  -> KTable k v
-handleToKTable m h =
-  KT.KTable
-    { KT.ktableNode = KGS.ctlNode h
-    , KT.ktableStore = KGS.ctlStore h
-    , KT.ktableBuilder = KGS.ctlBuilder h
-    , KT.ktableKeySerde =
-        case Mat.matKeySerde m of
-          Just s -> s
-          Nothing -> Exception.throw (MissingMaterializedSerde KeySide)
-    , KT.ktableValueSerde =
-        case Mat.matValueSerde m of
-          Just s -> s
-          Nothing -> Exception.throw (MissingMaterializedSerde ValueSide)
-    }
 
 
 {- | Whether the missing serde was the key or value side of the
