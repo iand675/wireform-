@@ -2,112 +2,58 @@
 
 {- |
 Module      : Kafka.Streams.Examples.Ops.EOSCommit
-Description : Exactly-once-v2 commit cycle visibility
+Description : Exactly-once-v2 commits: what a read_committed consumer sees
 
-Spins up the same passthrough topology twice against the
-shared 'Kafka.Streams.Mock.Cluster.MockCluster', once in
-at-least-once mode and once in exactly-once-v2 mode. Both
-drivers emit identical output to @out@; the only difference is
-/when/ a downstream 'ReadCommitted' consumer can see it.
+The same passthrough topology, once at least once and once exactly once
+v2, on the in-memory broker. Both write the same output; under
+exactly-once it only becomes visible to a @read_committed@ consumer
+when its transaction commits.
 
-The demo then injects a commit-time fault on the EOS driver
-and shows that the corresponding records are aborted: a
-read-committed peek sees nothing for the aborted batch.
-
-Mirror of 'Streams.MockDriverModesSpec' but printed as a
-runnable operations narrative rather than a tasty test.
+Then a transaction commit fails: the runtime aborts the transaction,
+rewinds the task to the last commit and processes the record again in
+a new one. The aborted copy stays in the log (a @read_uncommitted@
+peek sees it), but a @read_committed@ consumer sees the record exactly
+once.
 -}
 module Kafka.Streams.Examples.Ops.EOSCommit (
   runDemo,
 ) where
 
-import Data.Text (Text)
-import Data.Text qualified as T
+import Data.Maybe (mapMaybe)
 import Kafka.Streams.Examples.Ops.Helpers
 import Kafka.Streams.Imperative
-import Kafka.Streams.Mock.Cluster (
-  GroupId (..),
-  TxnId (..),
-  dumpPartition,
-  newMockCluster,
-  srValue,
- )
-import Kafka.Streams.Mock.Consumer
-import Kafka.Streams.Mock.Fault
-import Kafka.Streams.Mock.StreamsDriver
+import Kafka.Streams.Runtime.Driver (DriverRecord (..))
+import Kafka.Streams.Runtime.MockBroker
 
 
 runDemo :: IO ()
-runDemo = do
+runDemo = withDemoDirs 2 $ \[d1, d2] -> do
   section "EOSCommitDemo"
+  topo <- passthroughTopo
 
   bullet "Mode 1: at-least-once"
-  cluster1 <- newMockCluster 1
-  fp1 <- noFaults
-  topo1 <- passthroughTopo
-  alo <- newMockStreamsDriver cluster1 fp1 topo1 "ops-alo" 1
-  mapM_
-    (\v -> externalSend alo (topicName "in") 0 Nothing (bytes v) ts0)
-    (["alpha", "bravo"] :: [Text])
-  runUntilQuiet alo
-  rc1 <- newMockConsumer cluster1 fp1 (GroupId "alo-peek") ReadCommitted 100
-  subscribeMC rc1 [topicName "out"]
-  PollResult rs1 _ <- pollMC rc1
-  bullet
-    ( "    read-committed observer sees: "
-        <> show (map (\(_, _, sr) -> unbytes (srValue sr)) rs1)
-    )
-  closeMockDriver alo
+  b1 <- newMockBroker (Just 1)
+  mockCreateTopic b1 "in" 1
+  alo <- startInstance b1 (demoConfig "ops-alo" d1) topo
+  mapM_ (sendTo b1 "in" 0) ["alpha", "bravo"]
+  _ <- waitUntil [alo] ((== 2) . length <$> outputValues b1 "out")
+  outputValues b1 "out" >>= \vs -> bullet ("    read-committed observer sees: " <> show vs)
+  stopInstance alo
 
   bullet "Mode 2: exactly-once-v2"
-  cluster2 <- newMockCluster 1
-  fp2 <- noFaults
-  topo2 <- passthroughTopo
-  let txn = TxnId "ops-eos-tx"
-  eos <- newMockStreamsDriverEOS cluster2 fp2 topo2 "ops-eos" txn 1
-  mapM_
-    (\v -> externalSend eos (topicName "in") 0 Nothing (bytes v) ts0)
-    (["gamma", "delta"] :: [Text])
-  runUntilQuiet eos
-  rc2 <- newMockConsumer cluster2 fp2 (GroupId "eos-peek") ReadCommitted 100
-  subscribeMC rc2 [topicName "out"]
-  PollResult rs2 _ <- pollMC rc2
-  bullet
-    ( "    read-committed observer sees: "
-        <> show (map (\(_, _, sr) -> unbytes (srValue sr)) rs2)
-    )
+  b2 <- newMockBroker (Just 1)
+  mockCreateTopic b2 "in" 1
+  eos <- startInstance b2 ((demoConfig "ops-eos" d2) {processingGuarantee = ExactlyOnceV2}) topo
+  mapM_ (sendTo b2 "in" 0) ["gamma", "delta"]
+  _ <- waitUntil [eos] ((== 2) . length <$> outputValues b2 "out")
+  outputValues b2 "out" >>= \vs -> bullet ("    read-committed observer sees: " <> show vs)
 
-  bullet "Mode 2 + commit fault: aborts the tick"
-  -- Queue a single commitTxn failure so the next commit aborts.
-  addTxnCommitFault fp2 txn ErrCoordinatorNotAvailable
-  _ <- externalSend eos (topicName "in") 0 Nothing (bytes ("lost" :: Text)) ts0
-  runUntilQuiet eos
-
-  -- A read-uncommitted peek does see the aborted records on the
-  -- log (they're physically written before commit).
-  ru <- newMockConsumer cluster2 fp2 (GroupId "eos-peek-ru") ReadUncommitted 100
-  subscribeMC ru [topicName "out"]
-  PollResult rsRU _ <- pollMC ru
-  let ruVals = map (\(_, _, sr) -> unbytes (srValue sr)) rsRU
-  bullet
-    ( "    read-uncommitted peek sees "
-        <> show (length ruVals)
-        <> " records: "
-        <> show ruVals
-    )
-
-  rc3 <- newMockConsumer cluster2 fp2 (GroupId "eos-peek-2") ReadCommitted 100
-  subscribeMC rc3 [topicName "out"]
-  PollResult rsRC _ <- pollMC rc3
-  let rcVals = map (\(_, _, sr) -> unbytes (srValue sr)) rsRC
-  bullet
-    ( "    read-committed observer still sees: "
-        <> show rcVals
-        <> "  (the aborted batch is filtered out)"
-    )
-
-  -- Show the raw partition log too for full visibility.
-  raw <- dumpPartition cluster2 (topicName "out") 0
-  bullet ("    on-disk log entries: " <> show (length raw))
-
-  closeMockDriver eos
+  bullet "Mode 2 + a failed transaction commit"
+  mockFailTransactionCommits b2 1
+  sendTo b2 "in" 0 "echo"
+  _ <- waitUntil [eos] ((== 3) . length <$> outputValues b2 "out")
+  raw <- mapMaybe (fmap unbytes . drValue) <$> mockRecords b2 "out"
+  bullet ("    read-uncommitted peek sees " <> show (length raw) <> " records: " <> show raw)
+  outputValues b2 "out" >>= \vs ->
+    bullet ("    read-committed observer sees: " <> show vs <> "  (the aborted copy is filtered out)")
+  stopInstance eos

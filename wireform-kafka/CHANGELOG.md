@@ -10,6 +10,33 @@ and this project adheres to the
 
 ### Added
 
+- **Kafka Streams runtime, rebuilt on a `StreamDriver` seam**
+  (`Kafka.Streams.Runtime.{Driver,NativeDriver,MockBroker}`): one task
+  per subtopology and partition with co-partitioned routing,
+  timestamp-ordered processing and back-pressure; changelogged stores
+  restored before processing (checkpoints for persistent stores);
+  repartition topics and global tables; exactly-once v2 (one
+  transaction per commit, abort recovery from the changelogs, state
+  wipe after an unclean stop); KTable change semantics (deletes and
+  retractions reach every derived table, re-grouped aggregations, the
+  KIP-213 foreign-key join); `MockBroker`, an in-memory cluster that
+  runs the real runtime end to end, with fault injection.
+- **Streams group assignor** (`Kafka.Streams.Runtime.GroupAssignor`,
+  protocol `streams`): lag-aware, sticky, thread-proportional dealing of
+  whole tasks; `num.standby.replicas` standby tasks kept current from the
+  changelogs and promoted warm; KIP-441 warmups and probing rebalances;
+  KIP-535 discovery (`applicationServer`, `streamsMetadata`,
+  `queryMetadataForKey`, stale IQ reads from standbys). On the client:
+  `Kafka.Client.Assignor` custom assignors with assignment user data,
+  `Consumer.setAssignmentStrategy` / `setAssignmentHook`.
+- **Commit participants** (`Kafka.Streams.Runtime.Commit`): two-phase
+  sinks (`twoPhaseParticipant`) prepare with every commit, are recorded
+  in `<app>-twophase-commits` inside the transaction, commit after it,
+  and are settled at the next start after a crash.
+- **Streams metrics from the running instance** (`streamsMetrics`):
+  per-task unboxed counters plus commits, aborts, recoveries,
+  rebalances, restored and standby records; `localTaskLags`.
+
 - **`wireform-kafka-protocol` sublibrary.** Codegen-emitted
   `Kafka.Protocol.Generated.*` wire records (and
   `Kafka.Protocol.{Primitives,Message,Wire.*}`) live in a dedicated
@@ -58,19 +85,27 @@ and this project adheres to the
   configured `client.id` / `application.id`. Switches to the
   broker-assigned id when the `GetTelemetrySubscriptions`
   pipeline lands. (Consumer already had this in v3e.)
-- **KIP-924 `TaskAssignor` plug-in wiring.**
-  `Kafka.Streams.Config.StreamsConfig.taskAssignor`
-  (`Maybe TaskAssignor`) carries a user-supplied assignor
-  through the runtime; `Kafka.Streams.Runtime.streamsRunUserAssignor`
-  constructs the `ApplicationState` from the live runtime
-  view and invokes the plug-in. The leader-side rebalance
-  still defaults to the built-in cooperative-sticky
-  assignor; the assignment source can flip over to the
-  plug-in in a follow-up without changing the public
-  interface.
+- **KIP-924 `TaskAssignor`.** `StreamsConfig.taskAssignor`
+  replaces the streams group assignor's dealing at every
+  rebalance; the result is validated (`AssignmentError`, incl.
+  `MissingActiveTask`) and an invalid one falls back to the
+  built-in assignment. `KafkaStreamsState` carries per-task lags.
 
 ### Changed
 
+- **Kafka Streams.** `groupTableBy` returns a re-grouped table with
+  subtract/add semantics; table operators forward `Change`s;
+  aggregations return `KTable`s. Orphan-topic detection derives the
+  expected topics from the planner. The ops demos run the real runtime
+  on `MockBroker`.
+- **Removed (Kafka Streams).** `Runtime.EOS` (`EOSCoordinator`,
+  `runCommitCycle`, `withTwoPhaseSinks`), the `Kafka.Streams.Mock.*`
+  simulated runtime and `MultiInstanceMockHarness`, `Runtime.{Task,
+  StandbyTask,StandbyDriver,ProbingRebalance}`, `reportWarmupLag`,
+  `streamsRunUserAssignor`, `setLagListener` / `publishLag`,
+  `groupByKTable`, and the config knobs the runtime never read
+  (dispatch mode, cache size, task timeout, assignor class, DSL store,
+  rack awareness, window size, upgrade.from).
 - **Module consolidation.** Folded the JVM-equivalence SDK
   shims and admin long-tail RPCs back into their primary
   modules so the public surface has one obvious home per
@@ -138,18 +173,6 @@ and this project adheres to the
   built `Printed` to a `KStream`. Bracket-form
   `withPrintedFile` / `withPrintedRotatingFile` for
   deterministic shutdown.
-- **`Kafka.Streams.Runtime.MultiInstanceMockHarness`** — live
-  multi-instance rebalance harness over the in-process
-  `MockCluster`. `newMockSet` spins up N
-  `MockStreamsDriver`s sharing the same group, `tickAll` /
-  `tickAllUntilQuiet` / `refreshAll` drive them step-by-step,
-  `crashInstance` evicts a member and triggers reassignment.
-  `Streams.MultiInstanceRebalanceSpec` adds 4 cases (assignor
-  covers + disjoint, sink routing end-to-end, partition
-  migration on instance loss, Hedgehog property over
-  arbitrary (instances, partitions)). Closes the
-  multi-instance code-side parity gap; an OS-level
-  multi-process broker fixture is still follow-up CI work.
 - **Schema Registry compatibility-mode probing.**
   `Kafka.Streams.Serde.SchemaRegistry.SchemaRegistryClient`
   gained two new methods: `srCompatibilityMode` (read the

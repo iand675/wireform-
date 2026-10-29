@@ -31,20 +31,14 @@ import Streams.JoinSpec qualified
 import Streams.KGroupedTableSpec qualified
 import Streams.LagSpec qualified
 import Streams.MetricsSpec qualified
-import Streams.MockAdvancedSpec qualified
-import Streams.MockClusterSpec qualified
-import Streams.MockDriverModesSpec qualified
-import Streams.MockFailureModesSpec qualified
 import Streams.MoreParitySpec qualified
 import Streams.MoreParityThreeSpec qualified
 import Streams.MorePartiyTwoSpec qualified
 import Streams.MultiInstanceHarnessSpec qualified
-import Streams.MultiInstanceRebalanceSpec qualified
 import Streams.NamedSpec qualified
 import Streams.ObservabilityOTelSpec qualified
 import Streams.PersistentStoreSpec qualified
 import Streams.ProcessorAndStoreExtrasSpec qualified
-import Streams.Properties.AtLeastOnceRedeliverySpec qualified
 import Streams.Properties.CDCSourceSpec qualified
 import Streams.Properties.ChangelogReplaySpec qualified
 import Streams.Properties.KVStoreSMSpec qualified
@@ -62,6 +56,7 @@ import Streams.Properties.StoreRefSpec qualified
 import Streams.Properties.TTLSpec qualified
 import Streams.Properties.TieredStoreSpec qualified
 import Streams.Properties.TwoPhaseSinkSpec qualified
+import Streams.Properties.DeliverySpec qualified
 import Streams.Properties.WatermarkCoordSpec qualified
 import Streams.Properties.WatermarkSpec qualified
 import Streams.Properties.WatermarkWiringSpec qualified
@@ -158,10 +153,6 @@ main = do
         , Streams.EndToEndChainSpec.tests
         , Streams.MorePartiyTwoSpec.tests
         , Streams.MoreParityThreeSpec.tests
-        , Streams.MockClusterSpec.tests
-        , Streams.MockFailureModesSpec.tests
-        , Streams.MockAdvancedSpec.tests
-        , Streams.MockDriverModesSpec.tests
         , Streams.RevocationGraceSpec.tests
         , Streams.StableNamesSpec.tests
         , Streams.TopologyOptimizationSpec.tests
@@ -180,7 +171,6 @@ main = do
         , Streams.RemoteIQSpec.tests
         , Streams.IdiomaticDSLSpec.tests
         , Streams.DSLFacadeSpec.tests
-        , Streams.MultiInstanceRebalanceSpec.tests
         , Streams.RotatingFileSinkSpec.tests
         , Streams.SchemaRegistryCompatSpec.tests
         , Streams.SdkParitySpec.tests
@@ -207,8 +197,8 @@ main = do
               , Streams.Properties.ChangelogReplaySpec.tests
               , Streams.Properties.WatermarkSpec.tests
               , Streams.Properties.WorkerPoolConcurrentSpec.tests
-              , Streams.Properties.AtLeastOnceRedeliverySpec.tests
               , Streams.Properties.TwoPhaseSinkSpec.tests
+              , Streams.Properties.DeliverySpec.tests
               , Streams.Properties.WatermarkCoordSpec.tests
               , Streams.Properties.TTLSpec.tests
               , Streams.Properties.SchemaVersionedSpec.tests

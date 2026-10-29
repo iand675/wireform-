@@ -128,9 +128,10 @@ demos =
   , ("cogroup", InMemoryOnly Cogroup.runDemo)
   , ("idiomatic", InMemoryOnly IdiomaticPipeline.runDemo)
   , -- Operational demos: multi-instance cluster, deployments,
-    -- crashes, upgrades, warm failover, EOS. All in-memory --
-    -- the MockCluster / WorkerPool / Standby runtimes they
-    -- exercise have no broker analogue at this layer.
+    -- crashes, upgrades, warm failover, EOS. They run the real
+    -- runtime on the in-memory broker
+    -- ("Kafka.Streams.Runtime.MockBroker"); ops-threads and
+    -- ops-revoke show standalone libraries.
     ("ops-bringup", InMemoryOnly OpsBringup.runDemo)
   , ("ops-crash", InMemoryOnly OpsCrash.runDemo)
   , ("ops-rolling", InMemoryOnly OpsRolling.runDemo)
@@ -189,6 +190,6 @@ main = do
 announceMode :: RunMode -> IO ()
 announceMode = \case
   InMemory ->
-    putStrLn "[wireform-kafka-streams-examples] mode: in-memory (TopologyTestDriver)"
+    putStrLn "[wireform-kafka-streams-examples] mode: in-memory (no broker)"
   Broker b ->
     putStrLn $ "[wireform-kafka-streams-examples] mode: broker " <> T.unpack b

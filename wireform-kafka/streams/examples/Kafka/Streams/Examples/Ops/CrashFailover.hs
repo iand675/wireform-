@@ -2,18 +2,15 @@
 
 {- |
 Module      : Kafka.Streams.Examples.Ops.CrashFailover
-Description : One instance dies; peers inherit its partitions
+Description : One instance dies; its peer inherits its tasks
 
-Two instances share a 4-partition input. We send the first
-batch, then call 'H.crashInstance' on @i0@ (which closes its
-driver and 'MC.leaveGroup's its consumer) and 'H.refreshAll'.
-After the rebalance @i1@ owns all four partitions; the second
-batch flows entirely through @i1@.
+Two instances share a 4-partition input. After the first batch @i0@
+goes away; the group rebalances and @i1@ takes all four tasks over,
+starting each from the last committed offset, so the second batch (and
+anything @i0@ hadn't committed) flows through @i1@. Nothing is lost
+(at least once: something may be delivered twice).
 
-Equivalent to a pod dying mid-flight in a Kafka Streams
-StatefulSet — the surviving replica picks up the orphaned
-tasks once the consumer group coordinator notices the missing
-heartbeat.
+Equivalent to a pod dying mid-flight in a Kafka Streams StatefulSet.
 -}
 module Kafka.Streams.Examples.Ops.CrashFailover (
   runDemo,
@@ -25,59 +22,36 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Kafka.Streams.Examples.Ops.Helpers
 import Kafka.Streams.Imperative
-import Kafka.Streams.Mock.Cluster qualified as MC
-import Kafka.Streams.Runtime.MultiInstanceMockHarness qualified as H
+import Kafka.Streams.Runtime.MockBroker
 
 
 runDemo :: IO ()
-runDemo = do
+runDemo = withDemoDirs 2 $ \[d0, d1] -> do
   section "CrashFailoverDemo"
+  broker <- newMockBroker (Just 1)
+  mockCreateTopic broker "in" 4
   topo <- passthroughTopo
-  set <- H.newMockSet topo 4 "ops-crash" 2
+  i0 <- startInstance broker (demoConfig "ops-crash" d0) topo
+  i1 <- startInstance broker (demoConfig "ops-crash" d1) topo
+  let both = [("i0", i0), ("i1", i1)]
+  _ <- waitUntil [i0, i1] (everyoneOwns [i0, i1])
+  assignmentsOf both >>= printAssignments "Before the crash"
 
-  before <- H.instanceAssignments set
-  printAssignments "Before crash" before
+  let batch1, batch2 :: [Text]
+      batch1 = map (\p -> T.pack ("a" <> show p)) [0 .. 3 :: Int]
+      batch2 = map (\p -> T.pack ("b" <> show p)) [0 .. 3 :: Int]
+  mapM_ (\(p, v) -> sendTo broker "in" p v) (zip [0 ..] batch1)
+  _ <- waitUntil [i0, i1] ((>= 4) . length <$> outputValues broker "out")
 
-  -- Batch 1: every instance gets work.
-  let batch1 :: [(Int, Text)]
-      batch1 = [(p, T.pack ("a" <> show p)) | p <- [0 .. 3]]
-  mapM_
-    ( \(p, v) ->
-        H.send set (topicName "in") (fromIntegral p) Nothing (bytes v) ts0
-    )
-    batch1
-  H.tickAllUntilQuiet set
+  bullet "i0 goes away..."
+  stopInstance i0
+  _ <- waitUntil [i1] ((== 4) . length <$> ownedPartitions i1)
+  assignmentsOf [("i1", i1)] >>= printAssignments "After the crash"
 
-  -- Crash i0. The mock cluster evicts its membership; the
-  -- survivor needs 'refreshAll' so the assignor re-runs.
-  bullet "Crashing i0..."
-  H.crashInstance set "i0"
-  H.refreshAll set
-
-  after <- H.instanceAssignments set
-  printAssignments "After crash" after
-
-  -- Batch 2: only i1 is alive — it should own every partition
-  -- and process every record.
-  let batch2 :: [(Int, Text)]
-      batch2 = [(p, T.pack ("b" <> show p)) | p <- [0 .. 3]]
-  mapM_
-    ( \(p, v) ->
-        H.send set (topicName "in") (fromIntegral p) Nothing (bytes v) ts0
-    )
-    batch2
-  H.tickAllUntilQuiet set
-
-  outs <-
-    mapM
-      (\p -> map (unbytes . MC.srValue) <$> H.readSink set (topicName "out") p)
-      [0 .. 3]
-  let delivered = Set.fromList (concat outs)
-      expected = Set.fromList (map snd batch1 ++ map snd batch2)
+  mapM_ (\(p, v) -> sendTo broker "in" p v) (zip [0 ..] batch2)
+  _ <- waitUntil [i1] (Set.isSubsetOf (Set.fromList batch2) . Set.fromList <$> outputValues broker "out")
+  delivered <- Set.fromList <$> outputValues broker "out"
+  let expected = Set.fromList (batch1 <> batch2)
   bullet ("Records observed after failover: " <> show (Set.size delivered))
-  bullet
-    ( "Missing: "
-        <> show (L.sort (Set.toList (expected `Set.difference` delivered)))
-    )
-
-  H.closeMockSet set
+  bullet ("Missing: " <> show (L.sort (Set.toList (expected `Set.difference` delivered))))
+  stopInstance i1

@@ -491,11 +491,6 @@ library wireform-kafka-streams
         Kafka.Streams.State.Ref
         Kafka.Streams.EmitPolicy
         Kafka.Streams.Query
-        Kafka.Streams.Mock.Cluster
-        Kafka.Streams.Mock.Fault
-        Kafka.Streams.Mock.Producer
-        Kafka.Streams.Mock.Consumer
-        Kafka.Streams.Mock.StreamsDriver
         Kafka.Streams.State.Store
         Kafka.Streams.State.KeyValue.InMemory
         Kafka.Streams.State.KeyValue.Persistent
@@ -547,7 +542,6 @@ library wireform-kafka-streams
         Kafka.Streams.Runtime.GlobalStore
         Kafka.Streams.Runtime.StateDir
         Kafka.Streams.Runtime.MultiInstanceHarness
-        Kafka.Streams.Runtime.MultiInstanceMockHarness
         Kafka.Streams.State.Transactional
         Kafka.Streams.Topology.Optimization
         Kafka.Streams.Topology.StableNames
@@ -650,10 +644,6 @@ test-suite wireform-kafka-streams-test
         Streams.EndToEndChainSpec
         Streams.MorePartiyTwoSpec
         Streams.MoreParityThreeSpec
-        Streams.MockClusterSpec
-        Streams.MockFailureModesSpec
-        Streams.MockAdvancedSpec
-        Streams.MockDriverModesSpec
         Streams.RevocationGraceSpec
         Streams.StableNamesSpec
         Streams.TopologyOptimizationSpec
@@ -672,7 +662,6 @@ test-suite wireform-kafka-streams-test
         Streams.RemoteIQSpec
         Streams.IdiomaticDSLSpec
         Streams.DSLFacadeSpec
-        Streams.MultiInstanceRebalanceSpec
         Streams.RotatingFileSinkSpec
         Streams.SchemaRegistryCompatSpec
         Streams.SdkParitySpec
@@ -697,8 +686,8 @@ test-suite wireform-kafka-streams-test
         Streams.Properties.ChangelogReplaySpec
         Streams.Properties.WatermarkSpec
         Streams.Properties.WorkerPoolConcurrentSpec
-        Streams.Properties.AtLeastOnceRedeliverySpec
         Streams.Properties.TwoPhaseSinkSpec
+        Streams.Properties.DeliverySpec
         Streams.Properties.WatermarkCoordSpec
         Streams.Properties.TTLSpec
         Streams.Properties.SchemaVersionedSpec
@@ -809,8 +798,10 @@ executable wireform-kafka-streams-examples
         wireform-kafka,
         bytestring,
         containers,
+        filepath,
         hs-opentelemetry-api      >= 1.0   && < 1.1,
         stm,
+        temporary,
         text
 
 library wireform-kafka-codegen
