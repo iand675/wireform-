@@ -1,6 +1,5 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE BlockArguments #-}
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TemplateHaskell #-}
@@ -166,13 +165,8 @@ mindepths (Branch rule ts)
 -- TH code generation
 ------------------------------------------------------------------------
 
-#if MIN_VERSION_base(4,15,0)
 mkDoE :: [Stmt] -> Exp
 mkDoE = DoE Nothing
-#else
-mkDoE :: [Stmt] -> Exp
-mkDoE = DoE
-#endif
 
 
 switch :: Q Exp -> Q Exp

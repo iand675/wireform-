@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE TemplateHaskell #-}
 
 {- | IDL-to-Haskell codegen: generate typed value types and entity records
@@ -156,16 +155,7 @@ plainDeriv ns = DerivClause Nothing (map ConT ns)
 
 
 plainBndr :: Name -> TyVarBndr BndrVis
-#if MIN_VERSION_template_haskell(2,21,0)
 plainBndr n = PlainTV n BndrReq
-#else
-plainBndr n = PlainTV n ()
-#endif
-
-
-#if !MIN_VERSION_template_haskell(2,21,0)
-type BndrVis = ()
-#endif
 
 
 -- ---------------------------------------------------------------------------

@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP #-}
 
 module Main (main) where
 
@@ -9,9 +8,7 @@ import GHC.Conc (setUncaughtExceptionHandler)
 import System.IO
 import Test.Syd
 
-#if MIN_VERSION_base(4,18,0)
 import GHC.Conc.Sync (threadLabel)
-#endif
 
 import Test.Prop.Dialogue                     qualified as Dialogue
 import Test.Regression.Issue102               qualified as Issue102
@@ -56,12 +53,7 @@ main = do
 uncaughtExceptionHandler :: SomeException -> IO ()
 uncaughtExceptionHandler e = do
     tid    <- myThreadId
-    mLabel :: Maybe String <-
-#if MIN_VERSION_base(4,18,0)
-      threadLabel tid
-#else
-      return $ Just "unknown label"
-#endif
+    mLabel :: Maybe String <- threadLabel tid
     hPutStrLn stderr $ concat [
          "Uncaught exception in "
       , show tid
