@@ -19,14 +19,8 @@ let
   # Per-package GHC support overrides. A package absent from this map
   # builds across the full matrix. Entries here narrow the matrix for
   # packages with a known upstream incompatibility on some compiler so
-  # CI does not emit jobs that cannot pass.
-  #
-  #   * the proto-lens / ghc-source-gen toolchain (pulled in by the gRPC
-  #     stack) does not compile on GHC 9.10+ in the pinned nixpkgs.
-  ghcOverrides = {
-    grpc-spec     = [ "ghc96" "ghc98" ];
-    wireform-grpc = [ "ghc96" "ghc98" ];
-  };
+  # CI does not emit jobs that cannot pass. (None at the moment.)
+  ghcOverrides = { };
 
   # Word-boundary match: "wireform-core" must NOT match inside
   # "wireform-core-test" (the trailing hyphen is [a-zA-Z0-9-]).
