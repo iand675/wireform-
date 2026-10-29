@@ -1425,12 +1425,14 @@ sourceMultiCompile b ts c = do
         , Topo.sourceExtractor = Topo.AnyTimestampExtractor (consumedExtractor c)
         , Topo.sourceOffsetReset = consumedOffsetReset c
         , Topo.sourcePattern = Nothing
+        , Topo.sourceNullValues = False
         , Topo.sourceWatermarkStrategy = consumedWatermark c
         }
   pure
     ( KS.KStream
         { KS.kstreamBuilder = b
         , KS.kstreamParent = nm
+        , KS.kstreamKeyChanged = False
         , KS.kstreamKeySerde = consumedKeySerde c
         , KS.kstreamValueSerde = consumedValueSerde c
         }
@@ -3904,6 +3906,7 @@ transformStream prefix stores sup ks' vs' =
       KS.KStream
         { KS.kstreamBuilder = b
         , KS.kstreamParent = nm
+        , KS.kstreamKeyChanged = True
         , KS.kstreamKeySerde = ks'
         , KS.kstreamValueSerde = vs'
         }

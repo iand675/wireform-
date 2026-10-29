@@ -123,5 +123,6 @@ inMemorySessionStoreBuilder nm retention =
   StoreBuilderS
     { sbSName = nm
     , sbSLogging = defaultLoggingConfig
+    , sbSSerdes = Nothing
     , sbSBuild = inMemorySessionStore nm retention
     }

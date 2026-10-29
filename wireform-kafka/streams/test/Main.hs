@@ -7,6 +7,7 @@ import Streams.AsyncIOSpec qualified
 import Streams.BackfillSpec qualified
 import Streams.BoundedSuppressSpec qualified
 import Streams.CacheSpec qualified
+import Streams.ChangelogSpec qualified
 import Streams.CogroupSpec qualified
 import Streams.DSLFacadeSpec qualified
 import Streams.DSLSpec qualified
@@ -134,6 +135,7 @@ main = do
         , Streams.AggregationSpec.tests
         , Streams.InteractiveQueriesSpec.tests
         , Streams.CacheSpec.tests
+        , Streams.ChangelogSpec.tests
         , Streams.EOSSpec.tests
         , Streams.MultiTaskSpec.tests
         , Streams.StandbySpec.tests

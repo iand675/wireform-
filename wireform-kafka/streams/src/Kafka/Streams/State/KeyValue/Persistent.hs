@@ -49,10 +49,12 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as T
 import Data.Word (Word32)
+import Kafka.Streams.Serde (byteStringSerde)
 import Kafka.Streams.State.Store (
   KeyValueStore (..),
   StateStore (..),
   StoreBuilderKV (..),
+  StoreSerdes (..),
   StoreName,
   defaultLoggingConfig,
   kvIteratorFromList,
@@ -200,6 +202,7 @@ persistentKeyValueStoreBuilder nm cfg =
   StoreBuilderKV
     { sbKvName = nm
     , sbKvLogging = defaultLoggingConfig
+    , sbKvSerdes = Just (StoreSerdes byteStringSerde byteStringSerde)
     , sbKvBuild = persistentKeyValueStore nm cfg
     }
 

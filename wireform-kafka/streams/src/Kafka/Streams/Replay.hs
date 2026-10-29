@@ -371,7 +371,7 @@ runReplayCore d plan pacer records = do
         d
         (rrTopic r)
         (rrKey r)
-        (rrValue r)
+        (Just (rrValue r))
         (rrHeaders r)
         (rrTimestamp r)
         (rrPartition r)

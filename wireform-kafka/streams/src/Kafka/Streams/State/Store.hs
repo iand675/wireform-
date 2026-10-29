@@ -54,6 +54,10 @@ module Kafka.Streams.State.Store (
   StoreBuilderS (..),
   LoggingConfig (..),
   defaultLoggingConfig,
+  StoreSerdes (..),
+  withStoreSerdesKV,
+  withStoreSerdesW,
+  withStoreSerdesS,
 
   -- * Builder logging knobs (KIP-258 / KIP-150 surface)
   withLoggingEnabledKV,
@@ -81,6 +85,7 @@ import Data.String (IsString (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.Generics (Generic)
+import Kafka.Streams.Serde (Serde)
 import Kafka.Streams.Time (Timestamp)
 import Kafka.Streams.Types (TopicName)
 
@@ -305,10 +310,26 @@ data StoreBuilder = StoreBuilder
   }
 
 
+{- | Key / value serdes a store's changelog is written and restored
+with (the JVM's @Stores.keyValueStoreBuilder(supplier, keySerde,
+valueSerde)@). A logged store without them cannot run against a
+broker: the runtime refuses to start and names it.
+-}
+data StoreSerdes k v = StoreSerdes
+  { storeKeySerde :: ~(Serde k)
+  , storeValueSerde :: ~(Serde v)
+  {- ^ Lazy: a DSL operator that cannot infer its output serde
+  stores an error thunk asking for a 'Kafka.Streams.Materialized'
+  serde, which must only fire if the changelog is actually written.
+  -}
+  }
+
+
 -- | Typed key-value store builder.
 data StoreBuilderKV k v = StoreBuilderKV
   { sbKvName :: !StoreName
   , sbKvLogging :: !LoggingConfig
+  , sbKvSerdes :: !(Maybe (StoreSerdes k v))
   , sbKvBuild :: !(IO (KeyValueStore k v))
   }
 
@@ -317,6 +338,7 @@ data StoreBuilderKV k v = StoreBuilderKV
 data StoreBuilderW k v = StoreBuilderW
   { sbWName :: !StoreName
   , sbWLogging :: !LoggingConfig
+  , sbWSerdes :: !(Maybe (StoreSerdes k v))
   , sbWBuild :: !(IO (WindowStore k v))
   }
 
@@ -325,8 +347,24 @@ data StoreBuilderW k v = StoreBuilderW
 data StoreBuilderS k v = StoreBuilderS
   { sbSName :: !StoreName
   , sbSLogging :: !LoggingConfig
+  , sbSSerdes :: !(Maybe (StoreSerdes k v))
   , sbSBuild :: !(IO (SessionStore k v))
   }
+
+
+-- | Attach changelog serdes to a key-value store builder.
+withStoreSerdesKV :: Serde k -> Serde v -> StoreBuilderKV k v -> StoreBuilderKV k v
+withStoreSerdesKV ks vs b = b {sbKvSerdes = Just (StoreSerdes ks vs)}
+
+
+-- | Attach changelog serdes to a window store builder.
+withStoreSerdesW :: Serde k -> Serde v -> StoreBuilderW k v -> StoreBuilderW k v
+withStoreSerdesW ks vs b = b {sbWSerdes = Just (StoreSerdes ks vs)}
+
+
+-- | Attach changelog serdes to a session store builder.
+withStoreSerdesS :: Serde k -> Serde v -> StoreBuilderS k v -> StoreBuilderS k v
+withStoreSerdesS ks vs b = b {sbSSerdes = Just (StoreSerdes ks vs)}
 
 
 {- | Existential wrapper used by the topology to keep

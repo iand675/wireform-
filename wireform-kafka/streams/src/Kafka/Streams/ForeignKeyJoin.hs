@@ -82,8 +82,10 @@ import Kafka.Streams.KTable (
   ktableNode,
   ktableStore,
  )
+import Kafka.Streams.Internal.Serdes (int64BE, mapSerde, readInt64BE)
 import Kafka.Streams.Materialized (
   Materialized (..),
+  materializedKV,
  )
 import Kafka.Streams.Processor (
   Processor (..),
@@ -92,7 +94,7 @@ import Kafka.Streams.Processor (
   getStateStore,
   processorName,
  )
-import Kafka.Streams.Serde (HasSerde (..))
+import Kafka.Streams.Serde (HasSerde (..), Serde (..))
 import Kafka.Streams.State.KeyValue.InMemory (
   inMemoryKeyValueStoreBuilder,
  )
@@ -101,6 +103,7 @@ import Kafka.Streams.State.Store (
   KeyValueStore (..),
   StoreBuilderKV,
   StoreName,
+  withStoreSerdesKV,
  )
 import Kafka.Streams.StreamsBuilder (
   freshNodeName,
@@ -119,6 +122,18 @@ replaced.
 -}
 newtype SubscriptionToken = SubscriptionToken {unToken :: Int}
   deriving stock (Eq, Ord, Show, Generic)
+
+
+-- | Changelog serde for a token (its hash as 8 big-endian bytes).
+tokenSerde :: Serde SubscriptionToken
+tokenSerde =
+  Serde
+    { serialize = int64BE . fromIntegral . unToken
+    , deserialize = \bs -> case readInt64BE bs of
+        Just n -> Right (SubscriptionToken (fromIntegral n))
+        Nothing -> Left "subscription token shorter than 8 bytes"
+    , serializeHeaders = const mempty
+    }
 
 
 mkToken :: Hashable v => v -> SubscriptionToken
@@ -233,20 +248,22 @@ buildFKJoin _prefix extractor mode m kl kr = do
   tokenNm <- freshStoreName b "KTABLE-FK-TOKEN"
   lastFKNm <- freshStoreName b "KTABLE-FK-LASTFK"
 
-  let outBuilder =
-        inMemoryKeyValueStoreBuilder outNm
+  let !lk = ktableKeySerde kl
+      !rk = ktableKeySerde kr
+      outBuilder =
+        materializedKV m outNm lk serde
           :: StoreBuilderKV k v'
       subsBuilder =
-        inMemoryKeyValueStoreBuilder subsNm
+        withStoreSerdesKV rk (mapSerde lk tokenSerde) (inMemoryKeyValueStoreBuilder subsNm)
           :: StoreBuilderKV fk (Map k SubscriptionToken)
       leftBuilder =
-        inMemoryKeyValueStoreBuilder leftNm
+        withStoreSerdesKV lk (ktableValueSerde kl) (inMemoryKeyValueStoreBuilder leftNm)
           :: StoreBuilderKV k v
       tokenBuilder =
-        inMemoryKeyValueStoreBuilder tokenNm
+        withStoreSerdesKV lk tokenSerde (inMemoryKeyValueStoreBuilder tokenNm)
           :: StoreBuilderKV k SubscriptionToken
       lastFKBuilder =
-        inMemoryKeyValueStoreBuilder lastFKNm
+        withStoreSerdesKV lk rk (inMemoryKeyValueStoreBuilder lastFKNm)
           :: StoreBuilderKV k fk
   leftProcNm <- freshNodeName b "KTABLE-FK-LEFT-PROC"
   rightProcNm <- freshNodeName b "KTABLE-FK-RIGHT-PROC"

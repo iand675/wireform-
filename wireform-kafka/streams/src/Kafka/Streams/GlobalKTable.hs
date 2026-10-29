@@ -52,6 +52,9 @@ import Kafka.Streams.KStream (
 import Kafka.Streams.KStream qualified as KS
 import Kafka.Streams.Materialized (
   Materialized (..),
+  materializedKV,
+  materializedS,
+  materializedW,
  )
 import Kafka.Streams.Processor (
   Processor (..),
@@ -64,6 +67,7 @@ import Kafka.Streams.State.KeyValue.InMemory (
   inMemoryKeyValueStoreBuilder,
  )
 import Kafka.Streams.State.Store (
+  withLoggingDisabledKV,
   AnyStateStore (..),
   KeyValueStore (..),
   StoreBuilderKV,
@@ -99,10 +103,9 @@ data GlobalKTable k v = GlobalKTable
 
 {- | Materialise a topic as a globally-replicated table.
 
-We use the same source + source-table-processor pair as a regular
-'tableFromTopic' since within a single task the partitioning
-behaviour is irrelevant. A multi-task runtime would mark this
-source as needing a /global/ consumer that reads every partition.
+Every instance holds the whole table: the runtime's global thread
+reads every partition of the topic into the store, and tasks look it
+up read-only.
 -}
 globalTable
   :: forall k v
@@ -118,12 +121,17 @@ globalTable b topic c m = do
       (freshStoreName b "GLOBAL-TABLE-STORE")
       pure
       (matName m)
-  let supplier = inMemoryKeyValueStoreBuilder storeNm :: StoreBuilderKV k v
+  -- The global table's topic is its changelog: it is restored by
+  -- reading the topic, never written to a separate one.
+  let supplier =
+        withLoggingDisabledKV
+          (materializedKV m storeNm (consumedKeySerde c) (consumedValueSerde c))
+          :: StoreBuilderKV k v
   sourceNm <- freshNodeName b "GLOBAL-TABLE-SOURCE"
   procNm <- freshNodeName b "GLOBAL-TABLE-SOURCE-PROCESSOR"
   withTopology_ b $ \t ->
     let !t1 =
-          Topo.addSource
+          Topo.addTableSource
             sourceNm
             [topic]
             (consumedKeySerde c)
@@ -141,7 +149,7 @@ globalTable b topic c m = do
               }
             t1
         !t3 = Topo.addStateStoreKV supplier [procNm] t2
-    in t3
+    in Topo.markGlobalStore storeNm t3
   pure
     GlobalKTable
       { globalKTableNode = procNm
@@ -155,7 +163,7 @@ globalTable b topic c m = do
 globalSourceProc
   :: forall k v
    . Ord k
-  => StoreName -> IO (Processor k v)
+  => StoreName -> IO (Processor k (Maybe v))
 globalSourceProc sn = do
   ctxRef <- newIORef Nothing
   storeRef <- newIORef (Nothing :: Maybe (KeyValueStore k v))
@@ -169,13 +177,12 @@ globalSourceProc sn = do
               writeIORef storeRef (Just (Unsafe.unsafeCoerce kvs))
             _ -> error $ "GlobalKTable: store missing: " <> show sn
       , procClose = pure ()
-      , procProcess = \r ->
-          case (recordKey r,) <$> Just () of
-            Just (Just k, _) -> do
-              mst <- readIORef storeRef
-              case mst of
-                Just kvs -> kvsPut kvs k (recordValue r)
-                Nothing -> pure ()
+      , procProcess = \r -> do
+          mst <- readIORef storeRef
+          case (recordKey r, mst) of
+            (Just k, Just kvs) -> case recordValue r of
+              Just v -> kvsPut kvs k v
+              Nothing -> () <$ kvsDelete kvs k
             _ -> pure ()
       }
 
@@ -220,6 +227,7 @@ joinKStreamGlobalKTable keyMap joiner s g = do
     KS.KStream
       { kstreamBuilder = b
       , kstreamParent = nm
+      , kstreamKeyChanged = kstreamKeyChanged s
       , kstreamKeySerde = kstreamKeySerde s
       , kstreamValueSerde =
           error
@@ -258,6 +266,7 @@ leftJoinKStreamGlobalKTable keyMap joiner s g = do
     KS.KStream
       { kstreamBuilder = b
       , kstreamParent = nm
+      , kstreamKeyChanged = kstreamKeyChanged s
       , kstreamKeySerde = kstreamKeySerde s
       , kstreamValueSerde = serde
       }

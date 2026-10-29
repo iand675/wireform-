@@ -15,6 +15,11 @@ module Kafka.Streams.Materialized (
   withKeySerde,
   withValueSerde,
 
+  -- * Store construction (DSL internal)
+  materializedKV,
+  materializedW,
+  materializedS,
+
   -- * Queryable store info
   queryableStoreName,
   QueryableStoreType (..),
@@ -22,10 +27,24 @@ module Kafka.Streams.Materialized (
 ) where
 
 import Data.Int (Int64)
+import Data.Maybe (fromMaybe)
 import Kafka.Streams.Serde (Serde)
+import Kafka.Streams.State.KeyValue.InMemory (inMemoryKeyValueStoreBuilder)
+import Kafka.Streams.State.Session.InMemory (inMemorySessionStoreBuilder)
+import Kafka.Streams.State.Window.InMemory (inMemoryWindowStoreBuilder)
 import Kafka.Streams.State.Store (
   KeyValueStore,
+  StoreBuilderKV (..),
+  StoreBuilderS,
+  StoreBuilderW,
   StoreName,
+  defaultLoggingConfig,
+  withLoggingDisabledKV,
+  withLoggingDisabledS,
+  withLoggingDisabledW,
+  withStoreSerdesKV,
+  withStoreSerdesS,
+  withStoreSerdesW,
  )
 
 
@@ -112,6 +131,74 @@ withLoggingDisabled m = m {matLoggingEnabled = False}
 
 withRetention :: Int64 -> Materialized k v -> Materialized k v
 withRetention r m = m {matRetentionMs = Just r}
+
+
+{- | The key-value store a DSL operator materialises for @m@: the
+'matStoreSupplier' backend when one is given (in-memory otherwise),
+changelogged unless 'withLoggingDisabled', with @m@'s serdes or the
+operator's own as the changelog serdes.
+-}
+materializedKV
+  :: Ord k
+  => Materialized k v
+  -> StoreName
+  -> Serde k
+  -- ^ The operator's key serde (used unless @m@ sets one)
+  -> Serde v
+  -- ^ The operator's value serde (used unless @m@ sets one)
+  -> StoreBuilderKV k v
+materializedKV m nm defK defV =
+  let base = case matStoreSupplier m of
+        Just mk ->
+          StoreBuilderKV
+            { sbKvName = nm
+            , sbKvLogging = defaultLoggingConfig
+            , sbKvSerdes = Nothing
+            , sbKvBuild = mk nm
+            }
+        Nothing -> inMemoryKeyValueStoreBuilder nm
+      logged = if matLoggingEnabled m then base else withLoggingDisabledKV base
+  in withStoreSerdesKV
+       (fromMaybe defK (matKeySerde m))
+       (fromMaybe defV (matValueSerde m))
+       logged
+
+
+{- | The window store a windowed DSL aggregation materialises for
+@m@ ('materializedKV' for windows): 'withRetention' overrides the
+windows' own retention.
+-}
+materializedW
+  :: Ord k
+  => Materialized k v
+  -> StoreName
+  -> Int64
+  -- ^ window size (ms)
+  -> Int64
+  -- ^ the windows' retention (ms)
+  -> Serde k
+  -> Serde v
+  -> StoreBuilderW k v
+materializedW m nm size retention defK defV =
+  let base = inMemoryWindowStoreBuilder nm size (fromMaybe retention (matRetentionMs m))
+      logged = if matLoggingEnabled m then base else withLoggingDisabledW base
+  in withStoreSerdesW (fromMaybe defK (matKeySerde m)) (fromMaybe defV (matValueSerde m)) logged
+
+
+-- | 'materializedW' for session stores.
+materializedS
+  :: Ord k
+  => Materialized k v
+  -> StoreName
+  -> Int64
+  -- ^ the session windows' retention (ms)
+  -> Serde k
+  -> Serde v
+  -> StoreBuilderS k v
+materializedS m nm retention defK defV =
+  let base = inMemorySessionStoreBuilder nm (fromMaybe retention (matRetentionMs m))
+      logged = if matLoggingEnabled m then base else withLoggingDisabledS base
+  in withStoreSerdesS (fromMaybe defK (matKeySerde m)) (fromMaybe defV (matValueSerde m)) logged
 
 
 ----------------------------------------------------------------------

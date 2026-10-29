@@ -40,11 +40,13 @@ import Data.ByteString qualified as BS
 import Data.Text qualified as T
 import Database.RocksDB qualified as R
 import Database.RocksDB.Iterator qualified as RI
+import Kafka.Streams.Serde (byteStringSerde)
 import Kafka.Streams.State.Store (
   KeyValueIterator (..),
   KeyValueStore (..),
   StateStore (..),
   StoreBuilderKV (..),
+  StoreSerdes (..),
   StoreName,
   defaultLoggingConfig,
   unStoreName,
@@ -147,6 +149,7 @@ rocksDBKeyValueStoreBuilder nm cfg =
   StoreBuilderKV
     { sbKvName = nm
     , sbKvLogging = defaultLoggingConfig
+    , sbKvSerdes = Just (StoreSerdes byteStringSerde byteStringSerde)
     , sbKvBuild = rocksDBKeyValueStore nm cfg
     }
 

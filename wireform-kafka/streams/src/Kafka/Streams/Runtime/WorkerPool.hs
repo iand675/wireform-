@@ -792,7 +792,7 @@ workerLoop w = loop
                 (workerEngine w)
                 (wrTopic r)
                 (wrKey r)
-                (wrValue r)
+                (Just (wrValue r))
                 (wrHeaders r)
                 (wrTimestamp r)
                 (wrPartition r)

@@ -220,6 +220,7 @@ inMemoryLruKeyValueStoreBuilder nm maxEntries =
   StoreBuilderKV
     { sbKvName = nm
     , sbKvLogging = LoggingConfig False [] Nothing
+    , sbKvSerdes = Nothing
     , sbKvBuild = inMemoryLruKeyValueStore nm maxEntries
     }
 
@@ -236,5 +237,6 @@ inMemoryKeyValueStoreBuilder nm =
   StoreBuilderKV
     { sbKvName = nm
     , sbKvLogging = defaultLoggingConfig
+    , sbKvSerdes = Nothing
     , sbKvBuild = inMemoryKeyValueStore nm
     }

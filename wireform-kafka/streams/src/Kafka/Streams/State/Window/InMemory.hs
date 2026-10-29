@@ -138,5 +138,6 @@ inMemoryWindowStoreBuilder nm sz ret =
   StoreBuilderW
     { sbWName = nm
     , sbWLogging = defaultLoggingConfig
+    , sbWSerdes = Nothing
     , sbWBuild = inMemoryWindowStore nm sz ret
     }

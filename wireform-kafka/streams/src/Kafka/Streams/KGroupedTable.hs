@@ -64,6 +64,7 @@ import Kafka.Streams.KTable (
  )
 import Kafka.Streams.Materialized (
   Materialized (..),
+  materializedKV,
  )
 import Kafka.Streams.Processor (
   Processor (..),
@@ -76,6 +77,8 @@ import Kafka.Streams.State.KeyValue.InMemory (
   inMemoryKeyValueStoreBuilder,
  )
 import Kafka.Streams.State.Store (
+  withStoreSerdesKV,
+  withStoreSerdesW,
   AnyStateStore (..),
   KeyValueStore (..),
   StoreBuilderKV,
@@ -190,10 +193,10 @@ reduceKGroupedTable add sub m kgt = do
       (matName m)
   prevNm <- freshStoreName b "KTABLE-REDUCE-PREV"
   let outBuilder =
-        inMemoryKeyValueStoreBuilder storeNm
+        materializedKV m storeNm kgt.key kgt.value
           :: StoreBuilderKV k v
       prevBuilder =
-        inMemoryKeyValueStoreBuilder prevNm
+        withStoreSerdesKV kgt.key kgt.value (inMemoryKeyValueStoreBuilder prevNm)
           :: StoreBuilderKV k v
   procNm <- freshNodeName b "KTABLE-REDUCE"
   withTopology_ b $ \t ->
@@ -357,10 +360,10 @@ aggregateKGroupedTable initial add sub m kgt = do
   -- update).
   prevNm <- freshStoreName b "KTABLE-AGGREGATE-PREV"
   let outBuilder =
-        inMemoryKeyValueStoreBuilder storeNm
+        materializedKV m storeNm kgt.key (error "aggregate: pass Materialized with a value serde for the aggregate type")
           :: StoreBuilderKV k a
       prevBuilder =
-        inMemoryKeyValueStoreBuilder prevNm
+        withStoreSerdesKV kgt.key kgt.value (inMemoryKeyValueStoreBuilder prevNm)
           :: StoreBuilderKV k v
   procNm <- freshNodeName b "KTABLE-AGGREGATE"
   withTopology_ b $ \t ->

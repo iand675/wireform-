@@ -48,7 +48,8 @@ import Data.IORef
 import Data.Text qualified
 import GHC.Exts qualified
 import Kafka.Streams.Consumed (Consumed (..))
-import Kafka.Streams.Materialized (Materialized (..))
+import Data.Maybe (fromMaybe)
+import Kafka.Streams.Materialized (Materialized (..), materializedKV)
 import Kafka.Streams.Processor (
   Processor (..),
   ProcessorContext,
@@ -110,12 +111,14 @@ tableFromTopic b topic c m = do
       (freshStoreName b "KTABLE-SOURCE-STORE")
       pure
       (matName m)
-  let supplier = inMemoryKeyValueStoreBuilder storeNm :: StoreBuilderKV k v
+  let supplier =
+        materializedKV m storeNm (consumedKeySerde c) (consumedValueSerde c)
+          :: StoreBuilderKV k v
   sourceNm <- freshNodeName b "KTABLE-SOURCE"
   procNm <- freshNodeName b "KTABLE-SOURCE-PROCESSOR"
   withTopology_ b $ \t ->
     let !t1 =
-          Topo.addSource
+          Topo.addTableSource
             sourceNm
             [topic]
             (consumedKeySerde c)
@@ -147,7 +150,7 @@ tableFromTopic b topic c m = do
 sourceTableProcessor
   :: forall k v
    . Ord k
-  => StoreName -> IO (Processor k v)
+  => StoreName -> IO (Processor k (Maybe v))
 sourceTableProcessor sn = do
   ctxRef <- newIORef Nothing
   storeRef <- newIORef Nothing
@@ -166,9 +169,11 @@ sourceTableProcessor sn = do
           mctx <- readIORef ctxRef
           mst <- readIORef storeRef
           case (mctx, mst, recordKey r) of
-            (Just ctx, Just kvs, Just k) -> do
-              kvsPut kvs k (recordValue r)
-              forwardRecord ctx r
+            (Just ctx, Just kvs, Just k) -> case recordValue r of
+              Just v -> do
+                kvsPut kvs k v
+                forwardRecord ctx r {recordValue = v}
+              Nothing -> () <$ kvsDelete kvs k
             _ -> pure ()
       }
 
@@ -197,7 +202,9 @@ filterTable pred_ m parent = do
       pure
       (matName m)
   let b = ktableBuilder parent
-      supplier = inMemoryKeyValueStoreBuilder storeNm :: StoreBuilderKV k v
+      supplier =
+        materializedKV m storeNm (ktableKeySerde parent) (ktableValueSerde parent)
+          :: StoreBuilderKV k v
   procNm <- freshNodeName b "KTABLE-FILTER"
   withTopology_ b $ \t ->
     let !t1 =
@@ -296,7 +303,9 @@ mapValuesTable f m parent = do
       pure
       (matName m)
   let b = ktableBuilder parent
-      supplier = inMemoryKeyValueStoreBuilder storeNm :: StoreBuilderKV k v'
+      supplier =
+        materializedKV m storeNm (ktableKeySerde parent) serde
+          :: StoreBuilderKV k v'
   procNm <- freshNodeName b "KTABLE-MAPVAL"
   withTopology_ b $ \t ->
     let !t1 =
@@ -355,8 +364,12 @@ transformValuesTable supplier extraStores m parent = do
       pure
       (matName m)
   let supplierStore =
-        inMemoryKeyValueStoreBuilder storeNm
+        materializedKV m storeNm (ktableKeySerde parent) transformOutSerde
           :: StoreBuilderKV k v'
+      transformOutSerde =
+        fromMaybe
+          (error "KTable.transformValues: pass Materialized with serde to set output")
+          (matValueSerde m)
   procNm <- freshNodeName b "KTABLE-TRANSFORMVAL"
   -- The user processor wraps its own forwardRecord; we
   -- pre-compose with a small "remember-in-store" sink so the
@@ -431,9 +444,7 @@ transformValuesTable supplier extraStores m parent = do
       , ktableStore = storeNm
       , ktableBuilder = b
       , ktableKeySerde = ktableKeySerde parent
-      , ktableValueSerde =
-          error
-            "KTable.transformValues: pass Materialized with serde to set output"
+      , ktableValueSerde = transformOutSerde
       }
 
 
@@ -599,8 +610,12 @@ buildKTableKTableJoin prefix m mode tl tr = do
   leftNm <- freshNodeName b (prefix <> "-LEFT")
   rightNm <- freshNodeName b (prefix <> "-RIGHT")
   let outBuilder =
-        inMemoryKeyValueStoreBuilder outStoreNm
+        materializedKV m outStoreNm (ktableKeySerde tl) joinOutSerde
           :: StoreBuilderKV k v'
+      joinOutSerde =
+        fromMaybe
+          (error "KTable-KTable join: pass Materialized with serde to set output")
+          (matValueSerde m)
 
   withTopology_ b $ \t ->
     let !t1 =
@@ -644,9 +659,7 @@ buildKTableKTableJoin prefix m mode tl tr = do
       , ktableStore = outStoreNm
       , ktableBuilder = b
       , ktableKeySerde = ktableKeySerde tl
-      , ktableValueSerde =
-          error
-            "KTable-KTable join: pass Materialized with serde to set output"
+      , ktableValueSerde = joinOutSerde
       }
 
 

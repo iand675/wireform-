@@ -681,7 +681,7 @@ eventLoop ks driver engine = go
                     engine
                     (topicName rec.topic)
                     rec.key
-                    (maybe BS.empty id rec.value)
+                    rec.value
                     (KH.fromList rec.headers)
                     (Timestamp rec.timestamp)
                     (fromIntegral rec.partition)

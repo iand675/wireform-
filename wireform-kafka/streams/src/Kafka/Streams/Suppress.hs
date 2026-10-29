@@ -80,6 +80,9 @@ module Kafka.Streams.Suppress (
 ) where
 
 import Control.Exception (Exception, throwIO)
+import Data.ByteString qualified as BS
+import Data.ByteString.Builder qualified as BB
+import Data.ByteString.Lazy qualified as BSL
 import Data.IORef
 import Data.Int (Int64)
 import Data.List qualified as List
@@ -100,12 +103,13 @@ import Kafka.Streams.Processor (
   schedule,
  )
 import Kafka.Streams.Processor qualified
-import Kafka.Streams.Serde (Serde, serialize)
+import Kafka.Streams.Serde (Serde (..))
 import Kafka.Streams.SessionWindowedKStream qualified as SWKS
 import Kafka.Streams.State.KeyValue.InMemory (
   inMemoryKeyValueStoreBuilder,
  )
 import Kafka.Streams.State.Store (
+  withStoreSerdesKV,
   AnyStateStore (..),
   KeyValueStore (..),
   StoreBuilderKV,
@@ -205,6 +209,7 @@ doStreamFromWindowedHandle h kserde vserde = do
     KStream
       { kstreamBuilder = b
       , kstreamParent = nm
+      , kstreamKeyChanged = False
       , kstreamKeySerde =
           error
             "streamFromWindowedHandle: WindowedKey serde unset; supply one to to/through"
@@ -319,7 +324,10 @@ suppressWindowedWith grace windowSize bufCfg s = do
   bufNm <- freshStoreName b "SUPPRESS-BUFFER"
   procNm <- freshNodeName b "SUPPRESS"
   let bufBuilder =
-        inMemoryKeyValueStoreBuilder bufNm
+        withStoreSerdesKV
+          (kstreamKeySerde s)
+          (kstreamValueSerde s)
+          (inMemoryKeyValueStoreBuilder bufNm)
           :: StoreBuilderKV (WindowedKey k) v
   withTopology_ b $ \t ->
     let !t1 =
@@ -344,6 +352,7 @@ suppressWindowedWith grace windowSize bufCfg s = do
     KStream
       { kstreamBuilder = b
       , kstreamParent = procNm
+      , kstreamKeyChanged = kstreamKeyChanged s
       , kstreamKeySerde = kstreamKeySerde s
       , kstreamValueSerde = kstreamValueSerde s
       }
@@ -430,7 +439,10 @@ suppressWindowedShed grace windowSize shelf s = do
   bufNm <- freshStoreName b "SUPPRESS-SHED-BUFFER"
   procNm <- freshNodeName b "SUPPRESS-SHED"
   let bufBuilder =
-        inMemoryKeyValueStoreBuilder bufNm
+        withStoreSerdesKV
+          (kstreamKeySerde s)
+          (kstreamValueSerde s)
+          (inMemoryKeyValueStoreBuilder bufNm)
           :: StoreBuilderKV (WindowedKey k) v
   withTopology_ b $ \t ->
     let !t1 =
@@ -455,6 +467,7 @@ suppressWindowedShed grace windowSize shelf s = do
     KStream
       { kstreamBuilder = b
       , kstreamParent = procNm
+      , kstreamKeyChanged = kstreamKeyChanged s
       , kstreamKeySerde = kstreamKeySerde s
       , kstreamValueSerde = kstreamValueSerde s
       }
@@ -745,7 +758,10 @@ suppressUntilTimeLimit timeLimit s = do
   bufNm <- freshStoreName b "SUPPRESS-DEBOUNCE-BUFFER"
   procNm <- freshNodeName b "SUPPRESS-DEBOUNCE"
   let bufBuilder =
-        inMemoryKeyValueStoreBuilder bufNm
+        withStoreSerdesKV
+          (kstreamKeySerde s)
+          (stampedSerde (kstreamValueSerde s))
+          (inMemoryKeyValueStoreBuilder bufNm)
           :: StoreBuilderKV k (Int64, v)
   withTopology_ b $ \t ->
     let !t1 =
@@ -768,6 +784,7 @@ suppressUntilTimeLimit timeLimit s = do
     KStream
       { kstreamBuilder = b
       , kstreamParent = procNm
+      , kstreamKeyChanged = kstreamKeyChanged s
       , kstreamKeySerde = kstreamKeySerde s
       , kstreamValueSerde = kstreamValueSerde s
       }
@@ -947,6 +964,7 @@ streamFromSessionWindowedHandle h kserde vserde =
     KStream
       { kstreamBuilder = SWKS.swthBuilder h
       , kstreamParent = SWKS.swthNode h
+      , kstreamKeyChanged = False
       , kstreamKeySerde = kserde
       , kstreamValueSerde = vserde
       }
@@ -1025,3 +1043,22 @@ emitEarlyWhenFull b = b {overflow = EmitEarlyWhenFull}
 -- | Set the overflow policy to 'DropOldestSilently'.
 dropOldestSilently :: BufferConfig -> BufferConfig
 dropOldestSilently b = b {overflow = DropOldestSilently}
+
+
+{- | Changelog serde for a debounce-buffer entry: the 8-byte
+big-endian deadline, then the value's own bytes.
+-}
+stampedSerde :: Serde v -> Serde (Int64, v)
+stampedSerde vs =
+  Serde
+    { serialize = \(t, v) ->
+        BSL.toStrict (BB.toLazyByteString (BB.int64BE t)) <> serialize vs v
+    , deserialize = \bs ->
+        if BS.length bs < 8
+          then Left "debounce buffer entry shorter than its 8-byte deadline"
+          else
+            let (tb, vb) = BS.splitAt 8 bs
+                !t = BS.foldl' (\acc w -> acc * 256 + fromIntegral w) 0 tb
+            in fmap (\v -> (t, v)) (deserialize vs vb)
+    , serializeHeaders = serializeHeaders vs . snd
+    }

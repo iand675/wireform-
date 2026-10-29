@@ -43,9 +43,13 @@ module Kafka.Streams.Topology (
   unNodeName,
 
   -- * Topology
-  Topology,
+  Topology (..),
   emptyTopology,
+  InternalTopicSpec (..),
+  addInternalTopic,
+  topoInternalTopics,
   addSource,
+  addTableSource,
   addSourceWith,
   addProcessor,
   addProcessorWith,
@@ -56,6 +60,7 @@ module Kafka.Streams.Topology (
   addStateStoreW,
   addStateStoreS,
   addGlobalStore,
+  markGlobalStore,
   topoGlobalStores,
   topoChangelogPlan,
   connectProcessorAndStateStores,
@@ -212,6 +217,12 @@ data SourceSpec = SourceSpec
   which is the only mode the in-process driver supports
   today.
   -}
+  , sourceNullValues :: !Bool
+  {- ^ Set on a table source: the node forwards @Maybe v@, with
+  'Nothing' for a null value (a tombstone), so the table can delete
+  the key. A plain stream source drops null-valued records (they have
+  no @v@) and counts them as dropped.
+  -}
   , sourceWatermarkStrategy :: !(Maybe Watermark.WatermarkStrategy)
   {- ^ Riffle \xc2\xa75: optional per-source watermark strategy.
   'Nothing' (the default) preserves the legacy per-task
@@ -267,6 +278,12 @@ data Topology = Topology
   these as cluster-wide replicas and bypasses partition
   assignment for their source topics.
   -}
+  , topoInternalTopics :: !(Map TopicName InternalTopicSpec)
+  {- ^ Topics the topology owns (repartition topics), keyed by their
+  /unprefixed/ name. The broker runtime creates them, names them
+  @\<application.id\>-\<name\>@ ('prefixInternalTopics') and
+  subscribes to them like any source.
+  -}
   , topoChangelogPlan :: !(Map StoreName TopicName)
   {- ^ /Optimiser-derived/ KIP-295 @REUSE_KTABLE_SOURCE_TOPICS@
   decisions. Each entry @(store, topic)@ says \"the runtime
@@ -302,8 +319,28 @@ emptyTopology =
     , topoSourceOrder = Seq.empty
     , topoChildrenIndex = Map.empty
     , topoGlobalStores = Set.empty
+    , topoInternalTopics = Map.empty
     , topoChangelogPlan = Map.empty
     }
+
+
+{- | A topic the topology itself owns. A repartition topic gets
+'itsPartitions' partitions, or (when 'Nothing') as many as the
+widest source topic of the subtopology that writes to it.
+-}
+data InternalTopicSpec = InternalTopicSpec
+  { itsPartitions :: !(Maybe Int)
+  }
+  deriving stock (Eq, Show)
+
+
+{- | Declare a repartition topic. Pair it with a sink writing to it
+and a source reading from it (see
+'Kafka.Streams.KStream.repartitionWith').
+-}
+addInternalTopic :: TopicName -> InternalTopicSpec -> Topology -> Topology
+addInternalTopic tp spec t =
+  t {topoInternalTopics = Map.insert tp spec (topoInternalTopics t)}
 
 
 -- | Distinct error categories surfaced by 'validateTopology'.
@@ -392,6 +429,37 @@ addSource nm ts ks vs ex t =
         , sourceExtractor = AnyTimestampExtractor ex
         , sourceOffsetReset = Consumed.OffsetEarliest
         , sourcePattern = Nothing
+        , sourceNullValues = False
+        , sourceWatermarkStrategy = Nothing
+        }
+
+
+{- | A source for a table: like 'addSource', but the node forwards
+@Maybe v@ so a null value (a tombstone) reaches the table as
+'Nothing'. The extractor only sees non-null values; a tombstone keeps
+the record's own timestamp.
+-}
+addTableSource
+  :: NodeName
+  -> [TopicName]
+  -> Serde k
+  -> Serde v
+  -> TimestampExtractor k v
+  -> Topology
+  -> Topology
+addTableSource nm ts ks vs ex t =
+  ensureNameFree t nm $
+    insertSource
+      t
+      SourceSpec
+        { sourceName = nm
+        , sourceTopics = ts
+        , sourceKeySerde = AnySerde ks
+        , sourceValueSerde = AnySerde vs
+        , sourceExtractor = AnyTimestampExtractor ex
+        , sourceOffsetReset = Consumed.OffsetEarliest
+        , sourcePattern = Nothing
+        , sourceNullValues = True
         , sourceWatermarkStrategy = Nothing
         }
 
@@ -1099,8 +1167,17 @@ addGlobalStore builder sourceNm procNm topic ks vs ex updater t0 =
         , sourceExtractor = AnyTimestampExtractor ex
         , sourceOffsetReset = Consumed.OffsetEarliest
         , sourcePattern = Nothing
+        , sourceNullValues = False
         , sourceWatermarkStrategy = Nothing
         }
+
+
+{- | Mark an already-added store as global: one copy per instance,
+fed every partition of its source topics (the runtime's global
+thread), never part of a task.
+-}
+markGlobalStore :: StoreName -> Topology -> Topology
+markGlobalStore sn t = t {topoGlobalStores = Set.insert sn (topoGlobalStores t)}
 
 
 attachToProcessor

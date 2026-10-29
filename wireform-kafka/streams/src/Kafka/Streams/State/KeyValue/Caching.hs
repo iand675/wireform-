@@ -234,6 +234,7 @@ cachingKeyValueStoreBuilder cfg emit base =
   StoreBuilderKV
     { sbKvName = sbKvName base
     , sbKvLogging = sbKvLogging base
+    , sbKvSerdes = sbKvSerdes base
     , sbKvBuild = do
         under <- sbKvBuild base
         cachingKeyValueStore under cfg emit

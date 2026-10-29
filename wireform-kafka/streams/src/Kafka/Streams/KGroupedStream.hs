@@ -23,6 +23,9 @@ Mirrors @org.apache.kafka.streams.kstream.KGroupedStream<K,V>@.
 module Kafka.Streams.KGroupedStream (
   KGroupedStream,
   kgsParent,
+  kgsRepartition,
+  groupedInput,
+  groupedInputOf,
   kgsKey,
   kgsValue,
   kgsBuilder,
@@ -47,17 +50,16 @@ module Kafka.Streams.KGroupedStream (
 import Data.IORef
 import Data.Int (Int64)
 import Kafka.Streams.Grouped (Grouped (..))
+import Data.Text qualified as T
 import Kafka.Streams.KStream (
-  KStream,
-  kstreamBuilder,
-  kstreamKeySerde,
-  kstreamParent,
-  kstreamValueSerde,
+  KStream (..),
+  repartitionThrough,
   selectKey,
   selectKeyWith,
  )
 import Kafka.Streams.Materialized (
   Materialized (..),
+  materializedKV,
  )
 import Kafka.Streams.Processor (
   Processor (..),
@@ -65,11 +67,13 @@ import Kafka.Streams.Processor (
   getStateStore,
   processorName,
  )
-import Kafka.Streams.Serde (Serde)
+import Kafka.Streams.Serde (Serde, int64Serde)
 import Kafka.Streams.State.KeyValue.InMemory (
   inMemoryKeyValueStoreBuilder,
  )
 import Kafka.Streams.State.Store (
+  withStoreSerdesKV,
+  withStoreSerdesW,
   AnyStateStore (..),
   KeyValueStore (..),
   StoreBuilderKV,
@@ -93,6 +97,11 @@ data KGroupedStream k v = KGroupedStream
   , kgsKey :: !(Serde k)
   , kgsValue :: !(Serde v)
   , kgsBuilder :: !StreamsBuilder
+  , kgsRepartition :: !(Maybe (Maybe T.Text))
+  {- ^ @Just name@ when the key may have changed since the stream was
+  last partitioned by it: each aggregation then reads through a
+  repartition topic (named after the 'Grouped' name when given).
+  -}
   }
 
 
@@ -110,6 +119,8 @@ groupByKey g s =
     , kgsKey = groupedKeySerde g
     , kgsValue = groupedValueSerde g
     , kgsBuilder = kstreamBuilder s
+    , kgsRepartition =
+        if kstreamKeyChanged s then Just (groupedName g) else Nothing
     }
 
 
@@ -134,7 +145,43 @@ groupByStream f g s = do
       , kgsKey = groupedKeySerde g
       , kgsValue = groupedValueSerde g
       , kgsBuilder = kstreamBuilder s'
+      , kgsRepartition = Just (groupedName g)
       }
+
+
+{- | The node an aggregation of @kgs@ reads from: its parent, or a
+repartition of it when the key may have changed.
+-}
+groupedInput :: KGroupedStream k v -> IO Topo.NodeName
+groupedInput kgs =
+  groupedInputOf (kgsBuilder kgs) (kgsParent kgs) (kgsKey kgs) (kgsValue kgs) (kgsRepartition kgs)
+
+
+-- | 'groupedInput' from the pieces (shared by the windowed streams).
+groupedInputOf
+  :: StreamsBuilder
+  -> Topo.NodeName
+  -> Serde k
+  -> Serde v
+  -> Maybe (Maybe T.Text)
+  -> IO Topo.NodeName
+groupedInputOf _ parent _ _ Nothing = pure parent
+groupedInputOf b parent ks vs (Just mName) = do
+  s' <-
+    repartitionThrough
+      mName
+      Nothing
+      ks
+      vs
+      Nothing
+      KStream
+        { kstreamBuilder = b
+        , kstreamParent = parent
+        , kstreamKeyChanged = True
+        , kstreamKeySerde = ks
+        , kstreamValueSerde = vs
+        }
+  pure (kstreamParent s')
 
 
 ----------------------------------------------------------------------
@@ -161,15 +208,16 @@ countStream m kgs = do
       pure
       (matName m)
   let supplier =
-        inMemoryKeyValueStoreBuilder storeNm
+        materializedKV m storeNm (kgsKey kgs) int64Serde
           :: StoreBuilderKV k Int64
   nodeNm <- freshNodeName (kgsBuilder kgs) "KSTREAM-AGGREGATE"
+  input <- groupedInput kgs
   withTopology_ (kgsBuilder kgs) $ \t ->
     let !t1 =
           Topo.addProcessorWith
             Topo.ProcessorSpec
               { Topo.processorSpecName = nodeNm
-              , Topo.processorSpecParents = [kgsParent kgs]
+              , Topo.processorSpecParents = [input]
               , Topo.processorSpecSupplier =
                   Topo.AnyProcessor (countProcessor @k @v @Int64 storeNm)
               , Topo.processorSpecStores = []
@@ -202,14 +250,16 @@ reduceStream combine m kgs = do
       (freshStoreName (kgsBuilder kgs) "KSTREAM-REDUCE-STORE")
       pure
       (matName m)
-  let supplier = inMemoryKeyValueStoreBuilder storeNm :: StoreBuilderKV k v
+  let supplier =
+        materializedKV m storeNm (kgsKey kgs) (kgsValue kgs) :: StoreBuilderKV k v
   nodeNm <- freshNodeName (kgsBuilder kgs) "KSTREAM-REDUCE"
+  input <- groupedInput kgs
   withTopology_ (kgsBuilder kgs) $ \t ->
     let !t1 =
           Topo.addProcessorWith
             Topo.ProcessorSpec
               { Topo.processorSpecName = nodeNm
-              , Topo.processorSpecParents = [kgsParent kgs]
+              , Topo.processorSpecParents = [input]
               , Topo.processorSpecSupplier =
                   Topo.AnyProcessor (reduceProcessor @k @v storeNm combine)
               , Topo.processorSpecStores = []
@@ -246,14 +296,17 @@ aggregateStream initial agg m kgs = do
       (freshStoreName (kgsBuilder kgs) "KSTREAM-AGGREGATE-STORE")
       pure
       (matName m)
-  let supplier = inMemoryKeyValueStoreBuilder storeNm :: StoreBuilderKV k a
+  let supplier =
+        materializedKV m storeNm (kgsKey kgs) (error "aggregate: pass Materialized with a value serde for the aggregate type")
+          :: StoreBuilderKV k a
   nodeNm <- freshNodeName (kgsBuilder kgs) "KSTREAM-AGGREGATE"
+  input <- groupedInput kgs
   withTopology_ (kgsBuilder kgs) $ \t ->
     let !t1 =
           Topo.addProcessorWith
             Topo.ProcessorSpec
               { Topo.processorSpecName = nodeNm
-              , Topo.processorSpecParents = [kgsParent kgs]
+              , Topo.processorSpecParents = [input]
               , Topo.processorSpecSupplier =
                   Topo.AnyProcessor
                     (aggregateProcessor @k @v @a storeNm initial agg)
@@ -388,6 +441,7 @@ windowedByTime ws kgs =
     , twksValue = kgsValue kgs
     , twksBuilder = kgsBuilder kgs
     , twksWindows = ws
+    , twksRepartition = kgsRepartition kgs
     }
 
 
@@ -406,6 +460,7 @@ windowedBySession sw kgs =
     , swksValue = kgsValue kgs
     , swksBuilder = kgsBuilder kgs
     , swksWindows = sw
+    , swksRepartition = kgsRepartition kgs
     }
 
 
@@ -419,6 +474,8 @@ data TimeWindowedKStream k v = TimeWindowedKStream
   , twksValue :: !(Serde v)
   , twksBuilder :: !StreamsBuilder
   , twksWindows :: !Windows
+  , twksRepartition :: !(Maybe (Maybe T.Text))
+  -- ^ As 'kgsRepartition'
   }
 
 
@@ -428,6 +485,8 @@ data SessionWindowedKStream k v = SessionWindowedKStream
   , swksValue :: !(Serde v)
   , swksBuilder :: !StreamsBuilder
   , swksWindows :: !SessionWindows
+  , swksRepartition :: !(Maybe (Maybe T.Text))
+  -- ^ As 'kgsRepartition'
   }
 
 

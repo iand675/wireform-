@@ -32,8 +32,9 @@ import Data.IORef
 import Data.Int (Int64)
 import Kafka.Streams.KGroupedStream (
   TimeWindowedKStream (..),
+  groupedInputOf,
  )
-import Kafka.Streams.Materialized (Materialized (..))
+import Kafka.Streams.Materialized (Materialized (..), materializedKV, materializedS, materializedW)
 import Kafka.Streams.Processor (Processor (..), ProcessorContext (..), forwardRecord, getStateStore, processorName)
 import Kafka.Streams.State.Store (
   AnyStateStore (..),
@@ -140,18 +141,16 @@ reduceWindowed combine m twks = do
       pure
       (matName m)
   let supplier =
-        inMemoryWindowStoreBuilder
-          storeNm
-          (windowsSize ws)
-          (windowsRetention ws)
+        materializedW m storeNm (windowsSize ws) (windowsRetention ws) (twksKey twks) (twksValue twks)
           :: StoreBuilderW k v
   procNm <- freshNodeName b "WINDOWED-REDUCE"
+  input <- groupedInputOf b (twksParent twks) (twksKey twks) (twksValue twks) (twksRepartition twks)
   withTopology_ b $ \t ->
     let !t1 =
           Topo.addProcessorWith
             Topo.ProcessorSpec
               { Topo.processorSpecName = procNm
-              , Topo.processorSpecParents = [twksParent twks]
+              , Topo.processorSpecParents = [input]
               , Topo.processorSpecSupplier =
                   Topo.AnyProcessor
                     (windowedReduceProc @k @v storeNm ws combine)
@@ -245,18 +244,16 @@ aggregateWindowed initial agg m twks = do
       pure
       (matName m)
   let supplier =
-        inMemoryWindowStoreBuilder
-          storeNm
-          (windowsSize ws)
-          (windowsRetention ws)
+        materializedW m storeNm (windowsSize ws) (windowsRetention ws) (twksKey twks) (error "aggregate: pass Materialized with a value serde for the aggregate type")
           :: StoreBuilderW k a
   nodeNm <- freshNodeName b "WINDOWED-AGG"
+  input <- groupedInputOf b (twksParent twks) (twksKey twks) (twksValue twks) (twksRepartition twks)
   withTopology_ b $ \t ->
     let !t1 =
           Topo.addProcessorWith
             Topo.ProcessorSpec
               { Topo.processorSpecName = nodeNm
-              , Topo.processorSpecParents = [twksParent twks]
+              , Topo.processorSpecParents = [input]
               , Topo.processorSpecSupplier =
                   Topo.AnyProcessor
                     (windowedAggProc @k @v @a storeNm ws initial agg)

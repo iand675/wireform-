@@ -20,8 +20,9 @@ import Data.IORef
 import Data.Int (Int64)
 import Kafka.Streams.KGroupedStream (
   SessionWindowedKStream (..),
+  groupedInputOf,
  )
-import Kafka.Streams.Materialized (Materialized (..))
+import Kafka.Streams.Materialized (Materialized (..), materializedKV, materializedS, materializedW)
 import Kafka.Streams.Processor (
   Processor (..),
   forwardRecord,
@@ -93,15 +94,16 @@ aggregateSessionWindowed initial agg merger m swks = do
       pure
       (matName m)
   let supplier =
-        inMemorySessionStoreBuilder storeNm (swRetention sw)
+        materializedS m storeNm (swRetention sw) (swksKey swks) (error "aggregate: pass Materialized with a value serde for the aggregate type")
           :: StoreBuilderS k a
   nodeNm <- freshNodeName b "SESSION-AGG"
+  input <- groupedInputOf b (swksParent swks) (swksKey swks) (swksValue swks) (swksRepartition swks)
   withTopology_ b $ \t ->
     let !t1 =
           Topo.addProcessorWith
             Topo.ProcessorSpec
               { Topo.processorSpecName = nodeNm
-              , Topo.processorSpecParents = [swksParent swks]
+              , Topo.processorSpecParents = [input]
               , Topo.processorSpecSupplier =
                   Topo.AnyProcessor
                     (sessionAggProc @k @v @a storeNm sw initial agg merger)

@@ -40,10 +40,15 @@ import Kafka.Streams.KGroupedStream (
   CountedTableLocal (..),
   KGroupedStream,
   kgsBuilder,
-  kgsParent,
+  kgsKey,
+  groupedInput,
  )
+import Kafka.Streams.Serde (Serde)
 import Kafka.Streams.Materialized (
   Materialized (..),
+  materializedKV,
+  materializedS,
+  materializedW,
  )
 import Kafka.Streams.Processor (
   Processor (..),
@@ -99,6 +104,13 @@ data CogroupedStream k a = CogroupedStream
   }
 
 
+-- | The grouping key's serde (every source shares the key type).
+cogroupKeySerde :: CogroupedStream k a -> Serde k
+cogroupKeySerde cgs = case cgs.sources of
+  CogroupSource kgs _ : _ -> kgsKey kgs
+  [] -> error "cogroup: no sources"
+
+
 -- | Start a cogroup with one source.
 cogroup
   :: KGroupedStream k v
@@ -144,7 +156,7 @@ aggregateCogrouped initial m cgs = do
       pure
       (matName m)
   let supplier =
-        inMemoryKeyValueStoreBuilder storeNm
+        materializedKV m storeNm (cogroupKeySerde cgs) (error "aggregate: pass Materialized with a value serde for the aggregate type")
           :: StoreBuilderKV k a
   -- For each source we register the per-side processor immediately,
   -- and only export the side's NODE NAME outside the existential.
@@ -178,12 +190,13 @@ addCogrupSideToTopology
   -> IO a
   -> CogroupSource k a
   -> IO ()
-addCogrupSideToTopology b nm storeNm initial (CogroupSource kgs agg) =
+addCogrupSideToTopology b nm storeNm initial (CogroupSource kgs agg) = do
+  input <- groupedInput kgs
   withTopology_ b $
     Topo.addProcessorWith
       Topo.ProcessorSpec
         { Topo.processorSpecName = nm
-        , Topo.processorSpecParents = [kgsParent kgs]
+        , Topo.processorSpecParents = [input]
         , Topo.processorSpecSupplier =
             Topo.AnyProcessor (cogroupSideProc @k storeNm initial agg)
         , Topo.processorSpecStores = [storeNm]
@@ -290,7 +303,7 @@ aggregateWindowedCogrouped initial m twcg = do
       pure
       (matName m)
   let supplier =
-        inMemoryWindowStoreBuilder storeNm sz ret
+        materializedW m storeNm sz ret (cogroupKeySerde cgs) (error "aggregate: pass Materialized with a value serde for the aggregate type")
           :: StoreBuilderW k a
   ownerNms <-
     traverse
@@ -326,12 +339,13 @@ addCogroupWindowedSide
   -> IO a
   -> CogroupSource k a
   -> IO ()
-addCogroupWindowedSide b nm storeNm sz initial (CogroupSource kgs agg) =
+addCogroupWindowedSide b nm storeNm sz initial (CogroupSource kgs agg) = do
+  input <- groupedInput kgs
   withTopology_ b $
     Topo.addProcessorWith
       Topo.ProcessorSpec
         { Topo.processorSpecName = nm
-        , Topo.processorSpecParents = [kgsParent kgs]
+        , Topo.processorSpecParents = [input]
         , Topo.processorSpecSupplier =
             Topo.AnyProcessor
               (cogroupWindowedSideProc @k storeNm sz initial agg)

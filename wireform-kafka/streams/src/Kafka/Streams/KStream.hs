@@ -112,6 +112,8 @@ module Kafka.Streams.KStream (
   repartition,
   repartitionNamed,
   repartitionWith,
+  repartitionThrough,
+  repartitionIfKeyChanged,
   toKStreamFromKTable,
   groupByKTable,
 
@@ -145,6 +147,7 @@ module Kafka.Streams.KStream (
   -- processor primitives without duplicating the
   -- "fresh node name + addProcessor + return a KStream" boilerplate.
   attachProcessor,
+  attachRekeyingProcessor,
 ) where
 
 import Control.Concurrent.Async qualified
@@ -167,6 +170,7 @@ import Kafka.Streams.KTable (
 import Kafka.Streams.KTable qualified
 import Kafka.Streams.Materialized (
   Materialized (..),
+  materializedKV,
  )
 import Kafka.Streams.Named qualified
 import Kafka.Streams.Processor (
@@ -180,6 +184,7 @@ import Kafka.Streams.Processor (
 import Kafka.Streams.Processor qualified
 import Kafka.Streams.Produced (
   Produced (..),
+  StreamPartitioner,
   produced,
  )
 import Kafka.Streams.Repartitioned qualified as KafkaStreamsRepartitioned
@@ -188,6 +193,8 @@ import Kafka.Streams.State.KeyValue.InMemory (
   inMemoryKeyValueStoreBuilder,
  )
 import Kafka.Streams.State.Store (
+  withStoreSerdesKV,
+  withStoreSerdesW,
   AnyStateStore (..),
   KeyValueStore (..),
   StoreBuilderW,
@@ -232,6 +239,12 @@ data KStream k v = KStream
   , kstreamParent :: !Topo.NodeName
   , kstreamKeySerde :: ~(Serde k)
   , kstreamValueSerde :: ~(Serde v)
+  , kstreamKeyChanged :: !Bool
+  {- ^ Whether an upstream operator may have changed the key since
+  the stream was last partitioned by it (a source, a repartition,
+  a join). Grouping or joining such a stream first repartitions it
+  through an internal topic, as on the JVM.
+  -}
   }
 
 
@@ -266,12 +279,14 @@ streamFromTopic b topic c = do
         , Topo.sourceExtractor = Topo.AnyTimestampExtractor (consumedExtractor c)
         , Topo.sourceOffsetReset = consumedOffsetReset c
         , Topo.sourcePattern = Nothing
+        , Topo.sourceNullValues = False
         , Topo.sourceWatermarkStrategy = consumedWatermark c
         }
   pure
     KStream
       { kstreamBuilder = b
       , kstreamParent = nm
+      , kstreamKeyChanged = False
       , kstreamKeySerde = consumedKeySerde c
       , kstreamValueSerde = consumedValueSerde c
       }
@@ -309,12 +324,14 @@ streamFromPattern b pattern c = do
         , Topo.sourceExtractor = Topo.AnyTimestampExtractor (consumedExtractor c)
         , Topo.sourceOffsetReset = consumedOffsetReset c
         , Topo.sourcePattern = Just pattern
+        , Topo.sourceNullValues = False
         , Topo.sourceWatermarkStrategy = consumedWatermark c
         }
   pure
     KStream
       { kstreamBuilder = b
       , kstreamParent = nm
+      , kstreamKeyChanged = False
       , kstreamKeySerde = consumedKeySerde c
       , kstreamValueSerde = consumedValueSerde c
       }
@@ -339,7 +356,33 @@ attachProcessor
   -> Serde k'
   -> Serde v'
   -> IO (KStream k' v')
-attachProcessor parent prefix supplier ks' vs' = do
+attachProcessor parent prefix supplier ks' vs' =
+  attachProcessorKeyed (kstreamKeyChanged parent) parent prefix supplier ks' vs'
+
+
+{- | 'attachProcessor' for a processor that may change the key
+('selectKey', 'map', 'flatMap', ...): a later grouping or join
+repartitions the result.
+-}
+attachRekeyingProcessor
+  :: KStream k v
+  -> T.Text
+  -> IO (Processor k v)
+  -> Serde k'
+  -> Serde v'
+  -> IO (KStream k' v')
+attachRekeyingProcessor = attachProcessorKeyed True
+
+
+attachProcessorKeyed
+  :: Bool
+  -> KStream k v
+  -> T.Text
+  -> IO (Processor k v)
+  -> Serde k'
+  -> Serde v'
+  -> IO (KStream k' v')
+attachProcessorKeyed keyChanged parent prefix supplier ks' vs' = do
   let b = kstreamBuilder parent
   nm <- freshNodeName b prefix
   withTopology_ b $
@@ -348,6 +391,7 @@ attachProcessor parent prefix supplier ks' vs' = do
     KStream
       { kstreamBuilder = b
       , kstreamParent = nm
+      , kstreamKeyChanged = keyChanged
       , kstreamKeySerde = ks'
       , kstreamValueSerde = vs'
       }
@@ -547,7 +591,7 @@ mapKeyValueMWith
   -> KStream k v
   -> IO (KStream k' v')
 mapKeyValueMWith ks' vs' f s =
-  attachProcessor
+  attachRekeyingProcessor
     s
     "KSTREAM-MAP"
     (mapKVProc @k @v @k' @v' f)
@@ -634,7 +678,7 @@ mapRecordMWith
   -> KStream k v
   -> IO (KStream k' v')
 mapRecordMWith ks' vs' f s =
-  attachProcessor
+  attachRekeyingProcessor
     s
     "KSTREAM-MAPRECORD"
     (mapRecordProc f)
@@ -748,7 +792,7 @@ concatMapKeyValueWith
   -> KStream k v
   -> IO (KStream k' v')
 concatMapKeyValueWith ks' vs' f s =
-  attachProcessor
+  attachRekeyingProcessor
     s
     "KSTREAM-FLATMAP"
     (concatMapKVProc @k @v @k' @v' f)
@@ -887,7 +931,7 @@ selectKeyWith
   -> KStream k v
   -> IO (KStream k' v)
 selectKeyWith ks' f s =
-  attachProcessor
+  attachRekeyingProcessor
     s
     "KSTREAM-SELECTKEY"
     (selectKeyProc @k @v @k' f)
@@ -943,6 +987,7 @@ mergeStreams a b = do
     KStream
       { kstreamBuilder = bld
       , kstreamParent = nm
+      , kstreamKeyChanged = kstreamKeyChanged a || kstreamKeyChanged b
       , kstreamKeySerde = kstreamKeySerde a
       , kstreamValueSerde = kstreamValueSerde a
       }
@@ -1018,6 +1063,7 @@ branchStream preds s = do
     [ KStream
         { kstreamBuilder = b
         , kstreamParent = bn
+        , kstreamKeyChanged = kstreamKeyChanged s
         , kstreamKeySerde = kstreamKeySerde s
         , kstreamValueSerde = kstreamValueSerde s
         }
@@ -1135,7 +1181,9 @@ joinKStreamKTable
   -> KStream k v
   -> KTable k vt
   -> IO (KStream k v')
-joinKStreamKTable joiner _j s tab = do
+joinKStreamKTable joiner _j s0 tab = do
+  -- A re-keyed stream must be co-partitioned with the table first.
+  s <- repartitionIfKeyChanged Nothing s0
   let b = kstreamBuilder s
   nm <- freshNodeName b "KSTREAM-KTABLE-JOIN"
   -- Note on wiring: the join processor's only parent is the
@@ -1158,6 +1206,7 @@ joinKStreamKTable joiner _j s tab = do
     KStream
       { kstreamBuilder = b
       , kstreamParent = nm
+      , kstreamKeyChanged = False
       , kstreamKeySerde = kstreamKeySerde s
       , kstreamValueSerde = serde
       }
@@ -1176,7 +1225,8 @@ leftJoinKStreamKTable
   -> KStream k v
   -> KTable k vt
   -> IO (KStream k v')
-leftJoinKStreamKTable joiner _j s tab = do
+leftJoinKStreamKTable joiner _j s0 tab = do
+  s <- repartitionIfKeyChanged Nothing s0
   let b = kstreamBuilder s
   nm <- freshNodeName b "KSTREAM-KTABLE-LEFTJOIN"
   withTopology_ b $ \t ->
@@ -1194,6 +1244,7 @@ leftJoinKStreamKTable joiner _j s tab = do
     KStream
       { kstreamBuilder = b
       , kstreamParent = nm
+      , kstreamKeyChanged = False
       , kstreamKeySerde = kstreamKeySerde s
       , kstreamValueSerde = serde
       }
@@ -1421,7 +1472,10 @@ buildWindowJoin
   -> (StoreName -> StoreName -> Topo.NodeName -> IO (Processor k v1))
   -> (StoreName -> StoreName -> Topo.NodeName -> IO (Processor k v2))
   -> IO (KStream k v')
-buildWindowJoin sl sr jw prefix mkLeftProc mkRightProc = do
+buildWindowJoin sl0 sr0 jw prefix mkLeftProc mkRightProc = do
+  -- Both sides must be partitioned by the join key.
+  sl <- repartitionIfKeyChanged Nothing sl0
+  sr <- repartitionIfKeyChanged Nothing sr0
   let b = kstreamBuilder sl
   leftStoreNm <- freshStoreName b (prefix <> "-LEFT-STORE")
   rightStoreNm <- freshStoreName b (prefix <> "-RIGHT-STORE")
@@ -1432,10 +1486,16 @@ buildWindowJoin sl sr jw prefix mkLeftProc mkRightProc = do
   let !sz = jw.beforeMs + jw.afterMs + 1
       !ret = sz * 2
       lsb =
-        inMemoryWindowStoreBuilder leftStoreNm sz ret
+        withStoreSerdesW
+          (kstreamKeySerde sl)
+          (kstreamValueSerde sl)
+          (inMemoryWindowStoreBuilder leftStoreNm sz ret)
           :: StoreBuilderW k v1
       rsb =
-        inMemoryWindowStoreBuilder rightStoreNm sz ret
+        withStoreSerdesW
+          (kstreamKeySerde sr)
+          (kstreamValueSerde sr)
+          (inMemoryWindowStoreBuilder rightStoreNm sz ret)
           :: StoreBuilderW k v2
 
   withTopology_ b $ \t ->
@@ -1479,6 +1539,7 @@ buildWindowJoin sl sr jw prefix mkLeftProc mkRightProc = do
     KStream
       { kstreamBuilder = b
       , kstreamParent = mergeNm
+      , kstreamKeyChanged = False
       , kstreamKeySerde = kstreamKeySerde sl
       , kstreamValueSerde =
           error
@@ -1647,7 +1708,7 @@ toTable m s = do
       (matName m)
   procNm <- freshNodeName b "KSTREAM-TOTABLE"
   let supplier =
-        inMemoryKeyValueStoreBuilder storeNm
+        materializedKV m storeNm (kstreamKeySerde s) (kstreamValueSerde s)
           :: Kafka.Streams.State.Store.StoreBuilderKV k v
   withTopology_ b $ \t ->
     let !t1 =
@@ -1713,71 +1774,92 @@ toTableProc sn = do
 -- Repartition
 ----------------------------------------------------------------------
 
-{- | Force a repartition. In a single-task driver this is a
-no-op pass-through; in a multi-task / broker-backed runtime
-the generated topology routes the records through an
-internal repartition topic, which is what triggers the
-actual partitioning.
-
-/JVM equivalent:/ @KStream.repartition()@.
+{- | @KStream.repartition()@ with a topic name: route the stream
+through an internal topic so every record is re-partitioned by its
+current key. The topology gets a sink writing to
+@\<name\>-repartition@ and a source reading it back; against a broker
+the topic is @\<application.id\>-\<name\>-repartition@, created by the
+runtime with as many partitions as the widest upstream source topic.
 -}
 repartition
   :: forall k v
    . T.Text
-  -- ^ topic name prefix
+  -- ^ topic name (the @-repartition@ suffix is added)
   -> KStream k v
   -> IO (KStream k v)
-repartition topicPrefix s = do
-  let b = kstreamBuilder s
-  nm <- freshNodeName b ("KSTREAM-REPARTITION-" <> topicPrefix)
-  withTopology_ b $ \t ->
-    Topo.addProcessor nm [kstreamParent s] (mkPassThrough "KSTREAM-REPARTITION") t
-  pure
-    KStream
-      { kstreamBuilder = b
-      , kstreamParent = nm
-      , kstreamKeySerde = kstreamKeySerde s
-      , kstreamValueSerde = kstreamValueSerde s
-      }
+repartition name s =
+  repartitionThrough (Just name) Nothing (kstreamKeySerde s) (kstreamValueSerde s) Nothing s
 
 
-{- | @KStream.repartition(Repartitioned)@. Wires every
-override the 'Repartitioned' record carries: explicit
-internal-topic name, partition count, key/value serdes, and
-an optional 'StreamPartitioner'.
-
-In the in-process driver only the name override has
-visible effect (we don't emit real partitions); the rest
-threads through the topology to the live runtime where the
-internal repartition topic is created with the requested
-partition count and the per-record routing honours the
-'StreamPartitioner'.
+{- | @KStream.repartition(Repartitioned)@: 'repartition' with the
+'Repartitioned' overrides (topic name, partition count, serdes,
+'StreamPartitioner'), all of which reach the broker runtime.
 -}
 repartitionWith
   :: KafkaStreamsRepartitioned.Repartitioned k v
   -> KStream k v
   -> IO (KStream k v)
-repartitionWith cfg s = do
+repartitionWith cfg s =
+  repartitionThrough
+    cfg.name
+    (fromIntegral <$> cfg.numberOfPartitions)
+    (maybe (kstreamKeySerde s) id cfg.keySerde)
+    (maybe (kstreamValueSerde s) id cfg.valueSerde)
+    cfg.streamPartitioner
+    s
+
+
+{- | The repartition every grouping / join of a key-changed stream
+needs: a sink to an internal topic and a source reading it back.
+Anonymous repartitions take the fresh sink node's name.
+-}
+repartitionThrough
+  :: Maybe T.Text
+  -> Maybe Int
+  -> Serde k
+  -> Serde v
+  -> Maybe (StreamPartitioner k v)
+  -> KStream k v
+  -> IO (KStream k v)
+repartitionThrough mName nParts ks vs mPart s = do
   let b = kstreamBuilder s
-      !prefix = case cfg.name of
-        Just n -> n
-        Nothing -> "REPARTITION"
-  nm <- freshNodeName b ("KSTREAM-REPARTITION-" <> prefix)
+  sinkNm <- freshNodeName b "KSTREAM-REPARTITION-SINK"
+  srcNm <- freshNodeName b "KSTREAM-REPARTITION-SOURCE"
+  let !base = maybe (Topo.unNodeName sinkNm) id mName
+      !topic = Kafka.Streams.Types.topicName (base <> "-repartition")
   withTopology_ b $ \t ->
-    Topo.addProcessor
-      nm
-      [kstreamParent s]
-      (mkPassThrough "KSTREAM-REPARTITION")
-      t
+    let !t1 = Topo.addInternalTopic topic Topo.InternalTopicSpec {Topo.itsPartitions = nParts} t
+        !t2 = case mPart of
+          Nothing -> Topo.addSink sinkNm topic ks vs [kstreamParent s] t1
+          Just sp -> Topo.addSinkPartitioned sinkNm topic ks vs sp [kstreamParent s] t1
+        !t3 =
+          Topo.addSource
+            srcNm
+            [topic]
+            ks
+            vs
+            (consumedExtractor (consumed ks vs))
+            t2
+    in t3
   pure
     KStream
       { kstreamBuilder = b
-      , kstreamParent = nm
-      , kstreamKeySerde =
-          maybe (kstreamKeySerde s) id cfg.keySerde
-      , kstreamValueSerde =
-          maybe (kstreamValueSerde s) id cfg.valueSerde
+      , kstreamParent = srcNm
+      , kstreamKeyChanged = False
+      , kstreamKeySerde = ks
+      , kstreamValueSerde = vs
       }
+
+
+{- | Repartition @s@ first when an upstream operator changed its key
+(what JVM Streams does before a grouping or a join); otherwise @s@
+itself.
+-}
+repartitionIfKeyChanged :: Maybe T.Text -> KStream k v -> IO (KStream k v)
+repartitionIfKeyChanged mName s
+  | kstreamKeyChanged s =
+      repartitionThrough mName Nothing (kstreamKeySerde s) (kstreamValueSerde s) Nothing s
+  | otherwise = pure s
 
 
 ----------------------------------------------------------------------
@@ -1917,6 +1999,7 @@ splitStream branches mDefault s = do
                 KStream
                   { kstreamBuilder = b
                   , kstreamParent = n
+                  , kstreamKeyChanged = kstreamKeyChanged s
                   , kstreamKeySerde = kstreamKeySerde s
                   , kstreamValueSerde = kstreamValueSerde s
                   }
@@ -1950,6 +2033,7 @@ filterStreamNamed nm pred_ s = do
     KStream
       { kstreamBuilder = b
       , kstreamParent = nodeNm
+      , kstreamKeyChanged = kstreamKeyChanged s
       , kstreamKeySerde = kstreamKeySerde s
       , kstreamValueSerde = kstreamValueSerde s
       }
@@ -1972,6 +2056,7 @@ mapValuesNamed nm f s = do
     KStream
       { kstreamBuilder = b
       , kstreamParent = nodeNm
+      , kstreamKeyChanged = kstreamKeyChanged s
       , kstreamKeySerde = kstreamKeySerde s
       , kstreamValueSerde = serde
       }
@@ -1997,6 +2082,7 @@ mapKeyValueNamed nm f s = do
     KStream
       { kstreamBuilder = b
       , kstreamParent = nodeNm
+      , kstreamKeyChanged = True
       , kstreamKeySerde = serde
       , kstreamValueSerde = serde
       }
@@ -2031,6 +2117,7 @@ peekStreamNamed nm act s = do
     KStream
       { kstreamBuilder = b
       , kstreamParent = nodeNm
+      , kstreamKeyChanged = kstreamKeyChanged s
       , kstreamKeySerde = kstreamKeySerde s
       , kstreamValueSerde = kstreamValueSerde s
       }
@@ -2053,6 +2140,7 @@ selectKeyNamed nm f s = do
     KStream
       { kstreamBuilder = b
       , kstreamParent = nodeNm
+      , kstreamKeyChanged = True
       , kstreamKeySerde = serde
       , kstreamValueSerde = kstreamValueSerde s
       }
@@ -2103,6 +2191,7 @@ mapValuesMNamed nm f s = do
     KStream
       { kstreamBuilder = b
       , kstreamParent = nodeNm
+      , kstreamKeyChanged = kstreamKeyChanged s
       , kstreamKeySerde = kstreamKeySerde s
       , kstreamValueSerde = serde
       }
@@ -2125,6 +2214,7 @@ mapKeyValueMNamed nm f s = do
     KStream
       { kstreamBuilder = b
       , kstreamParent = nodeNm
+      , kstreamKeyChanged = True
       , kstreamKeySerde = serde
       , kstreamValueSerde = serde
       }
@@ -2158,6 +2248,7 @@ mapRecordMNamed nm f s = do
     KStream
       { kstreamBuilder = b
       , kstreamParent = nodeNm
+      , kstreamKeyChanged = True
       , kstreamKeySerde = serde
       , kstreamValueSerde = serde
       }
@@ -2180,6 +2271,7 @@ concatMapValuesNamed nm f s = do
     KStream
       { kstreamBuilder = b
       , kstreamParent = nodeNm
+      , kstreamKeyChanged = kstreamKeyChanged s
       , kstreamKeySerde = kstreamKeySerde s
       , kstreamValueSerde = serde
       }
@@ -2202,6 +2294,7 @@ concatMapKeyValueNamed nm f s = do
     KStream
       { kstreamBuilder = b
       , kstreamParent = nodeNm
+      , kstreamKeyChanged = True
       , kstreamKeySerde = serde
       , kstreamValueSerde = serde
       }
@@ -2222,6 +2315,7 @@ valuesStreamNamed nm s = do
     KStream
       { kstreamBuilder = b
       , kstreamParent = nodeNm
+      , kstreamKeyChanged = True
       , kstreamKeySerde = serde
       , kstreamValueSerde = kstreamValueSerde s
       }
@@ -2250,6 +2344,7 @@ mergeStreamsNamed nm a b = do
     KStream
       { kstreamBuilder = bld
       , kstreamParent = nodeNm
+      , kstreamKeyChanged = kstreamKeyChanged a || kstreamKeyChanged b
       , kstreamKeySerde = kstreamKeySerde a
       , kstreamValueSerde = kstreamValueSerde a
       }
@@ -2335,6 +2430,7 @@ processValuesStream prefix stores supplier vs s = do
     KStream
       { kstreamBuilder = b
       , kstreamParent = nm
+      , kstreamKeyChanged = kstreamKeyChanged s
       , kstreamKeySerde = kstreamKeySerde s
       , kstreamValueSerde = vs
       }
@@ -2368,6 +2464,7 @@ toKStreamFromKTable kt = do
     KStream
       { kstreamBuilder = b
       , kstreamParent = nm
+      , kstreamKeyChanged = False
       , kstreamKeySerde = Kafka.Streams.KTable.ktableKeySerde kt
       , kstreamValueSerde = Kafka.Streams.KTable.ktableValueSerde kt
       }
@@ -2496,6 +2593,7 @@ mergeStreamsN (s : ss) = do
     KStream
       { kstreamBuilder = bld
       , kstreamParent = nm
+      , kstreamKeyChanged = any kstreamKeyChanged (s : ss)
       , kstreamKeySerde = kstreamKeySerde s
       , kstreamValueSerde = kstreamValueSerde s
       }
@@ -2556,6 +2654,7 @@ valuesStream s = do
     KStream
       { kstreamBuilder = b
       , kstreamParent = nm
+      , kstreamKeyChanged = True
       , kstreamKeySerde = serde
       , kstreamValueSerde = kstreamValueSerde s
       }

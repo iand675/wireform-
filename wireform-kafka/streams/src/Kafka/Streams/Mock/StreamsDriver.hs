@@ -272,7 +272,7 @@ tickAtLeastOnce d = do
       (driverEngine d)
       tp
       (srKey sr)
-      (srValue sr)
+      (Just (srValue sr))
       (KH.fromList (srHeaders sr))
       (srTimestamp sr)
       (fromIntegral p)
@@ -305,7 +305,7 @@ tickExactlyOnce d = do
           (driverEngine d)
           tp
           (srKey sr)
-          (srValue sr)
+          (Just (srValue sr))
           (KH.fromList (srHeaders sr))
           (srTimestamp sr)
           (fromIntegral p)

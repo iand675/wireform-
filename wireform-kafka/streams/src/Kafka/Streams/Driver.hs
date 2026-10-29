@@ -75,6 +75,7 @@ module Kafka.Streams.Driver (
   createOutputTopic,
   pipeKV,
   pipeKVAt,
+  pipeTombstone,
   pipeValue,
   pipeAll,
   readKV,
@@ -212,7 +213,7 @@ pipeInput
   -- ^ partition (advisory)
   -> IO ()
 pipeInput d topic key value ts part =
-  pipeInputH d topic key value emptyHeaders ts part
+  pipeInputH d topic key (Just value) emptyHeaders ts part
 
 
 {- | Like 'pipeInput' but carries record headers into the topology.
@@ -223,9 +224,9 @@ pipeInputH
   :: TopologyTestDriver
   -> TopicName
   -> Maybe ByteString
-  -- ^ key bytes (or 'Nothing' for a tombstone)
-  -> ByteString
-  -- ^ value bytes
+  -- ^ key bytes ('Nothing' for a keyless record)
+  -> Maybe ByteString
+  -- ^ value bytes ('Nothing' for a null value, a tombstone)
   -> Headers
   -- ^ record headers
   -> Timestamp
@@ -437,7 +438,7 @@ drainInternalLoop d = go (8 :: Int)
         (driverEngine d)
         (crTopic cr)
         (crKey cr)
-        (crValueBytes cr)
+        (crValue cr)
         (crHeaders cr)
         (crTimestamp cr)
         0
@@ -549,6 +550,21 @@ pipeKVAt TestInputTopic {..} mk v ts part = do
   let kBytes = fmap (Kafka.Streams.Serde.serialize titKeySerde) mk
       vBytes = Kafka.Streams.Serde.serialize titValSerde v
   pipeInput titDriver titTopic kBytes vBytes ts part
+
+
+{- | Pipe a tombstone (a null value) for @k@: a table source deletes
+the key; a stream source drops the record.
+-}
+pipeTombstone :: TestInputTopic k v -> k -> IO ()
+pipeTombstone TestInputTopic {..} k =
+  pipeInputH
+    titDriver
+    titTopic
+    (Just (Kafka.Streams.Serde.serialize titKeySerde k))
+    Nothing
+    emptyHeaders
+    (Timestamp 0)
+    0
 
 
 -- | Pipe a single value with no key.
