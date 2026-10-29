@@ -28,6 +28,7 @@ import Kafka.Streams.InteractiveQueries (ReadOnlyKeyValueStore (..), queryKVStor
 import Kafka.Streams.Runtime.Driver (DriverRecord (..))
 import Kafka.Streams.Runtime.MockBroker
 import Streams.RuntimeHarness
+import Kafka.Streams.Serde.Windowed (windowedSerde)
 import Test.Syd
 
 
@@ -43,6 +44,7 @@ tests =
     it "a table tombstone deletes the key from the store" table_tombstone
     it "refuses a stateful subtopology over non-co-partitioned topics" not_copartitioned
     it "processing failures follow the processing and uncaught-exception handlers" processing_handlers
+    it "a suppressed window is emitted after a restart restored its buffer" suppress_survives_restart
 
 
 shared_repartition :: IO ()
@@ -281,3 +283,39 @@ processing_handlers = withStateDirs 2 $ \[d1, d2] -> do
 
 lastMaybe :: [a] -> Maybe a
 lastMaybe = foldl (\_ x -> Just x) Nothing
+
+
+suppress_survives_restart :: IO ()
+suppress_survives_restart = withStateDirs 2 $ \[d1, d2] -> do
+  broker <- newMockBroker (Just 1)
+  mockCreateTopic broker "in" 1
+  b <- newStreamsBuilder
+  src <- streamFromTopic b (topicName "in") (consumed textSerde textSerde)
+  h <- countWindowed (withValueSerde int64Serde materialized) (windowedByTime (tumblingWindows (millis 100)) (groupByKey (grouped textSerde textSerde) src))
+  st <- streamFromWindowedHandle h textSerde int64Serde
+  closed <- suppressWindowed (millis 0) 100 st
+  toTopic (topicName "out") (produced (windowedSerde textSerde) int64Serde) closed
+  topo <- buildTopology b >>= either (error . show) pure . validateTopology
+  let cfg d = testConfig "supp" d
+      produceAt ts = mockProduce broker "in" (Just (textBytes "k")) (Just "x") ts
+  a <- startOn broker (cfg d1) topo
+  ( do
+      eventually [a] "assigned" (not . null <$> ownedPartitions a)
+      produceAt 10
+      produceAt 20
+      -- processed, buffered (the window is open), then committed by the clean close
+      _ <- awaitTicks a 50
+      visible broker "out" >>= (`shouldSatisfy` null)
+    )
+    `finally` closeAll [a]
+  -- a fresh instance restores the buffer from its changelog; stream
+  -- time passing the window's end lets it out
+  c <- startOn broker (cfg d2) topo
+  ( do
+      eventually [c] "assigned" (not . null <$> ownedPartitions c)
+      produceAt 150
+      eventually [c] "the closed window emitted" $ do
+        outs <- visible broker "out"
+        pure (map (fmap decodeI64 . (.drValue)) outs == [Just 2])
+    )
+    `finally` closeAll [c]

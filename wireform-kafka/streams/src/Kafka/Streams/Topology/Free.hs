@@ -3937,7 +3937,7 @@ downstream sinks have them available. /JVM equivalent:/
 -}
 streamFromWindowed
   :: forall k v
-   . (Ord k, Eq v, HasSerde k, HasSerde v)
+   . (Ord k, HasSerde k, HasSerde v)
   => Topology (TWKS.WindowedTableHandle k v) (KStream (WindowedKey k) v)
 streamFromWindowed =
   liftIO_ "streamFromWindowed" $ \_b h ->

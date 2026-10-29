@@ -85,12 +85,12 @@ import Data.ByteString.Builder qualified as BB
 import Data.ByteString.Lazy qualified as BSL
 import Data.IORef
 import Data.Int (Int64)
-import Data.List qualified as List
 import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Text qualified as T
+import Control.Monad (forM_, when)
 import GHC.Generics (Generic)
 import Kafka.Streams.KStream (KStream (..))
-import Kafka.Streams.KStream qualified
 import Kafka.Streams.Processor (
   Processor (..),
   ProcessorContext (..),
@@ -115,13 +115,11 @@ import Kafka.Streams.State.Store (
   StoreBuilderKV,
   SessionKey (..),
   StoreName,
-  WindowStore (..),
   WindowedKey (..),
   kvIteratorToList,
  )
 import Kafka.Streams.Serde.Windowed (sessionKeySerde, windowedSerde)
 import Kafka.Streams.StreamsBuilder (
-  StreamsBuilder,
   freshNodeName,
   freshStoreName,
   withTopology_,
@@ -147,7 +145,7 @@ of the underlying window store.
 -}
 streamFromWindowedHandle
   :: forall k v
-   . (Ord k, Eq v)
+   . Ord k
   => WindowedTableHandle k v
   -> Serde k
   -- ^ key serde for downstream
@@ -242,9 +240,9 @@ suppressWindowedWith grace windowSize bufCfg s = do
   let bufBuilder =
         withStoreSerdesKV
           (kstreamKeySerde s)
-          (kstreamValueSerde s)
+          (bufferedSerde (kstreamValueSerde s))
           (inMemoryKeyValueStoreBuilder bufNm)
-          :: StoreBuilderKV (WindowedKey k) v
+          :: StoreBuilderKV (WindowedKey k) (Buffered v)
   withTopology_ b $ \t ->
     let !t1 =
           Topo.addProcessorWith
@@ -357,9 +355,9 @@ suppressWindowedShed grace windowSize shelf s = do
   let bufBuilder =
         withStoreSerdesKV
           (kstreamKeySerde s)
-          (kstreamValueSerde s)
+          (bufferedSerde (kstreamValueSerde s))
           (inMemoryKeyValueStoreBuilder bufNm)
-          :: StoreBuilderKV (WindowedKey k) v
+          :: StoreBuilderKV (WindowedKey k) (Buffered v)
   withTopology_ b $ \t ->
     let !t1 =
           Topo.addProcessorWith
@@ -397,103 +395,19 @@ suppressWindowedShedProc
   -> Int64 -- window size ms
   -> DeadLetterShelf k v
   -> IO (Processor (WindowedKey k) v)
-suppressWindowedShedProc sn graceMs winMs shelf = do
-  ctxRef <- newIORef Nothing
-  bufRef <- newIORef (Nothing :: Maybe (KeyValueStore (WindowedKey k) v))
-  sizeRef <- newIORef (0 :: Int)
-  let !cap_ = shelf.dlsRecordCap
-  pure
-    Processor
-      { procName = processorName "SUPPRESS-SHED"
-      , procInit = \ctx -> do
-          writeIORef ctxRef (Just ctx)
-          getStateStore ctx sn >>= \case
-            Just (AnyKeyValueStore kvs) ->
-              writeIORef bufRef (Just (Unsafe.unsafeCoerce kvs))
-            _ -> error $ "suppress-shed: buffer store missing: " <> show sn
-          -- Same flush-on-stream-time-advance contract as
-          -- 'suppressWindowedProc'; see comment there.
-          _ <-
-            schedule
-              ctx
-              1
-              StreamTimePunctuation
-              ( Punctuator $ \_ -> do
-                  mbuf' <- readIORef bufRef
-                  case mbuf' of
-                    Just buf_ -> flushDueShed ctx buf_ sizeRef
-                    Nothing -> pure ()
-              )
-          pure ()
-      , procClose = pure ()
-      , procProcess = \r -> case recordKey r of
-          Nothing -> pure ()
-          Just wk -> do
-            mctx <- readIORef ctxRef
-            mbuf <- readIORef bufRef
-            case (mctx, mbuf) of
-              (Just ctx, Just buf_) -> do
-                existing <- kvsGet buf_ wk
-                kvsPut buf_ wk (recordValue r)
-                case existing of
-                  Just _ -> pure ()
-                  Nothing -> modifyIORef' sizeRef (+ 1)
-                flushDueShed ctx buf_ sizeRef
-                enforceShed ctx buf_ sizeRef cap_
-              _ -> pure ()
-      }
-  where
-    flushDueShed ctx buf_ sizeRef = do
-      Timestamp now <- effectiveTime ctx
-      it <- kvsAll buf_
-      entries <- kvIteratorToList it
-      mapM_
-        ( \(wk@(WindowedKey _ (Timestamp wstart)), v) -> do
-            let !winEnd = wstart + winMs
-            if now > winEnd + graceMs
-              then do
-                _ <- kvsDelete buf_ wk
-                modifyIORef' sizeRef (\n -> max 0 (n - 1))
-                forwardRecord
-                  ctx
-                  ( Record (Just wk) v (Timestamp winEnd) emptyHeaders
-                      :: Record (WindowedKey k) v
-                  )
-              else pure ()
-        )
-        entries
-    enforceShed ctx buf_ sizeRef cap = do
-      cur <- readIORef sizeRef
-      if cur <= cap
-        then pure ()
-        else do
-          it <- kvsAll buf_
-          entries <- kvIteratorToList it
-          let !ordered =
-                List.sortOn (\(WindowedKey _ ts, _) -> ts) entries
-          shedUntil ctx buf_ sizeRef cap ordered
-    shedUntil _ _ _ _ [] = pure ()
-    shedUntil ctx buf_ sizeRef cap ((wk, v) : rest) = do
-      cur <- readIORef sizeRef
-      if cur <= cap
-        then pure ()
-        else do
-          let !keyBytes = Just (serialize shelf.dlsKeySerde wk)
-              !valBytes = serialize shelf.dlsValueSerde v
-              !ts = let WindowedKey _ wstart = wk in wstart
-          _ <- kvsDelete buf_ wk
-          modifyIORef' sizeRef (\n -> max 0 (n - 1))
-          ctxEmitToTopic
-            ctx
-            ( Kafka.Streams.Processor.SinkEmit
-                { Kafka.Streams.Processor.seTopic = unTopicName shelf.dlsTopic
-                , Kafka.Streams.Processor.seKey = keyBytes
-                , Kafka.Streams.Processor.seValue = valBytes
-                , Kafka.Streams.Processor.seTimestamp = ts
-                , Kafka.Streams.Processor.seHeaders = emptyHeaders
-                }
-            )
-          shedUntil ctx buf_ sizeRef cap rest
+suppressWindowedShedProc sn graceMs winMs shelf =
+  untilWindowClosesProc "SUPPRESS-SHED" sn graceMs winMs (Just shelf.dlsRecordCap) $ \ctx (wk, _) ->
+    -- over the cap: the oldest windows go to the side topic
+    \bv ->
+      ctxEmitToTopic
+        ctx
+        Kafka.Streams.Processor.SinkEmit
+          { Kafka.Streams.Processor.seTopic = unTopicName shelf.dlsTopic
+          , Kafka.Streams.Processor.seKey = Just (serialize shelf.dlsKeySerde wk)
+          , Kafka.Streams.Processor.seValue = serialize shelf.dlsValueSerde bv.bValue
+          , Kafka.Streams.Processor.seTimestamp = let WindowedKey _ wstart = wk in wstart
+          , Kafka.Streams.Processor.seHeaders = emptyHeaders
+          }
 
 
 suppressWindowedProc
@@ -504,141 +418,65 @@ suppressWindowedProc
   -> Int64 -- window size ms
   -> BufferConfig
   -> IO (Processor (WindowedKey k) v)
-suppressWindowedProc sn graceMs winMs bufCfg = do
-  ctxRef <- newIORef Nothing
-  bufRef <- newIORef (Nothing :: Maybe (KeyValueStore (WindowedKey k) v))
-  -- Live count of records currently buffered. Bumped on
-  -- 'kvsPut', decremented on each flush. Used to enforce the
-  -- BufferConfig cap.
-  sizeRef <- newIORef (0 :: Int)
-  let !cap_ = bufferConfigCap bufCfg
-      !policy = bufCfg.overflow
+suppressWindowedProc sn graceMs winMs bufCfg =
+  untilWindowClosesProc "SUPPRESS" sn graceMs winMs (bufferConfigCap bufCfg) $ \ctx (wk, n) bv ->
+    case bufCfg.overflow of
+      ShutdownWhenFull -> throwIO (SuppressBufferFullException sn (maybe 0 id (bufferConfigCap bufCfg)) n)
+      EmitEarlyWhenFull -> forwardRecord ctx (Record (Just wk) bv.bValue (Timestamp bv.bTs) emptyHeaders)
+      DropOldestSilently -> pure ()
+
+
+{- | @suppress(untilWindowCloses)@: each window's latest value waits in
+the buffer until stream time reaches its end plus the grace period
+(when its aggregation stops taking updates), then goes downstream at
+the timestamp of its last update, oldest window first. Over the cap,
+@overCap@ decides what becomes of the oldest windows (it is handed
+the window and the buffer's size).
+-}
+untilWindowClosesProc
+  :: forall k v
+   . Ord k
+  => T.Text
+  -> StoreName
+  -> Int64 -- grace ms
+  -> Int64 -- window size ms
+  -> Maybe Int
+  -> (ProcessorContext -> (WindowedKey k, Int) -> Buffered v -> IO ())
+  -> IO (Processor (WindowedKey k) v)
+untilWindowClosesProc nm sn graceMs winMs cap overCap = do
+  ref <- newIORef Nothing
+  let flushDue ctx tb = do
+        Timestamp now <- effectiveTime ctx
+        tbEvictWhile tb (\end -> end + graceMs <= now) $ \(wk, bv) ->
+          forwardRecord ctx (Record (Just wk) bv.bValue (Timestamp bv.bTs) emptyHeaders)
+      enforce ctx tb = forM_ cap $ \c -> do
+        n <- tbSize tb
+        when (n > c) $ tbEvictOldest tb (n - c) $ \(wk, bv) -> overCap ctx (wk, n) bv
   pure
     Processor
-      { procName = processorName "SUPPRESS"
+      { procName = processorName nm
       , procInit = \ctx -> do
-          writeIORef ctxRef (Just ctx)
-          getStateStore ctx sn >>= \case
-            Just (AnyKeyValueStore kvs) ->
-              writeIORef bufRef (Just (Unsafe.unsafeCoerce kvs))
-            _ -> error $ "suppress: buffer store missing: " <> show sn
-          -- Mirror Java's @Suppressed@: the suppress operator
-          -- registers a stream-time punctuator so windows whose
-          -- close time has been crossed get flushed even when no
-          -- new input arrives for the affected key. We fire on
-          -- every stream-time advance (@interval = 1@) because the
-          -- punctuator framework only fires once per advance, so
-          -- a larger interval would let advances slip past closed
-          -- windows in between fires.
-          let !punInterval = 1 :: Int
-          _ <-
-            schedule
-              ctx
-              punInterval
-              StreamTimePunctuation
-              ( Punctuator $ \_ -> do
-                  mbuf' <- readIORef bufRef
-                  case mbuf' of
-                    Just buf_ -> flushDue ctx buf_ sizeRef
-                    Nothing -> pure ()
-              )
+          tb <-
+            getStateStore ctx sn >>= \case
+              Just (AnyKeyValueStore kvs) -> newTimeBuffer (Unsafe.unsafeCoerce kvs)
+              _ -> error $ "suppress: buffer store missing: " <> show sn
+          writeIORef ref (Just (ctx, tb))
+          -- like the JVM's suppress, flush on stream time alone, so a
+          -- window closes even when its key sees no more input
+          _ <- schedule ctx 1 StreamTimePunctuation (Punctuator (\_ -> flushDue ctx tb))
           pure ()
       , procClose = pure ()
-      , procProcess = \r -> case recordKey r of
-          Nothing -> pure ()
-          Just wk -> do
-            mctx <- readIORef ctxRef
-            mbuf <- readIORef bufRef
-            case (mctx, mbuf) of
-              (Just ctx, Just buf_) -> do
-                -- If the key is already in the buffer the put
-                -- is an in-place update (no size growth).
-                existing <- kvsGet buf_ wk
-                kvsPut buf_ wk (recordValue r)
-                case existing of
-                  Just _ -> pure ()
-                  Nothing -> modifyIORef' sizeRef (+ 1)
-                -- Run the normal due-window flush first so
-                -- naturally-due windows leave before we have to
-                -- consider overflow.
-                flushDue ctx buf_ sizeRef
-                -- Now enforce the cap, if any.
-                enforceCap ctx buf_ sizeRef cap_ policy
-              _ -> pure ()
+      , procProcess = \r -> do
+          m <- readIORef ref
+          case (m, recordKey r) of
+            (Just (ctx, tb), Just wk@(WindowedKey _ (Timestamp wstart))) -> do
+              let Timestamp ts = recordTimestamp r
+              -- buffered by the window's end
+              tbPut tb wk (\_ -> Buffered (wstart + winMs) ts (recordValue r))
+              flushDue ctx tb
+              enforce ctx tb
+            _ -> pure ()
       }
-  where
-    flushDue ctx buf_ sizeRef = do
-      Timestamp now <- effectiveTime ctx
-      it <- kvsAll buf_
-      entries <- kvIteratorToList it
-      mapM_
-        ( \(wk@(WindowedKey _ (Timestamp wstart)), v) -> do
-            let !winEnd = wstart + winMs
-            if now > winEnd + graceMs
-              then do
-                _ <- kvsDelete buf_ wk
-                modifyIORef' sizeRef (\n -> max 0 (n - 1))
-                forwardRecord
-                  ctx
-                  ( Record (Just wk) v (Timestamp winEnd) emptyHeaders
-                      :: Record (WindowedKey k) v
-                  )
-              else pure ()
-        )
-        entries
-    enforceCap _ _ _ Nothing _ = pure ()
-    enforceCap ctx buf_ sizeRef (Just cap) policy = do
-      cur <- readIORef sizeRef
-      if cur <= cap
-        then pure ()
-        else case policy of
-          ShutdownWhenFull ->
-            throwIO (SuppressBufferFullException sn cap cur)
-          EmitEarlyWhenFull -> do
-            ordered <- orderedEntries buf_
-            evictUntil EvictEmit ctx buf_ sizeRef cap ordered
-          DropOldestSilently -> do
-            ordered <- orderedEntries buf_
-            evictUntil EvictDrop ctx buf_ sizeRef cap ordered
-    -- Eviction mode: should the evicted record be forwarded
-    -- downstream, or silently dropped?
-    --
-    -- 'EmitEarlyWhenFull' uses 'EvictEmit'; 'DropOldestSilently'
-    -- uses 'EvictDrop'. The shed-to-DLQ operator
-    -- ('suppressWindowedShed') has its own variant in
-    -- 'suppressWindowedShedProc'.
-    orderedEntries buf_ = do
-      it <- kvsAll buf_
-      entries <- kvIteratorToList it
-      pure (List.sortOn (\(WindowedKey _ ts, _) -> ts) entries)
-    evictUntil _ _ _ _ _ [] = pure ()
-    evictUntil
-      mode
-      ctx
-      buf_
-      sizeRef
-      cap
-      ((wk@(WindowedKey _ (Timestamp wstart)), v) : rest) = do
-        cur <- readIORef sizeRef
-        if cur <= cap
-          then pure ()
-          else do
-            let !winEnd = wstart + winMs
-            _ <- kvsDelete buf_ wk
-            modifyIORef' sizeRef (\n -> max 0 (n - 1))
-            case mode of
-              EvictEmit ->
-                forwardRecord
-                  ctx
-                  ( Record (Just wk) v (Timestamp winEnd) emptyHeaders
-                      :: Record (WindowedKey k) v
-                  )
-              EvictDrop -> pure ()
-            evictUntil mode ctx buf_ sizeRef cap rest
-
-
--- | Per-call eviction mode for the 'enforceCap' helper.
-data EvictMode = EvictEmit | EvictDrop
 
 
 {- | Effective record cap for a 'BufferConfig'. We treat
@@ -676,9 +514,9 @@ suppressUntilTimeLimit timeLimit s = do
   let bufBuilder =
         withStoreSerdesKV
           (kstreamKeySerde s)
-          (stampedSerde (kstreamValueSerde s))
+          (bufferedSerde (kstreamValueSerde s))
           (inMemoryKeyValueStoreBuilder bufNm)
-          :: StoreBuilderKV k (Int64, v)
+          :: StoreBuilderKV k (Buffered v)
   withTopology_ b $ \t ->
     let !t1 =
           Topo.addProcessorWith
@@ -706,6 +544,11 @@ suppressUntilTimeLimit timeLimit s = do
       }
 
 
+{- | @suppress(untilTimeLimit)@: a key's first buffered record starts
+its wait; later ones replace the value (not the wait) until stream
+time reaches the start plus @limitMs@, when the latest goes downstream
+at its own timestamp (the JVM's time-ordered buffer).
+-}
 suppressTimeLimitProc
   :: forall k v
    . Ord k
@@ -713,72 +556,133 @@ suppressTimeLimitProc
   -> Int64
   -> IO (Processor k v)
 suppressTimeLimitProc sn limitMs = do
-  ctxRef <- newIORef Nothing
-  bufRef <- newIORef (Nothing :: Maybe (KeyValueStore k (Int64, v)))
+  ref <- newIORef Nothing
+  let flushDue ctx tb = do
+        Timestamp now <- effectiveTime ctx
+        tbEvictWhile tb (\first -> first + limitMs <= now) $ \(k, bv) ->
+          forwardRecord ctx (Record (Just k) bv.bValue (Timestamp bv.bTs) emptyHeaders)
   pure
     Processor
       { procName = processorName "SUPPRESS-DEBOUNCE"
       , procInit = \ctx -> do
-          writeIORef ctxRef (Just ctx)
-          getStateStore ctx sn >>= \case
-            Just (AnyKeyValueStore kvs) ->
-              writeIORef bufRef (Just (Unsafe.unsafeCoerce kvs))
-            _ -> error $ "suppress-debounce: buffer missing: " <> show sn
-          -- Same flush-on-stream-time-advance contract as
-          -- 'suppressWindowedProc'; without it, a debounced key
-          -- whose source goes silent for longer than 'limitMs'
-          -- would sit in the buffer forever even though the
-          -- runtime's clock has crossed @firstSeen + limitMs@.
-          _ <-
-            schedule
-              ctx
-              1
-              StreamTimePunctuation
-              ( Punctuator $ \_ -> do
-                  mbuf' <- readIORef bufRef
-                  case mbuf' of
-                    Just buf_ -> do
-                      Timestamp now <- effectiveTime ctx
-                      flushExpired ctx buf_ now
-                    Nothing -> pure ()
-              )
+          tb <-
+            getStateStore ctx sn >>= \case
+              Just (AnyKeyValueStore kvs) -> newTimeBuffer (Unsafe.unsafeCoerce kvs)
+              _ -> error $ "suppress-debounce: buffer missing: " <> show sn
+          writeIORef ref (Just (ctx, tb))
+          _ <- schedule ctx 1 StreamTimePunctuation (Punctuator (\_ -> flushDue ctx tb))
           pure ()
       , procClose = pure ()
-      , procProcess = \r -> case recordKey r of
-          Nothing -> pure ()
-          Just k -> do
-            mctx <- readIORef ctxRef
-            mbuf <- readIORef bufRef
-            case (mctx, mbuf) of
-              (Just ctx, Just buf_) -> do
-                Timestamp now <- effectiveTime ctx
-                -- Step 1: flush any expired buffered entries (the
-                -- existing buffered value, NOT the just-arrived one).
-                flushExpired ctx buf_ now
-                -- Step 2: re-read this key and decide whether to
-                -- start a new debounce window or extend the current.
-                mPrev <- kvsGet buf_ k
-                let !firstSeen = case mPrev of
-                      Just (ts, _) -> ts
-                      Nothing -> now
-                kvsPut buf_ k (firstSeen, recordValue r)
-              _ -> pure ()
+      , procProcess = \r -> do
+          m <- readIORef ref
+          case (m, recordKey r) of
+            (Just (ctx, tb), Just k) -> do
+              let Timestamp ts = recordTimestamp r
+              tbPut tb k (\prev -> Buffered (maybe ts (.bTime) prev) ts (recordValue r))
+              flushDue ctx tb
+            _ -> pure ()
       }
+
+
+----------------------------------------------------------------------
+-- The time-ordered buffer
+----------------------------------------------------------------------
+
+-- | A buffered value: when it is due from, the timestamp it goes out at, and the value.
+data Buffered v = Buffered
+  { bTime :: {-# UNPACK #-} !Int64
+  , bTs :: {-# UNPACK #-} !Int64
+  , bValue :: !v
+  }
+
+
+{- | A suppress buffer: the store (logged, so it survives a restart)
+and an index of its keys by buffer time, built from the store on first
+use (after any restore), so that eviction costs the evicted entries,
+not a scan of the buffer.
+-}
+data TimeBuffer k v = TimeBuffer
+  { tbStore :: !(KeyValueStore k (Buffered v))
+  , tbIndex :: !(IORef (Maybe (Set.Set (Int64, k), Map.Map k Int64)))
+  }
+
+
+newTimeBuffer :: KeyValueStore k (Buffered v) -> IO (TimeBuffer k v)
+newTimeBuffer kvs = TimeBuffer kvs <$> newIORef Nothing
+
+
+indexOf :: Ord k => TimeBuffer k v -> IO (Set.Set (Int64, k), Map.Map k Int64)
+indexOf tb =
+  readIORef tb.tbIndex >>= \case
+    Just ix -> pure ix
+    Nothing -> do
+      rows <- kvsAll tb.tbStore >>= kvIteratorToList
+      let !ix = (Set.fromList (map (\(k, bv) -> (bv.bTime, k)) rows), Map.fromList (map (\(k, bv) -> (k, bv.bTime)) rows))
+      writeIORef tb.tbIndex (Just ix)
+      pure ix
+
+
+-- | Buffer @k@'s new entry, computed from its current one.
+tbPut :: Ord k => TimeBuffer k v -> k -> (Maybe (Buffered v) -> Buffered v) -> IO ()
+tbPut tb k f = do
+  (order, times) <- indexOf tb
+  prev <- kvsGet tb.tbStore k
+  let !bv = f prev
+  kvsPut tb.tbStore k bv
+  let order' = Set.insert (bv.bTime, k) (maybe order (\t -> Set.delete (t, k) order) (Map.lookup k times))
+  writeIORef tb.tbIndex (Just (order', Map.insert k bv.bTime times))
+
+
+tbSize :: Ord k => TimeBuffer k v -> IO Int
+tbSize tb = Map.size . snd <$> indexOf tb
+
+
+-- | Take out, oldest first, the entries whose buffer time satisfies @due@.
+tbEvictWhile :: Ord k => TimeBuffer k v -> (Int64 -> Bool) -> ((k, Buffered v) -> IO ()) -> IO ()
+tbEvictWhile tb due emit = go
   where
-    flushExpired ctx buf_ now = do
-      it <- kvsAll buf_
-      entries <- kvIteratorToList it
-      mapM_
-        ( \(k, (firstSeen, v)) ->
-            if now >= firstSeen + limitMs
-              then do
-                _ <- kvsDelete buf_ k
-                forwardRecord
-                  ctx
-                  (Record (Just k) v (Timestamp now) emptyHeaders :: Record k v)
-              else pure ()
-        )
-        entries
+    go = do
+      (order, _) <- indexOf tb
+      case Set.lookupMin order of
+        Just (t, k) | due t -> evictOne tb k emit >> go
+        _ -> pure ()
+
+
+-- | Take out the @n@ oldest entries.
+tbEvictOldest :: Ord k => TimeBuffer k v -> Int -> ((k, Buffered v) -> IO ()) -> IO ()
+tbEvictOldest tb n emit
+  | n <= 0 = pure ()
+  | otherwise = do
+      (order, _) <- indexOf tb
+      forM_ (Set.lookupMin order) $ \(_, k) -> evictOne tb k emit >> tbEvictOldest tb (n - 1) emit
+
+
+evictOne :: Ord k => TimeBuffer k v -> k -> ((k, Buffered v) -> IO ()) -> IO ()
+evictOne tb k emit = do
+  (order, times) <- indexOf tb
+  mbv <- kvsDelete tb.tbStore k
+  writeIORef tb.tbIndex (Just (maybe order (\t -> Set.delete (t, k) order) (Map.lookup k times), Map.delete k times))
+  mapM_ (\bv -> emit (k, bv)) mbv
+
+
+{- | A buffered entry's changelog bytes: its buffer time and timestamp
+(8 bytes big-endian each), then the value's.
+-}
+bufferedSerde :: Serde v -> Serde (Buffered v)
+bufferedSerde vs =
+  Serde
+    { serialize = \(Buffered t ts v) ->
+        BSL.toStrict (BB.toLazyByteString (BB.int64BE t <> BB.int64BE ts)) <> serialize vs v
+    , deserialize = \bs ->
+        if BS.length bs < 16
+          then Left "suppress buffer entry shorter than its 16-byte header"
+          else
+            let (tb, rest) = BS.splitAt 8 bs
+                (tsb, vb) = BS.splitAt 8 rest
+                be = BS.foldl' (\acc w -> acc * 256 + fromIntegral w) 0
+            in Buffered (be tb) (be tsb) <$> deserialize vs vb
+    , serializeHeaders = serializeHeaders vs . (.bValue)
+    }
 
 
 ----------------------------------------------------------------------
@@ -842,7 +746,7 @@ Mirrors @KTable.suppress(Suppressed.untilWindowCloses(...))@.
 -}
 suppressWindowedHandle
   :: forall k v
-   . (Ord k, Eq v)
+   . Ord k
   => Duration -- grace
   -> Int64 -- window size
   -> Serde k -- inner key serde
@@ -956,22 +860,3 @@ emitEarlyWhenFull b = b {overflow = EmitEarlyWhenFull}
 -- | Set the overflow policy to 'DropOldestSilently'.
 dropOldestSilently :: BufferConfig -> BufferConfig
 dropOldestSilently b = b {overflow = DropOldestSilently}
-
-
-{- | Changelog serde for a debounce-buffer entry: the 8-byte
-big-endian deadline, then the value's own bytes.
--}
-stampedSerde :: Serde v -> Serde (Int64, v)
-stampedSerde vs =
-  Serde
-    { serialize = \(t, v) ->
-        BSL.toStrict (BB.toLazyByteString (BB.int64BE t)) <> serialize vs v
-    , deserialize = \bs ->
-        if BS.length bs < 8
-          then Left "debounce buffer entry shorter than its 8-byte deadline"
-          else
-            let (tb, vb) = BS.splitAt 8 bs
-                !t = BS.foldl' (\acc w -> acc * 256 + fromIntegral w) 0 tb
-            in fmap (\v -> (t, v)) (deserialize vs vb)
-    , serializeHeaders = serializeHeaders vs . snd
-    }

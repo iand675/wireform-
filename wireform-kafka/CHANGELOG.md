@@ -29,6 +29,16 @@ and this project adheres to the
   `queryMetadataForKey`, stale IQ reads from standbys). On the client:
   `Kafka.Client.Assignor` custom assignors with assignment user data,
   `Consumer.setAssignmentStrategy` / `setAssignmentHook`.
+- **Suppress buffers are time-ordered**: `suppressWindowed`,
+  `suppressWindowedShed` and `suppressUntilTimeLimit` scanned their
+  whole buffer on every record and stream-time tick; they now keep a
+  (time, key) index (rebuilt from the store after a restore) and evict
+  only what is due. As on the JVM, a record is buffered before the due
+  entries go, a window is emitted once stream time reaches its end plus
+  grace, and an emitted record carries its last update's timestamp. The
+  buffer cap counts the restored entries too. Windowed suppression ran
+  with an error-thunk key serde for its changelog; it now has
+  `windowedSerde`.
 - **Windowed aggregations**: the aggregators forward each update keyed
   by its window themselves (the stream conversion rescanned the key's
   windows on every update and kept an ever-growing map of what it had
