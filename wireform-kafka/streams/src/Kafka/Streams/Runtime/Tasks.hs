@@ -217,6 +217,8 @@ data TaskManagerConfig = TaskManagerConfig
   -- ^ External systems committing with every cycle ("Kafka.Streams.Runtime.Commit")
   , tmcInstanceId :: !Text
   -- ^ Unique per run: names this instance's commit cycles
+  , tmcCacheMaxBytes :: !Int64
+  -- ^ @statestore.cache.max.bytes@: the record caches' budget over every active task
   }
 
 
@@ -449,7 +451,13 @@ buildTaskEngine tm sub tid dir clPos storesOnly = do
           , eoTaskDirectory = Just dir
           , eoSharedStores = tmcSharedStores cfg
           , eoStoresOnly = storesOnly
+          , eoCacheBytes =
+              if tmcCacheMaxBytes cfg > 0
+                then Just (cacheShare <$> readIORef (tmTasks tm))
+                else Nothing
           }
+      -- the instance's cache budget, split over its active tasks
+      cacheShare tasks = fromIntegral (tmcCacheMaxBytes cfg `quot` fromIntegral (max 1 (Map.size tasks)))
   e <- buildEngineWith opts (subPlanTopology sub) tid (tmcAppId cfg) (taskCollector tm clPos) (tmcDeserHandler cfg)
   setPartitionCountLookup e (sdPartitionsFor (tmDriver tm))
   pure e

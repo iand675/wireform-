@@ -74,7 +74,7 @@ module Kafka.Streams.Internal.Engine (
 ) where
 
 import Control.Exception (SomeException, throwIO, try)
-import Control.Monad (forM, forM_, unless)
+import Control.Monad (forM, forM_, unless, when)
 import Data.ByteString (ByteString)
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HashSet
@@ -97,6 +97,7 @@ import Kafka.Streams.Errors (
   StreamsException (..),
  )
 import Kafka.Streams.Internal.Changelog qualified as CL
+import Kafka.Streams.State.KeyValue.Caching qualified as Cache
 import Kafka.Streams.Internal.RecordCollector (
   CollectedRecord (..),
   RecordCollector (..),
@@ -116,6 +117,7 @@ import Kafka.Streams.Serde (Serde (..))
 import Kafka.Streams.State.Store (
   AnyStateStore (..),
   KeyValueStore (..),
+  KeyOrder (..),
   SessionStore (..),
   StateStore (..),
   StoreBuilder (..),
@@ -189,6 +191,8 @@ data StoreEntry = StoreEntry
   , storeEntryAny :: !AnyStateStore
   , storeEntryClose :: !(IO ())
   , storeEntryFlush :: !(IO ())
+  , storeEntryFlushCache :: !(IO Bool)
+  -- ^ Flush the store's record cache, if it has one; whether anything was dirty
   , storeEntryRestore :: !(Maybe (ByteString -> Maybe ByteString -> IO (Either Text ())))
   {- ^ Apply one changelog record (key bytes, null-able value bytes)
   to the store underneath its change-logging layer, so a restore is
@@ -227,6 +231,12 @@ data EngineOptions = EngineOptions
   and no source or sink is wired (a standby task, which only keeps its
   stores current from the changelogs)
   -}
+  , eoCacheBytes :: !(Maybe (IO Int))
+  {- ^ Give the stores that ask for one a record cache
+  ("Kafka.Streams.State.KeyValue.Caching"), holding at most this many
+  bytes over all of them. 'Nothing': no caches, every update is
+  forwarded and logged at once.
+  -}
   }
 
 
@@ -238,6 +248,7 @@ defaultEngineOptions =
     , eoTaskDirectory = Nothing
     , eoSharedStores = Map.empty
     , eoStoresOnly = False
+    , eoCacheBytes = Nothing
     }
 
 
@@ -387,8 +398,9 @@ buildEngineWith opts validated tid appId collector deserHandler = do
       tmp <- getTemporaryDirectory
       pure (tmp </> "wireform-streams" </> T.unpack appId </> T.unpack (taskIdToText tid))
   let ctx = StoreContext {scDirectory = dir, scTaskName = taskIdToText tid}
+  budget <- traverse Cache.newCacheBudget (eoCacheBytes opts)
   storeEntries <- forM (Map.toList (Topo.topoStores topo)) $ \(nm, ab) ->
-    realiseStore ctx (changelogSink nm) ab
+    realiseStore ctx budget (changelogSink nm) ab
   storesRef <-
     newIORef
       ( Map.union
@@ -459,18 +471,29 @@ activateEngine engine = do
 
 {- | Build one store. With a changelog sink and serdes, and logging
 left on, every write is also logged ('CL.logKeyValueStore' and
-friends); restore always goes to the unlogged store.
+friends); restore always goes to the unlogged store. A key-value store
+that asks for a record cache gets one when there is a budget: it
+then logs at flush, from the bytes it serialised.
 -}
-realiseStore :: StoreContext -> Maybe CL.ChangelogSink -> Topo.AnyStoreBuilder -> IO StoreEntry
-realiseStore ctx mSink = \case
+realiseStore :: StoreContext -> Maybe Cache.CacheBudget -> Maybe CL.ChangelogSink -> Topo.AnyStoreBuilder -> IO StoreEntry
+realiseStore ctx mBudget mSink = \case
   Topo.AsKeyValueBuilder b -> do
     s <- sbKvBuild b ctx
+    (store, flushCache) <- case (mBudget, sbKvCaching b) of
+      (Just budget, Just KeyOrder) -> do
+        let logTo = case (mSink, sbKvSerdes b) of
+              (Just sink, Just sd) | loggingEnabled (sbKvLogging b) -> Just (sd, sink)
+              _ -> Nothing
+        cs <- Cache.cachedKeyValueStore budget logTo s
+        pure (Cache.csStore cs, Cache.csFlush cs)
+      _ -> pure (logged (sbKvLogging b) (sbKvSerdes b) CL.logKeyValueStore s, pure False)
     pure
       StoreEntry
         { storeEntryName = sbKvName b
-        , storeEntryAny = AnyKeyValueStore (logged (sbKvLogging b) (sbKvSerdes b) CL.logKeyValueStore s)
+        , storeEntryAny = AnyKeyValueStore store
         , storeEntryClose = storeClose (kvsBase s)
         , storeEntryFlush = storeFlush (kvsBase s)
+        , storeEntryFlushCache = flushCache
         , storeEntryRestore = (\sd -> CL.restoreKeyValue sd s) <$> sbKvSerdes b
         }
   Topo.AsWindowBuilder b -> do
@@ -481,6 +504,7 @@ realiseStore ctx mSink = \case
         , storeEntryAny = AnyWindowStore (logged (sbWLogging b) (sbWSerdes b) CL.logWindowStore s)
         , storeEntryClose = storeClose (wsBase s)
         , storeEntryFlush = storeFlush (wsBase s)
+        , storeEntryFlushCache = pure False
         , storeEntryRestore = (\sd -> CL.restoreWindow sd s) <$> sbWSerdes b
         }
   Topo.AsSessionBuilder b -> do
@@ -491,6 +515,7 @@ realiseStore ctx mSink = \case
         , storeEntryAny = AnySessionStore (logged (sbSLogging b) (sbSSerdes b) CL.logSessionStore s)
         , storeEntryClose = storeClose (ssBase s)
         , storeEntryFlush = storeFlush (ssBase s)
+        , storeEntryFlushCache = pure False
         , storeEntryRestore = (\sd -> CL.restoreSession sd s) <$> sbSSerdes b
         }
   Topo.AsRawBuilder b -> do
@@ -501,6 +526,7 @@ realiseStore ctx mSink = \case
         , storeEntryAny = AnyKeyValueStore (rawAsKeyValuePlaceholder s)
         , storeEntryClose = storeClose s
         , storeEntryFlush = storeFlush s
+        , storeEntryFlushCache = pure False
         , storeEntryRestore = Nothing
         }
   where
@@ -528,6 +554,7 @@ rawAsKeyValuePlaceholder ss =
     , kvsApproxEntries = pure 0
     , kvsReverseRange = \_ _ -> opaque
     , kvsReverseAll = opaque
+    , kvsCache = Nothing
     }
   where
     opaque :: IO a
@@ -1224,9 +1251,17 @@ commitEngine engine = do
   -- as the source offsets they were produced from.
   drainPreCommit engine
   m <- readIORef (engineStores engine)
+  let own = Map.elems (Map.withoutKeys m (engineShared engine))
+      -- A flush forwards downstream, which can dirty another store's
+      -- cache: go round until they are all clean (the topology is a
+      -- DAG, so this ends).
+      flushCaches = do
+        dirty <- or <$> mapM storeEntryFlushCache own
+        when dirty flushCaches
+  flushCaches
   -- A store that cannot flush cannot commit: the failure propagates
   -- so the runtime does not commit offsets past unpersisted state.
-  forM_ (Map.elems (Map.withoutKeys m (engineShared engine))) storeEntryFlush
+  forM_ own storeEntryFlush
   collectorFlush (engineCollector engine)
   bump engine ixCommitted
 

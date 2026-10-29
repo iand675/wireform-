@@ -55,8 +55,6 @@ module Kafka.Streams.Runtime.WorkerPool (
 
   -- * Per-worker state
   workerProcessedCount,
-  workerEngine,
-  workerCollector,
 
   -- * Key-group dispatch state (Riffle \xc2\xa72)
   poolKeyGroupAssignment,

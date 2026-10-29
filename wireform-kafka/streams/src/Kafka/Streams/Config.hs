@@ -81,15 +81,15 @@ dropped):
   * 'acceptableRecoveryLag', 'maxWarmupReplicas',
     'probingRebalanceIntervalMs' — the KIP-441 keys
   * 'metadataMaxAgeMs'          — @metadata.max.age.ms@ (pattern sources)
+  * 'statestoreCacheMaxBytes'   — @statestore.cache.max.bytes@ (record caches)
 
 The embedded clients are configured from these; 'consumerOverrides',
 'producerOverrides' and 'adminOverrides' adjust anything else on them
 (the JVM's @consumer.@ / @producer.@ / @admin.@ prefixed properties).
 
-Not here, because the runtime has no such behaviour: record caches
-(every update is forwarded and logged, the JVM's behaviour with
-@statestore.cache.max.bytes = 0@) and rack-aware assignment. Their
-JVM keys are ignored by 'streamsConfigFromMap', like any unknown key.
+Not here, because the runtime has no such behaviour: rack-aware
+assignment. Its JVM keys are ignored by 'streamsConfigFromMap', like
+any unknown key.
 -}
 data StreamsConfig = StreamsConfig
   { applicationId :: !Text
@@ -140,6 +140,16 @@ data StreamsConfig = StreamsConfig
   {- ^ @probing.rebalance.interval.ms@ — KIP-441 cadence for
   re-issuing rebalances to check whether warmups are
   ready. Default 600_000 (10 minutes).
+  -}
+  , statestoreCacheMaxBytes :: !Int64
+  {- ^ @statestore.cache.max.bytes@ (also read from the older
+  @cache.max.bytes.buffering@) — what the record caches of the
+  instance's key-value stores may hold, split evenly over its active
+  tasks ("Kafka.Streams.State.KeyValue.Caching"). A cache flushes at
+  every commit and when its task's share is exceeded, so a key
+  updated many times between commits is forwarded and logged once.
+  @0@ turns caching off: every update is forwarded at once. Default
+  10 MiB.
   -}
   , metadataMaxAgeMs :: !Int
   {- ^ @metadata.max.age.ms@ — how often the topic list is fetched
@@ -206,6 +216,7 @@ defaultStreamsConfig =
     , maxWarmupReplicas = 2
     , probingRebalanceIntervalMs = 600_000
     , metadataMaxAgeMs = 300_000
+    , statestoreCacheMaxBytes = 10 * 1024 * 1024
     , taskAssignor = Nothing
       }
 
@@ -278,6 +289,10 @@ streamsConfigFromMap m = foldl' step defaultStreamsConfig (Map.toAscList m)
         maybe cfg (\n -> cfg {probingRebalanceIntervalMs = n}) (readT v)
       "metadata.max.age.ms" ->
         maybe cfg (\n -> cfg {metadataMaxAgeMs = n}) (readT v)
+      "statestore.cache.max.bytes" ->
+        maybe cfg (\n -> cfg {statestoreCacheMaxBytes = n}) (readT v)
+      "cache.max.bytes.buffering" ->
+        maybe cfg (\n -> cfg {statestoreCacheMaxBytes = n}) (readT v)
       _ -> cfg
 
 

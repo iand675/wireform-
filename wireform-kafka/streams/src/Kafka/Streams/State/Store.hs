@@ -33,6 +33,8 @@ module Kafka.Streams.State.Store (
   -- * Key-value store
   KeyValueStore (..),
   kvsPutAll,
+  StoreCache (..),
+  FlushListener,
   KeyValueIterator (..),
   kvIteratorFromList,
   kvIteratorToList,
@@ -51,6 +53,7 @@ module Kafka.Streams.State.Store (
   StoreBuilder (..),
   StoreContext (..),
   StoreBuilderKV (..),
+  KeyOrder (..),
   StoreBuilderW (..),
   StoreBuilderS (..),
   LoggingConfig (..),
@@ -67,6 +70,10 @@ module Kafka.Streams.State.Store (
   withLoggingDisabledW,
   withLoggingEnabledS,
   withLoggingDisabledS,
+
+  -- * Record cache
+  withCachingEnabledKV,
+  withCachingDisabledKV,
 
   -- * KIP-295 source-changelog reuse
   withSourceTopicChangelogKV,
@@ -88,7 +95,7 @@ import Data.Text qualified as T
 import GHC.Generics (Generic)
 import Kafka.Streams.Serde (Serde)
 import Kafka.Streams.Time (Timestamp)
-import Kafka.Streams.Types (TopicName)
+import Kafka.Streams.Types (Headers, TopicName)
 
 
 {- | Globally-unique store name. Must match the Java rule
@@ -192,6 +199,29 @@ data KeyValueStore k v = KeyValueStore
   -}
   , kvsReverseAll :: !(IO (KeyValueIterator k v))
   -- ^ Like 'kvsAll' but in descending key order.
+  , kvsCache :: !(Maybe (StoreCache k v))
+  {- ^ The record cache in front of the store, when it has one
+  ("Kafka.Streams.State.KeyValue.Caching"). A table processor then
+  writes with 'scWrite' and forwards its changes from 'scOnFlush'
+  instead of right away. Plain 'kvsPut' / 'kvsDelete' are buffered
+  too.
+  -}
+  }
+
+
+{- | What a cache flush hands on for each dirty key: the key, its new
+value ('Nothing': deleted), the value the store held before, and the
+timestamp and headers of the last write.
+-}
+type FlushListener k v = k -> Maybe v -> Maybe v -> Timestamp -> Headers -> IO ()
+
+
+-- | A store's record cache, as its table processor sees it.
+data StoreCache k v = StoreCache
+  { scWrite :: !(k -> Maybe v -> Timestamp -> Headers -> IO ())
+  -- ^ Buffer a write ('Nothing': a delete) made for a record with this timestamp and headers
+  , scOnFlush :: !(FlushListener k v -> IO ())
+  -- ^ Install what each flushed entry is handed to (the processor forwards it)
   }
 
 
@@ -345,7 +375,27 @@ data StoreBuilderKV k v = StoreBuilderKV
   , sbKvLogging :: !LoggingConfig
   , sbKvSerdes :: !(Maybe (StoreSerdes k v))
   , sbKvBuild :: !(StoreContext -> IO (KeyValueStore k v))
+  , sbKvCaching :: !(Maybe (KeyOrder k))
+  {- ^ Put a record cache in front of the store (the order is for
+  merging the cache into range reads). The DSL's 'Materialized'
+  stores have one unless 'withCachingDisabled'; the runtime sizes them
+  from @statestore.cache.max.bytes@.
+  -}
   }
+
+
+-- | Evidence that store keys are ordered.
+data KeyOrder k where
+  KeyOrder :: Ord k => KeyOrder k
+
+
+-- | Front the store with a record cache (@StoreBuilder.withCachingEnabled@).
+withCachingEnabledKV :: Ord k => StoreBuilderKV k v -> StoreBuilderKV k v
+withCachingEnabledKV b = b {sbKvCaching = Just KeyOrder}
+
+
+withCachingDisabledKV :: StoreBuilderKV k v -> StoreBuilderKV k v
+withCachingDisabledKV b = b {sbKvCaching = Nothing}
 
 
 -- | Typed window-store builder.

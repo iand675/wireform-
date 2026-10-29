@@ -138,6 +138,7 @@ loggedKeyValueStore underlying topic sn ks vs =
   pure
     KeyValueStore
       { kvsBase = kvsBase underlying
+      , kvsCache = Nothing
       , kvsGet = kvsGet underlying
       , kvsRange = kvsRange underlying
       , kvsAll = kvsAll underlying

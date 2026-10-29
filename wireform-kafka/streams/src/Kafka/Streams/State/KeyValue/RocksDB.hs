@@ -106,7 +106,8 @@ rocksDBKeyValueStore nm cfg = do
   db <- R.open path opts
   pure
     KeyValueStore
-      { kvsBase =
+      { kvsCache = Nothing
+      , kvsBase =
           StateStore
             { storeStoreName = nm
             , storePersistent = True
@@ -148,7 +149,8 @@ rocksDBKeyValueStoreBuilder
   -> StoreBuilderKV ByteString ByteString
 rocksDBKeyValueStoreBuilder nm cfg =
   StoreBuilderKV
-    { sbKvName = nm
+    { sbKvCaching = Nothing
+    , sbKvName = nm
     , sbKvLogging = defaultLoggingConfig
     , sbKvSerdes = Just (StoreSerdes byteStringSerde byteStringSerde)
     , sbKvBuild = \ctx -> rocksDBKeyValueStore nm cfg {rdbDirectory = scDirectory ctx}

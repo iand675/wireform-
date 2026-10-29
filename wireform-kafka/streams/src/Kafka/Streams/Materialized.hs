@@ -9,6 +9,7 @@ module Kafka.Streams.Materialized (
   materializedAs,
   materializedWithSupplier,
   withCachingDisabled,
+  withCachingEnabled,
   withLoggingDisabled,
   withRetention,
   withStoreSupplier,
@@ -40,6 +41,7 @@ import Kafka.Streams.State.Store (
   StoreBuilderW,
   StoreName,
   defaultLoggingConfig,
+  withCachingEnabledKV,
   withLoggingDisabledKV,
   withLoggingDisabledS,
   withLoggingDisabledW,
@@ -66,7 +68,7 @@ data Materialized k v = Materialized
   materialise this 'Materialized' will use the supplied
   function instead of the default in-memory builder. This is
   the hook point for plugging in a 'PersistentKeyValueStore',
-  'CachingKeyValueStore', 'VersionedKeyValueStore', or
+  'VersionedKeyValueStore', or
   'TimestampedKeyValueStore'.
   -}
   }
@@ -122,9 +124,18 @@ withStoreSupplier
 withStoreSupplier f m = m {matStoreSupplier = Just f}
 
 
--- | Accepted for parity; stores are never cached (every update is forwarded and logged).
+{- | No record cache: every update to the store is forwarded and
+logged at once (as with @statestore.cache.max.bytes = 0@). Key-value
+stores are cached by default ("Kafka.Streams.State.KeyValue.Caching");
+window and session stores are not cached.
+-}
 withCachingDisabled :: Materialized k v -> Materialized k v
 withCachingDisabled m = m {matCachingEnabled = False}
+
+
+-- | The default: a record cache in front of the store (key-value stores).
+withCachingEnabled :: Materialized k v -> Materialized k v
+withCachingEnabled m = m {matCachingEnabled = True}
 
 
 withLoggingDisabled :: Materialized k v -> Materialized k v
@@ -157,13 +168,15 @@ materializedKV m nm defK defV =
             , sbKvLogging = defaultLoggingConfig
             , sbKvSerdes = Nothing
             , sbKvBuild = mk nm
+            , sbKvCaching = Nothing
             }
         Nothing -> inMemoryKeyValueStoreBuilder nm
       logged = if matLoggingEnabled m then base else withLoggingDisabledKV base
+      cached = if matCachingEnabled m then withCachingEnabledKV logged else logged
   in withStoreSerdesKV
        (fromMaybe defK (matKeySerde m))
        (fromMaybe defV (matValueSerde m))
-       logged
+       cached
 
 
 {- | The window store a windowed DSL aggregation materialises for

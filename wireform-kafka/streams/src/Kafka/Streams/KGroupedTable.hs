@@ -53,7 +53,9 @@ import Kafka.Streams.KGroupedStream (aggregateSerde)
 import Kafka.Streams.KTable (
   Change (..),
   KTable (..),
+  bindTableCache,
   changeSerde,
+  writeRow,
  )
 import Kafka.Streams.Materialized (
   Materialized (..),
@@ -264,6 +266,7 @@ groupedAggregate label m kgt vs step = do
                 kvs <- getStateStore ctx storeNm >>= \case
                   Just (AnyKeyValueStore kvs) -> pure (Unsafe.unsafeCoerce kvs :: KeyValueStore k a)
                   _ -> error (T.unpack label <> ": store not found: " <> show storeNm)
+                bindTableCache ctx kvs
                 writeIORef ref (Just (ctx, kvs))
             , procClose = pure ()
             , procProcess = \r -> do
@@ -272,12 +275,7 @@ groupedAggregate label m kgt vs step = do
                   (Just (ctx, kvs), Just k) -> do
                     prev <- kvsGet kvs k
                     next <- step k (recordValue r) prev
-                    case next of
-                      Just a -> kvsPut kvs k a
-                      Nothing -> () <$ kvsDelete kvs k
-                    case (next, prev) of
-                      (Nothing, Nothing) -> pure ()
-                      _ -> forwardRecord ctx r {recordValue = Change next prev}
+                    writeRow ctx kvs r k next prev
                   _ -> pure ()
             }
   withTopology_ b $ \t ->

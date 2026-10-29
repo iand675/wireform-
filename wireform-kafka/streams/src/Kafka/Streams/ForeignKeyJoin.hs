@@ -57,6 +57,8 @@ import Kafka.Streams.Joined qualified as Joined
 import Kafka.Streams.KTable (
   Change (..),
   KTable (..),
+  bindTableCache,
+  writeRow,
  )
 import Kafka.Streams.Materialized (
   Materialized (..),
@@ -364,10 +366,12 @@ deleteProcessor :: forall k v (v' :: Type). StoreName -> IO (Processor k (Change
 deleteProcessor outNm =
   withContext "KTABLE-FK-JOIN-DELETE" $ \ctx -> do
     out <- bindKV ctx outNm :: IO (KeyValueStore k v')
+    -- this and the response processor both feed the merge node
+    bindTableCache ctx out
     pure $ \r -> case (recordKey r, changeNew (recordValue r)) of
       (Just k, Nothing) -> do
-        prev <- kvsDelete out k
-        mapM_ (\p -> forwardRecord ctx r {recordValue = Change Nothing (Just p) :: Change v'}) prev
+        prev <- kvsGet out k
+        writeRow ctx out r k Nothing prev
       _ -> pure ()
 
 
@@ -419,6 +423,8 @@ respondProcessor leftNm outNm hashOf row =
   withContext "KTABLE-FK-JOIN-RESPOND" $ \ctx -> do
     left <- bindKV ctx leftNm :: IO (KeyValueStore k v)
     out <- bindKV ctx outNm :: IO (KeyValueStore k v')
+    -- this and the response processor both feed the merge node
+    bindTableCache ctx out
     pure $ \r -> case recordKey r of
       Nothing -> pure ()
       Just k -> do
@@ -428,11 +434,6 @@ respondProcessor leftNm outNm hashOf row =
             | hashOf v == respHash (recordValue r) -> do
                 let new = row v (respRight (recordValue r))
                 prev <- kvsGet out k
-                case new of
-                  Just n -> kvsPut out k n
-                  Nothing -> () <$ kvsDelete out k
-                case (new, prev) of
-                  (Nothing, Nothing) -> pure ()
-                  _ -> forwardRecord ctx r {recordValue = Change new prev}
+                writeRow ctx out r k new prev
           -- a deleted or since-replaced left row: drop the stale answer
           _ -> pure ()

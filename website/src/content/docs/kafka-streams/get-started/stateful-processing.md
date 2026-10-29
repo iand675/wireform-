@@ -165,7 +165,7 @@ The `Materialized` configuration specifies store keys as `Text` (the words), sto
 
 ### `toStream`: KTable to KStream
 
-`count` produces a **KTable**: a changelog stream where later values replace earlier ones for the same key. `toStream` converts it back to a regular **KStream** for output: one record per update, with the row's new value. Deletes aren't part of that stream; the imperative API's `toChangelogStream` + `toTopicNullable` keep them as tombstones.
+`count` produces a **KTable**: a changelog stream where later values replace earlier ones for the same key. `toStream` converts it back to a regular **KStream** for output: one record per update, with the row's new value. Running against Kafka, the store's [record cache](../../glossary/#record-cache) folds the updates to a key between two commits into one, so a hot key emits its latest count once per commit rather than once per input (`withCachingDisabled` on the `Materialized` emits every one). Deletes aren't part of that stream; the imperative API's `toChangelogStream` + `toTopicNullable` keep them as tombstones.
 
 ## KStream vs KTable
 

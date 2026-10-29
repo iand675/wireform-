@@ -41,7 +41,7 @@ In SQL, the commit boundary is `COMMIT`. Reads after see the write.
 In Kafka Streams, the commit boundary is **`commitIntervalMs`** (or sooner when a processor calls `ctxRequestCommit`, and before every rebalance). Between commits:
 
 - Producer sends output and changelog records inside the open transaction (under EOS)
-- State stores apply writes immediately; there is no write buffer or record cache
+- The record caches of table stores hold their latest writes; they reach the store, its changelog and the operators downstream at the commit (or earlier, when a task's share of `statestoreCacheMaxBytes` runs out). Uncached stores apply writes immediately
 - Consumer position moves forward but offset commit hasn't fired
 
 A downstream consumer with `isolation.level = read_committed` sees nothing until commit. A consumer with `read_uncommitted` sees records as written, including potential aborts: `READ UNCOMMITTED` semantics.

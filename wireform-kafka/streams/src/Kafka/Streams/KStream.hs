@@ -1786,8 +1786,10 @@ toTableProc sn = do
       , procInit = \ctx -> do
           writeIORef ctxRef (Just ctx)
           getStateStore ctx sn >>= \case
-            Just (AnyKeyValueStore kvs) ->
-              writeIORef storeRef (Just (Unsafe.unsafeCoerce kvs))
+            Just (AnyKeyValueStore kvs0) -> do
+              let kvs = Unsafe.unsafeCoerce kvs0 :: KeyValueStore k v
+              Kafka.Streams.KTable.bindTableCache ctx kvs
+              writeIORef storeRef (Just kvs)
             _ -> error $ "toTable: store missing: " <> show sn
       , procClose = pure ()
       , procProcess = \r -> case recordKey r of
@@ -1798,8 +1800,7 @@ toTableProc sn = do
             case (mctx, mst) of
               (Just ctx, Just kvs) -> do
                 old <- kvsGet kvs k
-                kvsPut kvs k (recordValue r)
-                forwardRecord ctx r {recordValue = Kafka.Streams.KTable.Change (Just (recordValue r)) old}
+                Kafka.Streams.KTable.writeRow ctx kvs r k (Just (recordValue r)) old
               _ -> pure ()
       }
 

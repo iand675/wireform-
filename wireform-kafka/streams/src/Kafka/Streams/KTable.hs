@@ -44,6 +44,10 @@ module Kafka.Streams.KTable (
   -- * Conversion
   toStreamTable,
   queryKeyValueStore,
+
+  -- * For the DSL's table processors
+  writeRow,
+  bindTableCache,
 ) where
 
 import Data.Bits (testBit, (.|.))
@@ -68,6 +72,7 @@ import Kafka.Streams.State.Store (
   AnyStateStore (..),
   KeyValueStore (..),
   StoreBuilderKV,
+  StoreCache (..),
   StoreName,
  )
 import Kafka.Streams.StreamsBuilder (
@@ -155,10 +160,36 @@ emitChange ctx r k c = case c of
 change, with the row's previous value from the store as the old one.
 -}
 updateRow :: ProcessorContext -> KeyValueStore k v -> Record kin vin -> k -> Maybe v -> IO ()
-updateRow ctx kvs r k new = do
-  old <- kvsGet kvs k
-  writeTable kvs k new
-  emitChange ctx r k (Change new old)
+updateRow ctx kvs r k new = case kvsCache kvs of
+  Just c -> scWrite c k new (recordTimestamp r) (recordHeaders r)
+  Nothing -> do
+    old <- kvsGet kvs k
+    writeRow ctx kvs r k new old
+
+
+{- | Set @k@'s row to @new@, whose previous value @old@ the caller has
+already read, and forward the change. A cached store buffers the
+write instead, and its flush forwards the change ('bindTableCache').
+-}
+writeRow :: ProcessorContext -> KeyValueStore k v -> Record kin vin -> k -> Maybe v -> Maybe v -> IO ()
+writeRow ctx kvs r k new old = case kvsCache kvs of
+  Just c -> scWrite c k new (recordTimestamp r) (recordHeaders r)
+  Nothing -> do
+    writeTable kvs k new
+    emitChange ctx r k (Change new old)
+
+
+{- | A table processor's part in its store's record cache: forward
+what each flush hands on as the change for that key, with the
+timestamp and headers of its last write. Call at init with the
+processor's own context.
+-}
+bindTableCache :: ProcessorContext -> KeyValueStore k v -> IO ()
+bindTableCache ctx kvs = case kvsCache kvs of
+  Nothing -> pure ()
+  Just c ->
+    scOnFlush c $ \k new old ts hs ->
+      emitChange ctx (Record (Just k) () ts hs) k (Change new old)
 
 
 -- | Write a table's new value for @k@ (a delete when 'Nothing').
@@ -186,7 +217,10 @@ tableProcessor nm sn step = do
       , procInit = \ctx -> do
           st <- getStateStore ctx sn
           case st of
-            Just (AnyKeyValueStore kvs) -> writeIORef ref (Just (ctx, unsafeCastKV kvs :: KeyValueStore k vs))
+            Just (AnyKeyValueStore kvs0) -> do
+              let kvs = unsafeCastKV kvs0 :: KeyValueStore k vs
+              bindTableCache ctx kvs
+              writeIORef ref (Just (ctx, kvs))
             _ -> error (Data.Text.unpack nm <> ": store not found: " <> show sn)
       , procClose = pure ()
       , procProcess = \r -> do
@@ -393,6 +427,7 @@ transformValuesTable supplier extraStores m parent = do
                 kvs <- getStateStore ctx storeNm >>= \case
                   Just (AnyKeyValueStore kvs) -> pure (unsafeCastKV kvs :: KeyValueStore k v')
                   _ -> error ("KTable.transformValues: store not found: " <> show storeNm)
+                bindTableCache ctx kvs
                 writeIORef ref (Just (ctx, kvs))
                 -- The user's forwards become the row's new value.
                 let shim =
@@ -566,6 +601,8 @@ buildKTableKTableJoin prefix row m tl tr = do
                       _ -> error ("KTable-KTable join: store missing: " <> show sn)
                 other <- bind otherStore
                 out <- bind outStoreNm
+                -- both sides feed the merge node, so either can forward the flushes
+                bindTableCache ctx (out :: KeyValueStore k v')
                 writeIORef ref (Just (ctx, other :: KeyValueStore k vOther, out :: KeyValueStore k v'))
             , procClose = pure ()
             , procProcess = \r -> do

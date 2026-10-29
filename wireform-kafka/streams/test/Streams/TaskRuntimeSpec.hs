@@ -169,12 +169,14 @@ eos_abort_recovers = withStateDirs 1 $ \[d] -> do
       mockFailTransactionCommits broker 2
       produceWords broker 1
       eventually [ks] "counts reach 4" (countsReach broker 4)
-      -- committed output per key is exactly 1, 2, 3, 4: nothing from
-      -- the aborted transactions, no count twice
+      -- committed output per key climbs to 4 without repeating a count
+      -- (the record cache may fold some): nothing from the aborted
+      -- transactions, no count twice
       outs <- visible broker "out"
       forM_ keys $ \k -> do
         let seen = mapMaybe (\r -> if r.drKey == Just (textBytes k) then decodeI64 <$> r.drValue else Nothing) outs
-        seen `shouldBe` [1, 2, 3, 4]
+        and (zipWith (<) seen (drop 1 seen)) `shouldBe` True
+        lastMaybe seen `shouldBe` Just 4
       -- and the aborted writes really were written (then aborted)
       everything <- mockRecords broker "out"
       when (length everything <= length outs) $ expectationFailure "expected aborted records in the log"
@@ -275,3 +277,7 @@ processing_handlers = withStateDirs 2 $ \[d1, d2] -> do
     pure (case st of StreamsError _ -> True; _ -> False)
   closeAll [failing]
 
+
+
+lastMaybe :: [a] -> Maybe a
+lastMaybe = foldl (\_ x -> Just x) Nothing

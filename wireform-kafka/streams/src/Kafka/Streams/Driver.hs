@@ -91,7 +91,6 @@ module Kafka.Streams.Driver (
 
 import Control.Monad (forM)
 import Data.ByteString (ByteString)
-import Data.ByteString qualified as BS
 import Data.IORef
 import Data.Int (Int64)
 import Data.Map.Strict (Map)
@@ -109,7 +108,6 @@ import Kafka.Streams.Internal.Engine (
   commitEngine,
   engineCollector,
   engineTopology,
-  feedSource,
   feedSourceH,
   storeByName,
   storeEntryAny,
@@ -143,7 +141,6 @@ import Kafka.Streams.Types (
   TopicName,
   emptyHeaders,
  )
-import Kafka.Streams.Types qualified
 import Unsafe.Coerce qualified as Unsafe
 
 

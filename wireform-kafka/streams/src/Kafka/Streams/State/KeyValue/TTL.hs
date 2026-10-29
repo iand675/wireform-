@@ -113,6 +113,7 @@ ttlKeyValueStore cfg under = do
   pure
     ( KeyValueStore
         { kvsBase = kvsBase under
+        , kvsCache = Nothing
         , kvsApproxEntries = kvsApproxEntries under
         , kvsGet = ttlGet cfg under
         , kvsPut = ttlPut cfg under

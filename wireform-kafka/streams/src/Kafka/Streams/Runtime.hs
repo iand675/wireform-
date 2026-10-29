@@ -405,6 +405,7 @@ startKafkaStreamsWith ks drv = do
             , tmcSharedStores = shared
             , tmcParticipants = participants
             , tmcInstanceId = instanceId
+            , tmcCacheMaxBytes = statestoreCacheMaxBytes cfg
             }
           drv
           plan

@@ -44,7 +44,7 @@ import Kafka.Streams.KGroupedStream (
   groupedInput,
  )
 import Kafka.Streams.KStream (mkPassThrough)
-import Kafka.Streams.KTable (Change (..), KTable (..))
+import Kafka.Streams.KTable (KTable (..), bindTableCache, writeRow)
 import Kafka.Streams.Serde (Serde)
 import Kafka.Streams.Materialized (
   Materialized (..),
@@ -233,8 +233,11 @@ cogroupSideProc sn initial agg = do
       , procInit = \ctx -> do
           writeIORef ctxRef (Just ctx)
           getStateStore ctx sn >>= \case
-            Just (AnyKeyValueStore kvs) ->
-              writeIORef storeRef (Just (Unsafe.unsafeCoerce kvs))
+            Just (AnyKeyValueStore kvs0) -> do
+              let kvs = Unsafe.unsafeCoerce kvs0 :: KeyValueStore k a
+              -- every side feeds the merge node, so any can forward the flushes
+              bindTableCache ctx kvs
+              writeIORef storeRef (Just kvs)
             _ -> error $ "cogroup: store missing: " <> show sn
       , procClose = pure ()
       , procProcess = \r -> case recordKey r of
@@ -247,8 +250,7 @@ cogroupSideProc sn initial agg = do
                 mPrev <- kvsGet kvs k
                 !cur <- maybe initial pure mPrev
                 let !next = agg k (recordValue r) cur
-                kvsPut kvs k next
-                forwardRecord ctx r {recordValue = Change (Just next) mPrev}
+                writeRow ctx kvs r k (Just next) mPrev
               _ -> pure ()
       }
 

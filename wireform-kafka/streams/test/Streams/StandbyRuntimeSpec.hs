@@ -57,7 +57,8 @@ failoverRestore standbys = withStateDirs 2 $ \[d1, d2] -> do
   broker <- newMockBroker (Just 1)
   mockCreateTopic broker "in" 2
   topo <- wordCount
-  let cfg d = (testConfig "sb" d) {numStandbyReplicas = standbys}
+  -- uncached: the restore counts below are per update
+  let cfg d = (testConfig "sb" d) {numStandbyReplicas = standbys, statestoreCacheMaxBytes = 0}
   a <- startOn broker (cfg d1) topo
   b <- startOn broker (cfg d2) topo
   ( do
@@ -107,7 +108,7 @@ standby_eos = withStateDirs 2 $ \[d1, d2] -> do
   broker <- newMockBroker (Just 1)
   mockCreateTopic broker "in" 2
   topo <- wordCount
-  let cfg d = (testConfig "sbe" d) {numStandbyReplicas = 1, processingGuarantee = ExactlyOnceV2}
+  let cfg d = (testConfig "sbe" d) {numStandbyReplicas = 1, processingGuarantee = ExactlyOnceV2, statestoreCacheMaxBytes = 0}
   a <- startOn broker (cfg d1) topo
   b <- startOn broker (cfg d2) topo
   ( do
@@ -147,7 +148,7 @@ warmup_then_probe = withStateDirs 2 $ \[d1, d2] -> do
   broker <- newMockBroker (Just 1)
   mockCreateTopic broker "in" 2
   topo <- wordCount
-  let cfg d = (testConfig "wu" d) {acceptableRecoveryLag = 5, probingRebalanceIntervalMs = 100}
+  let cfg d = (testConfig "wu" d) {acceptableRecoveryLag = 5, probingRebalanceIntervalMs = 100, statestoreCacheMaxBytes = 0}
   a <- startOn broker (cfg d1) topo
   ( do
       produceWords broker 30

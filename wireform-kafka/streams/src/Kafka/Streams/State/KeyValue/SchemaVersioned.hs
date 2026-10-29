@@ -195,6 +195,7 @@ schemaVersionedKeyValueStore current migrations under =
   pure
     KeyValueStore
       { kvsBase = kvsBase under
+      , kvsCache = Nothing
       , kvsApproxEntries = kvsApproxEntries under
       , kvsGet = svGet
       , kvsPut = svPut

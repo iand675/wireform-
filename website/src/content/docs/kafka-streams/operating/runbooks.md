@@ -436,8 +436,9 @@ participants. Likely costs:
 
 1. **Pre-commit drains** waiting on slow async-I/O calls.
 2. **The producer flush** when a lot of output (or changelog traffic:
-   every store update is logged, there is no record cache) piled up
-   in the interval.
+   every update of an uncached store is logged, and the record caches
+   flush the latest value of every key they hold) piled up in the
+   interval.
 3. **The transaction round trips** to a loaded transaction
    coordinator.
 4. **Commit participants** (two-phase sinks) with slow prepare or

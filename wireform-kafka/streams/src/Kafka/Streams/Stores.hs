@@ -26,7 +26,6 @@ module Kafka.Streams.Stores (
   lruMapBuilder,
   persistentKeyValueStore,
   persistentKeyValueStoreBuilder,
-  cachingKeyValueStore,
 
   -- * Window
   inMemoryWindowStore,
@@ -47,9 +46,6 @@ module Kafka.Streams.Stores (
   module Kafka.Streams.State.Store,
   KVPers.PersistentConfig (..),
   KVPers.defaultPersistentConfig,
-  KVCache.CachingConfig (..),
-  KVCache.defaultCachingConfig,
-  KVCache.CacheEmitter,
   KVVer.VersionedConfig (..),
   KVVer.defaultVersionedConfig,
   KVVer.VersionedKeyValueStore,
@@ -59,7 +55,6 @@ module Kafka.Streams.Stores (
 
 import Data.ByteString (ByteString)
 import Data.Int (Int64)
-import Kafka.Streams.State.KeyValue.Caching qualified as KVCache
 import Kafka.Streams.State.KeyValue.InMemory qualified as KVInMem
 import Kafka.Streams.State.KeyValue.Persistent qualified as KVPers
 import Kafka.Streams.State.KeyValue.Timestamped qualified as KVTs
@@ -108,15 +103,6 @@ persistentKeyValueStoreBuilder
   -> KVPers.PersistentConfig
   -> StoreBuilderKV ByteString ByteString
 persistentKeyValueStoreBuilder = KVPers.persistentKeyValueStoreBuilder
-
-
-cachingKeyValueStore
-  :: Ord k
-  => KeyValueStore k v
-  -> KVCache.CachingConfig
-  -> KVCache.CacheEmitter k v
-  -> IO (KeyValueStore k v)
-cachingKeyValueStore = KVCache.cachingKeyValueStore
 
 
 inMemoryWindowStore

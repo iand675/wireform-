@@ -29,6 +29,16 @@ and this project adheres to the
   `queryMetadataForKey`, stale IQ reads from standbys). On the client:
   `Kafka.Client.Assignor` custom assignors with assignment user data,
   `Consumer.setAssignmentStrategy` / `setAssignmentHook`.
+- **Record caches** (`statestoreCacheMaxBytes`, JVM
+  `statestore.cache.max.bytes`, default 10 MiB split over the active
+  tasks): the DSL's table stores buffer writes per key, and the store,
+  its changelog and the operators downstream get the latest value of
+  each key once per commit (earlier when a task's share fills up), as
+  one change with the store's previous value. Reads and interactive
+  queries see the buffered writes. `withCachingDisabled` (and
+  `statestoreCacheMaxBytes = 0`) forwards every update at once, as
+  before; `withCachingEnabledKV` caches a Processor API store.
+  Replaces the free-standing `cachingKeyValueStore`.
 - **Pattern sources at runtime**: `streamFromPattern` /
   `sourcePattern` topics are resolved against the cluster when the
   instance starts (whole-name match, internal topics left out) and again

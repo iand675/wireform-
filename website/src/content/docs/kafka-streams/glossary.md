@@ -105,8 +105,9 @@ old value. Defined in `Kafka.Streams.KTable`.
 ### Changelog topic
 
 The compacted internal Kafka topic the runtime writes a [state
-store's](#state-store) updates to (every update: there is no record
-cache), one partition per [task](#task). A task that moves or
+store's](#state-store) updates to (for a cached store, the latest per
+key at each flush: see [record cache](#record-cache)), one partition
+per [task](#task). A task that moves or
 restarts restores the store from it before processing: from its
 checkpoint for persistent stores, else from the log start.
 Convention: `<applicationId>-<storeName>-changelog`.
@@ -605,6 +606,17 @@ TTL expiry.
 ---
 
 ## R
+
+### Record cache
+
+The write-back buffer in front of a DSL table's key-value store
+(`statestoreCacheMaxBytes`, default 10 MiB, split over the instance's
+tasks). Writes to a key between two flushes collapse into one: the
+store, its changelog and the operators downstream see only the latest,
+as one `Change new old`. A cache flushes at every commit, and early
+when its task's share is used up. `withCachingDisabled` on a
+`Materialized`, or `statestoreCacheMaxBytes = 0`, forwards every
+update at once. Window and session stores are not cached.
 
 ### Rebalance
 

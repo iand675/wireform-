@@ -51,7 +51,7 @@ import Data.IORef
 import Data.Int (Int64)
 import Data.Maybe (fromMaybe)
 import Kafka.Streams.Grouped (Grouped (..))
-import Kafka.Streams.KTable (Change (..), KTable (..))
+import Kafka.Streams.KTable (KTable (..), bindTableCache, writeRow)
 import Data.Text qualified as T
 import Kafka.Streams.KStream (
   KStream (..),
@@ -331,10 +331,10 @@ reduceProcessor sn combine = do
           writeIORef ctxRef (Just ctx)
           st <- getStateStore ctx sn
           case st of
-            Just (AnyKeyValueStore kvs) ->
-              writeIORef
-                storeRef
-                (Just (unsafeCastKV kvs :: KeyValueStore k v))
+            Just (AnyKeyValueStore kvs0) -> do
+              let kvs = unsafeCastKV kvs0 :: KeyValueStore k v
+              bindTableCache ctx kvs
+              writeIORef storeRef (Just kvs)
             _ -> error $ "KGroupedStream.reduce: store not found: " <> show sn
       , procClose = pure ()
       , procProcess = \r -> do
@@ -346,8 +346,7 @@ reduceProcessor sn combine = do
               let !next = case mPrev of
                     Nothing -> recordValue r
                     Just p -> combine p (recordValue r)
-              kvsPut kvs k next
-              forwardRecord ctx r {recordValue = Change (Just next) mPrev}
+              writeRow ctx kvs r k (Just next) mPrev
             _ -> pure ()
       }
 
@@ -369,8 +368,10 @@ aggregateProcessor sn initial agg = do
           writeIORef ctxRef (Just ctx)
           st <- getStateStore ctx sn
           case st of
-            Just (AnyKeyValueStore kvs) ->
-              writeIORef storeRef (Just (unsafeCastKV kvs))
+            Just (AnyKeyValueStore kvs0) -> do
+              let kvs = unsafeCastKV kvs0 :: KeyValueStore k a
+              bindTableCache ctx kvs
+              writeIORef storeRef (Just kvs)
             _ -> error $ "aggregate: store not found: " <> show sn
       , procClose = pure ()
       , procProcess = \r -> do
@@ -383,8 +384,7 @@ aggregateProcessor sn initial agg = do
                 Nothing -> initial
                 Just p -> pure p
               let !next = agg k (recordValue r) cur
-              kvsPut kvs k next
-              forwardRecord ctx r {recordValue = Change (Just next) mPrev}
+              writeRow ctx kvs r k (Just next) mPrev
             _ -> pure ()
       }
 
