@@ -29,6 +29,13 @@ and this project adheres to the
   `queryMetadataForKey`, stale IQ reads from standbys). On the client:
   `Kafka.Client.Assignor` custom assignors with assignment user data,
   `Consumer.setAssignmentStrategy` / `setAssignmentHook`.
+- **`SINGLE_STORE_SELF_JOIN`** (KIP-862): an inner window join of a
+  stream with itself runs on one store and processor when
+  `optSingleStoreSelfJoin` is set, with output identical to the
+  two-store join. `topologyOptimization` (`topology.optimization`, a
+  level or a comma-separated list) is applied by the instance. A node
+  now forwards to its children in the order they were added (it was
+  the reverse), as the JVM does.
 - **Stream-stream joins follow the JVM**: the right side matches the
   mirror of the left side's window (asymmetric `before` / `after` were
   applied the same way on both sides); records with the same key and

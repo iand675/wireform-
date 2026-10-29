@@ -18,6 +18,8 @@ import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import Kafka.Streams.Joined (JoinWindows (..))
 import Test.Syd.Hedgehog ()
+import Data.Map.Strict qualified as Map
+import Kafka.Streams.Topology qualified as Topo
 
 
 tests :: Spec
@@ -47,6 +49,8 @@ tests =
       , -- Window joins against a model
         it "window inner join: every pair within the windows, in any arrival order (model)" prop_inner_join_model
         , it "window left/outer join: matches, then the unmatched once their window closes (model)" prop_outer_join_model
+        , it "single-store self-join: the same output in the same order, on one store (KIP-862)" prop_self_join
+        , children_in_order
       ]
 
 
@@ -825,3 +829,51 @@ prop_outer_join_model = H.property $ do
   sort out H.=== sort (matched <> unmatched)
   where
     sortOnTs = map snd . sortOn fst . zipWith (\i x -> ((inTs x, i :: Int), x)) [0 ..]
+
+
+-- | A stream joined with itself, optimised to one store or not; its output and store count.
+runSelfJoin :: Bool -> JoinWindows -> [In] -> IO ([(Text, Text, Integer)], Int)
+runSelfJoin single jw ins = do
+  b <- newStreamsBuilder
+  st <- streamFromTopic b (topicName "in") (consumed textSerde textSerde)
+  j <- joinKStreamKStream (\l r -> l <> "|" <> r) jw (Kafka.Streams.Imperative.joined textSerde textSerde textSerde) st st
+  toTopic (topicName "out") (produced textSerde textSerde) j
+  topo0 <- buildTopology b
+  let topo = if single then Topo.optimizeTopology Topo.noOptimisations {Topo.optSingleStoreSelfJoin = True} topo0 else topo0
+  driver <- newDriver topo "self-join"
+  forM_ ins $ \i -> pipeInput driver (topicName "in") (Just (bytes (inKey i))) (bytes (inVal i)) (t (inTs i)) 0
+  out <- readOutput driver (topicName "out")
+  closeDriver driver
+  pure (map (\cr -> (maybe "" unbytes (crKey cr), unbytes (crValueBytes cr), toInteger (unTimestamp (crTimestamp cr)))) out, Map.size (Topo.topoStores topo))
+
+
+prop_self_join :: H.Property
+prop_self_join = H.property $ do
+  ins <- H.forAll genInputs
+  before <- H.forAll (Gen.integral (Range.linear 0 15))
+  after <- H.forAll (Gen.integral (Range.linear 0 15))
+  -- small graces drop some out-of-order records, as both forms must
+  grace <- H.forAll (Gen.integral (Range.linear 0 30))
+  let jw = JoinWindows before after grace
+  (twoStores, n2) <- liftIO (runSelfJoin False jw ins)
+  (oneStore, n1) <- liftIO (runSelfJoin True jw ins)
+  oneStore H.=== twoStores
+  (n2, n1) H.=== (2, 1)
+
+
+children_in_order :: Spec
+children_in_order =
+  it "a node forwards to its children in the order they were added" $ do
+    b <- newStreamsBuilder
+    st <- streamFromTopic b (topicName "in") (consumed textSerde textSerde)
+    one <- mapValues (<> "1") st
+    two <- mapValues (<> "2") st
+    toTopic (topicName "out") (produced textSerde textSerde) one
+    toTopic (topicName "out") (produced textSerde textSerde) two
+    topo <- buildTopology b
+    driver <- newDriver topo "children"
+    pipeInput driver (topicName "in") (Just (bytes "k")) (bytes "x") (t 0) 0
+    pipeInput driver (topicName "in") (Just (bytes "k")) (bytes "y") (t 1) 0
+    out <- readOutput driver (topicName "out")
+    map (unbytes . crValueBytes) out `shouldBe` ["x1", "x2", "y1", "y2"]
+    closeDriver driver

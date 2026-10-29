@@ -65,8 +65,10 @@ module Kafka.Streams.Topology (
   topoChangelogPlan,
   connectProcessorAndStateStores,
 
-  -- * Optimisations (KIP-295)
+  -- * Optimisations (KIP-295, KIP-862)
   OptimizationConfig (..),
+  SelfJoinRewrite (..),
+  addSelfJoinCandidate,
   defaultOptimizationConfig,
   noOptimisations,
   fromOptimizationFlags,
@@ -312,7 +314,29 @@ data Topology = Topology
   optimisation runs. Use 'effectiveChangelogReuse' to look up
   the combined effective changelog target for a store.
   -}
+  , topoSelfJoins :: !(Map NodeName SelfJoinRewrite)
+  {- ^ Window joins of a stream with itself, by their left node, with
+  the single-store form @SINGLE_STORE_SELF_JOIN@ swaps in
+  ('optimizeTopology'). An applied rewrite is removed.
+  -}
   }
+
+
+{- | A window join of a stream with itself, as the builder recorded it:
+the right side's node and store go, and the left node runs
+'sjrSingle' over the left store alone (KIP-862).
+-}
+data SelfJoinRewrite = SelfJoinRewrite
+  { sjrRight :: !NodeName
+  , sjrLeftStore :: !StoreName
+  , sjrRightStore :: !StoreName
+  , sjrSingle :: !AnyProcessor
+  }
+
+
+-- | Record that the join whose left node is @left@ may run on one store.
+addSelfJoinCandidate :: NodeName -> SelfJoinRewrite -> Topology -> Topology
+addSelfJoinCandidate left r t = t {topoSelfJoins = Map.insert left r (topoSelfJoins t)}
 
 
 emptyTopology :: Topology
@@ -329,6 +353,7 @@ emptyTopology =
     , topoGlobalStores = Set.empty
     , topoInternalTopics = Map.empty
     , topoChangelogPlan = Map.empty
+    , topoSelfJoins = Map.empty
     }
 
 
@@ -528,7 +553,8 @@ addProcessorWith spec t =
             , topoChildrenIndex =
                 foldl'
                   ( \acc p ->
-                      Map.insertWith (++) p [processorSpecName spec] acc
+                      -- children in insertion order: the JVM forwards to them in it
+                      Map.insertWith (flip (++)) p [processorSpecName spec] acc
                   )
                   (topoChildrenIndex t)
                   (processorSpecParents spec)
@@ -621,7 +647,7 @@ addSinkWith spec t =
             , topoOrder = topoOrder t |> sinkName spec
             , topoChildrenIndex =
                 foldl'
-                  (\acc p -> Map.insertWith (++) p [sinkName spec] acc)
+                  (\acc p -> Map.insertWith (flip (++)) p [sinkName spec] acc)
                   (topoChildrenIndex t)
                   (sinkParents spec)
             }
@@ -669,6 +695,11 @@ data OptimizationConfig = OptimizationConfig
   a source topic uses that topic as its changelog instead of a
   separate @-changelog@ topic.
   -}
+  , optSingleStoreSelfJoin :: !Bool
+  {- ^ KIP-862 @SINGLE_STORE_SELF_JOIN@: an inner window join of a
+  stream with itself runs on one window store and one processor
+  instead of two of each, with the same output in the same order.
+  -}
   }
   deriving stock (Eq, Show)
 
@@ -677,6 +708,7 @@ defaultOptimizationConfig :: OptimizationConfig
 defaultOptimizationConfig =
   OptimizationConfig
     { optReuseSourceKTable = True
+    , optSingleStoreSelfJoin = False
     }
 
 
@@ -688,6 +720,7 @@ noOptimisations :: OptimizationConfig
 noOptimisations =
   OptimizationConfig
     { optReuseSourceKTable = False
+    , optSingleStoreSelfJoin = False
     }
 
 
@@ -697,8 +730,7 @@ noOptimisations =
 the builder always shares one repartition topic among the groupings
 and joins of a re-keyed stream
 ('Kafka.Streams.StreamsBuilder.sharedRepartitionNode').
-@flagSingleStoreSelfJoin@ has no Haskell-side rewrite and is
-ignored.
+@flagSingleStoreSelfJoin@ turns on 'optSingleStoreSelfJoin'.
 -}
 fromOptimizationFlags
   :: Kafka.Streams.Topology.Optimization.OptimizationFlags
@@ -707,6 +739,8 @@ fromOptimizationFlags f =
   OptimizationConfig
     { optReuseSourceKTable =
         Kafka.Streams.Topology.Optimization.flagReuseSourceTopics f
+    , optSingleStoreSelfJoin =
+        Kafka.Streams.Topology.Optimization.flagSingleStoreSelfJoin f
     }
 
 
@@ -775,8 +809,12 @@ User-explicit declarations via
 'effectiveChangelogReuse' in addition to the side-table.
 -}
 optimizeTopology :: OptimizationConfig -> Topology -> Topology
-optimizeTopology cfg = reuseStep . wipePlan
+optimizeTopology cfg = selfJoinStep . reuseStep . wipePlan
   where
+    selfJoinStep
+      | optSingleStoreSelfJoin cfg = applySingleStoreSelfJoin
+      | otherwise = Prelude.id
+
     -- Reset every optimiser-derived decision before re-deriving.
     -- This is what makes 'optimizeTopology' reflective: subsequent
     -- modifications to the topology invalidate prior decisions,
@@ -787,6 +825,36 @@ optimizeTopology cfg = reuseStep . wipePlan
     reuseStep
       | optReuseSourceKTable cfg = applyReuseSourceKTable
       | otherwise = Prelude.id
+
+
+----------------------------------------------------------------------
+-- KIP-862 — SINGLE_STORE_SELF_JOIN
+----------------------------------------------------------------------
+
+{- | Swap every recorded self-join ('topoSelfJoins') for its
+single-store form: the right node and its store go (the merge node
+keeps the left one as its parent), and the left node runs the
+single processor over the left store.
+-}
+applySingleStoreSelfJoin :: Topology -> Topology
+applySingleStoreSelfJoin t0 = Map.foldrWithKey rewrite t0 {topoSelfJoins = Map.empty} (topoSelfJoins t0)
+  where
+    rewrite left r t
+      | Map.member left (topoProcessors t) && Map.member right (topoProcessors t) =
+          t
+            { topoProcessors =
+                Map.adjust
+                  (\p -> p {processorSpecSupplier = sjrSingle r, processorSpecStores = [sjrLeftStore r]})
+                  left
+                  (Map.map (\p -> p {processorSpecParents = filter (/= right) (processorSpecParents p)}) (Map.delete right (topoProcessors t)))
+            , topoStores = Map.delete (sjrRightStore r) (topoStores t)
+            , topoStoreOwners = Map.insert (sjrLeftStore r) [left] (Map.delete (sjrRightStore r) (topoStoreOwners t))
+            , topoOrder = Seq.filter (/= right) (topoOrder t)
+            , topoChildrenIndex = Map.map (filter (/= right)) (Map.delete right (topoChildrenIndex t))
+            }
+      | otherwise = t
+      where
+        right = sjrRight r
 
 
 ----------------------------------------------------------------------

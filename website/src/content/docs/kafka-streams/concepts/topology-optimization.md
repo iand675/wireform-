@@ -95,13 +95,16 @@ These change the internal topic layout on your Kafka brokers.
 |---------|--------|-----|
 | `REUSE_KTABLE_SOURCE_TOPICS` | A table read straight off a source topic uses that topic as its changelog (no `-changelog` topic) | `optimizeTopology`; the Free DSL's `compile` applies it |
 | `MERGE_REPARTITION_TOPICS` | The groupings and joins of one re-keyed stream share one repartition topic | Always on: the builder shares the repartition by construction |
-| `SINGLE_STORE_SELF_JOIN` | Use one store instead of two for self-joins | Not implemented (the flag is accepted and ignored) |
+| `SINGLE_STORE_SELF_JOIN` | An inner window join of a stream with itself runs on one window store and one processor instead of two of each, with the same output in the same order (KIP-862) | `optimizeTopology` with `optSingleStoreSelfJoin` |
 
-Reusing source topics changes which internal topics exist: rolling out a
-topology with a different setting than before can orphan topics or
-require state migration.
+Reusing source topics and single-store self-joins change which internal
+topics exist: rolling out a topology with a different setting than
+before can orphan topics or require state migration.
 
-With the imperative builder, optimise before validating:
+The instance applies `topologyOptimization` (`topology.optimization`:
+`none`, `all`, or a comma-separated list of the rewrites above) to its
+topology when it is created. To optimise yourself with the imperative
+builder, do it before validating:
 
 ```haskell
 import Kafka.Streams.Topology (fromOptimizationFlags, optimizeTopology, validateTopology)

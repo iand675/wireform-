@@ -16,8 +16,8 @@ rewrites with @topology.optimization@:
     builder always works
     ('Kafka.Streams.StreamsBuilder.sharedRepartitionNode'), so the flag
     changes nothing.
-  * @SINGLE_STORE_SELF_JOIN@       — not implemented; the flag is
-    accepted and ignored.
+  * @SINGLE_STORE_SELF_JOIN@       — an inner window join of a stream
+    with itself runs on one store ('Kafka.Streams.Topology.optimizeTopology').
 
 'optimizationFlags' turns the knob into booleans and
 'Kafka.Streams.Topology.fromOptimizationFlags' into the
@@ -32,10 +32,12 @@ module Kafka.Streams.Topology.Optimization (
   noOptimizations,
   optimizationFlags,
   parseOptimizationLevel,
+  parseOptimizationFlags,
   optimizationLevelText,
 ) where
 
 import Data.Text (Text)
+import Data.Text qualified as T
 import GHC.Generics (Generic)
 
 
@@ -89,6 +91,18 @@ parseOptimizationLevel = \case
   "single.store.self.join" -> Just OptimizeSingleStoreSelfJoin
   "all" -> Just OptimizeAll
   _ -> Nothing
+
+
+{- | Parse @topology.optimization@: one level, or several separated by
+commas (as the JVM accepts), their flags combined.
+-}
+parseOptimizationFlags :: Text -> Maybe OptimizationFlags
+parseOptimizationFlags =
+  fmap (foldr (orFlags . optimizationFlags) noOptimizations)
+    . traverse (parseOptimizationLevel . T.strip)
+    . T.splitOn ","
+  where
+    orFlags (OptimizationFlags a b c) (OptimizationFlags x y z) = OptimizationFlags (a || x) (b || y) (c || z)
 
 
 optimizationLevelText :: TopologyOptimizationLevel -> Text

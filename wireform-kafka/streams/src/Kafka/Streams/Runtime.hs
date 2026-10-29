@@ -174,6 +174,7 @@ import Kafka.Streams.Runtime.Tasks
 import Kafka.Streams.State.Store (StoreName, unStoreName)
 import Kafka.Streams.Time (nowMillis)
 import Kafka.Streams.Topology qualified as Topo
+import Kafka.Streams.Topology.Optimization (noOptimizations)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, removePathForcibly)
 import System.FilePath ((</>))
 import System.IO (hPutStrLn, stderr)
@@ -244,8 +245,25 @@ data KafkaStreams = KafkaStreams
   }
 
 
+{- | An instance of @valid@, rewritten by @topology.optimization@
+('topologyOptimization') first.
+-}
 newKafkaStreams :: StreamsConfig -> Topo.TopologyValid -> IO KafkaStreams
-newKafkaStreams cfg topo = do
+newKafkaStreams cfg valid = do
+  let graph = Topo.topologyValidGraph valid
+      wanted = Topo.fromOptimizationFlags (topologyOptimization cfg)
+      -- a topology optimised when it was built (the Free DSL's compile)
+      -- keeps its changelog reuse
+      optimised =
+        Topo.optimizeTopology
+          wanted {Topo.optReuseSourceKTable = Topo.optReuseSourceKTable wanted || not (Map.null (Topo.topoChangelogPlan graph))}
+          graph
+  topo <-
+    if topologyOptimization cfg == noOptimizations
+      then pure valid
+      else case Topo.validateTopology optimised of
+        Right v -> pure v
+        Left e -> valid <$ logLine ("topology.optimization: the rewritten topology is invalid (" <> show e <> "); running it as built")
   s <- newTVarIO StreamsCreated
   running <- newIORef Nothing
   lis <- newIORef (\_ _ -> pure ())

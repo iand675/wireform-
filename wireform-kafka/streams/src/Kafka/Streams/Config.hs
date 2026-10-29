@@ -48,6 +48,7 @@ import Kafka.Streams.Errors (
  )
 import Kafka.Streams.Discovery (HostInfo, parseHostInfo)
 import Kafka.Streams.Processor.Assignment (TaskAssignor)
+import Kafka.Streams.Topology.Optimization (OptimizationFlags, noOptimizations, parseOptimizationFlags)
 
 
 -- | What level of processing-guarantee should the runtime offer?
@@ -82,6 +83,7 @@ dropped):
     'probingRebalanceIntervalMs' — the KIP-441 keys
   * 'metadataMaxAgeMs'          — @metadata.max.age.ms@ (pattern sources)
   * 'statestoreCacheMaxBytes'   — @statestore.cache.max.bytes@ (record caches)
+  * 'topologyOptimization'      — @topology.optimization@
 
 The embedded clients are configured from these; 'consumerOverrides',
 'producerOverrides' and 'adminOverrides' adjust anything else on them
@@ -151,6 +153,11 @@ data StreamsConfig = StreamsConfig
   @0@ turns caching off: every update is forwarded at once. Default
   10 MiB.
   -}
+  , topologyOptimization :: !OptimizationFlags
+  {- ^ @topology.optimization@ — the rewrites the instance applies to
+  its topology when it is created ("Kafka.Streams.Topology.Optimization",
+  'Kafka.Streams.Topology.optimizeTopology'). Default none.
+  -}
   , metadataMaxAgeMs :: !Int
   {- ^ @metadata.max.age.ms@ — how often the topic list is fetched
   again for pattern sources. When the topics a pattern matches change,
@@ -215,6 +222,7 @@ defaultStreamsConfig =
     , acceptableRecoveryLag = 10_000
     , maxWarmupReplicas = 2
     , probingRebalanceIntervalMs = 600_000
+    , topologyOptimization = noOptimizations
     , metadataMaxAgeMs = 300_000
     , statestoreCacheMaxBytes = 10 * 1024 * 1024
     , taskAssignor = Nothing
@@ -287,6 +295,8 @@ streamsConfigFromMap m = foldl' step defaultStreamsConfig (Map.toAscList m)
         maybe cfg (\n -> cfg {maxWarmupReplicas = n}) (readT v)
       "probing.rebalance.interval.ms" ->
         maybe cfg (\n -> cfg {probingRebalanceIntervalMs = n}) (readT v)
+      "topology.optimization" ->
+        maybe cfg (\f -> cfg {topologyOptimization = f}) (parseOptimizationFlags v)
       "metadata.max.age.ms" ->
         maybe cfg (\n -> cfg {metadataMaxAgeMs = n}) (readT v)
       "statestore.cache.max.bytes" ->

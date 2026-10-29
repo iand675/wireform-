@@ -3,6 +3,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -1544,7 +1545,31 @@ buildWindowJoin sl0 sr0 jw j prefix spec = do
             t2
         !t4 = Topo.addStateStoreW lsb [leftNm, rightNm] t3
         !t5 = Topo.addStateStoreW rsb [leftNm, rightNm] t4
-    in if hasOuter then Topo.addStateStoreKV osb [leftNm, rightNm] t5 else t5
+        -- an inner join of a stream with itself can run on one store
+        selfJoin =
+          Topo.SelfJoinRewrite
+            { Topo.sjrRight = rightNm
+            , Topo.sjrLeftStore = leftStoreNm
+            , Topo.sjrRightStore = rightStoreNm
+            , Topo.sjrSingle =
+                Topo.AnyProcessor
+                  ( WJ.selfJoinProcessor @k @v1
+                      WJ.SelfJoinConfig
+                        { WJ.sjBefore = jw.beforeMs
+                        , WJ.sjAfter = jw.afterMs
+                        , WJ.sjGrace = jw.gracePeriodMs
+                        , -- both sides are one stream, so v2 is v1
+                          WJ.sjJoin = \a b -> spec.wjsJoin a (Unsafe.unsafeCoerce b)
+                        , WJ.sjStore = leftStoreNm
+                        , WJ.sjTimes = times
+                        , WJ.sjName = prefix <> "-SELF"
+                        }
+                  )
+            }
+    in if
+         | hasOuter -> Topo.addStateStoreKV osb [leftNm, rightNm] t5
+         | kstreamParent sl == kstreamParent sr -> Topo.addSelfJoinCandidate leftNm selfJoin t5
+         | otherwise -> t5
 
   pure
     KStream

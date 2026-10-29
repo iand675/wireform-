@@ -33,10 +33,7 @@ optimize_topology_is_identity_when_off :: Spec
 optimize_topology_is_identity_when_off =
   it "optimizeTopology is the identity when no toggles are enabled" $ do
     topo <- mkSimpleTopo
-    let cfg =
-          OptimizationConfig
-            { optReuseSourceKTable = False
-            }
+    let cfg = noOptimisations
         topo' = optimizeTopology cfg topo
     -- Same node count after optimisation (currently a no-op).
     length (topoOrder topo') `shouldBe` length (topoOrder topo)
