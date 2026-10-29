@@ -264,29 +264,38 @@ topoInternalTopicsText :: Topo.Topology -> Map Text Topo.InternalTopicSpec
 topoInternalTopicsText = Map.mapKeys unTopicName . Topo.topoInternalTopics
 
 
-{- | Partition counts of every topic: the external ones as found, a
-repartition topic its declared count or the most partitions feeding
-the subtopology that writes it (resolved writer by writer).
+{- | Partition counts of every topic: the external ones as found; a
+repartition topic its declared count, or, when a stateful
+subtopology reads it alongside topics whose counts are known, the
+most partitions of those (it must be co-partitioned with them, as the
+JVM's @CopartitionedTopicsEnforcer@ requires); otherwise the most
+partitions of the topics feeding the subtopology that writes it.
+Resolved until nothing changes.
 -}
 resolveCounts :: [Subtopology] -> Map Text Topo.InternalTopicSpec -> Map Text Int -> Either Text (Map Text Int)
-resolveCounts subs internal = go (Map.size internal + 1)
+resolveCounts subs internal = go (2 * Map.size internal + 1)
   where
     txt = unTopicName
     writers r = filter (\sub -> r `elem` map txt (subSinkTopics sub)) subs
+    statefulReaders r = filter (\sub -> not (null (subStores sub)) && r `elem` map txt (subSourceTopics sub)) subs
     go :: Int -> Map Text Int -> Either Text (Map Text Int)
     go fuel counts
       | all (`Map.member` counts) (Map.keys internal) = Right counts
       | fuel <= 0 =
           Left ("cannot work out the partition count of " <> T.intercalate ", " (filter (`Map.notMember` counts) (Map.keys internal)))
       | otherwise =
-          let step acc (r, spec) = case Topo.itsPartitions spec of
-                _ | Map.member r acc -> acc
-                Just n -> Map.insert r n acc
-                Nothing ->
-                  let feeding = concatMap (map txt . subSourceTopics) (writers r)
-                  in if not (null feeding) && all (`Map.member` acc) feeding
-                       then Map.insert r (maximum (map (acc Map.!) feeding)) acc
-                       else acc
+          let step acc (r, spec)
+                | Map.member r acc = acc
+                | Just n <- Topo.itsPartitions spec = Map.insert r n acc
+                | not (null copartitioned) = Map.insert r (maximum copartitioned) acc
+                | not (null feeding) && all (`Map.member` acc) feeding = Map.insert r (maximum (map (acc Map.!) feeding)) acc
+                | otherwise = acc
+                where
+                  copartitioned =
+                    mapMaybe
+                      (`Map.lookup` acc)
+                      (filter (/= r) (concatMap (map txt . subSourceTopics) (statefulReaders r)))
+                  feeding = concatMap (map txt . subSourceTopics) (writers r)
           in go (fuel - 1) (foldl step counts (Map.toList internal))
 
 

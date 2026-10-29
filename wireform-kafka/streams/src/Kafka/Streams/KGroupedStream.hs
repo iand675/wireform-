@@ -51,7 +51,7 @@ import Data.IORef
 import Data.Int (Int64)
 import Data.Maybe (fromMaybe)
 import Kafka.Streams.Grouped (Grouped (..))
-import Kafka.Streams.KTable (KTable (..))
+import Kafka.Streams.KTable (Change (..), KTable (..))
 import Data.Text qualified as T
 import Kafka.Streams.KStream (
   KStream (..),
@@ -357,7 +357,7 @@ reduceProcessor sn combine = do
                     Nothing -> recordValue r
                     Just p -> combine p (recordValue r)
               kvsPut kvs k next
-              forwardRecord ctx r {recordValue = next}
+              forwardRecord ctx r {recordValue = Change (Just next) mPrev}
             _ -> pure ()
       }
 
@@ -394,7 +394,7 @@ aggregateProcessor sn initial agg = do
                 Just p -> pure p
               let !next = agg k (recordValue r) cur
               kvsPut kvs k next
-              forwardRecord ctx r {recordValue = next}
+              forwardRecord ctx r {recordValue = Change (Just next) mPrev}
             _ -> pure ()
       }
 

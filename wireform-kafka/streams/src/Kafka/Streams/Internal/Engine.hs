@@ -586,9 +586,16 @@ sinkForwarder engine spec =
                 engine
                 (unTopicName topic)
                 (unsafeCoerce sp :: StreamPartitioner Erased Erased)
+          -- A nullable sink's values are @Maybe v@ ('Nothing': a tombstone).
+          nullable = Topo.sinkNullableValues spec
+          present :: Record Erased Erased -> Maybe Erased
+          present rec
+            | nullable = unsafeCoerce (recordValue rec) :: Maybe Erased
+            | otherwise = Just (recordValue rec)
       in \rec -> do
            let !keyB = serialize erasedK <$> recordKey rec
-               !valB = serialize erasedV (recordValue rec)
+               !mVal = present rec
+               !valB = serialize erasedV <$> mVal
                -- Stamp the serdes' header contributions (e.g. schema-identity
                -- headers) onto the outgoing record, mirroring the typed
                -- producer path ('Kafka.Client.Producer.publish'). Headers
@@ -596,15 +603,16 @@ sinkForwarder engine spec =
                -- trace-context headers) are preserved and the serde headers
                -- appended; built-in serdes contribute 'mempty'.
                !keyHdrs = maybe mempty (serializeHeaders erasedK) (recordKey rec)
-               !valHdrs = serializeHeaders erasedV (recordValue rec)
+               !valHdrs = maybe mempty (serializeHeaders erasedV) mVal
                !outHdrs = recordHeaders rec <> keyHdrs <> valHdrs
-           !part <- choosePartition rec
+           -- a tombstone's partition is the producer's (by key)
+           !part <- maybe (pure Nothing) (\v -> choosePartition rec {recordValue = v}) mVal
            collectorSend
              (engineCollector engine)
              CollectedRecord
                { crTopic = topic
                , crKey = keyB
-               , crValue = Just valB
+               , crValue = valB
                , crTimestamp = recordTimestamp rec
                , crHeaders = outHdrs
                , crPartition = part

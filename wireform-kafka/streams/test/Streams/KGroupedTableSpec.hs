@@ -62,7 +62,7 @@ count_updates_subtract_prior =
         (consumed textSerde textSerde)
         (materializedAs (storeName "orders-store"))
     let g = grouped textSerde textSerde
-        kgt =
+    kgt <-
           groupTableBy
             (\_orderId customer -> (customer, customer))
             g
@@ -124,7 +124,7 @@ reduce_subtracts_then_adds =
         (consumed textSerde int64Serde)
         (materializedAs (storeName "amounts-store"))
     let g = grouped textSerde int64Serde
-        kgt = groupTableBy (\_orderId amt -> ("TOTAL", amt)) g table
+    kgt <- groupTableBy (\_orderId amt -> ("TOTAL", amt)) g table
     totals <-
       reduceKGroupedTable
         (+)
@@ -188,7 +188,7 @@ aggregate_handles_first_record_specially =
         (consumed textSerde int64Serde)
         (materializedAs (storeName "scores-store"))
     let g = grouped textSerde int64Serde
-        kgt = groupTableBy (\_p score -> ("HIGH", score)) g table
+    kgt <- groupTableBy (\_p score -> ("HIGH", score)) g table
     highs <-
       aggregateKGroupedTable
         (pure (0 :: Int64))

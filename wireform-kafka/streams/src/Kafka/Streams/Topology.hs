@@ -90,6 +90,7 @@ module Kafka.Streams.Topology (
   AnySerde (..),
   AnyStreamPartitioner (..),
   addSinkPartitioned,
+  addSinkNullable,
   AnyTimestampExtractor (..),
   AnyStoreBuilder (..),
   storeBuilderName,
@@ -257,6 +258,10 @@ data SinkSpec = SinkSpec
   , sinkPartitioner :: !(Maybe AnyStreamPartitioner)
   {- ^ Per-record partition choice (@Produced.withStreamPartitioner@).
   'Nothing' leaves the partition to the producer's partitioner.
+  -}
+  , sinkNullableValues :: !Bool
+  {- ^ The sink receives @Maybe v@: 'Nothing' is written as a null value
+  (a tombstone), which a compacted topic reads as a delete.
   -}
   }
 
@@ -548,6 +553,31 @@ addSink nm tp ks vs parents =
       , sinkKeySerde = AnySerde ks
       , sinkValueSerde = AnySerde vs
       , sinkPartitioner = Nothing
+      , sinkNullableValues = False
+      }
+
+
+{- | 'addSink' for parents forwarding @Maybe v@: 'Nothing' is written as
+a tombstone.
+-}
+addSinkNullable
+  :: NodeName
+  -> TopicName
+  -> Serde k
+  -> Serde v
+  -> [NodeName]
+  -> Topology
+  -> Topology
+addSinkNullable nm tp ks vs parents =
+  addSinkWith
+    SinkSpec
+      { sinkName = nm
+      , sinkParents = parents
+      , sinkTopic = tp
+      , sinkKeySerde = AnySerde ks
+      , sinkValueSerde = AnySerde vs
+      , sinkPartitioner = Nothing
+      , sinkNullableValues = True
       }
 
 
@@ -574,6 +604,7 @@ addSinkPartitioned nm tp ks vs sp parents =
       , sinkKeySerde = AnySerde ks
       , sinkValueSerde = AnySerde vs
       , sinkPartitioner = Just (AnyStreamPartitioner sp)
+      , sinkNullableValues = False
       }
 
 

@@ -3029,6 +3029,7 @@ test_sinkSpec_compiles_with_custom_spec =
             , Topo.sinkKeySerde = Topo.AnySerde (textSerde :: Serde Text)
             , Topo.sinkValueSerde = Topo.AnySerde (textSerde :: Serde Text)
             , Topo.sinkPartitioner = Nothing
+            , Topo.sinkNullableValues = False
             }
         topology :: F.Topology Void ()
         topology =

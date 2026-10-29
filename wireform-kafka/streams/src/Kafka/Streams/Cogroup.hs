@@ -44,7 +44,7 @@ import Kafka.Streams.KGroupedStream (
   groupedInput,
  )
 import Kafka.Streams.KStream (mkPassThrough)
-import Kafka.Streams.KTable (KTable (..))
+import Kafka.Streams.KTable (Change (..), KTable (..))
 import Kafka.Streams.Serde (Serde)
 import Kafka.Streams.Materialized (
   Materialized (..),
@@ -248,7 +248,7 @@ cogroupSideProc sn initial agg = do
                 !cur <- maybe initial pure mPrev
                 let !next = agg k (recordValue r) cur
                 kvsPut kvs k next
-                forwardRecord ctx r {recordValue = next}
+                forwardRecord ctx r {recordValue = Change (Just next) mPrev}
               _ -> pure ()
       }
 

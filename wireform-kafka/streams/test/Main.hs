@@ -9,6 +9,7 @@ import Streams.BoundedSuppressSpec qualified
 import Streams.CacheSpec qualified
 import Streams.ChangelogSpec qualified
 import Streams.TaskRuntimeSpec qualified
+import Streams.TableChangeSpec qualified
 import Streams.ParityBatchSpec qualified
 import Streams.StandbyTaskSpec qualified
 import Streams.RuntimeBehaviourSpec qualified
@@ -134,6 +135,7 @@ main = do
         , Streams.CacheSpec.tests
         , Streams.ChangelogSpec.tests
         , Streams.TaskRuntimeSpec.tests
+        , Streams.TableChangeSpec.tests
         , Streams.ParityBatchSpec.tests
         , Streams.StandbyTaskSpec.tests
         , Streams.RuntimeBehaviourSpec.tests

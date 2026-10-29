@@ -1258,7 +1258,7 @@ runPrim b = go
     go (AggregateSessionWindowed seed step merger m) =
       SWKS.aggregateSessionWindowed seed step merger m
     -- KGroupedTable
-    go (GroupTableBy f g) = pure . KGT.groupTableBy f g
+    go (GroupTableBy f g) = KGT.groupTableBy f g
     go (CountKGroupedTable m) = \kgt -> do
       h <- KGT.countKGroupedTable m kgt
       pure h

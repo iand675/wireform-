@@ -103,6 +103,7 @@ module Kafka.Streams.KStream (
 
   -- * Sinks
   toTopic,
+  toTopicNullable,
   toTopicNamed,
   toExtracted,
   TopicNameExtractor (..),
@@ -116,6 +117,7 @@ module Kafka.Streams.KStream (
   repartitionThrough,
   repartitionIfKeyChanged,
   toKStreamFromKTable,
+  toChangelogStream,
   groupByKTable,
 
   -- * Joins
@@ -1122,6 +1124,22 @@ toTopic topic p s = do
   withTopology_ b $ producedSink nm topic p [kstreamParent s]
 
 
+{- | Write a stream of @Maybe v@ to a topic, 'Nothing' as a null value
+(a tombstone): what a 'toChangelogStream' of a table needs so a
+compacted output topic sees its deletes. The 'Produced' partitioner,
+if any, is not consulted (records go by key).
+-}
+toTopicNullable
+  :: TopicName
+  -> Produced k v
+  -> KStream k (Maybe v)
+  -> IO ()
+toTopicNullable topic p s = do
+  let b = kstreamBuilder s
+  nm <- maybe (freshNodeName b "KSTREAM-SINK") (pure . Topo.NodeName) (producedName p)
+  withTopology_ b $ Topo.addSinkNullable nm topic (producedKeySerde p) (producedValueSerde p) [kstreamParent s]
+
+
 -- | Add the sink node a 'Produced' describes, partitioner included.
 producedSink
   :: Topo.NodeName
@@ -1765,8 +1783,9 @@ toTableProc sn = do
             mst <- readIORef storeRef
             case (mctx, mst) of
               (Just ctx, Just kvs) -> do
+                old <- kvsGet kvs k
                 kvsPut kvs k (recordValue r)
-                forwardRecord ctx r
+                forwardRecord ctx r {recordValue = Kafka.Streams.KTable.Change (Just (recordValue r)) old}
               _ -> pure ()
       }
 
@@ -2441,23 +2460,62 @@ processValuesStream prefix stores supplier vs s = do
 -- KTable -> KStream / KTable.groupBy
 ----------------------------------------------------------------------
 
-{- | Convert a 'KTable' to a 'KStream' carrying every change event.
-Mirrors @KTable.toStream@.
+{- | The table's updates as a stream: each row's new value (deletes
+are not part of it; 'toChangelogStream' keeps them). Mirrors
+@KTable.toStream@ for consumers that only want current values.
 -}
 toKStreamFromKTable
   :: forall k v
    . Kafka.Streams.KTable.KTable k v
   -> IO (KStream k v)
-toKStreamFromKTable kt = do
+toKStreamFromKTable kt =
+  tableChanges "KTABLE-TOSTREAM" kt (Kafka.Streams.KTable.ktableValueSerde kt) $ \ctx r -> case recordValue r of
+    Kafka.Streams.KTable.Change (Just v) _ -> forwardRecord ctx r {recordValue = v}
+    _ -> pure ()
+
+
+{- | The table's changelog as a stream: 'Just' the new value, or
+'Nothing' for a delete (JVM @KTable.toStream@ with its null values).
+Write it with 'toTopicNullable' to keep deletes as tombstones.
+-}
+toChangelogStream
+  :: forall k v
+   . Kafka.Streams.KTable.KTable k v
+  -> IO (KStream k (Maybe v))
+toChangelogStream kt =
+  tableChanges
+    "KTABLE-TOCHANGELOG"
+    kt
+    (error "toChangelogStream: write it with toTopicNullable (its values are Maybe v)")
+    $ \ctx r -> forwardRecord ctx r {recordValue = Kafka.Streams.KTable.changeNew (recordValue r :: Kafka.Streams.KTable.Change v)}
+
+
+-- | A stream node fed a table's changes.
+tableChanges
+  :: forall k v w
+   . T.Text
+  -> Kafka.Streams.KTable.KTable k v
+  -> Serde w
+  -> (ProcessorContext -> Record k (Kafka.Streams.KTable.Change v) -> IO ())
+  -> IO (KStream k w)
+tableChanges label kt vs step = do
   let b = Kafka.Streams.KTable.ktableBuilder kt
-  nm <- freshNodeName b "KTABLE-TOSTREAM"
+  nm <- freshNodeName b label
   withTopology_ b $ \t ->
     Topo.addProcessorWith
       Topo.ProcessorSpec
         { Topo.processorSpecName = nm
         , Topo.processorSpecParents = [Kafka.Streams.KTable.ktableNode kt]
         , Topo.processorSpecSupplier =
-            Topo.AnyProcessor (mkPassThrough "KTABLE-TOSTREAM")
+            Topo.AnyProcessor $ do
+              ref <- newIORef Nothing
+              pure
+                Processor
+                  { procName = processorName label
+                  , procInit = writeIORef ref . Just
+                  , procClose = pure ()
+                  , procProcess = \r -> readIORef ref >>= mapM_ (`step` r)
+                  }
         , Topo.processorSpecStores = []
         }
       t
@@ -2467,7 +2525,7 @@ toKStreamFromKTable kt = do
       , kstreamParent = nm
       , kstreamKeyChanged = False
       , kstreamKeySerde = Kafka.Streams.KTable.ktableKeySerde kt
-      , kstreamValueSerde = Kafka.Streams.KTable.ktableValueSerde kt
+      , kstreamValueSerde = vs
       }
 
 
