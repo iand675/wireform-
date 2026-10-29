@@ -172,7 +172,6 @@ import Kafka.Streams.Runtime.GroupAssignor
 import Kafka.Streams.Runtime.StateDir (markCleanShutdown, prepareStateDir)
 import Kafka.Streams.Runtime.Tasks
 import Kafka.Streams.State.Store (StoreName, unStoreName)
-import Kafka.Streams.Topology.Subtopology (ChangelogTopic (..))
 import Kafka.Streams.Time (nowMillis)
 import Kafka.Streams.Topology qualified as Topo
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, removePathForcibly)
@@ -440,10 +439,9 @@ startKafkaStreamsWith ks drv = do
             LeaderContext
               { lcTasks = planTasks plan
               , lcTaskPartitions = taskSourcePartitions plan
-              , lcTaskChangelogs = Map.map (\tps -> (map fst (filter (clInternal . snd) tps), map fst (filter (not . clInternal . snd) tps))) cls
+              , lcTaskChangelogs = Map.map (map fst) cls
               , lcTaskStores = \(TaskId sid _) -> maybe Set.empty (Set.fromList . map unStoreName . Map.keys . subPlanChangelogs) (Map.lookup sid (rpSubtopologies plan))
               , lcEndOffsets = rdEndOffsets reader
-              , lcCommitted = sdCommitted drv
               , lcConfig =
                   AssignConfig
                     { acStandbys = numStandbyReplicas cfg

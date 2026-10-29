@@ -387,11 +387,13 @@ streamsProtocolName = "streams"
 data LeaderContext = LeaderContext
   { lcTasks :: ![TaskId]
   , lcTaskPartitions :: !(TaskId -> [KC.TopicPartition])
-  , lcTaskChangelogs :: !(Map TaskId ([KC.TopicPartition], [KC.TopicPartition]))
-  -- ^ Per stateful task: its internal changelog partitions, and the source partitions its stores reuse
+  , lcTaskChangelogs :: !(Map TaskId [KC.TopicPartition])
+  -- ^ Per stateful task: its stores' changelog partitions (internal, or the source topics they reuse)
   , lcTaskStores :: !(TaskId -> Set Text)
   , lcEndOffsets :: !([KC.TopicPartition] -> IO (Either String (Map KC.TopicPartition Int64)))
-  , lcCommitted :: !([KC.TopicPartition] -> IO (Either String (Map KC.TopicPartition Int64)))
+  {- ^ From a reader of its own: the leader runs inside the main
+  consumer's join, so it must not call back into that consumer
+  -}
   , lcConfig :: !AssignConfig
   , lcAssignmentConfigs :: !PA.AssignmentConfigs
   , lcUserAssignor :: !(Maybe PA.TaskAssignor)
@@ -447,21 +449,16 @@ most advanced member as caught up.
 taskSpecs :: LeaderContext -> [StreamsSubscription] -> IO (Map TaskId TaskSpec)
 taskSpecs lc subs = do
   let cls = lcTaskChangelogs lc
-      internal = concatMap fst (Map.elems cls)
-      reused = concatMap snd (Map.elems cls)
-  eEnds <- if null internal then pure (Right Map.empty) else lcEndOffsets lc internal
-  eCommitted <- if null reused then pure (Right Map.empty) else lcCommitted lc reused
+      tps = concat (Map.elems cls)
+  eEnds <- if null tps then pure (Right Map.empty) else lcEndOffsets lc tps
   either (\e -> lcLog lc ("assignor: changelog end offsets: " <> e)) (const (pure ())) eEnds
-  either (\e -> lcLog lc ("assignor: committed offsets: " <> e)) (const (pure ())) eCommitted
-  let known = either (const Nothing) Just
-      bestReported t = maximum (0 : filter (>= 0) (mapMaybe (Map.lookup t . ssOffsetSums) subs))
+  let bestReported t = maximum (0 : filter (>= 0) (mapMaybe (Map.lookup t . ssOffsetSums) subs))
       spec t = case Map.lookup t cls of
         Nothing -> TaskSpec False 0
-        Just (ins, rs) ->
-          let end = case (known eEnds, known eCommitted) of
-                (Just ends, Just comm) ->
-                  sum (map (\tp -> Map.findWithDefault 0 tp ends) ins) + sum (map (\tp -> Map.findWithDefault 0 tp comm) rs)
-                _ -> bestReported t
+        Just ps ->
+          let end = case eEnds of
+                Right ends -> sum (map (\tp -> Map.findWithDefault 0 tp ends) ps)
+                Left _ -> bestReported t
           in TaskSpec True end
   pure (Map.fromList (map (\t -> (t, spec t)) (lcTasks lc)))
 
@@ -504,7 +501,7 @@ userAssign lc ua specs subs builtIn = do
           , PA.tiTopicPartitions =
               Set.fromList
                 ( map (\tp -> PA.TaskTopicPartition tp.topic tp.partition False) (lcTaskPartitions lc t)
-                    <> map (\tp -> PA.TaskTopicPartition tp.topic tp.partition True) (maybe [] fst (Map.lookup t (lcTaskChangelogs lc)))
+                    <> map (\tp -> PA.TaskTopicPartition tp.topic tp.partition True) (Map.findWithDefault [] t (lcTaskChangelogs lc))
                 )
           , PA.tiIsStateful = tsStateful spec
           , PA.tiStores = lcTaskStores lc t
