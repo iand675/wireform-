@@ -3951,15 +3951,15 @@ streamFromWindowed =
     Suppress.streamFromWindowedHandle h (serde @k) (serde @v)
 
 
-{- | Bridge a 'SWKS.SessionWindowedTableHandle' into a
-@'KStream' k v@ pinned at the session aggregator's emit node.
-The aggregator forwards plain-keyed records (inner @k@, not
-'SWKS.SessionKey'), so the downstream stream is keyed by @k@.
+{- | Bridge a 'SWKS.SessionWindowedTableHandle' into the stream of its
+updates, keyed by session: each session's aggregate, and 'Nothing' for
+a session merged into a larger one (see
+'Suppress.streamFromSessionWindowedHandle').
 -}
 streamFromSessionWindowed
   :: forall k v
-   . (Ord k, HasSerde k, HasSerde v)
-  => Topology (SWKS.SessionWindowedTableHandle k v) (KStream k v)
+   . (HasSerde k, HasSerde v)
+  => Topology (SWKS.SessionWindowedTableHandle k v) (KStream (Store.SessionKey k) (Maybe v))
 streamFromSessionWindowed =
   liftIO_ "streamFromSessionWindowed" $ \_b h ->
     Suppress.streamFromSessionWindowedHandle h (serde @k) (serde @v)

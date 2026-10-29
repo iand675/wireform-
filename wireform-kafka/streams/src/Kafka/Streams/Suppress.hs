@@ -113,11 +113,13 @@ import Kafka.Streams.State.Store (
   AnyStateStore (..),
   KeyValueStore (..),
   StoreBuilderKV,
+  SessionKey (..),
   StoreName,
   WindowStore (..),
   WindowedKey (..),
   kvIteratorToList,
  )
+import Kafka.Streams.Serde.Windowed (sessionKeySerde, windowedSerde)
 import Kafka.Streams.StreamsBuilder (
   StreamsBuilder,
   freshNodeName,
@@ -167,111 +169,25 @@ streamFromWindowedHandle h kserde vserde = case wthEmit h of
   OnWindowUpdate -> doStreamFromWindowedHandle h kserde vserde
 
 
-{- | Original behaviour — emit on every update to the window
-store. Kept as a separate helper so the
-'streamFromWindowedHandle' dispatch above can route by
-'wthEmit'.
+{- | Every update of the window store as a record: the aggregation
+node forwards them keyed by window already.
 -}
 doStreamFromWindowedHandle
   :: forall k v
-   . (Ord k, Eq v)
-  => WindowedTableHandle k v
+   . WindowedTableHandle k v
   -> Serde k
   -> Serde v
   -> IO (KStream (WindowedKey k) v)
-doStreamFromWindowedHandle h kserde vserde = do
-  let b = wthBuilder h
-  -- The handle's @wthNode@ is the aggregation processor itself,
-  -- which forwards the latest aggregate /value/ each time. It
-  -- doesn't forward the windowed key in our model — the windowed
-  -- key only lives in the store. To produce a (WindowedKey k, v)
-  -- stream we attach a small adapter processor that reads the
-  -- store and emits the most recent (key, value) on every input.
-  --
-  -- This is admittedly not as efficient as Java's "out-of-band
-  -- emitter" but it's a faithful single-task driver model.
-  nm <- freshNodeName b "WINDOWED-AS-STREAM"
-  withTopology_ b $
-    Topo.addProcessorWith
-      Topo.ProcessorSpec
-        { Topo.processorSpecName = nm
-        , Topo.processorSpecParents = [wthNode h]
-        , Topo.processorSpecSupplier =
-            Topo.AnyProcessor (windowedAsStreamProc @k @v (wthStore h))
-        , Topo.processorSpecStores = [wthStore h]
-        }
-  -- 'kserde' is retained only conceptually; downstream sinks will
-  -- typically supply a WindowedKey-aware composite serde via
-  -- 'Produced' rather than relying on the KStream-carried one,
-  -- hence the explicit error placeholder.
-  let _ = kserde
+doStreamFromWindowedHandle h kserde vserde =
   pure
     KStream
-      { kstreamBuilder = b
-      , kstreamParent = nm
+      { kstreamBuilder = wthBuilder h
+      , kstreamParent = wthNode h
       , kstreamKeyChanged = False
-      , kstreamKeySerde =
-          error
-            "streamFromWindowedHandle: WindowedKey serde unset; supply one to to/through"
+      , kstreamKeySerde = windowedSerde kserde
       , kstreamValueSerde = vserde
       }
 
-
-windowedAsStreamProc
-  :: forall (k :: *) (v :: *) (origIn :: *)
-   . (Ord k, Eq v)
-  => StoreName
-  -> IO (Processor k origIn)
-windowedAsStreamProc sn = do
-  ctxRef <- newIORef Nothing
-  storeRef <- newIORef (Nothing :: Maybe (WindowStore k v))
-  -- Tracks the value most recently forwarded for each
-  -- @(k, windowStart)@ pair so we never re-emit unchanged
-  -- entries when the windowed aggregator forwards through us
-  -- for an update to a /different/ window of the same key.
-  lastFwdRef <- newIORef (Map.empty :: Map.Map (k, Timestamp) v)
-  pure
-    Processor
-      { procName = processorName "WINDOWED-AS-STREAM"
-      , procInit = \ctx -> do
-          writeIORef ctxRef (Just ctx)
-          getStateStore ctx sn >>= \case
-            Just (AnyWindowStore ws) ->
-              writeIORef storeRef (Just (Unsafe.unsafeCoerce ws))
-            _ -> error "windowedAsStreamProc: store missing"
-      , procClose = pure ()
-      , procProcess = \r -> do
-          mctx <- readIORef ctxRef
-          mst <- readIORef storeRef
-          case (mctx, mst, recordKey r) of
-            (Just ctx, Just ws, Just k) -> do
-              it <- wsFetchRange ws k (Timestamp minBound) (Timestamp maxBound)
-              entries <- kvIteratorToList it
-              mapM_
-                ( \(ts, v) -> do
-                    prior <- Map.lookup (k, ts) <$> readIORef lastFwdRef
-                    case prior of
-                      Just v' | v' == v -> pure ()
-                      _ -> do
-                        modifyIORef' lastFwdRef (Map.insert (k, ts) v)
-                        forwardRecord
-                          ctx
-                          ( Record
-                              (Just (WindowedKey k ts))
-                              v
-                              (recordTimestamp r)
-                              (recordHeaders r)
-                              :: Record (WindowedKey k) v
-                          )
-                )
-                entries
-            _ -> pure ()
-      }
-
-
-----------------------------------------------------------------------
--- Suppress (windowed)
-----------------------------------------------------------------------
 
 {- | Suppress all updates to a windowed KTable until the window has
 closed (i.e. stream time has advanced past @windowEnd +
@@ -942,31 +858,28 @@ suppressWindowedHandle grace winMs ks vs h = do
   suppressWindowed grace winMs s
 
 
-{- | Tap a 'SWKS.SessionWindowedTableHandle' as a 'KStream' of
-@(k, v)@ records pinned at the session-aggregator's emit node.
-
-The aggregator forwards plain-keyed records (the inner @k@,
-not 'SWKS.SessionKey k') so the downstream stream is keyed by
-@k@. The supplied serdes are stamped into the resulting
-'KStream' so downstream sinks / joins have them available.
+{- | A 'SWKS.SessionWindowedTableHandle' as the stream of its updates,
+keyed by session: each session's new aggregate, and 'Nothing' for a
+session merged into a larger one (the JVM's
+@SessionWindowedKStream...toStream()@, nulls included).
 -}
 streamFromSessionWindowedHandle
   :: forall k v
-   . Ord k
-  => SWKS.SessionWindowedTableHandle k v
+   . SWKS.SessionWindowedTableHandle k v
   -> Serde k
   -- ^ key serde for downstream
   -> Serde v
   -- ^ value serde for downstream
-  -> IO (KStream k v)
+  -> IO (KStream (SessionKey k) (Maybe v))
 streamFromSessionWindowedHandle h kserde vserde =
   pure
     KStream
       { kstreamBuilder = SWKS.swthBuilder h
       , kstreamParent = SWKS.swthNode h
       , kstreamKeyChanged = False
-      , kstreamKeySerde = kserde
-      , kstreamValueSerde = vserde
+      , kstreamKeySerde = sessionKeySerde kserde
+      , -- like 'Kafka.Streams.KStream.toChangelogStream': nullable values go out through toTopicNullable
+        kstreamValueSerde = const (error "streamFromSessionWindowedHandle: write it with toTopicNullable (its values are Maybe v)") vserde
       }
 
 

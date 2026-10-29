@@ -29,6 +29,17 @@ and this project adheres to the
   `queryMetadataForKey`, stale IQ reads from standbys). On the client:
   `Kafka.Client.Assignor` custom assignors with assignment user data,
   `Consumer.setAssignmentStrategy` / `setAssignmentHook`.
+- **Windowed aggregations**: the aggregators forward each update keyed
+  by its window themselves (the stream conversion rescanned the key's
+  windows on every update and kept an ever-growing map of what it had
+  sent); a record still updates its open windows when some of its
+  hopping windows have closed (it was all or nothing); a windowed
+  cogroup uses its windows (it bucketed into tumbling windows) and
+  forwards every side's updates (only the first side's reached the
+  stream); every window update is forwarded, as on the JVM, not only
+  changed values. Session aggregates drop records past the grace
+  period, and their stream is keyed by `SessionKey` with `Nothing`
+  for each session merged into a larger one (`sessionKeySerde`).
 - **`SINGLE_STORE_SELF_JOIN`** (KIP-862): an inner window join of a
   stream with itself runs on one store and processor when
   `optSingleStoreSelfJoin` is set, with output identical to the

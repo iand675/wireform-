@@ -35,6 +35,7 @@ module Kafka.Streams.Examples.FraudDetection (
 import Control.Category ((>>>))
 import Data.ByteString.Char8 qualified as BSC
 import Data.Int (Int64)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void)
@@ -51,7 +52,9 @@ fraudTopology =
     >>> F.windowedBySession (sessionWindows (minutes 5))
     >>> F.countSessionWindowed countMat
     >>> F.streamFromSessionWindowed
-    >>> F.filter (\r -> recordValue r >= 10)
+    -- a session's count; Nothing when it merged into a later one
+    >>> F.filter (\r -> maybe False (>= 10) (recordValue r))
+    >>> F.mapValues (fromMaybe 0)
     >>> F.sink "suspicious-sessions"
   where
     countMat :: Materialized Text Int64

@@ -16,6 +16,7 @@ module Kafka.Streams.SessionWindowedKStream (
   SessionWindowedTableHandle (..),
 ) where
 
+import Control.Monad (forM_, unless)
 import Data.IORef
 import Data.Int (Int64)
 import Kafka.Streams.KGroupedStream (
@@ -120,67 +121,60 @@ aggregateSessionWindowed initial agg merger m swks = do
       }
 
 
+{- | Fold a record into its session: the sessions of its key within
+the inactivity gap merge with it into one. Each merged-away session is
+retracted (forwarded as @Nothing@ under its old key) and the new one
+forwarded, each at its end. A record whose merged session ends before
+the processor's stream time minus the grace period is dropped (the
+JVM's @KStreamSessionWindowAggregate@).
+-}
 sessionAggProc
   :: forall k v a
-   . Ord k
-  => StoreName
+   . StoreName
   -> SessionWindows
   -> IO a
   -> (k -> v -> a -> a)
   -> (k -> a -> a -> a)
   -> IO (Processor k v)
 sessionAggProc sn sw initial agg merger = do
-  ctxRef <- newIORef Nothing
-  storeRef <- newIORef (Nothing :: Maybe (SessionStore k a))
+  ref <- newIORef Nothing
+  observed <- newIORef (minBound :: Int64)
   pure
     Processor
       { procName = processorName "SESSION-AGG"
       , procInit = \ctx -> do
-          writeIORef ctxRef (Just ctx)
           st <- getStateStore ctx sn
           case st of
-            Just (AnySessionStore ss) ->
-              writeIORef storeRef (Just (unsafeCastSS ss))
+            Just (AnySessionStore ss) -> writeIORef ref (Just (ctx, unsafeCastSS ss :: SessionStore k a))
             _ -> error $ "sessionAggProc: store not found: " <> show sn
       , procClose = pure ()
       , procProcess = \r -> do
-          mctx <- readIORef ctxRef
-          mst <- readIORef storeRef
-          case (mctx, mst, recordKey r) of
-            (Just ctx, Just store_, Just k) -> do
+          m <- readIORef ref
+          case (m, recordKey r) of
+            (Just (ctx, store_), Just k) -> do
               let !ts = recordTimestamp r
+                  Time.Timestamp tsMs = ts
                   !gap = swInactivityGap sw
-              -- Find adjacent sessions (anything ending within
-              -- [ts-gap, ts+gap]).
-              it <-
-                ssFindSessions
-                  store_
-                  k
-                  (timestampMinus ts gap)
-                  (timestampPlus ts gap)
-              adjacents <- kvIteratorToList it
-              -- Compute the merged session window bounds (always
-              -- includes 'ts'); compute the merged aggregate only if
-              -- there's at least one adjacent session.
-              let !lo =
-                    foldl
-                      (\s (SessionKey _ s' _, _) -> min s s')
-                      ts
-                      adjacents
-                  !hi =
-                    foldl
-                      (\e (SessionKey _ _ e', _) -> max e e')
-                      ts
-                      adjacents
-              base <- case adjacents of
-                [] -> initial
-                ((_, a0) : rest) ->
-                  pure $! foldl (\a (_, a') -> merger k a a') a0 rest
-              mapM_ (\(sk, _) -> ssRemove store_ sk) adjacents
-              let !newAgg = agg k (recordValue r) base
-                  !sk = SessionKey k lo hi
-              ssPut store_ sk newAgg
-              forwardRecord ctx r {recordValue = newAgg}
+              now <- atomicModifyIORef' observed (\o -> let !n = max o tsMs in (n, n))
+              let !closeTime = now - swGracePeriod sw
+              -- the sessions ending within [ts - gap] and starting by ts + gap
+              adjacents <- ssFindSessions store_ k (timestampMinus ts gap) (timestampPlus ts gap) >>= kvIteratorToList
+              let !lo = foldl (\s (SessionKey _ s' _, _) -> min s s') ts adjacents
+                  !hi@(Time.Timestamp hiMs) = foldl (\e (SessionKey _ _ e', _) -> max e e') ts adjacents
+                  forward key v (Time.Timestamp at) = forwardRecord ctx (Record (Just key) v (Time.Timestamp at) (recordHeaders r))
+              unless (hiMs < closeTime) $ do
+                base <- case adjacents of
+                  [] -> initial
+                  (_, a0) : rest -> pure $! foldl (\a (_, a') -> merger k a a') a0 rest
+                -- (a session that is exactly [ts, ts] is just overwritten)
+                unless (lo == ts && hi == ts) $
+                  forM_ adjacents $ \(old, _) -> do
+                    ssRemove store_ old
+                    forward old (Nothing :: Maybe a) (skEnd old)
+                let !newAgg = agg k (recordValue r) base
+                    !sk = SessionKey k lo hi
+                ssPut store_ sk newAgg
+                forward sk (Just newAgg) hi
             _ -> pure ()
       }
 

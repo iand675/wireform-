@@ -140,22 +140,17 @@ decodeWindowed r = do
 -- 1. Per-window dedup
 ----------------------------------------------------------------------
 
-{- | The aggregator forwards a record /every time/ an input
-falls into a window. With the @windowedAsStreamProc@ dedup,
-downstream only sees a record when the aggregate /value/
-actually changes for that (key, window-start). So a max-reduce
-that sees @20, 5, 20, 7@ in the same window emits two records,
-not four.
+{- | The aggregator forwards the window's aggregate /every time/ an
+input falls into it, changed or not (the JVM's behaviour). A max-reduce
+that sees @20, 5, 20, 7@ in one window emits @20@ four times.
 -}
 stream_from_windowed_dedupes_per_window :: Spec
 stream_from_windowed_dedupes_per_window =
-  it "windowedAsStreamProc: one emit per (key, window-start) value change" $ do
+  it "every update of a window is forwarded, under that window" $ do
     (_h, topo) <- F.compile (reduceMaxTopology EmitOnUpdate)
     driver <- newDriver topo "wd-dedupe"
 
-    -- One key, one window [0..5000). The max walks 20 -> 20 -> 20 -> 20:
-    -- only the first record bumps the aggregate; the next three
-    -- leave it unchanged and must NOT re-emit downstream.
+    -- One key, one window [0..5000). The max walks 20 -> 20 -> 20 -> 20.
     mapM_
       ( \(ts, v) ->
           pipeInput
@@ -172,8 +167,8 @@ stream_from_windowed_dedupes_per_window =
       , (4500, 7.0) -- max stays 20.0
       ]
     out <- readOutput driver (topicName "out")
-    map (fmap (\(_, _, v) -> v) . decodeWindowed) out
-      `shouldBe` [Right 20.0]
+    map (fmap (\(_, ts, v) -> (ts, v)) . decodeWindowed) out
+      `shouldBe` replicate 4 (Right (0, 20.0))
     closeDriver driver
 
 
@@ -183,21 +178,16 @@ stream_from_windowed_emits_old_window_only_on_value_change =
     (_h, topo) <- F.compile (reduceMaxTopology EmitOnUpdate)
     driver <- newDriver topo "wd-dedupe-2"
 
-    -- Same key, three windows.
-    --   window 0: max goes 10 -> 20  (2 emits)
-    --   window 1: max goes 5  -> 9   (2 emits)
-    --   window 2: max stays 1        (1 emit)
-    -- Total downstream: 5 emits. Without the dedup fix the
-    -- adapter re-forwards ALL prior entries on each input and
-    -- the suppress-free path would amplify this to N×W records.
+    -- Same key, three windows: each input emits its own window's
+    -- aggregate once, and nothing for the others.
     let inputs :: [(Int64, Double)]
         inputs =
           [ (100, 10.0) -- W0 = 10
           , (1500, 20.0) -- W0 = 20
-          , (2500, 5.0) -- W0 stays 20 (no emit)
+          , (2500, 5.0) -- W0 stays 20
           , (5500, 5.0) -- W1 = 5
           , (6500, 9.0) -- W1 = 9
-          , (9999, 3.0) -- W1 stays 9 (no emit)
+          , (9999, 3.0) -- W1 stays 9
           , (10500, 1.0) -- W2 = 1
           ]
     mapM_
@@ -218,17 +208,15 @@ stream_from_windowed_emits_old_window_only_on_value_change =
           | r <- out
           , Right (_, ts, v) <- [decodeWindowed r]
           ]
-    -- Each (window-start, value) appears at most once.
-    Set.size (Set.fromList decoded) `shouldBe` length decoded
-    -- And we see exactly the expected (window, value) updates.
-    Set.fromList decoded
-      `shouldBe` Set.fromList
-        [ (0, 10.0)
-        , (0, 20.0)
-        , (5000, 5.0)
-        , (5000, 9.0)
-        , (10000, 1.0)
-        ]
+    decoded
+      `shouldBe` [ (0, 10.0)
+                 , (0, 20.0)
+                 , (0, 20.0)
+                 , (5000, 5.0)
+                 , (5000, 9.0)
+                 , (5000, 9.0)
+                 , (10000, 1.0)
+                 ]
     closeDriver driver
 
 
