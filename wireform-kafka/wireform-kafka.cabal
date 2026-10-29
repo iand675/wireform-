@@ -943,6 +943,7 @@ test-suite wireform-kafka-test
         Client.ConfigParitySpec
         Client.ConfigValidationSpec
         Client.EnvSpec
+        Client.FetchSelectionSpec
         Client.HeartbeatRejoinSpec
         Codegen.WireGeneratorSpec
         Client.ProducerRetrySpec
@@ -1099,6 +1100,7 @@ benchmark wireform-kafka-bench
     build-depends:
         base,
         wireform-kafka,
+        wireform-kafka-protocol,
         async,
         binary,
         bytestring,

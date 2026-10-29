@@ -29,6 +29,7 @@ import Client.ConsumerConfigSpec qualified
 import Client.ConsumerGroupV2Spec qualified
 import Client.ConsumerSnapshotsSpec qualified
 import Client.EnvSpec qualified
+import Client.FetchSelectionSpec qualified
 import Client.FilterSpec qualified
 import Client.FutureSpec qualified
 import Client.GroupSpec qualified
@@ -243,6 +244,7 @@ clientTests =
       , Client.ConfigParitySpec.tests
       , Client.ConfigValidationSpec.tests
       , Client.EnvSpec.tests
+      , Client.FetchSelectionSpec.tests
       , Client.HeartbeatRejoinSpec.tests
       , Codegen.WireGeneratorSpec.tests
       , Protocol.WireCodecParitySpec.tests
