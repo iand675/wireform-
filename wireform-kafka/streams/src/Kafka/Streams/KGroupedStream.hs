@@ -107,10 +107,10 @@ data KGroupedStream k v = KGroupedStream
   }
 
 
-{- | Group records by their existing key. No repartition is
-needed in the single-task driver model; the broker-backed
-runtime emits a repartition node automatically when the key
-has been altered upstream.
+{- | Group records by their existing key. When the key may have
+changed upstream (a 'Kafka.Streams.KStream.selectKey', a 'map'),
+the aggregation reads through a repartition topic so each key is
+aggregated by the task owning its partition.
 
 /JVM equivalent:/ @KStream.groupByKey(Grouped)@.
 -}

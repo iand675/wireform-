@@ -123,8 +123,13 @@ Failure modes:
 
 `foreignKeyJoinKTable` lets a stream / table join against another
 table by a derived foreign key, even when the two tables don't
-share a partitioning key. The framework handles the subscription-
-token bookkeeping behind the scenes. Use when:
+share a partitioning key. As in the JVM (KIP-213), the left side
+sends a subscription per row through a
+`<name>-subscription-registration` topic co-partitioned with the
+right table, and the right side answers through a
+`<name>-subscription-response` topic co-partitioned with the left;
+a hash of the left value drops responses that a newer update has
+overtaken. Use when:
 
 - The lookup key is a property of the value, not the record key.
 - You can model both sides as KTables (i.e. the lookup data is
@@ -133,8 +138,8 @@ token bookkeeping behind the scenes. Use when:
   changes to propagate downstream.
 
 The result is a KTable that updates whenever either side
-changes. Implementation details and subscription-token
-verification are in
+changes, including deletes and foreign-key changes. Implementation
+details are in
 [`Kafka.Streams.ForeignKeyJoin`](https://github.com/iand675/wireform-/blob/main/wireform-kafka/streams/src/Kafka/Streams/ForeignKeyJoin.hs).
 
 ## Pattern 4: Synchronous `mapValuesM`
@@ -197,7 +202,7 @@ flowchart LR
   W2 -->|result| Reorder
   Wn -->|result| Reorder
   Reorder -->|drain on stream thread| Down["Downstream\nprocessor"]
-  Coord["EOSCoordinator\ncommit cycle"] -. preCommitDrain hook .-> Reorder
+  Coord["Runtime\ncommit"] -. preCommitDrain hook .-> Reorder
 ```
 
 ```haskell
@@ -274,8 +279,9 @@ including retries.
 ### How EOS works with async I/O
 
 This is the key correctness story. The async operator hooks into
-`runCommitCycle` via the `ProcessorContext.ctxRegisterPreCommitDrain`
-mechanism. During `flushBody`:
+the runtime's commit (`Kafka.Streams.Runtime.Tasks.tmCommit`) via
+the `ProcessorContext.ctxRegisterPreCommitDrain` mechanism. Before
+the stores are flushed and the offsets committed:
 
 1. The stream thread stops accepting new records into the
    async operator.

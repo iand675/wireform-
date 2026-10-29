@@ -18,20 +18,17 @@ Mirrors @org.apache.kafka.streams.StreamsMetadata@ and
   * 'KeyQueryMetadata' — for a specific @(store, key)@ which
     instance owns the active and which owns the standby.
 
-A running 'KafkaStreams' instance:
+In the JVM an instance publishes its metadata (@application.server@)
+in its group subscription and learns its peers' from the assignment;
+the lookups here then route a query to the right host before issuing
+IQ.
 
-  1. publishes its own metadata into the consumer-group
-     'JoinGroup' subscription metadata (the JVM uses
-     @application.server@ for the host:port);
-  2. learns peers' metadata from 'SyncGroup' assignment
-     responses;
-  3. exposes lookup helpers so user code can route a query
-     to the right host before issuing IQ.
-
-The streams runtime currently exposes the local-side surface
-('localStreamsMetadata' + 'setApplicationServer'); the
-cross-instance assignment-metadata exchange lands on the
-live consumer-group path. The data types are the same.
+This module is the data model and the lookups over a list of
+'StreamsMetadata'. The runtime does not exchange metadata between
+instances: the caller assembles the list (from its own service
+discovery, say) and the local view comes from
+'Kafka.Streams.Runtime.metadataForLocalThreads' /
+'Kafka.Streams.Runtime.localTasks'.
 -}
 module Kafka.Streams.Discovery (
   -- * Metadata

@@ -102,6 +102,7 @@ module Kafka.Streams.Runtime (
   LocalThreadMetadata (..),
   metadataForLocalThreads,
   metricsAndState,
+  streamsMetrics,
   TaskSnapshot (..),
   localTasks,
 
@@ -134,6 +135,7 @@ import Data.Maybe (catMaybes)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Kafka.Streams.Internal.Text (decimalText)
 import Data.Text.Encoding qualified as TE
 import Data.Text.Read qualified as TR
 import Data.UUID qualified as UUID
@@ -158,7 +160,9 @@ import Kafka.Streams.Errors (
   UncaughtExceptionResponse (..),
   replaceThreadOnException,
  )
-import Kafka.Streams.Internal.Engine (Engine, StoreEntry, engineOwnStores)
+import Kafka.Streams.Internal.Engine (Engine, EngineCounts (..), StoreEntry, engineOwnStores, readEngineCounts)
+import Kafka.Streams.Metrics (MetricValue (..))
+import Kafka.Streams.Metrics qualified as Met
 import Kafka.Streams.Processor (TaskId (..))
 import Kafka.Streams.Processor.Assignment qualified as PA
 import Kafka.Streams.Runtime.Commit
@@ -897,6 +901,43 @@ metadataForLocalThreads ks = do
                }
       )
       [0 .. n - 1]
+
+
+{- | The running instance's counters under the JVM metric names: each
+task's (tagged @{task=\<id\>}@, and summed untagged) and the
+instance's commits, recoveries, rebalances and restored records.
+Empty when the instance isn't running. A snapshot source for
+"Kafka.Streams.Observability.OpenTelemetry" and
+'Kafka.Streams.Observability.Topology.liveTopologyDescription'.
+-}
+streamsMetrics :: KafkaStreams -> IO (Map.Map Text MetricValue)
+streamsMetrics ks =
+  readIORef (ksRunning ks) >>= \case
+    Nothing -> pure Map.empty
+    Just r -> do
+      engines <- tmEngines (rTasks r)
+      perTask <- forM engines $ \(tid, e) -> (,) tid <$> readEngineCounts e
+      ic <- tmCounts (rTasks r)
+      let taskCounters c =
+            [ (Met.processTotal, ecProcessed c)
+            , (Met.droppedRecordsTotal, ecDropped c)
+            , (Met.punctuateTotal, ecPunctuated c)
+            , (Met.commitTotal, ecCommitted c)
+            ]
+          tagged (TaskId s p, c) =
+            map (\(nm, v) -> (nm <> "{task=" <> decimalText s <> "_" <> decimalText p <> "}", v)) (taskCounters c)
+          summed = Map.fromListWith (+) (concatMap (taskCounters . snd) perTask)
+          instanceCounters =
+            [ (Met.threadCommitTotal, icCommits ic)
+            , (Met.threadCommitFailedTotal, icCommitsFailed ic)
+            , (Met.threadCommitAbortedTotal, icCommitsAborted ic)
+            , (Met.taskRecoveriesTotal, icRecoveries ic)
+            , (Met.rebalanceTotal, icRebalances ic)
+            , (Met.restoredRecordsTotal, icRestoredRecords ic)
+            ]
+          counter = MVCounter . fromIntegral
+      pure . Map.map counter $
+        Map.unions [Map.fromList (concatMap tagged perTask), summed, Map.fromList instanceCounters]
 
 
 metricsAndState :: KafkaStreams -> IO (StreamsStatus, [LocalThreadMetadata])

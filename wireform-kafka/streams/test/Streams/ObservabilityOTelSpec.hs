@@ -20,6 +20,7 @@ import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Kafka.Streams.Metrics (
   addCounter,
+  registrySource,
   newMetricsRegistry,
   observeDuration,
   setGauge,
@@ -66,7 +67,7 @@ bridge_exports_counter_gauge_duration =
     observeDuration reg "lat" 300
 
     col <- newCollector
-    _ <- registerStreamsMetrics (collectingMeter col) reg
+    _ <- registerStreamsMetrics (collectingMeter col) (registrySource reg)
     runCallbacks col
     vals <- readTVarIO (colValues col)
 
@@ -86,7 +87,7 @@ bridge_instrument_count =
     setGauge reg "g" 1.0
     observeDuration reg "d" 7
     col <- newCollector
-    reg' <- registerStreamsMetrics (collectingMeter col) reg
+    reg' <- registerStreamsMetrics (collectingMeter col) (registrySource reg)
     -- 1 (counter) + 1 (gauge) + 4 (duration) = 6
     smrInstrumentCount reg' `shouldBe` 6
 

@@ -165,7 +165,7 @@ The `Materialized` configuration specifies store keys as `Text` (the words), sto
 
 ### `toStream`: KTable to KStream
 
-`count` produces a **KTable**: a changelog stream where later values replace earlier ones for the same key. `toStream` converts it back to a regular **KStream** for output.
+`count` produces a **KTable**: a changelog stream where later values replace earlier ones for the same key. `toStream` converts it back to a regular **KStream** for output: one record per update, with the row's new value. Deletes aren't part of that stream; the imperative API's `toChangelogStream` + `toTopicNullable` keep them as tombstones.
 
 ## KStream vs KTable
 
@@ -194,9 +194,9 @@ Our word count uses both: a **KStream** of words going in (each word is an event
 
 The state store is a local key-value structure (in-memory or RocksDB). It's **per-task**: each processing unit has its own store for the keys it owns.
 
-Durability comes from three mechanisms. Every state change is written to a hidden Kafka **changelog topic**. On restart, the changelog is replayed to rebuild state. Other instances keep **standby replicas** for fast failover.
+Durability comes from the **changelog topic**: every state change is written to a hidden, compacted Kafka topic. When a task starts (after a restart, or on another instance after a rebalance) it replays the changelog to rebuild its store before processing anything; persistent stores replay only what they're missing since their last checkpoint.
 
-Your process can restart without losing counts, you can scale out and counts stay correct, and if an instance dies another takes over quickly.
+Your process can restart without losing counts, you can scale out and counts stay correct, and if an instance dies another takes over its tasks once it has restored them.
 
 ## Querying state from outside
 

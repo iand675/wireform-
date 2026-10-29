@@ -41,6 +41,7 @@ import Data.Maybe (mapMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
+import Kafka.Streams.Internal.Text (decimalText)
 import Kafka.Streams.Consumed (AutoOffsetReset)
 import Kafka.Streams.Processor (TaskId (..))
 import Kafka.Streams.Runtime.Driver (NewInternalTopic (..), StreamDriver (..))
@@ -202,7 +203,7 @@ buildRuntimePlan appId replication drv valid = do
                         ( \nt -> case Map.lookup (nitName nt) got of
                             Just have
                               | have /= nitPartitions nt ->
-                                  Just (nitName nt <> " has " <> T.pack (show have) <> " partitions, needs " <> T.pack (show (nitPartitions nt)))
+                                  Just (nitName nt <> " has " <> decimalText have <> " partitions, needs " <> decimalText (nitPartitions nt))
                             _ -> Nothing
                         )
                         wanted

@@ -39,6 +39,7 @@ module Kafka.Streams.Runtime.Commit (
 import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Kafka.Streams.Internal.Text (decimalText)
 import Data.Text.Read qualified as TR
 
 
@@ -51,7 +52,7 @@ data CycleId = CycleId
 
 
 renderCycleId :: CycleId -> Text
-renderCycleId (CycleId i n) = i <> "/" <> T.pack (show n)
+renderCycleId (CycleId i n) = i <> "/" <> decimalText n
 
 
 parseCycleId :: Text -> Maybe CycleId

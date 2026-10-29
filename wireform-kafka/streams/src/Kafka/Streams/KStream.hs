@@ -118,7 +118,6 @@ module Kafka.Streams.KStream (
   repartitionIfKeyChanged,
   toKStreamFromKTable,
   toChangelogStream,
-  groupByKTable,
 
   -- * Joins
   joinKStreamKTable,
@@ -2527,25 +2526,6 @@ tableChanges label kt vs step = do
       , kstreamKeySerde = Kafka.Streams.KTable.ktableKeySerde kt
       , kstreamValueSerde = vs
       }
-
-
-{- | Re-key a 'KTable'. The result is a 'KStream' on the new key
-(since re-keying conceptually requires a repartition); the user
-can call 'groupByKey' / 'aggregate' to produce a re-grouped
-KTable. Mirrors Java's @KTable.groupBy(KeyValueMapper)@ —
-conceptually returns a 'KGroupedTable' that the caller can
-aggregate; we lower it to a stream + groupByKey because the
-single-task driver doesn't distinguish the two.
--}
-groupByKTable
-  :: forall k v k'
-   . (Ord k, Ord k', HasSerde k', HasSerde v)
-  => (k -> v -> k')
-  -> Kafka.Streams.KTable.KTable k v
-  -> IO (KStream k' v)
-groupByKTable keyMap kt = do
-  s <- toKStreamFromKTable kt
-  mapKeyValue (\k v -> (keyMap k v, v)) s
 
 
 ----------------------------------------------------------------------

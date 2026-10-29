@@ -15,9 +15,9 @@ Kafka, Streams, and Riffle terminology is defined in the [Glossary](../glossary/
 
 - Five kinds of topology diff each have a different operational story; the table below classifies them.
 - Name every stateful operator explicitly (`Named` + `materializedAs`): auto-generated names shift when you reshuffle the topology, which renames their changelog topics.
-- Run the [topology-JSON golden-file diff](../observability/#topology-json) in CI and the [orphan-topic detector](../observability/#orphan-internal-topics) on startup.
-- Set `numStandbyReplicas` to at least 1 for any non-trivial state, otherwise rebalance means a full changelog replay.
-- KIP-848 makes the rebalance itself incremental: no double-ownership at any point during a transfer.
+- Run the [topology-JSON golden-file diff](../observability/#topology-json) in CI and the [orphan-topic detector](../observability/#orphan-topic-detection) on startup.
+- There are no standby replicas: a task that moves restores its stores from the changelogs before processing. Keep that short with persistent stores on stable volumes and compacted changelogs.
+- Each member commits before it rejoins, closes revoked tasks before the new owner builds them, and the new owner restores first: no double processing within a generation.
 
 :::
 
@@ -30,7 +30,7 @@ overlapping diffs, and each one has a different operational story.
 | ---- | ------- | ----------------- | ------------ | ------------- |
 | Inserted a `peek` or `foreach` | Adding a log line | No | No | No |
 | Renamed an internal node | Removed a `Named` annotation | No | **Sometimes** | **Yes** |
-| Added a new operator with a new store | New `count` aggregation | No (new store warms from changelog) | No | No |
+| Added a new operator with a new store | New `count` aggregation | No (new store starts empty) | No | No |
 | Removed an operator with a store | Deleted a `groupBy`+`count` | No | The removed store's data is gone; its changelog becomes an orphan | **Yes** |
 | Changed the key, value, or window of an existing store | Switched `Materialized` value serde | **Yes (must migrate)** | **Yes if you don't migrate** | Possibly |
 
@@ -158,12 +158,9 @@ double-write, verify, cut over, decommission the old column.
 
 ### 3. Adding a new operator with a new store
 
-Roll out normally. The new instance discovers the new store at
-startup, fetches it from the (empty or replayed) changelog, and
-starts serving. With the Riffle snapshot backend
-(`Kafka.Streams.State.KeyValue.Snapshot`) the cold-start time is
-bounded by `time-since-last-snapshot` rather than store size, so a
-large materialised KTable doesn't gate the rollout.
+Roll out normally. The runtime creates the new store's changelog at
+startup; the store starts empty (its changelog is new) and fills as
+records arrive.
 
 The interesting case is when the new store needs to be **populated
 from scratch on rollout** (e.g. you added a new `aggregate` whose
@@ -179,7 +176,7 @@ The store's local files are removable; `cleanUp` (the Haskell port of
 `KafkaStreams.cleanUp()`) wipes them on next start. The changelog
 topic on the broker is **not** removable by the runtime: it lives
 on. Treat it as an orphan and resolve via the procedure in
-[Observability](./observability/#orphan-internal-topics).
+[Observability](../observability/#orphan-topic-detection).
 
 ### 5. Changing the key, value, or window of an existing store
 
@@ -203,63 +200,64 @@ about it".
 
 ## The consumer-group side of a rolling deploy
 
-The runtime joins a Kafka consumer group keyed on `applicationId`.
-Each new instance is a new group member; rebalances happen
-incrementally under the **[KIP-848](../glossary/#kip) next-gen protocol** (see
-`Kafka.Streams.Runtime.RebalanceProtocol`). The rules:
+The runtime joins a Kafka consumer group keyed on `applicationId`,
+with the classic group protocol and the range assignor. Each new
+instance is a new group member. The rules:
 
-- A task is never simultaneously owned by two members. If member A is
-  losing task T and member B is gaining it, A's heartbeat first
-  surfaces T in its `rRemove` set, A acknowledges by dropping T from
-  its `currentlyOwned`, then B sees T in its `rAdd`. This is the
-  reconciler in `Kafka.Streams.Runtime.RebalanceProtocol.reconcile`.
-- [Standby tasks](../glossary/#standby-task) (`StandbyTask`, `StandbyDriver`) keep a warm replica
-  of every active task's state. During a rolling deploy, the standby
-  catches up to within `acceptableRecoveryLag` records of the active,
-  and at promotion time the rebalance is **metadata-only** for any
-  standby that's caught up: no changelog replay needed.
+- **Before rejoining**, every member commits what its tasks have
+  processed (the consumer's pre-rejoin hook, while the old generation
+  can still commit). A member that fell out of the group (lost
+  partitions) commits nothing; under exactly-once its open
+  transaction is fenced by the generation and aborted.
+- **Revoked** partitions' tasks are closed cleanly and checkpointed;
+  **assigned** partitions' tasks are built with their sources paused
+  while every logged store restores from its changelog, then resume
+  from the committed offsets.
 - **Probing rebalances** (`Kafka.Streams.Runtime.ProbingRebalance`)
-  fire every `probingRebalanceIntervalMs` (default 10 minutes) when
-  warmups are within `acceptableRecoveryLag`. That's the cadence at
-  which a freshly-promoted standby can take over from a still-active
-  instance during a rollout.
+  fire every `probingRebalanceIntervalMs` (default 10 minutes) when a
+  warmup reported through `reportWarmupLag` is within
+  `acceptableRecoveryLag`. Nothing reports warmups on its own, since
+  there are no standby replicas.
 
-### Standby is the difference between a tolerable deploy and a bad one
+### Restore time is the difference between a tolerable deploy and a bad one
 
-If `numStandbyReplicas = 0` (the default), each task's state lives on
-exactly one instance. When that instance drains, the next instance to
-inherit the task replays the **entire** changelog from offset 0 (or
-from the last snapshot, with the Riffle snapshot backend) before
-serving. For a 1 TB store on a 100 MB/s replay, that is ~3 hours of
-blackhole on any active query against that task.
+Each task's state lives on exactly one instance, plus its changelog.
+When that instance drains, the next instance to inherit the task
+restores from its checkpoint, if it has one for that task (it owned
+the task before, on the same volume), else the **entire** changelog,
+before processing. For a 1 TB store at 100 MB/s, that is ~3 hours of
+blackhole on any query against that task.
 
-Set `numStandbyReplicas` to **at least 1** on any non-trivial state.
-For zero-downtime rollouts on critical workloads, set it to 2 so the
-standby itself has a standby. Trade-off is 2× / 3× state storage and
-the matching changelog write multiplier.
+To keep it short:
+
+- Use persistent stores (`persistentKeyValueStoreBuilder`) on a
+  persistent volume, with a stable `clientId` per instance so a
+  restarted instance gets its own partitions back (see
+  [Running in containers](./containers/#2-stable-identity-across-restarts)).
+- Keep changelogs compacted (the runtime creates them with
+  `cleanup.policy=compact`).
+- Spread big state over more partitions: restore is per task.
 
 ### Suggested rollout shape
 
 For a topology that owns meaningful state, the rolling deploy
-unfolds along this timeline. `numStandbyReplicas >= 1` is what
-makes the failover step metadata-only:
+unfolds along this timeline:
 
 ```mermaid
 sequenceDiagram
   participant Op as Operator
-  participant v1 as v1 instance (active)
-  participant v1s as v1 instance (standby, lag ≈ 0)
+  participant v1 as v1 instance (owner of T)
   participant v2 as v2 instance (new)
   participant Br as Broker (coordinator)
   Op->>Op: Run topology JSON golden diff\nRun orphan-topic detector
   Op->>v2: Start v2 binary
-  v2->>Br: JoinGroup (subscription + member epoch)
-  Br-->>v1s: Reconciliation { rRemove = {T}, ... }
-  v1s->>Br: Heartbeat (released T)
-  Br-->>v2: Reconciliation { rAdd = {T}, ... }
-  v2->>v2: Warm task from standby state\n+ replay tail
-  v2->>Br: Heartbeat (currentlyOwned += T)
-  Note over v2: streamsStatus = RUNNING
+  v2->>Br: JoinGroup
+  Br-->>v1: rebalance
+  v1->>v1: commit, then rejoin
+  v1->>v1: revoked T: close task, checkpoint
+  Br-->>v2: assigned T
+  v2->>v2: restore T's stores from the changelog\n(paused sources)
+  Note over v2: streamsStatus = StreamsRunning
   Op->>v1: Drain + close
   Op->>Op: Re-run orphan-topic detector
 ```
@@ -275,14 +273,14 @@ Concrete steps:
      deploying.
 2. **Deploy v2 to one instance.**
 3. **Wait for the new instance to reach `StreamsRunning`**
-   (`streamsStatus`). With snapshots and standby tasks, this is
-   metadata-only; without, it is bounded by changelog replay time.
-4. **Confirm assignment.** `metadataForLocalThreads` reports owned
-   partitions; verify the rebalance went where you expected.
+   (`streamsStatus`). That is bounded by its tasks' restore time.
+4. **Confirm assignment.** `ownedPartitions` (or
+   `metadataForLocalThreads`) reports owned partitions; verify the
+   rebalance went where you expected.
 5. **Roll the rest of the fleet** one instance at a time, waiting
-   for `StreamsRunning` between each. If you batch the rollout,
-   you may invalidate every warm standby simultaneously, which
-   undoes the whole point of having standbys.
+   for `StreamsRunning` between each. If you batch the rollout, many
+   tasks restore at once and the whole application stalls for the
+   longest restore.
 6. **Post-rollout, re-run the orphan detector and clean up any
    leaked internal topics** via a manual broker AdminClient delete.
 
@@ -295,9 +293,9 @@ warmup. You can roll as aggressively as the broker tolerates.
 
 ## Cleaning up local state on the instance
 
-`Kafka.Streams.Runtime.cleanUp` wipes the local store directory and
-re-fetches everything from the changelog (or the snapshot) on next
-start. Use it when:
+`Kafka.Streams.Runtime.cleanUp` wipes `<state.dir>/<application.id>`
+(only while the instance isn't running) and every task restores from
+its changelog on the next start. Use it when:
 
 - A node was offline long enough that incremental warmup is slower
   than a fresh fetch.
@@ -315,20 +313,17 @@ as auto-deleting orphans.
 For the duration of a rolling deploy you have v1 and v2 instances in
 the same consumer group. Three things to be aware of:
 
-1. **Subscription-metadata compatibility.** Both versions must agree
-   on the subscription-metadata format they exchange via JoinGroup.
-   The default in this library matches the JVM Streams 4.0 format;
-   changing the assignor (`taskAssignor` in `StreamsConfig`) without
-   also rolling out the matching assignor on every instance is a
-   compatibility break. Use the `upgradeFrom` knob if you ever need
-   to do this.
+1. **Assignor compatibility.** Every member must use the same
+   assignment strategy. The runtime's consumer always uses the range
+   assignor, so this only bites if a `consumerOverrides` changes
+   `consumerAssignmentStrategy` on some instances and not others.
 2. **Operator shape drift.** If v1 expects record value `{a, b}` and
    v2 produces `{a, b, c}`, every v1-owned task that consumes those
    records must tolerate the extra field. This is the standard
    schema-evolution discipline: backwards-and-forwards compatibility
    on the wire serdes, especially when you're using Schema Registry.
 3. **[Processing-guarantee](../glossary/#processing-guarantee) mismatch.** Switching `processingGuarantee`
-   between `AtLeastOnceP` and `ExactlyOnceP` mid-rollout is **not**
+   between `AtLeastOnceP` and `ExactlyOnceV2` mid-rollout is **not**
    safe. Drain v1 first, then bring up v2 with the new guarantee.
    Otherwise v1 instances are committing offsets outside the
    transactional cycle and v2 instances inside it; the consumer group
@@ -339,9 +334,9 @@ the same consumer group. Three things to be aware of:
 - [ ] Topology JSON golden-diff has been reviewed.
 - [ ] Orphan-topic detector reports nothing unexpected against the
       live broker.
-- [ ] `numStandbyReplicas >= 1` for every state-bearing instance, or
-      you have explicitly accepted the cold-start penalty for this
-      rollout.
+- [ ] Restore time per task is acceptable (persistent stores on
+      stable volumes, or you have explicitly accepted the cold-start
+      penalty for this rollout).
 - [ ] `applicationId` is unchanged. (Changing it is a fresh-start
       deploy, not a rollout. Be sure you mean it.)
 - [ ] `processingGuarantee` is unchanged.

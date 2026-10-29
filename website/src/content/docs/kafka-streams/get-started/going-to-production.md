@@ -20,8 +20,8 @@ Each item below prevents a specific class of production incident:
 
 1. **Pick a [processing guarantee](#1-processing-guarantee)**: at-least-once or exactly-once.
 2. **Name every stateful operator** explicitly.
-3. **Set `numStandbyReplicas` to at least 1**.
-4. **Wire metrics to your observability stack**.
+3. **Keep restores short**: persistent stores, stable state directories.
+4. **Wire listeners and progress to your observability stack**.
 5. **Add the orphan-topic detector** at startup.
 6. **Capture a golden file of the topology shape** in CI.
 7. **Test rebalance and restart** before they happen for real.
@@ -76,60 +76,46 @@ F.count Mat.defaultMaterialized
 Full discussion in
 [Topology evolution and rolling deploys](../../operating/topology-evolution/#stable-names-are-the-deployment-contract).
 
-## 3. Standby replicas
+## 3. Keep restores short
 
-Without standbys, when an instance restarts (deploy, failure, or scale-up), the new owner of each task must replay the entire changelog from the beginning. For large state stores this takes hours, during which that partition is unavailable for interactive queries and processes records slowly. Standbys keep warm replicas so failover is near-instant.
+There are no standby replicas: when an instance restarts (deploy, failure, or scale-up), the new owner of each task restores its stores from their changelogs before it processes anything. Without a local checkpoint that is the entire changelog: for a 1 TB store at 100 MB/s, three hours during which that task's partitions don't move and interactive queries against it find nothing.
 
-`numStandbyReplicas = 0` (the default) means each task's state
-lives on exactly one instance. When that instance drains, the
-next owner replays the *entire* changelog before serving: for a
-1 TB store on 100 MB/s replay, that's three hours of unavailability
-for any query against that task.
+What shortens it:
 
-**Set `numStandbyReplicas = 1`** for any non-trivial state. The
-runtime keeps warm replicas; failover becomes metadata-only and
-takes seconds, not hours.
-
-For zero-downtime rollouts of critical workloads, set it to 2 so
-each standby has its own standby.
+- **Persistent stores** (`persistentKeyValueStoreBuilder`) checkpoint their changelog position; a task that comes back to the same machine restores only the tail after the checkpoint.
+- **A stable `stateDir`** (a persistent volume) and a **stable `clientId`** per instance, so a restarted instance gets its own partitions back and finds its checkpoints. See [Running in containers](../../operating/containers/).
+- **Clean shutdowns** (`closeKafkaStreams`): under exactly-once, a start after an unclean stop wipes local state and restores everything.
+- **More partitions**: restore is per task, so smaller tasks restore faster and in parallel across instances.
 
 ```haskell
 import qualified Kafka.Streams.Config as C
 
 cfg :: C.StreamsConfig
 cfg = C.defaultStreamsConfig
-  { C.applicationId      = "my-app"
-  , C.bootstrapServers   = ["broker:9092"]
-  , C.numStreamThreads   = 4
-  , C.numStandbyReplicas = 1     -- <-- this
-  , C.processingGuarantee = C.ExactlyOnceP
+  { C.applicationId       = "my-app"
+  , C.bootstrapServers    = ["broker:9092"]
+  , C.clientId            = "my-app-instance-1"   -- stable per instance
+  , C.stateDir            = "/var/lib/my-app/state" -- on a persistent volume
+  , C.numStreamThreads    = 4
+  , C.processingGuarantee = C.ExactlyOnceV2
   }
 ```
 
-Trade-off is 2× state-storage and 2× changelog write
-amplification per replica. Worth it.
+Details: [Scaling: restore time is the failover time](../../operating/scaling/#restore-time-is-the-failover-time).
 
-Details: [Scaling: standby tasks](../../operating/scaling/#standby-tasks).
+## 4. Listeners and progress
 
-## 4. Metrics
+In the test driver, you see every record. In production, you have hundreds of thousands of records per second across multiple instances. Without visibility you can't tell whether processing is keeping up, whether commits are succeeding, or whether an instance is stuck restoring.
 
-In the test driver, you see every record. In production, you have hundreds of thousands of records per second across multiple instances. Without metrics, you have no visibility into whether processing is keeping up, whether commits are succeeding, or whether records are being silently dropped. The four metrics in the table below catch the most common production incidents.
+What a running instance gives you:
 
-`Kafka.Streams.Metrics.dumpMetrics` returns a snapshot of every
-counter, gauge, and duration stat the runtime records. Wire it to
-your observability stack via a periodic poll.
-
-The minimum you should alert on:
-
-| Metric | Alert when |
+| Signal | Alert when |
 | ------ | ---------- |
-| `droppedRecordsTotal` | Sustained non-zero rate (silent data loss) |
-| `commit-cycle-aborted` | High rate (something keeps failing) |
-| `commit-cycle-fatal` | Any value > 0 (operator intervention required) |
-| Per-task `warmup-lag` from `LagListener` | Above `acceptableRecoveryLag` for longer than `probingRebalanceIntervalMs` |
-
-Plus per-operator throughput (`processTotal`, `forwardTotal`) so
-you can see where the bottleneck is when latency rises.
+| `setStateListener` | Any transition to `StreamsError`; `StreamsRebalancing` for longer than your restore budget |
+| `setStateRestoreListener` | Restores getting slower (the changelog is growing) |
+| `streamsMetrics`: `process-total` | The rate stops increasing while input lag grows |
+| `streamsMetrics`: `commit-aborted-total`, `task-recoveries-total` | Any sustained rate |
+| `[streams] commit aborted` log lines | High rate (something keeps failing) |
 
 Full list and patterns:
 [Observability](../../operating/observability/).
@@ -158,7 +144,7 @@ foot-gun (a misconfigured rollout would happily nuke live state).
 Make manual deletion an audited operator action.
 
 Details:
-[Observability: orphan internal topics](../../operating/observability/#orphan-internal-topics).
+[Observability: orphan internal topics](../../operating/observability/#orphan-topic-detection).
 
 ## 6. Topology golden file
 
@@ -196,12 +182,12 @@ is where the operationally-surprising bugs live.
 
 Two extra tests every production topology should have:
 
-- **Rebalance test.** Spin up two `KafkaStreams` instances in the
-  same process pointed at the same `applicationId`. Use the
-  multi-instance mock harness
-  (`Kafka.Streams.Runtime.MultiInstanceMockHarness`) to simulate
-  membership changes. Verify the assignment is what you expect
-  and that no task is double-owned during the transfer.
+- **Rebalance test.** Start two `KafkaStreams` instances in the
+  same process, with the same `applicationId`, on one in-memory
+  broker (`Kafka.Streams.Runtime.MockBroker`: `newMockBroker`,
+  `mockDriverFor`, `startKafkaStreamsWith`). Produce input, close
+  one instance mid-stream, and verify every input reached the output
+  and the state the survivor restored is right.
 - **Restart test.** Start a topology, feed some records, close it,
   start it again with the same `applicationId` and state
   directory. Verify the second run picks up from where the first
@@ -213,7 +199,7 @@ exercised in its full mode. This includes partition handoff and replay.
 
 ## 8. Do you need Riffle?
 
-The base Kafka Streams library handles most workloads well, but it has limitations. External API calls block the stream thread. Exactly-once semantics only work for Kafka-to-Kafka pipelines. Large state stores take hours to replay. You can't scale past your partition count. Riffle extensions address these specific gaps.
+The base Kafka Streams library handles most workloads well, but it has limitations. External API calls block the stream thread. Exactly-once semantics only cover Kafka-to-Kafka pipelines. Riffle extensions address these gaps.
 
 Riffle is the extensions tier. You can ignore it until a parity
 limitation bites. Common signs you'll want it:
@@ -222,8 +208,6 @@ limitation bites. Common signs you'll want it:
 | --------- | --------- |
 | Enrich from a slow external API (HTTP, gRPC) | [Async I/O](../../guides/enrichment/#pattern-5-async-io-for-high-latency-external-calls) |
 | Write to Postgres / S3 / Iceberg / HTTP and need EOS | [Two-phase commit sinks](../../operating/exactly-once/) |
-| Have multi-TB state and 1 TB changelog replay is killing your rollouts | [Snapshot-aware stores](../riffle/#state-durability-decoupled-from-the-changelog) |
-| Want more workers than your topic has partitions | [Key-group dispatch](../../operating/scaling/#key-groups-parallelism-decoupled-from-partitions) |
 | Join two streams that advance at very different rates | [Watermark coordinator](../riffle/#cross-source-watermark-coordinator) |
 | Need to migrate a state store's schema | [`SchemaVersioned` store](../riffle/#operator-level-upgrades) |
 
@@ -244,14 +228,10 @@ prodCfg = C.defaultStreamsConfig
   , C.bootstrapServers          = ["broker-1:9092", "broker-2:9092"]
   , C.clientId                  = "my-app-instance-1"
   , C.numStreamThreads          = 4
-  , C.numStandbyReplicas        = 1
-  , C.processingGuarantee       = C.ExactlyOnceP
-  , C.commitIntervalMs          = 30_000
-  , C.acceptableRecoveryLag     = 10_000
-  , C.probingRebalanceIntervalMs = 600_000
+  , C.processingGuarantee       = C.ExactlyOnceV2
+  , C.commitIntervalMs          = Nothing            -- 100 ms under EOS
   , C.replicationFactor         = 3                  -- match your broker
   , C.stateDir                  = "/var/lib/my-app/state"
-  , C.applicationServer         = Just "my-app-instance-1.svc.cluster.local:8080"
   }
 ```
 
@@ -270,11 +250,12 @@ main = do
     warn ("orphan: " <> unTopicName (orphanTopic o))
 
   -- Construct + start
-  ks <- newKafkaStreams topo prodCfg
+  valid <- either (fail . show) pure (validateTopology topo)
+  ks <- newKafkaStreams prodCfg valid
   setStateListener ks $ \old new ->
     info ("state " <> show old <> " -> " <> show new)
-  setLagListener  ks $ \lags ->
-    forM_ lags publishMetric
+  setStateRestoreListener ks defaultStateRestoreListener
+    { onRestoreEnd = \tp store n -> publishRestore tp store n }
   startKafkaStreams ks
 
   -- Wait for shutdown signal
@@ -284,7 +265,7 @@ main = do
 
 ## Recap
 
-The eight things to set up before a production deploy. The trade-offs of each `processingGuarantee`. Why naming every stateful operator matters across deploys. The minimum metrics and listeners to wire up. The decision tree for whether to reach for Riffle.
+The eight things to set up before a production deploy. The trade-offs of each `processingGuarantee`. Why naming every stateful operator matters across deploys. What keeps restores short. The minimum listeners to wire up. The decision tree for whether to reach for Riffle.
 
 ## Where to go from here
 

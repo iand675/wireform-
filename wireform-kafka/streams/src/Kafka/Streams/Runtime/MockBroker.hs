@@ -73,6 +73,7 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
+import Kafka.Streams.Internal.Text (decimalText)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Kafka.Client.Consumer qualified as KC
 import Kafka.Client.Internal.Murmur2 qualified as Murmur2
@@ -656,7 +657,7 @@ newMockDriver (MockBroker v) opts = do
           mid <- atomically $ do
             s <- readTVar v
             let !n = stNextMember s
-                mid = mdoClientId opts <> "-" <> T.pack (show n)
+                mid = mdoClientId opts <> "-" <> decimalText n
                 member =
                   Member
                     { mTopics = topics
@@ -891,5 +892,5 @@ mockDriverFor b@(MockBroker v) cfg = do
       { mdoGroupId = applicationId cfg
       , mdoClientId = clientId cfg
       , mdoIsolation = if eos then KC.ReadCommitted else KC.ReadUncommitted
-      , mdoTransactionalId = if eos then Just (applicationId cfg <> "-" <> T.pack (show n)) else Nothing
+      , mdoTransactionalId = if eos then Just (applicationId cfg <> "-" <> decimalText n) else Nothing
       }

@@ -23,6 +23,8 @@ import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Kafka.Streams.Imperative
+import Kafka.Streams.Observability.OrphanTopics (detectOrphans, isInternalTopicName)
+import Kafka.Streams.Topology (topologyValidGraph)
 import Kafka.Streams.Runtime.MockBroker
 import Streams.RuntimeHarness
 import Test.Syd
@@ -154,6 +156,8 @@ fk_join_runtime = withStateDirs 1 $ \[dir] -> do
       topics <- mockTopics broker
       mapM (mockPartitionCount broker) (filter ("-subscription-registration" `T.isSuffixOf`) topics) >>= (`shouldBe` [Just 3])
       mapM (mockPartitionCount broker) (filter ("-subscription-response" `T.isSuffixOf`) topics) >>= (`shouldBe` [Just 4])
+      -- every internal topic the runtime created is one the orphan detector expects
+      detectOrphans (topologyValidGraph topo) "fk" (map topicName topics) `shouldBe` []
       -- a right-side update reaches its subscribers; an FK change moves an order; a delete removes it
       mockProduce broker "customers" (Just "c1") (Just "Ann") 1
       mockProduce broker "orders" (Just "o1") (Just "c3:item") 1
@@ -187,6 +191,9 @@ regroup_runtime = withStateDirs 1 $ \[dir] -> do
       eventually [ks] "10 and 10" $ do
         latest <- latestBy <$> visible broker "out"
         pure (Map.lookup "even" latest == Just (Just (i64 10)) && Map.lookup "odd" latest == Just (Just (i64 10)))
+      topics <- mockTopics broker
+      filter (isInternalTopicName "rg" . topicName) topics `shouldSatisfy` (not . null)
+      detectOrphans (topologyValidGraph topo) "rg" (map topicName topics) `shouldBe` []
       -- move four orders from odd to even, delete two evens
       forM_ [1, 3, 5, 7 :: Int] $ \i -> mockProduce broker "orders" (Just (textBytes ("o" <> T.pack (show i)))) (Just "even") 1
       forM_ [2, 4 :: Int] $ \i -> mockProduce broker "orders" (Just (textBytes ("o" <> T.pack (show i)))) Nothing 1

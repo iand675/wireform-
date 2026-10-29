@@ -57,6 +57,8 @@ module Kafka.Streams.Runtime.Tasks (
   tmProcess,
   CommitResult (..),
   tmCommit,
+  InstanceCounts (..),
+  tmCounts,
   tmRecoverAll,
   tmCloseAll,
   tmSetPaused,
@@ -96,7 +98,9 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
+import Kafka.Streams.Internal.Text (decimalText)
 import Data.Text.Encoding qualified as TE
+import Data.Vector.Unboxed.Mutable qualified as UMV
 import Kafka.Client.Consumer qualified as KC
 import Kafka.Client.Producer qualified as KP
 import Kafka.Headers qualified as KH
@@ -251,6 +255,8 @@ data TaskManager = TaskManager
   , tmLastPurge :: !(IORef Int64)
   , tmThreadsRef :: !(IORef Int)
   , tmCycle :: !(IORef Int64)
+  , tmCounters :: !(UMV.IOVector Int)
+  -- ^ 'InstanceCounts', written by the stream loop's thread
   }
 
 
@@ -273,6 +279,7 @@ newTaskManager cfg drv plan = do
       purge <- newIORef now
       threads <- newIORef (max 1 (tmcThreads cfg))
       cycleRef <- newIORef 0
+      counters <- UMV.replicate countersSize 0
       pure . Right $
         TaskManager
           { tmCfg = cfg
@@ -291,6 +298,7 @@ newTaskManager cfg drv plan = do
           , tmLastPurge = purge
           , tmThreadsRef = threads
           , tmCycle = cycleRef
+          , tmCounters = counters
           }
 
 
@@ -303,7 +311,7 @@ logLine = hPutStrLn stderr . ("[streams] " <>)
 
 
 taskName :: TaskId -> Text
-taskName (TaskId s p) = T.pack (show s) <> "_" <> T.pack (show p)
+taskName (TaskId s p) = decimalText s <> "_" <> decimalText p
 
 
 tmAssigned :: TaskManager -> IO (Set KC.TopicPartition)
@@ -458,6 +466,7 @@ source's offset-reset policy.
 -}
 tmOnAssigned :: TaskManager -> [KC.TopicPartition] -> IO (Either String ())
 tmOnAssigned tm tps = do
+  bump tm ixRebalances
   atomicModifyIORef' (tmAssignedRef tm) (\s -> (Set.union s (Set.fromList tps), ()))
   let plan = tmPlan tm
       wanted =
@@ -581,6 +590,7 @@ tmRestoreStep tm = do
               case sequence applied of
                 Left e -> pure (Left e)
                 Right counts -> do
+                  addCount tm ixRestored (fromIntegral (sum (map fst (Map.elems counts))))
                   forM_ (Map.toList counts) $ \(tp, (n, lastOff)) ->
                     forM_ (Map.lookup tp targets) $ \rt ->
                       onBatchRestored listener tp (unStoreName (rtStore rt)) lastOff n
@@ -766,7 +776,7 @@ feedRecord tm t engine r = do
               throwIO
                 StreamsException
                   { streamsErrorMessage =
-                      "processing failed in task " <> taskName (taskId t) <> " at " <> r.drTopic <> "-" <> T.pack (show r.drPartition) <> "@" <> T.pack (show r.drOffset) <> ": " <> T.pack (show e)
+                      "processing failed in task " <> taskName (taskId t) <> " at " <> r.drTopic <> "-" <> decimalText r.drPartition <> "@" <> decimalText r.drOffset <> ": " <> T.pack (show e)
                   , streamsErrorContext = Just "processing"
                   }
 
@@ -801,6 +811,16 @@ doesn't absorb, or a store that can't flush, is thrown.
 -}
 tmCommit :: TaskManager -> IO CommitResult
 tmCommit tm = do
+  r <- commitOnce tm
+  bump tm $ case r of
+    Committed -> ixCommits
+    CommitFailed _ -> ixCommitsFailed
+    CommitAborted _ -> ixCommitsAborted
+  pure r
+
+
+commitOnce :: TaskManager -> IO CommitResult
+commitOnce tm = do
   tasks <- Map.elems <$> readIORef (tmTasks tm)
   running <- filterM (\t -> (== Running) <$> readIORef (taskState t)) tasks
   forM_ running $ \t -> readIORef (taskEngine t) >>= commitEngine
@@ -884,6 +904,50 @@ tmCommit tm = do
       pure (CommitAborted why)
 
 
+-- | What the instance's task manager has done since it started.
+data InstanceCounts = InstanceCounts
+  { icCommits :: {-# UNPACK #-} !Int
+  , icCommitsFailed :: {-# UNPACK #-} !Int
+  -- ^ At least once: the offset commit failed (input is replayed)
+  , icCommitsAborted :: {-# UNPACK #-} !Int
+  -- ^ The commit was aborted and every task recovered
+  , icRecoveries :: {-# UNPACK #-} !Int
+  -- ^ Every task rewound to the last commit (aborts, replaced threads, lost partitions under EOS)
+  , icRebalances :: {-# UNPACK #-} !Int
+  -- ^ Assignments received
+  , icRestoredRecords :: {-# UNPACK #-} !Int
+  -- ^ Changelog records applied while restoring
+  }
+  deriving stock (Eq, Show)
+
+
+ixCommits, ixCommitsFailed, ixCommitsAborted, ixRecoveries, ixRebalances, ixRestored, countersSize :: Int
+ixCommits = 0
+ixCommitsFailed = 1
+ixCommitsAborted = 2
+ixRecoveries = 3
+ixRebalances = 4
+ixRestored = 5
+countersSize = 6
+
+
+bump :: TaskManager -> Int -> IO ()
+bump tm ix = addCount tm ix 1
+{-# INLINE bump #-}
+
+
+addCount :: TaskManager -> Int -> Int -> IO ()
+addCount tm ix n = UMV.unsafeModify (tmCounters tm) (+ n) ix
+{-# INLINE addCount #-}
+
+
+tmCounts :: TaskManager -> IO InstanceCounts
+tmCounts tm = do
+  let c = tmCounters tm
+      at = UMV.unsafeRead c
+  InstanceCounts <$> at ixCommits <*> at ixCommitsFailed <*> at ixCommitsAborted <*> at ixRecoveries <*> at ixRebalances <*> at ixRestored
+
+
 -- | The internal topic holding each instance's last committed cycle.
 cycleTopic :: TaskManager -> Text
 cycleTopic tm = tmcAppId (tmCfg tm) <> "-twophase-commits"
@@ -925,7 +989,7 @@ markCycle tm (Just (CycleId inst n)) = do
           KP.ProducerRecord
             { KP.topic = cycleTopic tm
             , KP.key = Just (TE.encodeUtf8 inst)
-            , KP.value = Just (TE.encodeUtf8 (T.pack (show n)))
+            , KP.value = Just (TE.encodeUtf8 (decimalText n))
             , KP.headers = []
             , KP.partition = Just 0
             , KP.timestamp = Nothing
@@ -1007,6 +1071,7 @@ exactly-once the open transaction is aborted first.
 -}
 tmRecoverAll :: TaskManager -> IO ()
 tmRecoverAll tm = do
+  bump tm ixRecoveries
   let drv = tmDriver tm
   when (eos tm) $ do
     txnOpen <- readMVar (tmTxnOpen tm)

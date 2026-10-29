@@ -192,7 +192,7 @@ live_metrics_overlay_surfaces_counters =
     Met.incCounter metrics "test-counter"
     Met.incCounter metrics "test-counter"
     Met.addCounter metrics "another" 7
-    v <- Obs.liveTopologyDescription topo metrics Obs.defaultRenderConfig
+    v <- Obs.liveTopologyDescription topo (Met.registrySource metrics) Obs.defaultRenderConfig
     case field "metrics" v of
       A.Object km -> do
         KM.lookup "test-counter" km `shouldBe` Just (A.Number 2)

@@ -69,4 +69,4 @@ See [Extended features](./riffle/) for details.
 
 - A **topology** is a typed Haskell value (`Topology input output`) composed with `Control.Category.(>>>)`. Like a function `input -> output`, it transforms streams. Common pattern: `Topology Void ()` for topologies that read from and write to Kafka topics.
 - The runtime is a **library**, not a cluster. Your service contains the topology; scaling means running more processes in the same consumer group.
-- State stores live **next to** your service (local disk or memory), backed by Kafka **changelog topics** for durability and **standby tasks** for fast failover.
+- State stores live **next to** your service (local disk or memory), backed by Kafka **changelog topics**: a task that moves restores its stores from them.

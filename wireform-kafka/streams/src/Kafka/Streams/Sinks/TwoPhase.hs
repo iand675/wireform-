@@ -121,14 +121,16 @@ newtype SinkTxnId = SinkTxnId {unSinkTxnId :: Text}
 -- | Result of a 2PC step.
 data SinkOutcome
   = SinkOK
-  | {- | The downstream system is transiently unavailable. The
-    coordinator will treat the cycle as 'CommitAborted' and the
-    runtime will retry on the next cycle.
+  | {- | The downstream system is transiently unavailable. From
+    'tpsPrepare' it aborts the cycle: the runtime rewinds and
+    reprocesses into the next one.
     -}
     SinkRetryable !Text
   | {- | The sink has lost consistency between the prepared batch
     and the downstream system in a way that the runtime can't
-    recover from automatically. The cycle becomes 'CommitFatal'.
+    recover from automatically. The runtime treats it like
+    'SinkRetryable' (the cycle aborts) and reports it as fatal; from
+    'tpsCommit' it stops the stream thread.
     -}
     SinkFatal !Text
   deriving stock (Eq, Show)

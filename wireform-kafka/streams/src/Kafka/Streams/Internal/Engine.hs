@@ -42,7 +42,8 @@ module Kafka.Streams.Internal.Engine (
   attachWatermarkCoordinator,
   setPartitionCountLookup,
   reportPollCycle,
-  engineMetrics,
+  EngineCounts (..),
+  readEngineCounts,
   buildEngine,
   buildEngineWith,
   EngineOptions (..),
@@ -83,7 +84,9 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
+import Kafka.Streams.Internal.Text (decimalText)
 import Data.Time.Clock qualified as Clock
+import Data.Vector.Unboxed.Mutable qualified as UMV
 import GHC.Exts (Any)
 import Kafka.Streams.Errors (
   DeserializationException (..),
@@ -97,11 +100,6 @@ import Kafka.Streams.Internal.RecordCollector (
   CollectedRecord (..),
   RecordCollector (..),
  )
-import Kafka.Streams.Metrics (
-  MetricsRegistry,
-  noopMetricsRegistry,
- )
-import Kafka.Streams.Metrics qualified as Met
 import Kafka.Streams.Processor (
   Cancellable (..),
   Processor (..),
@@ -290,7 +288,10 @@ data Engine = Engine
   , engineCurrentHeaders :: !(IORef (Maybe Kafka.Streams.Types.Headers))
   , enginePunctuators :: !(IORef [PunctuatorEntry])
   , engineDeserHandler :: !DeserializationHandler
-  , engineMetrics :: !MetricsRegistry
+  , engineCounters :: !(UMV.IOVector Int)
+  {- ^ Records processed / dropped, punctuations, commits ('EngineCounts'),
+  written only by the task's thread
+  -}
   , engineCommitRequested :: !(IORef Bool)
   , engineAsyncDrains :: !(IORef [IO ()])
   {- ^ Riffle: pre-commit drain registry. Processors that own
@@ -395,7 +396,7 @@ buildEngineWith opts validated tid appId collector deserHandler = do
   currentMdRef <- newIORef Nothing
   currentHsRef <- newIORef Nothing
   pesRef <- newIORef []
-  metrics <- noopMetricsRegistry
+  counters <- UMV.replicate countersSize 0
   commitReqRef <- newIORef False
   drainsRef <- newIORef []
   wmCoordRef <- newIORef Nothing
@@ -418,7 +419,7 @@ buildEngineWith opts validated tid appId collector deserHandler = do
           , engineCurrentHeaders = currentHsRef
           , enginePunctuators = pesRef
           , engineDeserHandler = deserHandler
-          , engineMetrics = metrics
+          , engineCounters = counters
           , engineCommitRequested = commitReqRef
           , engineAsyncDrains = drainsRef
           , enginePartitionCount = partCountRef
@@ -650,9 +651,9 @@ sinkPartition engine topic sp rec = do
                   | p < 0 || p >= n ->
                       throwIO . InvalidPartitionsException $
                         ( "sink topic " <> topic <> ": StreamPartitioner returned partition "
-                            <> T.pack (show p)
+                            <> decimalText p
                             <> " outside [0, "
-                            <> T.pack (show n)
+                            <> decimalText n
                             <> ")"
                         )
                 _ -> pure mp
@@ -719,7 +720,7 @@ handleSource engine spec children si = do
             | otherwise -> Right (Just (v, Just v))
   case (mErasedKey, eErasedVal) of
     (Right _, Right Nothing) ->
-      Met.incCounter (engineMetrics engine) Met.droppedRecordsTotal
+      bump engine ixDropped
     (Right mk, Right (Just (v, mRaw))) -> do
       st <- readIORef (engineStreamTime engine)
       ts <- case mRaw of
@@ -764,20 +765,12 @@ handleSource engine spec children si = do
               , recordHeaders = siHeaders si
               }
       writeIORef (engineCurrentHeaders engine) (Just (siHeaders si))
-      Met.incCounter (engineMetrics engine) Met.processTotal
-      -- Task-id-tagged variant for finer-grained inspection
-      -- (mirrors the Java client's task-tagged metric names).
-      Met.incCounter
-        (engineMetrics engine)
-        ( "stream-task-metrics:process-total{task="
-            <> taskIdToText (engineTaskId engine)
-            <> "}"
-        )
+      bump engine ixProcessed
       mapM_ (\fw -> fw rec) children
       writeIORef (engineCurrentMd engine) Nothing
       writeIORef (engineCurrentHeaders engine) Nothing
     _ -> do
-      Met.incCounter (engineMetrics engine) Met.droppedRecordsTotal
+      bump engine ixDropped
       handleDeserError engine si mErasedKey eErasedVal
 
 
@@ -852,9 +845,9 @@ handleDeserError engine si keyR valR = do
               "deserialization failure on "
                 <> unTopicName (siTopic si)
                 <> "-"
-                <> T.pack (show (siPartition si))
+                <> decimalText (siPartition si)
                 <> "@"
-                <> T.pack (show (siOffset si))
+                <> decimalText (siOffset si)
                 <> ": "
                 <> reason
           , streamsErrorContext = Just "deserialization"
@@ -1169,7 +1162,7 @@ fireDue engine pt now = do
     fireOnce pe
       | peNextFireMs pe <= now = do
           runPunctuator (pePunctuator pe) (Timestamp now)
-          Met.incCounter (engineMetrics engine) Met.punctuateTotal
+          bump engine ixPunctuated
           let !next = peNextFireMs pe + fromIntegral (peIntervalMs pe)
               -- If the next-fire is still behind now (because we
               -- jumped a huge gap in stream time), snap it to
@@ -1192,7 +1185,7 @@ used in metric names.
 -}
 taskIdToText :: TaskId -> Text
 taskIdToText (TaskId topo part) =
-  T.pack (show topo) <> "_" <> T.pack (show part)
+  decimalText topo <> "_" <> decimalText part
 
 
 {- | Atomically read and reset the "commit requested by processor"
@@ -1218,7 +1211,43 @@ commitEngine engine = do
   -- so the runtime does not commit offsets past unpersisted state.
   forM_ (Map.elems (Map.withoutKeys m (engineShared engine))) storeEntryFlush
   collectorFlush (engineCollector engine)
-  Met.incCounter (engineMetrics engine) Met.commitTotal
+  bump engine ixCommitted
+
+
+-- | What a task's engine has done since it was built.
+data EngineCounts = EngineCounts
+  { ecProcessed :: {-# UNPACK #-} !Int
+  -- ^ Records handed to the topology
+  , ecDropped :: {-# UNPACK #-} !Int
+  -- ^ Records skipped: no value where one is required, or a deserialization failure handled by continuing
+  , ecPunctuated :: {-# UNPACK #-} !Int
+  , ecCommitted :: {-# UNPACK #-} !Int
+  }
+  deriving stock (Eq, Show)
+
+
+ixProcessed, ixDropped, ixPunctuated, ixCommitted, countersSize :: Int
+ixProcessed = 0
+ixDropped = 1
+ixPunctuated = 2
+ixCommitted = 3
+countersSize = 4
+
+
+bump :: Engine -> Int -> IO ()
+bump engine = UMV.unsafeModify (engineCounters engine) (+ 1)
+{-# INLINE bump #-}
+
+
+-- | Read from any thread (each count is one aligned word).
+readEngineCounts :: Engine -> IO EngineCounts
+readEngineCounts engine = do
+  let c = engineCounters engine
+  EngineCounts
+    <$> UMV.unsafeRead c ixProcessed
+    <*> UMV.unsafeRead c ixDropped
+    <*> UMV.unsafeRead c ixPunctuated
+    <*> UMV.unsafeRead c ixCommitted
 
 
 {- | Run every registered pre-commit drain in /registration order/.

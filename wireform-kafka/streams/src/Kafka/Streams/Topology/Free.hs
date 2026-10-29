@@ -406,7 +406,6 @@ module Kafka.Streams.Topology.Free (
   -- * 'KStream' \<-\> 'KTable' conversions
   toTable,
   toStream,
-  groupByKTable,
   repartition,
   repartitionWith,
 
@@ -2563,10 +2562,11 @@ toTable :: Ord k => Materialized k v -> Topology (KStream k v) (KTable k v)
 toTable = liftPrim . ToTableT
 
 
-{- | Convert a 'KTable' back to a 'KStream' carrying every
-changelog event. The output stream emits one record for
-every update (including tombstones) that flowed into the
-table.
+{- | Convert a 'KTable' back to a 'KStream' of its updates: one
+record per row that changed, carrying the new value. Deletes have
+no value and are dropped; to see them as tombstones use
+'Kafka.Streams.KStream.toChangelogStream' (@KStream k (Maybe v)@)
+and 'Kafka.Streams.KStream.toTopicNullable'.
 
 /JVM equivalent:/ @KTable.toStream@.
 
@@ -2682,12 +2682,9 @@ Prefer 'groupBy' over @selectKey >>> groupByKey@ —
 the optimiser collapses the latter pair into the former, but
 writing it directly is clearer and skips a node.
 
-Like any key-changing op, 'groupBy' marks the stream as
-needing a repartition for downstream stateful operations.
-Callers usually want a 'repartition' between 'groupBy' and
-the aggregation if the partition layout matters; in the
-in-process test driver this is a no-op, but against a real
-broker it's what guarantees per-key ordering.
+Like any key-changing op, 'groupBy' sends the aggregation through
+a repartition topic (named after the 'Grouped' name when given), so
+every key is aggregated by the one task that owns its partition.
 -}
 groupBy
   :: forall k v k'
@@ -3996,23 +3993,6 @@ suppressWindowedShed
 suppressWindowedShed grace winMs shelf =
   liftIO_ "suppressWindowedShed" $ \_b s ->
     Suppress.suppressWindowedShed grace winMs shelf s
-
-
-----------------------------------------------------------------------
--- KTable.groupBy (Java) lowered onto KStream
-----------------------------------------------------------------------
-
-{- | Java's @KTable.groupBy(KeyValueMapper)@ lowered: convert the
-table to a stream, then re-key. Useful when you want to
-re-aggregate a 'KTable' under a derived key without taking the
-subtractor-aware 'groupTableBy' / 'KGroupedTable' path.
--}
-groupByKTable
-  :: (Ord k, Ord k', HasSerde k', HasSerde v)
-  => (k -> v -> k')
-  -> Topology (KTable k v) (KStream k' v)
-groupByKTable keyMap =
-  liftIO_ "groupByKTable" $ \_b kt -> KS.groupByKTable keyMap kt
 
 
 ----------------------------------------------------------------------

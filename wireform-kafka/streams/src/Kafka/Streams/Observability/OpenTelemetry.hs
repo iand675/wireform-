@@ -4,11 +4,13 @@
 
 {- |
 Module      : Kafka.Streams.Observability.OpenTelemetry
-Description : Bridge the in-process metrics registry to OpenTelemetry
+Description : Bridge streams metrics to OpenTelemetry
 
-'Kafka.Streams.Metrics' keeps a plain in-memory registry of
-counters, gauges, and duration summaries that the engine pokes on
-the hot path. This module exports that registry through the
+A 'Kafka.Streams.Metrics.MetricsSource' snapshots counters, gauges
+and duration summaries: a running instance's
+('Kafka.Streams.Runtime.streamsMetrics', read from per-task unboxed
+counters) or a registry's ('Kafka.Streams.Metrics.registrySource').
+This module exports a source through the
 OpenTelemetry metrics API (the @hs-opentelemetry-api@ 1.0 suite),
 which is the framework's single channel for /all/ observability —
 traces, logs, and metrics.
@@ -22,10 +24,11 @@ the global provider is a no-op and this bridge costs nothing.
 
 == How it works
 
-For each metric currently in the registry we create an
-/observable/ (asynchronous) instrument and register a callback
-that re-reads the live value from the registry on every collection
-cycle. Observable instruments are the idiomatic way to surface a
+For each metric in the source's snapshot at registration we create
+an /observable/ (asynchronous) instrument and register a callback
+that re-reads the source on every collection cycle. A running
+instance's per-task metrics appear as tasks are assigned, so register
+once it is running (and again after a rebalance moves tasks). Observable instruments are the idiomatic way to surface a
 pull-based source like ours:
 
   * counters  → 'ObservableCounter' @Int64@;
@@ -72,11 +75,7 @@ import Data.Map.Strict qualified as Map
 import Kafka.Streams.Metrics (
   DurationStats (..),
   MetricValue (..),
-  MetricsRegistry,
-  dumpMetrics,
-  readCounter,
-  readDurationStats,
-  readGauge,
+  MetricsSource,
  )
 import OpenTelemetry.Metric.Core (
   Meter,
@@ -151,9 +150,9 @@ set is known. Returns a 'StreamsMetricsRegistration' whose handles
 can later be passed to 'unregisterStreamsMetrics'.
 -}
 registerStreamsMetrics
-  :: Meter -> MetricsRegistry -> IO StreamsMetricsRegistration
-registerStreamsMetrics meter reg = do
-  snapshot <- dumpMetrics reg
+  :: Meter -> MetricsSource -> IO StreamsMetricsRegistration
+registerStreamsMetrics meter source = do
+  snapshot <- source
   handles <- fmap concat (traverse registerOne (Map.toList snapshot))
   pure
     StreamsMetricsRegistration
@@ -176,8 +175,9 @@ registerStreamsMetrics meter reg = do
           defaultAdvisoryParameters
           []
       h <- observableCounterRegisterCallback inst $ \res -> do
-        n <- readCounter reg rawName
-        observe res n emptyAttributes
+        current rawName $ \case
+          MVCounter n -> observe res n emptyAttributes
+          _ -> pure ()
       pure [h]
 
     registerGauge rawName = do
@@ -190,10 +190,9 @@ registerStreamsMetrics meter reg = do
           defaultAdvisoryParameters
           []
       h <- observableGaugeRegisterCallback inst $ \res -> do
-        mv <- readGauge reg rawName
-        case mv of
-          Just v -> observe res v emptyAttributes
-          Nothing -> pure ()
+        current rawName $ \case
+          MVGauge v -> observe res v emptyAttributes
+          _ -> pure ()
       pure [h]
 
     registerDuration rawName = do
@@ -247,11 +246,12 @@ registerStreamsMetrics meter reg = do
           observableGaugeRegisterCallback inst $ \res ->
             withDuration rawName (\s -> observe res (project s) emptyAttributes)
 
-    withDuration rawName k = do
-      ms <- readDurationStats reg rawName
-      case ms of
-        Just s -> k s
-        Nothing -> pure ()
+    withDuration rawName k = current rawName $ \case
+      MVDuration s -> k s
+      _ -> pure ()
+
+    -- the metric's value in a fresh snapshot, if it is still there
+    current rawName k = source >>= maybe (pure ()) k . Map.lookup rawName
 
 
 {- | Detach every callback created by 'registerStreamsMetrics'. After

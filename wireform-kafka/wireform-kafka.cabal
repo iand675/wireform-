@@ -506,6 +506,7 @@ library wireform-kafka-streams
         Kafka.Streams.State.Session.InMemory
         Kafka.Streams.Internal.RecordCollector
         Kafka.Streams.Internal.Engine
+        Kafka.Streams.Internal.Text
         Kafka.Streams.Internal.Serdes
         Kafka.Streams.Internal.Changelog
         Kafka.Streams.Driver

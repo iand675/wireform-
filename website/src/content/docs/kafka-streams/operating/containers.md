@@ -9,7 +9,7 @@ A `wireform-kafka-streams` process keeps its working state on local
 disk. The RocksDB backend
 (`Kafka.Streams.State.KeyValue.RocksDB`, built with the
 `+rocksdb` Cabal flag) writes column-family files under
-`<stateDir>/<storeName>/`; the WAL-backed
+`<stateDir>/<applicationId>/<task>/`; the WAL-backed
 `Kafka.Streams.State.KeyValue.Persistent` backend does the same.
 Either way, "the database lives in the container" is the model.
 
@@ -27,10 +27,10 @@ Kafka, Streams, and Riffle terminology is defined in the [Glossary](../glossary/
 
 :::note[TL;DR]
 - Mount a persistent volume at `stateDir` (default `/tmp/kafka-streams`) or pay the changelog-replay cost on every restart.
-- One pod = one stable identity: `StatefulSet`-style ordinals + a stable `clientId` so the assignor reuses the same partition assignment across restarts. Combine with `numStandbyReplicas >= 1` for seconds-scale failover.
+- One pod = one stable identity: `StatefulSet`-style ordinals + a stable `clientId` and a volume that follows the ordinal, so a restarted pod restores only the changelog tail after its checkpoints. There are no standby replicas: failover time is restore time.
 - RocksDB block cache and write buffers are **off-heap**. The container memory limit must cover heap + RocksDB + page-cache headroom, or the OOM-killer takes you mid-compaction.
-- Give `closeKafkaStreams` enough wall-clock time to drain (`terminationGracePeriodSeconds` ≥ `commitIntervalMs + 30 s`).
-- If you can't have persistent volumes, use the Riffle [snapshot-aware KV store](../riffle/#state-durability-decoupled-from-the-changelog) so cold-boot is bounded by snapshot cadence, not state size.
+- Give `closeKafkaStreams` enough wall-clock time to reach its final commit (`terminationGracePeriodSeconds` above its 30 s `timeoutMs`).
+- Without persistent volumes, every restart restores every store from its changelog; keep changelogs compacted and size rollouts around restore time.
 :::
 
 ## 1. State persistence
@@ -48,47 +48,51 @@ enough: a store can hold writes from a transaction the broker aborted
 when the process died, and replaying the changelog tail on top of them
 applies those writes twice. So the runtime does what the JVM does.
 `closeKafkaStreams` writes a `.wireform-clean-shutdown` marker into
-`stateDir` once the stream thread has stopped at a commit boundary
-and every store is closed. `startKafkaStreams` consumes that marker
-before it opens any store, and if the marker is missing it deletes
-everything under `stateDir`. The stores then restore from their
-changelogs. A run that aborted a transaction, hit a fatal commit
-error, or lost its stream thread to an uncaught exception never
-writes the marker. Two things follow:
+`<stateDir>/<applicationId>` once the stream thread has stopped at a
+commit boundary and every task is closed. `startKafkaStreams` consumes
+that marker before it opens any store, and if the marker is missing
+it deletes everything under `<stateDir>/<applicationId>`. The stores
+then restore from their changelogs. A run that lost its stream thread
+to an uncaught exception, or was killed, never writes the marker.
+(An aborted transaction doesn't need the wipe: the runtime recovers
+the tasks in place.) Two things follow:
 
-- Keep every store **under** `stateDir`, and give each application
-  instance its own `stateDir`. The wipe covers only that directory,
-  and it removes the directory's entries, not the directory itself,
-  so a volume mount point is safe.
+- Give each application instance its own `stateDir`. The wipe covers
+  only `<stateDir>/<applicationId>`, and removes its entries, not the
+  directory, so a volume mount point is safe.
 - Allow `closeKafkaStreams` its `timeoutMs` (default 30 s). If the
   loop doesn't reach a commit boundary in time, the close cancels it,
   and the next start pays a full restore.
 
 At-least-once never wipes; duplicates are within its contract.
 
-You therefore have four strategies, in order of decreasing cost on
-restart:
+The strategies, from cheapest restart to most expensive:
 
 | Strategy | Cold-boot cost | When to pick |
 | -------- | -------------- | ------------ |
-| Persistent volume at `stateDir` | Near-zero: WAL replay only | Default for any non-trivial stateful topology |
-| Ephemeral disk + `numStandbyReplicas >= 1` | Metadata flip on failover; full replay if every replica dies | When you'd rather pay 2× changelog bandwidth than mount a volume |
-| Ephemeral disk + Riffle snapshot store | `O(time-since-last-snapshot)` replay from object store + tail | Multi-TB state where full changelog replay would gate rollouts |
-| Ephemeral disk + plain changelog | `O(state-size / replay-bandwidth)` on every cold start | Small stores or recreatable workloads only |
+| Persistent volume at `stateDir` + persistent stores | The changelog tail after each task's checkpoint (a full restore after an unclean EOS stop) | Default for any non-trivial stateful topology |
+| Ephemeral disk (or in-memory stores) | `O(state-size / restore-bandwidth)` on every cold start | Small stores or recreatable workloads only |
+
+The Riffle snapshot store (`Kafka.Streams.State.KeyValue.Snapshot`)
+can restore itself from an object store, but the runtime's restore
+doesn't use it, so a task without a checkpoint still replays its
+whole changelog.
 
 ### Persistent volume layout
 
-The runtime opens one RocksDB directory per `(storeName, taskId)`
-under `stateDir`. For a `StatefulSet` pod `app-0` with
-`numStreamThreads = 4`, the layout is roughly:
+The runtime gives each task a directory
+`<stateDir>/<applicationId>/<subtopology>_<partition>/`, holding its
+stores and its changelog checkpoint. For a `StatefulSet` pod `app-0`
+of application `view-counter`, the layout is roughly:
 
 ```
 /var/lib/wireform/state/
-  view-counts/0_0/  -- task 0_0
-  view-counts/0_1/  -- task 0_1
-  ...
-  user-profiles/1_0/
-  ...
+  view-counter/
+    .wireform-clean-shutdown   -- after a clean close
+    0_0/                       -- task 0_0: its stores + checkpoint
+    0_1/
+    ...
+    1_0/
 ```
 
 The volume must be writable by the process user, and the filesystem
@@ -100,15 +104,14 @@ compaction throughput collapses).
 
 ```mermaid
 flowchart TD
-  Start([Pod starts]) --> CheckDir{stateDir<br/>has existing<br/>RocksDB?}
-  CheckDir -- yes --> WALReplay[RocksDB opens<br/>WAL replay]
-  CheckDir -- no --> CheckSnap{Snapshot store<br/>configured?}
-  WALReplay --> TailReplay[Replay changelog tail<br/>from last committed offset]
-  CheckSnap -- yes --> FetchSnap[Fetch snapshot blob<br/>from object store]
-  FetchSnap --> SnapTail[Replay changelog tail<br/>since snapshot offset]
-  CheckSnap -- no --> FullReplay[Replay entire changelog<br/>from earliest]
-  TailReplay --> Ready([Task RUNNING])
-  SnapTail --> Ready
+  Start([Pod starts]) --> EOS{Exactly-once and<br/>no clean-shutdown<br/>marker?}
+  EOS -- yes --> Wipe[Wipe stateDir/applicationId]
+  EOS -- no --> Assign
+  Wipe --> Assign[Partitions assigned;<br/>tasks built, sources paused]
+  Assign --> CheckPt{Task has a<br/>checkpoint?}
+  CheckPt -- yes --> TailReplay[Restore changelog tail<br/>from the checkpoint]
+  CheckPt -- no --> FullReplay[Restore entire changelog<br/>from the log start]
+  TailReplay --> Ready([Task processing])
   FullReplay --> Ready
 ```
 
@@ -123,12 +126,12 @@ Three identities matter:
 | Identity | Set by | Survival requirement |
 | -------- | ------ | -------------------- |
 | Consumer-group member | `applicationId` + member metadata | Stable across the group's lifetime; one per process |
-| Task assignment | The assignor, based on member metadata | Cooperative-sticky **prefers** to keep the same tasks on the same member if its identity is stable |
+| Task assignment | The range assignor, over the members ordered by member id | The same members (by `clientId`, which prefixes the broker-generated member id) get the same partitions |
 | RocksDB directory | `stateDir` mount | Stable iff the volume is reattached to the same pod |
 
-For the assignor to recognise a restarted pod as "the same member
-who just left", its `clientId` and (when set) `applicationServer`
-need to be stable across restarts:
+For a restarted pod to get its old partitions back (and find their
+checkpoints on its volume), its `clientId` needs to be stable across
+restarts:
 
 ```haskell
 import qualified Kafka.Streams.Config as C
@@ -141,9 +144,7 @@ mkCfg = do
     { C.applicationId     = "view-counter"
     , C.bootstrapServers  = ["broker:9092"]
     , C.clientId          = "view-counter-" <> T.pack hostname
-    , C.applicationServer = Just (T.pack hostname <> ".view-counter.svc.cluster.local:8080")
     , C.numStreamThreads  = 4
-    , C.numStandbyReplicas = 1
     , C.stateDir          = "/var/lib/wireform/state"
     }
 ```
@@ -157,17 +158,17 @@ For Kubernetes specifically: a `Deployment` does **not** give you
 stable identity; pod names are random suffixes that change on every
 restart. Use a `StatefulSet` whenever the topology has state.
 
-### Why this matters in concert with KIP-848
+### Why this matters for restore time
 
-The cooperative-sticky assignor in `Kafka.Streams.Runtime.RebalanceProtocol`
-tries to keep tasks where they were. If the restarted member shows
-up under a brand-new `clientId`, the assignor has no record of its
-prior ownership and reassigns from scratch: which means task
-reshuffles even though the underlying pod is "the same". Stable
-identity makes the rebalance a metadata flip instead of a data
-movement.
+The runtime's consumer uses the classic group protocol with the
+range assignor, which orders members by member id. The broker builds
+a member id from the `clientId` plus a random suffix, so members with
+stable, distinct `clientId`s keep their order, and the same set of
+members gets the same partitions back. A pod that comes back under a
+new `clientId` can land on different partitions: its checkpoints are
+for the wrong tasks, and those tasks restore their whole changelog.
 
-The full reconciliation walk is in
+The full rebalance walk is in
 [Scaling and rebalancing → Processes across the group](./scaling/#processes-across-the-group).
 
 ## 3. Memory accounting
@@ -253,29 +254,29 @@ growth](./runbooks/#local-state-directory-grows-without-bound).
 ## 5. Graceful shutdown
 
 `closeKafkaStreams` walks the shutdown path:
-finish the in-flight commit cycle → flush memtables → close
-RocksDB → leave the group. If the container is `SIGKILL`-ed before
-that completes:
+final commit → close every task (flushing and checkpointing its
+stores) → write the clean-shutdown marker → leave the group. If the
+container is `SIGKILL`-ed before that completes:
 
-- Records in the transactional buffer are dropped (under EOS the
-  next owner will reprocess from the last committed offset, so no
-  data loss: just extra work).
+- The open transaction is aborted by the broker (under EOS the next
+  owner reprocesses from the last committed offset, so no data loss:
+  just extra work), and the next start on this volume wipes the
+  local state and restores it all.
 - The pod leaves the group via session timeout instead of a clean
   `Leave`, so the rebalance starts later than it could.
 - RocksDB recovers from its WAL on next open: but it's another
   full WAL replay cycle, which adds to startup time.
 
-Kubernetes default is `terminationGracePeriodSeconds: 30`. For a
-production stateful topology with `commitIntervalMs = 30_000`, that
-is **not enough**: the in-flight cycle alone can take up to that
-long. Set the grace period to at least `commitIntervalMs + 30 s`,
-or to whatever bound your slowest `commit2PC` sink advertises plus
-a safety margin.
+Kubernetes default is `terminationGracePeriodSeconds: 30`, the same
+as `closeKafkaStreams`'s default `timeoutMs`: **not enough** to also
+leave headroom for the process to exit. Set the grace period above
+the close timeout, plus whatever your slowest commit participant
+(two-phase sink) needs to prepare and commit.
 
 Pair the grace period with a `preStop` hook that calls
 `closeKafkaStreams` (typically by sending the process a SIGTERM
 your runtime translates into the close call) and waits for the
-internal state machine to reach `NOT_RUNNING` before exiting.
+instance to reach `StreamsClosed` before exiting.
 
 ## 6. File handles and other ulimits
 
@@ -306,28 +307,25 @@ deployments converge to looks like:
 | -------- | --- |
 | `StatefulSet` | Stable pod hostnames (`app-0`, `app-1`, …) and stable PVC binding per ordinal |
 | `volumeClaimTemplates` on a local-SSD `StorageClass` | Mount at `stateDir`; survives pod restarts |
-| `applicationServer = $HOSTNAME.<svc>:<port>` | Cross-instance IQ routing finds the right pod after rebalance |
-| `clientId = "<app>-$HOSTNAME"` | Stable assignor identity; cooperative-sticky reuses prior assignment |
-| `terminationGracePeriodSeconds` ≥ `commitIntervalMs/1000 + 30` | Enough wall-clock to flush, commit, and leave cleanly |
+| `clientId = "<app>-$HOSTNAME"` | Stable member order for the range assignor; the pod gets its partitions (and checkpoints) back |
+| `terminationGracePeriodSeconds` above the 30 s close timeout | Enough wall-clock to commit, close, and leave cleanly |
 | `resources.limits.memory` covers heap + RocksDB + headroom | Avoids OOM during compaction spikes |
-| `readinessProbe` distinguishes `RUNNING` from `REBALANCING` | Don't take a pod out of rotation during a normal rebalance |
-| `livenessProbe` triggers only on `ERROR` / hung commit cycle | Don't restart a healthy pod that's mid-replay |
+| `readinessProbe` distinguishes `StreamsRunning` from `StreamsRebalancing` | Don't take a pod out of rotation during a normal rebalance |
+| `livenessProbe` triggers only on `StreamsError` / a hung commit | Don't restart a healthy pod that's mid-restore |
 
 The probes should consult `setStateListener` output (or equivalent
 metric) rather than just "did the process start"; a pod can be
-process-alive but partition-unowned for the full
-`probingRebalanceIntervalMs` window during a rebalance, and you
-don't want that to count as ready.
+process-alive but still restoring its stores for minutes after a
+rebalance, and you don't want that to count as ready.
 
 ## 8. Which storage strategy for which workload
 
 | You have… | Pick |
 | --------- | ---- |
 | Stateless topology (map / filter / branch only) | Ephemeral disk; nothing to persist |
-| Small state (< 10 GB per task) you can afford to replay | Ephemeral disk + `numStandbyReplicas = 1` |
-| Bounded state, want fast rollouts | Persistent volume + `numStandbyReplicas = 1` |
-| Large state, can tolerate a snapshot-cadence-bound replay | Riffle snapshot store + ephemeral disk + `SnapshotPointer` standby |
-| Multi-TB state where hot working set is small | [Tiered KV store](../riffle/#cold-state-spilling) (RocksDB hot + object-store cold) |
+| Small state (< 10 GB per task) you can afford to replay | Ephemeral disk |
+| Bounded state, want fast rollouts | Persistent volume + persistent stores + stable `clientId` |
+| Large state | Persistent volume, and more partitions so each task's changelog restores in bounded time |
 | You don't run on Kubernetes; Nomad / bare ECS / Fly volumes | Same principles: stable identity + persistent mount + grace period |
 
 ## Related reading
@@ -344,5 +342,5 @@ don't want that to count as ready.
 - [Runbooks → rebalance storm](./runbooks/#rebalance-storm) -
   RocksDB compaction stalls as a cause of liveness flaps.
 - [Riffle: state durability decoupled from the changelog](../riffle/#state-durability-decoupled-from-the-changelog) -
-  the snapshot-aware store and pointer-mode standby that make
-  ephemeral-disk deployments viable for large state.
+  the snapshot-aware store (a separate library; the runtime's
+  restore doesn't use it).

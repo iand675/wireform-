@@ -39,7 +39,6 @@ tests =
       , long_serde_alias
       , process_stream_runs
       , ktable_toStream_emits_changes
-      , ktable_groupBy_rekeys
       ]
 
 
@@ -115,25 +114,3 @@ ktable_toStream_emits_changes =
     closeDriver driver
 
 
-ktable_groupBy_rekeys :: Spec
-ktable_groupBy_rekeys =
-  it "groupByKTable produces a re-keyed KStream" $ do
-    b <- newStreamsBuilder
-    kt <-
-      tableFromTopic
-        b
-        (topicName "in")
-        (consumed textSerde textSerde)
-        (materializedAs (storeName "kt-store-rk"))
-    s <- groupByKTable (\_oldKey v -> v) kt -- new key = current value
-    toTopic (topicName "out") (produced textSerde textSerde) s
-    topo <- buildTopology b
-    driver <- newDriver topo "ext-app"
-
-    pipeInput driver (topicName "in") (Just (bytes "k1")) (bytes "alpha") (t 0) 0
-    pipeInput driver (topicName "in") (Just (bytes "k2")) (bytes "beta") (t 0) 0
-    out <- readOutput driver (topicName "out")
-    -- The re-keyed stream uses value as the new key; we only assert
-    -- that we got two records (key inspection is bytes-noisy).
-    length out `shouldBe` 2
-    closeDriver driver

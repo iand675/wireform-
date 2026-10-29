@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -11,10 +12,12 @@ module Streams.RuntimeBehaviourSpec (tests) where
 import Control.Exception (ErrorCall (..), finally, toException)
 import Control.Monad (forM_, replicateM_)
 import Data.IORef
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Kafka.Client.RebalanceListener (RebalanceListener (..), noopRebalanceListener)
 import Kafka.Streams.Imperative
+import Kafka.Streams.Metrics (MetricValue (..), processTotal, rebalanceTotal, threadCommitTotal)
 import Kafka.Streams.Runtime.Driver (DriverRecord (..))
 import Kafka.Streams.Runtime.MockBroker
 import Streams.RuntimeHarness
@@ -86,6 +89,13 @@ threads_process_everything = withStateDirs 1 $ \[d] -> do
       meta <- metadataForLocalThreads ks
       length meta `shouldBe` 4
       sum (map processedRecs meta) `shouldBe` 40
+      -- the same counts through the metrics snapshot
+      m <- streamsMetrics ks
+      Map.lookup processTotal m `shouldBe` Just (MVCounter 40)
+      length (filter ("stream-processor-node-metrics:process-total{task=" `T.isPrefixOf`) (Map.keys m)) `shouldBe` 4
+      Map.lookup rebalanceTotal m `shouldSatisfy` maybe False (\case MVCounter n -> n >= 1; _ -> False)
+      eventually [ks] "a commit counted" $
+        maybe False (\case MVCounter n -> n >= 1; _ -> False) . Map.lookup threadCommitTotal <$> streamsMetrics ks
       _ <- addStreamThread ks
       produceN broker 10
       eventually [ks] "50 outputs" ((== 50) <$> outputCount broker)
