@@ -1228,11 +1228,10 @@ forwarding they perform (via 'ProcessorContext.ctxForward') is
 not thread-safe. Each drain blocks until its background workers
 have caught up, then forwards any pending output downstream.
 
-Called automatically as the first step of 'commitEngine'.
-Exposed publicly for callers (and tests) that need an explicit
-drain boundary outside of a full commit cycle — e.g. the
-'Kafka.Streams.Runtime.EOS.EOSCoordinator' production runtime
-can invoke this directly between @beginTxn@ and @commitOffsets@.
+Called automatically as the first step of 'commitEngine' (so,
+under exactly-once, inside the commit's transaction). Exposed for
+callers (and tests) that need an explicit drain boundary outside a
+commit.
 -}
 drainPreCommit :: Engine -> IO ()
 drainPreCommit engine = do

@@ -19,8 +19,8 @@ tests =
           "defaults match the JVM 3.x defaults"
           defaults_match
       , it
-          "task.timeout.ms is honoured by streamsConfigFromMap"
-          ttl_parsed
+          "commit.interval.ms and buffered.records.per.partition are honoured"
+          commit_and_buffer_parsed
       , it
           "acceptable.recovery.lag is honoured"
           arl_parsed
@@ -31,24 +31,25 @@ tests =
           "probing.rebalance.interval.ms is honoured"
           pri_parsed
       , it
-          "task.assignor.class is honoured"
-          tac_parsed
+          "the exactly-once commit interval defaults to 100 ms"
+          eos_commit_default
       ]
 
 
 defaults_match :: IO ()
 defaults_match = do
-  C.taskTimeoutMs C.defaultStreamsConfig `shouldBe` 300_000
   C.acceptableRecoveryLag C.defaultStreamsConfig `shouldBe` 10_000
   C.maxWarmupReplicas C.defaultStreamsConfig `shouldBe` 2
   C.probingRebalanceIntervalMs C.defaultStreamsConfig `shouldBe` 600_000
-  C.taskAssignorClass C.defaultStreamsConfig `shouldBe` Nothing
+  C.bufferedRecordsPerPartition C.defaultStreamsConfig `shouldBe` 1000
+  C.effectiveCommitIntervalMs C.defaultStreamsConfig `shouldBe` 30_000
 
 
-ttl_parsed :: IO ()
-ttl_parsed =
-  C.taskTimeoutMs (C.streamsConfigFromMap (Map.singleton "task.timeout.ms" "120000"))
-    `shouldBe` 120_000
+commit_and_buffer_parsed :: IO ()
+commit_and_buffer_parsed = do
+  let cfg = C.streamsConfigFromMap (Map.fromList [("commit.interval.ms", "250"), ("buffered.records.per.partition", "64")])
+  C.commitIntervalMs cfg `shouldBe` Just 250
+  C.bufferedRecordsPerPartition cfg `shouldBe` 64
 
 
 arl_parsed :: IO ()
@@ -72,10 +73,8 @@ pri_parsed =
     `shouldBe` 30_000
 
 
-tac_parsed :: IO ()
-tac_parsed =
-  C.taskAssignorClass
-    ( C.streamsConfigFromMap
-        (Map.singleton "task.assignor.class" "com.acme.MyAssignor")
-    )
-    `shouldBe` Just "com.acme.MyAssignor"
+eos_commit_default :: IO ()
+eos_commit_default = do
+  C.effectiveCommitIntervalMs C.defaultStreamsConfig {C.processingGuarantee = C.ExactlyOnceV2} `shouldBe` 100
+  C.effectiveCommitIntervalMs C.defaultStreamsConfig {C.processingGuarantee = C.ExactlyOnceV2, C.commitIntervalMs = Just 7}
+    `shouldBe` 7

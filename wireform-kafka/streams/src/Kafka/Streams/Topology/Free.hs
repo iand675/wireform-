@@ -728,10 +728,9 @@ data Prim i o where
     -> !(Produced k v)
     -> Prim (KStream k v) (KStream k v)
   {- | Riffle \xc2\xa74: two-phase-commit sink. Each record is staged
-  into the sink's per-cycle buffer via 'tpsPrepare'; the
-  runtime's 'EOSCoordinator.preCommit2PC' \/ 'commit2PC' /
-  'abort2PC' hooks drive the commit cycle. Wire the sink into
-  the coordinator with 'Kafka.Streams.Sinks.TwoPhase.withTwoPhaseSinks'.
+  into the sink's per-cycle buffer via 'tpsStage'; the runtime's
+  commit cycles prepare / commit / abort it once it is registered
+  ('Kafka.Streams.Sinks.TwoPhase.twoPhaseParticipant').
   -}
   SinkTwoPhase
     :: !(TPS.TwoPhaseSink (Record k v))
@@ -1915,10 +1914,10 @@ sinkWith t p = liftPrim (Sink t p)
 
 
 {- | Riffle \xc2\xa74: terminate the stream into a two-phase-commit sink.
-Every record is staged via 'TPS.tpsStage'; the runtime's
-'Kafka.Streams.Runtime.EOS.EOSCoordinator' drives prepare /
-commit / abort through the 5-step cycle once the sink has
-been wired in via 'TPS.withTwoPhaseSinks'. The same
+Every record is staged via 'TPS.tpsStage'; the runtime's commit
+cycles prepare / commit / abort it once it is registered with
+'Kafka.Streams.Runtime.addCommitParticipant'
+('TPS.twoPhaseParticipant'). The same
 contract works for JDBC \/ Iceberg \/ S3 \/ HTTP adapters
 shipped in separate packages.
 -}

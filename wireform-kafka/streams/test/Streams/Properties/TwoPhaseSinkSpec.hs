@@ -25,30 +25,19 @@ Properties:
 -}
 module Streams.Properties.TwoPhaseSinkSpec (tests) where
 
-import Control.Monad (forM, forM_, when)
+import Control.Monad (forM_)
 import Data.ByteString.Char8 qualified as BSC
-import Data.HashMap.Strict qualified as HM
 import Data.IORef (
-  IORef,
-  atomicModifyIORef',
   modifyIORef',
   newIORef,
   readIORef,
-  writeIORef,
  )
-import Data.List qualified as List
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Hedgehog qualified as H
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
-import Kafka.Streams.Runtime.EOS (
-  CommitOutcome (..),
-  EOSCoordinator (..),
-  noopEOSCoordinator,
-  runCommitCycle,
- )
 import Kafka.Streams.Sinks.TwoPhase
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Syd
@@ -248,56 +237,6 @@ prop_filesystem_crash_consistency = H.property $ do
 
 
 ----------------------------------------------------------------------
--- Property: withTwoPhaseSinks integrates with runCommitCycle
-----------------------------------------------------------------------
-
-{- | Drive 'runCommitCycle' with a 2PC sink composed in, and assert
-that the sink only commits when the cycle succeeds. The base
-coordinator's flushBody can fail, in which case sink-prepare
-runs but neither base.storeCommit nor sink.tpsCommit should run.
--}
-prop_eos_integration :: H.Property
-prop_eos_integration = H.property $ do
-  rows <-
-    H.forAll
-      (Gen.list (Range.linear 1 6) (Gen.element ["a", "b", "c"]))
-  -- Force a flush failure ~ half the time so we exercise both paths.
-  flushOK <- H.forAll Gen.bool
-  (committedRows, prepared) <- H.evalIO $ do
-    (sink, st) <- inMemoryTwoPhaseSink "eos"
-    -- The rowsFor closure returns the same fixed rows for the
-    -- single sink.
-    let rowsFor _ _ = pure rows
-    txnCounter <- newIORef (0 :: Int)
-    let nextLabel = do
-          i <- atomicModifyIORef' txnCounter (\n -> (n + 1, n))
-          pure (T.pack ("cycle-" <> show i))
-    coord <-
-      withTwoPhaseSinks
-        noopEOSCoordinator
-        [sink]
-        rowsFor
-        nextLabel
-    let flushBody =
-          if flushOK
-            then pure ()
-            else error "<synthetic flush failure>"
-    _ <- runCommitCycle coord "group" (pure HM.empty) flushBody
-    c <- readCommittedRows st
-    p <- readPreparedRows st
-    pure (c, p)
-  if flushOK
-    then do
-      committedRows H.=== rows
-      H.assert (Map.null prepared)
-    else do
-      -- Flush failed: sink was prepared, base.storeCommit never
-      -- ran, and the abort path cleared the buffered rows.
-      committedRows H.=== []
-      H.assert (Map.null prepared)
-
-
-----------------------------------------------------------------------
 -- Tests
 ----------------------------------------------------------------------
 
@@ -314,10 +253,7 @@ tests =
           H.withTests 120 prop_http_echo_fires_once
       , it "filesystem sink survives prepare-without-commit crashes" $
           H.withTests 60 prop_filesystem_crash_consistency
-      , it "withTwoPhaseSinks ties commit to runCommitCycle outcome" $
-          H.withTests 80 prop_eos_integration
       , unit_stage_then_prepare_includes_staged
-      , unit_five_step_cycle_order
       ]
 
 
@@ -338,41 +274,3 @@ unit_stage_then_prepare_includes_staged =
     _ <- tpsCommit sink (mkTxn 1)
     rs <- readCommittedRows st
     rs `shouldBe` ["a", "b" :: Text]
-
-
-{- | Drives the 5-step cycle and asserts the prepare \xe2\x86\x92 commit
-\xe2\x86\x92 storeCommit invocation order recorded by the coordinator.
--}
-unit_five_step_cycle_order :: Spec
-unit_five_step_cycle_order =
-  it "runCommitCycle invokes preCommit2PC \xe2\x86\x92 commitTxn \xe2\x86\x92 commit2PC \xe2\x86\x92 storeCommit in order" $ do
-    trace <- newIORef ([] :: [Text])
-    let bump t = atomicModifyIORef' trace (\xs -> (t : xs, ()))
-        coord =
-          noopEOSCoordinator
-            { beginTxn = bump "begin" >> pure (Right ())
-            , commitOffsets = \_ _ -> bump "commitOffsets" >> pure (Right ())
-            , preCommit2PC = bump "preCommit2PC" >> pure (Right ())
-            , commitTxn = bump "commitTxn" >> pure (Right ())
-            , commit2PC = bump "commit2PC" >> pure (Right ())
-            , storeCommit = bump "storeCommit" >> pure (Right ())
-            }
-    out <-
-      runCommitCycle
-        coord
-        "g"
-        (pure HM.empty)
-        (bump "flushBody")
-    case out of
-      CommitSucceeded -> pure ()
-      _ -> error ("expected CommitSucceeded, got " <> show out)
-    got <- reverse <$> readIORef trace
-    got
-      `shouldBe` [ "begin"
-                 , "flushBody"
-                 , "commitOffsets"
-                 , "preCommit2PC"
-                 , "commitTxn"
-                 , "commit2PC"
-                 , "storeCommit"
-                 ]

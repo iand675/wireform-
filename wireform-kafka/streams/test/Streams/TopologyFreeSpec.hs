@@ -18,12 +18,13 @@ module Streams.TopologyFreeSpec (tests) where
 import Control.Arrow ((&&&), (***), (>>>))
 import Control.Arrow qualified
 import Control.Category qualified as Cat
-import Control.Exception (evaluate, try)
+import Control.Exception (evaluate, finally, try)
+import Control.Monad (forM_, when)
 import Data.ByteString.Char8 qualified as BSC
-import Data.HashMap.Strict qualified as HMap
 import Data.IORef
 import Data.Int (Int64)
 import Data.List (elemIndex, findIndex)
+import Data.List qualified as List
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
 import Data.Profunctor (dimap)
@@ -38,11 +39,8 @@ import Kafka.Streams.Imperative
 import Kafka.Streams.Joined qualified as Joined
 import Kafka.Streams.Materialized qualified as Mat
 import Kafka.Streams.Named qualified as Named
-import Kafka.Streams.Runtime.EOS (
-  CommitOutcome (..),
-  EOSCoordinator (..),
-  runCommitCycle,
- )
+import Kafka.Streams.Runtime.Driver (DriverRecord (..))
+import Kafka.Streams.Runtime.MockBroker
 import Kafka.Streams.State.Store qualified
 import Kafka.Streams.Suppress qualified as Suppress
 import Kafka.Streams.TimeWindowedKStream qualified as TWKS
@@ -50,6 +48,7 @@ import Kafka.Streams.Topology qualified as Topo
 import Kafka.Streams.Topology.Free qualified as F
 import Kafka.Streams.Topology.Free.Graphviz qualified as DOT
 import Kafka.Streams.Window qualified as Win
+import Streams.RuntimeHarness
 import Test.Syd
 import Unsafe.Coerce qualified as Unsafe
 
@@ -1508,46 +1507,41 @@ test_missing_serde_throws_typed_exception =
 ----------------------------------------------------------------------
 -- 36-38. EOS atomicity of Fork / ForkN / Tap topologies
 ----------------------------------------------------------------------
--- We can't drive a real broker in unit tests, but we can verify:
---
--- 1. Fork / ForkN / Tap topologies compile to a single source feeding
---    multiple sinks. /All sinks share the upstream source node/ — so
---    when the engine processes one record, every downstream sink
---    receives it within the same task, before any commit fires. That
---    means all sinks participate in the SAME EOS commit cycle.
---
--- 2. With a recording 'EOSCoordinator' wrapping the record-pumping
---    'flushBody', a single 'runCommitCycle' invocation drives records
---    through all branches and lands every sink's output within one
---    transaction. The call sequence is the canonical
---    @begin → commitOffsets → commit → storeCommit@.
---
--- This is the strongest assertion we can make at the unit-test layer
--- without a live transactional broker; the broker-side wire path is
--- exercised by the EOS integration tests in 'Streams.EOSRuntimeSpec'.
+-- Fork / ForkN / Tap compile to one source feeding several sinks, so
+-- one task writes every branch and every branch commits in that
+-- task's transaction. Each test runs its topology under exactly-once
+-- on the in-memory broker and aborts transactions mid-run: committed
+-- output on every sink is then exactly once, none of the aborted
+-- writes on any branch shows.
 
-{- | Recording 'EOSCoordinator' that captures the call sequence in an
-'IORef'. Identical to the helper in 'Streams.EOSRuntimeSpec' but
-duplicated here to avoid a cross-module test dependency.
+{- | Run @topo@ under exactly-once: the first input of each topic,
+then (with the next two transaction commits failing) the rest. Each
+input yields one record on every output, so the committed values of
+each output topic must be exactly @outputs@ (in any order across input
+topics), and the aborted attempts must really have written to every
+one of them.
 -}
-mkRecordingCoord :: IO (EOSCoordinator, IO [Text])
-mkRecordingCoord = do
-  buf <- newIORef ([] :: [Text])
-  let log_ s = modifyIORef' buf (s :)
-      coord =
-        EOSCoordinator
-          { initTxn = log_ "init" *> pure (Right ())
-          , beginTxn = log_ "begin" *> pure (Right ())
-          , commitTxn = log_ "commit" *> pure (Right ())
-          , abortTxn = log_ "abort" *> pure (Right ())
-          , commitOffsets = \_ _ -> log_ "commitOffsets" *> pure (Right ())
-          , storeCommit = log_ "storeCommit" *> pure (Right ())
-          , storeAbort = log_ "storeAbort" *> pure (Right ())
-          , preCommit2PC = pure (Right ())
-          , commit2PC = pure (Right ())
-          , abort2PC = pure ()
-          }
-  pure (coord, reverse <$> readIORef buf)
+eosAbortsAtomically :: Topology -> [(Text, [Text])] -> [(Text, [Text])] -> IO ()
+eosAbortsAtomically topo inputs outputs = withStateDirs 1 $ \[dir] -> do
+  broker <- newMockBroker (Just 1)
+  forM_ (inputs <> outputs) $ \(t, _) -> mockCreateTopic broker t 1
+  valid <- either (fail . show) pure (validateTopology topo)
+  ks <- startOn broker ((testConfig "free-eos" dir) {processingGuarantee = ExactlyOnceV2}) valid
+  let produce t v = mockProduce broker t Nothing (Just (textBytes v)) 0
+      committed t = map drValue <$> visible broker t
+      everyOutputHas n = and <$> mapM (\(t, _) -> (>= n) . length <$> committed t) outputs
+  ( do
+      forM_ inputs $ \(t, vs) -> mapM_ (produce t) (take 1 vs)
+      eventually [ks] "the first records committed" (everyOutputHas (length inputs))
+      mockFailTransactionCommits broker 2
+      forM_ inputs $ \(t, vs) -> mapM_ (produce t) (drop 1 vs)
+      eventually [ks] "every output committed" (everyOutputHas (length (concatMap snd inputs)))
+      forM_ outputs $ \(t, vs) -> do
+        List.sort <$> committed t `shouldReturn` List.sort (map (Just . textBytes) vs)
+        written <- length <$> mockRecords broker t
+        when (written <= length vs) $ expectationFailure ("expected aborted records in " <> T.unpack t)
+    )
+    `finally` (closeKafkaStreams ks >> awaitState ks StreamsClosed)
 
 
 test_fork_topology_is_eos_atomic :: Spec
@@ -1577,26 +1571,10 @@ test_fork_topology_is_eos_atomic =
     nSources `shouldBe` 1
     length sinks `shouldBe` 2
 
-    -- Drive records through with a recording EOS coordinator
-    -- wrapping the flushBody. A single commit cycle covers both
-    -- sinks.
-    driver <- newDriver topo "free-eos-fork"
-    (coord, drain) <- mkRecordingCoord
-    outcome <- runCommitCycle coord "g" (pure HMap.empty) $ do
-      pipeInput driver (topicName "fork-in") Nothing (bytes "Hello") t0 0
-      pipeInput driver (topicName "fork-in") Nothing (bytes "World") t0 0
-    outcome `shouldBe` CommitSucceeded
-
-    upperOut <- readOutput driver (topicName "fork-upper")
-    lowerOut <- readOutput driver (topicName "fork-lower")
-    map (unbytes . crValueBytes) upperOut `shouldBe` ["HELLO", "WORLD"]
-    map (unbytes . crValueBytes) lowerOut `shouldBe` ["hello", "world"]
-
-    -- The commit cycle ran the canonical EOS sequence, with /all/
-    -- branch outputs captured between 'begin' and 'commit'.
-    log_ <- drain
-    log_ `shouldBe` ["begin", "commitOffsets", "commit", "storeCommit"]
-    closeDriver driver
+    eosAbortsAtomically
+      topo
+      [("fork-in", ["Hello", "World", "Again"])]
+      [("fork-upper", ["HELLO", "WORLD", "AGAIN"]), ("fork-lower", ["hello", "world", "again"])]
 
 
 test_forkN_topology_is_eos_atomic :: Spec
@@ -1625,22 +1603,10 @@ test_forkN_topology_is_eos_atomic =
     nSources `shouldBe` 1
     length sinks `shouldBe` 3
 
-    driver <- newDriver topo "free-eos-forkn"
-    (coord, drain) <- mkRecordingCoord
-    outcome <- runCommitCycle coord "g" (pure HMap.empty) $ do
-      pipeInput driver (topicName "forkn-in") Nothing (bytes "abc") t0 0
-    outcome `shouldBe` CommitSucceeded
-
-    u <- readOutput driver (topicName "fn-upper")
-    l <- readOutput driver (topicName "fn-lower")
-    r <- readOutput driver (topicName "fn-rev")
-    map (unbytes . crValueBytes) u `shouldBe` ["ABC"]
-    map (unbytes . crValueBytes) l `shouldBe` ["abc"]
-    map (unbytes . crValueBytes) r `shouldBe` ["cba"]
-
-    log_ <- drain
-    log_ `shouldBe` ["begin", "commitOffsets", "commit", "storeCommit"]
-    closeDriver driver
+    eosAbortsAtomically
+      topo
+      [("forkn-in", ["abc", "xyZ"])]
+      [("fn-upper", ["ABC", "XYZ"]), ("fn-lower", ["abc", "xyz"]), ("fn-rev", ["cba", "Zyx"])]
 
 
 test_tap_topology_is_eos_atomic :: Spec
@@ -1666,23 +1632,10 @@ test_tap_topology_is_eos_atomic =
     nSources `shouldBe` 1
     length sinks `shouldBe` 2
 
-    driver <- newDriver topo "free-eos-tap"
-    (coord, drain) <- mkRecordingCoord
-    outcome <- runCommitCycle coord "g" (pure HMap.empty) $ do
-      pipeInput driver (topicName "tap-in") Nothing (bytes "ping") t0 0
-      pipeInput driver (topicName "tap-in") Nothing (bytes "pong") t0 0
-    outcome `shouldBe` CommitSucceeded
-
-    audit <- readOutput driver (topicName "tap-audit")
-    main_ <- readOutput driver (topicName "tap-main")
-    -- The audit log gets the /original/ values; the main sink
-    -- gets the transformed ones. Both within one transaction.
-    map (unbytes . crValueBytes) audit `shouldBe` ["ping", "pong"]
-    map (unbytes . crValueBytes) main_ `shouldBe` ["PING", "PONG"]
-
-    log_ <- drain
-    log_ `shouldBe` ["begin", "commitOffsets", "commit", "storeCommit"]
-    closeDriver driver
+    eosAbortsAtomically
+      topo
+      [("tap-in", ["ping", "pong"])]
+      [("tap-audit", ["ping", "pong"]), ("tap-main", ["PING", "PONG"])]
 
 
 -- Small helpers reaching into the topology graph for the EOS
@@ -1903,19 +1856,10 @@ test_mergeSourced_two_sources_share_one_task_under_eos =
     nSources `shouldBe` 2
     length sinks `shouldBe` 1
 
-    driver <- newDriver topo "free-eos-merged-sources"
-    (coord, drain) <- mkRecordingCoord
-    outcome <- runCommitCycle coord "g" (pure HMap.empty) $ do
-      pipeInput driver (topicName "ms-a") Nothing (bytes "hello") t0 0
-      pipeInput driver (topicName "ms-b") Nothing (bytes "world") t0 0
-    outcome `shouldBe` CommitSucceeded
-
-    out <- readOutput driver (topicName "ms-out")
-    map (unbytes . crValueBytes) out `shouldBe` ["HELLO", "WORLD"]
-
-    log_ <- drain
-    log_ `shouldBe` ["begin", "commitOffsets", "commit", "storeCommit"]
-    closeDriver driver
+    eosAbortsAtomically
+      topo
+      [("ms-a", ["hello", "again"]), ("ms-b", ["world"])]
+      [("ms-out", ["HELLO", "AGAIN", "WORLD"])]
 
 
 ----------------------------------------------------------------------

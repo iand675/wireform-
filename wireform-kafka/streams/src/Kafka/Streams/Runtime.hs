@@ -72,6 +72,9 @@ module Kafka.Streams.Runtime (
   clearWarmupLag,
   warmupSnapshot,
 
+  -- * Two-phase commit participants
+  addCommitParticipant,
+
   -- * Exception handlers
   setProductionExceptionHandler,
   setProcessingExceptionHandler,
@@ -131,7 +134,10 @@ import Data.Maybe (catMaybes)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Text.Encoding qualified as TE
+import Data.Text.Read qualified as TR
 import Data.UUID qualified as UUID
+import Data.UUID.V4 qualified as UUID
 import Kafka.Client.Consumer qualified as KC
 import Kafka.Client.RebalanceListener (
   RebalanceListener,
@@ -155,6 +161,7 @@ import Kafka.Streams.Errors (
 import Kafka.Streams.Internal.Engine (Engine, StoreEntry, engineOwnStores)
 import Kafka.Streams.Processor (TaskId (..))
 import Kafka.Streams.Processor.Assignment qualified as PA
+import Kafka.Streams.Runtime.Commit
 import Kafka.Streams.Runtime.Driver
 import Kafka.Streams.Runtime.GlobalStore
 import Kafka.Streams.Runtime.NativeDriver (newNativeDriver)
@@ -225,6 +232,7 @@ data KafkaStreams = KafkaStreams
   , ksWarmupLag :: !(TVar (Map.Map TaskId Int64))
   , ksLastProbeAt :: !(TVar Int64)
   , ksThreads :: !(IORef Int)
+  , ksParticipants :: !(IORef [CommitParticipant])
   , ksCleanStop :: !(IORef Bool)
   {- ^ Whether local state still matches the last commit: cleared by
   a failed commit or a stream-thread failure. Only then does close
@@ -251,6 +259,7 @@ newKafkaStreams cfg topo = do
   lastPr <- newTVarIO 0
   threads <- newIORef (max 1 (numStreamThreads cfg))
   cleanStop <- newIORef False
+  participants <- newIORef []
   pure
     KafkaStreams
       { ksConfig = cfg
@@ -271,6 +280,7 @@ newKafkaStreams cfg topo = do
       , ksLastProbeAt = lastPr
       , ksThreads = threads
       , ksCleanStop = cleanStop
+      , ksParticipants = participants
       }
 
 
@@ -327,6 +337,10 @@ startKafkaStreamsWith ks drv = do
           case ePlan of
             Left e -> pure (Left e)
             Right plan -> do
+              participants <- readIORef (ksParticipants ks)
+              instanceId <- UUID.toText <$> UUID.nextRandom
+              eRecovered <- recoverParticipants drv (applicationId cfg) (replicationFactor cfg) participants
+              either (\e -> throwIO (StreamsException e (Just "two-phase commit recovery"))) pure eRecovered
               grLis <- readIORef (ksGlobalRestoreLis ks)
               eGlobal <- case rpGlobal plan of
                 Nothing -> pure (Right Nothing)
@@ -361,6 +375,8 @@ startKafkaStreamsWith ks drv = do
                         , tmcProductionHandler = readIORef (ksProdHand ks)
                         , tmcRestoreListener = readIORef (ksRestoreListener ks)
                         , tmcSharedStores = shared
+                        , tmcParticipants = participants
+                        , tmcInstanceId = instanceId
                         }
                       drv
                       plan
@@ -404,6 +420,66 @@ startKafkaStreamsWith ks drv = do
             tmOnLost tm tps
             readIORef (ksRebLis ks) >>= \l -> RBL.dispatchLost l tps
         }
+
+
+{- | Register an external system that commits with every cycle (see
+"Kafka.Streams.Runtime.Commit"; "Kafka.Streams.Sinks.TwoPhase" builds
+them from sinks). Call before starting.
+-}
+addCommitParticipant :: KafkaStreams -> CommitParticipant -> IO ()
+addCommitParticipant ks p = atomicModifyIORef' (ksParticipants ks) (\ps -> (ps <> [p], ()))
+
+
+{- | Create the commit-cycle topic, read the last committed cycle per
+instance, and settle every participant's prepared cycles: commit the
+ones Kafka committed, abort the rest.
+-}
+recoverParticipants :: StreamDriver -> Text -> Int -> [CommitParticipant] -> IO (Either Text ())
+recoverParticipants _ _ _ [] = pure (Right ())
+recoverParticipants drv appId replication participants = do
+  let topic = appId <> "-twophase-commits"
+      tp = KC.TopicPartition topic 0
+  created <-
+    sdCreateTopics
+      drv
+      [ NewInternalTopic
+          { nitName = topic
+          , nitPartitions = 1
+          , nitReplicationFactor = replication
+          , nitConfigs = [("cleanup.policy", "compact")]
+          }
+      ]
+  eReader <- sdNewReader drv
+  case (created, eReader) of
+    (Left e, _) -> pure (Left ("create " <> topic <> ": " <> Text.pack e))
+    (_, Left e) -> pure (Left (Text.pack e))
+    (Right (), Right rd) -> do
+      _ <- rdAssign rd [(tp, -2)]
+      eEnd <- rdEndOffsets rd [tp]
+      let end = either (const 0) (Map.findWithDefault 0 tp) eEnd
+          readAll acc = do
+            pos <- either (const end) id <$> rdPosition rd tp
+            if pos >= end
+              then pure acc
+              else do
+                recs <- either (const []) id <$> rdPoll rd 100
+                readAll (foldl latest acc recs)
+          latest acc r = case (r.drKey, r.drValue >>= either (const Nothing) Just . TR.decimal . TE.decodeUtf8Lenient) of
+            (Just k, Just (n, rest)) | Text.null rest -> Map.insert (TE.decodeUtf8Lenient k) n acc
+            _ -> acc
+      committed <- readAll Map.empty
+      rdClose rd
+      forM_ participants $ \p -> do
+        prepared <- cpRecover p
+        forM_ prepared $ \cid -> case parseCycleId cid of
+          Just (CycleId inst n)
+            | Just done <- Map.lookup inst committed
+            , n <= done -> do
+                r <- cpCommit p cid
+                either (\e -> logLine ("recovering " <> Text.unpack (cpName p) <> ": commit " <> Text.unpack cid <> " failed: " <> Text.unpack e)) pure r
+            | otherwise -> cpAbort p cid
+          Nothing -> logLine ("recovering " <> Text.unpack (cpName p) <> ": leaving unrecognised cycle " <> Text.unpack cid)
+      pure (Right ())
 
 
 logLine :: String -> IO ()

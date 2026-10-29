@@ -12,8 +12,6 @@ against the original key name so users porting code can grep across.
 module Kafka.Streams.Config (
   -- * Config
   StreamsConfig (..),
-  DslStore (..),
-  RackAwareStrategy (..),
   defaultStreamsConfig,
   effectiveCommitIntervalMs,
 
@@ -70,7 +68,6 @@ dropped):
   * 'numStandbyReplicas'        — @num.standby.replicas@
   * 'commitIntervalMs'          — @commit.interval.ms@
   * 'pollMs'                    — @poll.ms@
-  * 'cacheMaxBytesBuffering'    — @cache.max.bytes.buffering@
   * 'maxTaskIdleMs'             — @max.task.idle.ms@
   * 'processingGuarantee'       — @processing.guarantee@
   * 'replicationFactor'         — @replication.factor@
@@ -83,6 +80,14 @@ dropped):
 The embedded clients are configured from these; 'consumerOverrides',
 'producerOverrides' and 'adminOverrides' adjust anything else on them
 (the JVM's @consumer.@ / @producer.@ / @admin.@ prefixed properties).
+
+Not here, because the runtime has no such behaviour: record caches
+(every update is forwarded and logged, the JVM's behaviour with
+@statestore.cache.max.bytes = 0@), standby replicas
+('numStandbyReplicas' is accepted but restoring from the changelog is
+the only failover path), rack-aware assignment and
+@application.server@ discovery. Their JVM keys are ignored by
+'streamsConfigFromMap', like any unknown key.
 -}
 data StreamsConfig = StreamsConfig
   { applicationId :: !Text
@@ -95,7 +100,6 @@ data StreamsConfig = StreamsConfig
   defaults); see 'effectiveCommitIntervalMs'.
   -}
   , pollMs :: !Int
-  , cacheMaxBytesBuffering :: !Int64
   , maxTaskIdleMs :: !Int
   , processingGuarantee :: !ProcessingGuarantee
   , replicationFactor :: !Int
@@ -111,13 +115,8 @@ data StreamsConfig = StreamsConfig
   , consumerOverrides :: !(KC.ConsumerConfig -> KC.ConsumerConfig)
   , producerOverrides :: !(KP.ProducerConfig -> KP.ProducerConfig)
   , adminOverrides :: !(KA.AdminClientConfig -> KA.AdminClientConfig)
-  , -- KIP-892 / Streams full-config-surface additions ------------
-    taskTimeoutMs :: !Int
-  {- ^ @task.timeout.ms@ — how long a task may stall on a
-  recoverable error before the runtime kills it. Default
-  300_000 (5 minutes), matching Java.
-  -}
-  , acceptableRecoveryLag :: !Int64
+  , -- KIP-441 probing rebalances ---------------------------------
+    acceptableRecoveryLag :: !Int64
   {- ^ @acceptable.recovery.lag@ — maximum changelog lag (in
   records) at which a warmup replica is considered "caught
   up" and may be promoted to active. Default 10_000.
@@ -131,13 +130,6 @@ data StreamsConfig = StreamsConfig
   re-issuing rebalances to check whether warmups are
   ready. Default 600_000 (10 minutes).
   -}
-  , taskAssignorClass :: !(Maybe Text)
-  {- ^ @task.assignor.class@ — fully-qualified class name (or
-  our @Text@ tag for an in-process assignor) the runtime
-  should use when computing assignments. 'Nothing' (the
-  default) selects the built-in cooperative-sticky
-  assignor.
-  -}
   , taskAssignor :: !(Maybe TaskAssignor)
   {- ^ KIP-924 in-process 'TaskAssignor' plug-in. When set,
   the streams runtime's leader-side assignment path
@@ -149,32 +141,6 @@ data StreamsConfig = StreamsConfig
   constructs the 'ApplicationState' from the live
   runtime view and invokes 'taAssign' on the plug-in.
   -}
-  , applicationServer :: !(Maybe Text)
-  {- ^ KIP-67 @application.server@ — host:port advertised in
-  JoinGroup subscription metadata so peers can discover
-  this instance for cross-instance interactive queries.
-  'Nothing' disables advertisement.
-  -}
-  , defaultDslStore :: !DslStore
-  {- ^ KIP-591 @default.dsl.store@ — which backend the DSL
-  uses when 'Materialized' doesn't pin one (in-memory or
-  RocksDB). Today only 'DslInMemoryStore' is honoured.
-  -}
-  , rackAwareAssignmentStrategy :: !RackAwareStrategy
-  -- ^ KIP-925 @rack.aware.assignment.strategy@.
-  , rackAwareTrafficCost :: !Int
-  -- ^ KIP-925 @rack.aware.assignment.traffic.cost@.
-  , rackAwareNonOverlapCost :: !Int
-  -- ^ KIP-925 @rack.aware.assignment.non.overlap.cost@.
-  , windowSizeMs :: !(Maybe Int64)
-  {- ^ KIP-585 @window.size.ms@ — default window size used by
-  the windowed-serde auto-resolver when no explicit
-  serde is supplied.
-  -}
-  , upgradeFrom :: !(Maybe Text)
-  {- ^ @upgrade.from@ — multi-version upgrade compatibility
-  knob (read by the assignor on a rolling upgrade).
-  -}
   }
 
 
@@ -184,21 +150,6 @@ effectiveCommitIntervalMs cfg = case (commitIntervalMs cfg, processingGuarantee 
   (Just ms, _) -> ms
   (Nothing, ExactlyOnceV2) -> 100
   (Nothing, AtLeastOnceP) -> defaultCommitIntervalMs
-
-
--- | KIP-591 @default.dsl.store@ enum.
-data DslStore
-  = DslInMemoryStore
-  | DslRocksDbStore
-  deriving stock (Eq, Show)
-
-
--- | KIP-925 rack-aware assignment-strategy enum.
-data RackAwareStrategy
-  = RackAwareNone
-  | RackAwareMinTrafficCost
-  | RackAwareBalanceSubtopology
-  deriving stock (Eq, Show)
 
 
 defaultCommitIntervalMs :: Int
@@ -226,7 +177,6 @@ defaultStreamsConfig =
     , numStandbyReplicas = 0
     , commitIntervalMs = Nothing
     , pollMs = defaultPollMs
-    , cacheMaxBytesBuffering = 10 * 1024 * 1024
     , maxTaskIdleMs = 0
     , processingGuarantee = AtLeastOnceP
     , replicationFactor = 1
@@ -238,20 +188,11 @@ defaultStreamsConfig =
     , consumerOverrides = id
     , producerOverrides = id
     , adminOverrides = id
-    , taskTimeoutMs = 300_000
     , acceptableRecoveryLag = 10_000
     , maxWarmupReplicas = 2
     , probingRebalanceIntervalMs = 600_000
-    , taskAssignorClass = Nothing
     , taskAssignor = Nothing
-    , applicationServer = Nothing
-    , defaultDslStore = DslInMemoryStore
-    , rackAwareAssignmentStrategy = RackAwareNone
-    , rackAwareTrafficCost = 1
-    , rackAwareNonOverlapCost = 10
-    , windowSizeMs = Nothing
-    , upgradeFrom = Nothing
-    }
+      }
 
 
 ----------------------------------------------------------------------
@@ -277,8 +218,8 @@ Recognised keys (matching Java):
   * @num.standby.replicas@
   * @commit.interval.ms@
   * @poll.ms@
-  * @cache.max.bytes.buffering@
   * @max.task.idle.ms@
+  * @buffered.records.per.partition@
   * @processing.guarantee@         — @"at_least_once"@ or @"exactly_once_v2"@
   * @replication.factor@
   * @state.dir@
@@ -302,8 +243,8 @@ streamsConfigFromMap m = foldl' step defaultStreamsConfig (Map.toAscList m)
         maybe cfg (\n -> cfg {commitIntervalMs = Just n}) (readT v)
       "poll.ms" ->
         maybe cfg (\n -> cfg {pollMs = n}) (readT v)
-      "cache.max.bytes.buffering" ->
-        maybe cfg (\n -> cfg {cacheMaxBytesBuffering = n}) (readT v)
+      "buffered.records.per.partition" ->
+        maybe cfg (\n -> cfg {bufferedRecordsPerPartition = n}) (readT v)
       "max.task.idle.ms" ->
         maybe cfg (\n -> cfg {maxTaskIdleMs = n}) (readT v)
       "processing.guarantee" -> case v of
@@ -313,37 +254,12 @@ streamsConfigFromMap m = foldl' step defaultStreamsConfig (Map.toAscList m)
       "replication.factor" ->
         maybe cfg (\n -> cfg {replicationFactor = n}) (readT v)
       "state.dir" -> cfg {stateDir = T.unpack v}
-      "task.timeout.ms" ->
-        maybe cfg (\n -> cfg {taskTimeoutMs = n}) (readT v)
       "acceptable.recovery.lag" ->
         maybe cfg (\n -> cfg {acceptableRecoveryLag = n}) (readT v)
       "max.warmup.replicas" ->
         maybe cfg (\n -> cfg {maxWarmupReplicas = n}) (readT v)
       "probing.rebalance.interval.ms" ->
         maybe cfg (\n -> cfg {probingRebalanceIntervalMs = n}) (readT v)
-      "task.assignor.class" -> cfg {taskAssignorClass = Just v}
-      "application.server" -> cfg {applicationServer = Just v}
-      "default.dsl.store" -> case v of
-        "in_memory" -> cfg {defaultDslStore = DslInMemoryStore}
-        "ROCKS_DB" -> cfg {defaultDslStore = DslRocksDbStore}
-        "rocksdb" -> cfg {defaultDslStore = DslRocksDbStore}
-        _ -> cfg
-      "rack.aware.assignment.strategy" -> case v of
-        "MIN_TRAFFIC" -> cfg {rackAwareAssignmentStrategy = RackAwareMinTrafficCost}
-        "BALANCE_SUBTOPOLOGY" -> cfg {rackAwareAssignmentStrategy = RackAwareBalanceSubtopology}
-        "NONE" -> cfg {rackAwareAssignmentStrategy = RackAwareNone}
-        _ -> cfg
-      "rack.aware.assignment.traffic.cost" ->
-        maybe cfg (\n -> cfg {rackAwareTrafficCost = n}) (readT v)
-      "rack.aware.assignment.non.overlap.cost" ->
-        maybe cfg (\n -> cfg {rackAwareNonOverlapCost = n}) (readT v)
-      "statestore.cache.max.bytes" ->
-        -- Renamed-from cache.max.bytes.buffering in 3.4. We
-        -- accept both names; the field is the same.
-        maybe cfg (\n -> cfg {cacheMaxBytesBuffering = n}) (readT v)
-      "window.size.ms" ->
-        maybe cfg (\n -> cfg {windowSizeMs = Just n}) (readT v)
-      "upgrade.from" -> cfg {upgradeFrom = Just v}
       _ -> cfg
 
 

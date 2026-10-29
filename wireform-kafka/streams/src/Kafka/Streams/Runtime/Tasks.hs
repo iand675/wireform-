@@ -96,6 +96,7 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Kafka.Client.Consumer qualified as KC
 import Kafka.Client.Producer qualified as KP
 import Kafka.Headers qualified as KH
@@ -131,6 +132,7 @@ import Kafka.Streams.Internal.RecordCollector (
   RecordCollector (..),
  )
 import Kafka.Streams.Processor (TaskId (..))
+import Kafka.Streams.Runtime.Commit
 import Kafka.Streams.Runtime.Driver
 import Kafka.Streams.Runtime.Plan
 import Kafka.Streams.Runtime.StateDir (readCheckpoint, writeCheckpoint)
@@ -190,6 +192,10 @@ data TaskManagerConfig = TaskManagerConfig
   , tmcRestoreListener :: !(IO StateRestoreListener)
   , tmcSharedStores :: !(Map StoreName StoreEntry)
   -- ^ The global stores, visible to every task
+  , tmcParticipants :: ![CommitParticipant]
+  -- ^ External systems committing with every cycle ("Kafka.Streams.Runtime.Commit")
+  , tmcInstanceId :: !Text
+  -- ^ Unique per run: names this instance's commit cycles
   }
 
 
@@ -244,6 +250,7 @@ data TaskManager = TaskManager
   , tmBackpressured :: !(IORef (Set KC.TopicPartition))
   , tmLastPurge :: !(IORef Int64)
   , tmThreadsRef :: !(IORef Int)
+  , tmCycle :: !(IORef Int64)
   }
 
 
@@ -265,6 +272,7 @@ newTaskManager cfg drv plan = do
       now <- nowMillis
       purge <- newIORef now
       threads <- newIORef (max 1 (tmcThreads cfg))
+      cycleRef <- newIORef 0
       pure . Right $
         TaskManager
           { tmCfg = cfg
@@ -282,6 +290,7 @@ newTaskManager cfg drv plan = do
           , tmBackpressured = bp
           , tmLastPurge = purge
           , tmThreadsRef = threads
+          , tmCycle = cycleRef
           }
 
 
@@ -800,6 +809,11 @@ tmCommit tm = do
     committed <- readIORef (taskCommitted t)
     pure (filter (\(tp, off) -> Map.lookup tp committed /= Just off) (Map.toList consumed))
   let drv = tmDriver tm
+      done = do
+        markCommitted running offsets
+        unless (eos tm) (forM_ running (checkpoint tm))
+        purgeRepartitions tm running
+        pure Committed
   if eos tm
     then do
       txnOpen <- readMVar (tmTxnOpen tm)
@@ -809,26 +823,27 @@ tmCommit tm = do
           began <- ensureTransaction tm
           fl <- sdFlush drv
           errs <- atomicModifyIORef' (tmSendErrors tm) (\es -> ([], es))
-          let failure = case (began, fl, errs) of
-                (Left e, _, _) -> Just ("begin transaction: " <> T.pack e)
-                (_, Left e, _) -> Just ("flush: " <> T.pack e)
-                (_, _, (tp, e) : _) -> Just ("send to " <> tp <> ": " <> T.pack e)
-                _ -> Nothing
-          case failure of
-            Just why -> abortAndRecover why
-            Nothing -> do
-              so <- if null offsets then pure (Right ()) else sdSendOffsetsToTransaction drv offsets
-              case so of
-                Left e -> abortAndRecover ("send offsets to transaction: " <> T.pack e)
-                Right () -> do
-                  c <- sdCommitTransaction drv
-                  case c of
-                    Left e -> abortAndRecover ("commit transaction: " <> T.pack e)
+          case sendFailure began fl errs of
+            Just why -> abortAndRecover Nothing why
+            Nothing ->
+              prepareCycle tm >>= \case
+                Left why -> abortAndRecover Nothing why
+                Right mCycle -> do
+                  -- the cycle's marker rides in the transaction
+                  marked <- markCycle tm mCycle
+                  so <- case marked of
+                    Left e -> pure (Left e)
+                    Right () -> if null offsets then pure (Right ()) else sdSendOffsetsToTransaction drv offsets
+                  case so of
+                    Left e -> abortAndRecover mCycle ("send offsets to transaction: " <> T.pack e)
                     Right () -> do
-                      _ <- swapMVar (tmTxnOpen tm) False
-                      markCommitted running offsets
-                      purgeRepartitions tm running
-                      pure Committed
+                      c <- sdCommitTransaction drv
+                      case c of
+                        Left e -> abortAndRecover mCycle ("commit transaction: " <> T.pack e)
+                        Right () -> do
+                          _ <- swapMVar (tmTxnOpen tm) False
+                          commitCycle tm mCycle
+                          done
     else do
       fl <- sdFlush drv
       errs <- atomicModifyIORef' (tmSendErrors tm) (\es -> ([], es))
@@ -841,19 +856,101 @@ tmCommit tm = do
         case resp of
           ProdContinueProcessing -> logLine ("dropped a record for " <> T.unpack tp <> ": " <> e)
           ProdFailFast -> throwIO (StreamsException ("send to " <> tp <> " failed: " <> T.pack e) (Just "production"))
-      c <- if null offsets then pure (Right ()) else sdCommitOffsets drv offsets
-      case c of
-        Left e -> pure (CommitFailed (T.pack e))
-        Right () -> do
-          markCommitted running offsets
-          forM_ running (checkpoint tm)
-          purgeRepartitions tm running
-          pure Committed
+      prepareCycle tm >>= \case
+        Left why -> abortAndRecover Nothing why
+        Right mCycle -> do
+          -- marker, then the participants' commit, then the offsets: a
+          -- crash in between replays input (duplicates), never loses it
+          marked <- markCycle tm mCycle
+          flushed <- either (pure . Left) (const (sdFlush drv)) marked
+          case flushed of
+            Left e -> abortAndRecover mCycle ("record commit cycle: " <> T.pack e)
+            Right () -> do
+              commitCycle tm mCycle
+              c <- if null offsets then pure (Right ()) else sdCommitOffsets drv offsets
+              case c of
+                Left e -> pure (CommitFailed (T.pack e))
+                Right () -> done
   where
-    abortAndRecover why = do
-      logLine ("transaction aborted, recovering every task: " <> T.unpack why)
+    sendFailure began fl errs = case (began, fl, errs) of
+      (Left e, _, _) -> Just ("begin transaction: " <> T.pack e)
+      (_, Left e, _) -> Just ("flush: " <> T.pack e)
+      (_, _, (tp, e) : _) -> Just ("send to " <> tp <> ": " <> T.pack e)
+      _ -> Nothing
+    abortAndRecover mCycle why = do
+      logLine ("commit aborted, recovering every task: " <> T.unpack why)
+      forM_ mCycle $ \c -> forM_ (tmcParticipants (tmCfg tm)) (\p -> cpAbort p (renderCycleId c))
       tmRecoverAll tm
       pure (CommitAborted why)
+
+
+-- | The internal topic holding each instance's last committed cycle.
+cycleTopic :: TaskManager -> Text
+cycleTopic tm = tmcAppId (tmCfg tm) <> "-twophase-commits"
+
+
+{- | Have every participant prepare a new cycle; on a failure the ones
+already prepared abort it. 'Nothing' when there are no participants.
+-}
+prepareCycle :: TaskManager -> IO (Either Text (Maybe CycleId))
+prepareCycle tm = case tmcParticipants (tmCfg tm) of
+  [] -> pure (Right Nothing)
+  parts -> do
+    n <- atomicModifyIORef' (tmCycle tm) (\c -> (c + 1, c + 1))
+    let cyc = CycleId (tmcInstanceId (tmCfg tm)) n
+        cid = renderCycleId cyc
+        go _ [] = pure (Right (Just cyc))
+        go prepared (p : rest) = do
+          r <- cpPrepare p cid
+          case r of
+            Right () -> go (p : prepared) rest
+            Left e -> do
+              mapM_ (\q -> cpAbort q cid) (p : prepared)
+              pure (Left ("prepare " <> cpName p <> ": " <> e))
+    go [] parts
+
+
+-- | Send the cycle's marker (inside the open transaction under exactly-once).
+markCycle :: TaskManager -> Maybe CycleId -> IO (Either String ())
+markCycle _ Nothing = pure (Right ())
+markCycle tm (Just (CycleId inst n)) = do
+  began <- ensureTransaction tm
+  case began of
+    Left e -> pure (Left e)
+    Right () -> do
+      failed <- newIORef Nothing
+      r <-
+        sdSend
+          (tmDriver tm)
+          KP.ProducerRecord
+            { KP.topic = cycleTopic tm
+            , KP.key = Just (TE.encodeUtf8 inst)
+            , KP.value = Just (TE.encodeUtf8 (T.pack (show n)))
+            , KP.headers = []
+            , KP.partition = Just 0
+            , KP.timestamp = Nothing
+            }
+          (either (writeIORef failed . Just) (const (pure ())))
+      fl <- sdFlush (tmDriver tm)
+      f <- readIORef failed
+      pure $ case (r, fl, f) of
+        (Left e, _, _) -> Left e
+        (_, Left e, _) -> Left e
+        (_, _, Just e) -> Left e
+        _ -> Right ()
+
+
+-- | The cycle committed in Kafka: make it visible everywhere.
+commitCycle :: TaskManager -> Maybe CycleId -> IO ()
+commitCycle _ Nothing = pure ()
+commitCycle tm (Just cyc) =
+  forM_ (tmcParticipants (tmCfg tm)) $ \p -> do
+    r <- cpCommit p (renderCycleId cyc)
+    case r of
+      Right () -> pure ()
+      -- committed in Kafka, not yet in the participant: retried by the
+      -- recovery at the next start
+      Left e -> throwIO (StreamsException ("commit " <> cpName p <> " for " <> renderCycleId cyc <> ": " <> e) (Just "two-phase commit"))
 
 
 markCommitted :: [Task] -> [(KC.TopicPartition, Int64)] -> IO ()
@@ -926,6 +1023,8 @@ tmRecoverAll tm = do
     _ <- swapMVar (tmTxnOpen tm) False
     pure ()
   writeIORef (tmSendErrors tm) []
+  -- the input is rewound: what the participants staged comes again
+  forM_ (tmcParticipants (tmCfg tm)) cpDiscard
   tasks <- Map.elems <$> readIORef (tmTasks tm)
   -- cancel in-flight restores; they are rescheduled from scratch
   writeIORef (tmRestore tm) Map.empty
@@ -966,13 +1065,11 @@ tmOnRevoked tm tps = do
 tmOnLost :: TaskManager -> [KC.TopicPartition] -> IO ()
 tmOnLost tm tps = do
   atomicModifyIORef' (tmAssignedRef tm) (\s -> (foldr Set.delete s tps, ()))
-  when (eos tm) $ do
-    txnOpen <- readMVar (tmTxnOpen tm)
-    when txnOpen $ do
-      _ <- sdAbortTransaction (tmDriver tm)
-      _ <- swapMVar (tmTxnOpen tm) False
-      pure ()
   closeTasksFor tm tps False
+  -- Under exactly-once the open transaction holds every task's
+  -- uncommitted output, so it is aborted and the tasks kept are
+  -- rewound with it (what the participants staged goes too).
+  when (eos tm) (tmRecoverAll tm)
 
 
 closeTasksFor :: TaskManager -> [KC.TopicPartition] -> Bool -> IO ()

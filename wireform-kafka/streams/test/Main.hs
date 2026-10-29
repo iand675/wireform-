@@ -9,6 +9,7 @@ import Streams.BoundedSuppressSpec qualified
 import Streams.CacheSpec qualified
 import Streams.ChangelogSpec qualified
 import Streams.TaskRuntimeSpec qualified
+import Streams.TwoPhaseRuntimeSpec qualified
 import Streams.TableChangeSpec qualified
 import Streams.ParityBatchSpec qualified
 import Streams.StandbyTaskSpec qualified
@@ -18,7 +19,6 @@ import Streams.CogroupSpec qualified
 import Streams.DSLFacadeSpec qualified
 import Streams.DSLSpec qualified
 import Streams.DriverSpec qualified
-import Streams.EOSSpec qualified
 import Streams.EndToEndChainSpec qualified
 import Streams.ExtensionsSpec qualified
 import Streams.ForeignKeyJoinDSLSpec qualified
@@ -48,7 +48,6 @@ import Streams.ProcessorAndStoreExtrasSpec qualified
 import Streams.Properties.AtLeastOnceRedeliverySpec qualified
 import Streams.Properties.CDCSourceSpec qualified
 import Streams.Properties.ChangelogReplaySpec qualified
-import Streams.Properties.EOSChaosSpec qualified
 import Streams.Properties.KVStoreSMSpec qualified
 import Streams.Properties.KeyGroupAssignorSpec qualified
 import Streams.Properties.KeyGroupDispatchSpec qualified
@@ -135,12 +134,12 @@ main = do
         , Streams.CacheSpec.tests
         , Streams.ChangelogSpec.tests
         , Streams.TaskRuntimeSpec.tests
+        , Streams.TwoPhaseRuntimeSpec.tests
         , Streams.TableChangeSpec.tests
         , Streams.ParityBatchSpec.tests
         , Streams.StandbyTaskSpec.tests
         , Streams.RuntimeBehaviourSpec.tests
         , Streams.RuntimeRecordFidelitySpec.tests
-        , Streams.EOSSpec.tests
         , Streams.MultiTaskSpec.tests
         , Streams.StandbySpec.tests
         , Streams.AssignorSpec.tests
@@ -206,7 +205,6 @@ main = do
               [ Streams.Properties.KVStoreSMSpec.tests
               , Streams.Properties.OptimizerEqSpec.tests
               , Streams.Properties.WindowMathSpec.tests
-              , Streams.Properties.EOSChaosSpec.tests
               , Streams.Properties.WorkerPoolSMSpec.tests
               , Streams.Properties.ObservabilityTopologySpec.tests
               , Streams.Properties.OrphanTopicsSpec.tests

@@ -122,6 +122,7 @@ withStoreSupplier
 withStoreSupplier f m = m {matStoreSupplier = Just f}
 
 
+-- | Accepted for parity; stores are never cached (every update is forwarded and logged).
 withCachingDisabled :: Materialized k v -> Materialized k v
 withCachingDisabled m = m {matCachingEnabled = False}
 

@@ -531,7 +531,6 @@ library wireform-kafka-streams
         Kafka.Streams.Suppress
         Kafka.Streams.DslStoreSuppliers
         Kafka.Streams.Runtime
-        Kafka.Streams.Runtime.EOS
         Kafka.Streams.Runtime.Task
         Kafka.Streams.Runtime.Standby
         Kafka.Streams.Runtime.Assignor
@@ -545,6 +544,7 @@ library wireform-kafka-streams
         Kafka.Streams.Runtime.MockBroker
         Kafka.Streams.Runtime.Plan
         Kafka.Streams.Runtime.Tasks
+        Kafka.Streams.Runtime.Commit
         Kafka.Streams.Runtime.GlobalStore
         Kafka.Streams.Runtime.StateDir
         Kafka.Streams.Runtime.MultiInstanceHarness
@@ -613,6 +613,7 @@ test-suite wireform-kafka-streams-test
         Streams.ChangelogSpec
         Streams.RuntimeHarness
         Streams.TaskRuntimeSpec
+        Streams.TwoPhaseRuntimeSpec
         Streams.TableChangeSpec
         Streams.StandbyTaskSpec
         Streams.ParityBatchSpec
@@ -630,7 +631,6 @@ test-suite wireform-kafka-streams-test
         Streams.AggregationSpec
         Streams.InteractiveQueriesSpec
         Streams.CacheSpec
-        Streams.EOSSpec
         Streams.MultiTaskSpec
         Streams.StandbySpec
         Streams.AssignorSpec
@@ -694,7 +694,6 @@ test-suite wireform-kafka-streams-test
         Streams.Properties.KVStoreSMSpec
         Streams.Properties.OptimizerEqSpec
         Streams.Properties.WindowMathSpec
-        Streams.Properties.EOSChaosSpec
         Streams.Properties.WorkerPoolSMSpec
         Streams.Properties.ObservabilityTopologySpec
         Streams.Properties.OrphanTopicsSpec
