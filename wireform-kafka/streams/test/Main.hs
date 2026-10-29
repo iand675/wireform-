@@ -12,6 +12,7 @@ import Streams.TaskRuntimeSpec qualified
 import Streams.TwoPhaseRuntimeSpec qualified
 import Streams.GroupAssignorSpec qualified
 import Streams.StandbyRuntimeSpec qualified
+import Streams.PatternRuntimeSpec qualified
 import Streams.TableChangeSpec qualified
 import Streams.ParityBatchSpec qualified
 import Streams.RuntimeBehaviourSpec qualified
@@ -130,6 +131,7 @@ main = do
         , Streams.TwoPhaseRuntimeSpec.tests
         , Streams.GroupAssignorSpec.tests
         , Streams.StandbyRuntimeSpec.tests
+        , Streams.PatternRuntimeSpec.tests
         , Streams.TableChangeSpec.tests
         , Streams.ParityBatchSpec.tests
         , Streams.RuntimeBehaviourSpec.tests

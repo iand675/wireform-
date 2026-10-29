@@ -83,6 +83,7 @@ module Kafka.Streams.Runtime.Tasks (
   tmThreads,
   tmAssigned,
   tmPlanOf,
+  tmCarryOver,
 
   -- * Restore listener
   StateRestoreListener (..),
@@ -356,6 +357,16 @@ taskName (TaskId s p) = decimalText s <> "_" <> decimalText p
 
 tmPlanOf :: TaskManager -> RuntimePlan
 tmPlanOf = tmPlan
+
+
+{- | Hand what outlives a re-plan from @old@ to @new@: the counts, and
+the commit-cycle sequence (cycle ids must keep increasing for the
+instance, or recovery would mistake a new cycle for a committed one).
+-}
+tmCarryOver :: TaskManager -> TaskManager -> IO ()
+tmCarryOver old new = do
+  UMV.copy (tmCounters new) (tmCounters old)
+  readIORef (tmCycle old) >>= writeIORef (tmCycle new)
 
 
 tmAssigned :: TaskManager -> IO (Set KC.TopicPartition)

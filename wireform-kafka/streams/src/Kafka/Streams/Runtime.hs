@@ -359,45 +359,65 @@ startKafkaStreamsWith ks drv = do
                 Left e -> pure (Left (Text.pack e))
                 Right mGlobal -> do
                   shared <- maybe (pure Map.empty) globalStores mGlobal
-                  threads <- readIORef (ksThreads ks)
-                  eTm <-
-                    newTaskManager
-                      TaskManagerConfig
-                        { tmcAppId = applicationId cfg
-                        , tmcAppDir = dir
-                        , tmcGuarantee = processingGuarantee cfg
-                        , tmcThreads = threads
-                        , tmcMaxTaskIdleMs = maxTaskIdleMs cfg
-                        , tmcMaxBufferedPerPartition = max 1 (bufferedRecordsPerPartition cfg)
-                        , tmcDeserHandler = defaultDeserHandler cfg
-                        , tmcProcessingHandler = readIORef (ksProcHand ks)
-                        , tmcProductionHandler = readIORef (ksProdHand ks)
-                        , tmcRestoreListener = readIORef (ksRestoreListener ks)
-                        , tmcSharedStores = shared
-                        , tmcParticipants = participants
-                        , tmcInstanceId = instanceId
-                        }
-                      drv
-                      plan
-                  case eTm of
-                    Left e -> do
-                      mapM_ stopGlobalStore mGlobal
-                      pure (Left ("task manager: " <> Text.pack e))
-                    Right tm -> do
-                      pid <- loadProcessId dir
-                      ga <- groupAssignor plan tm pid
-                      eSub <- sdSubscribe drv (rpSubscription plan) ga (callbacks tm)
-                      case eSub of
-                        Left e -> do
-                          mapM_ stopGlobalStore mGlobal
-                          pure (Left ("subscribe: " <> Text.pack e))
-                        Right () -> do
+                  -- the leader's view of changelog ends, for the assignor
+                  eReader <- sdNewReader drv
+                  let start = startTasks dir shared participants instanceId
+                      failed e = mapM_ stopGlobalStore mGlobal >> pure (Left e)
+                  case eReader of
+                    Left e -> failed ("assignor reader: " <> Text.pack e)
+                    Right reader -> do
+                      eTm <- start reader plan
+                      case eTm of
+                        Left e -> failed e
+                        Right tm -> do
+                          let replan old = do
+                                ePlan' <- buildRuntimePlan (applicationId cfg) (replicationFactor cfg) drv (ksTopology ks)
+                                case ePlan' of
+                                  Left e -> pure (Left e)
+                                  Right plan' -> do
+                                    writeIORef (ksProbeAt ks) Nothing
+                                    eNew <- start reader plan'
+                                    traverse (\new -> new <$ tmCarryOver old new) eNew
                           writeIORef (ksCleanStop ks) True
-                          a <- async (supervised ks drv tm mGlobal)
+                          a <- async (supervised ks drv replan tm mGlobal)
                           writeIORef
                             (ksRunning ks)
                             (Just Running {rDriver = drv, rTasks = tm, rGlobal = mGlobal, rThread = a})
                           pure (Right ())
+
+    -- A task manager for @plan@, subscribed.
+    startTasks dir shared participants instanceId reader plan = do
+      let cfg = ksConfig ks
+      threads <- readIORef (ksThreads ks)
+      eTm <-
+        newTaskManager
+          TaskManagerConfig
+            { tmcAppId = applicationId cfg
+            , tmcAppDir = dir
+            , tmcGuarantee = processingGuarantee cfg
+            , tmcThreads = threads
+            , tmcMaxTaskIdleMs = maxTaskIdleMs cfg
+            , tmcMaxBufferedPerPartition = max 1 (bufferedRecordsPerPartition cfg)
+            , tmcDeserHandler = defaultDeserHandler cfg
+            , tmcProcessingHandler = readIORef (ksProcHand ks)
+            , tmcProductionHandler = readIORef (ksProdHand ks)
+            , tmcRestoreListener = readIORef (ksRestoreListener ks)
+            , tmcSharedStores = shared
+            , tmcParticipants = participants
+            , tmcInstanceId = instanceId
+            }
+          drv
+          plan
+      case eTm of
+        Left e -> pure (Left ("task manager: " <> Text.pack e))
+        Right tm -> do
+          pid <- loadProcessId dir
+          eSub <- sdSubscribe drv (rpSubscription plan) (groupAssignor reader plan tm pid) (callbacks tm)
+          case eSub of
+            Left e -> do
+              tmCloseAll tm True
+              pure (Left ("subscribe: " <> Text.pack e))
+            Right () -> pure (Right tm)
 
     callbacks tm =
       RebalanceCallbacks
@@ -430,11 +450,9 @@ startKafkaStreamsWith ks drv = do
               writeIORef (ksProbeAt ks) (if saProbe sa && interval > 0 then Just (now + fromIntegral interval) else Nothing)
         }
 
-    groupAssignor plan tm pid = do
+    groupAssignor reader plan tm pid =
       let cfg = ksConfig ks
-      eReader <- sdNewReader drv
-      reader <- either (\e -> throwIO (StreamsException ("assignor reader: " <> Text.pack e) Nothing)) pure eReader
-      let cls = planTaskChangelogs plan
+          cls = planTaskChangelogs plan
           lc =
             LeaderContext
               { lcTasks = planTasks plan
@@ -459,8 +477,7 @@ startKafkaStreamsWith ks drv = do
               , lcUserAssignor = taskAssignor cfg
               , lcLog = logLine
               }
-      pure
-        GroupAssignor
+      in GroupAssignor
           { gaAssignor = streamsAssignor lc
           , gaSubscriptionUserData = do
               sums <- tmOffsetSums tm
@@ -542,18 +559,45 @@ setError ks msg = transitionTo ks (StreamsError msg)
 -- Stream thread
 ----------------------------------------------------------------------
 
+-- | Why the stream loop returned.
+data LoopEnd
+  = -- | The instance is closing (its tasks are closed) or failed
+    LoopDone
+  | -- | Pattern sources match different topics now: re-plan
+    LoopReplan
+
+
 {- | Run the loop under the uncaught-exception handler: "replace
 thread" recovers every task (rewinding to the last commit) and runs
 the loop again; the shutdown responses put the instance in
-'StreamsError'.
+'StreamsError'. A re-plan commits, closes every task, and carries on
+with the task manager @replan@ builds for the new plan.
 -}
-supervised :: KafkaStreams -> StreamDriver -> TaskManager -> Maybe GlobalStore -> IO ()
-supervised ks drv tm mGlobal = go
+supervised
+  :: KafkaStreams
+  -> StreamDriver
+  -> (TaskManager -> IO (Either Text TaskManager))
+  -> TaskManager
+  -> Maybe GlobalStore
+  -> IO ()
+supervised ks drv replan tm0 mGlobal = go tm0
   where
-    go = do
+    go tm = do
       r <- try (streamLoop ks drv tm mGlobal)
       case r of
-        Right () -> pure ()
+        Right LoopDone -> pure ()
+        Right LoopReplan -> do
+          logLine "pattern sources match different topics: re-planning"
+          commitAndCloseTasks ks tm
+          next <- try (replan tm)
+          case next of
+            Left (e :: SomeException)
+              | Just (_ :: SomeAsyncException) <- fromException e -> throwIO e
+              | otherwise -> setError ks ("re-plan failed: " <> Text.pack (show e))
+            Right (Left e) -> setError ks ("re-plan failed: " <> e)
+            Right (Right tm') -> do
+              atomicModifyIORef' (ksRunning ks) (\m -> (fmap (\run -> run {rTasks = tm'}) m, ()))
+              go tm'
         Left (e :: SomeException)
           | Just (_ :: SomeAsyncException) <- fromException e -> throwIO e
           | otherwise -> do
@@ -565,25 +609,53 @@ supervised ks drv tm mGlobal = go
                 ReplaceThread -> do
                   rec_ <- try (tmRecoverAll tm)
                   case rec_ of
-                    Right () -> go
+                    Right () -> go tm
                     Left (e' :: SomeException) -> setError ks ("recovery failed: " <> Text.pack (show e'))
                 ShutdownClient -> setError ks ("uncaught (shutdown-client): " <> Text.pack (show e))
                 ShutdownApplication -> setError ks ("uncaught (shutdown-app): " <> Text.pack (show e))
 
 
-streamLoop :: KafkaStreams -> StreamDriver -> TaskManager -> Maybe GlobalStore -> IO ()
+-- | Commit what was processed, then close every task (cleanly if the commit went through).
+commitAndCloseTasks :: KafkaStreams -> TaskManager -> IO ()
+commitAndCloseTasks ks tm = do
+  res <- tmCommit tm
+  clean <- case res of
+    Committed -> pure True
+    CommitFailed e -> logLine ("final commit failed: " <> Text.unpack e) >> pure False
+    CommitAborted e -> logLine ("final transaction aborted: " <> Text.unpack e) >> pure True
+  unless clean (writeIORef (ksCleanStop ks) False)
+  tmCloseAll tm clean
+
+
+streamLoop :: KafkaStreams -> StreamDriver -> TaskManager -> Maybe GlobalStore -> IO LoopEnd
 streamLoop ks drv tm mGlobal = do
   lastCommit <- nowMillis >>= newIORef
+  lastListed <- nowMillis >>= newIORef
   let cfg = ksConfig ks
       interval = fromIntegral (effectiveCommitIntervalMs cfg)
+      matched = rpPatternTopics (tmPlanOf tm)
+      -- Pattern sources: list the topics again every metadata.max.age.ms
+      -- and re-plan when what they match has changed.
+      patternsMoved now
+        | Map.null matched = pure False
+        | otherwise = do
+            before <- readIORef lastListed
+            if now - before < fromIntegral (metadataMaxAgeMs cfg)
+              then pure False
+              else do
+                writeIORef lastListed now
+                r <- currentPatternTopics (applicationId cfg) drv (ksTopology ks)
+                case r of
+                  Left e -> False <$ logLine ("pattern sources: " <> Text.unpack e <> " (keeping the current topics)")
+                  Right now' -> pure (now' /= matched)
       loop = do
         -- Fairness when polls return at once (pollMs = 0, tests).
         yield
         status <- readTVarIO (ksStatus ks)
         case status of
-          StreamsClosing -> shutdown
-          StreamsClosed -> pure ()
-          StreamsError _ -> pure ()
+          StreamsClosing -> LoopDone <$ commitAndCloseTasks ks tm
+          StreamsClosed -> pure LoopDone
+          StreamsError _ -> pure LoopDone
           _ -> do
             gFail <- maybe (pure Nothing) globalStoreFailure mGlobal
             forM_ gFail $ \e -> throwIO (StreamsException ("global store thread failed: " <> e) (Just "global"))
@@ -616,17 +688,10 @@ streamLoop ks drv tm mGlobal = do
                 Committed -> pure ()
                 CommitFailed e -> logLine ("offset commit failed (records will be reprocessed): " <> Text.unpack e)
                 CommitAborted e -> logLine ("transaction aborted, tasks rewound: " <> Text.unpack e)
-            bumpTick ks
-            loop
-      -- Closing: commit what was processed, then close every task cleanly.
-      shutdown = do
-        res <- tmCommit tm
-        clean <- case res of
-          Committed -> pure True
-          CommitFailed e -> logLine ("final commit failed: " <> Text.unpack e) >> pure False
-          CommitAborted e -> logLine ("final transaction aborted: " <> Text.unpack e) >> pure True
-        unless clean (writeIORef (ksCleanStop ks) False)
-        tmCloseAll tm clean
+            moved <- patternsMoved now
+            if moved
+              then pure LoopReplan
+              else bumpTick ks >> loop
   loop
 
 

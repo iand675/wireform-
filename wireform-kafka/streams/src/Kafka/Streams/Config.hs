@@ -80,6 +80,7 @@ dropped):
   * 'applicationServer'         — @application.server@
   * 'acceptableRecoveryLag', 'maxWarmupReplicas',
     'probingRebalanceIntervalMs' — the KIP-441 keys
+  * 'metadataMaxAgeMs'          — @metadata.max.age.ms@ (pattern sources)
 
 The embedded clients are configured from these; 'consumerOverrides',
 'producerOverrides' and 'adminOverrides' adjust anything else on them
@@ -140,6 +141,12 @@ data StreamsConfig = StreamsConfig
   re-issuing rebalances to check whether warmups are
   ready. Default 600_000 (10 minutes).
   -}
+  , metadataMaxAgeMs :: !Int
+  {- ^ @metadata.max.age.ms@ — how often the topic list is fetched
+  again for pattern sources. When the topics a pattern matches change,
+  the instance commits, closes its tasks, re-plans the topology over
+  the new topics and rejoins the group. Default 300_000 (5 minutes).
+  -}
   , taskAssignor :: !(Maybe TaskAssignor)
   {- ^ KIP-924: the group leader deals the tasks with this instead of
   the built-in assignor ("Kafka.Streams.Runtime.GroupAssignor"); an
@@ -198,6 +205,7 @@ defaultStreamsConfig =
     , acceptableRecoveryLag = 10_000
     , maxWarmupReplicas = 2
     , probingRebalanceIntervalMs = 600_000
+    , metadataMaxAgeMs = 300_000
     , taskAssignor = Nothing
       }
 
@@ -268,6 +276,8 @@ streamsConfigFromMap m = foldl' step defaultStreamsConfig (Map.toAscList m)
         maybe cfg (\n -> cfg {maxWarmupReplicas = n}) (readT v)
       "probing.rebalance.interval.ms" ->
         maybe cfg (\n -> cfg {probingRebalanceIntervalMs = n}) (readT v)
+      "metadata.max.age.ms" ->
+        maybe cfg (\n -> cfg {metadataMaxAgeMs = n}) (readT v)
       _ -> cfg
 
 

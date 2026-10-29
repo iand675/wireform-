@@ -36,10 +36,14 @@ module Kafka.Streams.Runtime.Plan (
   taskSourcePartitions,
   planTasks,
   planTaskChangelogs,
+  patternSources,
+  currentPatternTopics,
+  resolvePatternTopics,
 ) where
 
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.List (sort)
 import Data.Maybe (mapMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -52,7 +56,9 @@ import Kafka.Streams.Runtime.Driver (NewInternalTopic (..), StreamDriver (..))
 import Kafka.Streams.State.Store (LoggingConfig (..), StoreName, unStoreName)
 import Kafka.Streams.Topology qualified as Topo
 import Kafka.Streams.Topology.Subtopology
-import Kafka.Streams.Types (unTopicName)
+import Kafka.Streams.Types (topicName, unTopicName)
+import Text.Regex.TDFA (Regex, makeRegexM, matchTest)
+import Text.Regex.TDFA.Text ()
 
 
 -- | One subtopology, ready to instantiate as tasks.
@@ -87,7 +93,67 @@ data RuntimePlan = RuntimePlan
   , rpPartitionCounts :: !(Map Text Int)
   -- ^ Every source, repartition and global topic's partition count
   , rpGlobal :: !(Maybe GlobalPlan)
+  , rpPatternTopics :: !(Map Topo.NodeName [Text])
+  -- ^ The topics each pattern source matched when the plan was made
   }
+
+
+-- | The sources subscribing by pattern, with their patterns.
+patternSources :: Topo.Topology -> Map Topo.NodeName Text
+patternSources t = Map.mapMaybe Topo.sourcePattern (Topo.topoSources t)
+
+
+{- | The topics each pattern source subscribes to, out of @topics@: a
+whole-name match of its pattern (POSIX extended regex, the JVM's
+@Pattern.matcher(topic).matches()@), leaving out Kafka's own (@__@)
+topics and the application's (@\<application.id\>-@). A topic matched
+by two patterns, or matched and also read by name, is an error: every
+record would reach two sources.
+-}
+resolvePatternTopics :: Text -> Topo.Topology -> [Text] -> Either Text (Map Topo.NodeName [Text])
+resolvePatternTopics appId t topics = do
+  let candidates = sort (filter (\x -> not ("__" `T.isPrefixOf` x) && not ((appId <> "-") `T.isPrefixOf` x)) topics)
+      named = Set.fromList (concatMap (map unTopicName . Topo.sourceTopics) (Map.elems (Topo.topoSources t)))
+  resolved <-
+    traverse
+      ( \pat -> case compileWholeName pat of
+          Nothing -> Left ("not a valid pattern: " <> pat)
+          Just re -> Right (filter (matchTest re) candidates)
+      )
+      (patternSources t)
+  let claims = Map.fromListWith (<>) (concatMap (\(nm, ts) -> map (\x -> (x, [nm])) ts) (Map.toList resolved))
+      twice = Map.keys (Map.filter ((> 1) . length) claims)
+      alsoNamed = filter (`Set.member` named) (Map.keys claims)
+  case (twice, alsoNamed) of
+    (x : _, _) -> Left ("topic " <> x <> " matches two pattern sources")
+    (_, x : _) -> Left ("topic " <> x <> " matches a pattern source and is also read by name")
+    _ -> Right resolved
+  where
+    compileWholeName :: Text -> Maybe Regex
+    compileWholeName pat = makeRegexM ("^(" <> pat <> ")$")
+
+
+-- | What each pattern source of @valid@ matches in the cluster now.
+currentPatternTopics :: Text -> StreamDriver -> Topo.TopologyValid -> IO (Either Text (Map Topo.NodeName [Text]))
+currentPatternTopics appId drv valid =
+  patternTopicsOf appId drv (prefixInternalTopics appId (Topo.topologyValidGraph valid))
+
+
+patternTopicsOf :: Text -> StreamDriver -> Topo.Topology -> IO (Either Text (Map Topo.NodeName [Text]))
+patternTopicsOf appId drv t
+  | Map.null (patternSources t) = pure (Right Map.empty)
+  | otherwise = either (Left . ("list topics: " <>) . T.pack) (resolvePatternTopics appId t) <$> sdListTopics drv
+
+
+-- | @t@ with each pattern source reading the topics it matched.
+withResolvedPatterns :: Map Topo.NodeName [Text] -> Topo.Topology -> Topo.Topology
+withResolvedPatterns resolved t =
+  t
+    { Topo.topoSources =
+        Map.mapWithKey
+          (\nm src -> maybe src (\ts -> src {Topo.sourceTopics = map topicName ts}) (Map.lookup nm resolved))
+          (Topo.topoSources t)
+    }
 
 
 -- | A task's source partitions: partition @p@ of each source topic that has one.
@@ -139,17 +205,20 @@ the broker default).
 -}
 buildRuntimePlan :: Text -> Int -> StreamDriver -> Topo.TopologyValid -> IO (Either Text RuntimePlan)
 buildRuntimePlan appId replication drv valid = do
-  let topo = prefixInternalTopics appId (Topo.topologyValidGraph valid)
-      plan = planSubtopologies topo
-      subs = spSubtopologies plan
-      internal = topoInternalTopicsText topo
-      txt = unTopicName
-      allSources = concatMap (map txt . subSourceTopics) subs <> map txt (spGlobalTopics plan)
-      external = dedup (filter (`Map.notMember` internal) allSources)
-      patterned = mapMaybe Topo.sourcePattern (Map.elems (Topo.topoSources topo))
-  if not (null patterned)
-    then pure (Left ("pattern subscriptions are not supported: " <> T.intercalate ", " patterned))
-    else do
+  let topo0 = prefixInternalTopics appId (Topo.topologyValidGraph valid)
+  eResolved <- patternTopicsOf appId drv topo0
+  case eResolved of
+    Left e -> pure (Left e)
+    Right resolved -> planWith (withResolvedPatterns resolved topo0) resolved
+  where
+   planWith topo resolved = do
+    let plan = planSubtopologies topo
+        subs = spSubtopologies plan
+        internal = topoInternalTopicsText topo
+        txt = unTopicName
+        allSources = concatMap (map txt . subSourceTopics) subs <> map txt (spGlobalTopics plan)
+        external = dedup (filter (`Map.notMember` internal) allSources)
+    do
       eDesc <- sdDescribeTopics drv external
       case eDesc of
         Left e -> pure (Left ("describe source topics: " <> T.pack e))
@@ -159,12 +228,15 @@ buildRuntimePlan appId replication drv valid = do
             then pure (Left ("missing source topics: " <> T.intercalate ", " missing))
             else case resolveCounts subs internal known of
               Left e -> pure (Left e)
-              Right counts -> finish topo plan internal counts
-  where
-    finish topo plan internal counts = do
+              Right counts -> finish topo plan internal counts resolved
+
+   finish topo plan internal counts resolved = do
       let subs = spSubtopologies plan
           txt = unTopicName
-          taskCount sub = maximum (1 : map (\t -> Map.findWithDefault 1 (txt t) counts) (subSourceTopics sub))
+          -- a pattern source that matched nothing has no tasks
+          taskCount sub
+            | null (subSourceTopics sub) = 0
+            | otherwise = maximum (1 : map (\t -> Map.findWithDefault 1 (txt t) counts) (subSourceTopics sub))
           builderOf sn = Map.lookup sn (Topo.topoStores topo)
           isLogged sn = maybe False loggingEnabled (builderOf sn >>= Topo.storeBuilderLogging)
           logged sub =
@@ -233,7 +305,7 @@ buildRuntimePlan appId replication drv valid = do
         | not (null reuseMismatch) ->
             pure (Left ("stores whose source-topic changelog doesn't match their task count: " <> T.intercalate ", " reuseMismatch))
         | otherwise -> do
-            let wanted = repartitionTopics <> changelogTopics
+            let wanted = filter ((> 0) . nitPartitions) (repartitionTopics <> changelogTopics)
             eCreate <- sdCreateTopics drv wanted
             eDesc <- sdDescribeTopics drv (map nitName wanted)
             case (eCreate, eDesc) of
@@ -253,9 +325,9 @@ buildRuntimePlan appId replication drv valid = do
                 if
                   | not (null absent) -> pure (Left ("internal topics were not created: " <> T.intercalate ", " absent))
                   | not (null wrong) -> pure (Left ("internal topics with the wrong partition count: " <> T.intercalate "; " wrong))
-                  | otherwise -> pure (Right (assemble topo plan internal counts taskCount logged))
+                  | otherwise -> pure (Right (assemble topo plan internal counts taskCount logged resolved))
 
-    assemble topo plan internal counts taskCount logged =
+   assemble topo plan internal counts taskCount logged resolved =
       let subs = spSubtopologies plan
           txt = unTopicName
           resetFor sub =
@@ -297,6 +369,7 @@ buildRuntimePlan appId replication drv valid = do
                  (flip (<>))
                  (concatMap (\sub -> map (\t -> (txt t, [subId sub])) (subSourceTopics sub)) subs)
            , rpSubscription = dedup (concatMap (map txt . subSourceTopics) subs)
+           , rpPatternTopics = resolved
            , rpRepartitionTopics = Map.keys internal
            , rpPartitionCounts = counts
            , rpGlobal = global

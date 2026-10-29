@@ -107,31 +107,13 @@ module Kafka.Streams (
   -- ** Imperative-DSL handle accessors
 
   --
-  -- 'liftIO_' fragments that interoperate with the imperative
-  -- DSL — e.g. inspecting 'kstreamParent' when wiring a custom
-  -- 'StoreBuilderKV' against a processor — need these
-  -- selectors. They're re-exported so callers don't have to
-  -- reach into the per-handle modules.
-  KS.kstreamParent,
-  KS.kstreamBuilder,
-  KS.kstreamKeySerde,
-  KS.kstreamValueSerde,
-  KT.ktableNode,
-  KT.ktableStore,
-  KT.ktableBuilder,
-  KT.ktableKeySerde,
-  KT.ktableValueSerde,
+  -- The handles above export their fields; the global table's
+  -- selectors are re-exported here for the same reason.
   GT.globalKTableStore,
   GT.globalKTableNode,
   GT.globalKTableBuilder,
   GT.globalKTableKeySerde,
   GT.globalKTableValueSerde,
-  TWKS.wthNode,
-  TWKS.wthStore,
-  TWKS.wthBuilder,
-  SWKS.swthNode,
-  SWKS.swthStore,
-  SWKS.swthBuilder,
 
   -- ** TopicNameExtractor (KIP-303)
   KS.TopicNameExtractor (..),
@@ -189,8 +171,6 @@ module Kafka.Streams (
   -- ('addProcessor', 'addStateStoreKV', etc.) is reachable
   -- via @import qualified Kafka.Streams.Topology as Topo@.
   Topo.NodeName (..),
-  Topo.nodeName,
-  Topo.unNodeName,
   Topo.AnyProcessor (..),
   Topo.OptimizationConfig,
   Topo.defaultOptimizationConfig,
@@ -240,7 +220,6 @@ import Kafka.Streams.KGroupedTable (KGroupedTable)
 import Kafka.Streams.KStream (KStream (..))
 import Kafka.Streams.KStream qualified as KS
 import Kafka.Streams.KTable (KTable (..))
-import Kafka.Streams.KTable qualified as KT
 import Kafka.Streams.Materialized
 import Kafka.Streams.Metrics
 import Kafka.Streams.Named

@@ -160,6 +160,8 @@ assess st severity = case st of
     _ -> (Healthy, True, ["running"])
   StreamsCreated ->
     (Degraded, False, ["created but not started"])
+  StreamsRebalancing ->
+    (Degraded, False, ["rebalancing: restoring state or waiting for an assignment"])
   StreamsClosing ->
     (Degraded, False, ["closing"])
   StreamsClosed ->
@@ -239,6 +241,7 @@ statusText = \case
 stateText :: StreamsStatus -> Text
 stateText = \case
   StreamsCreated -> "CREATED"
+  StreamsRebalancing -> "REBALANCING"
   StreamsRunning -> "RUNNING"
   StreamsClosing -> "CLOSING"
   StreamsClosed -> "CLOSED"

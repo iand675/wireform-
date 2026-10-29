@@ -692,6 +692,7 @@ newMockDriver (MockBroker v) opts = do
           writeIORef cbRef cbs
           writeIORef udRef (gaSubscriptionUserData ga)
           ud <- gaSubscriptionUserData ga
+          known <- readIORef memberRef
           mid <- atomically $ do
             s <- readTVar v
             let !n = stNextMember s
@@ -711,14 +712,24 @@ newMockDriver (MockBroker v) opts = do
                     , mTargetUserData = BS.empty
                     }
                 s1 = s {stNextMember = n + 1}
-            writeTVar v $
-              modifyGroup
-                gid
-                ( \g ->
-                    let g' = triggerRebalance g in g' {gMembers = Map.insert mid member (gMembers g')}
-                )
-                s1
-            pure mid
+            case known of
+              -- subscribing again (a re-plan): the same member starts over
+              Just old -> do
+                writeTVar v $
+                  modifyGroup
+                    gid
+                    (\g -> let g' = triggerRebalance g in g' {gMembers = Map.insert old member (gMembers g')})
+                    s
+                pure old
+              Nothing -> do
+                writeTVar v $
+                  modifyGroup
+                    gid
+                    ( \g ->
+                        let g' = triggerRebalance g in g' {gMembers = Map.insert mid member (gMembers g')}
+                    )
+                    s1
+                pure mid
           writeIORef memberRef (Just mid)
           pure (Right ())
       , sdPoll = poll
@@ -908,6 +919,7 @@ newMockDriver (MockBroker v) opts = do
       , sdDescribeTopics = \ts -> do
           s <- readTVarIO v
           pure (Right (Map.map Map.size (Map.restrictKeys (stTopics s) (Set.fromList ts))))
+      , sdListTopics = Right . Map.keys . stTopics <$> readTVarIO v
       , sdDeleteRecords = \offs -> do
           atomically $ modifyTVar' v $ \s ->
             bump s {stLogStart = Map.unionWith max (Map.fromList offs) (stLogStart s)}

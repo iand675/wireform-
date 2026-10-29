@@ -288,6 +288,34 @@ Concrete steps:
 6. **Post-rollout, re-run the orphan detector and clean up any
    leaked internal topics** via a manual broker AdminClient delete.
 
+## New topics under a pattern source
+
+A pattern source (`streamFromPattern b "tenant-.*"`) is the one place the
+input changes without a deploy. The pattern is matched against whole
+topic names (POSIX extended regex, like the JVM's `matches()`), leaving
+out Kafka's own `__` topics and the application's `<application.id>-`
+internal topics. A topic matched by two pattern sources, or matched and
+also read by name, is an error: its records would reach both.
+
+The instance resolves the pattern when it starts, and lists the topics
+again every `metadataMaxAgeMs` (`metadata.max.age.ms`, default 5
+minutes). When the matching set changes it commits, closes its tasks
+cleanly (checkpoints and all), re-plans over the new topics, and rejoins
+the group. State carries over: persistent stores restore the tail after
+their checkpoints, in-memory ones replay their changelogs.
+A pattern that matches nothing yet is fine: that subtopology just has no
+tasks until a topic appears.
+
+Two things to plan for:
+
+- Instances notice at different times, so for up to one
+  `metadataMaxAgeMs` the group rebalances more than once. Lower it if new
+  topics must be picked up quickly.
+- Every topic a stateful pattern source matches has to have the same
+  partition count (they are co-partitioned into one task per partition);
+  a new topic with a different count fails the re-plan and puts the
+  instance in `StreamsError`.
+
 ## Multi-instance with no state
 
 If your topology owns no state (it is pure `map` / `filter` / `merge`

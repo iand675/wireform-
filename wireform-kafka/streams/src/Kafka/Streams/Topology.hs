@@ -121,7 +121,7 @@ import Data.Sequence (Seq, (|>))
 import Data.Sequence qualified as Seq
 import Data.Set (Set)
 import Data.Set qualified as Set
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text qualified as Text
@@ -1075,7 +1075,7 @@ validateTopology t = do
   when_ (Map.null (topoSources t)) NoSources
   Map.foldlWithKey'
     ( \acc nm src ->
-        acc >> when_ (null (sourceTopics src)) (EmptySourceTopics nm)
+        acc >> when_ (null (sourceTopics src) && isNothing (sourcePattern src)) (EmptySourceTopics nm)
     )
     (Right ())
     (topoSources t)

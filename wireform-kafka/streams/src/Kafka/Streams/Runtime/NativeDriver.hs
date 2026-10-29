@@ -112,6 +112,11 @@ newNativeDriver cfg = do
           pure . Right $
             StreamDriver
               { sdSubscribe = \topics ga cbs -> do
+                  -- Subscribing again (a re-plan) starts over: drop the
+                  -- assignment without telling the old callbacks, so
+                  -- the rejoin hands the new ones every partition.
+                  KC.setRebalanceListener consumer (const (pure ())) (const (pure ())) (const (pure ()))
+                  KC.unsubscribe consumer
                   KC.setAssignmentStrategy consumer (KC.CustomAssignment (gaAssignor ga))
                   KC.setSubscriptionUserDataHook consumer (gaSubscriptionUserData ga)
                   KC.setRebalanceListener consumer (rcAssigned cbs) (rcRevoked cbs) (rcLost cbs)
@@ -207,6 +212,7 @@ newNativeDriver cfg = do
                           . map (\d -> (KA.tdName d, length (KA.tdPartitions d)))
                           . filter (not . null . KA.tdPartitions)
                           <$> r
+              , sdListTopics = KA.listTopicsExcludeInternal admin
               , sdDeleteRecords = \offs ->
                   fmap (const ())
                     <$> KA.deleteRecords admin (map (\(tp, o) -> (tp.topic, tp.partition, o)) offs)

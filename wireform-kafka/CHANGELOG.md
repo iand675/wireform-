@@ -29,6 +29,12 @@ and this project adheres to the
   `queryMetadataForKey`, stale IQ reads from standbys). On the client:
   `Kafka.Client.Assignor` custom assignors with assignment user data,
   `Consumer.setAssignmentStrategy` / `setAssignmentHook`.
+- **Pattern sources at runtime**: `streamFromPattern` /
+  `sourcePattern` topics are resolved against the cluster when the
+  instance starts (whole-name match, internal topics left out) and again
+  every `metadataMaxAgeMs` (`metadata.max.age.ms`); a change re-plans the
+  instance in place (commit, clean close, new plan, rejoin) with its
+  state carried over. `StreamDriver` gains `sdListTopics`.
 - **Commit participants** (`Kafka.Streams.Runtime.Commit`): two-phase
   sinks (`twoPhaseParticipant`) prepare with every commit, are recorded
   in `<app>-twophase-commits` inside the transaction, commit after it,

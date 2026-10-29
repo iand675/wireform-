@@ -177,6 +177,8 @@ data StreamDriver = StreamDriver
   -- ^ Create the topics that don't exist; existing ones are left alone.
   , sdDescribeTopics :: !([Text] -> IO (Either String (Map Text Int)))
   -- ^ Partition counts of the topics that exist.
+  , sdListTopics :: !(IO (Either String [Text]))
+  -- ^ Every topic in the cluster but Kafka's internal ones (for pattern sources).
   , sdDeleteRecords :: !([(KC.TopicPartition, Int64)] -> IO (Either String ()))
   -- ^ Drop everything before these offsets (purging consumed repartition records).
   , sdClose :: !(IO ())
