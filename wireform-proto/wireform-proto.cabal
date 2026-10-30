@@ -209,6 +209,7 @@ test-suite wireform-proto-test
   main-is: Main.hs
   other-modules:
     Test.Wire
+    Test.RingSink
     Test.Roundtrip
     Test.Collect
     Test.StreamCodec

@@ -11,6 +11,7 @@ import Test.Options (optionsTests)
 import Test.Parser (parserTests)
 import Test.PrintInspect (printInspectTests)
 import Test.Resolver (resolverTests)
+import Test.RingSink (ringSinkTests)
 import Test.Roundtrip (roundtripTests)
 import Test.Schema (schemaTests)
 import Test.StreamCodec (streamCodecTests)
@@ -34,6 +35,7 @@ main = do
     $ sequence_
       [ parserTests
       , wireTests
+      , ringSinkTests
       , roundtripTests
       , codeGenTests
       , wellKnownTests
