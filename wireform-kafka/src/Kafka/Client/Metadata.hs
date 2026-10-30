@@ -45,6 +45,7 @@ module Kafka.Client.Metadata (
   -- * Metadata Refresh
   refreshMetadata,
   refreshTopicMetadata,
+  refreshTopicMetadataWith,
 
   -- * KIP-466 client-side leader cache update
   updatePartitionLeader,
@@ -204,8 +205,11 @@ getPartitionCount (MetadataCache metaVar) topic = do
     Just ClusterMetadata {..} ->
       case HashMap.lookup topic clusterTopics of
         Nothing -> return Nothing
-        Just TopicMetadata {..} ->
-          return $ Just $ fromIntegral $ IntMap.size topicMetaPartitions
+        -- a topic listed without partitions (still being created,
+        -- LEADER_NOT_AVAILABLE) has no usable count yet
+        Just TopicMetadata {..}
+          | IntMap.null topicMetaPartitions -> return Nothing
+          | otherwise -> return $ Just $ fromIntegral $ IntMap.size topicMetaPartitions
 
 
 {- | KIP-466: update the cached leader for a (topic, partition).
@@ -328,7 +332,22 @@ refreshTopicMetadata
   -> Int32
   -- ^ Correlation ID
   -> IO (Either String ())
-refreshTopicMetadata conn (MetadataCache metaVar) topicsM correlationId = do
+refreshTopicMetadata = refreshTopicMetadataWith False
+
+
+{- | 'refreshTopicMetadata', asking the broker to create the named
+topics that don't exist when @autoCreate@ (and the broker's
+@auto.create.topics.enable@) allow it: the producer's
+@allow.auto.create.topics@.
+-}
+refreshTopicMetadataWith
+  :: Bool
+  -> Connection
+  -> MetadataCache
+  -> Maybe [Text]
+  -> Int32
+  -> IO (Either String ())
+refreshTopicMetadataWith autoCreate conn (MetadataCache metaVar) topicsM correlationId = do
   -- Create metadata request. For v4+ Metadata the convention is
   -- /null/ topics array means "fetch every topic"; an empty
   -- non-null array means "fetch nothing". v0-v3 also accepts an
@@ -363,7 +382,7 @@ refreshTopicMetadata conn (MetadataCache metaVar) topicsM correlationId = do
       request =
         MR.MetadataRequest
           { MR.metadataRequestTopics = topics
-          , MR.metadataRequestAllowAutoTopicCreation = False
+          , MR.metadataRequestAllowAutoTopicCreation = autoCreate
           , MR.metadataRequestIncludeClusterAuthorizedOperations = False
           , MR.metadataRequestIncludeTopicAuthorizedOperations = False
           }

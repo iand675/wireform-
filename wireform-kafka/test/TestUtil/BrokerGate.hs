@@ -44,12 +44,16 @@ brokerCase name body = it name $ do
   if ok then body else pure ()
 
 
-{- | A property test that requires a live broker. When no broker is
-configured the property body is skipped via `H.discard`.
+{- | A property test that requires a live broker, checked once with
+@tests@ cases. When no broker is configured it is skipped.
+
+It runs from a plain IO case rather than as a sydtest property:
+sydtest's Hedgehog runner replaces a property's test limit with its
+own (100), and every case of a broker property opens connections.
 -}
-brokerProperty :: String -> H.Property -> Spec
-brokerProperty name prop = it name $ H.withTests 1 $ H.property $ do
-  ok <- H.evalIO hasBroker
+brokerProperty :: String -> H.TestLimit -> H.Property -> Spec
+brokerProperty name tests prop = it name $ do
+  ok <- hasBroker
   if ok
-    then H.evalIO (H.check prop) >>= H.assert
-    else H.success
+    then H.check (H.withTests tests prop) >>= (`shouldBe` True)
+    else pure ()

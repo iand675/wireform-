@@ -912,7 +912,8 @@ listTopics client@AdminClient {..} = liftIO $ do
       withNegotiatedVersion client brokerAddr apiKey 0 13 8 $ \conn corrId apiVersion -> do
         let request =
               MReq.MetadataRequest
-                { MReq.metadataRequestTopics = P.mkKafkaArray V.empty
+                { -- every topic: a null array (v1+); an empty one asks for none
+                  MReq.metadataRequestTopics = allTopicsArray apiVersion
                 , MReq.metadataRequestAllowAutoTopicCreation = False
                 , MReq.metadataRequestIncludeClusterAuthorizedOperations = False
                 , MReq.metadataRequestIncludeTopicAuthorizedOperations = False
@@ -1436,6 +1437,13 @@ the @isInternal@ flag set: @__consumer_offsets@,
 @__transaction_state@, …). Mirrors the JVM client's
 @ListTopicsOptions.listInternal(false)@.
 -}
+{- | The topics field of a Metadata request for every topic: null from
+v1 (an empty array there asks for no topics), empty at v0.
+-}
+allTopicsArray :: Integral v => v -> P.KafkaArray a
+allTopicsArray v = if v >= 1 then P.KafkaArray P.Null else P.mkKafkaArray V.empty
+
+
 listTopicsExcludeInternal :: MonadIO m => AdminClient -> m (Either String [Text])
 listTopicsExcludeInternal client@AdminClient {..} = liftIO $ do
   -- Re-issues the same MetadataRequest 'listTopics' does but
@@ -1451,7 +1459,8 @@ listTopicsExcludeInternal client@AdminClient {..} = liftIO $ do
       withNegotiatedVersion client brokerAddr apiKey 0 13 8 $ \conn corrId apiVersion -> do
         let request =
               MReq.MetadataRequest
-                { MReq.metadataRequestTopics = P.mkKafkaArray V.empty
+                { -- every topic: a null array (v1+); an empty one asks for none
+                  MReq.metadataRequestTopics = allTopicsArray apiVersion
                 , MReq.metadataRequestAllowAutoTopicCreation = False
                 , MReq.metadataRequestIncludeClusterAuthorizedOperations = False
                 , MReq.metadataRequestIncludeTopicAuthorizedOperations = False

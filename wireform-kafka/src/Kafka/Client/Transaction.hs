@@ -80,6 +80,7 @@ module Kafka.Client.Transaction (
 
   -- * Transactional sends
   sendInTransaction,
+  registerPartition,
   sendOffsetsToTransaction,
 
   -- * Types
@@ -116,7 +117,7 @@ module Kafka.Client.Transaction (
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM
 import Control.Exception (Exception, SomeException, try)
-import Control.Monad (unless)
+import Control.Monad (when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.IO.Unlift (MonadUnliftIO, withRunInIO)
 import Data.HashMap.Strict (HashMap)
@@ -133,6 +134,7 @@ import Data.IORef (
 import Data.Int (Int16, Int32, Int64)
 import Data.Text (Text)
 import Data.Text qualified as T
+import GHC.Clock (getMonotonicTimeNSec)
 import Kafka.Client.Consumer (TopicPartition (..))
 import Kafka.Client.Internal.TransactionCoordinator (TransactionCoordinator)
 import Kafka.Client.Internal.TransactionCoordinator qualified as TC
@@ -198,6 +200,16 @@ data Transaction = Transaction
   , txnState :: !(IORef TransactionState)
   , txnPartitions :: !(TVar (HashSet TopicPartition))
   -- ^ Partitions involved in the current transaction.
+  , txnPendingPartitions :: !(TVar (HashSet TopicPartition))
+  {- ^ Partitions whose @AddPartitionsToTxn@ is in flight
+  ('registerPartition'); a concurrent first send to one waits for it.
+  -}
+  , txnStarted :: !(IORef Bool)
+  {- ^ Whether the coordinator has this transaction open: some
+  @AddPartitionsToTxn@ or @AddOffsetsToTxn@ succeeded since
+  'beginTransaction'. Without one there is nothing to end, and the
+  coordinator would answer @EndTxn@ with @INVALID_TXN_STATE@.
+  -}
   , txnSequenceNumbers :: !(TVar (HashMap TopicPartition Int32))
   -- ^ Sequence numbers per partition for idempotency.
   , txnCoordinator :: !(IORef (Maybe TransactionCoordinator))
@@ -284,6 +296,8 @@ createTransaction transactionalId connMgr connConfig versionCache clientId boots
   producerEpoch <- newIORef Nothing
   state <- newIORef Uninitialized
   partitions <- newTVarIO HashSet.empty
+  pending <- newTVarIO HashSet.empty
+  started <- newIORef False
   sequences <- newTVarIO HashMap.empty
   coordinator <- newIORef Nothing
   correlationId <- newIORef 0
@@ -294,6 +308,8 @@ createTransaction transactionalId connMgr connConfig versionCache clientId boots
       , txnProducerEpoch = producerEpoch
       , txnState = state
       , txnPartitions = partitions
+      , txnPendingPartitions = pending
+      , txnStarted = started
       , txnSequenceNumbers = sequences
       , txnCoordinator = coordinator
       , txnConnectionManager = connMgr
@@ -482,6 +498,7 @@ beginTransaction txn = liftIO $ do
         then do
           -- Clear partition tracking for new transaction
           atomically $ writeTVar (txnPartitions txn) HashSet.empty
+          writeIORef (txnStarted txn) False
           return $ Right ()
         else return $ Left $ InvalidStateTransition state InTransaction
     InTransaction -> return $ Left $ TransactionAlreadyInProgress "Transaction already in progress"
@@ -504,30 +521,18 @@ commitTransaction txn = liftIO $ do
           coordM <- readIORef (txnCoordinator txn)
           pidM <- readIORef (txnProducerId txn)
           epochM <- readIORef (txnProducerEpoch txn)
-          partitions <- readTVarIO (txnPartitions txn)
+          started <- readIORef (txnStarted txn)
 
           case (coordM, pidM, epochM) of
-            (Just coordinator, Just (ProducerId pid), Just (ProducerEpoch epoch)) -> do
+            _ | not started -> do
+              -- Nothing reached the coordinator: nothing to commit.
+              writeIORef (txnState txn) Ready
+              return $ Right ()
+            (Just _, Just (ProducerId pid), Just (ProducerEpoch epoch)) -> do
               let transactionalId = unTransactionalId $ txnTransactionalId txn
 
-              -- Add partitions to transaction if any exist
-              unless (HashSet.null partitions) $ do
-                _ <-
-                  TC.addPartitionsToTxn
-                    (txnConnectionManager txn)
-                    (txnConnConfig txn)
-                    (txnVersionCache txn)
-                    (txnCorrelationId txn)
-                    (txnClientId txn)
-                    coordinator
-                    transactionalId
-                    pid
-                    epoch
-                    (HashSet.toList partitions)
-                return ()
-
               -- End transaction with commit=true
-              endResult <- endTransactionWithRetry txn coordinator transactionalId pid epoch True 8
+              endResult <- endTransactionWithRetry txn transactionalId pid epoch True
               case endResult of
                 Left err -> failEnd txn InTransaction err
                 Right () -> do
@@ -558,30 +563,18 @@ abortTransaction txn = liftIO $ do
           coordM <- readIORef (txnCoordinator txn)
           pidM <- readIORef (txnProducerId txn)
           epochM <- readIORef (txnProducerEpoch txn)
-          partitions <- readTVarIO (txnPartitions txn)
+          started <- readIORef (txnStarted txn)
 
           case (coordM, pidM, epochM) of
-            (Just coordinator, Just (ProducerId pid), Just (ProducerEpoch epoch)) -> do
+            _ | not started -> do
+              -- Nothing reached the coordinator: nothing to abort.
+              writeIORef (txnState txn) Ready
+              return $ Right ()
+            (Just _, Just (ProducerId pid), Just (ProducerEpoch epoch)) -> do
               let transactionalId = unTransactionalId $ txnTransactionalId txn
 
-              -- Add partitions to transaction if any exist
-              unless (HashSet.null partitions) $ do
-                _ <-
-                  TC.addPartitionsToTxn
-                    (txnConnectionManager txn)
-                    (txnConnConfig txn)
-                    (txnVersionCache txn)
-                    (txnCorrelationId txn)
-                    (txnClientId txn)
-                    coordinator
-                    transactionalId
-                    pid
-                    epoch
-                    (HashSet.toList partitions)
-                return ()
-
               -- End transaction with commit=false (abort)
-              endResult <- endTransactionWithRetry txn coordinator transactionalId pid epoch False 8
+              endResult <- endTransactionWithRetry txn transactionalId pid epoch False
               case endResult of
                 Left err -> failEnd txn InTransaction err
                 Right () -> do
@@ -600,27 +593,78 @@ abortTransaction txn = liftIO $ do
     _ -> return $ Left $ InvalidStateTransition state Aborting
 
 
-{- | @EndTxn@ with the JVM @TransactionManager@'s retry policy: the
-coordinator answers @CONCURRENT_TRANSACTIONS@ while a previous
-marker is still being written, and @COORDINATOR_LOAD_IN_PROGRESS@ /
-@NOT_COORDINATOR@ / @COORDINATOR_NOT_AVAILABLE@ while the
-transaction-log partition moves; all clear up, so they are retried
-with exponential backoff (re-discovering the coordinator after a
-move) before being reported.
+{- | Send a request to the transaction coordinator with the JVM
+@TransactionManager@'s retry policy: the coordinator answers
+@CONCURRENT_TRANSACTIONS@ while a previous transaction's markers are
+still being written (so right after a commit, the next
+transaction's first @AddPartitionsToTxn@ often gets it), and
+@COORDINATOR_LOAD_IN_PROGRESS@ / @NOT_COORDINATOR@ /
+@COORDINATOR_NOT_AVAILABLE@ while the transaction-log partition
+moves. All clear up, so they are retried with exponential backoff
+(20 ms doubling to 1 s, re-discovering the coordinator after a
+move) until the transaction timeout has passed, and only then
+reported.
 -}
+withCoordinatorRetry
+  :: Transaction
+  -> (TC.TransactionCoordinator -> IO (Either TC.TransactionCoordinatorError a))
+  -> IO (Either TC.TransactionCoordinatorError a)
+withCoordinatorRetry txn req = do
+  coordM <- readIORef (txnCoordinator txn)
+  case coordM of
+    Nothing -> pure (Left (TC.CoordinatorNotAvailable "no transaction coordinator (initTransactions never completed?)"))
+    Just coord0 -> do
+      start <- getMonotonicTimeNSec
+      go (start + fromIntegral (max 0 (txnTimeoutMs txn)) * 1_000_000) 20_000 coord0
+  where
+    go !deadline !delayUs coordinator = do
+      r <- req coordinator
+      case r of
+        Left err | retriable err -> do
+          now <- getMonotonicTimeNSec
+          if now >= deadline
+            then pure r
+            else do
+              threadDelay delayUs
+              coordinator' <- case err of
+                TC.ConcurrentTransactions _ -> pure coordinator
+                _ -> rediscover coordinator
+              go deadline (min 1_000_000 (2 * delayUs)) coordinator'
+        _ -> pure r
+    rediscover coordinator = do
+      found <-
+        TC.findTransactionCoordinator
+          (txnConnectionManager txn)
+          (txnConnConfig txn)
+          (txnVersionCache txn)
+          (txnCorrelationId txn)
+          (txnBootstrapBroker txn)
+          (txnClientId txn)
+          (unTransactionalId (txnTransactionalId txn))
+      case found of
+        Right c -> do
+          writeIORef (txnCoordinator txn) (Just c)
+          pure c
+        Left _ -> pure coordinator
+    retriable e = case e of
+      TC.ConcurrentTransactions _ -> True
+      TC.CoordinatorLoadInProgress _ -> True
+      TC.CoordinatorNotAvailable _ -> True
+      TC.NotCoordinator _ -> True
+      _ -> False
+
+
+-- | @EndTxn@ for the open transaction, with 'withCoordinatorRetry'.
 endTransactionWithRetry
   :: Transaction
-  -> TC.TransactionCoordinator
   -> Text
   -> Int64
   -> Int16
   -> Bool
   -- ^ commit (True) or abort (False)
-  -> Int
-  -- ^ remaining attempts
   -> IO (Either TC.TransactionCoordinatorError ())
-endTransactionWithRetry txn coordinator transactionalId pid epoch commit attemptsLeft = do
-  r <-
+endTransactionWithRetry txn transactionalId pid epoch commit =
+  withCoordinatorRetry txn $ \coordinator ->
     TC.endTransaction
       (txnConnectionManager txn)
       (txnConnConfig txn)
@@ -632,37 +676,6 @@ endTransactionWithRetry txn coordinator transactionalId pid epoch commit attempt
       pid
       epoch
       commit
-  case r of
-    Left err
-      | attemptsLeft > 1 && retriableEnd err -> do
-          let !attempt = 8 - attemptsLeft
-          threadDelay (50_000 * (2 ^ min 5 (max 0 attempt)))
-          coordinator' <- case err of
-            TC.ConcurrentTransactions _ -> pure coordinator
-            _ -> do
-              found <-
-                TC.findTransactionCoordinator
-                  (txnConnectionManager txn)
-                  (txnConnConfig txn)
-                  (txnVersionCache txn)
-                  (txnCorrelationId txn)
-                  (txnBootstrapBroker txn)
-                  (txnClientId txn)
-                  transactionalId
-              case found of
-                Right c -> do
-                  writeIORef (txnCoordinator txn) (Just c)
-                  pure c
-                Left _ -> pure coordinator
-          endTransactionWithRetry txn coordinator' transactionalId pid epoch commit (attemptsLeft - 1)
-    _ -> pure r
-  where
-    retriableEnd e = case e of
-      TC.ConcurrentTransactions _ -> True
-      TC.CoordinatorLoadInProgress _ -> True
-      TC.CoordinatorNotAvailable _ -> True
-      TC.NotCoordinator _ -> True
-      _ -> False
 
 
 {- | Record a failed @EndTxn@. Fencing errors make the producer
@@ -745,6 +758,59 @@ sendInTransaction txn tp = liftIO $ do
     _ -> return $ Left $ TransactionNotInProgress "Must be in a transaction to send records"
 
 
+{- | Add a partition to the open transaction with the coordinator
+(@AddPartitionsToTxn@), once per partition per transaction, before
+the producer's first record to it. A concurrent first send to the
+same partition waits for the registration in flight rather than
+producing ahead of it; a failed registration is forgotten, so the
+next send tries again.
+-}
+registerPartition
+  :: Transaction
+  -> Int64
+  -- ^ producer id
+  -> Int16
+  -- ^ producer epoch
+  -> TopicPartition
+  -> IO (Either String ())
+registerPartition txn pid epoch tp = do
+  fresh <- atomically $ do
+    added <- readTVar (txnPartitions txn)
+    if HashSet.member tp added
+      then pure False
+      else do
+        pending <- readTVar (txnPendingPartitions txn)
+        when (HashSet.member tp pending) retry
+        writeTVar (txnPendingPartitions txn) (HashSet.insert tp pending)
+        pure True
+  if not fresh
+    then pure (Right ())
+    else do
+      r <-
+        either (\e -> Left ("AddPartitionsToTxn failed: " <> show e)) Right
+          <$> withCoordinatorRetry txn (\coord ->
+            TC.addPartitionsToTxn
+              (txnConnectionManager txn)
+              (txnConnConfig txn)
+              (txnVersionCache txn)
+              (txnCorrelationId txn)
+              (txnClientId txn)
+              coord
+              (unTransactionalId (txnTransactionalId txn))
+              pid
+              epoch
+              [tp])
+      case r of
+        Right () -> writeIORef (txnStarted txn) True
+        Left _ -> pure ()
+      atomically $ do
+        modifyTVar' (txnPendingPartitions txn) (HashSet.delete tp)
+        case r of
+          Right () -> modifyTVar' (txnPartitions txn) (HashSet.insert tp)
+          Left _ -> pure ()
+      pure r
+
+
 {- | Commit consumer-group offsets as part of the open transaction
 (the JVM's @KafkaProducer.sendOffsetsToTransaction@, KIP-98 /
 KIP-447): @AddOffsetsToTxn@ to the transaction coordinator, then
@@ -773,16 +839,16 @@ sendOffsetsToTransaction txn groupCoord member offsets = liftIO $ do
       pidM <- readIORef (txnProducerId txn)
       epochM <- readIORef (txnProducerEpoch txn)
       case (coordM, pidM, epochM) of
-        (Just coordinator, Just (ProducerId pid), Just (ProducerEpoch epoch)) -> do
+        (Just _, Just (ProducerId pid), Just (ProducerEpoch epoch)) -> do
           let transactionalId = unTransactionalId (txnTransactionalId txn)
-          addR <-
+          addR <- withCoordinatorRetry txn $ \coord ->
             TC.addOffsetsToTxn
               (txnConnectionManager txn)
               (txnConnConfig txn)
               (txnVersionCache txn)
               (txnCorrelationId txn)
               (txnClientId txn)
-              coordinator
+              coord
               transactionalId
               pid
               epoch
@@ -790,6 +856,7 @@ sendOffsetsToTransaction txn groupCoord member offsets = liftIO $ do
           case addR of
             Left e -> pure (Left (coordinatorErrorToTxn e))
             Right () -> do
+              writeIORef (txnStarted txn) True
               r <-
                 TC.txnOffsetCommitWith
                   (txnConnectionManager txn)

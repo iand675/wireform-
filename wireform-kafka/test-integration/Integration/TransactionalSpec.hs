@@ -67,6 +67,9 @@ tests =
           "produce + abortTransaction -> invisible to read-committed"
           txn_abort_invisible
       , it
+          "a second transaction to the same partition commits and is visible"
+          txn_second_transaction_visible
+      , it
           "second producer with same transactional.id fences the first"
           txn_fences_old_producer
       , it
@@ -190,6 +193,28 @@ txn_commit_visible = do
   vs <- drainValues c 10
   Consumer.closeConsumer c
   (if (value `elem` vs) then pure () else expectationFailure ("expected to find " <> show value <> " in " <> show vs))
+
+
+{- | Each transaction adds its partitions to itself with the
+coordinator: a partition the first transaction wrote to is added
+again for the second, so the second's record is covered by its
+commit marker.
+-}
+txn_second_transaction_visible :: IO ()
+txn_second_transaction_visible = do
+  txId <- freshTxnId "wfkafka-txn-second"
+  let v1 = BSC.pack "wfkafka-second-1"
+      v2 = BSC.pack "wfkafka-second-2"
+      round_ p txn v = do
+        Txn.beginTransaction txn >>= either (\e -> expectationFailure ("beginTransaction: " <> show e)) pure
+        Producer.sendMessage p sinkTopic Nothing v >>= either (\e -> expectationFailure ("sendMessage: " <> e)) (const (pure ()))
+        Txn.commitTransaction txn >>= either (\e -> expectationFailure ("commitTransaction: " <> show e)) pure
+  withTxnProducer txId $ \p txn -> round_ p txn v1 >> round_ p txn v2
+  c <- mkRcConsumer "wfkafka-txn-second-rc" sinkTopic 0
+  threadDelay 500_000
+  vs <- drainValues c 10
+  Consumer.closeConsumer c
+  (if all (`elem` vs) [v1, v2] then pure () else expectationFailure ("expected both values in " <> show vs))
 
 
 txn_abort_invisible :: IO ()

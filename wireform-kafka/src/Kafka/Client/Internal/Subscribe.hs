@@ -246,12 +246,22 @@ subscribeFlow
     where
       nextCorrId = atomicModifyIORef' corrIdVar (\v -> (v + 1, v))
 
+      -- A connection whose ApiVersions are in the cache, so the
+      -- requests sent on it pick a version the broker speaks
+      -- (the coordinator is often a broker nobody has talked to
+      -- yet). A failed handshake leaves the compiled-in defaults.
+      connectNegotiated addr = do
+        r <- Conn.getOrCreateConnection connMgr addr connConfig
+        case r of
+          Right conn -> VN.ensureVersionsNegotiated conn addr versionCache nextCorrId >> pure r
+          Left _ -> pure r
+
       ensureMetadata = do
         brokersM <- atomically $ Meta.getAllBrokers metaCache
         case brokersM of
           Just (b : _) -> do
             let addr = Meta.brokerMetaAddress b
-            connRes <- Conn.getOrCreateConnection connMgr addr connConfig
+            connRes <- connectNegotiated addr
             case connRes of
               Left err -> pure (Left ("connect: " <> err))
               Right conn -> do
@@ -264,7 +274,7 @@ subscribeFlow
         case brokersM of
           Just (b : _) -> do
             let addr = Meta.brokerMetaAddress b
-            connRes <- Conn.getOrCreateConnection connMgr addr connConfig
+            connRes <- connectNegotiated addr
             case connRes of
               Left err -> pure (Left (SubscribeOther ("bootstrap connect: " <> err)))
               Right conn -> k addr conn
@@ -275,7 +285,7 @@ subscribeFlow
               BrokerAddress
                 (T.unpack (CG.coordHost coord))
                 (fromIntegral (CG.coordPort coord))
-        coordConnR <- Conn.getOrCreateConnection connMgr coordAddr connConfig
+        coordConnR <- connectNegotiated coordAddr
         case coordConnR of
           Left err -> pure (Left (SubscribeCoordinator err))
           Right coordConn -> do
@@ -507,7 +517,7 @@ subscribeFlow
         case brokersM of
           Just (b : _) -> do
             let addr = Meta.brokerMetaAddress b
-            connRes <- Conn.getOrCreateConnection connMgr addr connConfig
+            connRes <- connectNegotiated addr
             case connRes of
               Left err -> pure (Left ("ListOffsets connect: " <> err))
               Right c -> doListOffsets addr c tps timestamp
