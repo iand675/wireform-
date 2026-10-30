@@ -345,6 +345,33 @@ spec = describe "SendTransport" $ do
       readChunks bytes `shouldBe` payload
       readIORef pubs >>= (`shouldSatisfy` (> 1))
 
+    -- 'byteString' copies below ~8 KiB and inserts above it, while
+    -- the ring size tracks the page size; pin both paths explicitly
+    -- so the suite exercises each regardless of host page size.
+    it "byteStringCopy > ring inside cork" $ do
+      sz <- ringSizeAt 4096
+      let payload = patternBytes (sz + 1)
+      (bytes, pubs) <- withTestTransport 4096 $ \t ->
+        withSendCork t $ \corked ->
+          sendBuilderDirect corked (word8 0x7F <> byteStringCopy payload <> word8 0x7E)
+      readChunks bytes `shouldBe` BS.concat [BS.singleton 0x7F, payload, BS.singleton 0x7E]
+      readIORef pubs >>= (`shouldSatisfy` (> 1))
+
+    it "byteStringCopy > ring uncorked" $ do
+      sz <- ringSizeAt 4096
+      let payload = patternBytes (sz * 3 + 7)
+      (bytes, _) <- withTestTransport 4096 $ \t ->
+        sendBuilderDirect t (byteStringCopy payload)
+      readChunks bytes `shouldBe` payload
+
+    it "byteStringInsert > ring inside cork" $ do
+      sz <- ringSizeAt 4096
+      let payload = patternBytes (sz + 1)
+      (bytes, _) <- withTestTransport 4096 $ \t ->
+        withSendCork t $ \corked ->
+          sendBuilderDirect corked (byteStringInsert payload)
+      readChunks bytes `shouldBe` payload
+
     it "many small sends exceeding ring" $ do
       sz <- ringSizeAt 4096
       let chunk = patternBytes 500

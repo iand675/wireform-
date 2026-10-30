@@ -976,9 +976,36 @@ byteStringThreshold th bstr =
 to the buffer, regardless of the size.
 -}
 byteStringCopy :: S.ByteString -> Builder
-byteStringCopy !bstr =
-  -- TODO: this is suboptimal; should keep using the same buffer size.
-  ensureBytes (S.length bstr) <> byteStringCopyNoCheck bstr
+byteStringCopy !bstr = mkBuilder $ do
+  r <- remainingBytes
+  if r >= S.length bstr
+    then useBuilder $ byteStringCopyNoCheck bstr
+    else useBuilder $ byteStringCopySlow_ bstr
+{-# INLINE byteStringCopy #-}
+
+
+{- | Out-of-line overflow path for 'byteStringCopy'.
+
+A 'RingSink' can offer at most @ringSize@ contiguous bytes, so a
+copy larger than the ring is chunked via the insert path instead
+of asking 'getBytes' for an impossible region.  Which path
+'byteString' picks depends on 'maximalCopySize' (~8 KiB) while
+the ring size depends on the page size, so on 4 KiB-page hosts a
+payload in @(ringSize, maximalCopySize)@ lands here.
+-}
+byteStringCopySlow_ :: S.ByteString -> Builder
+byteStringCopySlow_ bstr = mkBuilder $ do
+  sink <- getSink
+  case sink of
+    RingSink rsRef -> do
+      rs <- io $ readIORef rsRef
+      if S.length bstr > rsRingSize rs
+        then useBuilder $ byteStringInsert_ bstr
+        else useBuilder $ getBytes (S.length bstr) <> byteStringCopyNoCheck bstr
+    _ ->
+      -- TODO: this is suboptimal; should keep using the same buffer size.
+      useBuilder $ getBytes (S.length bstr) <> byteStringCopyNoCheck bstr
+{-# NOINLINE byteStringCopySlow_ #-}
 
 
 -- | Like 'byteStringCopy', but assumes that the current buffer is large enough.
