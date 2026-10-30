@@ -35,6 +35,9 @@ module Kafka.Client.Internal.ProducerSender (
 
   -- * Batch Sending
   sendBatches,
+  retryOrFail,
+  RetryEntry (..),
+  LostSequence (..),
   retryBatch,
   bumpBatchAttempts,
   batchBackoffMs,
@@ -67,10 +70,12 @@ import Control.Concurrent.Chan.Unagi qualified as U
 import Control.Concurrent.Chan.Unagi.Bounded qualified as UB
 import Control.Concurrent.STM
 import Control.Exception (SomeException, try)
-import Control.Monad (forM, forM_, forever, void, when)
+import Control.Monad (forM, forM_, forever, unless, void, when)
 import Data.ByteString qualified as BS
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HashMap
+import Data.Hashable (hash)
+import Data.Maybe (isNothing, mapMaybe)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int
 import Data.List (groupBy, partition, sortBy)
@@ -78,12 +83,12 @@ import Data.List qualified
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Ord (comparing)
-import Data.Sequence qualified as Seq
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Vector qualified as V
 import Kafka.Client.Internal.BatchAccumulator qualified as BA
 import Kafka.Client.Internal.Request qualified as Req
+import Kafka.Client.RetryClassifier qualified as RC
 import Kafka.Client.Metadata qualified as Meta
 import Kafka.Compression.Types (CompressionCodec (NoCompression))
 import Kafka.Network.Connection qualified as Conn
@@ -309,7 +314,6 @@ data PendingProduce = PendingProduce
   { ppCorrId :: !Int32
   , ppApiVersion :: !Int16
   , ppBatches :: ![BA.ProducerBatch]
-  , ppMetaCache :: !Meta.MetadataCache
   }
 
 
@@ -369,11 +373,6 @@ data SenderState = SenderState
   on-demand metadata refresh path that uses the shared
   'producerConnManager').
   -}
-  , senderRoundRobin :: !(IORef Int)
-  {- ^ Counter the sender uses to round-robin enqueueing
-  across the per-broker pipes. Single 'IORef' is fine —
-  the only writer is the sender main thread.
-  -}
   , senderAcks :: !Int16
   -- ^ Required acks: 0 = none, 1 = leader, -1 = all ISRs
   , senderTimeoutMs :: !Int32
@@ -426,6 +425,46 @@ data SenderState = SenderState
   /unbinds/ a transaction mid-flight stops attaching the
   id from the next send onwards.
   -}
+  , senderRetryQueue :: !(TVar [RetryEntry])
+  {- ^ Batches waiting to be sent again (in the order they
+  joined), after a retriable produce error, an unknown leader or
+  a transport failure: with their sequence numbers unchanged, so
+  an idempotent producer's retry is deduplicated by the broker.
+  -}
+  , senderLostSequences :: !(TVar (HashMap BA.TopicPartition LostSequence))
+  {- ^ Per partition, the first sequence number (under its
+  producer id and epoch) whose batch failed for good. Every
+  later batch under the same epoch would be rejected as out of
+  order, so it fails at once instead of being retried until its
+  delivery timeout; a new epoch (which restarts the sequences)
+  leaves the entry behind.
+  -}
+  , senderRefreshMetadata :: !(IORef ([Text] -> IO ()))
+  {- ^ Refreshes the metadata for some topics; called when a
+  batch's leader is unknown or has moved. Set by the producer
+  (it owns the connections the refresh goes through).
+  -}
+  , senderOnSequenceLost :: !(IORef (BA.ProducerBatch -> IO ()))
+  {- ^ Called when an idempotent or transactional batch fails for
+  good, leaving a gap in its partition's sequence: the producer
+  bumps its epoch (KIP-360), at once for an idempotent producer,
+  with the abort for a transactional one.
+  -}
+  }
+
+
+-- | A batch due to be sent again at 'reDueMs'.
+data RetryEntry = RetryEntry
+  { reDueMs :: {-# UNPACK #-} !Int64
+  , reBatch :: !BA.ProducerBatch
+  }
+
+
+-- | Where a partition's sequence was lost: see 'senderLostSequences'.
+data LostSequence = LostSequence
+  { lsProducerId :: {-# UNPACK #-} !Int64
+  , lsEpoch :: {-# UNPACK #-} !Int16
+  , lsSequence :: {-# UNPACK #-} !Int32
   }
 
 
@@ -467,7 +506,10 @@ createSenderState accumulator metadata connManager connConfig retryConfig acks d
   correlationId <- newIORef 0
   txnIdVar <- newIORef Nothing
   brokerPipes <- newIORef HashMap.empty
-  rrCounter <- newIORef 0
+  retryQueue <- newTVarIO []
+  lostSeqs <- newTVarIO HashMap.empty
+  refresh <- newIORef (\_ -> pure ())
+  onLost <- newIORef (\_ -> pure ())
   -- Use the smaller of delivery timeout and 30 seconds for individual request timeout
   -- The delivery timeout covers all retries, while request timeout is per-request
   let requestTimeoutMs = min 30000 (fromIntegral deliveryTimeoutMs)
@@ -483,7 +525,6 @@ createSenderState accumulator metadata connManager connConfig retryConfig acks d
       , senderMaxInFlight = max 1 maxInFlight
       , senderConnsPerBroker = 16
       , senderBrokerPipes = brokerPipes
-      , senderRoundRobin = rrCounter
       , senderAcks = acks
       , senderTimeoutMs = requestTimeoutMs
       , senderDeliveryTimeoutMs = fromIntegral deliveryTimeoutMs
@@ -493,6 +534,10 @@ createSenderState accumulator metadata connManager connConfig retryConfig acks d
       , senderLogger = defaultLogger
       , senderVersionCache = versionCache
       , senderTransactionalId = txnIdVar
+      , senderRetryQueue = retryQueue
+      , senderLostSequences = lostSeqs
+      , senderRefreshMetadata = refresh
+      , senderOnSequenceLost = onLost
       }
 
 
@@ -527,20 +572,42 @@ senderLoop state@SenderState {..} = do
   if not shouldRun
     then return () -- Exit loop
     else do
-      -- Check for ready batches
+      -- Mark the sender busy /before/ taking anything off the
+      -- accumulator or the retry queue: from then until
+      -- 'sendBatches' has handed the batches to a pipe (or back to
+      -- the retry queue) they are nowhere else, and 'flushProducer'
+      -- / 'closeProducer' wait on (not hasReady) AND (not
+      -- senderBusy) AND nothing in flight or queued.
+      writeIORef senderBusy True
       hasReady <- BA.hasReadyBatches senderAccumulator
+      now <- KafkaTime.currentTimeMillis
+      -- A partition's queued batches go out together, in sequence
+      -- order, once every one of them is due: sending a later
+      -- batch ahead of an earlier one would only earn it
+      -- OUT_OF_ORDER_SEQUENCE_NUMBER.
+      due <- atomically $ do
+        q <- readTVar senderRetryQueue
+        let lastDue = HashMap.fromListWith max (map (\e -> (BA.batchTopicPartition (reBatch e), reDueMs e)) q)
+            ready e = HashMap.findWithDefault 0 (BA.batchTopicPartition (reBatch e)) lastDue <= now
+            (go, waiting) = partition ready q
+        writeTVar senderRetryQueue waiting
+        pure go
 
-      if hasReady
+      if hasReady || not (null due)
         then do
-          -- Mark the sender busy /before/ draining; the drain
-          -- removes batches from the accumulator queue but the
-          -- 'ProduceResponse' for them only lands inside
-          -- 'sendBatches' below. 'flushProducer' /
-          -- 'closeProducer' wait on (not hasReady) AND (not
-          -- senderBusy) so they don't return mid-flight.
-          writeIORef senderBusy True
-          batches <- BA.drainReadyBatches senderAccumulator
-          result <- try $ sendBatches state batches
+          fresh <- if hasReady then BA.drainReadyBatches senderAccumulator else pure []
+          -- A fresh batch for a partition that still has a retry
+          -- waiting goes after it, so the partition's batches
+          -- reach the broker in sequence order.
+          held <- atomically $ do
+            q <- readTVar senderRetryQueue
+            let waitingFor = HashMap.fromListWith max (map (\e -> (BA.batchTopicPartition (reBatch e), reDueMs e)) q)
+                (behind, go) = partition (\b -> HashMap.member (BA.batchTopicPartition b) waitingFor) fresh
+                queued = map (\b -> RetryEntry (HashMap.findWithDefault 0 (BA.batchTopicPartition b) waitingFor) b) behind
+            writeTVar senderRetryQueue (q ++ queued)
+            pure go
+          let retried = sortBy (comparing (\b -> (BA.batchTopicPartition b, BA.batchBaseSequence b))) (map reBatch due)
+          result <- try $ sendBatches state (retried ++ held)
           writeIORef senderBusy False
           case result of
             Left (e :: SomeException) ->
@@ -550,6 +617,7 @@ senderLoop state@SenderState {..} = do
             Right () -> return ()
           senderLoop state
         else do
+          writeIORef senderBusy False
           threadDelay 10000 -- 10ms
           senderLoop state
 
@@ -577,31 +645,32 @@ request, which is the librdkafka /
 @max.in.flight.requests.per.connection@ model.
 -}
 sendBatches :: SenderState -> [BA.ProducerBatch] -> IO ()
-sendBatches state@SenderState {..} batches = do
-  batchesByBroker <- groupBatchesByBroker senderMetadata batches
+sendBatches state batches = do
+  batchesByBroker <- groupBatchesByBroker state batches
   forM_ (Map.toList batchesByBroker) $ \(broker, brokerBatches) -> do
     poolR <- ensureBrokerPool state broker
     case poolR of
       Left err ->
-        forM_ brokerBatches $ \batch ->
-          forM_ (BA.batchCallbacks batch) $ \cb ->
-            BA.runRecordCallback cb (Left (T.pack ("Failed to open broker pipe: " <> err)))
+        forM_ brokerBatches $ retryOrFail state (T.pack ("Failed to open broker pipe: " <> err))
       Right pool -> do
-        forM_ (roundsPerPartition brokerBatches) $ \roundBatches -> do
-          -- Round-robin across the pool's pipes so the writer
-          -- threads run in parallel on different sockets.
-          rr <- atomicModifyIORef' senderRoundRobin $
-            \k -> (k + 1, k)
-          let !pipes = bpPipes pool
-              !nPipes = V.length pipes
-              !pipe = pipes V.! (rr `mod` nPipes)
-          result <- try $ enqueueRound state pipe broker roundBatches
-          case result of
-            Left (e :: SomeException) ->
-              forM_ roundBatches $ \batch ->
-                forM_ (BA.batchCallbacks batch) $ \cb ->
-                  BA.runRecordCallback cb (Left ("Exception enqueueing batch: " <> T.pack (show e)))
-            Right () -> pure ()
+        -- Every batch of a partition goes down the same pipe: one
+        -- TCP connection delivers in order, so the partition's
+        -- batches reach the broker in sequence order (pipes are
+        -- for parallelism across partitions).
+        let !pipes = bpPipes pool
+            !nPipes = V.length pipes
+            byPipe =
+              HashMap.toList $
+                HashMap.fromListWith
+                  (flip (++))
+                  (map (\b -> (hash (BA.batchTopicPartition b) `mod` nPipes, [b])) brokerBatches)
+        forM_ byPipe $ \(ix, pipeBatches) ->
+          forM_ (roundsPerPartition pipeBatches) $ \roundBatches -> do
+            result <- try $ enqueueRound state (pipes V.! ix) broker roundBatches
+            case result of
+              Left (e :: SomeException) ->
+                forM_ roundBatches $ retryOrFail state ("Exception enqueueing batch: " <> T.pack (show e))
+              Right () -> pure ()
   where
     -- Split batches into rounds such that every (topic, partition)
     -- appears at most once per round. The k-th round contains the
@@ -673,7 +742,6 @@ enqueueRound state@SenderState {..} pipe (_broker :: Meta.BrokerMetadata) batche
             { ppCorrId = cid
             , ppApiVersion = apiVersion
             , ppBatches = valid
-            , ppMetaCache = senderMetadata
             }
         !out =
           OutboundProduce
@@ -840,8 +908,7 @@ brokerWriterLoop PipeBootstrap {..} = forever $ do
       -- whatever is already in flight; a subsequent request
       -- on this pipe will hit the broken socket and surface.
       let !errMsg = "Wire write failed: " <> T.pack (show (e :: SomeException))
-      forM_ (ppBatches (opPending out)) $ \batch ->
-        forM_ (BA.batchCallbacks batch) $ \cb -> BA.runRecordCallback cb (Left errMsg)
+      forM_ (ppBatches (opPending out)) $ retryOrFail pbsState errMsg
       atomically $ modifyTVar' pbsCount (subtract 1)
     Right () ->
       -- Single-producer-single-consumer hand-off from this
@@ -867,32 +934,26 @@ brokerReaderLoop pbs@PipeBootstrap {..} = do
       -- send).
       drained <- drainUnagi pbsInFlightOut
       forM_ drained $ \pp ->
-        forM_ (ppBatches pp) $ \batch ->
-          forM_ (BA.batchCallbacks batch) $ \cb ->
-            BA.runRecordCallback cb (Left ("Wire read failed: " <> T.pack (show (e :: SomeException))))
+        forM_ (ppBatches pp) $ retryOrFail pbsState ("Wire read failed: " <> T.pack (show (e :: SomeException)))
       atomically $ writeTVar pbsCount 0
       void (try (Conn.disconnect pbsConn) :: IO (Either SomeException ()))
+      -- Forget this broker's pool, so the retries open fresh pipes.
+      atomicModifyIORef' (senderBrokerPipes pbsState) $ \m -> (HashMap.delete pbsAddr m, ())
     Right raw -> do
       pp <- U.readChan pbsInFlightOut
       let parsed = Req.parseResponseFrame 0 (ppApiVersion pp) raw
       case parsed of
         Left err ->
-          forM_ (ppBatches pp) $ \batch ->
-            forM_ (BA.batchCallbacks batch) $ \cb ->
-              BA.runRecordCallback cb (Left ("Response decode error: " <> T.pack err))
+          forM_ (ppBatches pp) $ failBatch pbsState ("Response decode error: " <> T.pack err)
         Right (responseCorrId, body)
           | responseCorrId /= ppCorrId pp ->
-              forM_ (ppBatches pp) $ \batch ->
-                forM_ (BA.batchCallbacks batch) $ \cb ->
-                  BA.runRecordCallback cb (Left "Correlation ID mismatch")
+              forM_ (ppBatches pp) $ failBatch pbsState "Correlation ID mismatch"
           | otherwise ->
               case WC.runDecodeVer @PResp.ProduceResponse (ppApiVersion pp) body of
                 Left err ->
-                  forM_ (ppBatches pp) $ \batch ->
-                    forM_ (BA.batchCallbacks batch) $ \cb ->
-                      BA.runRecordCallback cb (Left ("Failed to parse response: " <> T.pack err))
+                  forM_ (ppBatches pp) $ failBatch pbsState ("Failed to parse response: " <> T.pack err)
                 Right resp ->
-                  processProduceResponse (Just (ppMetaCache pp)) (ppBatches pp) resp
+                  processProduceResponse pbsState (ppBatches pp) resp
       atomically $ modifyTVar' pbsCount (subtract 1)
       brokerReaderLoop pbs
 
@@ -933,45 +994,88 @@ replying for them).
 senderTotalInFlight :: SenderState -> IO Int
 senderTotalInFlight SenderState {..} = do
   pools <- readIORef senderBrokerPipes
-  fmap sum $ forM (HashMap.elems pools) $ \BrokerPool {..} ->
+  queued <- length <$> readTVarIO senderRetryQueue
+  fmap ((+ queued) . sum) $ forM (HashMap.elems pools) $ \BrokerPool {..} ->
     fmap sum $ forM (V.toList bpPipes) $ \BrokerPipe {..} ->
       atomically (readTVar bpInFlightCount)
 
 
--- | Group batches by their target broker
+{- | Group batches by their target broker. A batch whose leader isn't
+known (a topic just created, a leader election) waits for a metadata
+refresh and is retried.
+-}
 groupBatchesByBroker
-  :: Meta.MetadataCache
+  :: SenderState
   -> [BA.ProducerBatch]
   -> IO (Map Meta.BrokerMetadata [BA.ProducerBatch])
-groupBatchesByBroker metadata batches = do
-  -- Look up leader for each batch's topic-partition
+groupBatchesByBroker state batches = do
   batchesWithBroker <- forM batches $ \batch -> do
     let tp = BA.batchTopicPartition batch
-        topic = BA.tpTopic tp
-        partition = BA.tpPartition tp
-
-    brokerM <- atomically $ Meta.getPartitionLeader metadata topic partition
+    brokerM <- atomically $ Meta.getPartitionLeader (senderMetadata state) (BA.tpTopic tp) (BA.tpPartition tp)
     return (brokerM, batch)
+  let unknown = map snd (filter (isNothing . fst) batchesWithBroker)
+  unless (null unknown) $ do
+    refresh <- readIORef (senderRefreshMetadata state)
+    refresh (Data.List.nub (map (BA.tpTopic . BA.batchTopicPartition) unknown))
+    forM_ unknown $ \batch -> do
+      let tp = BA.batchTopicPartition batch
+      retryOrFail state ("Unknown leader for topic " <> BA.tpTopic tp <> " partition " <> T.pack (show (BA.tpPartition tp))) batch
+  pure $
+    Map.fromListWith
+      (flip (++))
+      (mapMaybe (\(brokerM, batch) -> fmap (\b -> (b, [batch])) brokerM) batchesWithBroker)
 
-  -- Handle batches with unknown leaders by invoking error callbacks
-  let unknownLeaderBatches = [batch | (Nothing, batch) <- batchesWithBroker]
-  forM_ unknownLeaderBatches $ \batch -> do
-    let tp = BA.batchTopicPartition batch
-        errorMsg =
-          "Unknown leader for topic "
-            <> BA.tpTopic tp
-            <> " partition "
-            <> T.pack (show (BA.tpPartition tp))
-        callbacks = BA.batchCallbacks batch
-    forM_ callbacks $ \callback -> BA.runRecordCallback callback (Left errorMsg)
 
-  -- Group by broker, filtering out batches with unknown leaders
-  let validBatches = [(broker, batch) | (Just broker, batch) <- batchesWithBroker]
-      grouped =
-        groupBy (\(b1, _) (b2, _) -> b1 == b2) $
-          sortBy (comparing fst) validBatches
+{- | Send @batch@ again after its backoff, with its sequence numbers
+unchanged, unless it has run out of attempts or past its delivery
+timeout, or an earlier batch's sequence on its partition is lost; then
+fail it with @why@.
+-}
+retryOrFail :: SenderState -> Text -> BA.ProducerBatch -> IO ()
+retryOrFail state why batch = do
+  now <- KafkaTime.currentTimeMillis
+  lost <- sequenceLostBefore state batch
+  if lost || isBatchTimedOut now (senderDeliveryTimeoutMs state) batch || not (shouldRetry state batch)
+    then failBatch state why batch
+    else do
+      let tp = BA.batchTopicPartition batch
+      senderLogger state LogWarn $
+        "producer: retrying a batch to " <> BA.tpTopic tp <> "-" <> T.pack (show (BA.tpPartition tp))
+          <> " (attempt " <> T.pack (show (BA.batchAttempts batch + 1)) <> "): " <> why
+      let !entry = RetryEntry (now + fromIntegral (batchBackoffMs state batch)) (bumpBatchAttempts batch)
+      atomically $ modifyTVar' (senderRetryQueue state) (++ [entry])
 
-  return $ Map.fromList $ map (\g -> (fst (head g), map snd g)) grouped
+
+-- | Whether an earlier batch of @batch@'s partition, under its epoch, failed for good.
+sequenceLostBefore :: SenderState -> BA.ProducerBatch -> IO Bool
+sequenceLostBefore state batch
+  | BA.batchBaseSequence batch < 0 = pure False
+  | otherwise = do
+      m <- readTVarIO (senderLostSequences state)
+      pure $ case HashMap.lookup (BA.batchTopicPartition batch) m of
+        Just ls ->
+          lsProducerId ls == BA.batchProducerId batch
+            && lsEpoch ls == BA.batchProducerEpoch batch
+            && lsSequence ls < BA.batchBaseSequence batch
+        Nothing -> False
+
+
+{- | Fail every record of @batch@ with @why@. An idempotent or
+transactional batch leaves a gap in its partition's sequence: record
+it ('senderLostSequences') and tell the producer
+('senderOnSequenceLost').
+-}
+failBatch :: SenderState -> Text -> BA.ProducerBatch -> IO ()
+failBatch state why batch = do
+  when (BA.batchBaseSequence batch >= 0) $ do
+    let !ls = LostSequence (BA.batchProducerId batch) (BA.batchProducerEpoch batch) (BA.batchBaseSequence batch)
+        keepEarliest new old
+          | lsProducerId old == lsProducerId new && lsEpoch old == lsEpoch new = if lsSequence old <= lsSequence new then old else new
+          | otherwise = new
+    atomically $ modifyTVar' (senderLostSequences state) (HashMap.insertWith keepEarliest (BA.batchTopicPartition batch) ls)
+    onLost <- readIORef (senderOnSequenceLost state)
+    onLost batch
+  forM_ (BA.batchCallbacks batch) $ \cb -> BA.runRecordCallback cb (Left why)
 
 
 -- | Check if a batch has exceeded the delivery timeout (KIP-91)
@@ -1209,12 +1313,11 @@ request waits the broker-requested interval. This is the same
 behaviour the JVM client / librdkafka implement.
 -}
 processProduceResponse
-  :: Maybe Meta.MetadataCache
-  -- ^ Optional metadata cache for KIP-466 leader-cache patches
+  :: SenderState
   -> [BA.ProducerBatch]
   -> PResp.ProduceResponse
   -> IO ()
-processProduceResponse metaCacheM batches response = do
+processProduceResponse state batches response = do
   -- KIP-219 throttle. Negative / zero values are no-ops.
   let throttleMs = PResp.produceResponseThrottleTimeMs response
   when (throttleMs > 0) $
@@ -1252,19 +1355,18 @@ processProduceResponse metaCacheM batches response = do
       -- partition (>= 0), patch the metadata cache so the next
       -- produce goes to that broker without an extra
       -- MetadataRequest round-trip.
-      case metaCacheM of
-        Just cache
-          | curLeaderId >= 0 ->
-              atomically $
-                Meta.updatePartitionLeader cache topicName partitionId curLeaderId
-        _ -> pure ()
+      when (curLeaderId >= 0) $
+        atomically $
+          Meta.updatePartitionLeader (senderMetadata state) topicName partitionId curLeaderId
 
       let !key = BA.TopicPartition topicName partitionId
           matchingBatches = HashMap.lookupDefault [] key batchIndex
 
       -- Update batch state based on error code
       forM_ matchingBatches $ \batch -> do
-        if errorCode == 0
+        -- DUPLICATE_SEQUENCE_NUMBER: the broker already has this
+        -- batch (a retry of one whose response was lost).
+        if errorCode == 0 || errorCode == 46
           then do
             -- Success: complete each record callback with its
             -- assigned offset. We deliberately don't log on every
@@ -1305,19 +1407,20 @@ processProduceResponse metaCacheM batches response = do
                           }
                   f (Right meta)
           else do
-            hPutStrLn
-              stderr
-              ( "[error] producer: error sending batch to "
-                  <> T.unpack topicName
-                  <> " partition "
-                  <> show partitionId
-                  <> ": error code "
-                  <> show errorCode
-              )
-            let callbacks = BA.batchCallbacks batch
-                errorMsg = "Kafka error: " <> T.pack (show errorCode)
-            forM_ callbacks $ \callback -> do
-              BA.runRecordCallback callback (Left errorMsg)
+            let why = "Kafka error: " <> T.pack (show errorCode) <> " (" <> RC.errorMessage errorCode <> ")"
+                -- OUT_OF_ORDER_SEQUENCE_NUMBER: an earlier batch of
+                -- this partition hasn't landed yet (it is being
+                -- retried); 'retryOrFail' gives up at once if that
+                -- earlier batch is lost.
+                retriable = RC.isRetriable errorCode || (errorCode == 45 && BA.batchBaseSequence batch >= 0)
+            when (errorCode `elem` [3, 5, 6, 74, 75]) $ do
+              refresh <- readIORef (senderRefreshMetadata state)
+              refresh [topicName]
+            if retriable
+              then retryOrFail state why batch
+              else do
+                senderLogger state LogError ("producer: batch to " <> topicName <> "-" <> T.pack (show partitionId) <> " failed: " <> why)
+                failBatch state why batch
 
 
 -- | Extract text from a KafkaString

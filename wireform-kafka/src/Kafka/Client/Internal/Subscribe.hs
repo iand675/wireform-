@@ -266,7 +266,8 @@ subscribeFlow
               Left err -> pure (Left ("connect: " <> err))
               Right conn -> do
                 cid <- nextCorrId
-                Meta.refreshTopicMetadata conn metaCache (Just topics) cid
+                Conn.withBrokerLock connMgr addr $
+                  Meta.refreshTopicMetadata conn metaCache (Just topics) cid
           _ -> pure (Left "no brokers in metadata cache (call createConsumer first)")
 
       withBootstrapBroker k = do

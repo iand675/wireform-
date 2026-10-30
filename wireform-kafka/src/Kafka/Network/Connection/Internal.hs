@@ -18,6 +18,7 @@ module Kafka.Network.Connection.Internal (
   connectionClose,
 ) where
 
+import Control.Concurrent.MVar (MVar)
 import Control.Exception (SomeException, throwIO, try)
 import Data.Bits ((.&.))
 import Data.ByteString (ByteString)
@@ -50,6 +51,11 @@ data Connection = Connection
   , connCtx :: !(Maybe SslCtx)
   , connCursor :: !(IORef Word64)
   , connClosed :: !(IORef Bool)
+  , connRequestLock :: !(MVar ())
+  {- ^ Held across one request's send and its response's receive
+  ('Kafka.Client.Internal.Request.sendRequestReceiveResponse'), so
+  callers sharing the connection never read each other's responses.
+  -}
   }
 
 

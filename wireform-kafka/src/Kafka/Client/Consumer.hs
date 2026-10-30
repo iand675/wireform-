@@ -2202,7 +2202,7 @@ fetchRecords consumer@Consumer {..} partitions timeoutMs = do
           corrId <- atomicModifyIORef' consumerCorrelationId $ \cid -> (cid + 1, cid)
 
           -- Refresh metadata for these topics
-          refreshResult <- Meta.refreshTopicMetadata conn consumerMetadata (Just topics) corrId
+          refreshResult <- Conn.withBrokerLock consumerConnManager brokerAddr $ Meta.refreshTopicMetadata conn consumerMetadata (Just topics) corrId
           case refreshResult of
             Left err -> return $ Left $ "Failed to refresh metadata: " ++ err
             Right _ -> do
@@ -3337,7 +3337,8 @@ queryPartitionOffsetsByTimestampFull consumer@Consumer {..} pts0 = do
             Left err -> pure (Left err)
             Right conn -> do
               corrId <- atomicModifyIORef' consumerCorrelationId $ \cid -> (cid + 1, cid)
-              Meta.refreshTopicMetadata conn consumerMetadata (Just topics) corrId
+              Conn.withBrokerLock consumerConnManager addr $
+                Meta.refreshTopicMetadata conn consumerMetadata (Just topics) corrId
         _ -> pure (Left "no brokers in the metadata cache")
 
     -- One ListOffsets round trip to one broker, every partition's

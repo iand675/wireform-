@@ -153,7 +153,12 @@ tests :: Spec
 tests =
   describe "Metadata" $
     sequence_
-      [ describe "Metadata Cache" $
+      [ describe "applyMetadataResponse" $
+          sequence_
+            [ it "a refresh for some topics keeps the others, the response's topics winning" prop_scopedRefreshMerges
+            , it "a refresh for all topics replaces the cache" prop_fullRefreshReplaces
+            ]
+      , describe "Metadata Cache" $
           sequence_
             [ it "Create empty cache" unit_createMetadataCache
             , it "Empty cache returns Nothing" prop_emptyCacheReturnsNothing
@@ -169,3 +174,24 @@ tests =
             , it "Get all brokers from empty cache" prop_getAllBrokersEmpty
             ]
       ]
+
+
+prop_scopedRefreshMerges :: Property
+prop_scopedRefreshMerges = property $ do
+  old <- forAll genClusterMetadata
+  new <- forAll genClusterMetadata
+  let got = applyMetadataResponse True new (Just old)
+  clusterBrokers got === clusterBrokers new
+  clusterControllerId got === clusterControllerId new
+  -- every topic the response carries, as it carries it
+  Map.intersection (clusterTopics got) (clusterTopics new) === clusterTopics new
+  -- and every other topic the cache had, untouched
+  Map.difference (clusterTopics got) (clusterTopics new) === Map.difference (clusterTopics old) (clusterTopics new)
+
+
+prop_fullRefreshReplaces :: Property
+prop_fullRefreshReplaces = property $ do
+  old <- forAll genClusterMetadata
+  new <- forAll genClusterMetadata
+  applyMetadataResponse False new (Just old) === new
+  applyMetadataResponse True new Nothing === new

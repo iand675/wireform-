@@ -233,14 +233,14 @@ module Kafka.Client.Producer (
   dispatchEnhanced,
 ) where
 
-import Control.Concurrent (threadDelay)
+import Control.Concurrent (forkIO, threadDelay)
 import GHC.Clock (getMonotonicTimeNSec)
 import Control.Concurrent.Async (Async)
 import Control.Concurrent.Async qualified as Async
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar)
 import Control.Concurrent.STM
-import Control.Exception (SomeException, bracket, throwIO, try)
-import Control.Monad (when)
+import Control.Exception (SomeException, bracket, finally, throwIO, try)
+import Control.Monad (void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.IO.Unlift (MonadUnliftIO, withRunInIO)
 import Data.ByteString (ByteString)
@@ -710,6 +710,10 @@ data Producer = Producer
   {- ^ Per-(topic, partition) next sequence number to stamp
   onto the next batch's 'batchBaseSequence'. KIP-98.
   -}
+  , producerSequenceEpoch :: !(TVar ProducerIdAndEpoch)
+  {- ^ The producer id and epoch 'producerSequenceNumbers' count
+  under: sequences start over at 0 with every new epoch (KIP-360).
+  -}
   , producerTransaction :: !(TVar (Maybe Txn.Transaction))
   {- ^ When 'Just', the producer is bound to a 'Txn.Transaction'
   and 'sendMessage' participates in its KIP-98 / KIP-447
@@ -997,12 +1001,12 @@ createProducer' brokerAddrs config connConfig = do
       idempotentPid <- newTVarIO RB.noProducerId
       idempotentEpoch <- newTVarIO RB.noProducerEpoch
       sequenceNumbers <- StmMap.newIO
+      sequenceEpoch <- newTVarIO (ProducerIdAndEpoch RB.noProducerId RB.noProducerEpoch)
       transaction <- newTVarIO Nothing
+      refreshing <- newIORef False
 
-      -- Return producer handle
-      return $
-        Right
-          Producer
+      let p =
+            Producer
             { producerConfig = config
             , producerMetadata = metadataCache
             , producerAccumulator = accumulator
@@ -1017,8 +1021,18 @@ createProducer' brokerAddrs config connConfig = do
             , producerIdempotentId = idempotentPid
             , producerIdempotentEpoch = idempotentEpoch
             , producerSequenceNumbers = sequenceNumbers
+            , producerSequenceEpoch = sequenceEpoch
             , producerTransaction = transaction
             }
+      -- The sender refreshes metadata through the producer's
+      -- connections, one refresh at a time, off its own threads.
+      writeIORef (Sender.senderRefreshMetadata senderState) $ \topics -> do
+        go <- atomicModifyIORef' refreshing (\r -> (True, not r))
+        when go $
+          void . forkIO $
+            refreshTopicsOnDemand p topics `finally` writeIORef refreshing False
+      writeIORef (Sender.senderOnSequenceLost senderState) (sequenceLost p)
+      return (Right p)
 
 
 -- | Parse broker address in "host:port" format
@@ -1874,17 +1888,22 @@ fullPreSendCheck p@Producer {..} topic key mExplicit mTxn = do
         Right () -> do
           -- 3. Allocate sequence + producer-id stamp.
           stamp <- atomically $ do
-            curM <- StmMap.lookup tp producerSequenceNumbers
-            let !cur = case curM of
-                  Just s -> s
-                  Nothing -> 0
-            StmMap.insert (cur + 1) tp producerSequenceNumbers
             (pid, ep) <- case txnInfo of
               Just (_, pid', ep') -> return (pid', ep')
               Nothing -> do
                 pid' <- readTVar producerIdempotentId
                 ep' <- readTVar producerIdempotentEpoch
                 return (pid', ep')
+            -- A new producer id or epoch starts the sequences over.
+            known <- readTVar producerSequenceEpoch
+            when (known /= ProducerIdAndEpoch pid ep) $ do
+              StmMap.reset producerSequenceNumbers
+              writeTVar producerSequenceEpoch (ProducerIdAndEpoch pid ep)
+            curM <- StmMap.lookup tp producerSequenceNumbers
+            let !cur = case curM of
+                  Just s -> s
+                  Nothing -> 0
+            StmMap.insert (cur + 1) tp producerSequenceNumbers
             return
               BA.BatchStamp
                 { BA.stampProducerId = pid
@@ -2382,7 +2401,12 @@ because the caller falls back to partition 0 + sender-side
 retry on failure.
 -}
 refreshTopicOnDemand :: Producer -> Text -> IO ()
-refreshTopicOnDemand Producer {..} topic = do
+refreshTopicOnDemand p topic = refreshTopicsOnDemand p [topic]
+
+
+-- | 'refreshTopicOnDemand' for several topics in one request.
+refreshTopicsOnDemand :: Producer -> [Text] -> IO ()
+refreshTopicsOnDemand Producer {..} topics = do
   brokersM <- atomically (Meta.getAllBrokers producerMetadata)
   case brokersM of
     Just (b : _) -> do
@@ -2397,16 +2421,41 @@ refreshTopicOnDemand Producer {..} topic = do
           -- Reuse the sender's correlation-id source so we
           -- don't tread on its in-flight numbering.
           cid <- atomicModifyIORef' (Sender.senderCorrelationId producerSenderState) $ \n -> (n + 1, n)
+          -- The connection is shared: one request on it at a time.
           _ <-
-            Meta.refreshTopicMetadataWith
-              (producerAllowAutoCreateTopics producerConfig)
-              conn
-              producerMetadata
-              (Just [topic])
-              cid
+            Conn.withBrokerLock producerConnManager addr $
+              Meta.refreshTopicMetadataWith
+                (producerAllowAutoCreateTopics producerConfig)
+                conn
+                producerMetadata
+                (Just topics)
+                cid
           pure ()
         Left _ -> pure ()
     _ -> pure ()
+
+
+{- | A producer id and epoch: what a producer's sequence numbers are
+counted under.
+-}
+data ProducerIdAndEpoch = ProducerIdAndEpoch {-# UNPACK #-} !Int64 {-# UNPACK #-} !Int16
+  deriving stock (Eq)
+
+
+{- | The sender lost a batch of @batch@'s partition for good, leaving a
+gap in its sequence. A transactional batch: the open transaction can
+only abort, and its abort bumps the epoch. An idempotent one: bump the
+epoch here (KIP-360 lets an idempotent producer do that itself), so
+the next batches start a fresh sequence.
+-}
+sequenceLost :: Producer -> BA.ProducerBatch -> IO ()
+sequenceLost Producer {..} batch
+  | BA.batchIsTransactional batch = readTVarIO producerTransaction >>= mapM_ Txn.markSendFailed
+  | otherwise = atomically $ do
+      pid <- readTVar producerIdempotentId
+      ep <- readTVar producerIdempotentEpoch
+      when (pid >= 0 && pid == BA.batchProducerId batch && ep == BA.batchProducerEpoch batch && ep < maxBound) $
+        writeTVar producerIdempotentEpoch (ep + 1)
 
 
 {- | Hash-based partitioning using Kafka's murmur2 variant.

@@ -46,6 +46,7 @@ module Kafka.Client.Metadata (
   refreshMetadata,
   refreshTopicMetadata,
   refreshTopicMetadataWith,
+  applyMetadataResponse,
 
   -- * KIP-466 client-side leader cache update
   updatePartitionLeader,
@@ -63,6 +64,7 @@ import Data.HashMap.Strict qualified as HashMap
 import Data.Int
 import Data.IntMap.Strict (IntMap)
 import Data.IntMap.Strict qualified as IntMap
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Vector qualified as V
@@ -410,9 +412,22 @@ refreshTopicMetadataWith autoCreate conn (MetadataCache metaVar) topicsM correla
           Right response -> do
             -- Parse metadata from response
             let metadata = parseMetadataResponse response
-            -- Store in cache
-            atomically $ writeTVar metaVar (Just metadata)
+            -- An all-topics refresh replaces the cache; one for some
+            -- topics updates those and keeps the rest (brokers and
+            -- controller come from the response either way).
+            atomically $ modifyTVar' metaVar (Just . applyMetadataResponse (isJust topicsM) metadata)
             return $ Right ()
+
+
+{- | The cache after a metadata response: one for all topics
+replaces it; one for some topics (@scoped@) updates those and keeps
+the others, with the brokers, controller and cluster id from the
+response either way.
+-}
+applyMetadataResponse :: Bool -> ClusterMetadata -> Maybe ClusterMetadata -> ClusterMetadata
+applyMetadataResponse scoped new old = case old of
+  Just prev | scoped -> new {clusterTopics = HashMap.union (clusterTopics new) (clusterTopics prev)}
+  _ -> new
 
 
 -- | Parse metadata response into our internal format

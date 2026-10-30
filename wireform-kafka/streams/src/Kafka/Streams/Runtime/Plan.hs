@@ -41,6 +41,7 @@ module Kafka.Streams.Runtime.Plan (
   resolvePatternTopics,
 ) where
 
+import Control.Concurrent (threadDelay)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.List (sort)
@@ -59,6 +60,7 @@ import Kafka.Streams.Topology.Subtopology
 import Kafka.Streams.Types (topicName, unTopicName)
 import Text.Regex.TDFA (Regex, makeRegexM, matchTest)
 import Text.Regex.TDFA.Text ()
+import GHC.Clock (getMonotonicTimeNSec)
 
 
 -- | One subtopology, ready to instantiate as tasks.
@@ -307,7 +309,22 @@ buildRuntimePlan appId replication drv valid = do
         | otherwise -> do
             let wanted = filter ((> 0) . nitPartitions) (repartitionTopics <> changelogTopics)
             eCreate <- sdCreateTopics drv wanted
-            eDesc <- sdDescribeTopics drv (map nitName wanted)
+            -- A topic the controller has just created takes a moment
+            -- to reach every broker's metadata: describe until all
+            -- of them show up (or 30 s pass).
+            let describeAll deadline delayUs = do
+                  r <- sdDescribeTopics drv (map nitName wanted)
+                  now <- getMonotonicTimeNSec
+                  case r of
+                    Right got
+                      | any (\nt -> Map.notMember (nitName nt) got) wanted && now < deadline -> do
+                          threadDelay delayUs
+                          describeAll deadline (min 1_000_000 (2 * delayUs))
+                    _ -> pure r
+            start <- getMonotonicTimeNSec
+            eDesc <- case eCreate of
+              Left _ -> pure (Right Map.empty)
+              Right () -> describeAll (start + 30_000_000_000) 50_000
             case (eCreate, eDesc) of
               (Left e, _) -> pure (Left ("create internal topics: " <> T.pack e))
               (_, Left e) -> pure (Left ("describe internal topics: " <> T.pack e))

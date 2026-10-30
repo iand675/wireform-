@@ -671,6 +671,10 @@ readRecords
   -> Ptr Word8
   -> IO (V.Vector Record)
 readRecords fp basePtr n start endPtr = do
+  -- A record takes at least a byte: more than the bytes left is a
+  -- corrupt count, refused before it sizes an allocation.
+  when (n > endPtr `minusPtr` start) $
+    errOut ("record count " ++ show n ++ " exceeds the " ++ show (endPtr `minusPtr` start) ++ "-byte body")
   mv <- MV.unsafeNew n
   let go !i !p
         | i >= n = pure ()
@@ -1273,6 +1277,8 @@ readSlicedRecords
        , VU.Vector (Int32, Int32) -- header value (offset, length)
        )
 readSlicedRecords basePtr n start endPtr = do
+  when (n > endPtr `minusPtr` start) $
+    errOut ("record count " ++ show n ++ " exceeds the " ++ show (endPtr `minusPtr` start) ++ "-byte body")
   mvOff <- VUM.unsafeNew n
   mvTs <- VUM.unsafeNew n
   mvKey <- VUM.unsafeNew n

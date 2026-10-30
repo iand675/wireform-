@@ -81,6 +81,7 @@ module Kafka.Client.Transaction (
   -- * Transactional sends
   sendInTransaction,
   registerPartition,
+  markSendFailed,
   sendOffsetsToTransaction,
 
   -- * Types
@@ -204,6 +205,12 @@ data Transaction = Transaction
   {- ^ Partitions whose @AddPartitionsToTxn@ is in flight
   ('registerPartition'); a concurrent first send to one waits for it.
   -}
+  , txnEpochBumpNeeded :: !(IORef Bool)
+  {- ^ A record of the open transaction failed to send, leaving a
+  gap in its partition's sequence ('markSendFailed'): the transaction
+  can only be aborted, and the abort bumps the producer epoch
+  (KIP-360) so the sequences start over.
+  -}
   , txnStarted :: !(IORef Bool)
   {- ^ Whether the coordinator has this transaction open: some
   @AddPartitionsToTxn@ or @AddOffsetsToTxn@ succeeded since
@@ -298,6 +305,7 @@ createTransaction transactionalId connMgr connConfig versionCache clientId boots
   partitions <- newTVarIO HashSet.empty
   pending <- newTVarIO HashSet.empty
   started <- newIORef False
+  bumpNeeded <- newIORef False
   sequences <- newTVarIO HashMap.empty
   coordinator <- newIORef Nothing
   correlationId <- newIORef 0
@@ -310,6 +318,7 @@ createTransaction transactionalId connMgr connConfig versionCache clientId boots
       , txnPartitions = partitions
       , txnPendingPartitions = pending
       , txnStarted = started
+      , txnEpochBumpNeeded = bumpNeeded
       , txnSequenceNumbers = sequences
       , txnCoordinator = coordinator
       , txnConnectionManager = connMgr
@@ -512,7 +521,11 @@ beginTransaction txn = liftIO $ do
 commitTransaction :: MonadIO m => Transaction -> m (Either TransactionError ())
 commitTransaction txn = liftIO $ do
   state <- getTransactionState txn
+  sendFailed <- readIORef (txnEpochBumpNeeded txn)
   case state of
+    InTransaction
+      | sendFailed ->
+          return $ Left $ TransactionAborted "a record of this transaction failed to send: abort it"
     InTransaction -> do
       success <- transitionState txn Committing
       if success
@@ -575,7 +588,11 @@ abortTransaction txn = liftIO $ do
 
               -- End transaction with commit=false (abort)
               endResult <- endTransactionWithRetry txn transactionalId pid epoch False
-              case endResult of
+              bumpNeeded <- readIORef (txnEpochBumpNeeded txn)
+              bumped <- case endResult of
+                Right () | bumpNeeded -> bumpEpoch txn transactionalId pid epoch
+                _ -> pure endResult
+              case bumped of
                 Left err -> failEnd txn InTransaction err
                 Right () -> do
                   writeIORef (txnState txn) Aborted
@@ -591,6 +608,43 @@ abortTransaction txn = liftIO $ do
     Error msg -> return $ Left $ UnknownTransactionError msg
     Fenced -> return $ Left $ ProducerFenced "Producer has been fenced"
     _ -> return $ Left $ InvalidStateTransition state Aborting
+
+
+{- | KIP-360: after aborting a transaction that lost a send, ask the
+coordinator for a new epoch of the same producer id
+(@InitProducerId@ with the current id and epoch), so the
+producer's sequence numbers start over rather than every later
+batch being rejected as out of order.
+-}
+bumpEpoch :: Transaction -> Text -> Int64 -> Int16 -> IO (Either TC.TransactionCoordinatorError ())
+bumpEpoch txn transactionalId pid epoch = do
+  r <- withCoordinatorRetry txn $ \coordinator ->
+    TC.initProducerId
+      (txnConnectionManager txn)
+      (txnConnConfig txn)
+      (txnVersionCache txn)
+      (txnCorrelationId txn)
+      (txnClientId txn)
+      coordinator
+      (Just transactionalId)
+      (txnTimeoutMs txn)
+      (Just pid)
+      (Just epoch)
+  case r of
+    Left err -> pure (Left err)
+    Right (pid', epoch') -> do
+      writeIORef (txnProducerId txn) (Just (ProducerId pid'))
+      writeIORef (txnProducerEpoch txn) (Just (ProducerEpoch epoch'))
+      writeIORef (txnEpochBumpNeeded txn) False
+      pure (Right ())
+
+
+{- | A record of the open transaction failed to send for good (the
+producer calls this): the transaction can't commit, and its abort
+bumps the epoch.
+-}
+markSendFailed :: Transaction -> IO ()
+markSendFailed txn = writeIORef (txnEpochBumpNeeded txn) True
 
 
 {- | Send a request to the transaction coordinator with the JVM

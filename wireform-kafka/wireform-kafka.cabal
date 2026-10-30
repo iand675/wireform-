@@ -735,6 +735,7 @@ test-suite wireform-kafka-streams-integration
     hs-source-dirs: streams/test-integration
     ghc-options: -threaded -rtsopts -with-rtsopts=-N
     other-modules:
+        Streams.Integration.Live
         Streams.Integration.NativeDriver
         Streams.Integration.RoundTrip
     -- Skipped at run time unless WIREFORM_KAFKA_BROKER=host:port is set.
@@ -745,7 +746,9 @@ test-suite wireform-kafka-streams-integration
         bytestring,
         containers,
         sydtest,
-        text
+        temporary,
+        text,
+        time
 
 executable wireform-kafka-client-examples
     import: defaults

@@ -40,7 +40,9 @@ import Data.Int (Int16, Int32)
 import Foreign.ForeignPtr (mallocForeignPtrBytes, withForeignPtr)
 import Foreign.Ptr (plusPtr)
 import GHC.IO (unsafePerformIO)
+import Control.Concurrent.MVar (withMVar)
 import Kafka.Network.Connection.Internal (Connection, connectionGet, connectionPut)
+import Kafka.Network.Connection.Internal qualified as I
 import Wireform.Builder qualified as WB
 import "wireform-kafka-protocol" Kafka.Protocol.Generated.RequestHeader qualified as RH
 import "wireform-kafka-protocol" Kafka.Protocol.Primitives qualified as P
@@ -542,8 +544,12 @@ sendRequestReceiveResponse
   -> IO (Either String (Int32, ByteString))
 sendRequestReceiveResponse conn apiKey apiVersion correlationId clientId requestBody = do
   let framedRequest = frameRequest apiKey apiVersion correlationId clientId requestBody
-  sendRawRequest conn framedRequest
-  response <- receiveRawResponse conn
+  -- One request in flight per shared connection: whoever sends
+  -- reads the next response, so the pair must not interleave with
+  -- another caller's.
+  response <- withMVar (I.connRequestLock conn) $ \_ -> do
+    sendRawRequest conn framedRequest
+    receiveRawResponse conn
   return $ parseResponseFrame apiKey apiVersion response
 
 

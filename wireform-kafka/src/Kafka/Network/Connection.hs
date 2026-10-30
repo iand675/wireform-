@@ -442,6 +442,7 @@ buildPlainConnection sock = do
   duplex <- newDuplexTransport cfg sock
   cursor <- newIORef 0
   closed <- newIORef False
+  reqLock <- newMVar ()
   pure
     I.Connection
       { I.connDuplex = duplex
@@ -450,6 +451,7 @@ buildPlainConnection sock = do
       , I.connCtx = Nothing
       , I.connCursor = cursor
       , I.connClosed = closed
+      , I.connRequestLock = reqLock
       }
 
 
@@ -463,6 +465,7 @@ buildTlsConnection sock ctx sslConn = do
   duplex <- newTlsDuplexTransport cfg sslConn
   cursor <- newIORef 0
   closed <- newIORef False
+  reqLock <- newMVar ()
   pure
     I.Connection
       { I.connDuplex = duplex
@@ -471,6 +474,7 @@ buildTlsConnection sock ctx sslConn = do
       , I.connCtx = Just ctx
       , I.connCursor = cursor
       , I.connClosed = closed
+      , I.connRequestLock = reqLock
       }
 
 

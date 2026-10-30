@@ -29,6 +29,7 @@
 module Main (main) where
 
 import Control.Concurrent.Async (withAsync)
+import Control.Concurrent.MVar (newMVar)
 import Control.Exception (throwIO)
 import Control.Monad (when)
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
@@ -131,6 +132,7 @@ kafkaWorkload l =
     dummy <- NS.socket NS.AF_INET NS.Stream NS.defaultProtocol
     cursor <- newIORef 0
     closed <- newIORef False
+    reqLock <- newMVar ()
     let conn =
           Connection
             { connDuplex = leDuplex (slClient l)
@@ -139,6 +141,7 @@ kafkaWorkload l =
             , connCtx = Nothing
             , connCursor = cursor
             , connClosed = closed
+            , connRequestLock = reqLock
             }
     cache <- createVersionCache
     result <- negotiateVersions conn (BrokerAddress "sim" 9092) cache 1
