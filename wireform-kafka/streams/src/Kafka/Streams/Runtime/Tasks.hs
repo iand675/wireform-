@@ -163,7 +163,7 @@ import Kafka.Streams.Topology.Subtopology (ChangelogTopic (..))
 import Kafka.Streams.Types (topicName, unTopicName)
 import System.Directory (createDirectoryIfMissing, removePathForcibly)
 import System.FilePath ((</>))
-import System.IO (hPutStrLn, stderr)
+import Kafka.Streams.Internal.Log qualified as SLog
 
 
 ----------------------------------------------------------------------
@@ -349,8 +349,6 @@ eos :: TaskManager -> Bool
 eos tm = tmcGuarantee (tmCfg tm) == ExactlyOnceV2
 
 
-logLine :: String -> IO ()
-logLine = hPutStrLn stderr . ("[streams] " <>)
 
 
 taskName :: TaskId -> Text
@@ -815,7 +813,7 @@ checkpointStandby sb = do
 closeStandby :: TaskManager -> Standby -> IO ()
 closeStandby _tm sb = do
   r <- try (checkpointStandby sb >> closeEngine (sbEngine sb)) :: IO (Either SomeException ())
-  either (\e -> logLine ("closing standby " <> T.unpack (taskName (sbTask sb)) <> ": " <> show e)) pure r
+  either (\e -> SLog.logWarn ("closing standby " <> T.unpack (taskName (sbTask sb)) <> ": " <> show e)) pure r
 
 
 -- | A task's local state against its changelogs.
@@ -1145,7 +1143,7 @@ commitOnce tm = do
       forM_ (reverse errs) $ \(tp, e) -> do
         resp <- runProductionHandler h ProductionException {topic = tp, reason = T.pack e}
         case resp of
-          ProdContinueProcessing -> logLine ("dropped a record for " <> T.unpack tp <> ": " <> e)
+          ProdContinueProcessing -> SLog.logWarn ("dropped a record for " <> T.unpack tp <> ": " <> e)
           ProdFailFast -> throwIO (StreamsException ("send to " <> tp <> " failed: " <> T.pack e) (Just "production"))
       prepareCycle tm >>= \case
         Left why -> abortAndRecover Nothing why
@@ -1169,7 +1167,7 @@ commitOnce tm = do
       (_, _, (tp, e) : _) -> Just ("send to " <> tp <> ": " <> T.pack e)
       _ -> Nothing
     abortAndRecover mCycle why = do
-      logLine ("commit aborted, recovering every task: " <> T.unpack why)
+      SLog.logWarn ("commit aborted, recovering every task: " <> T.unpack why)
       forM_ mCycle $ \c -> forM_ (tmcParticipants (tmCfg tm)) (\p -> cpAbort p (renderCycleId c))
       tmRecoverAll tm
       pure (CommitAborted why)
@@ -1339,7 +1337,7 @@ purgeRepartitions tm running = do
       pure (filter (\(tp, _) -> Set.member tp.topic repartition) (Map.toList c))
     unless (null offs) $ do
       r <- sdDeleteRecords (tmDriver tm) offs
-      either (\e -> logLine ("purging repartition topics failed: " <> e)) pure r
+      either (\e -> SLog.logWarn ("purging repartition topics failed: " <> e)) pure r
 
 
 ----------------------------------------------------------------------
@@ -1363,7 +1361,7 @@ tmRecoverAll tm = do
         Left e -> do
           -- A producer that can't abort is re-initialised, which
           -- aborts the transaction on the broker.
-          logLine ("abort failed (" <> e <> "); re-initialising the transactional producer")
+          SLog.logError ("abort failed (" <> e <> "); re-initialising the transactional producer")
           ri <- sdInitTransactions drv
           either (\e' -> throwIO (StreamsException ("cannot re-initialise transactions: " <> T.pack e') (Just "eos"))) pure ri
     _ <- swapMVar (tmTxnOpen tm) False
@@ -1436,7 +1434,7 @@ closeTask tm clean t = do
   when (clean && st == Running) (checkpoint tm t)
   engine <- readIORef (taskEngine t)
   r <- try (closeEngine engine) :: IO (Either SomeException ())
-  either (\e -> logLine ("closing task " <> T.unpack (taskName (taskId t)) <> ": " <> show e)) pure r
+  either (\e -> SLog.logWarn ("closing task " <> T.unpack (taskName (taskId t)) <> ": " <> show e)) pure r
   -- dirty state must not be trusted by the next owner on this machine
   unless clean (removePathForcibly (taskDir t))
   atomicModifyIORef' (tmTasks tm) (\m -> (Map.delete (taskId t) m, ()))

@@ -45,10 +45,9 @@ module Kafka.Client.RebalanceListener (
 
 import Control.Exception (SomeException, try)
 import Data.Text qualified as T
-import Data.Text.IO qualified as TIO
 import GHC.Generics (Generic)
+import Kafka.Telemetry.Log qualified as KLog
 import Kafka.Client.Consumer (TopicPartition (..))
-import System.IO qualified as IO
 
 
 -- | Java's @ConsumerRebalanceListener@.
@@ -69,9 +68,9 @@ noopRebalanceListener =
     }
 
 
-{- | Listener that writes one line per event to stderr. Useful
-as a default during development; production should swap in a
-structured-logger variant.
+{- | Listener that emits one OpenTelemetry log record per event
+("Kafka.Telemetry.Log"), at info level, with the partitions as
+attributes.
 -}
 logRebalanceListener :: RebalanceListener
 logRebalanceListener =
@@ -82,9 +81,7 @@ logRebalanceListener =
     }
   where
     log_ tag tps =
-      TIO.hPutStrLn
-        IO.stderr
-        ("[rebalance] " <> tag <> " " <> T.pack (show tps))
+      KLog.logInfo KLog.kafkaInstrumentationLibrary ("consumer group: partitions " <> tag) [KLog.attrShow "messaging.kafka.partitions" tps]
 
 
 combineListeners :: RebalanceListener -> RebalanceListener -> RebalanceListener

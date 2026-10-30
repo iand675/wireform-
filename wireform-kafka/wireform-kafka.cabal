@@ -398,6 +398,7 @@ library
         Kafka.Protocol.Wire.Codec
         Kafka.Protocol.Wire.Primitives
         Kafka.Protocol.Wire.SliceVector
+        Kafka.Telemetry.Log
         Kafka.Telemetry.Metrics
         Kafka.Telemetry.OpenTelemetry
         Kafka.Telemetry.Push
@@ -423,7 +424,7 @@ library
         directory                 >= 1.3   && < 1.4,
         filepath                  >= 1.4   && < 1.6,
         hashable                  >= 1.3   && < 1.6,
-        hs-opentelemetry-api      >= 0.2   && < 1.1,
+        hs-opentelemetry-api      >= 1.0   && < 1.1,
         http-types                >= 0.12  && < 0.13,
         list-t                    >= 1.0   && < 1.1,
         memory                    >= 0.18  && < 0.19,
@@ -502,6 +503,7 @@ library wireform-kafka-streams
         Kafka.Streams.State.Session.InMemory
         Kafka.Streams.Internal.RecordCollector
         Kafka.Streams.Internal.Engine
+        Kafka.Streams.Internal.Log
         Kafka.Streams.Internal.Text
         Kafka.Streams.Internal.Serdes
         Kafka.Streams.Internal.Changelog
@@ -567,7 +569,7 @@ library wireform-kafka-streams
     build-depends:
         base                      >= 4.20  && < 5,
         aeson                     >= 2.0   && < 2.4,
-        hs-opentelemetry-api      >= 0.2   && < 1.1,
+        hs-opentelemetry-api      >= 1.0   && < 1.1,
         async                     >= 2.2   && < 3,
         binary                    >= 0.8   && < 0.11,
         bytestring                >= 0.11  && < 0.13,
@@ -951,6 +953,7 @@ test-suite wireform-kafka-test
         Client.HeartbeatRejoinSpec
         Codegen.WireGeneratorSpec
         Client.ProducerRetrySpec
+        Client.TelemetryLogSpec
         Client.PipelineSpec
         Client.SubscribeSpec
         Network.ConnectionLivenessSpec
@@ -981,6 +984,7 @@ test-suite wireform-kafka-test
         Serde.ProtoBufSpec
         TestUtil.BrokerGate
     build-depends:
+        hs-opentelemetry-api,
         base,
         wireform-core,
         wireform-kafka,

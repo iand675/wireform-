@@ -27,6 +27,7 @@ module Kafka.Streams.Runtime.GlobalStore (
 ) where
 
 import Control.Concurrent.Async (Async, async, waitCatch)
+import Kafka.Streams.Internal.Log qualified as SLog
 import Control.Concurrent.STM
 import Control.Exception (SomeException, try)
 import Control.Monad (forM_, unless, when)
@@ -228,5 +229,5 @@ stopGlobalStore gs = do
     -- a failed thread may have applied part of a batch: don't certify it
     maybe (saveCheckpoint gs) (const (pure ())) failed
     closeEngine (gsEngine gs)
-  either (\e -> putStrLn ("[streams] closing global stores: " <> show (e :: SomeException))) pure r
+  either (\e -> SLog.logWarn ("closing global stores: " <> show (e :: SomeException))) pure r
   rdClose (gsReader gs)

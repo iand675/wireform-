@@ -74,6 +74,7 @@ module Kafka.Streams.Internal.Engine (
 ) where
 
 import Control.Exception (SomeException, throwIO, try)
+import Kafka.Streams.Internal.Log qualified as SLog
 import Control.Monad (forM, forM_, unless, when)
 import Data.ByteString (ByteString)
 import Data.HashSet (HashSet)
@@ -1342,7 +1343,7 @@ drainPreCommit engine = do
       case r of
         Right () -> pure ()
         Left e -> do
-          putStrLn ("[streams] pre-commit drain failed: " <> show e)
+          SLog.logError ("pre-commit drain failed: " <> show e)
           -- Re-throw so 'commitEngine' surfaces the failure to
           -- the runtime; EOS-mode runtimes will abort the
           -- transaction rather than commit an inconsistent
@@ -1357,8 +1358,8 @@ closeEngine engine = do
     eclose <- try (prClose pr) :: IO (Either SomeException ())
     case eclose of
       Left e ->
-        putStrLn $
-          "[streams] processor close failed ("
+        SLog.logWarn $
+          "processor close failed ("
             <> T.unpack (unProcessorName (prName pr))
             <> "): "
             <> show e
@@ -1368,8 +1369,8 @@ closeEngine engine = do
     eclose <- try (storeEntryClose se) :: IO (Either SomeException ())
     case eclose of
       Left e ->
-        putStrLn $
-          "[streams] store close failed ("
+        SLog.logWarn $
+          "store close failed ("
             <> T.unpack (unStoreName (storeEntryName se))
             <> "): "
             <> show e

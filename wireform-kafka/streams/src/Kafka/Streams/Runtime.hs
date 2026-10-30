@@ -177,7 +177,7 @@ import Kafka.Streams.Topology qualified as Topo
 import Kafka.Streams.Topology.Optimization (noOptimizations)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, removePathForcibly)
 import System.FilePath ((</>))
-import System.IO (hPutStrLn, stderr)
+import Kafka.Streams.Internal.Log qualified as SLog
 import System.Timeout (timeout)
 
 
@@ -263,7 +263,7 @@ newKafkaStreams cfg valid = do
       then pure valid
       else case Topo.validateTopology optimised of
         Right v -> pure v
-        Left e -> valid <$ logLine ("topology.optimization: the rewritten topology is invalid (" <> show e <> "); running it as built")
+        Left e -> valid <$ SLog.logWarn ("topology.optimization: the rewritten topology is invalid (" <> show e <> "); running it as built")
   s <- newTVarIO StreamsCreated
   running <- newIORef Nothing
   lis <- newIORef (\_ _ -> pure ())
@@ -329,7 +329,7 @@ startKafkaStreamsWith ks drv = do
   -- and restore from the changelogs.
   wiped <- prepareStateDir (processingGuarantee cfg) dir
   when wiped $
-    logLine ("no clean shutdown recorded in " <> dir <> " under exactly-once: wiped local state")
+    SLog.logWarn ("no clean shutdown recorded in " <> dir <> " under exactly-once: wiped local state")
   transitionTo ks StreamsRebalancing
   r <- try (setUp dir)
   case r of
@@ -447,8 +447,8 @@ startKafkaStreamsWith ks drv = do
               Committed -> pure ()
               CommitFailed e -> do
                 writeIORef (ksCleanStop ks) False
-                logLine ("commit before rebalance failed: " <> Text.unpack e)
-              CommitAborted e -> logLine ("transaction aborted before rebalance: " <> Text.unpack e)
+                SLog.logWarn ("commit before rebalance failed: " <> Text.unpack e)
+              CommitAborted e -> SLog.logWarn ("transaction aborted before rebalance: " <> Text.unpack e)
         , rcRevoked = \tps -> do
             tmOnRevoked tm tps
             readIORef (ksRebLis ks) >>= \l -> RBL.dispatchRevoked l tps
@@ -503,7 +503,7 @@ startKafkaStreamsWith ks drv = do
                     , PA.acRackAware = rackAwareAssignment cfg
                     }
               , lcUserAssignor = taskAssignor cfg
-              , lcLog = logLine
+              , lcLog = SLog.logWarn
               }
       in GroupAssignor
           { gaAssignor = streamsAssignor lc
@@ -569,14 +569,12 @@ recoverParticipants drv appId replication participants = do
             | Just done <- Map.lookup inst committed
             , n <= done -> do
                 r <- cpCommit p cid
-                either (\e -> logLine ("recovering " <> Text.unpack (cpName p) <> ": commit " <> Text.unpack cid <> " failed: " <> Text.unpack e)) pure r
+                either (\e -> SLog.logWarn ("recovering " <> Text.unpack (cpName p) <> ": commit " <> Text.unpack cid <> " failed: " <> Text.unpack e)) pure r
             | otherwise -> cpAbort p cid
-          Nothing -> logLine ("recovering " <> Text.unpack (cpName p) <> ": leaving unrecognised cycle " <> Text.unpack cid)
+          Nothing -> SLog.logWarn ("recovering " <> Text.unpack (cpName p) <> ": leaving unrecognised cycle " <> Text.unpack cid)
       pure (Right ())
 
 
-logLine :: String -> IO ()
-logLine = hPutStrLn stderr . ("[streams] " <>)
 
 
 setError :: KafkaStreams -> Text -> IO ()
@@ -615,7 +613,7 @@ supervised ks drv replan tm0 mGlobal = go tm0
       case r of
         Right LoopDone -> pure ()
         Right LoopReplan -> do
-          logLine "pattern sources match different topics: re-planning"
+          SLog.logInfo "pattern sources match different topics: re-planning"
           commitAndCloseTasks ks tm
           next <- try (replan tm)
           case next of
@@ -630,7 +628,7 @@ supervised ks drv replan tm0 mGlobal = go tm0
           | Just (_ :: SomeAsyncException) <- fromException e -> throwIO e
           | otherwise -> do
               writeIORef (ksCleanStop ks) False
-              logLine ("stream thread failed: " <> show e)
+              SLog.logError ("stream thread failed: " <> show e)
               h <- readIORef (ksUncaught ks)
               resp <- runStreamsUncaughtExceptionHandler h e
               case resp of
@@ -649,8 +647,8 @@ commitAndCloseTasks ks tm = do
   res <- tmCommit tm
   clean <- case res of
     Committed -> pure True
-    CommitFailed e -> logLine ("final commit failed: " <> Text.unpack e) >> pure False
-    CommitAborted e -> logLine ("final transaction aborted: " <> Text.unpack e) >> pure True
+    CommitFailed e -> SLog.logError ("final commit failed: " <> Text.unpack e) >> pure False
+    CommitAborted e -> SLog.logWarn ("final transaction aborted: " <> Text.unpack e) >> pure True
   unless clean (writeIORef (ksCleanStop ks) False)
   tmCloseAll tm clean
 
@@ -674,7 +672,7 @@ streamLoop ks drv tm mGlobal = do
                 writeIORef lastListed now
                 r <- currentPatternTopics (applicationId cfg) drv (ksTopology ks)
                 case r of
-                  Left e -> False <$ logLine ("pattern sources: " <> Text.unpack e <> " (keeping the current topics)")
+                  Left e -> False <$ SLog.logWarn ("pattern sources: " <> Text.unpack e <> " (keeping the current topics)")
                   Right now' -> pure (now' /= matched)
       loop = do
         -- Fairness when polls return at once (pollMs = 0, tests).
@@ -714,8 +712,8 @@ streamLoop ks drv tm mGlobal = do
               res <- tmCommit tm
               case res of
                 Committed -> pure ()
-                CommitFailed e -> logLine ("offset commit failed (records will be reprocessed): " <> Text.unpack e)
-                CommitAborted e -> logLine ("transaction aborted, tasks rewound: " <> Text.unpack e)
+                CommitFailed e -> SLog.logWarn ("offset commit failed (records will be reprocessed): " <> Text.unpack e)
+                CommitAborted e -> SLog.logWarn ("transaction aborted, tasks rewound: " <> Text.unpack e)
             moved <- patternsMoved now
             if moved
               then pure LoopReplan

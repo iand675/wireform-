@@ -115,8 +115,8 @@ import Control.Monad.IO.Unlift (MonadUnliftIO, withRunInIO)
 import Data.IORef
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Text.IO qualified as TIO
 import Data.Vector qualified as V
+import Kafka.Telemetry.Log qualified as KLog
 import Kafka.Client.Consumer qualified as C
 import Kafka.Errors qualified as Errors
 import Kafka.Network.Auth.AwsMskIam qualified as Iam
@@ -124,7 +124,6 @@ import Kafka.Network.Auth.OAuthBearer qualified as OAuth
 import Kafka.Network.Auth.SASL qualified as SASL
 import Kafka.Network.Auth.Scram qualified as Scram
 import Kafka.Network.Connection qualified as Conn
-import System.IO qualified as IO
 import Wireform.Network.TLS.Config qualified as TLS
 
 
@@ -216,8 +215,8 @@ data GroupConfig = GroupConfig
   -- ^ What happens when your handler throws.
   , onPollError :: !(String -> IO ())
   {- ^ What to do when the underlying poll itself fails (network
-  blip, broker rejection, etc.). Default: 'TIO.hPutStrLn'
-  stderr and back off briefly. Returning normally signals
+  blip, broker rejection, etc.). Default: log a warning
+  ("Kafka.Telemetry.Log") and back off briefly. Returning normally signals
   "retry"; throw to stop the loop.
   -}
   , closeTimeoutMs :: !Int
@@ -262,7 +261,7 @@ defaultGroupConfig =
     , commitMode = CommitSync
     , onError = LogAndRaise
     , onPollError = \msg -> do
-        TIO.hPutStrLn IO.stderr (T.pack ("[wireform-kafka] poll error: " <> msg))
+        KLog.logWarn KLog.kafkaInstrumentationLibrary "consumer group: poll failed" [KLog.attrText "exception.message" (T.pack msg)]
         threadDelay 250000 -- back off 250ms
     , closeTimeoutMs = 30000
     , useTls = False
@@ -504,9 +503,7 @@ handlePolicy policy e = case policy of
   CustomError k -> k e
   where
     logErr ex =
-      TIO.hPutStrLn IO.stderr $
-        T.pack
-          ("[wireform-kafka] handler exception: " <> show ex)
+      KLog.logError KLog.kafkaInstrumentationLibrary "consumer group: record handler threw" [KLog.attrShow "exception.message" ex]
 
 
 -- | Cheap sanity checks before we even open a network connection.

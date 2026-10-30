@@ -56,12 +56,6 @@ module Kafka.Client.Internal.ProducerSender (
   RetryConfig (..),
   defaultRetryConfig,
   nextRetryBackoffMs,
-
-  -- * Structured logger
-  LogLevel (..),
-  Logger,
-  defaultLogger,
-  silentLogger,
 ) where
 
 import Control.Concurrent (threadDelay)
@@ -89,6 +83,7 @@ import Data.Vector qualified as V
 import Kafka.Client.Internal.BatchAccumulator qualified as BA
 import Kafka.Client.Internal.Request qualified as Req
 import Kafka.Client.RetryClassifier qualified as RC
+import Kafka.Telemetry.Log qualified as KLog
 import Kafka.Client.Metadata qualified as Meta
 import Kafka.Compression.Types (CompressionCodec (NoCompression))
 import Kafka.Network.Connection qualified as Conn
@@ -97,7 +92,6 @@ import Kafka.Protocol.RecordBatch qualified as RB
 import Kafka.Protocol.RecordBatchWire qualified as RBW
 import Kafka.Protocol.VersionNegotiation qualified as VN
 import Kafka.Time qualified as KafkaTime
-import System.IO (hPutStrLn, stderr)
 import "wireform-kafka-protocol" Kafka.Protocol.Generated.ProduceRequest qualified as PR
 import "wireform-kafka-protocol" Kafka.Protocol.Generated.ProduceResponse qualified as PResp
 import "wireform-kafka-protocol" Kafka.Protocol.Primitives qualified as P
@@ -140,44 +134,6 @@ defaultRetryConfig =
     , retryBackoffMultiplier = 2.0
     , retryBackoffJitter = 0.2
     }
-
-
--- | Severity bucket for the structured 'Logger'.
-data LogLevel
-  = LogDebug
-  | LogInfo
-  | LogWarn
-  | LogError
-  deriving (Eq, Ord, Show)
-
-
-{- | Structured logger callback. Sender threads call this on every
-retriable produce error / batch send / timeout, so callers can
-route the events to whatever observability stack they prefer.
-'defaultLogger' writes to stderr; 'silentLogger' is a no-op
-suitable for tests.
--}
-type Logger = LogLevel -> Text -> IO ()
-
-
-defaultLogger :: Logger
-defaultLogger lvl msg =
-  -- Use 'putStrLn' on stderr so library logs don't pollute stdout
-  -- — the producer's record callbacks are the public success
-  -- channel.
-  hPutStrLn stderr (renderLogLevel lvl <> " " <> T.unpack msg)
-
-
-renderLogLevel :: LogLevel -> String
-renderLogLevel = \case
-  LogDebug -> "[debug]"
-  LogInfo -> "[info]"
-  LogWarn -> "[warn]"
-  LogError -> "[error]"
-
-
-silentLogger :: Logger
-silentLogger _ _ = pure ()
 
 
 {- | Compute the next backoff for the given attempt number
@@ -389,10 +345,6 @@ data SenderState = SenderState
   'IORef' + 'atomicModifyIORef\'' instead of an STM
   transaction on every Produce request.
   -}
-  , senderLogger :: !Logger
-  {- ^ Structured logger callback; invoked on retriable / fatal
-  produce errors. Defaults to 'defaultLogger'.
-  -}
   , senderVersionCache :: !AV.ApiVersionCache
   {- ^ Per-broker negotiated API version cache. Populated on
   first contact with each leader broker via
@@ -531,7 +483,6 @@ createSenderState accumulator metadata connManager connConfig retryConfig acks d
       , senderCompression = compression
       , senderClientId = clientId
       , senderCorrelationId = correlationId
-      , senderLogger = defaultLogger
       , senderVersionCache = versionCache
       , senderTransactionalId = txnIdVar
       , senderRetryQueue = retryQueue
@@ -611,9 +562,7 @@ senderLoop state@SenderState {..} = do
           writeIORef senderBusy False
           case result of
             Left (e :: SomeException) ->
-              senderLogger
-                LogError
-                (T.pack ("Sender loop error: " <> show e))
+              KLog.logError KLog.kafkaInstrumentationLibrary "producer: sender loop error" [KLog.attrShow "exception.message" e]
             Right () -> return ()
           senderLoop state
         else do
@@ -1038,12 +987,19 @@ retryOrFail state why batch = do
   if lost || isBatchTimedOut now (senderDeliveryTimeoutMs state) batch || not (shouldRetry state batch)
     then failBatch state why batch
     else do
-      let tp = BA.batchTopicPartition batch
-      senderLogger state LogWarn $
-        "producer: retrying a batch to " <> BA.tpTopic tp <> "-" <> T.pack (show (BA.tpPartition tp))
-          <> " (attempt " <> T.pack (show (BA.batchAttempts batch + 1)) <> "): " <> why
+      KLog.logWarn KLog.kafkaInstrumentationLibrary ("producer: retrying a batch: " <> why) $
+        KLog.attrInt "messaging.kafka.produce.attempt" (BA.batchAttempts batch + 1) : batchAttrs batch
       let !entry = RetryEntry (now + fromIntegral (batchBackoffMs state batch)) (bumpBatchAttempts batch)
       atomically $ modifyTVar' (senderRetryQueue state) (++ [entry])
+
+
+-- | Log attributes naming @batch@'s partition and sequence.
+batchAttrs :: BA.ProducerBatch -> [KLog.Attr]
+batchAttrs batch =
+  KLog.attrInt "messaging.kafka.produce.base_sequence" (BA.batchBaseSequence batch)
+    : KLog.topicAttrs (BA.tpTopic tp) (fromIntegral (BA.tpPartition tp))
+  where
+    tp = BA.batchTopicPartition batch
 
 
 -- | Whether an earlier batch of @batch@'s partition, under its epoch, failed for good.
@@ -1182,12 +1138,10 @@ buildPartitionProduceData batch = do
       encodeResult <- RBW.encodeRecordBatchWireCompressedWithLevel recordBatch compressionLevel
       case encodeResult of
         Left err -> do
-          hPutStrLn
-            stderr
-            ( "[warn] producer: compression failed for batch, "
-                <> "sending uncompressed: "
-                <> err
-            )
+          KLog.logWarn
+            KLog.kafkaInstrumentationLibrary
+            "producer: compression failed for a batch, sending it uncompressed"
+            [KLog.attrText "exception.message" (T.pack err)]
           pure $
             PR.PartitionProduceData
               { PR.partitionProduceDataIndex = partition
@@ -1419,7 +1373,8 @@ processProduceResponse state batches response = do
             if retriable
               then retryOrFail state why batch
               else do
-                senderLogger state LogError ("producer: batch to " <> topicName <> "-" <> T.pack (show partitionId) <> " failed: " <> why)
+                KLog.logError KLog.kafkaInstrumentationLibrary ("producer: batch failed: " <> why) $
+                  KLog.errorAttr (RC.errorMessage errorCode) : batchAttrs batch
                 failBatch state why batch
 
 

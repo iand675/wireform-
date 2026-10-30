@@ -22,7 +22,7 @@ Haskell.
 | Compression | `Kafka.Compression.*`, `Kafka.Compression.Ring` | gzip, snappy, lz4, zstd record-batch codecs; the `Ring` variant takes a raw `Ptr Word8` source (e.g. a ring slice) and writes plaintext straight into a caller-supplied destination magic ring via direct `libz` / `liblz4` / `libzstd` / `libsnappy` FFI |
 | High-level client | `Kafka.Client.*` | Producer, Consumer, AdminClient, Transaction |
 | Mock broker | `Kafka.Client.Mock.*` | Deterministic in-process broker for tests |
-| Telemetry | `Kafka.Telemetry.OpenTelemetry` | Semantic-convention spans for produce/consume/admin |
+| Telemetry | `Kafka.Telemetry.OpenTelemetry`, `Kafka.Telemetry.Log` | Semantic-convention spans for produce/consume/admin; diagnostics as OTel log records |
 
 The umbrella module `Kafka` re-exports the high-level client surface so you can
 get started with a single import.
@@ -275,6 +275,14 @@ The Kafka Streams DSL (documented separately under **Kafka Streams**) uses
 `Kafka.Telemetry.OpenTelemetry` adds semantic-convention spans for produce,
 consume, and admin operations. Pass your `TracerProvider` to the config and
 spans appear automatically.
+
+Diagnostics (retried batches, failed heartbeats, reconnects, aborted
+transactions, Streams commit failures) are OpenTelemetry log records, not
+console output: `Kafka.Telemetry.Log` emits them through the global
+`LoggerProvider` under the `wireform-kafka` and `wireform-kafka-streams`
+scopes, with `messaging.*` / `server.*` attributes and the calling thread's
+span context. Install an SDK logger provider (`setGlobalLoggerProvider`) to
+collect them; without one they cost a single `IORef` read and are never built.
 
 ## Next steps
 

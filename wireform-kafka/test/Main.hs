@@ -55,6 +55,7 @@ import Client.PartitionerSpec qualified
 import Client.PipelineSpec qualified
 import Client.ProducerConsumerLifecycleSpec qualified
 import Client.ProducerRetrySpec qualified
+import Client.TelemetryLogSpec qualified
 import Client.ProducerTimeoutSpec qualified
 import Client.ProducerTransactionWiringSpec qualified
 import Client.RackAwareSpec qualified
@@ -249,6 +250,7 @@ clientTests =
       , Codegen.WireGeneratorSpec.tests
       , Protocol.WireCodecParitySpec.tests
       , Client.ProducerRetrySpec.tests
+      , Client.TelemetryLogSpec.tests
       , Client.PipelineSpec.tests
       , Client.SubscribeSpec.tests
       , Network.ConnectionLivenessSpec.tests

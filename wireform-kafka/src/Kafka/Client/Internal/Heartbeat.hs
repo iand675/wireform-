@@ -54,7 +54,7 @@ import Kafka.Client.Internal.Request qualified as Req
 import Kafka.Network.Connection (BrokerAddress (..), Connection)
 import Kafka.Network.Connection qualified as Conn
 import Kafka.Protocol.ApiVersions qualified as AV
-import System.IO (hPutStrLn, stderr)
+import Kafka.Telemetry.Log qualified as KLog
 import "wireform-kafka-protocol" Kafka.Protocol.Generated.HeartbeatRequest qualified as HBReq
 import "wireform-kafka-protocol" Kafka.Protocol.Generated.HeartbeatResponse qualified as HBResp
 import "wireform-kafka-protocol" Kafka.Protocol.Primitives qualified as P
@@ -230,7 +230,8 @@ heartbeatLoop state@HeartbeatState {..} = do
           result <- try $ sendHeartbeat state coordAddr memberId genId
           case result of
             Left (e :: SomeException) ->
-              hPutStrLn stderr $ "Heartbeat error: " ++ show e
+              KLog.logWarn KLog.kafkaInstrumentationLibrary "consumer group: heartbeat failed" $
+                KLog.attrShow "exception.message" e : KLog.serverAttrs (Conn.brokerHost coordAddr) (fromIntegral (Conn.brokerPort coordAddr))
             Right (Left outcome) -> applyHeartbeatOutcome state outcome
             Right (Right needsRebalance) ->
               when needsRebalance $ atomically $ writeTVar hbNeedsRebalance True
