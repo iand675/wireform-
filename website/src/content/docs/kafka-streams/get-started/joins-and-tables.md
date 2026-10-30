@@ -128,7 +128,7 @@ three most often:
 | **Stream-Stream** (windowed) | "Match an event on one stream to an event on another stream within X minutes." Trading, fraud, sessionisation. |
 | **Table-Table** | "Two tables: for each pair of keys present in both, produce a derived value." Slowly-changing data combined into a denormalised view. |
 | **Stream-GlobalKTable** | Same as stream-table but the table is replicated to every instance. Use for small reference data (currency rates, country lookups). |
-| **Foreign-key Table-Table** | Join two tables by a key derived from the left's value, not the left's key. The library handles the subscription-token bookkeeping. |
+| **Foreign-key Table-Table** | Join two tables by a key derived from the left's value, not the left's key. The two tables don't need to be co-partitioned: as in KIP-213, subscriptions and responses travel through two internal topics. |
 
 Each has a Haskell function with a predictable name:
 
@@ -140,6 +140,26 @@ Each has a Haskell function with a predictable name:
 | Stream-Global | `joinKStreamGlobalKTable` | `leftJoinKStreamGlobalKTable` | n/a |
 | Foreign-key | `foreignKeyJoinKTable` | `leftForeignKeyJoinKTable` | n/a |
 
+### Stream-stream windows
+
+A `JoinWindows` of `before` / `after` / `gracePeriodMs`: a left record
+at `t` meets the right records in `[t - before, t + after]` (so a
+right record at `t` meets the left ones in `[t - after, t + before]`),
+and a joined record carries the later of the two timestamps. Both
+sides keep every record (including several with the same key and
+timestamp) until no record still within grace can reach it.
+
+A left (or outer) join holds a record that found no match until its
+window closes (`t + after + gracePeriodMs`, measured in stream time,
+which both inputs advance), and only then emits it with `Nothing` on
+the other side, if nothing matched it meanwhile. This is the JVM's
+behaviour since KIP-633: no `(v, Nothing)` followed shortly by the
+real match. A record arriving after its window closed but within
+grace is joined and, unmatched, emitted at once; past grace it is
+dropped. The `Joined` serdes are the join stores' serdes, and its
+name names them (`<name>-this-join-store`, `<name>-other-join-store`,
+`<name>-outer-shared-join-store`).
+
 The example above used `joinStreamTable`, the Free DSL helper for
 stream-table joins. The imperative builder uses
 `joinKStreamKTable`; the Free helpers re-skin the names for the
@@ -149,7 +169,7 @@ arrow-style composition.
 
 For any join other than `Global` and `ForeignKey`, **both sides must be co-partitioned**: same partition count and same key partitioner. Each task owns one partition of each input. If `alice` on the views side lands on partition 3 but `alice` on the users side lands on partition 7, the task that holds the views will never see the user record.
 
-The library validates this at startup. A mismatch throws a topology validation error before the runtime starts; you'll see something like `CoPartitioningRequired { left = "PageViews", right = "UserProfiles" }`.
+The runtime checks the partition counts at startup. On a mismatch the instance doesn't start processing: it goes to `StreamsError` with a message like `stateful subtopologies over source topics with different partition counts (not co-partitioned): ...`.
 
 Three ways to satisfy it:
 

@@ -80,7 +80,7 @@ runDemo = do
     ]
   out <- readOutput driver (topicName "lines-out")
   putStrLn ("Records emitted to lines-out (" <> show (length out) <> "):")
-  mapM_ (\cr -> putStrLn ("  " <> BSC.unpack (crValue cr))) out
+  mapM_ (\cr -> putStrLn ("  " <> BSC.unpack (crValueBytes cr))) out
   closeDriver driver
   where
     send d (k, v) =

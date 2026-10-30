@@ -61,7 +61,8 @@ mkStore
   -> KeyValueStore k v
 mkStore nm ref =
   KeyValueStore
-    { kvsBase =
+    { kvsCache = Nothing
+    , kvsBase =
         StateStore
           { storeStoreName = nm
           , storePersistent = False
@@ -149,7 +150,8 @@ inMemoryLruKeyValueStore nm maxEntries = do
           else pure ()
       kvs =
         KeyValueStore
-          { kvsBase =
+          { kvsCache = Nothing
+          , kvsBase =
               StateStore
                 { storeStoreName = nm
                 , storePersistent = False
@@ -218,9 +220,11 @@ inMemoryLruKeyValueStoreBuilder
   -> StoreBuilderKV k v
 inMemoryLruKeyValueStoreBuilder nm maxEntries =
   StoreBuilderKV
-    { sbKvName = nm
+    { sbKvCaching = Nothing
+    , sbKvName = nm
     , sbKvLogging = LoggingConfig False [] Nothing
-    , sbKvBuild = inMemoryLruKeyValueStore nm maxEntries
+    , sbKvSerdes = Nothing
+    , sbKvBuild = \_ -> inMemoryLruKeyValueStore nm maxEntries
     }
 
 
@@ -234,7 +238,9 @@ inMemoryKeyValueStoreBuilder
   -> StoreBuilderKV k v
 inMemoryKeyValueStoreBuilder nm =
   StoreBuilderKV
-    { sbKvName = nm
+    { sbKvCaching = Nothing
+    , sbKvName = nm
     , sbKvLogging = defaultLoggingConfig
-    , sbKvBuild = inMemoryKeyValueStore nm
+    , sbKvSerdes = Nothing
+    , sbKvBuild = \_ -> inMemoryKeyValueStore nm
     }

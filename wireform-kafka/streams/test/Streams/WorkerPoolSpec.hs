@@ -76,9 +76,9 @@ pool_routes_to_owner =
       [w0, w1] -> do
         out0 <- collectorTake (workerCollector w0) (topicName "out")
         out1 <- collectorTake (workerCollector w1) (topicName "out")
-        Set.fromList (map (unbytes . crValue) out0)
+        Set.fromList (map (unbytes . crValueBytes) out0)
           `shouldBe` Set.fromList ["p0", "p1"]
-        Set.fromList (map (unbytes . crValue) out1)
+        Set.fromList (map (unbytes . crValueBytes) out1)
           `shouldBe` Set.fromList ["p2", "p3"]
       _ -> error "expected 2 workers"
     closeWorkerPool pool

@@ -211,7 +211,8 @@ requestBuilderTests =
       , it "buildTxnOffsetCommitRequest groups partitions by topic" $ do
           let req =
                 buildTxnOffsetCommitRequest
-                  "grp"
+                  "tx-1"
+                  (member "grp")
                   100
                   5
                   [ (TopicPartition "t1" 0, 10)
@@ -237,7 +238,7 @@ requestBuilderTests =
           lookup "t1" countsByName `shouldBe` Just 2
           lookup "t2" countsByName `shouldBe` Just 1
       , it "buildTxnOffsetCommitRequest stamps -1 leader epoch + null metadata" $ do
-          let req = buildTxnOffsetCommitRequest "g" 1 0 [(TopicPartition "x" 0, 99)]
+          let req = buildTxnOffsetCommitRequest "tx-1" (member "g") 1 0 [(TopicPartition "x" 0, 99)]
               [topic] = V.toList $ case P.unKafkaArray (TOCReq.txnOffsetCommitRequestTopics req) of
                 P.Null -> V.empty
                 P.NotNull v -> v
@@ -251,7 +252,7 @@ requestBuilderTests =
             P.KafkaString P.Null -> pure ()
             other -> expectationFailure ("expected null metadata, got " <> show other)
       , it "buildTxnOffsetCommitRequest with empty offsets emits no topics" $ do
-          let req = buildTxnOffsetCommitRequest "g" 1 0 []
+          let req = buildTxnOffsetCommitRequest "tx-1" (member "g") 1 0 []
               topics = case P.unKafkaArray (TOCReq.txnOffsetCommitRequestTopics req) of
                 P.Null -> V.empty
                 P.NotNull v -> v
@@ -259,7 +260,8 @@ requestBuilderTests =
       , it "TxnOffsetCommitRequest round-trips through encoder/decoder (v3)" $ do
           let req =
                 buildTxnOffsetCommitRequest
-                  "grp"
+                  "tx-rt"
+                  (member "grp")
                   7
                   9
                   [(TopicPartition "x" 0, 1), (TopicPartition "x" 1, 2)]
@@ -268,6 +270,11 @@ requestBuilderTests =
             Left err -> expectationFailure ("decode failed: " <> err)
             Right r2 -> do
               extractK (TOCReq.txnOffsetCommitRequestGroupId r2) `shouldBe` "grp"
+              -- The real transactional id and the member's identity
+              -- (KIP-447 fencing) reach the wire.
+              extractK (TOCReq.txnOffsetCommitRequestTransactionalId r2) `shouldBe` "tx-rt"
+              TOCReq.txnOffsetCommitRequestGenerationId r2 `shouldBe` 4
+              extractK (TOCReq.txnOffsetCommitRequestMemberId r2) `shouldBe` "member-1"
               TOCReq.txnOffsetCommitRequestProducerId r2 `shouldBe` 7
               TOCReq.txnOffsetCommitRequestProducerEpoch r2 `shouldBe` 9
               let topics = case P.unKafkaArray (TOCReq.txnOffsetCommitRequestTopics r2) of
@@ -322,3 +329,14 @@ prop_coordinatorPreservesFields = H.property $ do
   H.assert (tcNodeId coordinator == nodeId)
   H.assert (tcHost coordinator == host)
   H.assert (tcPort coordinator == port)
+
+
+-- | A group member at generation 4 (for the TxnOffsetCommit builders).
+member :: Text -> TxnGroupMember
+member g =
+  TxnGroupMember
+    { tgmGroupId = g
+    , tgmGenerationId = 4
+    , tgmMemberId = "member-1"
+    , tgmGroupInstanceId = Nothing
+    }

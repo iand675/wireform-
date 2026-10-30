@@ -14,7 +14,7 @@ maintainer: ian@iankduncan.com
 copyright: 2026 Ian Duncan
 category: Network, Codec
 build-type: Simple
-tested-with: GHC ==9.6.4 || ==9.8.4
+tested-with: GHC == 9.10.3, GHC == 9.12.4, GHC == 9.14.1
 
 source-repository head
     type: git
@@ -238,7 +238,7 @@ library
         Kafka.Protocol.Wire.Primitives
         Kafka.Protocol.Wire.SliceVector
     build-depends:
-        base                      >= 4.16  && < 5,
+        base                      >= 4.20  && < 5,
         bytestring                >= 0.11  && < 0.13,
         containers                >= 0.6   && < 0.9,
         deepseq                   >= 1.4   && < 1.6,

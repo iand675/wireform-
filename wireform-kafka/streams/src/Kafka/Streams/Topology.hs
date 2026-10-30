@@ -43,9 +43,13 @@ module Kafka.Streams.Topology (
   unNodeName,
 
   -- * Topology
-  Topology,
+  Topology (..),
   emptyTopology,
+  InternalTopicSpec (..),
+  addInternalTopic,
+  topoInternalTopics,
   addSource,
+  addTableSource,
   addSourceWith,
   addProcessor,
   addProcessorWith,
@@ -56,17 +60,22 @@ module Kafka.Streams.Topology (
   addStateStoreW,
   addStateStoreS,
   addGlobalStore,
+  markGlobalStore,
   topoGlobalStores,
   topoChangelogPlan,
   connectProcessorAndStateStores,
 
-  -- * Optimisations (KIP-295)
+  -- * Optimisations (KIP-295, KIP-862)
   OptimizationConfig (..),
+  SelfJoinRewrite (..),
+  addSelfJoinCandidate,
   defaultOptimizationConfig,
   noOptimisations,
   fromOptimizationFlags,
   optimizeTopology,
   effectiveChangelogReuse,
+  storeBuilderLogging,
+  storeBuilderHasSerdes,
 
   -- * Validation
   validateTopology,
@@ -81,6 +90,9 @@ module Kafka.Streams.Topology (
   SinkSpec (..),
   AnyProcessor (..),
   AnySerde (..),
+  AnyStreamPartitioner (..),
+  addSinkPartitioned,
+  addSinkNullable,
   AnyTimestampExtractor (..),
   AnyStoreBuilder (..),
   storeBuilderName,
@@ -111,6 +123,7 @@ import Data.Sequence (Seq, (|>))
 import Data.Sequence qualified as Seq
 import Data.Set (Set)
 import Data.Set qualified as Set
+import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text qualified as Text
@@ -120,6 +133,7 @@ import Kafka.Streams.Processor (
   Processor,
   ProcessorName (..),
  )
+import Kafka.Streams.Produced (StreamPartitioner)
 import Kafka.Streams.Serde (Serde)
 import Kafka.Streams.State.Store (
   LoggingConfig (..),
@@ -144,6 +158,14 @@ import Kafka.Streams.Watermark qualified as Watermark
 -- | Type-erased serde used in the topology AST.
 data AnySerde where
   AnySerde :: !(Serde a) -> AnySerde
+
+
+{- | Type-erased 'StreamPartitioner' carried by a 'SinkSpec'. Its
+@k@ / @v@ match the sink's key / value serdes; the engine coerces
+it back the same way it does the serdes.
+-}
+data AnyStreamPartitioner where
+  AnyStreamPartitioner :: !(StreamPartitioner k v) -> AnyStreamPartitioner
 
 
 -- | Type-erased timestamp extractor.
@@ -201,6 +223,12 @@ data SourceSpec = SourceSpec
   which is the only mode the in-process driver supports
   today.
   -}
+  , sourceNullValues :: !Bool
+  {- ^ Set on a table source: the node forwards @Maybe v@, with
+  'Nothing' for a null value (a tombstone), so the table can delete
+  the key. A plain stream source drops null-valued records (they have
+  no @v@) and counts them as dropped.
+  -}
   , sourceWatermarkStrategy :: !(Maybe Watermark.WatermarkStrategy)
   {- ^ Riffle \xc2\xa75: optional per-source watermark strategy.
   'Nothing' (the default) preserves the legacy per-task
@@ -229,6 +257,14 @@ data SinkSpec = SinkSpec
   , sinkTopic :: !TopicName
   , sinkKeySerde :: !AnySerde
   , sinkValueSerde :: !AnySerde
+  , sinkPartitioner :: !(Maybe AnyStreamPartitioner)
+  {- ^ Per-record partition choice (@Produced.withStreamPartitioner@).
+  'Nothing' leaves the partition to the producer's partitioner.
+  -}
+  , sinkNullableValues :: !Bool
+  {- ^ The sink receives @Maybe v@: 'Nothing' is written as a null value
+  (a tombstone), which a compacted topic reads as a delete.
+  -}
   }
 
 
@@ -252,6 +288,12 @@ data Topology = Topology
   these as cluster-wide replicas and bypasses partition
   assignment for their source topics.
   -}
+  , topoInternalTopics :: !(Map TopicName InternalTopicSpec)
+  {- ^ Topics the topology owns (repartition topics), keyed by their
+  /unprefixed/ name. The broker runtime creates them, names them
+  @\<application.id\>-\<name\>@ ('prefixInternalTopics') and
+  subscribes to them like any source.
+  -}
   , topoChangelogPlan :: !(Map StoreName TopicName)
   {- ^ /Optimiser-derived/ KIP-295 @REUSE_KTABLE_SOURCE_TOPICS@
   decisions. Each entry @(store, topic)@ says \"the runtime
@@ -272,7 +314,29 @@ data Topology = Topology
   optimisation runs. Use 'effectiveChangelogReuse' to look up
   the combined effective changelog target for a store.
   -}
+  , topoSelfJoins :: !(Map NodeName SelfJoinRewrite)
+  {- ^ Window joins of a stream with itself, by their left node, with
+  the single-store form @SINGLE_STORE_SELF_JOIN@ swaps in
+  ('optimizeTopology'). An applied rewrite is removed.
+  -}
   }
+
+
+{- | A window join of a stream with itself, as the builder recorded it:
+the right side's node and store go, and the left node runs
+'sjrSingle' over the left store alone (KIP-862).
+-}
+data SelfJoinRewrite = SelfJoinRewrite
+  { sjrRight :: !NodeName
+  , sjrLeftStore :: !StoreName
+  , sjrRightStore :: !StoreName
+  , sjrSingle :: !AnyProcessor
+  }
+
+
+-- | Record that the join whose left node is @left@ may run on one store.
+addSelfJoinCandidate :: NodeName -> SelfJoinRewrite -> Topology -> Topology
+addSelfJoinCandidate left r t = t {topoSelfJoins = Map.insert left r (topoSelfJoins t)}
 
 
 emptyTopology :: Topology
@@ -287,8 +351,29 @@ emptyTopology =
     , topoSourceOrder = Seq.empty
     , topoChildrenIndex = Map.empty
     , topoGlobalStores = Set.empty
+    , topoInternalTopics = Map.empty
     , topoChangelogPlan = Map.empty
+    , topoSelfJoins = Map.empty
     }
+
+
+{- | A topic the topology itself owns. A repartition topic gets
+'itsPartitions' partitions, or (when 'Nothing') as many as the
+widest source topic of the subtopology that writes to it.
+-}
+data InternalTopicSpec = InternalTopicSpec
+  { itsPartitions :: !(Maybe Int)
+  }
+  deriving stock (Eq, Show)
+
+
+{- | Declare a repartition topic. Pair it with a sink writing to it
+and a source reading from it (see
+'Kafka.Streams.KStream.repartitionWith').
+-}
+addInternalTopic :: TopicName -> InternalTopicSpec -> Topology -> Topology
+addInternalTopic tp spec t =
+  t {topoInternalTopics = Map.insert tp spec (topoInternalTopics t)}
 
 
 -- | Distinct error categories surfaced by 'validateTopology'.
@@ -311,6 +396,10 @@ data TopologyError
     topology to restore the invariant.
     -}
     StaleChangelogPlan !StoreName !TopicName !ChangelogPlanProblem
+  | {- | Two sources read one topic (every record would reach both).
+    The JVM's "topic has already been registered by another source".
+    -}
+    TopicReadTwice !TopicName ![NodeName]
   deriving stock (Eq, Show, Generic)
   deriving anyclass (Exception)
 
@@ -377,6 +466,37 @@ addSource nm ts ks vs ex t =
         , sourceExtractor = AnyTimestampExtractor ex
         , sourceOffsetReset = Consumed.OffsetEarliest
         , sourcePattern = Nothing
+        , sourceNullValues = False
+        , sourceWatermarkStrategy = Nothing
+        }
+
+
+{- | A source for a table: like 'addSource', but the node forwards
+@Maybe v@ so a null value (a tombstone) reaches the table as
+'Nothing'. The extractor only sees non-null values; a tombstone keeps
+the record's own timestamp.
+-}
+addTableSource
+  :: NodeName
+  -> [TopicName]
+  -> Serde k
+  -> Serde v
+  -> TimestampExtractor k v
+  -> Topology
+  -> Topology
+addTableSource nm ts ks vs ex t =
+  ensureNameFree t nm $
+    insertSource
+      t
+      SourceSpec
+        { sourceName = nm
+        , sourceTopics = ts
+        , sourceKeySerde = AnySerde ks
+        , sourceValueSerde = AnySerde vs
+        , sourceExtractor = AnyTimestampExtractor ex
+        , sourceOffsetReset = Consumed.OffsetEarliest
+        , sourcePattern = Nothing
+        , sourceNullValues = True
         , sourceWatermarkStrategy = Nothing
         }
 
@@ -433,7 +553,8 @@ addProcessorWith spec t =
             , topoChildrenIndex =
                 foldl'
                   ( \acc p ->
-                      Map.insertWith (++) p [processorSpecName spec] acc
+                      -- children in insertion order: the JVM forwards to them in it
+                      Map.insertWith (flip (++)) p [processorSpecName spec] acc
                   )
                   (topoChildrenIndex t)
                   (processorSpecParents spec)
@@ -461,6 +582,59 @@ addSink nm tp ks vs parents =
       , sinkTopic = tp
       , sinkKeySerde = AnySerde ks
       , sinkValueSerde = AnySerde vs
+      , sinkPartitioner = Nothing
+      , sinkNullableValues = False
+      }
+
+
+{- | 'addSink' for parents forwarding @Maybe v@: 'Nothing' is written as
+a tombstone.
+-}
+addSinkNullable
+  :: NodeName
+  -> TopicName
+  -> Serde k
+  -> Serde v
+  -> [NodeName]
+  -> Topology
+  -> Topology
+addSinkNullable nm tp ks vs parents =
+  addSinkWith
+    SinkSpec
+      { sinkName = nm
+      , sinkParents = parents
+      , sinkTopic = tp
+      , sinkKeySerde = AnySerde ks
+      , sinkValueSerde = AnySerde vs
+      , sinkPartitioner = Nothing
+      , sinkNullableValues = True
+      }
+
+
+{- | 'addSink' with a 'StreamPartitioner' that picks each record's
+partition (given the topic's partition count from producer
+metadata). A partitioner answering 'Nothing' for a record defers
+to the producer's partitioner for that record.
+-}
+addSinkPartitioned
+  :: NodeName
+  -> TopicName
+  -> Serde k
+  -> Serde v
+  -> StreamPartitioner k v
+  -> [NodeName]
+  -> Topology
+  -> Topology
+addSinkPartitioned nm tp ks vs sp parents =
+  addSinkWith
+    SinkSpec
+      { sinkName = nm
+      , sinkParents = parents
+      , sinkTopic = tp
+      , sinkKeySerde = AnySerde ks
+      , sinkValueSerde = AnySerde vs
+      , sinkPartitioner = Just (AnyStreamPartitioner sp)
+      , sinkNullableValues = False
       }
 
 
@@ -473,7 +647,7 @@ addSinkWith spec t =
             , topoOrder = topoOrder t |> sinkName spec
             , topoChildrenIndex =
                 foldl'
-                  (\acc p -> Map.insertWith (++) p [sinkName spec] acc)
+                  (\acc p -> Map.insertWith (flip (++)) p [sinkName spec] acc)
                   (topoChildrenIndex t)
                   (sinkParents spec)
             }
@@ -516,17 +690,15 @@ addStateStoreS b owners =
 of the KIP-295 optimisations.
 -}
 data OptimizationConfig = OptimizationConfig
-  { optMergeRepartitionTopics :: !Bool
-  {- ^ When two consecutive selectKey/groupBy operations would
-  each materialise a repartition topic, merge them into one.
-  Currently a no-op (the DSL doesn't auto-insert repartition
-  topics yet); the field exists so callers can opt in once
-  the DSL change lands.
+  { optReuseSourceKTable :: !Bool
+  {- ^ KIP-295 @REUSE_KTABLE_SOURCE_TOPICS@: a table read straight off
+  a source topic uses that topic as its changelog instead of a
+  separate @-changelog@ topic.
   -}
-  , optReuseSourceKTable :: !Bool
-  {- ^ When a KTable's only consumer is a join, reuse the source
-  topic directly instead of materialising. Currently a no-op
-  (most KTables in our DSL are explicitly materialised).
+  , optSingleStoreSelfJoin :: !Bool
+  {- ^ KIP-862 @SINGLE_STORE_SELF_JOIN@: an inner window join of a
+  stream with itself runs on one window store and one processor
+  instead of two of each, with the same output in the same order.
   -}
   }
   deriving stock (Eq, Show)
@@ -535,8 +707,8 @@ data OptimizationConfig = OptimizationConfig
 defaultOptimizationConfig :: OptimizationConfig
 defaultOptimizationConfig =
   OptimizationConfig
-    { optMergeRepartitionTopics = True
-    , optReuseSourceKTable = True
+    { optReuseSourceKTable = True
+    , optSingleStoreSelfJoin = False
     }
 
 
@@ -547,34 +719,37 @@ want to inspect the un-rewritten 'Topology' shape.
 noOptimisations :: OptimizationConfig
 noOptimisations =
   OptimizationConfig
-    { optMergeRepartitionTopics = False
-    , optReuseSourceKTable = False
+    { optReuseSourceKTable = False
+    , optSingleStoreSelfJoin = False
     }
 
 
 {- | Lift a JVM-style 'OptimizationFlags' (from
 "Kafka.Streams.Topology.Optimization") into the local
-'OptimizationConfig'. The third Java flag
-(@flagSingleStoreSelfJoin@) currently has no Haskell-side
-rewrite and is ignored.
+'OptimizationConfig'. @MERGE_REPARTITION_TOPICS@ needs no rewrite:
+the builder always shares one repartition topic among the groupings
+and joins of a re-keyed stream
+('Kafka.Streams.StreamsBuilder.sharedRepartitionNode').
+@flagSingleStoreSelfJoin@ turns on 'optSingleStoreSelfJoin'.
 -}
 fromOptimizationFlags
   :: Kafka.Streams.Topology.Optimization.OptimizationFlags
   -> OptimizationConfig
 fromOptimizationFlags f =
   OptimizationConfig
-    { optMergeRepartitionTopics =
-        Kafka.Streams.Topology.Optimization.flagMergeRepartitionTopics f
-    , optReuseSourceKTable =
+    { optReuseSourceKTable =
         Kafka.Streams.Topology.Optimization.flagReuseSourceTopics f
+    , optSingleStoreSelfJoin =
+        Kafka.Streams.Topology.Optimization.flagSingleStoreSelfJoin f
     }
 
 
 {- | Mirrors @Topology.optimize(StreamsConfig)@. Applies the
-requested KIP-295 optimisations and returns a (possibly)
-rewritten topology.
+requested KIP-295 optimisation and returns a (possibly)
+rewritten topology. (@MERGE_REPARTITION_TOPICS@ is built into the
+builder, see 'fromOptimizationFlags'.)
 
-The two rewrites are:
+The rewrite is:
 
 ['optReuseSourceKTable' — @REUSE_KTABLE_SOURCE_TOPICS@]
   For every processor that has exactly one parent which is a
@@ -599,34 +774,12 @@ The two rewrites are:
     * The store is a global store (its source is already its
       changelog by construction).
 
-['optMergeRepartitionTopics' — @MERGE_REPARTITION_TOPICS@]
-  Sibling pass-through repartition processors (named
-  @KSTREAM-REPARTITION-\<prefix\>-…@) that share the same
-  single parent /and/ the same repartition prefix are merged
-  into one. Every downstream consumer is rewired to the surviving
-  node, the duplicate nodes are removed, and 'topoChildrenIndex'
-  is rebuilt. The result: one shared repartition processor
-  instead of N independent ones, mirroring the Java optimisation
-  that collapses multiple internal repartition topics into one.
-
-  Skipped when:
-
-    * A repartition node has multiple parents (split lineage —
-      not a sibling collision).
-    * Two repartition processors share a parent but disagree on
-      prefix (different broker-side topics in the JVM
-      equivalent).
-    * The processor owns a state store (a stateful repartition,
-      which we never auto-emit but a 'liftIO_' caller could).
-
 == Semantics
 
-Both rewrites are observably equivalent to the un-rewritten
-topology under the in-process 'TopologyTestDriver' (which
-doesn't materialise broker topics — changelogs are an in-memory
-store, repartition is a logical pass-through). They become
-observable against a real broker, where the changelog/topic
-count drops.
+The rewrite is observably equivalent to the un-rewritten topology
+under the in-process 'TopologyTestDriver' (which doesn't
+materialise broker topics). On a cluster the changelog topic count
+drops.
 
 == Idempotence + dynamic modification
 
@@ -648,12 +801,6 @@ re-derives them from the current graph state. This means:
     modified the graph and /forgot/ to re-optimise. Stale
     entries are reported as 'StaleChangelogPlan' errors.
 
-For 'optReuseSourceKTable' the reflective behaviour applies
-cleanly: clear + re-derive on every call. For
-'optMergeRepartitionTopics' the rewrite is destructive
-(duplicate nodes are removed) — re-running picks up newly-added
-siblings but cannot recover removed ones. See
-'applyMergeRepartitionTopics' for the full contract.
 
 User-explicit declarations via
 'Kafka.Streams.State.Store.withSourceTopicChangelogKV' are
@@ -662,8 +809,12 @@ User-explicit declarations via
 'effectiveChangelogReuse' in addition to the side-table.
 -}
 optimizeTopology :: OptimizationConfig -> Topology -> Topology
-optimizeTopology cfg = mergeRepartitions . reuseStep . wipePlan
+optimizeTopology cfg = selfJoinStep . reuseStep . wipePlan
   where
+    selfJoinStep
+      | optSingleStoreSelfJoin cfg = applySingleStoreSelfJoin
+      | otherwise = Prelude.id
+
     -- Reset every optimiser-derived decision before re-deriving.
     -- This is what makes 'optimizeTopology' reflective: subsequent
     -- modifications to the topology invalidate prior decisions,
@@ -674,9 +825,36 @@ optimizeTopology cfg = mergeRepartitions . reuseStep . wipePlan
     reuseStep
       | optReuseSourceKTable cfg = applyReuseSourceKTable
       | otherwise = Prelude.id
-    mergeRepartitions
-      | optMergeRepartitionTopics cfg = applyMergeRepartitionTopics
-      | otherwise = Prelude.id
+
+
+----------------------------------------------------------------------
+-- KIP-862 — SINGLE_STORE_SELF_JOIN
+----------------------------------------------------------------------
+
+{- | Swap every recorded self-join ('topoSelfJoins') for its
+single-store form: the right node and its store go (the merge node
+keeps the left one as its parent), and the left node runs the
+single processor over the left store.
+-}
+applySingleStoreSelfJoin :: Topology -> Topology
+applySingleStoreSelfJoin t0 = Map.foldrWithKey rewrite t0 {topoSelfJoins = Map.empty} (topoSelfJoins t0)
+  where
+    rewrite left r t
+      | Map.member left (topoProcessors t) && Map.member right (topoProcessors t) =
+          t
+            { topoProcessors =
+                Map.adjust
+                  (\p -> p {processorSpecSupplier = sjrSingle r, processorSpecStores = [sjrLeftStore r]})
+                  left
+                  (Map.map (\p -> p {processorSpecParents = filter (/= right) (processorSpecParents p)}) (Map.delete right (topoProcessors t)))
+            , topoStores = Map.delete (sjrRightStore r) (topoStores t)
+            , topoStoreOwners = Map.insert (sjrLeftStore r) [left] (Map.delete (sjrRightStore r) (topoStoreOwners t))
+            , topoOrder = Seq.filter (/= right) (topoOrder t)
+            , topoChildrenIndex = Map.map (filter (/= right)) (Map.delete right (topoChildrenIndex t))
+            }
+      | otherwise = t
+      where
+        right = sjrRight r
 
 
 ----------------------------------------------------------------------
@@ -749,6 +927,15 @@ storeBuilderLogging = \case
   AsRawBuilder b -> Just (sbLogging b)
 
 
+-- | Whether the builder carries the serdes its changelog needs.
+storeBuilderHasSerdes :: AnyStoreBuilder -> Bool
+storeBuilderHasSerdes = \case
+  AsKeyValueBuilder b -> isJust (sbKvSerdes b)
+  AsWindowBuilder b -> isJust (sbWSerdes b)
+  AsSessionBuilder b -> isJust (sbSSerdes b)
+  AsRawBuilder _ -> False
+
+
 {- | The effective KIP-295 changelog-reuse target for @store@, if
 any. Consults both the /user-explicit/ declaration
 ('LoggingConfig.loggingSourceTopic') and the
@@ -766,184 +953,6 @@ effectiveChangelogReuse t sn =
       , Just tp <- loggingSourceTopic lc ->
           Just tp
     _ -> Map.lookup sn (topoChangelogPlan t)
-
-
-----------------------------------------------------------------------
--- KIP-295 #2 — MERGE_REPARTITION_TOPICS
-----------------------------------------------------------------------
-
-{- | Collapse sibling pass-through repartition processors that
-share a single parent and the same @KSTREAM-REPARTITION-\<prefix\>@
-name prefix into one. Downstream consumers are rewired to the
-survivor; 'topoChildrenIndex' is rebuilt at the end.
-
-== Dynamic-modification contract
-
-The rewrite is /destructive/ on the topology — losing
-repartition nodes are removed entirely from 'topoProcessors',
-'topoOrder', and 'topoChildrenIndex'. Subsequent modifications
-are still safe and correct: re-running 'applyMergeRepartitionTopics'
-(via 'optimizeTopology') on the modified graph picks up the new
-state. Specifically:
-
-  * Adding a new sibling with the same prefix gets absorbed
-    into the existing survivor.
-  * Adding a new sibling with a /smaller/ node name swaps the
-    survivor — the new node becomes the merged target, the
-    old survivor folds in.
-  * Adding a sibling under a different parent leaves both
-    alone (different parents = different merge group).
-
-Unlike 'applyReuseSourceKTable', this rewrite cannot be
-/reverted/ — once the duplicate nodes are gone, you'd have to
-rebuild the graph from the AST to recover them. That's by
-design: the merge is semantically equivalent (pass-throughs
-don't observe records) and the broker resource savings are the
-whole point.
--}
-applyMergeRepartitionTopics :: Topology -> Topology
-applyMergeRepartitionTopics t =
-  let !groups = repartitionSiblingGroups t
-      !rename = buildRenameMap groups
-      !t1 = applyRename rename t
-  in t1 {topoChildrenIndex = rebuildChildrenIndex t1}
-  where
-    buildRenameMap :: [[NodeName]] -> Map NodeName NodeName
-    buildRenameMap = foldl' addGroup Map.empty
-      where
-        addGroup acc grp = case grp of
-          [] -> acc
-          (survivor : vs) ->
-            foldl' (\m loser -> Map.insert loser survivor m) acc vs
-
-
-{- | Discover groups of sibling repartition processors that can be
-merged. The returned list contains one entry per group; each
-group is a non-empty list of 'NodeName's where the head is the
-survivor and the tail is the to-be-removed duplicates.
-
-Survivor selection is deterministic: within each group we pick
-the lexicographically smallest 'NodeName'. This is independent
-of insertion order, so 'applyMergeRepartitionTopics' is
-idempotent under the optimiser's normal compose-with-itself
-semantics.
--}
-repartitionSiblingGroups :: Topology -> [[NodeName]]
-repartitionSiblingGroups t =
-  [ orderedGrp
-  | (_parent, kids) <- Map.toList (topoChildrenIndex t)
-  , let buckets = groupRepartitionsByPrefix t kids
-  , (_prefix, grp) <- buckets
-  , length grp > 1
-  , let orderedGrp = List.sort grp
-  ]
-
-
-{- | Partition a child list by repartition prefix; keeps only
-nodes that are eligible for merging (single-parent
-pass-through repartition processors with no owned stores).
-Returns @[(prefix, [nodes-in-insertion-order])]@.
--}
-groupRepartitionsByPrefix
-  :: Topology
-  -> [NodeName]
-  -> [(Text, [NodeName])]
-groupRepartitionsByPrefix t kids =
-  let eligible =
-        [ (prefix, kid)
-        | kid <- kids
-        , Just spec <- [Map.lookup kid (topoProcessors t)]
-        , length (processorSpecParents spec) == 1
-        , null (processorSpecStores spec)
-        , Just prefix <- [repartitionPrefix (unNodeName kid)]
-        ]
-  in Map.toList $
-       Map.fromListWith
-         (\new old -> old ++ new)
-         [(prefix, [kid]) | (prefix, kid) <- eligible]
-
-
-{- | Extract the @\<prefix\>@ part from a @KSTREAM-REPARTITION-\<prefix\>-\<id\>@
-'NodeName'. Returns 'Nothing' if the name doesn't match the
-repartition pattern.
--}
-repartitionPrefix :: Text -> Maybe Text
-repartitionPrefix nm = do
-  rest <- Text.stripPrefix "KSTREAM-REPARTITION-" nm
-  -- Strip the trailing @-<counter>@ that 'freshNodeName' appends.
-  -- The counter is a non-empty run of digits at the end.
-  let (lhs, dashCounter) = Text.breakOnEnd "-" rest
-  if Text.null dashCounter || not (Text.all Char.isDigit dashCounter)
-    then pure rest
-    -- @lhs@ ends in '-' (because 'breakOnEnd' keeps the delimiter
-    -- in the left half); strip it.
-    else pure (Text.dropWhileEnd (== '-') lhs)
-
-
-{- | Apply a survivor-rename map to every parent/owner reference
-in the topology and drop the renamed-away nodes.
--}
-applyRename :: Map NodeName NodeName -> Topology -> Topology
-applyRename m t
-  | Map.null m = t
-  | otherwise =
-      let resolve nm = Map.findWithDefault nm nm m
-          renameList = map resolve
-          dropLosers ns = filter (\n -> not (Map.member n m)) ns
-      in t
-           { topoProcessors =
-               Map.map
-                 (renameProcessorParents resolve)
-                 ( Map.filterWithKey
-                     (\k _ -> not (Map.member k m))
-                     (topoProcessors t)
-                 )
-           , topoSinks =
-               Map.map (renameSinkParents resolve) (topoSinks t)
-           , topoOrder =
-               Seq.filter
-                 (\n -> not (Map.member n m))
-                 (topoOrder t)
-           , topoStoreOwners =
-               Map.map (nub . renameList) (topoStoreOwners t)
-           , topoChildrenIndex =
-               -- Drop renamed keys; the index is rebuilt afterwards.
-               Map.mapKeys
-                 resolve
-                 (Map.map (dropLosers . renameList) (topoChildrenIndex t))
-           }
-  where
-    renameProcessorParents f spec =
-      spec
-        { processorSpecParents = nub (map f (processorSpecParents spec))
-        }
-    renameSinkParents f spec =
-      spec
-        { sinkParents = nub (map f (sinkParents spec))
-        }
-
-
-{- | Recompute 'topoChildrenIndex' from scratch by walking every
-processor's and sink's parent list.
--}
-rebuildChildrenIndex :: Topology -> Map NodeName [NodeName]
-rebuildChildrenIndex t =
-  Map.map reverse $
-    foldl'
-      ( \acc (child, parents) ->
-          foldl' (\a p -> Map.insertWith (++) p [child] a) acc parents
-      )
-      Map.empty
-      childParents
-  where
-    childParents :: [(NodeName, [NodeName])]
-    childParents =
-      [ (processorSpecName s, processorSpecParents s)
-      | s <- Map.elems (topoProcessors t)
-      ]
-        ++ [ (sinkName s, sinkParents s)
-           | s <- Map.elems (topoSinks t)
-           ]
 
 
 {- | Connect an existing processor to one or more existing state
@@ -1057,8 +1066,17 @@ addGlobalStore builder sourceNm procNm topic ks vs ex updater t0 =
         , sourceExtractor = AnyTimestampExtractor ex
         , sourceOffsetReset = Consumed.OffsetEarliest
         , sourcePattern = Nothing
+        , sourceNullValues = False
         , sourceWatermarkStrategy = Nothing
         }
+
+
+{- | Mark an already-added store as global: one copy per instance,
+fed every partition of its source topics (the runtime's global
+thread), never part of a task.
+-}
+markGlobalStore :: StoreName -> Topology -> Topology
+markGlobalStore sn t = t {topoGlobalStores = Set.insert sn (topoGlobalStores t)}
 
 
 attachToProcessor
@@ -1125,10 +1143,18 @@ validateTopology t = do
   when_ (Map.null (topoSources t)) NoSources
   Map.foldlWithKey'
     ( \acc nm src ->
-        acc >> when_ (null (sourceTopics src)) (EmptySourceTopics nm)
+        acc >> when_ (null (sourceTopics src) && isNothing (sourcePattern src)) (EmptySourceTopics nm)
     )
     (Right ())
     (topoSources t)
+  -- 1b. each topic has one reader
+  let readers =
+        Map.fromListWith
+          (flip (<>))
+          (concatMap (\(nm, src) -> map (\tp -> (tp, [nm])) (sourceTopics src)) (Map.toList (topoSources t)))
+  case Map.toList (Map.filter ((> 1) . length) readers) of
+    (tp, nms) : _ -> Left (TopicReadTwice tp nms)
+    [] -> Right ()
   -- 2. parents resolve
   Map.foldlWithKey'
     ( \acc nm spec ->

@@ -66,6 +66,7 @@ module Kafka.Streams.Driver (
 
   -- * Re-export of the raw collected record shape
   CollectedRecord (..),
+  crValueBytes,
 
   -- * Typed input / output topic helpers (streams-test-utils)
   TestInputTopic,
@@ -74,6 +75,7 @@ module Kafka.Streams.Driver (
   createOutputTopic,
   pipeKV,
   pipeKVAt,
+  pipeTombstone,
   pipeValue,
   pipeAll,
   readKV,
@@ -89,7 +91,6 @@ module Kafka.Streams.Driver (
 
 import Control.Monad (forM)
 import Data.ByteString (ByteString)
-import Data.ByteString qualified as BS
 import Data.IORef
 import Data.Int (Int64)
 import Data.Map.Strict (Map)
@@ -107,7 +108,6 @@ import Kafka.Streams.Internal.Engine (
   commitEngine,
   engineCollector,
   engineTopology,
-  feedSource,
   feedSourceH,
   storeByName,
   storeEntryAny,
@@ -116,6 +116,7 @@ import Kafka.Streams.Internal.Engine (
  )
 import Kafka.Streams.Internal.RecordCollector (
   CollectedRecord (..),
+  crValueBytes,
   RecordCollector,
   collectorPeek,
   collectorTake,
@@ -140,7 +141,6 @@ import Kafka.Streams.Types (
   TopicName,
   emptyHeaders,
  )
-import Kafka.Streams.Types qualified
 import Unsafe.Coerce qualified as Unsafe
 
 
@@ -210,7 +210,7 @@ pipeInput
   -- ^ partition (advisory)
   -> IO ()
 pipeInput d topic key value ts part =
-  pipeInputH d topic key value emptyHeaders ts part
+  pipeInputH d topic key (Just value) emptyHeaders ts part
 
 
 {- | Like 'pipeInput' but carries record headers into the topology.
@@ -221,9 +221,9 @@ pipeInputH
   :: TopologyTestDriver
   -> TopicName
   -> Maybe ByteString
-  -- ^ key bytes (or 'Nothing' for a tombstone)
-  -> ByteString
-  -- ^ value bytes
+  -- ^ key bytes ('Nothing' for a keyless record)
+  -> Maybe ByteString
+  -- ^ value bytes ('Nothing' for a null value, a tombstone)
   -> Headers
   -- ^ record headers
   -> Timestamp
@@ -470,7 +470,7 @@ decodeOutput
   -> Either Text (OutputRecord k v)
 decodeOutput ks vs cr = do
   k <- maybe (Right Nothing) (fmap Just . deserialize ks) (crKey cr)
-  v <- deserialize vs (crValue cr)
+  v <- deserialize vs (crValueBytes cr)
   pure
     OutputRecord
       { orKey = k
@@ -549,6 +549,21 @@ pipeKVAt TestInputTopic {..} mk v ts part = do
   pipeInput titDriver titTopic kBytes vBytes ts part
 
 
+{- | Pipe a tombstone (a null value) for @k@: a table source deletes
+the key; a stream source drops the record.
+-}
+pipeTombstone :: TestInputTopic k v -> k -> IO ()
+pipeTombstone TestInputTopic {..} k =
+  pipeInputH
+    titDriver
+    titTopic
+    (Just (Kafka.Streams.Serde.serialize titKeySerde k))
+    Nothing
+    emptyHeaders
+    (Timestamp 0)
+    0
+
+
 -- | Pipe a single value with no key.
 pipeValue :: TestInputTopic k v -> v -> IO ()
 pipeValue tit v = pipeKV tit Nothing v
@@ -575,7 +590,7 @@ readKeyValuesToList TestOutputTopic {..} = do
       mk <- case crKey cr of
         Nothing -> Right Nothing
         Just kb -> Just <$> Kafka.Streams.Serde.deserialize totKeySerde kb
-      v <- Kafka.Streams.Serde.deserialize totValSerde (crValue cr)
+      v <- Kafka.Streams.Serde.deserialize totValSerde (crValueBytes cr)
       Right (mk, v)
 
 
@@ -627,7 +642,7 @@ toTestRecord
   -> Either Text (TestRecord k v)
 toTestRecord ks vs cr = do
   k <- maybe (Right Nothing) (fmap Just . deserialize ks) (crKey cr)
-  v <- deserialize vs (crValue cr)
+  v <- deserialize vs (crValueBytes cr)
   pure
     TestRecord
       { trKey = k

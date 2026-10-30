@@ -20,6 +20,7 @@ module Kafka.Streams.TimeWindowedKStream (
   aggregateWindowed,
   reduceWindowed,
   WindowedTableHandle (..),
+  windowedUpdateProc,
 
   -- * Emit strategy (KIP-825)
   EmitStrategy (..),
@@ -28,18 +29,22 @@ module Kafka.Streams.TimeWindowedKStream (
   withEmitStrategy,
 ) where
 
+import Control.Monad (forM_, when)
 import Data.IORef
 import Data.Int (Int64)
 import Kafka.Streams.KGroupedStream (
   TimeWindowedKStream (..),
+  groupedInputOf,
  )
-import Kafka.Streams.Materialized (Materialized (..))
+import Kafka.Streams.Materialized (Materialized (..), materializedKV, materializedS, materializedW)
 import Kafka.Streams.Processor (Processor (..), ProcessorContext (..), forwardRecord, getStateStore, processorName)
 import Kafka.Streams.State.Store (
   AnyStateStore (..),
   StoreBuilderW,
   StoreName,
+  WindowCache (..),
   WindowStore (..),
+  WindowedKey (..),
  )
 import Kafka.Streams.State.Window.InMemory (
   inMemoryWindowStoreBuilder,
@@ -86,9 +91,9 @@ emitOnWindowClose :: EmitStrategy
 emitOnWindowClose = OnWindowClose
 
 
-{- | Result of a windowed aggregation: a (synthetic) handle to a
-window-store materialisation.  Convert into a stream of windowed
-records using 'toStreamWindowed'.
+{- | Result of a windowed aggregation: its store, and the node that
+forwards every update as a @(WindowedKey k, v)@ record
+("Kafka.Streams.Suppress" turns it into a stream).
 -}
 data WindowedTableHandle k v = WindowedTableHandle
   { wthNode :: !Topo.NodeName
@@ -140,18 +145,16 @@ reduceWindowed combine m twks = do
       pure
       (matName m)
   let supplier =
-        inMemoryWindowStoreBuilder
-          storeNm
-          (windowsSize ws)
-          (windowsRetention ws)
+        materializedW m storeNm (windowsSize ws) (windowsRetention ws) (twksKey twks) (twksValue twks)
           :: StoreBuilderW k v
   procNm <- freshNodeName b "WINDOWED-REDUCE"
+  input <- groupedInputOf b (twksParent twks) (twksKey twks) (twksValue twks) (twksRepartition twks)
   withTopology_ b $ \t ->
     let !t1 =
           Topo.addProcessorWith
             Topo.ProcessorSpec
               { Topo.processorSpecName = procNm
-              , Topo.processorSpecParents = [twksParent twks]
+              , Topo.processorSpecParents = [input]
               , Topo.processorSpecSupplier =
                   Topo.AnyProcessor
                     (windowedReduceProc @k @v storeNm ws combine)
@@ -170,62 +173,18 @@ reduceWindowed combine m twks = do
       }
 
 
-{- | Per-window reduce processor. Mirrors the JVM
-@TimeWindowedKStream.reduce(adder)@ semantics: the first
-record assigned to a window stores its value verbatim;
-subsequent records combine via @adder(existing, new)@. We
-can't model this through 'aggregateWindowed' without a
-'Maybe v' wrapper because the JVM contract has no
-"initialiser" — the first value /is/ the seed.
+{- | The windowed update processor (see 'windowedUpdateProc') for a
+reduce: the first record of a window seeds it, later ones combine
+with @adder existing new@ (the JVM's @TimeWindowedKStream.reduce@).
 -}
 windowedReduceProc
   :: forall k v
-   . Ord k
-  => StoreName
+   . StoreName
   -> Windows
   -> (v -> v -> v)
   -> IO (Processor k v)
-windowedReduceProc sn ws combine = do
-  ctxRef <- newIORef Nothing
-  storeRef <- newIORef (Nothing :: Maybe (WindowStore k v))
-  pure
-    Processor
-      { procName = processorName "WINDOWED-REDUCE"
-      , procInit = \ctx -> do
-          writeIORef ctxRef (Just ctx)
-          st <- getStateStore ctx sn
-          case st of
-            Just (AnyWindowStore wstore) ->
-              writeIORef storeRef (Just (unsafeCastWS wstore))
-            _ -> error $ "windowedReduceProc: store not found: " <> show sn
-      , procClose = pure ()
-      , procProcess = \r -> do
-          mctx <- readIORef ctxRef
-          mst <- readIORef storeRef
-          case (mctx, mst, recordKey r) of
-            (Just ctx, Just store_, Just k) -> do
-              Timestamp now <- ctxStreamTime ctx
-              let !grace = windowsGracePeriod ws
-                  !winSize = windowsSize ws
-                  Timestamp rt = recordTimestamp r
-                  !rightEdge = rt + winSize
-                  isExpired = rightEdge + grace < now
-              if isExpired
-                then pure ()
-                else do
-                  let !windows = windowsAssign ws (recordTimestamp r)
-                  mapM_
-                    ( \(Window startT _) -> do
-                        mPrev <- wsFetch store_ k startT
-                        let !next = case mPrev of
-                              Just acc -> combine acc (recordValue r)
-                              Nothing -> recordValue r
-                        wsPut store_ k next startT
-                        forwardRecord ctx r {recordValue = next}
-                    )
-                    windows
-            _ -> pure ()
-      }
+windowedReduceProc sn ws combine =
+  windowedUpdateProc sn ws (\_ v prev -> pure (maybe v (`combine` v) prev))
 
 
 aggregateWindowed
@@ -245,18 +204,16 @@ aggregateWindowed initial agg m twks = do
       pure
       (matName m)
   let supplier =
-        inMemoryWindowStoreBuilder
-          storeNm
-          (windowsSize ws)
-          (windowsRetention ws)
+        materializedW m storeNm (windowsSize ws) (windowsRetention ws) (twksKey twks) (error "aggregate: pass Materialized with a value serde for the aggregate type")
           :: StoreBuilderW k a
   nodeNm <- freshNodeName b "WINDOWED-AGG"
+  input <- groupedInputOf b (twksParent twks) (twksKey twks) (twksValue twks) (twksRepartition twks)
   withTopology_ b $ \t ->
     let !t1 =
           Topo.addProcessorWith
             Topo.ProcessorSpec
               { Topo.processorSpecName = nodeNm
-              , Topo.processorSpecParents = [twksParent twks]
+              , Topo.processorSpecParents = [input]
               , Topo.processorSpecSupplier =
                   Topo.AnyProcessor
                     (windowedAggProc @k @v @a storeNm ws initial agg)
@@ -277,54 +234,61 @@ aggregateWindowed initial agg m twks = do
 
 windowedAggProc
   :: forall k v a
-   . Ord k
-  => StoreName
+   . StoreName
   -> Windows
   -> IO a
   -> (k -> v -> a -> a)
   -> IO (Processor k v)
-windowedAggProc sn ws initial agg = do
-  ctxRef <- newIORef Nothing
-  storeRef <- newIORef (Nothing :: Maybe (WindowStore k a))
+windowedAggProc sn ws initial agg =
+  windowedUpdateProc sn ws (\k v prev -> agg k v <$> maybe initial pure prev)
+
+
+{- | Fold a record into every window it falls in that is still open,
+and forward each window's new aggregate keyed by the window. A window
+is open while its end is past the processor's stream time (the latest
+timestamp it has seen) minus the grace period; a record's closed
+windows are skipped, its open ones still updated (the JVM's
+@KStreamWindowAggregate@).
+-}
+windowedUpdateProc
+  :: forall k v a
+   . StoreName
+  -> Windows
+  -> (k -> v -> Maybe a -> IO a)
+  -> IO (Processor k v)
+windowedUpdateProc sn ws step = do
+  ref <- newIORef Nothing
+  observed <- newIORef (minBound :: Int64)
   pure
     Processor
       { procName = processorName "WINDOWED-AGG"
       , procInit = \ctx -> do
-          writeIORef ctxRef (Just ctx)
           st <- getStateStore ctx sn
           case st of
-            Just (AnyWindowStore wstore) ->
-              writeIORef storeRef (Just (unsafeCastWS wstore))
-            _ -> error $ "windowedAggProc: store not found: " <> show sn
+            Just (AnyWindowStore wstore) -> do
+              let store_ = unsafeCastWS wstore :: WindowStore k a
+              -- a cached store hands its flushed windows on here
+              forM_ (wsCache store_) $ \c ->
+                wcOnFlush c $ \k start v ts hs -> forwardRecord ctx (Record (Just (WindowedKey k start)) v ts hs)
+              writeIORef ref (Just (ctx, store_))
+            _ -> error $ "windowed aggregation: store not found: " <> show sn
       , procClose = pure ()
       , procProcess = \r -> do
-          mctx <- readIORef ctxRef
-          mst <- readIORef storeRef
-          case (mctx, mst, recordKey r) of
-            (Just ctx, Just store_, Just k) -> do
-              -- Grace-period enforcement: skip records whose latest
-              -- assignable window has fully closed below stream-time -
-              -- grace. Mirrors the "late record drop" behaviour of
-              -- KIP-633.
-              Timestamp now <- ctxStreamTime ctx
-              let !grace = windowsGracePeriod ws
-                  !winSize = windowsSize ws
-                  Timestamp rt = recordTimestamp r
-                  !rightEdge = rt + winSize
-                  isExpired = rightEdge + grace < now
-              if isExpired
-                then pure () -- silently drop the late record
-                else do
-                  let !windows = windowsAssign ws (recordTimestamp r)
-                  mapM_
-                    ( \(Window startT _) -> do
-                        mPrev <- wsFetch store_ k startT
-                        cur <- maybe initial pure mPrev
-                        let !next = agg k (recordValue r) cur
-                        wsPut store_ k next startT
-                        forwardRecord ctx r {recordValue = next}
-                    )
-                    windows
+          m <- readIORef ref
+          case (m, recordKey r) of
+            (Just (ctx, store_), Just k) -> do
+              let Timestamp ts = recordTimestamp r
+              now <- atomicModifyIORef' observed (\o -> let !n = max o ts in (n, n))
+              let !closeTime = now - windowsGracePeriod ws
+              forM_ (windowsAssign ws (recordTimestamp r)) $ \(Window start (Timestamp end)) ->
+                when (end > closeTime) $ do
+                  prev <- wsFetch store_ k start
+                  !next <- step k (recordValue r) prev
+                  case wsCache store_ of
+                    Just c -> wcWrite c k next start (recordTimestamp r) (recordHeaders r)
+                    Nothing -> do
+                      wsPut store_ k next start
+                      forwardRecord ctx (Record (Just (WindowedKey k start)) next (recordTimestamp r) (recordHeaders r))
             _ -> pure ()
       }
 

@@ -16,12 +16,14 @@ module Kafka.Streams.SessionWindowedKStream (
   SessionWindowedTableHandle (..),
 ) where
 
+import Control.Monad (forM_, unless)
 import Data.IORef
 import Data.Int (Int64)
 import Kafka.Streams.KGroupedStream (
   SessionWindowedKStream (..),
+  groupedInputOf,
  )
-import Kafka.Streams.Materialized (Materialized (..))
+import Kafka.Streams.Materialized (Materialized (..), materializedKV, materializedS, materializedW)
 import Kafka.Streams.Processor (
   Processor (..),
   forwardRecord,
@@ -33,6 +35,7 @@ import Kafka.Streams.State.Session.InMemory (
  )
 import Kafka.Streams.State.Store (
   AnyStateStore (..),
+  SessionCache (..),
   SessionKey (..),
   SessionStore (..),
   StoreBuilderS,
@@ -93,15 +96,16 @@ aggregateSessionWindowed initial agg merger m swks = do
       pure
       (matName m)
   let supplier =
-        inMemorySessionStoreBuilder storeNm (swRetention sw)
+        materializedS m storeNm (swRetention sw) (swksKey swks) (error "aggregate: pass Materialized with a value serde for the aggregate type")
           :: StoreBuilderS k a
   nodeNm <- freshNodeName b "SESSION-AGG"
+  input <- groupedInputOf b (swksParent swks) (swksKey swks) (swksValue swks) (swksRepartition swks)
   withTopology_ b $ \t ->
     let !t1 =
           Topo.addProcessorWith
             Topo.ProcessorSpec
               { Topo.processorSpecName = nodeNm
-              , Topo.processorSpecParents = [swksParent swks]
+              , Topo.processorSpecParents = [input]
               , Topo.processorSpecSupplier =
                   Topo.AnyProcessor
                     (sessionAggProc @k @v @a storeNm sw initial agg merger)
@@ -118,67 +122,70 @@ aggregateSessionWindowed initial agg merger m swks = do
       }
 
 
+{- | Fold a record into its session: the sessions of its key within
+the inactivity gap merge with it into one. Each merged-away session is
+retracted (forwarded as @Nothing@ under its old key) and the new one
+forwarded, each at its end. A record whose merged session ends before
+the processor's stream time minus the grace period is dropped (the
+JVM's @KStreamSessionWindowAggregate@).
+-}
 sessionAggProc
   :: forall k v a
-   . Ord k
-  => StoreName
+   . StoreName
   -> SessionWindows
   -> IO a
   -> (k -> v -> a -> a)
   -> (k -> a -> a -> a)
   -> IO (Processor k v)
 sessionAggProc sn sw initial agg merger = do
-  ctxRef <- newIORef Nothing
-  storeRef <- newIORef (Nothing :: Maybe (SessionStore k a))
+  ref <- newIORef Nothing
+  observed <- newIORef (minBound :: Int64)
   pure
     Processor
       { procName = processorName "SESSION-AGG"
       , procInit = \ctx -> do
-          writeIORef ctxRef (Just ctx)
           st <- getStateStore ctx sn
           case st of
-            Just (AnySessionStore ss) ->
-              writeIORef storeRef (Just (unsafeCastSS ss))
+            Just (AnySessionStore ss) -> do
+              let store_ = unsafeCastSS ss :: SessionStore k a
+              -- a cached store hands its flushed sessions on here, each at its end
+              forM_ (ssCache store_) $ \c ->
+                scsOnFlush c $ \sk new _ _ hs -> forwardRecord ctx (Record (Just sk) new (skEnd sk) hs)
+              writeIORef ref (Just (ctx, store_))
             _ -> error $ "sessionAggProc: store not found: " <> show sn
       , procClose = pure ()
       , procProcess = \r -> do
-          mctx <- readIORef ctxRef
-          mst <- readIORef storeRef
-          case (mctx, mst, recordKey r) of
-            (Just ctx, Just store_, Just k) -> do
+          m <- readIORef ref
+          case (m, recordKey r) of
+            (Just (ctx, store_), Just k) -> do
               let !ts = recordTimestamp r
+                  Time.Timestamp tsMs = ts
                   !gap = swInactivityGap sw
-              -- Find adjacent sessions (anything ending within
-              -- [ts-gap, ts+gap]).
-              it <-
-                ssFindSessions
-                  store_
-                  k
-                  (timestampMinus ts gap)
-                  (timestampPlus ts gap)
-              adjacents <- kvIteratorToList it
-              -- Compute the merged session window bounds (always
-              -- includes 'ts'); compute the merged aggregate only if
-              -- there's at least one adjacent session.
-              let !lo =
-                    foldl
-                      (\s (SessionKey _ s' _, _) -> min s s')
-                      ts
-                      adjacents
-                  !hi =
-                    foldl
-                      (\e (SessionKey _ _ e', _) -> max e e')
-                      ts
-                      adjacents
-              base <- case adjacents of
-                [] -> initial
-                ((_, a0) : rest) ->
-                  pure $! foldl (\a (_, a') -> merger k a a') a0 rest
-              mapM_ (\(sk, _) -> ssRemove store_ sk) adjacents
-              let !newAgg = agg k (recordValue r) base
-                  !sk = SessionKey k lo hi
-              ssPut store_ sk newAgg
-              forwardRecord ctx r {recordValue = newAgg}
+              now <- atomicModifyIORef' observed (\o -> let !n = max o tsMs in (n, n))
+              let !closeTime = now - swGracePeriod sw
+              -- the sessions ending within [ts - gap] and starting by ts + gap
+              adjacents <- ssFindSessions store_ k (timestampMinus ts gap) (timestampPlus ts gap) >>= kvIteratorToList
+              let !lo = foldl (\s (SessionKey _ s' _, _) -> min s s') ts adjacents
+                  !hi@(Time.Timestamp hiMs) = foldl (\e (SessionKey _ _ e', _) -> max e e') ts adjacents
+                  forward key v (Time.Timestamp at) = forwardRecord ctx (Record (Just key) v (Time.Timestamp at) (recordHeaders r))
+              unless (hiMs < closeTime) $ do
+                base <- case adjacents of
+                  [] -> initial
+                  (_, a0) : rest -> pure $! foldl (\a (_, a') -> merger k a a') a0 rest
+                -- (a session that is exactly [ts, ts] is just overwritten)
+                unless (lo == ts && hi == ts) $
+                  forM_ adjacents $ \(old, _) -> case ssCache store_ of
+                    Just c -> scsWrite c old Nothing (skEnd old) (recordHeaders r)
+                    Nothing -> do
+                      ssRemove store_ old
+                      forward old (Nothing :: Maybe a) (skEnd old)
+                let !newAgg = agg k (recordValue r) base
+                    !sk = SessionKey k lo hi
+                case ssCache store_ of
+                  Just c -> scsWrite c sk (Just newAgg) hi (recordHeaders r)
+                  Nothing -> do
+                    ssPut store_ sk newAgg
+                    forward sk (Just newAgg) hi
             _ -> pure ()
       }
 

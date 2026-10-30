@@ -287,6 +287,8 @@ data SinkEmit = SinkEmit
   , seKey :: !(Maybe ByteString)
   , seValue :: !ByteString
   , seTimestamp :: !Timestamp
+  , seHeaders :: !Kafka.Streams.Types.Headers
+  -- ^ Written onto the outgoing record verbatim.
   }
   deriving stock (Generic)
 

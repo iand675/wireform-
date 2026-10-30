@@ -31,6 +31,8 @@ the operator's job.
 -}
 module Integration.TransactionalSpec (tests) where
 
+import Data.Maybe (mapMaybe)
+import Kafka.Client.Internal.TransactionCoordinator qualified as TC
 import Control.Concurrent (threadDelay)
 import Data.ByteString.Char8 qualified as BSC
 import Data.HashMap.Strict qualified as Map
@@ -64,6 +66,9 @@ tests =
       , it
           "produce + abortTransaction -> invisible to read-committed"
           txn_abort_invisible
+      , it
+          "a second transaction to the same partition commits and is visible"
+          txn_second_transaction_visible
       , it
           "second producer with same transactional.id fences the first"
           txn_fences_old_producer
@@ -114,6 +119,7 @@ withTxnProducer txId action = do
         Txn.createTransaction
           (Txn.TransactionalId txId)
           connMgr
+          Conn.defaultConnectionConfig
           vCache
           (Producer.producerClientId pcfg)
           bootstrap
@@ -157,7 +163,7 @@ drainValues c maxAttempts = go [] maxAttempts
       case r of
         Left _ -> pure acc
         Right [] -> go acc (k - 1)
-        Right rs -> go (acc ++ map (.value) rs) (k - 1)
+        Right rs -> go (acc ++ mapMaybe (.value) rs) (k - 1)
 
 
 ----------------------------------------------------------------------
@@ -187,6 +193,28 @@ txn_commit_visible = do
   vs <- drainValues c 10
   Consumer.closeConsumer c
   (if (value `elem` vs) then pure () else expectationFailure ("expected to find " <> show value <> " in " <> show vs))
+
+
+{- | Each transaction adds its partitions to itself with the
+coordinator: a partition the first transaction wrote to is added
+again for the second, so the second's record is covered by its
+commit marker.
+-}
+txn_second_transaction_visible :: IO ()
+txn_second_transaction_visible = do
+  txId <- freshTxnId "wfkafka-txn-second"
+  let v1 = BSC.pack "wfkafka-second-1"
+      v2 = BSC.pack "wfkafka-second-2"
+      round_ p txn v = do
+        Txn.beginTransaction txn >>= either (\e -> expectationFailure ("beginTransaction: " <> show e)) pure
+        Producer.sendMessage p sinkTopic Nothing v >>= either (\e -> expectationFailure ("sendMessage: " <> e)) (const (pure ()))
+        Txn.commitTransaction txn >>= either (\e -> expectationFailure ("commitTransaction: " <> show e)) pure
+  withTxnProducer txId $ \p txn -> round_ p txn v1 >> round_ p txn v2
+  c <- mkRcConsumer "wfkafka-txn-second-rc" sinkTopic 0
+  threadDelay 500_000
+  vs <- drainValues c 10
+  Consumer.closeConsumer c
+  (if all (`elem` vs) [v1, v2] then pure () else expectationFailure ("expected both values in " <> show vs))
 
 
 txn_abort_invisible :: IO ()
@@ -258,7 +286,20 @@ txn_send_offsets_atomically = do
         let offs =
               Map.fromList
                 [(Consumer.TopicPartition sourceTopic 0, 1)]
-        _ <- Txn.commitOffsetsInTransaction txn groupId offs
+        -- Single-broker fixture: the bootstrap broker is the group
+        -- coordinator, and the source consumer was assigned (not
+        -- joined), so the member identity is the standalone one.
+        _ <-
+          Txn.sendOffsetsToTransaction
+            txn
+            (Conn.BrokerAddress "127.0.0.1" 9092)
+            TC.TxnGroupMember
+              { TC.tgmGroupId = groupId
+              , TC.tgmGenerationId = -1
+              , TC.tgmMemberId = ""
+              , TC.tgmGroupInstanceId = Nothing
+              }
+            (Map.toList offs)
         _ <- Txn.commitTransaction txn
         pure ()
       Consumer.closeConsumer src

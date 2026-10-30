@@ -1,112 +1,102 @@
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeApplications #-}
 
 {- |
 Module      : Kafka.Streams.Examples.Ops.StandbyWarmup
-Description : Warm a standby off the changelog and decide when it's ready
+Description : Warm failover with standbys, and warmups with probing rebalances
 
-Models the KIP-441 warm-failover flow:
+Part 1: two instances of a counting application with
+@num.standby.replicas = 1@. Each runs one task and keeps the other's
+stores current as a standby ('localTaskLags' shows its lag reach 0).
+When one instance goes away the other takes its task over and restores
+next to nothing.
 
-  1. The /active/ task writes through a 'loggedKeyValueStore'
-     that mirrors every put to an in-memory changelog topic.
-  2. A /standby/ task lives on a different node; we replay
-     the changelog into its store via 'advanceStandby'.
-  3. The runtime polls @lag = activeOffset - standbyOffset@
-     periodically and uses
-     'Kafka.Streams.Runtime.ProbingRebalance.classifyWarmups'
-     to decide whether the standby is close enough to be
-     promoted to active in the next probing rebalance.
-
-The demo prints lag and classification at every step so you
-can see the standby cross the acceptable-recovery-lag
-threshold and become @WarmupReady@.
+Part 2 (KIP-441): one instance has been counting for a while when a
+second, empty one joins. Moving a task to it would mean a full
+restore, so the assignor leaves both tasks where they are caught up
+and gives the newcomer a warmup. At the next probing rebalance
+(@probing.rebalance.interval.ms@) the warmup has caught up
+(@acceptable.recovery.lag@) and the task moves.
 -}
 module Kafka.Streams.Examples.Ops.StandbyWarmup (
   runDemo,
 ) where
 
 import Control.Monad (forM_)
-import Data.IORef (readIORef)
-import Data.Int (Int64)
-import Data.Text (Text)
 import Data.Text qualified as T
-import Kafka.Streams.Examples.Ops.Helpers (bullet, section)
+import Kafka.Streams.Examples.Ops.Helpers
 import Kafka.Streams.Imperative
-import Kafka.Streams.Runtime.ProbingRebalance qualified as PR
-import Kafka.Streams.Runtime.Standby
-import Kafka.Streams.State.KeyValue.InMemory (inMemoryKeyValueStore)
+import Kafka.Streams.Metrics (restoredRecordsTotal, standbyRecordsTotal)
+import Kafka.Streams.Runtime.MockBroker
+
+
+produceVisits :: MockBroker -> Int -> IO ()
+produceVisits broker n =
+  forM_ [1 .. n] $ \i -> mockProduce broker "in" (Just (bytes ("user-" <> T.pack (show (i `mod` 10))))) (Just "visit") 0
+
+
+showLags :: String -> KafkaStreams -> IO ()
+showLags who ks = do
+  r <- localTaskLags ks
+  case r of
+    Left e -> bullet ("    " <> who <> ": " <> T.unpack e)
+    Right lags ->
+      forM_ lags $ \l ->
+        bullet
+          ( "    "
+              <> who
+              <> (if l.lagStandby then " standby " else " active  ")
+              <> taskLabel l.lagTaskId
+              <> ": "
+              <> show l.lagCurrentOffset
+              <> " / "
+              <> show l.lagEndOffset
+          )
 
 
 runDemo :: IO ()
 runDemo = do
   section "StandbyWarmupDemo"
+  topo <- countTopo
 
-  -- Active side: in-memory store wrapped with a changelog.
-  changelog <- newInMemoryChangelogTopic
-  activeUnder <- inMemoryKeyValueStore @Text @Text (storeName "session-store")
-  active <-
-    loggedKeyValueStore
-      activeUnder
-      changelog
-      (storeName "session-store")
-      textSerde
-      textSerde
+  bullet "Part 1: standbys"
+  withDemoDirs 2 $ \[d1, d2] -> do
+    broker <- newMockBroker (Just 1)
+    mockCreateTopic broker "in" 2
+    let cfg d = (demoConfig "ops-standby" d) {numStandbyReplicas = 1}
+    a <- startInstance broker (cfg d1) topo
+    b <- startInstance broker (cfg d2) topo
+    _ <- waitUntil [a, b] ((\x y -> x == 1 && y == 1) <$> (length <$> ownedPartitions a) <*> (length <$> ownedPartitions b))
+    produceVisits broker 400
+    _ <- waitUntil [a, b] ((== 400) . length <$> outputValues broker "out")
+    _ <- waitUntil [a, b] (either (const False) (all (\l -> l.lagCurrentOffset == l.lagEndOffset)) <$> localTaskLags a)
+    bullet "  task state (position / changelog end):"
+    showLags "a" a
+    showLags "b" b
+    before <- counterOf a restoredRecordsTotal
+    bullet "  b goes away; a takes its task over"
+    stopInstance b
+    _ <- waitUntil [a] ((== 2) . length <$> ownedPartitions a)
+    after <- counterOf a restoredRecordsTotal
+    bullet ("  a restored " <> show (after - before) <> " changelog records for it (its standby had the rest)")
+    stopInstance a
 
-  -- Standby side: an independent store + a 'StandbyTask' that
-  -- catches it up off the changelog.
-  standbyStore <-
-    inMemoryKeyValueStore @Text @Text
-      (storeName "session-store-standby")
-  sb <-
-    newStandbyTask
-      standbyStore
-      changelog
-      (storeName "session-store")
-      textSerde
-      textSerde
-
-  -- KIP-441 knob: how far behind is "close enough"?
-  let acceptableLag :: Int64
-      acceptableLag = 2
-
-  bullet
-    ( "Active is now writing; acceptableRecoveryLag = "
-        <> show acceptableLag
-    )
-
-  -- Three rounds: the active emits writes, then we advance the
-  -- standby, then we check readiness.
-  forM_
-    [ (1 :: Int, mkBatch 1 5)
-    , (2, mkBatch 6 5)
-    , (3, mkBatch 11 2)
-    ]
-    $ \(round_, batch) -> do
-      bullet ("Round " <> show round_ <> ": active writes " <> show (length batch))
-      forM_ batch $ \(k, v) -> kvsPut active k v
-
-      -- Standby pulls a batch off the changelog. The remaining
-      -- lag is end-offset minus standby-offset.
-      n <- advanceStandby sb
-      headOff <- currentChangelogOffset changelog
-      sbOff <- readIORef (sbOffset sb)
-      let lag = headOff - sbOff
-      bullet ("    standby replayed " <> show n <> " entries; lag = " <> show lag)
-
-      let progress =
-            PR.WarmupProgress
-              { PR.task = TaskId 0 0
-              , PR.lag = lag
-              }
-      case PR.classifyWarmups acceptableLag [progress] of
-        [(_, PR.WarmupReady)] ->
-          bullet "    classifier: WarmupReady -> eligible for next probing rebalance"
-        [(_, PR.WarmupCatchingUp)] ->
-          bullet "    classifier: WarmupCatchingUp -> keep as standby for now"
-        _ -> bullet "    classifier: <unexpected shape>"
-  where
-    mkBatch :: Int -> Int -> [(Text, Text)]
-    mkBatch start count =
-      [ (T.pack ("k" <> show i), T.pack ("v" <> show i))
-      | i <- [start .. start + count - 1]
-      ]
+  bullet "Part 2: warmups and a probing rebalance"
+  withDemoDirs 2 $ \[d1, d2] -> do
+    broker <- newMockBroker (Just 1)
+    mockCreateTopic broker "in" 2
+    let cfg d = (demoConfig "ops-warmup" d) {acceptableRecoveryLag = 10, probingRebalanceIntervalMs = 500}
+    a <- startInstance broker (cfg d1) topo
+    produceVisits broker 400
+    _ <- waitUntil [a] ((== 400) . length <$> outputValues broker "out")
+    b <- startInstance broker (cfg d2) topo
+    _ <- waitUntil [a, b] (either (const False) (not . null) <$> localTaskLags b)
+    bullet "  b joined with no state: a keeps both tasks, b warms one up"
+    assignmentsOf [("a", a), ("b", b)] >>= printAssignments "  right after b joined"
+    showLags "b" b
+    moved <- waitUntil [a, b] ((== 1) . length <$> ownedPartitions b)
+    assignmentsOf [("a", a), ("b", b)] >>= printAssignments ("  after the probing rebalance (moved: " <> show moved <> ")")
+    warm <- counterOf b standbyRecordsTotal
+    restored <- counterOf b restoredRecordsTotal
+    bullet ("  b applied " <> show warm <> " records as a warmup and restored " <> show restored <> " once active")
+    mapM_ stopInstance [b, a]

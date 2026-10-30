@@ -59,17 +59,21 @@ Full walkthrough with capacity sizing: [Enrichment via external systems](../guid
 
 ### The problem
 
-Kafka Streams maintains state by writing every state change to a changelog topic. When a task starts (a fresh deploy, a rebalance, or a crash recovery), it replays the entire changelog from offset zero to rebuild the state store.
+Kafka Streams maintains state by writing every state change to a changelog topic. When a task starts (a fresh deploy, a rebalance, or a crash recovery) without a local checkpoint, it replays the entire changelog to rebuild the state store.
 
 This design is sound and correct, but recovery time scales with state size. A state store holding 50 GB of data means replaying 50 GB of changelog records, which can take 30-60 minutes depending on your broker throughput and record complexity. On a rolling deploy with 20 instances, each one waits its turn. What should be a 5-minute deploy becomes a multi-hour operation.
 
-Standby replicas help (they pre-replicate state so that a rebalanced task can start from a warm copy), but they double your state storage requirements and still need to catch up on any records written since the last replication cycle.
+In the JVM, standby replicas help (they pre-replicate state so that a rebalanced task can start from a warm copy), but they double your state storage requirements and still need to catch up on any records written since the last replication cycle. This runtime doesn't run standbys.
 
 ### The solution
 
-Riffle adds snapshot-based recovery. The runtime periodically checkpoints the entire state store to a durable object store: local filesystem for development, S3 or GCS or Azure Blob for production. The changelog still exists and still captures every write, but it now acts as a write-ahead log between snapshots rather than the sole recovery mechanism.
+Riffle adds snapshot-based recovery. A snapshot store periodically checkpoints its entire state to a durable object store: local filesystem for development, S3 or GCS or Azure Blob for production. The changelog still exists and still captures every write, but it now acts as a write-ahead log between snapshots rather than the sole recovery mechanism.
 
-On restart, the runtime:
+:::caution
+The streams runtime's restore doesn't use snapshots yet: a task without a local checkpoint replays its whole changelog whatever the store. The snapshot stores, the tiered and remote backends and the pointer-mode standby below are a library you can drive yourself (`Kafka.Streams.Runtime.Snapshot`, `Kafka.Streams.Backfill`).
+:::
+
+On restart, snapshot recovery:
 
 1. Finds the latest snapshot for each state store
 2. Loads it (a bulk read, not a record-by-record replay)
@@ -115,15 +119,19 @@ Riffle provides a two-phase commit (2PC) sink interface that coordinates the ext
 2. **Pre-commit**: The sink prepares its transaction (e.g., `PREPARE TRANSACTION` in Postgres). If this fails, the Kafka transaction aborts too.
 3. **Kafka commit**: The producer transaction commits offsets and output records.
 4. **Sink commit**: The sink commits its prepared transaction (e.g., `COMMIT PREPARED` in Postgres).
-5. **Recovery**: If the process crashes between steps 3 and 4, the sink transaction is left in prepared state. On next boot, `tpsRecover` inspects the prepared transaction and decides whether to commit or abort it based on whether the Kafka transaction landed.
+5. **Recovery**: If the process crashes between steps 3 and 4, the sink transaction is left in prepared state. On next boot, `tpsRecover` lists the prepared transactions and the runtime commits or aborts each one depending on whether the Kafka transaction landed.
 
 ```haskell
-sinkTwoPhase "postgres-sink" postgresSink produced
+-- in the topology
+... >>> F.sinkTwoPhase postgresSink
+
+-- before starting
+R.addCommitParticipant streams (TPS.twoPhaseParticipant postgresSink)
 ```
 
-You implement the `TwoPhaseSink` interface for your external system. The interface has four methods: `tpsPreCommit` (prepare the transaction), `tpsCommit` (commit it), `tpsAbort` (roll it back), and `tpsRecover` (resolve any in-doubt transactions from a previous run).
+You implement the `TwoPhaseSink` interface for your external system: `tpsStage` (take one record), `tpsPrepare` (prepare the transaction), `tpsCommit` (commit it), `tpsAbort` (roll it back), and `tpsRecover` (list the in-doubt transactions from a previous run). The runtime records each committed cycle in a `<application.id>-twophase-commits` topic inside the Kafka transaction, which is how recovery knows whether the Kafka side landed.
 
-The contract and reference sinks (in-memory, filesystem, HTTP echo) ship in core so you can develop and test locally. Production adapters for JDBC, Iceberg, S3, and HTTP live in separate packages to keep the core dependency footprint small.
+The contract and reference sinks (in-memory, filesystem, HTTP echo) ship in core so you can develop and test locally. There are no production adapters (JDBC, Iceberg, S3, HTTP) yet; they would live in separate packages to keep the core dependency footprint small.
 
 Operator walkthrough: [Exactly-once across Kafka and other systems](../operating/exactly-once/).
 
@@ -174,16 +182,11 @@ This is fine when you create the topic with enough partitions up front. But requ
 
 ### The solution
 
-Key-group routing decouples parallelism from the topic's partition count. Instead of assigning one task per partition, the runtime hashes each record's key onto one of N key-groups (default 128, configurable). The group assignor distributes key-groups across workers, and workers can handle multiple key-groups concurrently.
+Key-group routing decouples parallelism from the topic's partition count. Instead of assigning one task per partition, records' keys hash onto one of N key-groups (default 128, configurable), and an assignor distributes key-groups across workers.
 
-```haskell
-let config = defaultStreamsConfig
-      { dispatchMode = DispatchKeyGroup (keyGroupConfig 128) }
-```
-
-With 128 key-groups, you can scale from 1 worker to 128 workers without touching the topic. Key-group assignment is sticky: the assignor tries to keep key-groups on the same worker across rebalances to minimize state migration.
-
-The standard dispatch modes (`DispatchPartition` for one-task-per-partition, `DispatchHashed` for hash-based routing within a partition) remain available and stay the default. Key-group routing is purely opt-in.
+:::caution
+`Kafka.Streams.Runtime.KeyGroup` and `Kafka.Streams.Runtime.WorkerPool` are a separate library: the streams runtime doesn't use them. Its parallelism is one task per partition, so it is capped by partition counts; repartition (`repartitionWith` an explicit partition count) to go wider.
+:::
 
 See [Scaling and rebalancing](../operating/scaling/).
 
@@ -217,13 +220,12 @@ Every Riffle feature is independent. You can adopt one without adopting any of t
 
 4. **Switch to typed StoreRef** during any refactor that touches state store access. The old stringly-typed calls keep working alongside the new typed ones, so you can migrate incrementally.
 
-5. **Add snapshot stores** when changelog replay time becomes the gate on rolling deploys. This is the biggest infrastructure change (you need an object store), but the payoff is dramatic for large state.
+5. **Add snapshot stores** when changelog replay time becomes the gate on rolling deploys, once the runtime's restore uses them (see the caution above). This is the biggest infrastructure change (you need an object store).
 
 6. **Add the watermark coordinator** when you start joining mixed-rate sources or hit idle-partition stalls in your windowed operations.
 
 7. **Add 2PC sinks** when you have external writes that need atomic-with-Kafka semantics.
 
-8. **Switch to key-group dispatch** when you hit the partition-count parallelism ceiling and can't or don't want to repartition topics.
 
 You can stop at any step. Every step is an additive deploy; you're never committed to the full set.
 
@@ -231,7 +233,7 @@ You can stop at any step. Every step is an additive deploy; you're never committ
 
 - [Enrichment via external systems](../guides/enrichment/): async I/O walkthrough with capacity sizing
 - [Topology evolution](../operating/topology-evolution/): how snapshot stores change rolling deploys
-- [Scaling and rebalancing](../operating/scaling/): key-groups and rebalance
+- [Scaling and rebalancing](../operating/scaling/): tasks, threads and rebalances
 - [Exactly-once across Kafka and other systems](../operating/exactly-once/): the 2PC sink contract
 - [Observability](../operating/observability/): topology JSON, orphan detection, live overlays
 - [Visibility versus ACID databases](../operating/visibility/): watermarks and event-time TTL

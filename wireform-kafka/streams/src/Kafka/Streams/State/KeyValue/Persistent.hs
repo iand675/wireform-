@@ -49,10 +49,13 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as T
 import Data.Word (Word32)
+import Kafka.Streams.Serde (byteStringSerde)
 import Kafka.Streams.State.Store (
   KeyValueStore (..),
   StateStore (..),
   StoreBuilderKV (..),
+  StoreContext (..),
+  StoreSerdes (..),
   StoreName,
   defaultLoggingConfig,
   kvIteratorFromList,
@@ -121,7 +124,8 @@ mkStore
   -> KeyValueStore ByteString ByteString
 mkStore nm cfg snapPath walPath ref walRef =
   KeyValueStore
-    { kvsBase =
+    { kvsCache = Nothing
+    , kvsBase =
         StateStore
           { storeStoreName = nm
           , storePersistent = True
@@ -198,9 +202,11 @@ persistentKeyValueStoreBuilder
   -> StoreBuilderKV ByteString ByteString
 persistentKeyValueStoreBuilder nm cfg =
   StoreBuilderKV
-    { sbKvName = nm
+    { sbKvCaching = Nothing
+    , sbKvName = nm
     , sbKvLogging = defaultLoggingConfig
-    , sbKvBuild = persistentKeyValueStore nm cfg
+    , sbKvSerdes = Just (StoreSerdes byteStringSerde byteStringSerde)
+    , sbKvBuild = \ctx -> persistentKeyValueStore nm cfg {pcDirectory = scDirectory ctx}
     }
 
 

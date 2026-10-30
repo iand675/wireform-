@@ -217,7 +217,7 @@ toWireformRecord ProducerRecord {..} =
   WF.ProducerRecord
     { WF.topic = unTopicName prTopic
     , WF.key = prKey
-    , WF.value = maybe BS.empty id prValue
+    , WF.value = prValue
     , WF.headers = map convertHeader (headersToList prHeaders)
     , WF.partition = partitionToWireform prPartition
     , WF.timestamp = Nothing
@@ -240,7 +240,7 @@ fromWireformRecord WF.ProducerRecord {..} =
     { prTopic = TopicName topic
     , prPartition = maybe UnassignedPartition (SpecifiedPartition . fromIntegral) partition
     , prKey = key
-    , prValue = Just value
+    , prValue = value
     , prHeaders = headersFromList (map (\(name, headerValue) -> (TE.encodeUtf8 name, headerValue)) headers)
     }
 

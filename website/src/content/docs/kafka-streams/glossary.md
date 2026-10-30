@@ -41,10 +41,11 @@ deploy, not a rollout. See
 
 The component that decides which member of a [consumer
 group](#consumer-group) owns which [partition](#partition) (and,
-in Streams, which [task](#task)). The built-in default is
-**cooperative-sticky**: it prefers to keep tasks on their current
-owner across rebalances, and revocations are incremental rather
-than stop-the-world. See also [KIP-848](#kip).
+in Streams, which [task](#task)). The runtime's main consumer runs
+the application's own [group assignor](#group-assignor) over the
+classic group protocol: it deals whole tasks, so the partitions a
+[co-partitioned](#co-partitioning) task reads land together. See
+[Scaling](./operating/scaling/#processes-across-the-group).
 
 ### Async I/O operator
 
@@ -69,8 +70,9 @@ effects should be idempotent.
 
 The mechanism by which a slow downstream stage signals an upstream
 stage to slow down. In Kafka Streams the consumer poll loop is
-naturally backpressured by the processor it feeds: a full inbox
-blocks new fetches. In Riffle async I/O, a full in-flight queue
+naturally backpressured by the processor it feeds: a partition
+with `bufferedRecordsPerPartition` (default 1000) records waiting
+is paused until its task catches up. In Riffle async I/O, a full in-flight queue
 blocks the [stream thread](#stream-thread) on enqueue.
 
 ### Broker
@@ -93,12 +95,21 @@ are the canonical implementations. Riffle's `Kafka.Streams.Sources.CDC`
 ships a primitive for materialising CDC feeds into KTables with
 snapshot/streaming-phase awareness and key-aware compaction.
 
+### `Change`
+
+What a [KTable](#ktable) operator forwards per update: the row's new
+value and its old one (`Nothing` for an insert or a delete). It
+lets a downstream table, join or re-grouped aggregation retract the
+old value. Defined in `Kafka.Streams.KTable`.
+
 ### Changelog topic
 
-The internal Kafka topic the framework writes a [state
-store's](#state-store) updates to. On instance loss, the state is
-rebuilt by replaying this topic from offset 0 (or, with [snapshot
-stores](#snapshot-store), from the last snapshot's offset).
+The compacted internal Kafka topic the runtime writes a [state
+store's](#state-store) updates to (for a cached store, the latest per
+key at each flush: see [record cache](#record-cache)), one partition
+per [task](#task). A task that moves or
+restarts restores the store from it before processing: from its
+checkpoint for persistent stores, else from the log start.
 Convention: `<applicationId>-<storeName>-changelog`.
 
 ### Co-partitioning
@@ -106,8 +117,9 @@ Convention: `<applicationId>-<storeName>-changelog`.
 The requirement that two topics being joined share the same
 partition count and the same key partitioner, so each `(key, A)`
 record and its matching `(key, B)` record land on the same task.
-Streams validates co-partitioning at startup; mismatches throw
-during topology validation.
+The runtime checks it at start: a stateful
+[subtopology](#subtopology) reading topics with different partition
+counts puts the instance in `StreamsError`.
 
 ### Cogroup
 
@@ -119,12 +131,28 @@ function per stream and a single shared store. The Haskell port is
 
 ### Commit cycle
 
-The orchestrated sequence the runtime runs every
-`commitIntervalMs` (default 30 s) to make a batch of work durable.
-Under EOS-V2 with Riffle 2PC sinks the six steps are:
-`beginTxn → flush → commitOffsets → preCommit2PC → commitTxn →
-commit2PC → storeCommit`. See `Kafka.Streams.Runtime.EOS.runCommitCycle`
-and the [Exactly-once page](./operating/exactly-once/).
+What the runtime runs every `commitIntervalMs` (`Nothing`: 100 ms
+under exactly-once, 30 s otherwise) to make a batch of work durable
+(`Kafka.Streams.Runtime.Tasks.tmCommit`): every task's
+[pre-commit drains](#pre-commit-drain), a flush of every store
+(writing its changelog), a producer flush, the
+[commit participants'](#commit-participant) prepare, then the
+offsets: under exactly-once `sendOffsetsToTransaction` +
+`commitTransaction`, otherwise an offset commit; then the
+participants' commit. A failed exactly-once commit aborts and
+recovers every task. See the [Exactly-once page](./operating/exactly-once/).
+
+### Commit participant
+
+An external system that commits and aborts with the runtime's
+[commits](#commit-cycle): a `CommitParticipant`
+(`Kafka.Streams.Runtime.Commit`) registered with
+`addCommitParticipant`. Each cycle it prepares after the flush and
+commits once Kafka has; the committed cycles are recorded in
+`<applicationId>-twophase-commits`, so prepared cycles left by a
+crash are committed or aborted at the next start.
+`twoPhaseParticipant` builds one from a
+[two-phase commit sink](#two-phase-commit-sink).
 
 ### Consumer group
 
@@ -135,7 +163,9 @@ owned by at most one member at a time.
 
 ### Cooperative-sticky
 
-See [Assignor](#assignor).
+The JVM consumer's default assignor. A streams application's
+consumer uses the [group assignor](#group-assignor) instead; see
+[Assignor](#assignor).
 
 ### CQRS (Command Query Responsibility Segregation)
 
@@ -156,15 +186,6 @@ process. Riffle's bounded `suppress` supports a dead-letter
 overflow policy; `processing.exception.handler` (KIP-1033) supports
 a DLQ disposition for records that throw.
 
-### `DispatchMode`
-
-The Riffle `StreamsConfig` knob that picks which
-`Kafka.Streams.Runtime.WorkerPool` constructor the runtime uses.
-Three values: `DispatchPartition` (parity default: explicit
-per-worker partition ownership), `DispatchHashed` (parity hashing
-by `(topic, partition)`), `DispatchKeyGroup` (Riffle key-group
-routing). See [Scaling](./operating/scaling/).
-
 ### DSL
 
 **D**omain-**s**pecific **l**anguage. In Kafka Streams, the
@@ -183,10 +204,10 @@ imperative builder DSL (`Kafka.Streams.KStream`, etc.).
 **E**xactly-**o**nce **s**emantics. EOS-V2 (KIP-447, KIP-129) is
 the transactional-producer-plus-`TxnOffsetCommit` story that
 ensures records written by Streams and consumer offsets advance
-atomically. EOS-V3 / KIP-892 adds transactional state stores so a
-store's writes commit in lockstep with the producer transaction.
-The `processingGuarantee` config selects between
-`AtLeastOnceP` and `ExactlyOnceP`.
+atomically. EOS-V3 / KIP-892 (transactional state stores) is not
+implemented: after an abort, stores are restored from their
+changelogs instead. The `processingGuarantee` config selects between
+`AtLeastOnceP` and `ExactlyOnceV2`.
 
 ### Emit policy
 
@@ -219,17 +240,23 @@ watermark](#watermark-coordinator), not on wall-clock. Lives in
 
 A producer the broker has rejected because a newer producer with
 the same `transactional.id` was observed. Surfaces as
-`ProducerFencedException` / `InvalidProducerEpochException`. Almost
-always means two instances are running for the same `(applicationId,
-taskId)`. See the [zombie-producer
+`ProducerFencedException` / `InvalidProducerEpochException`. Each
+instance has its own transactional id
+(`<applicationId>-<random uuid>`), so a zombie instance is fenced by
+the group generation instead (its `sendOffsetsToTransaction` is
+rejected). See the [zombie-producer
 runbook](./operating/runbooks/#producer-fenced--invalid_producer_epoch).
 
 ### Foreign-key join
 
 A KTable-KTable join keyed not on the record key but on a
-caller-supplied extractor of the left value. Streams handles the
-subscription-token bookkeeping. Haskell port:
-`foreignKeyJoinKTable` / `leftForeignKeyJoinKTable` in
+caller-supplied extractor of the left value. As in KIP-213, the left
+side sends subscriptions through a `<base>-subscription-registration`
+topic co-partitioned with the right table, and the right side
+answers through a `<base>-subscription-response` topic
+co-partitioned with the left; a hash of the left value drops stale
+responses. The two tables can be partitioned differently. Haskell
+port: `foreignKeyJoinKTable` / `leftForeignKeyJoinKTable` in
 `Kafka.Streams.ForeignKeyJoin`.
 
 ### Free arrow / `FreeArrow`
@@ -265,6 +292,18 @@ The amount of time a [window](#window) stays open accepting late
 records past its end. A 1-hour tumbling window with a 10-minute
 grace closes 70 minutes after the window's start in event time.
 Configured via `withGracePeriod` / `withSessionGracePeriod`.
+
+### Group assignor
+
+The application's consumer-group protocol (`streams`,
+`Kafka.Streams.Runtime.GroupAssignor`): the elected leader deals whole
+[tasks](#task) using every member's [subscription
+metadata](#subscription-metadata). Stateful tasks go to instances whose
+state is caught up (within `acceptableRecoveryLag`), balanced in
+proportion to threads and sticky; an instance that should own a task
+but isn't caught up gets a [warmup](#warmup-replica); `numStandbyReplicas`
+[standbys](#standby-task) go to other instances. A
+[`TaskAssignor`](#taskassignor) replaces the dealing.
 
 ---
 
@@ -353,9 +392,10 @@ take a `KafkaStreams` value.
 ### Key-group
 
 A Riffle abstraction: a fixed routing space (default 128) into
-which record keys hash, decoupling [parallelism](#parallelism)
-from [partition](#partition) count. Lives in
-`Kafka.Streams.Runtime.KeyGroup`. See [Scaling](./operating/scaling/#key-groups-parallelism-decoupled-from-partitions).
+which record keys hash, decoupling worker count from
+[partition](#partition) count. Lives in
+`Kafka.Streams.Runtime.KeyGroup`, a separate library: the runtime
+doesn't use it. See [Scaling](./operating/scaling/#key-groups).
 
 ### KGroupedStream / KGroupedTable
 
@@ -374,14 +414,14 @@ docs:
 | **KIP-295** | `topology.optimization` config knob (reuse-source-topics, merge-repartitions, single-store-self-join) |
 | **KIP-307** | Stable, deterministic processor names |
 | **KIP-418** | Named branches (`Branched.*`) |
-| **KIP-441** | Probing rebalance for warmup-ready standbys |
+| **KIP-441** | Warmup replicas and probing rebalances (`acceptableRecoveryLag`, `maxWarmupReplicas`, `probingRebalanceIntervalMs`) |
 | **KIP-447** | EOS-V2 producer-per-instance with `TxnOffsetCommit` |
-| **KIP-535** | Cross-instance IQ discovery (`StreamsMetadata`, `KeyQueryMetadata`) |
-| **KIP-591** | `default.dsl.store` config |
+| **KIP-535** | Cross-instance IQ discovery (`applicationServer`, `streamsMetadata`, `queryMetadataForKey`) |
+| **KIP-591** | DSL store backend selection (`DslStoreSuppliers` on the builder) |
 | **KIP-825** | First-class `EmitStrategy` |
 | **KIP-848** | Next-gen consumer-group protocol: broker-side incremental reconciliation |
 | **KIP-892** | EOS-V3 transactional state stores |
-| **KIP-924** | In-process `TaskAssignor` plug-in |
+| **KIP-924** | `TaskAssignor` plug-in for the group assignor |
 | **KIP-925** | Rack-aware assignment strategy |
 | **KIP-1033** | First-class processing-exception handler with DLQ disposition |
 
@@ -393,8 +433,12 @@ value, timestamp, headers)` tuples. Compare with [KTable](#ktable).
 ### KTable
 
 A Kafka Streams changelog stream interpreted as a key-value table:
-later records overwrite earlier ones for the same key. Materialised
-into a [state store](#state-store) (in-memory or RocksDB).
+later records overwrite earlier ones for the same key, and a
+tombstone deletes it. Materialised into a [state store](#state-store)
+(in-memory or RocksDB). Operators forward a `Change` (new and old
+value) per update, so deletes and filter retractions reach every
+derived table; `toChangelogStream` keeps them as tombstones,
+`toKStreamFromKTable` keeps current values only.
 [GlobalKTable](#globalktable) is the fully-replicated variant.
 
 ### KRaft
@@ -448,6 +492,15 @@ owned assignment changes; rebalance epoch bumps every time the
 group-wide target changes. Stale-epoch heartbeats must reconcile
 before continuing.
 
+### `MockBroker`
+
+The in-memory Kafka broker in `Kafka.Streams.Runtime.MockBroker`
+for testing the real runtime without a cluster: topics and
+partitions, consumer groups with rebalances, transactions with
+`read_committed` visibility, and fault injection (`mockFailSends`,
+`mockFailTransactionCommits`, `mockFailOffsetCommits`).
+`mockDriverFor` gives `startKafkaStreamsWith` a driver over it.
+
 ---
 
 ## O
@@ -481,11 +534,10 @@ deploy renamed something. Detected by
 
 ### Parallelism
 
-The number of concurrent units of work the runtime can run. In
-parity Streams: bounded by `numStreamThreads × instances`, capped
-by the source-topic [partition](#partition) count. Under Riffle
-[key-groups](#key-group): bounded by `kgcTotal` (default 128),
-independent of partition count.
+The number of concurrent units of work the runtime can run:
+`numStreamThreads × instances`, capped by the number of
+[tasks](#task), i.e. by source-topic [partition](#partition)
+counts.
 
 ### Partition
 
@@ -518,18 +570,18 @@ represents one operator in the typed AST. Every DSL combinator
 
 ### Probing rebalance
 
-The cadence at which the runtime re-issues a rebalance to promote
-[standby](#standby-task) tasks that are within
-`acceptableRecoveryLag`. Lives in
-`Kafka.Streams.Runtime.ProbingRebalance`. Default cadence: 10
-minutes (`probingRebalanceIntervalMs`).
+When an assignment includes [warmups](#warmup-replica), every member
+rejoins after `probingRebalanceIntervalMs` (default 10 minutes; `0`
+disables it) so the leader can move the tasks whose warmups have
+caught up (within `acceptableRecoveryLag`). KIP-441.
 
 ### Processing guarantee
 
-`AtLeastOnceP` vs `ExactlyOnceP` in `StreamsConfig.processingGuarantee`.
+`AtLeastOnceP` vs `ExactlyOnceV2` in `StreamsConfig.processingGuarantee`.
 Determines whether the producer is transactional, whether offsets
-commit through `TxnOffsetCommit`, and whether state stores use the
-transactional buffer. See [EOS](#eos--eos-v2--eos-v3).
+commit through `TxnOffsetCommit`, whether consumers read
+`read_committed`, and the default commit interval. See
+[EOS](#eos--eos-v2--eos-v3).
 
 ### Processing time
 
@@ -549,19 +601,31 @@ A scheduled callback inside a processor. Two clocks:
 `WallClockTimePunctuation` (every N ms of real time) and
 `StreamTimePunctuation` (every N ms of [event time](#event-time)
 advance). Used for time-driven emits, idle-window detection,
-cache eviction.
+TTL expiry.
 
 ---
 
 ## R
 
+### Record cache
+
+The write-back buffer in front of a DSL table's key-value store
+(`statestoreCacheMaxBytes`, default 10 MiB, split over the instance's
+tasks). Writes to a key between two flushes collapse into one: the
+store, its changelog and the operators downstream see only the latest,
+as one `Change new old`. A cache flushes at every commit, and early
+when its task's share is used up. `withCachingDisabled` on a
+`Materialized`, or `statestoreCacheMaxBytes = 0`, forwards every
+update at once. Windowed and session aggregations are cached per window and per session the same way (a session merged away before a flush never surfaces).
+
 ### Rebalance
 
 The process by which a [consumer group](#consumer-group)
 reassigns partition / [task](#task) ownership across its members
-in response to a membership change. Under the classic protocol it
-was stop-the-world; under [KIP-848](#kip) it's incremental
-per-task with no double-ownership at any point.
+in response to a membership change. The runtime's consumer uses
+the classic protocol: before rejoining it commits, then closes the
+tasks of revoked partitions and restores the tasks of assigned
+ones. See [Scaling](./operating/scaling/#processes-across-the-group).
 
 ### Reconciliation
 
@@ -569,7 +633,8 @@ KIP-848 term for the diff between a member's currently-owned
 assignment and its target assignment. `Reconciliation` carries
 `rAdd` and `rRemove` sets; a losing member acknowledges its
 `rRemove` before the gaining member sees the task in `rAdd`.
-Defined in `Kafka.Streams.Runtime.RebalanceProtocol`.
+Defined in `Kafka.Streams.Runtime.RebalanceProtocol`, a model the
+runtime doesn't use (its consumer runs the classic protocol).
 
 ### Remote KV
 
@@ -612,13 +677,6 @@ surfaces; the [`Pipeline`](#pipeline) newtype's `ArrowChoice`
 instance is the explicit ROP combinator set. Full mapping in
 [Railway-oriented programming with streams](../concepts/railway-oriented-programming/).
 
-### `runCommitCycle`
-
-The orchestrator function in `Kafka.Streams.Runtime.EOS` that
-drives one [commit cycle](#commit-cycle). Takes an `EOSCoordinator`
-+ a flush body + a getter for offsets-to-commit; returns
-`CommitSucceeded` / `CommitAborted` / `CommitFatal`.
-
 ---
 
 ## S
@@ -642,10 +700,9 @@ entries in-place with resumable progress. Lives in
 ### `SinkTxnId`
 
 The Riffle identifier for one in-flight transaction on a
-[two-phase commit sink](#two-phase-commit-sink). Made stable
-across restarts (typically `applicationId-instanceId-cycleCounter`)
-so recovery can correlate prepared txns with their producer
-counterparts.
+[two-phase commit sink](#two-phase-commit-sink): the runtime's
+commit cycle id, `<instance>/<n>`. Recovery compares it with the
+last committed cycle of that instance to commit or abort it.
 
 ### Snapshot store
 
@@ -664,12 +721,13 @@ topics](#internal-topic) inherit from it. Lives in
 
 ### Standby task
 
-A warm replica of an active [task's](#task) state, maintained by
-tailing the active's [changelog](#changelog-topic). Promotion on
-instance loss becomes metadata-only if the standby is within
-`acceptableRecoveryLag`. Riffle's `SnapshotPointer` mode lets a
-standby hold only `(snapshotId, advancedTo)` rather than a full
-replica.
+A warm replica of an active [task's](#task) stores on another
+instance (`numStandbyReplicas` per stateful task), kept current by
+tailing their [changelogs](#changelog-topic) (`read_committed` under
+exactly-once). It runs no processors. When the task moves to it, its
+processors are wired onto those stores and it restores only what it
+hadn't applied. Placed by the [group assignor](#group-assignor);
+`localTaskLags` shows how far each is behind.
 
 ### State store
 
@@ -686,10 +744,11 @@ The top-level runtime configuration record. Mirrors the Java
 
 ### `StreamsMetadata`
 
-KIP-535 record: what each instance in the group looks like to its
-peers (host:port, owned partitions per store, standby partitions
-per store). Used by an external IQ proxy to route key-level queries
-to the right host.
+KIP-535 record: what an instance looks like to its peers (its
+`applicationServer`, stores, active and standby partitions), in
+`Kafka.Streams.Discovery`. `streamsMetadata` lists every advertising
+instance as of the last assignment; `queryMetadataForKey` finds the
+instance (and standbys) holding a key.
 
 ### `StreamTime`
 
@@ -700,18 +759,29 @@ opts in.
 
 ### Stream thread
 
-The OS thread that drives one consumer + N workers in this
-runtime. (Different from the JVM Streams "one stream thread per
-consumer" model: see the README for the comparison.) The thread
-that runs user-supplied processor code; nothing in user code
-should block it for long.
+One of the `numStreamThreads` workers an instance spreads its
+[tasks](#task) over between polls. Unlike the JVM, there is one
+consumer per instance, not per stream thread, and tasks aren't tied
+to a worker: `addStreamThread` / `removeStreamThread` change the
+count without a rebalance. Workers run user-supplied processor code;
+nothing in user code should block one for long.
 
 ### Subscription metadata
 
 Bytes a [consumer group](#consumer-group) member attaches to its
-JoinGroup request. Streams uses it to advertise
-[`application.server`](#streamsmetadata), owned standby tasks,
-and the assignor's per-member state.
+JoinGroup request. The [group assignor](#group-assignor)'s carries
+the member's process id, `applicationServer`, thread count, standbys,
+and per task it has state for, how far that state reaches into the
+changelogs. The leader's reply carries, per member, its active and
+standby tasks, every instance's tasks by host, and whether to probe.
+
+### Subtopology
+
+A connected piece of the [topology](#topology): nodes linked by an
+edge, or sharing a state store, belong together; a
+[repartition topic](#repartition-topic) is a cut. Each subtopology
+runs as one [task](#task) per partition number. Computed by
+`Kafka.Streams.Topology.Subtopology`.
 
 ### Suppress
 
@@ -727,16 +797,20 @@ expires". Riffle adds a bounded variant with explicit
 
 ### Task
 
-The unit of [parallelism](#parallelism). One task owns one
-partition of one subtopology + its local [state stores](#state-store).
-`TaskId` identifies a `(subtopology, partition)` pair.
+The unit of [parallelism](#parallelism). One task owns partition
+`p` of every source topic of one [subtopology](#subtopology), its
+own [state stores](#state-store), and partition `p` of their
+[changelogs](#changelog-topic). `TaskId` identifies a
+`(subtopology, partition)` pair.
 
 ### `TaskAssignor`
 
-KIP-924 in-process plug-in for the leader-side assignment path.
-Replaces the built-in cooperative-sticky assignor. The runtime
-constructs an `ApplicationState` from the live view and invokes
-`taAssign`.
+KIP-924 plug-in (`StreamsConfig.taskAssignor`): the
+[group assignor](#group-assignor)'s leader calls `taAssign` with every
+task and every instance (threads, previous tasks, per-task lag)
+instead of dealing the tasks itself. The result is validated
+(`AssignmentError`) and reported to `taOnAssignmentComputed`; an
+invalid one falls back to the built-in dealing.
 
 ### Tiered KV
 
@@ -777,12 +851,15 @@ belongs to exactly one window.
 
 ### Two-phase commit sink
 
-A Riffle sink interface that commits external-system
-writes atomically with the Kafka [commit cycle](#commit-cycle).
-Five operations: `tpsStage` (per-record buffer), `tpsPrepare`
+A Riffle sink interface that commits external-system writes
+atomically with the runtime's [commit](#commit-cycle), as a
+[commit participant](#commit-participant) (`twoPhaseParticipant`).
+Records reach it through the topology's `sinkTwoPhase` node.
+Six operations: `tpsStage` (per-record buffer), `tpsPrepare`
 (promote batch to "prepared"), `tpsCommit` (atomically make
-visible), `tpsAbort` (discard), `tpsRecover` (resolve half-
-committed txns on restart). Lives in
+visible), `tpsAbort` (discard a prepared batch), `tpsDiscardStaged`
+(drop unprepared rows when the runtime rewinds), `tpsRecover`
+(resolve half-committed txns on restart). Lives in
 `Kafka.Streams.Sinks.TwoPhase`.
 
 ---
@@ -795,6 +872,15 @@ A durable log of intended changes written before the changes are
 applied to the underlying store. Under Riffle [snapshot
 stores](#snapshot-store) the [changelog topic](#changelog-topic) is
 the WAL between snapshots: not the sole source of truth.
+
+### Warmup replica
+
+A [standby](#standby-task) placed on the instance the
+[group assignor](#group-assignor) wants a task to move to, while the
+task stays on an instance that is caught up (at most
+`maxWarmupReplicas` at a time). It restores in the background; at the
+next [probing rebalance](#probing-rebalance) the task moves if it has
+caught up. KIP-441.
 
 ### Watermark
 

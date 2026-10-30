@@ -17,7 +17,7 @@ author: Ian Duncan
 maintainer: ian@iankduncan.com
 copyright: 2026 Ian Duncan
 build-type: Simple
-tested-with: GHC == 9.6.4, GHC == 9.8.4
+tested-with: GHC == 9.10.3, GHC == 9.12.4, GHC == 9.14.1
 
 common defaults
   ghc-options:
@@ -50,7 +50,7 @@ library
     Wireform.Stats.Coverage
     Wireform.Stats.Shields
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     -- We dogfood: wireform-xml renders the SVG charts (since SVG is
     -- XML), and wireform-cbor is what we recommend in the README
     -- benchmark sections so it makes sense to validate the deps
@@ -58,7 +58,7 @@ library
     -- aeson directly because the lingua franca for stats interchange
     -- is JSON.
     wireform-xml,
-    aeson >= 2.1 && < 2.3,
+    aeson >= 2.1 && < 2.4,
     bytestring >= 0.11 && < 0.13,
     containers >= 0.6 && < 0.9,
     directory >= 1.3 && < 1.4,
@@ -73,7 +73,7 @@ executable regen-stats
   main-is: Main.hs
   hs-source-dirs: app
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-stats,
     bytestring,
     containers,

@@ -199,7 +199,7 @@ data CDCPoll k v = CDCPoll
 
 
 {- | A 'CDCSource' is a non-Kafka source the runtime can poll.
-The shape extends what a mock 'Kafka.Streams.Mock.Consumer'
+The shape extends what a consumer
 provides with CDC-specific bits: phase awareness, schema
 changes, and the standard commit-cursor checkpointing.
 

@@ -11,7 +11,7 @@ library
   hs-source-dirs: src
   exposed-modules: Wireform.Parser.Adapter.Attoparsec
   build-depends:
-    base >= 4.18 && < 5,
+    base >= 4.20 && < 5,
     bytestring,
     attoparsec >= 0.14 && < 0.15,
     wireform-core

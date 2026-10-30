@@ -59,7 +59,7 @@ filter_select_groupby_count_chain =
       (\v -> pipeInput driver (topicName "in") Nothing (bytes v) (t 0) 0)
       ["alpha", "ant", "bravo", "skip", "barn", "skip", "abacus"]
 
-    Just kvs <- getKeyValueStore @Text @Int64 driver (ctlStore table)
+    Just kvs <- getKeyValueStore @Text @Int64 driver (ktableStore table)
     -- Three "a"s alpha/ant/abacus, two "b"s bravo/barn, "skip" filtered
     kvsGet kvs "a" >>= (`shouldBe` Just 3)
     kvsGet kvs "b" >>= (`shouldBe` Just 2)
@@ -91,6 +91,6 @@ merge_then_groupby_aggregate =
     pipeInput driver (topicName "in3") (Just (bytes "k")) (i64Bytes 4) (t 2) 0
     pipeInput driver (topicName "in1") (Just (bytes "k")) (i64Bytes 8) (t 3) 0
 
-    Just kvs <- getKeyValueStore @Text @Int64 driver (ctlStore table)
+    Just kvs <- getKeyValueStore @Text @Int64 driver (ktableStore table)
     kvsGet kvs "k" >>= (`shouldBe` Just 15)
     closeDriver driver

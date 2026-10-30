@@ -121,6 +121,9 @@ module Kafka.Client.Consumer (
   ConsumerGroupMetadata (..),
   newConsumerGroupMetadata,
   groupMetadata,
+  groupCoordinator,
+  setPreRejoinHook,
+  rebalancePending,
 
   -- * Subscription
 
@@ -184,6 +187,9 @@ module Kafka.Client.Consumer (
   enforceRebalance,
   enforceRebalanceWithReason,
   setSubscriptionUserDataHook,
+  setAssignmentHook,
+  assignmentUserData,
+  setAssignmentStrategy,
   StaticMembershipState (..),
   currentStaticMembershipState,
 
@@ -237,8 +243,14 @@ module Kafka.Client.Consumer (
   AssignorHint (..),
   assignorHintText,
   PerPartitionFetchKnob (..),
+
+  -- * Fetch internals (exposed for tests)
+  selectFetchedRecords,
+  advanceFetchPositions,
+  decodeAllBatchesSliced,
 ) where
 
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (Async, async)
 import Control.Concurrent.Async qualified as Async
 import Control.Concurrent.STM
@@ -251,18 +263,22 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.HashMap.Strict qualified as HashMap
 import Data.Hashable (Hashable)
-import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int
 import Data.List (foldl')
 import Data.List qualified as List
+import Data.HashSet qualified as HashSet
 import Data.Map.Strict qualified as Map
-import Data.Maybe (mapMaybe)
+import Data.Maybe (catMaybes, isNothing, mapMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Vector qualified as V
+import GHC.Clock (getMonotonicTimeNSec)
 import GHC.Generics (Generic)
+import Kafka.Client.RetryClassifier qualified as RC
+import Kafka.Client.Assignor (CustomAssignor)
 import Kafka.Client.ConfigValidation (
   ConfigError,
   renderConfigErrors,
@@ -310,6 +326,8 @@ data AssignmentStrategy
     RoundRobinAssignment
   | -- | Sticky assignment (minimizes rebalance)
     StickyAssignment
+  | -- | An application assignor ("Kafka.Client.Assignor")
+    CustomAssignment !CustomAssignor
   deriving (Eq, Show, Generic)
 
 
@@ -324,6 +342,13 @@ data IsolationLevel
     -}
     ReadCommitted
   deriving (Eq, Show, Generic)
+
+
+-- | The wire code of an 'IsolationLevel' (Fetch and ListOffsets).
+isolationLevelCode :: IsolationLevel -> Int8
+isolationLevelCode = \case
+  ReadUncommitted -> 0
+  ReadCommitted -> 1
 
 
 {- | Consumer configuration. Field names + defaults map onto
@@ -396,6 +421,12 @@ data ConsumerConfig = ConsumerConfig
   , consumerFetchErrorBackoffMs :: !Int
   {- ^ @fetch.error.backoff.ms@: backoff after a failed fetch
   before retrying. Default 500.
+  -}
+  , consumerDefaultApiTimeoutMs :: !Int
+  {- ^ @default.api.timeout.ms@: how long the offset lookups
+  ('assign', 'seekToBeginning', 'endOffsets', 'offsetsForTimes', ...)
+  keep retrying transient broker errors (a leader election, a topic
+  still being created) before failing. Default 60000.
   -}
   , consumerQueuedMaxMessagesKbytes :: !Int
   {- ^ @queued.max.messages.kbytes@: per-partition fetch queue
@@ -494,6 +525,7 @@ defaultConsumerConfig =
     , consumerFetchMaxWaitMs = 500
     , consumerFetchMessageMaxBytes = 1_048_576 -- 1 MiB
     , consumerFetchErrorBackoffMs = 500
+    , consumerDefaultApiTimeoutMs = 60_000
     , consumerQueuedMaxMessagesKbytes = 65_536
     , consumerRackId = Nothing -- KIP-392
     , consumerConnectionConfig = Conn.defaultConnectionConfig
@@ -627,7 +659,8 @@ data ConsumerRecord = ConsumerRecord
   , offset :: !Int64
   , timestamp :: !Int64
   , key :: !(Maybe ByteString)
-  , value :: !ByteString
+  , value :: !(Maybe ByteString)
+  -- ^ 'Nothing' is a null value: a tombstone on a compacted topic
   , headers :: ![(Text, ByteString)]
   }
   deriving (Eq, Show, Generic)
@@ -681,6 +714,14 @@ data Consumer = Consumer
   , consumerOnAssigned :: !(TVar ([TopicPartition] -> IO ()))
   , consumerOnRevoked :: !(TVar ([TopicPartition] -> IO ()))
   , consumerOnLost :: !(TVar ([TopicPartition] -> IO ()))
+  , consumerPreRejoin :: !(TVar (IO ()))
+  {- ^ Run by 'poll' just before it re-joins the group after the
+  coordinator signalled a rebalance, while this member still holds
+  its current generation and partitions (and only when the member
+  was not fenced). The JVM eager protocol's @onPartitionsRevoked@
+  slot: the last moment offsets for the current assignment can be
+  committed. Set with 'setPreRejoinHook'.
+  -}
   {- ^ Per-event callbacks fired on assigned / revoked / lost
   transitions. Default is the no-op; replace via
   'setRebalanceListener'.
@@ -689,6 +730,12 @@ data Consumer = Consumer
   {- ^ The assignment as of the last fired callback. Used to
   compute revoked / assigned deltas on the next rebalance.
   -}
+  , consumerStrategy :: !(TVar AssignmentStrategy)
+  -- ^ The assignor advertised at the next join ('setAssignmentStrategy'); starts as the config's
+  , consumerAssignmentUserData :: !(TVar ByteString)
+  -- ^ The user data the leader's assignor attached to this member's last assignment
+  , consumerOnAssignment :: !(TVar ([TopicPartition] -> ByteString -> IO ()))
+  -- ^ Fired after every successful join ('setAssignmentHook')
   , consumerSubscriptionUserData :: !(TVar (IO ByteString))
   {- ^ Hook for cross-instance IQ: when 'subscribe' issues a
   JoinGroup, the consumer calls this 'IO ByteString' and
@@ -811,6 +858,10 @@ validateConsumerConfig ConsumerConfig {..} =
     , CV.check
         (consumerFetchErrorBackoffMs < 0)
         "fetch.error.backoff.ms"
+        "must be >= 0"
+    , CV.check
+        (consumerDefaultApiTimeoutMs < 0)
+        "default.api.timeout.ms"
         "must be >= 0"
     , CV.check
         (consumerQueuedMaxMessagesKbytes <= 0)
@@ -1051,8 +1102,12 @@ createConsumer' brokers groupId config = do
               onA <- newTVarIO (\_ -> pure () :: IO ())
               onR <- newTVarIO (\_ -> pure () :: IO ())
               onL <- newTVarIO (\_ -> pure () :: IO ())
+              preRejoin <- newTVarIO (pure () :: IO ())
               lastAsgn <- newTVarIO []
               subUD <- newTVarIO (pure BS.empty :: IO ByteString)
+              asgUD <- newTVarIO BS.empty
+              strategyV <- newTVarIO (consumerAssignmentStrategy config)
+              onAsg <- newTVarIO (\_ _ -> pure () :: IO ())
               wakeup <- newTVarIO False
 
               let consumer =
@@ -1069,8 +1124,12 @@ createConsumer' brokers groupId config = do
                       , consumerOnAssigned = onA
                       , consumerOnRevoked = onR
                       , consumerOnLost = onL
+                      , consumerPreRejoin = preRejoin
                       , consumerLastAssignment = lastAsgn
                       , consumerSubscriptionUserData = subUD
+                      , consumerAssignmentUserData = asgUD
+                      , consumerStrategy = strategyV
+                      , consumerOnAssignment = onAsg
                       , consumerWakeupPending = wakeup
                       }
 
@@ -1101,130 +1160,9 @@ queryPartitionOffsets
   -> Int64
   -- ^ Timestamp (-2 for earliest, -1 for latest)
   -> IO (Either String [(TopicPartition, Int64)])
-queryPartitionOffsets consumer@Consumer {..} partitions timestamp = do
-  -- Group partitions by topic
-  let byTopic =
-        Map.fromListWith
-          (++)
-          [ (tp.topic, [tp.partition])
-          | tp <- partitions
-          ]
-
-  -- Get any broker from the metadata cache
-  brokersM <- atomically $ Meta.getAllBrokers consumerMetadata
-  case brokersM of
-    Nothing -> return $ Left "No brokers available in metadata cache"
-    Just [] -> return $ Left "No brokers available in metadata cache"
-    Just (broker : _) -> do
-      let brokerAddr = Meta.brokerMetaAddress broker
-      -- Use the negotiation-aware connect so the broker's
-      -- ApiVersions cache entry is populated before we read
-      -- it back via 'pickApiVersion' below.
-      connResult <- consumerConnect consumer brokerAddr
-      case connResult of
-        Left err -> return $ Left $ "Failed to connect to broker: " ++ err
-        Right conn -> do
-          corrId <- atomicModifyIORef' consumerCorrelationId $ \cid -> (cid + 1, cid)
-          let apiKey = 2 -- ListOffsets
-          -- ListOffsets: codegen handles up to v10. Schema
-          -- changes by version:
-          --   v2  KIP-98  IsolationLevel (we always send 0 here;
-          --               'fetchFromBroker' honours the consumer's
-          --               own isolation-level config)
-          --   v4  KIP-320 LeaderEpoch in request + response
-          --   v6  flexible (compact + tagged fields)
-          --   v7  KIP-734 LeaderEpoch becomes mandatory in
-          --               response; no request-shape change
-          --   v8  KIP-1146 EarliestLocalTimestamp (-4) sentinel
-          --               accepted in the timestamp field; no
-          --               schema change
-          --   v9  KIP-1133 Tiered storage sentinel (-5); no
-          --               schema change
-          --   v10 KIP-994 TimeoutMs added to the request
-          -- We cap at v8 (the highest the broker accepts on
-          -- non-tiered-storage clusters; v9+ rely on the broker
-          -- having KIP-405 enabled which Kafka 3.7's default
-          -- builds do not). The api key + cache lookup come from
-          -- the 'KafkaMessage LOReq.ListOffsetsRequest' instance
-          -- via 'pickApiVersionForRange'; the (0, 8) override
-          -- enforces the cap. 'offsetsForTimesFull' exposes the
-          -- timestamp + leader-epoch fields v4+ adds to the
-          -- per-partition response.
-          verR <-
-            VN.pickApiVersionForRange @LOReq.ListOffsetsRequest
-              0
-              8
-              consumerVersionCache
-              brokerAddr
-              1
-          let apiVersion = case verR of
-                Right v -> v
-                Left _ -> 1 -- preserve legacy fallback
-              topics = V.fromList $ map buildTopicRequest $ Map.toList byTopic
-
-              buildTopicRequest :: (Text, [Int32]) -> LOReq.ListOffsetsTopic
-              buildTopicRequest (topic, partIds) =
-                LOReq.ListOffsetsTopic
-                  { LOReq.listOffsetsTopicName = P.mkKafkaString topic
-                  , LOReq.listOffsetsTopicPartitions = P.mkKafkaArray $ V.fromList $ map buildPartRequest partIds
-                  }
-
-              buildPartRequest :: Int32 -> LOReq.ListOffsetsPartition
-              buildPartRequest partId =
-                LOReq.ListOffsetsPartition
-                  { LOReq.listOffsetsPartitionPartitionIndex = partId
-                  , LOReq.listOffsetsPartitionCurrentLeaderEpoch = -1
-                  , LOReq.listOffsetsPartitionTimestamp = timestamp
-                  }
-
-              request =
-                LOReq.ListOffsetsRequest
-                  { LOReq.listOffsetsRequestReplicaId = -1 -- Consumer
-                  , LOReq.listOffsetsRequestIsolationLevel = 0 -- Read uncommitted
-                  , LOReq.listOffsetsRequestTopics = P.mkKafkaArray topics
-                  , LOReq.listOffsetsRequestTimeoutMs = 30000 -- v10+; ignored otherwise
-                  }
-
-              requestBody = WC.runEncodeVer @LOReq.ListOffsetsRequest apiVersion request
-              clientId = P.mkKafkaString (consumerClientId consumerConfig)
-
-          result <- Req.sendRequestReceiveResponseLocked (Conn.withBrokerLock consumerConnManager brokerAddr) conn apiKey apiVersion corrId clientId requestBody
-          case result of
-            Left err -> return $ Left err
-            Right (respCorrId, respBody) ->
-              if respCorrId /= corrId
-                then return $ Left "Correlation ID mismatch"
-                else case WC.runDecodeVer @LOResp.ListOffsetsResponse apiVersion respBody of
-                  Left err -> return $ Left $ "Failed to decode ListOffsets response: " ++ err
-                  Right response -> do
-                    -- Extract offsets from response
-                    let offsets = extractOffsets response
-                    return $ Right offsets
-  where
-    extractOffsets :: LOResp.ListOffsetsResponse -> [(TopicPartition, Int64)]
-    extractOffsets response =
-      case P.unKafkaArray (LOResp.listOffsetsResponseTopics response) of
-        P.Null -> []
-        P.NotNull topicsVec -> concatMap extractTopicOffsets (V.toList topicsVec)
-
-    extractTopicOffsets :: LOResp.ListOffsetsTopicResponse -> [(TopicPartition, Int64)]
-    extractTopicOffsets topicResp =
-      let topic = case P.unKafkaString (LOResp.listOffsetsTopicResponseName topicResp) of
-            P.Null -> ""
-            P.NotNull t -> t
-          partitions = case P.unKafkaArray (LOResp.listOffsetsTopicResponsePartitions topicResp) of
-            P.Null -> []
-            P.NotNull vec -> V.toList vec
-      in mapMaybe (extractPartitionOffset topic) partitions
-
-    extractPartitionOffset :: Text -> LOResp.ListOffsetsPartitionResponse -> Maybe (TopicPartition, Int64)
-    extractPartitionOffset topic partResp =
-      let partId = LOResp.listOffsetsPartitionResponsePartitionIndex partResp
-          errorCode = LOResp.listOffsetsPartitionResponseErrorCode partResp
-          offset = LOResp.listOffsetsPartitionResponseOffset partResp
-      in if errorCode == 0
-           then Just (TopicPartition topic partId, offset)
-           else Nothing
+queryPartitionOffsets consumer partitions timestamp =
+  fmap (map (\(tp, oat) -> (tp, oatOffset oat)))
+    <$> queryPartitionOffsetsByTimestampFull consumer (map (\tp -> (tp, timestamp)) partitions)
 
 
 {- | Close the consumer.
@@ -1294,6 +1232,26 @@ setSubscriptionUserDataHook
   :: Consumer -> IO ByteString -> IO ()
 setSubscriptionUserDataHook Consumer {..} f =
   atomically (writeTVar consumerSubscriptionUserData f)
+
+
+{- | Run @f@ after every successful join with the whole new assignment
+and the user data the leader's assignor attached for this member
+(empty for the built-in assignors). It runs after the rebalance
+listener's callbacks, also when the partitions did not change; an
+exception propagates out of the 'subscribe' / 'poll' that joined.
+-}
+setAssignmentHook :: Consumer -> ([TopicPartition] -> ByteString -> IO ()) -> IO ()
+setAssignmentHook Consumer {..} f = atomically (writeTVar consumerOnAssignment f)
+
+
+-- | The assignor to advertise from the next join on.
+setAssignmentStrategy :: Consumer -> AssignmentStrategy -> IO ()
+setAssignmentStrategy Consumer {..} st = atomically (writeTVar consumerStrategy st)
+
+
+-- | The user data of this member's last assignment.
+assignmentUserData :: Consumer -> IO ByteString
+assignmentUserData Consumer {..} = readTVarIO consumerAssignmentUserData
 
 
 {- | Shared implementation. @doLeaveGroup = False@ skips the
@@ -1486,10 +1444,12 @@ subscribe Consumer {..} topics = liftIO $ do
             Earliest -> Sub.ResetEarliest
             Latest -> Sub.ResetLatest
             None -> Sub.ResetNone
-          assignor = case consumerAssignmentStrategy consumerConfig of
+      strategy <- readTVarIO consumerStrategy
+      let assignor = case strategy of
             RangeAssignment -> Sub.AssignorRange
             RoundRobinAssignment -> Sub.AssignorRoundRobin
             StickyAssignment -> Sub.AssignorSticky
+            CustomAssignment ca -> Sub.AssignorCustom ca
           sessionTimeout = fromIntegral (consumerSessionTimeoutMs consumerConfig)
           rebalanceTimeout = fromIntegral (consumerMaxPollIntervalMs consumerConfig)
       fetchUD <- readTVarIO consumerSubscriptionUserData
@@ -1511,7 +1471,7 @@ subscribe Consumer {..} topics = liftIO $ do
           fetchUD
       case result of
         Left err -> return $ Left ("subscribe: " ++ show err)
-        Right tps -> do
+        Right (tps, assignmentUD) -> do
           let !newAssignment =
                 [ TopicPartition (Sub.tpTopic stp) (Sub.tpPartition stp)
                 | (stp, _) <- tps
@@ -1552,8 +1512,11 @@ subscribe Consumer {..} topics = liftIO $ do
           -- check below reads it via 'readIORef' independently
           -- of the assignment-table swap above.
           writeIORef consumerSubscription (Just topics)
+          atomically $ writeTVar consumerAssignmentUserData assignmentUD
           -- Fire the user listener with the new assignment.
           dispatchAssignmentDelta Consumer {..} newAssignmentSorted asLost
+          onAssignment <- readTVarIO consumerOnAssignment
+          onAssignment newAssignmentSorted assignmentUD
           return $ Right ()
 
 
@@ -1591,6 +1554,23 @@ setRebalanceListener Consumer {..} onA onR onL = atomically $ do
   writeTVar consumerOnAssigned onA
   writeTVar consumerOnRevoked onR
   writeTVar consumerOnLost onL
+
+
+{- | Install the hook 'poll' runs just before re-joining the group
+(see 'consumerPreRejoin'). Exceptions from the hook propagate out
+of 'poll'.
+-}
+setPreRejoinHook :: Consumer -> IO () -> IO ()
+setPreRejoinHook Consumer {..} hook = atomically (writeTVar consumerPreRejoin hook)
+
+
+{- | Whether the coordinator has asked this member to re-join (the
+next 'poll' will run the pre-rejoin hook and re-join first).
+-}
+rebalancePending :: Consumer -> IO Bool
+rebalancePending Consumer {..} = case consumerHeartbeat of
+  Nothing -> pure False
+  Just (hbSt, _) -> readTVarIO (HB.hbNeedsRebalance hbSt)
 
 
 {- | Current partition assignment, in deterministic order
@@ -1769,7 +1749,17 @@ poll consumer@Consumer {..} timeoutMs = liftIO $ do
           then do
             topicsM <- readIORef consumerSubscription
             case topicsM of
-              Just ts -> subscribe consumer ts
+              Just ts -> do
+                -- Still in the old generation: give the owner its
+                -- last chance to commit, unless the coordinator
+                -- already fenced it (a commit would be rejected).
+                lost <- case consumerHeartbeat of
+                  Just (hbSt, _) -> readTVarIO (HB.hbLost hbSt)
+                  Nothing -> pure False
+                unless lost $ do
+                  hook <- readTVarIO consumerPreRejoin
+                  hook
+                subscribe consumer ts
               Nothing -> pure (Right ())
           else pure (Right ())
       case rejoinR of
@@ -1799,29 +1789,52 @@ poll consumer@Consumer {..} timeoutMs = liftIO $ do
 
           case result of
             Left err -> return $ Left err
-            Right records -> do
-              -- Update fetch positions based on fetched records.
-              -- Tier 3: the per-record @StmMap.lookup + StmMap.insert
-              -- pair becomes a single 'atomicModifyIORef\'' that
-              -- folds the offset advance over the whole map.
-              atomicModifyIORef' consumerAssignment $ \m0 ->
-                let !m1 = foldl' advanceOffset m0 records
-                in (m1, ())
+            Right FetchResult {frRecords = records, frErrors = errs, frBatchEnds = ends} -> do
+              handled <- handleFetchErrors consumer errs
+              case handled of
+                Left err -> return (Left err)
+                Right () -> deliver records ends
 
-              -- Limit to maxPollRecords, then run user interceptor
-              let maxRecords = consumerMaxPollRecords consumerConfig
-                  limitedRecords = take maxRecords records
-              -- ConsumerInterceptor.onConsume (KIP-388 / JVM): an
-              -- exception here propagates; tracing tools that just
-              -- need to attach attributes shouldn't throw.
-              iceptedRecords <- consumerInterceptor consumerConfig limitedRecords
+    -- Cap at max.poll.records, then advance fetch positions past the
+    -- records handed back only. Each partition's returned records
+    -- are a prefix of its fetched ones, so the rest are fetched again
+    -- by the next poll; advancing past them would let the next commit
+    -- skip records the caller never saw. A single
+    -- 'atomicModifyIORef\'' folds the advance over the whole map.
+    deliver records ends = do
+      let (limitedRecords, advance) = advanceFetchPositions (consumerMaxPollRecords consumerConfig) records ends
+      atomicModifyIORef' consumerAssignment $ \m0 ->
+        let !m1 = advance m0 in (m1, ())
+      -- ConsumerInterceptor.onConsume (KIP-388 / JVM): an
+      -- exception here propagates; tracing tools that just
+      -- need to attach attributes shouldn't throw.
+      iceptedRecords <- consumerInterceptor consumerConfig limitedRecords
+      return $ Right iceptedRecords
 
-              return $ Right iceptedRecords
 
-    advanceOffset !m r =
-      let !tp = TopicPartition r.topic r.partition
-          !nextOffset = r.offset + 1
-      in HashMap.alter (Just . maybe nextOffset (max nextOffset)) tp m
+
+{- | What one poll hands back and how it moves the fetch positions:
+at most @maxRecords@ of the fetched @records@; each partition moves
+past its last delivered record, and a partition with nothing held
+back moves on to the end of its fetched batches (@ends@), past
+transaction markers and aborted batches.
+
+Only partitions already in the position map move ('HashMap.adjust':
+one revoked while its fetch was in flight is not re-added).
+-}
+advanceFetchPositions
+  :: Int
+  -> [ConsumerRecord]
+  -> HashMap.HashMap TopicPartition Int64
+  -> ([ConsumerRecord], HashMap.HashMap TopicPartition Int64 -> HashMap.HashMap TopicPartition Int64)
+advanceFetchPositions maxRecords records ends =
+  let (delivered, heldBack) = splitAt maxRecords records
+      partial = HashSet.fromList (map (\r -> TopicPartition r.topic r.partition) heldBack)
+      complete = HashMap.filterWithKey (\tp _ -> not (HashSet.member tp partial)) ends
+      pastRecord !m r = HashMap.adjust (max (r.offset + 1)) (TopicPartition r.topic r.partition) m
+      advance m0 =
+        HashMap.foldlWithKey' (\m tp end -> HashMap.adjust (max end) tp m) (foldl' pastRecord m0 delivered) complete
+  in (delivered, advance)
 
 
 {- | Wake the next 'poll' call. This is intentionally one-shot:
@@ -2160,7 +2173,7 @@ fetchRecords
   -- ^ Partitions and their fetch offsets
   -> Int
   -- ^ Timeout (ms)
-  -> IO (Either String [ConsumerRecord])
+  -> IO (Either String FetchResult)
 fetchRecords consumer@Consumer {..} partitions timeoutMs = do
   -- Group partitions by topic
   let byTopic =
@@ -2189,26 +2202,22 @@ fetchRecords consumer@Consumer {..} partitions timeoutMs = do
           corrId <- atomicModifyIORef' consumerCorrelationId $ \cid -> (cid + 1, cid)
 
           -- Refresh metadata for these topics
-          refreshResult <- Meta.refreshTopicMetadata conn consumerMetadata (Just topics) corrId
+          refreshResult <- Conn.withBrokerLock consumerConnManager brokerAddr $ Meta.refreshTopicMetadata conn consumerMetadata (Just topics) corrId
           case refreshResult of
             Left err -> return $ Left $ "Failed to refresh metadata: " ++ err
             Right _ -> do
               -- Now look up leaders
-              leaderMap <- fmap Map.fromList $ forM (Map.toList byTopic) $ \(topic, parts) -> do
+              -- A partition with no known leader (mid-election, or a
+              -- topic still being created) is skipped this poll and
+              -- retried on the next one, which refreshes metadata
+              -- again, rather than failing the whole fetch.
+              topicLeaders <- fmap Map.fromList $ forM (Map.toList byTopic) $ \(topic, parts) -> do
                 leaders <- forM parts $ \(partId, offset) -> do
                   leaderM <- atomically $ Meta.getPartitionLeader consumerMetadata topic partId
-                  case leaderM of
-                    Nothing -> return $ Left $ "No leader for " ++ T.unpack topic ++ ":" ++ show partId
-                    Just leader -> return $ Right (leader, (partId, offset))
+                  pure $ fmap (\leader -> (leader, (partId, offset))) leaderM
+                return (topic, catMaybes leaders)
 
-                case sequence leaders of
-                  Left err -> return (topic, Left err)
-                  Right ls -> return (topic, Right ls)
-
-              -- Check for errors
-              case sequence leaderMap of
-                Left err -> return $ Left err
-                Right topicLeaders -> do
+              do
                   -- Group by broker
                   let byBroker =
                         Map.fromListWith
@@ -2239,7 +2248,14 @@ fetchRecords consumer@Consumer {..} partitions timeoutMs = do
                   -- Combine results
                   case sequence results of
                     Left err -> return $ Left err
-                    Right recordLists -> return $ Right $ concat recordLists
+                    Right frs ->
+                      return $
+                        Right
+                          FetchResult
+                            { frRecords = concatMap frRecords frs
+                            , frErrors = concatMap frErrors frs
+                            , frBatchEnds = foldl' (HashMap.unionWith max) HashMap.empty (map frBatchEnds frs)
+                            }
 
 
 -- | Internal: Fetch from a single broker
@@ -2259,7 +2275,7 @@ fetchFromBroker
   -- ^ Connection / SASL config (re-used cached conns when matching)
   -> IsolationLevel
   -- ^ KIP-98 isolation level (ReadUncommitted / ReadCommitted)
-  -> IO (Either String [ConsumerRecord])
+  -> IO (Either String FetchResult)
 fetchFromBroker connMgr versionCache broker requests timeoutMs corrIdVar rackIdM connConfig isolationLevel = do
   let brokerAddr = Meta.brokerMetaAddress broker
       nextCid = atomicModifyIORef' corrIdVar $ \cid -> (cid + 1, cid)
@@ -2358,9 +2374,7 @@ fetchFromBroker connMgr versionCache broker requests timeoutMs corrIdVar rackIdM
               , FR.fetchRequestMaxWaitMs = fromIntegral timeoutMs
               , FR.fetchRequestMinBytes = 1
               , FR.fetchRequestMaxBytes = 52428800 -- 50MB total
-              , FR.fetchRequestIsolationLevel = case isolationLevel of
-                  ReadUncommitted -> 0
-                  ReadCommitted -> 1
+              , FR.fetchRequestIsolationLevel = isolationLevelCode isolationLevel
               , FR.fetchRequestSessionId = 0
               , FR.fetchRequestSessionEpoch = -1
               , FR.fetchRequestTopics = P.mkKafkaArray fetchTopics
@@ -2385,7 +2399,100 @@ fetchFromBroker connMgr versionCache broker requests timeoutMs corrIdVar rackIdM
           case WC.runDecodeVer @FResp.FetchResponse apiVersion responseBody of
             Left err -> return $ Left $ "Failed to parse FetchResponse: " ++ err
             Right response ->
-              extractRecordsFromFetchResponse isolationLevel response
+              extractRecordsFromFetchResponse
+                isolationLevel
+                ( HashMap.fromList
+                    (map (\(t, p, o) -> ((t, p), o)) requests)
+                )
+                response
+
+
+-- | One partition's error code from a FetchResponse.
+data PartitionFetchError = PartitionFetchError
+  { pfeTopicPartition :: !TopicPartition
+  , pfeErrorCode :: !Int16
+  }
+
+
+-- | Records plus per-partition errors from one fetch round.
+data FetchResult = FetchResult
+  { frRecords :: ![ConsumerRecord]
+  , frErrors :: ![PartitionFetchError]
+  , frBatchEnds :: !(HashMap.HashMap TopicPartition Int64)
+  {- ^ Per partition, the offset after the last fetched batch. Once a
+  partition's records are all delivered its position moves here, past
+  trailing transaction markers and aborted batches that never become
+  records (otherwise a read_committed consumer would refetch them
+  forever and never reach the last stable offset).
+  -}
+  }
+
+
+{- | Act on partition-level fetch errors the way the JVM @Fetcher@
+does: @OFFSET_OUT_OF_RANGE@ resets the position by
+@auto.offset.reset@ (failing under 'None'); leadership / metadata
+errors are retried by the next 'poll', which refreshes metadata
+first; anything else fails the poll.
+-}
+handleFetchErrors :: Consumer -> [PartitionFetchError] -> IO (Either String ())
+handleFetchErrors _ [] = pure (Right ())
+handleFetchErrors consumer@Consumer {..} errs = do
+  let outOfRange = map pfeTopicPartition (filter ((== 1) . pfeErrorCode) errs)
+      fatal = filter (\e -> pfeErrorCode e /= 1 && not (retriableFetchError (pfeErrorCode e))) errs
+  case fatal of
+    (e : _) ->
+      pure
+        ( Left
+            ( "Fetch error for "
+                ++ T.unpack (pfeTopicPartition e).topic
+                ++ ":"
+                ++ show (pfeTopicPartition e).partition
+                ++ " code="
+                ++ show (pfeErrorCode e)
+            )
+        )
+    []
+      | null outOfRange -> pure (Right ())
+      | otherwise -> case consumerAutoOffsetReset consumerConfig of
+          None ->
+            pure
+              ( Left
+                  ( "Fetch offset out of range with auto.offset.reset=none: "
+                      ++ show (map (\tp -> (tp.topic, tp.partition)) outOfRange)
+                  )
+              )
+          strategy -> do
+            let !ts = case strategy of
+                  Earliest -> -2
+                  _ -> -1
+            r <- queryPartitionOffsets consumer outOfRange ts
+            case r of
+              Left e -> pure (Left ("offset reset: " ++ e))
+              Right offs -> do
+                atomicModifyIORef' consumerAssignment $ \m ->
+                  (foldl' (\acc (tp, o) -> HashMap.adjust (const o) tp acc) m offs, ())
+                pure (Right ())
+
+
+{- | Fetch error codes that clear up on their own once metadata is
+refreshed or the broker recovers: the partition is skipped this
+poll and fetched again on the next.
+-}
+retriableFetchError :: Int16 -> Bool
+retriableFetchError code =
+  code
+    `elem` [ 3 -- UNKNOWN_TOPIC_OR_PARTITION
+           , 5 -- LEADER_NOT_AVAILABLE
+           , 6 -- NOT_LEADER_OR_FOLLOWER
+           , 7 -- REQUEST_TIMED_OUT
+           , 9 -- REPLICA_NOT_AVAILABLE
+           , 13 -- NETWORK_EXCEPTION
+           , 56 -- KAFKA_STORAGE_ERROR
+           , 74 -- FENCED_LEADER_EPOCH
+           , 75 -- UNKNOWN_LEADER_EPOCH
+           , 78 -- OFFSET_NOT_AVAILABLE
+           , 100 -- UNKNOWN_TOPIC_ID
+           ]
 
 
 {- | Extract records from a FetchResponse.
@@ -2423,29 +2530,42 @@ which broke 'ReadCommitted' end-to-end and surprised
 -}
 extractRecordsFromFetchResponse
   :: IsolationLevel
+  -> HashMap.HashMap (Text, Int32) Int64
+  {- ^ The offset each partition was fetched from. The broker sends
+  whole batches, so the first batch can start before it; records
+  below it were already delivered and are dropped here.
+  -}
   -> FResp.FetchResponse
-  -> IO (Either String [ConsumerRecord])
-extractRecordsFromFetchResponse isolationLevel response = do
+  -> IO (Either String FetchResult)
+extractRecordsFromFetchResponse isolationLevel fetchOffsets response = do
   let topicsVec = case P.unKafkaArray (FResp.fetchResponseResponses response) of
         P.Null -> V.empty
         P.NotNull v -> v
+  -- Partition-level errors don't fail the fetch: 'poll' decides per
+  -- error code (reset, retry next poll, or fail).
+  errsRef <- newIORef []
+  endsRef <- newIORef HashMap.empty
   -- Walk topics with V.foldM' so we don't build an intermediate
   -- list of '[[ConsumerRecord]]' chunks; per-iteration work is
   -- in 'IO' because 'decodeAllBatches' may decompress.
-  go (V.length topicsVec) topicsVec
+  r <- go (errsRef, endsRef) (V.length topicsVec) topicsVec
+  errs <- readIORef errsRef
+  ends <- readIORef endsRef
+  pure (fmap (\recs -> FetchResult {frRecords = recs, frErrors = errs, frBatchEnds = ends}) r)
   where
-    go 0 _ = pure (Right [])
-    go _ topicsVec = do
-      r <- V.foldM' addTopic (Right []) topicsVec
+    go _ 0 _ = pure (Right [])
+    go errsRef _ topicsVec = do
+      r <- V.foldM' (addTopic errsRef) (Right []) topicsVec
       case r of
         Left e -> pure (Left e)
         Right vs -> pure (Right (V.toList (V.concat (reverse vs))))
 
     addTopic
-      :: Either String [V.Vector ConsumerRecord]
+      :: (IORef [PartitionFetchError], IORef (HashMap.HashMap TopicPartition Int64))
+      -> Either String [V.Vector ConsumerRecord]
       -> FResp.FetchableTopicResponse
       -> IO (Either String [V.Vector ConsumerRecord])
-    addTopic acc topicResp = case acc of
+    addTopic errsRef acc topicResp = case acc of
       Left e -> pure (Left e)
       Right chunks -> do
         let topicName = extractKafkaString $ FResp.fetchableTopicResponseTopic topicResp
@@ -2453,17 +2573,18 @@ extractRecordsFromFetchResponse isolationLevel response = do
               case P.unKafkaArray (FResp.fetchableTopicResponsePartitions topicResp) of
                 P.Null -> V.empty
                 P.NotNull v -> v
-        partRes <- V.foldM' (addPartition topicName) (Right V.empty) partitionsVec
+        partRes <- V.foldM' (addPartition errsRef topicName) (Right V.empty) partitionsVec
         case partRes of
           Left e -> pure (Left e)
           Right pv -> pure (Right (pv : chunks))
 
     addPartition
-      :: Text
+      :: (IORef [PartitionFetchError], IORef (HashMap.HashMap TopicPartition Int64))
+      -> Text
       -> Either String (V.Vector ConsumerRecord)
       -> FResp.PartitionData
       -> IO (Either String (V.Vector ConsumerRecord))
-    addPartition topicName acc partResp = case acc of
+    addPartition (errsRef, endsRef) topicName acc partResp = case acc of
       Left e -> pure (Left e)
       Right partial -> do
         let partId = FResp.partitionDataPartitionIndex partResp
@@ -2472,39 +2593,40 @@ extractRecordsFromFetchResponse isolationLevel response = do
               case P.unKafkaBytes (FResp.partitionDataRecords partResp) of
                 P.Null -> BS.empty
                 P.NotNull bs -> bs
-            -- Pre-build a HashMap (producerId -> minimum firstOffset)
-            -- of aborted transactions on this partition. Skipped
-            -- entirely on ReadUncommitted (the map is only ever
-            -- consulted in the ReadCommitted branch of
-            -- 'keepBatch').
-            abortedByProducer = case isolationLevel of
-              ReadUncommitted -> HashMap.empty
+            -- Aborted transactions overlapping this fetch, in
+            -- first-offset order. Only consulted on ReadCommitted.
+            abortedTxns = case isolationLevel of
+              ReadUncommitted -> []
               ReadCommitted ->
                 let abortsVec =
                       case P.unKafkaArray
                         (FResp.partitionDataAbortedTransactions partResp) of
                         P.Null -> V.empty
                         P.NotNull v -> v
-                in V.foldl'
-                     ( \m at ->
-                         let pid = FResp.abortedTransactionProducerId at
-                             off = FResp.abortedTransactionFirstOffset at
-                         in HashMap.insertWith min pid off m
+                in List.sortOn snd
+                     ( V.toList
+                         ( V.map
+                             ( \at ->
+                                 ( FResp.abortedTransactionProducerId at
+                                 , FResp.abortedTransactionFirstOffset at
+                                 )
+                             )
+                             abortsVec
+                         )
                      )
-                     HashMap.empty
-                     abortsVec
+            !fetchOffset =
+              HashMap.lookupDefault 0 (topicName, partId) fetchOffsets
         if errorCode /= 0
-          then
-            pure
-              ( Left
-                  ( "Fetch error for "
-                      ++ T.unpack topicName
-                      ++ ":"
-                      ++ show partId
-                      ++ " code="
-                      ++ show errorCode
-                  )
+          then do
+            modifyIORef'
+              errsRef
+              ( PartitionFetchError
+                  { pfeTopicPartition = TopicPartition topicName partId
+                  , pfeErrorCode = errorCode
+                  }
+                  :
               )
+            pure (Right partial)
           else
             if BS.null recordsBytes
               then pure (Right partial)
@@ -2517,31 +2639,81 @@ extractRecordsFromFetchResponse isolationLevel response = do
                 batches <- decodeAllBatchesSliced recordsBytes
                 case batches of
                   Left err -> pure (Left ("Failed to decode batches: " ++ err))
-                  Right bs ->
-                    let !kept = filter (keepSlicedBatch abortedByProducer) bs
-                        !v =
-                          V.concat
-                            (map (convertSlicedBatchToRecordsV topicName partId) kept)
-                    in pure (Right (partial V.++ v))
+                  Right bs -> do
+                    case bs of
+                      [] -> pure ()
+                      _ ->
+                        let lastB = last bs
+                            !end = RBW.sbBaseOffset lastB + fromIntegral (RBW.sbLastOffsetDelta lastB) + 1
+                        in modifyIORef' endsRef (HashMap.insertWith max (TopicPartition topicName partId) end)
+                    let !v =
+                          selectFetchedRecords
+                            isolationLevel
+                            abortedTxns
+                            fetchOffset
+                            topicName
+                            partId
+                            bs
+                    pure (Right (partial V.++ v))
 
-    -- Sliced-batch variant of 'keepBatch'. See the haddock at
-    -- the top of the function for the rule set.
-    keepSlicedBatch
-      :: HashMap.HashMap Int64 Int64 -> RBW.SlicedRecordBatch -> Bool
-    keepSlicedBatch abortedByProducer batch =
-      let attrs = RBW.sbAttributes batch
-      in not (RB.attrIsControl attrs)
-           && ( case isolationLevel of
-                  ReadUncommitted -> True
-                  ReadCommitted ->
-                    not (RB.attrIsTransactional attrs)
-                      || case HashMap.lookup
-                        (RBW.sbProducerId batch)
-                        abortedByProducer of
-                        Nothing -> True
-                        Just firstOffset ->
-                          RBW.sbBaseOffset batch < firstOffset
-              )
+
+
+{- | The records of one partition's fetched batches that reach the
+caller, in log order (the JVM's @CompletedFetch.nextFetchedRecord@):
+
+  * Control batches (transaction markers) never do.
+  * On 'ReadCommitted', an aborted transaction's producer id becomes
+    "aborting" once the scan reaches the transaction's first offset;
+    its transactional batches are dropped from there until its ABORT
+    marker (a control batch from that producer) ends it, so the same
+    producer's later transactions are kept.
+  * Records below the fetch offset are dropped: the broker sends
+    whole batches, so the first one can start before it.
+-}
+selectFetchedRecords
+  :: IsolationLevel
+  -> [(Int64, Int64)]
+  {- ^ Aborted transactions overlapping the fetch, as
+  @(producerId, firstOffset)@ sorted by @firstOffset@ (ignored on
+  'ReadUncommitted').
+  -}
+  -> Int64
+  -- ^ Fetch offset
+  -> Text
+  -> Int32
+  -> [RBW.SlicedRecordBatch]
+  -> V.Vector ConsumerRecord
+selectFetchedRecords isolationLevel aborted fetchOffset topicName partId bs =
+  V.filter
+    (\r -> r.offset >= fetchOffset)
+    ( V.concat
+        ( map
+            (convertSlicedBatchToRecordsV topicName partId)
+            (keepBatches pending HashSet.empty bs)
+        )
+    )
+  where
+    !pending = case isolationLevel of
+      ReadUncommitted -> []
+      ReadCommitted -> aborted
+    keepBatches
+      :: [(Int64, Int64)]
+      -> HashSet.HashSet Int64
+      -> [RBW.SlicedRecordBatch]
+      -> [RBW.SlicedRecordBatch]
+    keepBatches _ _ [] = []
+    keepBatches pend aborting (batch : rest) =
+      let !lastOff = RBW.sbBaseOffset batch + fromIntegral (RBW.sbLastOffsetDelta batch)
+          (starting, pend') = span (\(_, first) -> first <= lastOff) pend
+          !aborting' = foldl' (\acc (pid, _) -> HashSet.insert pid acc) aborting starting
+          !attrs = RBW.sbAttributes batch
+          !pid = RBW.sbProducerId batch
+      in if RB.attrIsControl attrs
+           then keepBatches pend' (HashSet.delete pid aborting') rest
+           else
+             if RB.attrIsTransactional attrs && HashSet.member pid aborting'
+               then keepBatches pend' aborting' rest
+               else batch : keepBatches pend' aborting' rest
 
 
 -- | 'Vector'-returning sibling of 'convertBatchToRecords'.
@@ -3073,34 +3245,133 @@ parseOffsetFetchResponseV8 resp =
 {- | Variant of 'queryPartitionOffsets' that returns
 the full @OffsetAndTimestamp@ tuple (offset + timestamp +
 leader epoch). The offset-only helper and 'offsetsForTimesFull'
-both delegate here so the wire round-trip only happens once
-per call.
+both delegate here.
+
+Each partition is asked of its leader. A partition answered with a
+retriable error (no leader yet, a leader change, a topic still being
+created), or whose leader couldn't be reached, is asked again after
+a metadata refresh, with backoff, until
+'consumerDefaultApiTimeoutMs'; any other error fails the call. Every
+partition asked for is in the result, or the call fails.
 -}
 queryPartitionOffsetsByTimestampFull
   :: Consumer
   -> [(TopicPartition, Int64)]
   -> IO (Either String [(TopicPartition, OffsetAndTimestamp)])
-queryPartitionOffsetsByTimestampFull consumer@Consumer {..} pts = do
-  -- Group partitions by topic, carrying per-partition timestamp.
-  let byTopic =
-        Map.fromListWith
-          (++)
-          [ (tp.topic, [(tp.partition, ts)])
-          | (tp, ts) <- pts
-          ]
-  brokersM <- atomically $ Meta.getAllBrokers consumerMetadata
-  case brokersM of
-    Nothing -> pure (Left "No brokers available in metadata cache")
-    Just [] -> pure (Left "No brokers available in metadata cache")
-    Just (broker : _) -> do
-      let brokerAddr = Meta.brokerMetaAddress broker
+queryPartitionOffsetsByTimestampFull consumer@Consumer {..} pts0 = do
+  start <- getMonotonicTimeNSec
+  let deadline = start + fromIntegral (consumerDefaultApiTimeoutMs consumerConfig) * 1_000_000
+  go deadline (100 :: Int) False pts0 []
+  where
+    go deadline backoffMs refresh pending done = do
+      r <- offsetsRound refresh pending
+      case r of
+        Left err -> pure (Left err)
+        Right rnd
+          | null (orRetry rnd) -> pure (Right (orDone rnd ++ done))
+          | otherwise -> do
+              now <- getMonotonicTimeNSec
+              if now >= deadline
+                then
+                  pure . Left $
+                    "ListOffsets: timed out after "
+                      ++ show (consumerDefaultApiTimeoutMs consumerConfig)
+                      ++ " ms; last error: "
+                      ++ orLastError rnd
+                else do
+                  let remainingMs = fromIntegral ((deadline - now) `quot` 1_000_000) :: Int
+                  threadDelay (1000 * max 1 (min backoffMs remainingMs))
+                  go deadline (min 1000 (2 * backoffMs)) True (orRetry rnd) (orDone rnd ++ done)
+
+    -- One pass: route every pending partition to its leader (after a
+    -- metadata refresh when asked to, or when a leader is unknown)
+    -- and ask every leader at once.
+    offsetsRound refresh pending = do
+      let topics = List.nub (map (\(tp, _) -> tp.topic) pending)
+          lookupLeaders = forM pending $ \p@(tp, _) ->
+            fmap (\b -> (Meta.brokerMetaAddress b, p))
+              <$> atomically (Meta.getPartitionLeader consumerMetadata tp.topic tp.partition)
+      leaders0 <- lookupLeaders
+      refreshed <-
+        if refresh || any isNothing leaders0
+          then refreshMeta topics
+          else pure (Right ())
+      case refreshed of
+        Left err -> pure (Right (OffsetsRound [] pending ("metadata refresh: " ++ err)))
+        Right () -> do
+          leaders <- if refresh || any isNothing leaders0 then lookupLeaders else pure leaders0
+          let routed = catMaybes leaders
+              unrouted = map snd (filter (isNothing . fst) (zip leaders pending))
+              byBroker = Map.toList (Map.fromListWith (++) (map (\(addr, p) -> (addr, [p])) routed))
+          answers <- Async.forConcurrently byBroker $ \(addr, ps) -> (,) ps <$> listOffsetsAt addr ps
+          pure $
+            foldl'
+              classifyBroker
+              (Right (OffsetsRound [] unrouted (if null unrouted then "" else "no leader known")))
+              answers
+
+    classifyBroker (Left e) _ = Left e
+    classifyBroker (Right rnd) (asked, Left err) =
+      Right rnd {orRetry = asked ++ orRetry rnd, orLastError = err}
+    classifyBroker (Right rnd0) (asked, Right answered) =
+      foldl' classifyOne (Right rnd0) asked
+      where
+        byTp = HashMap.fromList (map (\(tp, ec, oat) -> (tp, (ec, oat))) answered)
+        classifyOne (Left e) _ = Left e
+        classifyOne (Right rnd) p@(tp, _) = case HashMap.lookup tp byTp of
+          Just (0, oat) -> Right rnd {orDone = (tp, oat) : orDone rnd}
+          Just (ec, _)
+            | RC.isRetriable ec ->
+                Right rnd {orRetry = p : orRetry rnd, orLastError = describe tp (RC.errorMessage ec)}
+            | otherwise -> Left ("ListOffsets: " ++ describe tp (RC.errorMessage ec))
+          Nothing -> Right rnd {orRetry = p : orRetry rnd, orLastError = describe tp "not in the response"}
+    describe tp why = T.unpack tp.topic ++ "-" ++ show tp.partition ++ ": " ++ T.unpack why
+
+    refreshMeta topics = do
+      brokersM <- atomically $ Meta.getAllBrokers consumerMetadata
+      case brokersM of
+        Just (b : _) -> do
+          let addr = Meta.brokerMetaAddress b
+          connR <- consumerConnect consumer addr
+          case connR of
+            Left err -> pure (Left err)
+            Right conn -> do
+              corrId <- atomicModifyIORef' consumerCorrelationId $ \cid -> (cid + 1, cid)
+              Conn.withBrokerLock consumerConnManager addr $
+                Meta.refreshTopicMetadata conn consumerMetadata (Just topics) corrId
+        _ -> pure (Left "no brokers in the metadata cache")
+
+    -- One ListOffsets round trip to one broker, every partition's
+    -- error code kept.
+    listOffsetsAt
+      :: Conn.BrokerAddress
+      -> [(TopicPartition, Int64)]
+      -> IO (Either String [(TopicPartition, Int16, OffsetAndTimestamp)])
+    listOffsetsAt brokerAddr pts = do
       connResult <- consumerConnect consumer brokerAddr
       case connResult of
         Left err -> pure (Left ("Failed to connect to broker: " ++ err))
         Right conn -> do
           corrId <- atomicModifyIORef' consumerCorrelationId $ \cid -> (cid + 1, cid)
           let apiKey = 2 -- ListOffsets
-          -- See 'queryPartitionOffsets' for the v8 cap rationale.
+          -- ListOffsets: codegen handles up to v10. Schema
+          -- changes by version:
+          --   v2  KIP-98  IsolationLevel (the consumer's own, so
+          --               a read_committed "latest" is the LSO)
+          --   v4  KIP-320 LeaderEpoch in request + response
+          --   v6  flexible (compact + tagged fields)
+          --   v7  KIP-734 LeaderEpoch becomes mandatory in
+          --               response; no request-shape change
+          --   v8  KIP-1146 EarliestLocalTimestamp (-4) sentinel
+          --               accepted in the timestamp field; no
+          --               schema change
+          --   v9  KIP-1133 Tiered storage sentinel (-5); no
+          --               schema change
+          --   v10 KIP-994 TimeoutMs added to the request
+          -- We cap at v8 (the highest the broker accepts on
+          -- non-tiered-storage clusters; v9+ rely on the broker
+          -- having KIP-405 enabled which Kafka 3.7's default
+          -- builds do not).
           verR <-
             VN.pickApiVersionForRange @LOReq.ListOffsetsRequest
               0
@@ -3111,7 +3382,8 @@ queryPartitionOffsetsByTimestampFull consumer@Consumer {..} pts = do
           let apiVersion = case verR of
                 Right v -> v
                 Left _ -> 1
-              topics = V.fromList $ map buildTopicReq (Map.toList byTopic)
+              byTopic = Map.toList (Map.fromListWith (++) (map (\(tp, ts) -> (tp.topic, [(tp.partition, ts)])) pts))
+              topics = V.fromList $ map buildTopicReq byTopic
               buildTopicReq (topic, parts) =
                 LOReq.ListOffsetsTopic
                   { LOReq.listOffsetsTopicName = P.mkKafkaString topic
@@ -3130,8 +3402,10 @@ queryPartitionOffsetsByTimestampFull consumer@Consumer {..} pts = do
                   }
               request =
                 LOReq.ListOffsetsRequest
-                  { LOReq.listOffsetsRequestReplicaId = -1
-                  , LOReq.listOffsetsRequestIsolationLevel = 0
+                  { LOReq.listOffsetsRequestReplicaId = -1 -- Consumer
+                  , -- A read_committed consumer's "latest" is the last
+                    -- stable offset, not the high watermark (v2+).
+                    LOReq.listOffsetsRequestIsolationLevel = isolationLevelCode (consumerIsolationLevel consumerConfig)
                   , LOReq.listOffsetsRequestTopics = P.mkKafkaArray topics
                   , LOReq.listOffsetsRequestTimeoutMs = 30000 -- v10+; ignored otherwise
                   }
@@ -3145,7 +3419,7 @@ queryPartitionOffsetsByTimestampFull consumer@Consumer {..} pts = do
               | otherwise -> case WC.runDecodeVer @LOResp.ListOffsetsResponse apiVersion body of
                   Left err -> pure (Left ("Failed to decode ListOffsets response: " ++ err))
                   Right resp -> pure (Right (extract resp))
-  where
+
     extract resp = case P.unKafkaArray (LOResp.listOffsetsResponseTopics resp) of
       P.Null -> []
       P.NotNull tvec ->
@@ -3157,28 +3431,30 @@ queryPartitionOffsetsByTimestampFull consumer@Consumer {..} pts = do
                   partsVec = case P.unKafkaArray (LOResp.listOffsetsTopicResponsePartitions tr) of
                     P.Null -> V.empty
                     P.NotNull v -> v
-              in mapMaybe
+              in map
                    ( \pr ->
-                       let pid = LOResp.listOffsetsPartitionResponsePartitionIndex pr
-                           ec = LOResp.listOffsetsPartitionResponseErrorCode pr
-                           off = LOResp.listOffsetsPartitionResponseOffset pr
-                           ts = LOResp.listOffsetsPartitionResponseTimestamp pr
-                           lep = LOResp.listOffsetsPartitionResponseLeaderEpoch pr
-                       in if ec == 0
-                            then
-                              Just
-                                ( TopicPartition topic pid
-                                , OffsetAndTimestamp
-                                    { oatOffset = off
-                                    , oatTimestamp = ts
-                                    , oatLeaderEpoch = lep
-                                    }
-                                )
-                            else Nothing
+                       ( TopicPartition topic (LOResp.listOffsetsPartitionResponsePartitionIndex pr)
+                       , LOResp.listOffsetsPartitionResponseErrorCode pr
+                       , OffsetAndTimestamp
+                           { oatOffset = LOResp.listOffsetsPartitionResponseOffset pr
+                           , oatTimestamp = LOResp.listOffsetsPartitionResponseTimestamp pr
+                           , oatLeaderEpoch = LOResp.listOffsetsPartitionResponseLeaderEpoch pr
+                           }
+                       )
                    )
                    (V.toList partsVec)
           )
           (V.toList tvec)
+
+
+-- | What one round of 'queryPartitionOffsetsByTimestampFull' settled.
+data OffsetsRound = OffsetsRound
+  { orDone :: ![(TopicPartition, OffsetAndTimestamp)]
+  , orRetry :: ![(TopicPartition, Int64)]
+  -- ^ asked again next round
+  , orLastError :: !String
+  -- ^ why the last of 'orRetry' wasn't answered
+  }
 
 
 ----------------------------------------------------------------------
@@ -3664,14 +3940,32 @@ newConsumerGroupMetadata g gen mid inst =
 groupMetadata :: Consumer -> IO ConsumerGroupMetadata
 groupMetadata c = do
   let !cfg = effectiveConsumerSnapshot (consumerConfigOf c)
-  mb <- currentStaticMembershipState c
+  -- The live generation and member id come from the heartbeat
+  -- state, which every JoinGroup / SyncGroup updates; they are what
+  -- the group coordinator checks a transactional offset commit
+  -- against (KIP-447 fencing).
+  (gen, mid) <- case consumerHeartbeat c of
+    Just (hbSt, _) -> do
+      g <- readIORef (HB.hbGenerationId hbSt)
+      m <- readIORef (HB.hbMemberId hbSt)
+      pure (g, m)
+    Nothing -> pure (-1, T.empty)
   pure
     ConsumerGroupMetadata
       { cgmGroupId = cfg.ecsGroupId
-      , cgmGenerationId = maybe 0 staticGenerationId mb
-      , cgmMemberId = maybe T.empty staticMemberId mb
+      , cgmGenerationId = gen
+      , cgmMemberId = mid
       , cgmGroupInstanceId = cfg.ecsGroupInstanceId
       }
+
+
+{- | The group coordinator this consumer last found, if any
+(where a transactional offset commit for its group goes).
+-}
+groupCoordinator :: Consumer -> IO (Maybe Conn.BrokerAddress)
+groupCoordinator c = case consumerHeartbeat c of
+  Just (hbSt, _) -> readIORef (HB.hbCoordinatorAddr hbSt)
+  Nothing -> pure Nothing
 
 
 ----------------------------------------------------------------------

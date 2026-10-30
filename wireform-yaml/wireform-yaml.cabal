@@ -48,13 +48,13 @@ library
     YAML.Pretty
     YAML.Value
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-derive,
     bytestring >= 0.11 && < 0.13,
     text >= 2.0 && < 2.2,
     vector >= 0.13 && < 0.14,
     containers >= 0.6 && < 0.9,
-    aeson >= 2.1 && < 2.3,
+    aeson >= 2.1 && < 2.4,
     scientific >= 0.3 && < 0.4,
     deepseq >= 1.4 && < 1.6,
     template-haskell >= 2.18 && < 2.25
@@ -98,7 +98,7 @@ test-suite wireform-yaml-test
     base,
     wireform-yaml,
     wireform-derive,
-    aeson >= 2.1 && < 2.3,
+    aeson >= 2.1 && < 2.4,
     bytestring,
     scientific,
     text,

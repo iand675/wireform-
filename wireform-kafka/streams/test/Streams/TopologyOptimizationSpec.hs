@@ -44,6 +44,21 @@ import Kafka.Streams.Topology (
  )
 import Kafka.Streams.Topology qualified
 import Kafka.Streams.Types (TopicName, topicName)
+import Control.Exception (try)
+import Kafka.Streams.Errors (TopologyException (..))
+import Kafka.Streams.Imperative (
+  consumed,
+  countStream,
+  groupByKey,
+  grouped,
+  materializedAs,
+  newStreamsBuilder,
+  buildTopology,
+  recordValue,
+  selectKey,
+  streamFromTopic,
+ )
+import Kafka.Streams.Grouped (Grouped (..))
 import Test.Syd
 
 
@@ -96,47 +111,11 @@ tests =
                 "adds a new plan entry when the new graph creates a candidate"
                 reuse_dynamic_adds_new_candidate
             ]
-      , describe "optimizeTopology — MERGE_REPARTITION_TOPICS" $
+      , describe "MERGE_REPARTITION_TOPICS (built into the builder)" $
           sequence_
-            [ it
-                "merges two sibling repartition processors that share a parent + prefix"
-                merge_repartition_pair
-            , it
-                "merges N sibling repartitions and rewires downstream sinks"
-                merge_repartition_many
-            , it
-                "leaves different prefixes alone"
-                merge_skip_different_prefixes
-            , it
-                "leaves repartitions with different parents alone"
-                merge_skip_different_parents
-            , it
-                "is a no-op when the toggle is disabled"
-                merge_disabled_noop
-            , it
-                "is idempotent — applying twice == applying once"
-                merge_idempotent
-            , it
-                "rebuilds topoChildrenIndex consistently after merging"
-                merge_rebuilds_children_index
-            ]
-      , describe "optimizeTopology — dynamic-modification safety (MERGE)" $
-          sequence_
-            [ it
-                "adding a third sibling after merge, re-running absorbs it"
-                merge_dynamic_new_sibling_absorbed
-            , it
-                "adding a sibling with a smaller name after merge, the new one becomes the survivor"
-                merge_dynamic_smaller_sibling_takes_over
-            , it
-                "adding a sibling under a different parent, re-running leaves both alone"
-                merge_dynamic_different_parent_left_alone
-            ]
-      , describe "optimizeTopology — both rewrites" $
-          sequence_
-            [ it
-                "applies both rewrites on the same topology"
-                both_rewrites_compose
+            [ it "the aggregations of one re-keyed grouping share one repartition topic" merge_builtin_shared
+            , it "a repartition name used for two different streams is rejected" merge_builtin_name_clash
+            , it "a topic read by two sources is rejected" validate_rejects_topic_read_twice
             ]
       , describe "validateChangelogPlan" $
           sequence_
@@ -215,21 +194,6 @@ addSinkOnTopic
   :: NodeName -> TopicName -> NodeName -> Topology -> Topology
 addSinkOnTopic nm tp parent =
   addSink nm tp textSerde textSerde [parent]
-
-
-{- | Add a pass-through @KSTREAM-REPARTITION-…@ processor with the
-supplied node name and single parent. Mirrors the shape produced
-by 'Kafka.Streams.KStream.repartition'.
--}
-addRepartitionNode
-  :: Text
-  -- ^ exact node name
-  -> Text
-  -- ^ parent name
-  -> Topology
-  -> Topology
-addRepartitionNode nm parent =
-  addProcessor (NodeName nm) [NodeName parent] mkProc
 
 
 ----------------------------------------------------------------------
@@ -552,190 +516,6 @@ reuse_dynamic_adds_new_candidate = do
 
 
 ----------------------------------------------------------------------
--- MERGE_REPARTITION_TOPICS tests
-----------------------------------------------------------------------
-
-twoRepartitionSiblings :: Topology
-twoRepartitionSiblings =
-  addRepartitionNode "KSTREAM-REPARTITION-x-2" "S"
-    $ addRepartitionNode "KSTREAM-REPARTITION-x-1" "S"
-    $ addSource
-      (NodeName "S")
-      [topicName "in"]
-      textSerde
-      textSerde
-      recordTimestampExtractor
-    $ emptyTopology
-
-
-merge_repartition_pair :: IO ()
-merge_repartition_pair = do
-  let !t = twoRepartitionSiblings
-  Map.size (topoProcessors t) `shouldBe` 2
-  -- 'topoChildrenIndex' stores children in reverse-insertion order
-  -- (each new child is prepended); the order here is one
-  -- implementation detail we don't bet on. Sort before comparing.
-  List.sort (childrenOf t (NodeName "S"))
-    `shouldBe` [ NodeName "KSTREAM-REPARTITION-x-1"
-               , NodeName "KSTREAM-REPARTITION-x-2"
-               ]
-  let !t' = optimizeTopology defaultOptimizationConfig t
-  Map.size (topoProcessors t') `shouldBe` 1
-  -- The merge survivor is the lexicographically smallest node name.
-  childrenOf t' (NodeName "S") `shouldBe` [NodeName "KSTREAM-REPARTITION-x-1"]
-
-
-merge_repartition_many :: IO ()
-merge_repartition_many = do
-  let t =
-        addSinkOnTopic
-          (NodeName "sinkB")
-          (topicName "outB")
-          (NodeName "KSTREAM-REPARTITION-x-3")
-          $ addSinkOnTopic
-            (NodeName "sinkA")
-            (topicName "outA")
-            (NodeName "KSTREAM-REPARTITION-x-2")
-          $ addRepartitionNode "KSTREAM-REPARTITION-x-3" "S"
-          $ addRepartitionNode "KSTREAM-REPARTITION-x-2" "S"
-          $ addRepartitionNode "KSTREAM-REPARTITION-x-1" "S"
-          $ addSource
-            (NodeName "S")
-            [topicName "in"]
-            textSerde
-            textSerde
-            recordTimestampExtractor
-          $ emptyTopology
-  Map.size (topoProcessors t) `shouldBe` 3
-  let !t' = optimizeTopology defaultOptimizationConfig t
-  Map.size (topoProcessors t') `shouldBe` 1
-  -- Both sinks now reference the survivor as their parent.
-  let sinkParentsOf nm =
-        maybe [] sinkParents (Map.lookup (NodeName nm) (topoSinks t'))
-  sinkParentsOf "sinkA" `shouldBe` [NodeName "KSTREAM-REPARTITION-x-1"]
-  sinkParentsOf "sinkB" `shouldBe` [NodeName "KSTREAM-REPARTITION-x-1"]
-
-
-merge_skip_different_prefixes :: IO ()
-merge_skip_different_prefixes = do
-  let t =
-        addRepartitionNode "KSTREAM-REPARTITION-y-1" "S"
-          $ addRepartitionNode "KSTREAM-REPARTITION-x-1" "S"
-          $ addSource
-            (NodeName "S")
-            [topicName "in"]
-            textSerde
-            textSerde
-            recordTimestampExtractor
-          $ emptyTopology
-      !t' = optimizeTopology defaultOptimizationConfig t
-  Map.size (topoProcessors t') `shouldBe` 2
-
-
-merge_skip_different_parents :: IO ()
-merge_skip_different_parents = do
-  let t =
-        addRepartitionNode "KSTREAM-REPARTITION-x-2" "SB"
-          $ addRepartitionNode "KSTREAM-REPARTITION-x-1" "SA"
-          $ addSource
-            (NodeName "SB")
-            [topicName "in2"]
-            textSerde
-            textSerde
-            recordTimestampExtractor
-          $ addSource
-            (NodeName "SA")
-            [topicName "in1"]
-            textSerde
-            textSerde
-            recordTimestampExtractor
-          $ emptyTopology
-      !t' = optimizeTopology defaultOptimizationConfig t
-  -- Each parent has one child, so no sibling group is eligible.
-  Map.size (topoProcessors t') `shouldBe` 2
-
-
-merge_disabled_noop :: IO ()
-merge_disabled_noop = do
-  let !t = twoRepartitionSiblings
-      cfg = defaultOptimizationConfig {optMergeRepartitionTopics = False}
-      !t' = optimizeTopology cfg t
-  Map.size (topoProcessors t') `shouldBe` 2
-
-
-merge_idempotent :: IO ()
-merge_idempotent = do
-  let !t = twoRepartitionSiblings
-      !t1 = optimizeTopology defaultOptimizationConfig t
-      !t2 = optimizeTopology defaultOptimizationConfig t1
-  Map.size (topoProcessors t1) `shouldBe` 1
-  Map.size (topoProcessors t2) `shouldBe` 1
-  childrenOf t1 (NodeName "S") `shouldBe` childrenOf t2 (NodeName "S")
-
-
-merge_rebuilds_children_index :: IO ()
-merge_rebuilds_children_index = do
-  let !t = twoRepartitionSiblings
-      !t' = optimizeTopology defaultOptimizationConfig t
-  childrenOf t' (NodeName "S") `shouldBe` [NodeName "KSTREAM-REPARTITION-x-1"]
-  -- The removed node should not have any recorded children either —
-  -- it doesn't exist as a parent in the index at all.
-  (null (childrenOf t' (NodeName "KSTREAM-REPARTITION-x-2"))) `shouldBe` True
-
-
-----------------------------------------------------------------------
--- Dynamic-modification safety (MERGE)
-----------------------------------------------------------------------
-
-merge_dynamic_new_sibling_absorbed :: IO ()
-merge_dynamic_new_sibling_absorbed = do
-  -- 1) Two siblings, optimise -> one survivor.
-  let !t1 = optimizeTopology defaultOptimizationConfig twoRepartitionSiblings
-  Map.size (topoProcessors t1) `shouldBe` 1
-  -- 2) Dynamically add a third sibling under the same parent.
-  let !t2 = addRepartitionNode "KSTREAM-REPARTITION-x-3" "S" t1
-  Map.size (topoProcessors t2) `shouldBe` 2
-  -- 3) Re-run -> the new one is absorbed into the survivor.
-  let !t3 = optimizeTopology defaultOptimizationConfig t2
-  Map.size (topoProcessors t3) `shouldBe` 1
-  childrenOf t3 (NodeName "S") `shouldBe` [NodeName "KSTREAM-REPARTITION-x-1"]
-
-
-merge_dynamic_smaller_sibling_takes_over :: IO ()
-merge_dynamic_smaller_sibling_takes_over = do
-  let !t1 = optimizeTopology defaultOptimizationConfig twoRepartitionSiblings
-  childrenOf t1 (NodeName "S") `shouldBe` [NodeName "KSTREAM-REPARTITION-x-1"]
-  -- Add a sibling whose name sorts smaller than the survivor.
-  let !t2 = addRepartitionNode "KSTREAM-REPARTITION-x-0" "S" t1
-      !t3 = optimizeTopology defaultOptimizationConfig t2
-  -- The newly-added smaller node becomes the survivor; the
-  -- previous survivor is folded in.
-  childrenOf t3 (NodeName "S") `shouldBe` [NodeName "KSTREAM-REPARTITION-x-0"]
-  Map.size (topoProcessors t3) `shouldBe` 1
-
-
-merge_dynamic_different_parent_left_alone :: IO ()
-merge_dynamic_different_parent_left_alone = do
-  let !t1 = optimizeTopology defaultOptimizationConfig twoRepartitionSiblings
-  Map.size (topoProcessors t1) `shouldBe` 1
-  -- Add a new source + a repartition under it. Same prefix as
-  -- the surviving one but different parent: should NOT merge.
-  let !t2 =
-        addRepartitionNode "KSTREAM-REPARTITION-x-99" "S2" $
-          addSource
-            (NodeName "S2")
-            [topicName "other"]
-            textSerde
-            textSerde
-            recordTimestampExtractor
-            t1
-      !t3 = optimizeTopology defaultOptimizationConfig t2
-  Map.size (topoProcessors t3) `shouldBe` 2
-  childrenOf t3 (NodeName "S") `shouldBe` [NodeName "KSTREAM-REPARTITION-x-1"]
-  childrenOf t3 (NodeName "S2") `shouldBe` [NodeName "KSTREAM-REPARTITION-x-99"]
-
-
-----------------------------------------------------------------------
 -- validateChangelogPlan tests
 ----------------------------------------------------------------------
 
@@ -818,45 +598,41 @@ validate_rejects_user_inconsistent = do
     `shouldBe` Left (StaleChangelogPlan storeNm topic (StaleWrongTopic actual))
 
 
-----------------------------------------------------------------------
--- Both rewrites composed
-----------------------------------------------------------------------
+merge_builtin_shared :: IO ()
+merge_builtin_shared = do
+  b <- newStreamsBuilder
+  s <- streamFromTopic b (topicName "in") (consumed textSerde textSerde)
+  byValue <- selectKey recordValue s
+  let g = groupByKey (grouped textSerde textSerde) byValue
+  _ <- countStream (materializedAs (storeName "a")) g
+  _ <- countStream (materializedAs (storeName "b")) g
+  -- a stream-stream join of the same re-keyed stream reads it too
+  _ <- countStream (materializedAs (storeName "c")) (groupByKey (grouped textSerde textSerde) byValue)
+  topo <- buildTopology b
+  Map.size (Kafka.Streams.Topology.topoInternalTopics topo) `shouldBe` 1
+  either (expectationFailure . show) (const (pure ())) (Kafka.Streams.Topology.validateTopology topo)
 
-both_rewrites_compose :: IO ()
-both_rewrites_compose = do
-  let tableTopic = topicName "tbl"
-      tableSrc = NodeName "TS"
-      tableProc = NodeName "TP"
-      tableStore = storeName "tbl-store"
-      streamSrc = NodeName "SS"
-      tableStoreBuilder :: StoreBuilderKV () ()
-      tableStoreBuilder = inMemoryKeyValueStoreBuilder tableStore
-      t =
-        addRepartitionNode "KSTREAM-REPARTITION-x-2" "SS"
-          $ addRepartitionNode "KSTREAM-REPARTITION-x-1" "SS"
-          $ addSource
-            streamSrc
-            [topicName "stream-in"]
-            textSerde
-            textSerde
-            recordTimestampExtractor
-          $ addStateStoreKV tableStoreBuilder [tableProc]
-          $ addProcessor tableProc [tableSrc] mkProc
-          $ addSource
-            tableSrc
-            [tableTopic]
-            textSerde
-            textSerde
-            recordTimestampExtractor
-          $ emptyTopology
-  let !t' = optimizeTopology defaultOptimizationConfig t
-  effectiveChangelogReuse t' tableStore `shouldBe` Just tableTopic
-  -- One surviving repartition processor + one source-table
-  -- processor = two processors total.
-  Map.size (topoProcessors t') `shouldBe` 2
-  -- The repartition merge survivor is the lexicographically
-  -- earliest @-1@ suffix.
-  childrenOf t' (NodeName "SS") `shouldBe` [NodeName "KSTREAM-REPARTITION-x-1"]
-  -- Silence "unused" warning on Text import in some GHC configs.
-  _ <- pure (T.length "x")
-  pure ()
+
+merge_builtin_name_clash :: IO ()
+merge_builtin_name_clash = do
+  b <- newStreamsBuilder
+  s <- streamFromTopic b (topicName "in") (consumed textSerde textSerde)
+  k1 <- selectKey recordValue s
+  k2 <- selectKey (\r -> recordValue r <> "!") s
+  let named = (grouped textSerde textSerde) {groupedName = Just "same"}
+  _ <- countStream (materializedAs (storeName "a")) (groupByKey named k1)
+  r <- try (countStream (materializedAs (storeName "b")) (groupByKey named k2))
+  case r of
+    Left (TopologyException _) -> pure ()
+    Right _ -> expectationFailure "expected a TopologyException"
+
+
+validate_rejects_topic_read_twice :: IO ()
+validate_rejects_topic_read_twice = do
+  b <- newStreamsBuilder
+  _ <- streamFromTopic b (topicName "in") (consumed textSerde textSerde)
+  _ <- streamFromTopic b (topicName "in") (consumed textSerde textSerde)
+  topo <- buildTopology b
+  case Kafka.Streams.Topology.validateTopology topo of
+    Left (TopicReadTwice t _) -> t `shouldBe` topicName "in"
+    other -> expectationFailure ("expected TopicReadTwice, got " <> either show (const "a valid topology") other)

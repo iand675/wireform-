@@ -13,7 +13,7 @@ A Haskell port of Apache Kafka Streams. Stateful stream processing with joins, w
 | Time-windowed analysis | Tumbling, hopping, sliding, session windows |
 | Join streams/tables | Stream-stream, stream-table, table-table, foreign-key |
 | Queryable state | Interactive Queries (IQ) from outside the topology |
-| Exactly-once | Transactions: atomic producer + state commits |
+| Exactly-once | One transaction per commit: output, changelogs and offsets together |
 
 ## Core abstractions
 
@@ -21,7 +21,7 @@ A Haskell port of Apache Kafka Streams. Stateful stream processing with joins, w
 
 **KTable** - A stream of updates. Latest value per key; a materialized view.
 
-Converting: `toTable` (stream to table), `toStream` (table to stream).
+Converting: `toTable` (stream to table), `toKStreamFromKTable` (table to stream of current values) and `toChangelogStream` (every change, deletes as tombstones). Table operators forward each row's new and old value, so deletes and retractions reach every derived table.
 
 ## Building a topology
 
@@ -159,9 +159,12 @@ config = defaultStreamsConfig { processingGuarantee = ExactlyOnceV2 }
 ```
 
 Provides:
-- Producer transactions: atomic multi-partition writes
-- Offset commits: consumer offsets committed with producer transaction
-- State store commits: state changes committed atomically
+- One transactional producer per instance; each commit interval (100 ms by default) is one transaction
+- Output records, state-store changelog writes, and the consumed offsets (`sendOffsetsToTransaction`) commit together
+- On an aborted transaction every task is restored from its changelogs and rewound to the last commit
+- `read_committed` consumers and restore readers
+
+External systems can join the commit as two-phase commit participants (`Kafka.Streams.Sinks.TwoPhase`, `Kafka.Streams.Runtime.addCommitParticipant`).
 
 ## Running a topology
 
@@ -172,27 +175,51 @@ import qualified Kafka.Streams.Runtime as Runtime
 
 main :: IO ()
 main = do
-  config <- S.defaultStreamsConfig
-    { S.applicationId = "my-app"
-    , S.bootstrapServers = ["localhost:9092"]
-    }
-  streams <- Runtime.newKafkaStreams topology config
+  let config = S.defaultStreamsConfig
+        { S.applicationId = "my-app"
+        , S.bootstrapServers = ["localhost:9092"]
+        }
+  valid <- either (fail . show) pure (S.validateTopology topo)
+  streams <- Runtime.newKafkaStreams config valid
   Runtime.startKafkaStreams streams
-  Runtime.awaitTermination streams
+  Runtime.awaitState streams Runtime.StreamsClosed
+```
+
+Each source partition number of each subtopology is a task with its own
+stores; the instance's tasks run in parallel over `numStreamThreads`
+workers, and instances with the same `applicationId` share the
+partitions through the consumer group. Stores are change-logged to
+compacted topics and restored from them before a task processes
+anything.
+
+### In-memory broker (no cluster)
+
+`Kafka.Streams.Runtime.MockBroker` runs the same runtime against an
+in-memory broker (topics, groups and rebalances, transactions, fault
+injection):
+
+```haskell
+broker <- newMockBroker (Just 1)
+mockCreateTopic broker "input" 4
+streams <- Runtime.newKafkaStreams config valid
+Runtime.startKafkaStreamsWith streams =<< mockDriverFor broker config
 ```
 
 ### Test driver (no broker)
 
 ```haskell
-import qualified Kafka.Streams.Driver.TopologyTestDriver as TTD
+import qualified Kafka.Streams.Driver as TTD
 
 main :: IO ()
 main = do
-  driver <- TTD.newDriver topology (ApplicationId "test-app")
-  TTD.pipeInput driver "input-topic" "key" "value"
-  outputs <- TTD.readOutput driver "output-topic"
+  driver <- TTD.newDriver topo "test-app"
+  TTD.pipeInput driver (S.topicName "input") (Just "key") "value" (Timestamp 0) 0
+  outputs <- TTD.readOutput driver (S.topicName "output")
   print outputs
 ```
+
+The test driver runs the whole topology in one in-process engine (no
+tasks, rebalances or transactions); use the in-memory broker for those.
 
 ## Examples
 

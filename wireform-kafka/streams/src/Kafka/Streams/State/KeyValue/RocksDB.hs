@@ -40,11 +40,14 @@ import Data.ByteString qualified as BS
 import Data.Text qualified as T
 import Database.RocksDB qualified as R
 import Database.RocksDB.Iterator qualified as RI
+import Kafka.Streams.Serde (byteStringSerde)
 import Kafka.Streams.State.Store (
   KeyValueIterator (..),
   KeyValueStore (..),
   StateStore (..),
   StoreBuilderKV (..),
+  StoreContext (..),
+  StoreSerdes (..),
   StoreName,
   defaultLoggingConfig,
   unStoreName,
@@ -103,7 +106,8 @@ rocksDBKeyValueStore nm cfg = do
   db <- R.open path opts
   pure
     KeyValueStore
-      { kvsBase =
+      { kvsCache = Nothing
+      , kvsBase =
           StateStore
             { storeStoreName = nm
             , storePersistent = True
@@ -145,9 +149,11 @@ rocksDBKeyValueStoreBuilder
   -> StoreBuilderKV ByteString ByteString
 rocksDBKeyValueStoreBuilder nm cfg =
   StoreBuilderKV
-    { sbKvName = nm
+    { sbKvCaching = Nothing
+    , sbKvName = nm
     , sbKvLogging = defaultLoggingConfig
-    , sbKvBuild = rocksDBKeyValueStore nm cfg
+    , sbKvSerdes = Just (StoreSerdes byteStringSerde byteStringSerde)
+    , sbKvBuild = \ctx -> rocksDBKeyValueStore nm cfg {rdbDirectory = scDirectory ctx}
     }
 
 

@@ -70,7 +70,6 @@ module Kafka.Streams.DSL (
   Joined,
   Grouped,
   KGroupedStream,
-  KGS.CountedTableLocal,
   Timestamp (..),
 
   -- * Sources
@@ -567,7 +566,7 @@ count
   :: Ord k
   => Materialized k Int64
   -> KGroupedStream k v
-  -> Streams (KGS.CountedTableLocal k Int64)
+  -> Streams (KTable k Int64)
 count m g = liftIO (KGS.countStream m g)
 
 
@@ -577,7 +576,7 @@ reduce
   => (v -> v -> v)
   -> Materialized k v
   -> KGroupedStream k v
-  -> Streams (KGS.CountedTableLocal k v)
+  -> Streams (KTable k v)
 reduce f m g = liftIO (KGS.reduceStream f m g)
 
 
@@ -591,7 +590,7 @@ aggregate
   -> (k -> v -> agg -> agg)
   -> Materialized k agg
   -> KGroupedStream k v
-  -> Streams (KGS.CountedTableLocal k agg)
+  -> Streams (KTable k agg)
 aggregate z step m g = liftIO (KGS.aggregateStream z step m g)
 
 

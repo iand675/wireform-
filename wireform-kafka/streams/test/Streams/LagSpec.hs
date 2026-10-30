@@ -30,16 +30,16 @@ tests =
 
 sampleLags :: [LagInfo]
 sampleLags =
-  [ LagInfo (TaskId 1 0) 500 1500 -- behind 1000
-  , LagInfo (TaskId 0 0) 980 1000 -- behind 20
-  , LagInfo (TaskId 0 1) 1000 1000 -- caught up
+  [ LagInfo (TaskId 1 0) 500 1500 False -- behind 1000
+  , LagInfo (TaskId 0 0) 980 1000 False -- behind 20
+  , LagInfo (TaskId 0 1) 1000 1000 False -- caught up
   ]
 
 
 task_lag_clamps_negative :: Spec
 task_lag_clamps_negative =
   it "taskLagOf clamps a current ahead of end to zero behind" $ do
-    let tl = taskLagOf (LagInfo (TaskId 0 0) 1200 1000)
+    let tl = taskLagOf (LagInfo (TaskId 0 0) 1200 1000 False)
     taskLagBehind tl `shouldBe` 0
 
 
@@ -67,7 +67,7 @@ classify_thresholds =
     let rep = lagReport sampleLags
     classifyLag 2000 rep `shouldBe` LagWithinThreshold
     classifyLag 500 rep `shouldBe` LagExceeded
-    classifyLag 0 (lagReport [LagInfo (TaskId 0 0) 10 10]) `shouldBe` LagCaughtUp
+    classifyLag 0 (lagReport [LagInfo (TaskId 0 0) 10 10 False]) `shouldBe` LagCaughtUp
 
 
 record_lag_sets_gauges :: Spec

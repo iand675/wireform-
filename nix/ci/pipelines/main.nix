@@ -18,7 +18,7 @@ let
   affected = changes.affectedPackages changedFiles;
   hasAffected = affected != {};
 
-  defaultGHC = "ghc98";
+  defaultGHC = "ghc910";
 
   inherit (ci) nixAgents;
 

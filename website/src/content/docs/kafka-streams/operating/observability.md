@@ -25,58 +25,79 @@ The library exposes four main observability surfaces:
 
 | Surface | What it tells you | Why it matters |
 | ------- | ----------------- | -------------- |
-| **Metrics registry** | Throughput, latency, errors per operator | Detects stalls, data loss, and performance degradation |
+| **Metrics** (`streamsMetrics`) | Throughput, drops, commits, recoveries, rebalances | Detects stalls, data loss, and performance degradation |
 | **Topology JSON** | The shape of your processing graph | Catches accidental topology changes before deploy |
 | **Orphan-topic detection** | Internal topics that should not exist | Prevents storage leaks and state confusion |
-| **Lag tracking** | How far standbys are behind the active | Ensures fast failover is actually possible |
+| **Runtime listeners** | State transitions, rebalances, restore progress | Shows stuck rebalances and how long failover takes |
 
 Plus **interactive queries** for debugging: looking directly at your state stores when something seems wrong.
 
-## The metrics registry
+## Metrics
 
 Unlike HTTP services where you can see failures in request
 logs, streaming applications process records continuously in the background.
 Without metrics, you have no visibility into whether records are being processed,
-dropped, or stalled. The registry is the foundation of all observability.
+dropped, or stalled.
 
-`Kafka.Streams.Metrics` maintains counters, gauges, and duration stats in memory. Unlike some clients, it does not automatically push to Prometheus or Datadog. You poll it and forward to your own system.
+A running instance counts in its tasks (unboxed counters, nothing
+allocated per record) and `streamsMetrics` snapshots them, under the
+JVM metric names, as a `Map Text MetricValue`. Nothing is pushed
+anywhere: you poll it, or hand it to the OpenTelemetry bridge
+(`Kafka.Streams.Observability.OpenTelemetry.registerStreamsMetrics`),
+which takes the same snapshot action.
 
-### Key metrics to watch
+### What it reports
 
-The most important metrics for operational health:
+Per task (tagged `{task=<subtopology>_<partition>}`) and summed over
+the instance's tasks (untagged):
 
-| Metric | What it measures | Alert when |
+| Metric | What it counts | Alert when |
 | -------- | ---------------- | ---------- |
-| `processTotal` | Records processed per operator | Sudden drop indicates stall |
-| `forwardTotal` | Records emitted per operator | Gap from `processTotal` shows filtering rate |
-| `droppedRecordsTotal` | Records dropped (deserialization failures, etc.) | Any sustained non-zero value |
-| `commitTotal` | Commit cycles completed | Drop indicates transaction problems |
-| `commit-cycle-fatal` | Unrecoverable commit failures | Any value above zero |
-| `warmup-lag` | How far standbys trail the active | Above threshold for extended period |
+| `stream-processor-node-metrics:process-total` | Records handed to the topology | The rate drops while input lag grows |
+| `stream-task-metrics:dropped-records-total` | Records skipped (a deserialization failure the handler continued past, a missing value where one is required) | Any sustained non-zero rate |
+| `stream-task-metrics:punctuate-total` | Punctuator firings | It stops while a punctuator should be firing |
+| `stream-task-metrics:commit-total` | Task commits | |
+
+For the instance:
+
+| Metric | What it counts | Alert when |
+| -------- | ---------------- | ---------- |
+| `stream-thread-metrics:commit-total` | Commits | The rate drops |
+| `stream-thread-metrics:commit-failed-total` | At least once: offset commits that failed (input is replayed) | It rises outside rebalances |
+| `stream-thread-metrics:commit-aborted-total` | Commits aborted (every task recovered) | Any sustained rate |
+| `stream-thread-metrics:task-recoveries-total` | Rewinds of every task to the last commit: aborts, replaced threads, lost partitions under EOS | A spike, or a steady rate |
+| `stream-thread-metrics:rebalance-total` | Assignments received | Rising quickly: a rebalance storm |
+| `stream-state-metrics:restore-total` | Changelog records applied while restoring | Rising for long after a rebalance |
+
+Counters restart from zero when the instance starts (and a task's
+when it is assigned), so alert on rates.
 
 ### Reading metrics in code
 
 ```haskell
+import qualified Data.Map.Strict as Map
+import Kafka.Streams.Metrics (MetricValue (..))
 import qualified Kafka.Streams.Metrics as Met
 
--- Poll all metrics
-m <- Met.dumpMetrics registry
-
--- Read specific counters
-counter <- Met.readCounter registry "stream-task-metrics:commit-total"
-gauge   <- Met.readGauge   registry "stream-state-metrics:cache-hit-ratio"
+m <- streamsMetrics streams
+case Map.lookup Met.threadCommitAbortedTotal m of
+  Just (MVCounter n) -> report "commit-aborted-total" n
+  _ -> pure ()
 ```
 
-A typical setup runs a background thread:
+A typical setup polls it on a timer and forwards the snapshot:
 
 ```haskell
-metricsLoop :: Met.MetricsRegistry -> IO ()
-metricsLoop registry = forever $ do
-  metrics <- Met.dumpMetrics registry
-  -- Forward to Prometheus, Datadog, etc.
-  pushToGateway metrics
+metricsLoop :: KafkaStreams -> IO ()
+metricsLoop streams = forever $ do
+  streamsMetrics streams >>= pushToGateway
   threadDelay (10 * 1000000)  -- 10 seconds
 ```
+
+`Kafka.Streams.Metrics` also has a standalone registry
+(`newMetricsRegistry`, `incCounter`, `dumpMetrics`) for counters of
+your own; `registrySource` turns it into the same kind of snapshot
+action.
 
 ### Essential metric labels
 
@@ -127,7 +148,7 @@ This catches accidental changes that would create new internal topics or rename 
 During incidents, dump the live topology:
 
 ```haskell
-live <- Obs.liveTopologyDescription topo metricsRegistry cfg
+live <- Obs.liveTopologyDescription topo (streamsMetrics streams) cfg
 -- live includes current metric values overlaid on the graph
 ```
 
@@ -160,36 +181,57 @@ Orphan topics cause two problems:
 
 The detector only warns. It never deletes. Make deletion a manual, audited operation.
 
-## Lag tracking
+## Runtime listeners
 
-Standby replicas maintain copies of state for fast failover. But they only help if they are reasonably current.
-
-### What lag tells you
-
-`LagListener` receives snapshots of how far each standby trails its active:
+Failover time is restore time: a task that moves restores its stores
+before it processes anything (from its standby's position when it
+lands on one, else from a checkpoint or the changelog start), and the
+instance reports `StreamsRebalancing` meanwhile. Three listeners show
+what's happening:
 
 ```haskell
-R.setLagListener streams $ \lags ->
-  forM_ lags $ \lag -> do
-    -- lag contains taskId, store name, current offset, end offset
-    publishMetric (makeLagGauge lag)
-```
+import Kafka.Client.RebalanceListener (RebalanceListener (..), noopRebalanceListener)
 
-If a standby's lag exceeds `acceptableRecoveryLag`, it will not be promoted during failover. The new active will replay from the changelog instead, which takes time.
+R.setStateListener streams $ \old new ->
+  logInfo ("state " <> show old <> " -> " <> show new)
+
+R.setRebalanceListener streams noopRebalanceListener
+  { rlOnAssigned = \tps -> logInfo ("assigned " <> show tps)
+  , rlOnRevoked  = \tps -> logInfo ("revoked " <> show tps)
+  , rlOnLost     = \tps -> logWarn ("lost " <> show tps)
+  }
+
+R.setStateRestoreListener streams R.defaultStateRestoreListener
+  { R.onRestoreStart  = \tp store from to -> restoreStarted tp store (to - from)
+  , R.onBatchRestored = \tp store _offset n -> restoreProgress tp store n
+  , R.onRestoreEnd    = \tp store total -> restoreFinished tp store total
+  }
+```
 
 ### Alert thresholds
 
-- **Warning**: Lag above 50% of `acceptableRecoveryLag` for 5 minutes
-- **Critical**: Lag above `acceptableRecoveryLag` for any duration
-- **Page**: Standby promoted but lag above zero (means degraded failover)
+- **Warning**: an instance in `StreamsRebalancing` for longer than
+  your expected restore time.
+- **Critical**: `StreamsError` (the instance stopped; the state
+  listener gets the reason).
+- Track the restore duration per store over time: it's the failover
+  time, and it grows with the changelog.
+
+`localTaskLags` reads, on demand, every task the instance holds state
+for (running, restoring, standby) against its changelogs' end: a
+standby that falls behind there makes its failover slower.
+`Kafka.Streams.Observability.Lag` summarises the rows and
+`Kafka.Streams.Observability.Health.kafkaStreamsHealthWithLag` turns
+the active ones into readiness.
 
 ## Interactive queries for debugging
 
 When metrics show a problem but the cause is unclear, query the state stores directly:
 
 ```haskell
-ro <- IQ.queryKVStore streams "user-store"
-count <- IQ.roKvGet ro "user-123"
+-- with OverloadedRecordDot
+Just ro <- IQ.queryKVStore @Text @Int64 streams (storeName "user-store")
+count <- ro.roKvGet "user-123"
 putStrLn ("User 123 has " <> show count <> " events")
 ```
 
@@ -210,35 +252,36 @@ IQ reads local state, which may be slightly ahead of committed state:
 Timeline:
   t=0: Record processed, state updated
   t=1: IQ query returns new value
-  t=2: Commit cycle runs
+  t=2: Commit runs
   t=3: State is durable in Kafka
 ```
 
-Between t=1 and t=2, a crash would lose that state update. IQ is for debugging and approximate reads, not financial transactions.
+Between t=1 and t=2, a crash would roll that update back (it's replayed from the last committed offsets). IQ is for debugging and approximate reads, not financial transactions.
 
 ## The minimum viable observability setup
 
 Before going to production, set up:
 
-1. **Metrics polling**: Every 10 seconds to your time-series database
+1. **Metrics polling**: `streamsMetrics` every 10 seconds to your time-series database
 2. **Three alerts**:
-   - `droppedRecordsTotal` > 0 for 1 minute
-   - `commit-cycle-fatal` > 0
-   - `warmup-lag` > `acceptableRecoveryLag` for 5 minutes
+   - the instance in `StreamsError`
+   - `StreamsRebalancing` for longer than your restore budget
+   - repeated `commit aborted` log lines
 3. **Golden-file test**: CI fails if topology shape changes unexpectedly
 4. **Orphan detection**: Startup warning for drift detection
 5. **State listener**: Log all state transitions for incident debugging
 
 ```haskell
 main = do
-  streams <- newKafkaStreams topo cfg
+  streams <- newKafkaStreams cfg topo
 
   -- Alert-critical listeners
-  setStateListener streams $ \old new ->
-    when (new == ERROR) $ sendPage "Streams entered ERROR state"
+  setStateListener streams $ \_old new -> case new of
+    StreamsError why -> sendPage ("Streams entered StreamsError: " <> why)
+    _ -> pure ()
 
   -- Observability setup
-  forkIO metricsLoop
+  forkIO (metricsLoop streams)    -- streamsMetrics in a loop
   checkForOrphans streams
 
   startKafkaStreams streams

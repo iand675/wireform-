@@ -51,7 +51,7 @@ suppress_time_limit_debounces =
 
     out0 <- readOutput driver (topicName "out")
     -- Within the 100ms window from t=0, no emission.
-    map (T.pack . BSC.unpack . crValue) out0 `shouldBe` []
+    map (T.pack . BSC.unpack . crValueBytes) out0 `shouldBe` []
     closeDriver driver
 
 
@@ -71,12 +71,14 @@ suppress_time_limit_emits_after_limit =
 
     pipeInput driver (topicName "in") (Just (bytes "k")) (bytes "first") (t 0) 0
     pipeInput driver (topicName "in") (Just (bytes "k")) (bytes "second") (t 50) 0
-    -- This record is at t=200, well past the t=100 limit; the
-    -- buffered "second" should flush.
+    -- This record is at t=200, past the limit of the key's first
+    -- buffered record (t=0): as on the JVM it is buffered first, so the
+    -- key's latest value, "third", goes out, at its own timestamp.
     pipeInput driver (topicName "in") (Just (bytes "k")) (bytes "third") (t 200) 0
 
     out <- readOutput driver (topicName "out")
-    map (T.pack . BSC.unpack . crValue) out `shouldBe` ["second"]
+    map (T.pack . BSC.unpack . crValueBytes) out `shouldBe` ["third"]
+    map crTimestamp out `shouldBe` [t 200]
     closeDriver driver
 
 
@@ -101,13 +103,14 @@ suppress_time_limit_first_seen_is_sticky =
     pipeInput driver (topicName "in") (Just (bytes "B")) (bytes "b1") (t 50) 0
     pipeInput driver (topicName "in") (Just (bytes "A")) (bytes "a2") (t 100) 0
     pipeInput driver (topicName "in") (Just (bytes "B")) (bytes "b2") (t 150) 0
-    -- Trigger evaluation at t=210: A should flush "a2", B not yet.
+    -- At t=210 A (waiting since 0) is due, with its latest value; B
+    -- (waiting since 50) is not.
     pipeInput driver (topicName "in") (Just (bytes "A")) (bytes "a3") (t 210) 0
     out1 <- readOutput driver (topicName "out")
-    map (T.pack . BSC.unpack . crValue) out1 `shouldBe` ["a2"]
+    map (T.pack . BSC.unpack . crValueBytes) out1 `shouldBe` ["a3"]
 
-    -- Trigger at t=300: B flushes "b2", A's new debounce holds "a3".
+    -- At t=300 B is due; A starts a new wait with nothing buffered.
     pipeInput driver (topicName "in") (Just (bytes "B")) (bytes "b3") (t 300) 0
     out2 <- readOutput driver (topicName "out")
-    map (T.pack . BSC.unpack . crValue) out2 `shouldBe` ["b2"]
+    map (T.pack . BSC.unpack . crValueBytes) out2 `shouldBe` ["b3"]
     closeDriver driver

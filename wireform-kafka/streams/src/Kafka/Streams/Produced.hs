@@ -76,7 +76,10 @@ data Produced k v = Produced
   { producedKeySerde :: !(Serde k)
   , producedValueSerde :: !(Serde v)
   , producedName :: !(Maybe Text)
-  , producedPartitioner :: !(StreamPartitioner k v)
+  , producedPartitioner :: !(Maybe (StreamPartitioner k v))
+  {- ^ 'Nothing' (the default) leaves partitioning to the producer
+  and skips the per-record partition-count lookup entirely.
+  -}
   }
 
 
@@ -86,7 +89,7 @@ produced ks vs =
     { producedKeySerde = ks
     , producedValueSerde = vs
     , producedName = Nothing
-    , producedPartitioner = defaultStreamPartitioner
+    , producedPartitioner = Nothing
     }
 
 
@@ -94,7 +97,11 @@ withProducedName :: Text -> Produced k v -> Produced k v
 withProducedName n p = p {producedName = Just n}
 
 
--- | Override the per-record partitioner.
+{- | Override the per-record partitioner. The sink calls it with the
+topic's partition count (from producer metadata) and sends the
+record to the partition it returns; 'Nothing' for a record defers
+to the producer's partitioner.
+-}
 withStreamPartitioner
   :: StreamPartitioner k v -> Produced k v -> Produced k v
-withStreamPartitioner sp p = p {producedPartitioner = sp}
+withStreamPartitioner sp p = p {producedPartitioner = Just sp}

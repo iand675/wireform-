@@ -43,7 +43,7 @@ library
     MsgPack.Stream
     MsgPack.Value
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-core,
     wireform-derive,
     template-haskell >= 2.18 && < 2.25,
@@ -52,7 +52,7 @@ library
     containers >= 0.6 && < 0.9,
     text >= 2.0 && < 2.2,
     vector >= 0.13 && < 0.14,
-    aeson >= 2.1 && < 2.3,
+    aeson >= 2.1 && < 2.4,
     scientific >= 0.3 && < 0.4,
     hashable >= 1.3 && < 1.6,
     unordered-containers >= 0.2.16 && < 0.3,

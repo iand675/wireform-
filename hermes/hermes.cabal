@@ -314,7 +314,7 @@ library
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
   build-depends:
       MonadRandom
-    , base >=4.7 && <5
+    , base >=4.20 && <5
     , binary
     , bitvec
     , bytestring

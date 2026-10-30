@@ -27,4 +27,4 @@ runDemo =
       , Kafka.topics = ["events"]
       }
     $ \rec ->
-      putStrLn $ "got " <> show rec.key <> " -> " <> BS8.unpack rec.value
+      putStrLn $ "got " <> show rec.key <> " -> " <> maybe "<null>" BS8.unpack rec.value

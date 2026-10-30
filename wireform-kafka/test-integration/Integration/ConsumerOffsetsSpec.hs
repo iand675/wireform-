@@ -189,7 +189,7 @@ testProduceAndPollRoundTrip brokerText = do
             (r : _) -> do
               r.topic `shouldBe` topic
               r.partition `shouldBe` 0
-              r.value `shouldBe` payload
+              r.value `shouldBe` Just payload
             [] ->
               expectationFailure
                 ( "poll did not return the record we just produced "

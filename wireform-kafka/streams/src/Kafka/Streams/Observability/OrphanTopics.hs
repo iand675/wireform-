@@ -25,16 +25,20 @@ diagnostic and for tools (CI, CLI) to consume.
 
 == Naming convention
 
-The detector uses the JVM Kafka Streams convention:
+The expected set is what the runtime creates
+("Kafka.Streams.Runtime.Plan"), the JVM Kafka Streams convention:
 
-  * Changelog: @\<applicationId\>-\<storeName\>-changelog@
-  * Repartition: @\<applicationId\>-\<repartitionNodeName\>-repartition@
+  * Changelog: @\<applicationId\>-\<storeName\>-changelog@ for every
+    logged store a task owns, unless it reuses its source topic
+    (KIP-295, 'changelogTopicFor'). Global stores restore from their
+    source topic and have none.
+  * Every internal topic the topology declares (repartitions, the
+    foreign-key join's subscription and response topics), prefixed
+    with @\<applicationId\>-@.
 
-Stores with @loggingEnabled = False@ or with an explicit
-@loggingSourceTopic@ (KIP-295 reuse) are excluded from the
-changelog set. Stores covered by the optimiser-derived
-'Topo.topoChangelogPlan' are also excluded — they reuse an
-external topic instead.
+A broker topic counts as internal when it carries the application
+prefix and ends in @-changelog@, @-repartition@,
+@-subscription-registration@ or @-subscription-response@.
 -}
 module Kafka.Streams.Observability.OrphanTopics (
   -- * Detection
@@ -51,12 +55,21 @@ module Kafka.Streams.Observability.OrphanTopics (
 
 import Data.List qualified as List
 import Data.Map.Strict qualified as Map
+import Data.Maybe (mapMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Kafka.Streams.State.Store qualified as Store
 import Kafka.Streams.Topology qualified as Topo
+import Kafka.Streams.Topology.Subtopology (
+  ChangelogTopic (..),
+  SubtopologyPlan (..),
+  Subtopology (..),
+  changelogTopicFor,
+  planSubtopologies,
+  prefixInternalTopics,
+ )
 import Kafka.Streams.Types (
   TopicName,
   topicName,
@@ -72,7 +85,9 @@ import Kafka.Streams.Types (
 data OrphanReason
   = -- | Topic name ends in @-changelog@.
     OrphanChangelog
-  | -- | Topic name ends in @-repartition@.
+  | {- | A repartition-style topic: @-repartition@, or a foreign-key
+    join's @-subscription-registration@ / @-subscription-response@
+    -}
     OrphanRepartition
   deriving stock (Eq, Show, Ord)
 
@@ -116,11 +131,7 @@ detectOrphans topo appId brokerTopics =
                 | not (Set.member t expected) ->
                     Just (OrphanInternalTopic t r appId)
               _ -> Nothing
-  in List.sort
-       [ o
-       | t <- brokerTopics
-       , Just o <- [classify t]
-       ]
+  in List.sort (mapMaybe classify brokerTopics)
 
 
 {- | Compute the full set of internal topic names the runtime would
@@ -128,20 +139,16 @@ create for a given topology + application id.
 -}
 expectedInternalTopics :: Topo.Topology -> Text -> Set TopicName
 expectedInternalTopics topo appId =
-  Set.fromList (changelogs <> repartitions)
+  Set.fromList (changelogs <> Map.keys (Topo.topoInternalTopics t))
   where
+    t = prefixInternalTopics appId topo
+    logged sn = maybe False Store.loggingEnabled (Map.lookup sn (Topo.topoStores t) >>= Topo.storeBuilderLogging)
     changelogs =
-      [ changelogTopic appId nm
-      | (nm, builder) <- Map.toList (Topo.topoStores topo)
-      , builderLoggingEnabled builder
-      , not (isSourceReused topo nm builder)
-      ]
-
-    repartitions =
-      [ repartitionTopic appId nm
-      | nm <- foldr (:) [] (Topo.topoOrder topo)
-      , isRepartitionNode nm
-      ]
+      map clTopic
+        . filter clInternal
+        . map (changelogTopicFor appId t)
+        . filter logged
+        $ concatMap subStores (spSubtopologies (planSubtopologies t))
 
 
 ----------------------------------------------------------------------
@@ -181,44 +188,11 @@ matchesPrefix appId t = (appId <> "-") `T.isPrefixOf` unTopicName t
 suffixedReason :: TopicName -> Maybe OrphanReason
 suffixedReason t
   | "-changelog" `T.isSuffixOf` unTopicName t = Just OrphanChangelog
-  | "-repartition" `T.isSuffixOf` unTopicName t = Just OrphanRepartition
+  | any (`T.isSuffixOf` unTopicName t) ["-repartition", "-subscription-registration", "-subscription-response"] =
+      Just OrphanRepartition
   | otherwise = Nothing
 
 
-isRepartitionNode :: Topo.NodeName -> Bool
-isRepartitionNode nm =
-  "KSTREAM-REPARTITION" `T.isPrefixOf` unNodeName nm
-
-
-builderLoggingEnabled :: Topo.AnyStoreBuilder -> Bool
-builderLoggingEnabled = \case
-  Topo.AsKeyValueBuilder b -> Store.loggingEnabled (Store.sbKvLogging b)
-  Topo.AsWindowBuilder b -> Store.loggingEnabled (Store.sbWLogging b)
-  Topo.AsSessionBuilder b -> Store.loggingEnabled (Store.sbSLogging b)
-  Topo.AsRawBuilder b -> Store.loggingEnabled (Store.sbLogging b)
-
-
-{- | Does this store's changelog reuse an external topic instead
-of creating an internal one? Two ways:
-
-  * The user explicitly set 'loggingSourceTopic' on the
-    builder via 'Store.withSourceTopicChangelogKV' & friends.
-  * The KIP-295 optimiser populated 'topoChangelogPlan'.
--}
-isSourceReused :: Topo.Topology -> Store.StoreName -> Topo.AnyStoreBuilder -> Bool
-isSourceReused topo nm builder =
-  Map.member nm (Topo.topoChangelogPlan topo)
-    || case builderSourceTopic builder of
-      Just _ -> True
-      Nothing -> False
-
-
-builderSourceTopic :: Topo.AnyStoreBuilder -> Maybe TopicName
-builderSourceTopic = \case
-  Topo.AsKeyValueBuilder b -> Store.loggingSourceTopic (Store.sbKvLogging b)
-  Topo.AsWindowBuilder b -> Store.loggingSourceTopic (Store.sbWLogging b)
-  Topo.AsSessionBuilder b -> Store.loggingSourceTopic (Store.sbSLogging b)
-  Topo.AsRawBuilder b -> Store.loggingSourceTopic (Store.sbLogging b)
 ----------------------------------------------------------------------
 -- Pragmatics
 --

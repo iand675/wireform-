@@ -6,22 +6,25 @@ Module      : Kafka.Streams.Topology.Optimization
 Description : KIP-295 / @StreamsConfig.topology.optimization@ toggles
 
 The Java client lets users opt into a small set of topology
-rewrites with @Topology.optimize(StreamsBuilder.OPTIMIZE)@:
+rewrites with @topology.optimization@:
 
-  * @REUSE_KTABLE_SOURCE_TOPICS@   — drop the per-source-table
-    repartition topic when the source topic already has a
-    suitable key.
-  * @MERGE_REPARTITION_TOPICS@     — collapse adjacent repartitions
-    that share a key.
-  * @SINGLE_STORE_SELF_JOIN@       — when both sides of a stream-stream
-    self-join read from the same source, hold one window-store
-    instead of two.
+  * @REUSE_KTABLE_SOURCE_TOPICS@   — a table read straight off a source
+    topic uses that topic as its changelog instead of a separate
+    @-changelog@ topic ('Kafka.Streams.Topology.optimizeTopology').
+  * @MERGE_REPARTITION_TOPICS@     — the groupings and joins of one
+    re-keyed stream share one repartition topic. Here that is how the
+    builder always works
+    ('Kafka.Streams.StreamsBuilder.sharedRepartitionNode'), so the flag
+    changes nothing.
+  * @SINGLE_STORE_SELF_JOIN@       — an inner window join of a stream
+    with itself runs on one store ('Kafka.Streams.Topology.optimizeTopology').
 
-This module is the pure decision layer: 'TopologyOptimizationLevel'
-+ 'optimizationFlags' translate the user-facing knob into an
-internal set of booleans the topology builder consults. The actual
-rewrites would call 'shouldReuseSourceTopics' etc. when assembling
-the topology DAG.
+'optimizationFlags' turns the knob into booleans and
+'Kafka.Streams.Topology.fromOptimizationFlags' into the
+'Kafka.Streams.Topology.OptimizationConfig' that
+'Kafka.Streams.Topology.optimizeTopology' takes. The imperative
+builder's topology is not optimised unless you call it; the Free DSL's
+'Kafka.Streams.Topology.Free.compile' does.
 -}
 module Kafka.Streams.Topology.Optimization (
   TopologyOptimizationLevel (..),
@@ -29,10 +32,12 @@ module Kafka.Streams.Topology.Optimization (
   noOptimizations,
   optimizationFlags,
   parseOptimizationLevel,
+  parseOptimizationFlags,
   optimizationLevelText,
 ) where
 
 import Data.Text (Text)
+import Data.Text qualified as T
 import GHC.Generics (Generic)
 
 
@@ -86,6 +91,18 @@ parseOptimizationLevel = \case
   "single.store.self.join" -> Just OptimizeSingleStoreSelfJoin
   "all" -> Just OptimizeAll
   _ -> Nothing
+
+
+{- | Parse @topology.optimization@: one level, or several separated by
+commas (as the JVM accepts), their flags combined.
+-}
+parseOptimizationFlags :: Text -> Maybe OptimizationFlags
+parseOptimizationFlags =
+  fmap (foldr (orFlags . optimizationFlags) noOptimizations)
+    . traverse (parseOptimizationLevel . T.strip)
+    . T.splitOn ","
+  where
+    orFlags (OptimizationFlags a b c) (OptimizationFlags x y z) = OptimizationFlags (a || x) (b || y) (c || z)
 
 
 optimizationLevelText :: TopologyOptimizationLevel -> Text

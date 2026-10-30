@@ -90,6 +90,7 @@ module Kafka.Streams.AsyncIO (
 ) where
 
 import Control.Concurrent (threadDelay)
+import Kafka.Streams.Internal.Log qualified as SLog
 import Control.Concurrent.Async (Async, async, waitCatch)
 import Control.Concurrent.Async qualified as Async
 import Control.Concurrent.STM
@@ -668,11 +669,8 @@ applyFailurePolicy p e = case p of
   FailTask -> pure False
   DropAndContinue -> pure True
   LogAndContinue -> do
-    -- Match the engine's logAndContinue style: write the
-    -- exception to stderr-ish via 'putStrLn'. We don't depend on
-    -- the engine's logger here to keep this module free of
-    -- 'Engine' coupling.
-    putStrLn ("[AsyncIO] dropping record: " <> show e)
+    -- Log it (an OpenTelemetry log record) and move on.
+    SLog.logWarn ("async I/O: dropping a record: " <> show e)
     pure True
   CustomFailure h -> do
     _ <- try (h e) :: IO (Either SomeException ())

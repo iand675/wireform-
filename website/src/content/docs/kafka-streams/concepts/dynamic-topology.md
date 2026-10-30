@@ -24,7 +24,7 @@ Changes that affect these require care. The framework enforces safety by making 
 | ---- | ------------------- | ---------------- | ---------- |
 | **Hot** | Runtime configuration | Function call on running instance | Worker threads, pause/resume, listeners |
 | **Warm** | Group membership | Add/remove instances | Scaling horizontally, rolling deploys |
-| **Restart** | Startup configuration | Restart the process | Processing guarantee, dispatch mode, most config |
+| **Restart** | Startup configuration | Restart the process | Processing guarantee, most config |
 | **Migration** | Topology fundamentals | Follow a procedure | Change topology shape, application ID, serde |
 
 ## Hot tier: change without stopping
@@ -42,7 +42,7 @@ R.addStreamThread streams     -- Add a worker
 R.removeStreamThread streams  -- Remove a worker
 ```
 
-Workers share the same consumer connection. Adding one just reshuffles partition assignments within the process. No broker coordination needed.
+Workers share the instance's one consumer. Adding or removing one changes how many workers the instance's tasks are spread over on the next loop. No rebalance, and no state moves.
 
 Use this when your CPU usage is low and you want more parallelism, or when you want to reduce threads during quiet periods.
 
@@ -64,15 +64,16 @@ Use when you need exclusive access to state stores for maintenance, when you're 
 Add or replace listeners for observability:
 
 ```haskell
--- State transitions (RUNNING, REBALANCING, ERROR)
+-- State transitions (StreamsRunning, StreamsRebalancing, StreamsError, ...)
 R.setStateListener streams $ \old new ->
   publishLog ("State: " <> show old <> " -> " <> show new)
 
--- Rebalance events (assignments, revocations)
-R.setRebalanceListener streams $ \event ->
-  case event of
-    Assigned partitions -> warmCaches partitions
-    Revoked partitions  -> flushBuffers partitions
+-- Rebalance events (assignments, revocations, lost partitions);
+-- import Kafka.Client.RebalanceListener (RebalanceListener (..), noopRebalanceListener)
+R.setRebalanceListener streams noopRebalanceListener
+  { rlOnAssigned = \tps -> publishLog ("Assigned: " <> show tps)
+  , rlOnRevoked  = \tps -> publishLog ("Revoked: " <> show tps)
+  }
 ```
 
 Listeners observe; they don't change processing. Replacing a listener just changes who gets notified.
@@ -92,7 +93,7 @@ Start a new process with the same `applicationId`:
 my-streams-app  -- same config, same applicationId
 ```
 
-The new instance joins the consumer group, the group coordinator computes new partition assignments, existing instances release some partitions (incremental rebalance), the new instance picks up its share, and processing resumes. Typically takes seconds; the new instance must replay changelog tails for assigned state stores.
+The new instance joins the consumer group, the group coordinator computes new partition assignments, existing instances commit and release some partitions, the new instance picks up its share, and processing resumes. The new instance's tasks restore their state stores from the changelogs first, so it takes as long as those restores.
 
 ### Scale by removing instances
 
@@ -102,7 +103,7 @@ Stop a process cleanly:
 R.closeKafkaStreams streams  -- Clean shutdown
 ```
 
-The instance leaves the consumer group, remaining instances get reassigned its partitions, and if standbys exist they become active (fast); otherwise replay from changelog (slower). The group must rebalance to redistribute work, which is why this is warm, not hot.
+The instance leaves the consumer group, remaining instances get reassigned its tasks and restore their state (from their standbys' positions where they hold one, else from the changelogs). The group must rebalance to redistribute work, which is why this is warm, not hot.
 
 ## Restart tier: change configuration
 
@@ -111,14 +112,12 @@ These settings are read once at startup and baked into the runtime:
 | Setting | Why it requires restart |
 | ------- | ----------------------- |
 | `processingGuarantee` | Determines whether producer is transactional |
-| `dispatchMode` | Worker pool routing function baked in |
-| `numStandbyReplicas` | Standby state machine initialized at startup |
-| `commitIntervalMs` | Commit cycle scheduler configured at start |
+| `commitIntervalMs` | Read by the commit loop at start |
 | `stateDir` | Local paths opened at initialization |
 
 To change: update configuration, drain the instance (stop processing cleanly), restart with new config, rejoin the consumer group.
 
-For rolling restarts, update one instance at a time and wait for it to reach RUNNING state before proceeding. With standbys configured, each restart is a metadata-only promotion.
+For rolling restarts, update one instance at a time and wait for it to reach RUNNING state before proceeding. A cleanly closed instance that comes back with the same state directory restores only from its persistent stores' checkpoints.
 
 ## Migration tier: change fundamentals
 
@@ -159,12 +158,6 @@ Some changes aren't supported because they would undermine correctness.
 You cannot add a new processing branch to a running topology without restarting. New nodes need state stores created atomically across the group, the rebalance protocol would need to version topology shapes, and optimizations assume static topology for correctness.
 
 Alternatives: use `TopicNameExtractor` for dynamic sink topics (one topology, many destinations), use `Branched.withConsumer` for runtime-registered handlers (within fixed topology), or deploy a new topology version as a separate application.
-
-### Change key-group count live
-
-You cannot scale `kgcTotal` without restart. Key-group routing is baked into state store sharding, and changing it requires re-partitioning state.
-
-Alternative: drain, wipe local state, restart with new count, warm from changelog.
 
 ## Summary table
 

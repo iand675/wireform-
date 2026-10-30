@@ -25,7 +25,7 @@ category:           Data, Codec, Serialization
 homepage:           https://github.com/iand675/wireform-
 bug-reports:        https://github.com/iand675/wireform-/issues
 build-type:         Simple
-tested-with:        GHC == 9.6.4, GHC == 9.8.4
+tested-with:        GHC == 9.10.3, GHC == 9.12.4, GHC == 9.14.1
 extra-doc-files:
   CHANGELOG.md
   docs/README.md
@@ -88,7 +88,7 @@ executable wireform-gen
   main-is: Main.hs
   hs-source-dirs: app
   build-depends:
-      base                   >= 4.16 && < 5
+      base                   >= 4.20 && < 5
     , wireform-proto
     , wireform-avro
     , wireform-thrift
@@ -172,7 +172,7 @@ test-suite wireform-test
     Test.NDJSON
     Test.ORC
   build-depends:
-      base                 >= 4.16 && < 5
+      base                 >= 4.20 && < 5
     , wireform-columnar
     , wireform-columnar-core
     , wireform-core
@@ -222,7 +222,7 @@ test-suite interop-test
   main-is: InteropTest.hs
   hs-source-dirs: test-interop
   build-depends:
-      base             >= 4.16 && < 5
+      base             >= 4.20 && < 5
     , wireform-proto
     , wireform-avro
     , wireform-bson
@@ -282,7 +282,7 @@ test-suite python-interop
   if !flag(python-interop)
     buildable: False
   build-depends:
-      base             >= 4.16 && < 5
+      base             >= 4.20 && < 5
     , wireform-proto
     , bytestring
     , text
@@ -325,7 +325,7 @@ benchmark quick-prof
   type: exitcode-stdio-1.0
   main-is: QuickProf.hs
   build-depends:
-      base >= 4.16 && < 5
+      base >= 4.20 && < 5
     , wireform-proto
     , wireform-html
     , bytestring
@@ -339,7 +339,7 @@ benchmark html-bench
   type: exitcode-stdio-1.0
   main-is: HTMLBench.hs
   build-depends:
-      base >= 4.16 && < 5
+      base >= 4.20 && < 5
     , wireform-core
     , wireform-html
     , bytestring
@@ -352,7 +352,7 @@ executable profile-rewriter
   import: defaults
   main-is: ProfileRewriter.hs
   build-depends:
-      base >= 4.16 && < 5
+      base >= 4.20 && < 5
     , wireform-html
     , bytestring
     , text
@@ -379,7 +379,7 @@ benchmark yaml-bench
   type: exitcode-stdio-1.0
   main-is: YAMLBench.hs
   build-depends:
-      base               >= 4.16 && < 5
+      base               >= 4.20 && < 5
     , wireform-yaml
     , bytestring
     , text
@@ -393,7 +393,7 @@ benchmark format-bench
   type: exitcode-stdio-1.0
   main-is: FormatBench.hs
   build-depends:
-      base             >= 4.16 && < 5
+      base             >= 4.20 && < 5
     , wireform-proto
     , wireform-avro
     , wireform-thrift

@@ -67,7 +67,7 @@ runDemo mode = do
       ddAdvance dd (Timestamp 0)
       out <- ddRead dd outTopic
       putStrLn ("Words emitted (" <> show (length out) <> "):")
-      mapM_ (\cr -> putStrLn ("  " <> BSC.unpack (crValue cr))) out
+      mapM_ (\cr -> putStrLn ("  " <> BSC.unpack (crValueBytes cr))) out
   where
     sendLine d inTopic line =
       ddSend

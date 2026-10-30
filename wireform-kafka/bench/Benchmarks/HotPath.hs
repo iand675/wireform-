@@ -263,7 +263,7 @@ sampleRecord =
     { RB.recordTimestampDelta = 0
     , RB.recordOffsetDelta = 0
     , RB.recordKey = Just "k"
-    , RB.recordValue = payload100
+    , RB.recordValue = Just payload100
     , RB.recordHeaders = []
     }
 
@@ -274,7 +274,7 @@ sampleBatch n =
     { BA.batchTopicPartition = BA.TopicPartition "topic" 0
     , BA.batchRecords =
         V.fromList
-          [ RB.Record 0 (fromIntegral i) (Just "k") payload100 []
+          [ RB.Record 0 (fromIntegral i) (Just "k") (Just payload100) []
           | i <- [0 .. n - 1]
           ]
     , BA.batchSizeBytes = n * 120

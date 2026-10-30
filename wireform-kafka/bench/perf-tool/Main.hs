@@ -149,7 +149,7 @@ runConsume broker topic group n = do
                       ts <- realToFrac <$> Time.getPOSIXTime
                       writeIORef tStartRef ts
                     let !nrs = length rs
-                        !nbs = sum (map (BS.length . (.value)) rs)
+                        !nbs = sum (map (maybe 0 BS.length . (.value)) rs)
                     modifyIORef' countRef (+ nrs)
                     modifyIORef' bytesRef (+ nbs)
                     go

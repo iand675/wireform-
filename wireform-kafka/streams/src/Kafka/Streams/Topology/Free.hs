@@ -406,7 +406,6 @@ module Kafka.Streams.Topology.Free (
   -- * 'KStream' \<-\> 'KTable' conversions
   toTable,
   toStream,
-  groupByKTable,
   repartition,
   repartitionWith,
 
@@ -551,6 +550,7 @@ import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
 import Data.Profunctor (rmap)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void)
@@ -728,10 +728,9 @@ data Prim i o where
     -> !(Produced k v)
     -> Prim (KStream k v) (KStream k v)
   {- | Riffle \xc2\xa74: two-phase-commit sink. Each record is staged
-  into the sink's per-cycle buffer via 'tpsPrepare'; the
-  runtime's 'EOSCoordinator.preCommit2PC' \/ 'commit2PC' /
-  'abort2PC' hooks drive the commit cycle. Wire the sink into
-  the coordinator with 'Kafka.Streams.Sinks.TwoPhase.withTwoPhaseSinks'.
+  into the sink's per-cycle buffer via 'tpsStage'; the runtime's
+  commit cycles prepare / commit / abort it once it is registered
+  ('Kafka.Streams.Sinks.TwoPhase.twoPhaseParticipant').
   -}
   SinkTwoPhase
     :: !(TPS.TwoPhaseSink (Record k v))
@@ -834,7 +833,7 @@ data Prim i o where
 
   ToTableT :: Ord k => !(Materialized k v) -> Prim (KStream k v) (KTable k v)
   ToStream :: Prim (KTable k v) (KStream k v)
-  Repartition :: !Text -> Prim (KStream k v) (KStream k v)
+  Repartition :: !(Maybe Text) -> Prim (KStream k v) (KStream k v)
   RepartitionWith :: !(Rep.Repartitioned k v) -> Prim (KStream k v) (KStream k v)
   -- ------------------------------------------------------------------
   -- Grouping + aggregation
@@ -1231,20 +1230,22 @@ runPrim b = go
     -- Conversions
     go (ToTableT m) = KS.toTable m
     go ToStream = KS.toKStreamFromKTable
-    go (Repartition prefix) = KS.repartition prefix
+    go (Repartition (Just prefix)) = KS.repartition prefix
+    -- auto-inserted: one topic per re-keyed stream, shared by everything downstream of it
+    go (Repartition Nothing) = KS.sharedRepartition Nothing
     go (RepartitionWith cfg) = KS.repartitionWith cfg
     -- Grouping + aggregation
     go (GroupByKey g) = pure . KGS.groupByKey g
     go (GroupBy f g) = KGS.groupByStream f g
     go (Count m) = \g -> do
       h <- KGS.countStream m g
-      pure (handleToKTable m h)
+      pure h
     go (Reduce f m) = \g -> do
       h <- KGS.reduceStream f m g
-      pure (handleToKTable m h)
+      pure h
     go (Aggregate seed step m) = \g -> do
       h <- KGS.aggregateStream seed step m g
-      pure (handleToKTable m h)
+      pure h
 
     -- Windowed aggregation
     go (WindowedByTime ws) = pure . KGS.windowedByTime ws
@@ -1258,23 +1259,23 @@ runPrim b = go
     go (AggregateSessionWindowed seed step merger m) =
       SWKS.aggregateSessionWindowed seed step merger m
     -- KGroupedTable
-    go (GroupTableBy f g) = pure . KGT.groupTableBy f g
+    go (GroupTableBy f g) = KGT.groupTableBy f g
     go (CountKGroupedTable m) = \kgt -> do
       h <- KGT.countKGroupedTable m kgt
-      pure (handleToKTable m h)
+      pure h
     go (ReduceKGroupedTable add sub m) = \kgt -> do
       h <- KGT.reduceKGroupedTable add sub m kgt
-      pure (handleToKTable m h)
+      pure h
     go (AggregateKGroupedTable seed add sub m) = \kgt -> do
       h <- KGT.aggregateKGroupedTable seed add sub m kgt
-      pure (handleToKTable m h)
+      pure h
 
     -- Cogroup
     go (Cogroup step) = pure . (\g -> Cog.cogroup g step)
     go (AddCogrouped step) = \(cs, g) -> pure (Cog.addCogrouped cs g step)
     go (AggregateCogrouped seed m) = \cs -> do
       h <- Cog.aggregateCogrouped seed m cs
-      pure (handleToKTable m h)
+      pure h
 
     -- Joins
     go (StreamTableJoin j jo) =
@@ -1425,53 +1426,18 @@ sourceMultiCompile b ts c = do
         , Topo.sourceExtractor = Topo.AnyTimestampExtractor (consumedExtractor c)
         , Topo.sourceOffsetReset = consumedOffsetReset c
         , Topo.sourcePattern = Nothing
+        , Topo.sourceNullValues = False
         , Topo.sourceWatermarkStrategy = consumedWatermark c
         }
   pure
     ( KS.KStream
         { KS.kstreamBuilder = b
         , KS.kstreamParent = nm
+        , KS.kstreamKeyChanged = False
         , KS.kstreamKeySerde = consumedKeySerde c
         , KS.kstreamValueSerde = consumedValueSerde c
         }
     )
-
-
-{- | Promote an aggregation handle to a real 'KTable'.
-
-The 'CountedTableLocal' handle the existing DSL returns from
-aggregations is a thin wrapper around a 'KTable' — it just
-doesn't carry the serdes. We extract the serdes from the
-supplied 'Materialized'. If they're absent the corresponding
-'KTable' field becomes a /deferred/ 'TopologyFreeError' —
-matching the existing 'KTable' lazy-serde behaviour after
-@mapValues@ etc. Downstream @to@\/@join@ that forces the
-serde will raise the exception at the actual use site.
-
-Unlike a bare 'error', the deferred thunk uses
-'TopologyFreeError' so callers who want to surface friendlier
-diagnostics can catch it (via 'Control.Exception.evaluate' on
-the thunk, or by wrapping the downstream operation in
-'Control.Exception.try').
--}
-handleToKTable
-  :: Materialized k v
-  -> KGS.CountedTableLocal k v
-  -> KTable k v
-handleToKTable m h =
-  KT.KTable
-    { KT.ktableNode = KGS.ctlNode h
-    , KT.ktableStore = KGS.ctlStore h
-    , KT.ktableBuilder = KGS.ctlBuilder h
-    , KT.ktableKeySerde =
-        case Mat.matKeySerde m of
-          Just s -> s
-          Nothing -> Exception.throw (MissingMaterializedSerde KeySide)
-    , KT.ktableValueSerde =
-        case Mat.matValueSerde m of
-          Just s -> s
-          Nothing -> Exception.throw (MissingMaterializedSerde ValueSide)
-    }
 
 
 {- | Whether the missing serde was the key or value side of the
@@ -1598,20 +1564,9 @@ compileWithOptimization cfg t = do
   topo <- buildTopology b
   -- After the AST-level rewrites have collapsed adjacent
   -- operators in the 'Topology' GADT, hand the resulting Kafka
-  -- 'Topo.Topology' graph to the graph-level optimiser. Today
-  -- 'Topo.optimizeTopology' is a no-op placeholder (it returns
-  -- its input unchanged), but as of the KIP-295 implementation
-  -- it now performs:
-  --
-  --   * 'optReuseSourceKTable' — for table-source-style
-  --     processors (one source parent + one owned store), point
-  --     the store's changelog at the source topic.
-  --   * 'optMergeRepartitionTopics' — collapse sibling
-  --     @KSTREAM-REPARTITION-\<prefix\>-…@ processors sharing
-  --     a single parent and prefix into one shared node.
-  --
-  -- Both rewrites are toggleable via 'Topo.OptimizationConfig';
-  -- the default config enables both. Callers that want the
+  -- 'Topo.Topology' graph to the graph-level optimiser
+  -- ('optReuseSourceKTable': a table-source-style processor's store
+  -- uses the source topic as its changelog). Callers that want the
   -- un-optimised graph can substitute @'Topo.optimizeTopology'
   -- 'Topo.noOptimisations'@ here.
   let !topo' = Topo.optimizeTopology Topo.defaultOptimizationConfig topo
@@ -1950,10 +1905,10 @@ sinkWith t p = liftPrim (Sink t p)
 
 
 {- | Riffle \xc2\xa74: terminate the stream into a two-phase-commit sink.
-Every record is staged via 'TPS.tpsStage'; the runtime's
-'Kafka.Streams.Runtime.EOS.EOSCoordinator' drives prepare /
-commit / abort through the 5-step cycle once the sink has
-been wired in via 'TPS.withTwoPhaseSinks'. The same
+Every record is staged via 'TPS.tpsStage'; the runtime's commit
+cycles prepare / commit / abort it once it is registered with
+'Kafka.Streams.Runtime.addCommitParticipant'
+('TPS.twoPhaseParticipant'). The same
 contract works for JDBC \/ Iceberg \/ S3 \/ HTTP adapters
 shipped in separate packages.
 -}
@@ -2599,10 +2554,11 @@ toTable :: Ord k => Materialized k v -> Topology (KStream k v) (KTable k v)
 toTable = liftPrim . ToTableT
 
 
-{- | Convert a 'KTable' back to a 'KStream' carrying every
-changelog event. The output stream emits one record for
-every update (including tombstones) that flowed into the
-table.
+{- | Convert a 'KTable' back to a 'KStream' of its updates: one
+record per row that changed, carrying the new value. Deletes have
+no value and are dropped; to see them as tombstones use
+'Kafka.Streams.KStream.toChangelogStream' (@KStream k (Maybe v)@)
+and 'Kafka.Streams.KStream.toTopicNullable'.
 
 /JVM equivalent:/ @KTable.toStream@.
 
@@ -2636,7 +2592,7 @@ would otherwise pay for the extra topic round-trip with
 no benefit.
 -}
 repartition :: Text -> Topology (KStream k v) (KStream k v)
-repartition = liftPrim . Repartition
+repartition = liftPrim . Repartition . Just
 
 
 {- | 'repartition' with a fully-specified 'Rep.Repartitioned'
@@ -2718,12 +2674,9 @@ Prefer 'groupBy' over @selectKey >>> groupByKey@ —
 the optimiser collapses the latter pair into the former, but
 writing it directly is clearer and skips a node.
 
-Like any key-changing op, 'groupBy' marks the stream as
-needing a repartition for downstream stateful operations.
-Callers usually want a 'repartition' between 'groupBy' and
-the aggregation if the partition layout matters; in the
-in-process test driver this is a no-op, but against a real
-broker it's what guarantees per-key ordering.
+Like any key-changing op, 'groupBy' sends the aggregation through
+a repartition topic (named after the 'Grouped' name when given), so
+every key is aggregated by the one task that owns its partition.
 -}
 groupBy
   :: forall k v k'
@@ -3904,6 +3857,7 @@ transformStream prefix stores sup ks' vs' =
       KS.KStream
         { KS.kstreamBuilder = b
         , KS.kstreamParent = nm
+        , KS.kstreamKeyChanged = True
         , KS.kstreamKeySerde = ks'
         , KS.kstreamValueSerde = vs'
         }
@@ -3983,7 +3937,7 @@ downstream sinks have them available. /JVM equivalent:/
 -}
 streamFromWindowed
   :: forall k v
-   . (Ord k, Eq v, HasSerde k, HasSerde v)
+   . (Ord k, HasSerde k, HasSerde v)
   => Topology (TWKS.WindowedTableHandle k v) (KStream (WindowedKey k) v)
 streamFromWindowed =
   liftIO_ "streamFromWindowed" $ \_b h ->
@@ -3997,15 +3951,15 @@ streamFromWindowed =
     Suppress.streamFromWindowedHandle h (serde @k) (serde @v)
 
 
-{- | Bridge a 'SWKS.SessionWindowedTableHandle' into a
-@'KStream' k v@ pinned at the session aggregator's emit node.
-The aggregator forwards plain-keyed records (inner @k@, not
-'SWKS.SessionKey'), so the downstream stream is keyed by @k@.
+{- | Bridge a 'SWKS.SessionWindowedTableHandle' into the stream of its
+updates, keyed by session: each session's aggregate, and 'Nothing' for
+a session merged into a larger one (see
+'Suppress.streamFromSessionWindowedHandle').
 -}
 streamFromSessionWindowed
   :: forall k v
-   . (Ord k, HasSerde k, HasSerde v)
-  => Topology (SWKS.SessionWindowedTableHandle k v) (KStream k v)
+   . (HasSerde k, HasSerde v)
+  => Topology (SWKS.SessionWindowedTableHandle k v) (KStream (Store.SessionKey k) (Maybe v))
 streamFromSessionWindowed =
   liftIO_ "streamFromSessionWindowed" $ \_b h ->
     Suppress.streamFromSessionWindowedHandle h (serde @k) (serde @v)
@@ -4031,23 +3985,6 @@ suppressWindowedShed
 suppressWindowedShed grace winMs shelf =
   liftIO_ "suppressWindowedShed" $ \_b s ->
     Suppress.suppressWindowedShed grace winMs shelf s
-
-
-----------------------------------------------------------------------
--- KTable.groupBy (Java) lowered onto KStream
-----------------------------------------------------------------------
-
-{- | Java's @KTable.groupBy(KeyValueMapper)@ lowered: convert the
-table to a stream, then re-key. Useful when you want to
-re-aggregate a 'KTable' under a derived key without taking the
-subtractor-aware 'groupTableBy' / 'KGroupedTable' path.
--}
-groupByKTable
-  :: (Ord k, Ord k', HasSerde k', HasSerde v)
-  => (k -> v -> k')
-  -> Topology (KTable k v) (KStream k' v)
-groupByKTable keyMap =
-  liftIO_ "groupByKTable" $ \_b kt -> KS.groupByKTable keyMap kt
 
 
 ----------------------------------------------------------------------
@@ -4473,7 +4410,7 @@ labelPrim p0 = case p0 of
   Branch ps -> "Branch(" <> T.pack (show (length ps)) <> ")"
   ToTableT _ -> "ToTable"
   ToStream -> "ToStream"
-  Repartition pfx -> "Repartition(" <> pfx <> ")"
+  Repartition pfx -> "Repartition(" <> fromMaybe "auto" pfx <> ")"
   RepartitionWith _ -> "RepartitionWith"
   GroupByKey _ -> "GroupByKey"
   GroupBy _ _ -> "GroupBy"
@@ -4687,13 +4624,10 @@ Java's Kafka Streams ships two formal optimisations, both at the
     instead of creating a separate internal one. See
     'Kafka.Streams.Topology.optReuseSourceKTable' /
     'Kafka.Streams.State.Store.loggingSourceTopic'.
-  * @MERGE_REPARTITION_TOPICS@ — sibling
-    @KSTREAM-REPARTITION-\<prefix\>-…@ processors that share
-    the same single parent /and/ the same repartition prefix
-    are merged into one. Two downstream stateful ops that both
-    called 'repartition' on the same upstream therefore share
-    one physical repartition node instead of duplicating the
-    shuffle. See 'Kafka.Streams.Topology.optMergeRepartitionTopics'.
+  * @MERGE_REPARTITION_TOPICS@ needs no pass: the groupings and joins
+    of a re-keyed stream (and auto-inserted repartitions) share one
+    repartition topic by construction
+    ('Kafka.Streams.StreamsBuilder.sharedRepartitionNode').
 
 The chained AST-level rewrites this module ships are /additional/
 to those: they fuse adjacent operators (saving processor nodes /
@@ -4816,10 +4750,9 @@ data OptimizeConfig = OptimizeConfig
     using do-notation should insert 'repartition'
     explicitly.
 
-  The inserted prefix is @\"auto-rep\"@; downstream graph-level
-  merging ('Kafka.Streams.Topology.optMergeRepartitionTopics')
-  collapses sibling inserts so two stateful ops downstream
-  of the same key-change share one physical repartition.
+  An inserted repartition is named after the stream it re-keys and
+  shared ('Kafka.Streams.KStream.sharedRepartition'), so two stateful
+  ops downstream of the same key change read one topic.
   -}
   , optCollapseValues :: !Bool
   {- ^ @'Values' '.' 'Values' = 'Values'@ — idempotent key
@@ -5114,11 +5047,11 @@ autoInsertRepartitionPass cfg t0
     -- before. Stays dirty=False afterwards (the inserted
     -- Repartition restored partitioning by the current key).
     walkPrim True p@(GroupByKey _) =
-      (False, Compose (liftPrim p) (liftPrim (Repartition "auto-rep")))
+      (False, Compose (liftPrim p) (liftPrim (Repartition Nothing)))
     walkPrim True p@(GroupBy _ _) =
-      (False, Compose (liftPrim p) (liftPrim (Repartition "auto-rep")))
+      (False, Compose (liftPrim p) (liftPrim (Repartition Nothing)))
     walkPrim True p@(ToTableT _) =
-      (False, Compose (liftPrim p) (liftPrim (Repartition "auto-rep")))
+      (False, Compose (liftPrim p) (liftPrim (Repartition Nothing)))
     walkPrim d p = (d, liftPrim p)
 
     -- Insertion helpers operating on the immediate-Fanout tuple
@@ -5134,7 +5067,7 @@ autoInsertRepartitionPass cfg t0
       -> Topology a (KStream k vL, KTable k vT)
     insertOnLeftST (Fanout l r)
       | endsKeyDirty l =
-          Fanout (Compose (liftPrim (Repartition "auto-rep")) l) r
+          Fanout (Compose (liftPrim (Repartition Nothing)) l) r
     insertOnLeftST t = t
 
     insertOnBothSS
@@ -5144,8 +5077,8 @@ autoInsertRepartitionPass cfg t0
     insertOnBothSS (Fanout l r)
       | dl || dr =
           Fanout
-            (if dl then Compose (liftPrim (Repartition "auto-rep")) l else l)
-            (if dr then Compose (liftPrim (Repartition "auto-rep")) r else r)
+            (if dl then Compose (liftPrim (Repartition Nothing)) l else l)
+            (if dr then Compose (liftPrim (Repartition Nothing)) r else r)
       where
         dl = endsKeyDirty l
         dr = endsKeyDirty r

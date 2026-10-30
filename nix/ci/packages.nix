@@ -12,25 +12,15 @@
 let
   knownNames = builtins.attrNames metadata;
 
-  # The full released GHC line the flake exposes (`<pkg>-<ghc>` outputs).
-  # Keep in sync with `ghcMatrix` in flake.nix. (GHC 9.4 is excluded: the
-  # core parser needs the PromptTag# primop, which is GHC 9.6+.)
-  allGhcVersions = [ "ghc96" "ghc98" "ghc910" "ghc912" "ghc914" ];
+  # The supported GHC line the flake exposes (`<pkg>-<ghc>` outputs):
+  # 9.10 and newer. Keep in sync with `ghcMatrix` in flake.nix.
+  allGhcVersions = [ "ghc910" "ghc912" "ghc914" ];
 
   # Per-package GHC support overrides. A package absent from this map
   # builds across the full matrix. Entries here narrow the matrix for
   # packages with a known upstream incompatibility on some compiler so
-  # CI does not emit jobs that cannot pass.
-  #
-  #   * text >= 2.1 first ships with GHC 9.8, so packages pinned to it
-  #     cannot build on 9.4 / 9.6.
-  #   * the proto-lens / ghc-source-gen toolchain (pulled in by the gRPC
-  #     stack) does not compile on GHC 9.10+ in the pinned nixpkgs.
-  ghcOverrides = {
-    wireform-html = [ "ghc98" "ghc910" "ghc912" "ghc914" ];
-    grpc-spec     = [ "ghc96" "ghc98" ];
-    wireform-grpc = [ "ghc96" "ghc98" ];
-  };
+  # CI does not emit jobs that cannot pass. (None at the moment.)
+  ghcOverrides = { };
 
   # Word-boundary match: "wireform-core" must NOT match inside
   # "wireform-core-test" (the trailing hyphen is [a-zA-Z0-9-]).

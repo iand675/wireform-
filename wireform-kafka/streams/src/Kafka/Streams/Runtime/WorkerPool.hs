@@ -38,7 +38,9 @@ module Kafka.Streams.Runtime.WorkerPool (
   poolWorkerCount,
   submitRecord,
   submitRecordHashed,
+  submitRecordHashedWith,
   submitRecordKeyGrouped,
+  setPoolPartitionCountLookup,
   waitForQuiescence,
   commitAllWorkers,
   closeWorkerPool,
@@ -53,8 +55,6 @@ module Kafka.Streams.Runtime.WorkerPool (
 
   -- * Per-worker state
   workerProcessedCount,
-  workerEngine,
-  workerCollector,
 
   -- * Key-group dispatch state (Riffle \xc2\xa72)
   poolKeyGroupAssignment,
@@ -81,6 +81,7 @@ import Data.IORef (
   atomicModifyIORef',
   newIORef,
   readIORef,
+  writeIORef,
  )
 import Data.Int (Int32, Int64)
 import Data.List qualified as Data.List
@@ -93,7 +94,8 @@ import Kafka.Streams.Internal.Engine (
   buildEngine,
   closeEngine,
   commitEngine,
-  feedSource,
+  feedSourceH,
+  setPartitionCountLookup,
  )
 import Kafka.Streams.Internal.RecordCollector (
   RecordCollector,
@@ -110,7 +112,7 @@ import Kafka.Streams.Runtime.KeyGroup (
 import Kafka.Streams.Runtime.KeyGroup qualified as KG
 import Kafka.Streams.Time (Timestamp)
 import Kafka.Streams.Topology qualified as Topo
-import Kafka.Streams.Types (TopicName)
+import Kafka.Streams.Types (Headers, TopicName, emptyHeaders)
 import System.IO.Unsafe (unsafePerformIO)
 
 
@@ -150,6 +152,7 @@ data WorkRecord = WorkRecord
   , wrTimestamp :: !Timestamp
   , wrPartition :: !Int
   , wrOffset :: !Int64
+  , wrHeaders :: !Headers
   }
 
 
@@ -171,6 +174,10 @@ data WorkerPool = WorkerPool
   -}
   , poolRouting :: !(TVar (HashMap.HashMap (TopicName, Int32) Int))
   , poolNextOff :: !(IORef Int64)
+  , poolPartitionCount :: !(IORef (Maybe (Text -> IO (Either String Int))))
+  {- ^ Sink partition-count lookup ('setPoolPartitionCountLookup'),
+  kept so workers added later ('addPoolWorker') get it too.
+  -}
   , poolTopo :: !Topo.TopologyValid
   , poolAppId :: !Text
   , poolNextWorkerId :: !(TVar Int)
@@ -236,6 +243,7 @@ newWorkerPool
   -> IO WorkerPool
 newWorkerPool topo appId perWorkerOwnership = do
   off <- newIORef 0
+  partCount <- newIORef Nothing
   routing <- newTVarIO (buildRouting perWorkerOwnership)
   -- Build workers into a 'Vector' directly so we don't pay the
   -- 'fromList' cost on every iteration site. 'V.imapM' gives us
@@ -258,6 +266,7 @@ newWorkerPool topo appId perWorkerOwnership = do
       , poolByIdxTV = byIdxTV
       , poolRouting = routing
       , poolNextOff = off
+      , poolPartitionCount = partCount
       , poolTopo = topo
       , poolAppId = appId
       , poolNextWorkerId = nextIdTV
@@ -408,7 +417,7 @@ submitRecord pool topic key val ts part = do
           atomically $ do
             writeTQueue
               (workerInbox w)
-              (WorkRecord topic key val ts part off)
+              (WorkRecord topic key val ts part off emptyHeaders)
             modifyTVar' (workerSubmitted w) (+ 1)
 
 
@@ -434,6 +443,24 @@ submitRecordHashed
   -> IO ()
 submitRecordHashed pool topic key val ts part = do
   off <- atomicModifyIORef' (poolNextOff pool) (\n -> (n + 1, n))
+  submitRecordHashedWith pool topic key val emptyHeaders ts part off
+
+
+{- | 'submitRecordHashed' for a record polled off the broker: the
+record's own headers and offset reach the topology (the plain
+variant hands it empty headers and a pool-synthesised offset).
+-}
+submitRecordHashedWith
+  :: WorkerPool
+  -> TopicName
+  -> Maybe ByteString
+  -> ByteString
+  -> Headers
+  -> Timestamp
+  -> Int
+  -> Int64
+  -> IO ()
+submitRecordHashedWith pool topic key val hdrs ts part off = do
   -- Read the worker list + the by-id map in the SAME STM
   -- transaction as the routing so we don't race against
   -- 'addPoolWorker' / 'removePoolWorker' between picking an
@@ -473,7 +500,7 @@ submitRecordHashed pool topic key val ts part = do
           Just w -> do
             writeTQueue
               (workerInbox w)
-              (WorkRecord topic key val ts part off)
+              (WorkRecord topic key val ts part off hdrs)
             modifyTVar' (workerSubmitted w) (+ 1)
             pure (Just w)
   _ <- pure mw
@@ -536,7 +563,7 @@ submitRecordKeyGrouped pool topic mKey val ts part =
               Just w -> do
                 writeTQueue
                   (workerInbox w)
-                  (WorkRecord topic mKey val ts part off)
+                  (WorkRecord topic mKey val ts part off emptyHeaders)
                 modifyTVar' (workerSubmitted w) (+ 1)
                 pure (Just w)
       _ <- pure mw
@@ -637,6 +664,17 @@ It's safe to call concurrently with 'submitRecordHashed' —
 the routing read + worker lookup happen in one STM
 transaction (see 'submitRecordHashed').
 -}
+{- | Install the sink partition-count lookup on every worker engine,
+present and future (see 'setPartitionCountLookup').
+-}
+setPoolPartitionCountLookup
+  :: WorkerPool -> (Text -> IO (Either String Int)) -> IO ()
+setPoolPartitionCountLookup pool f = do
+  writeIORef (poolPartitionCount pool) (Just f)
+  ws <- poolWorkersSnapshot pool
+  V.forM_ ws $ \w -> setPartitionCountLookup (workerEngine w) f
+
+
 addPoolWorker :: WorkerPool -> IO Int
 addPoolWorker pool = do
   -- Reserve a fresh id atomically so two concurrent calls
@@ -646,6 +684,8 @@ addPoolWorker pool = do
     writeTVar (poolNextWorkerId pool) (n + 1)
     pure n
   w <- mkWorker (poolTopo pool) (poolAppId pool) idx HashSet.empty
+  readIORef (poolPartitionCount pool)
+    >>= mapM_ (setPartitionCountLookup (workerEngine w))
   atomically $ do
     modifyTVar' (poolWorkersTV pool) (`V.snoc` w)
     modifyTVar' (poolByIdxTV pool) (HashMap.insert idx w)
@@ -746,11 +786,12 @@ workerLoop w = loop
                   || HashSet.member tp (workerOwned w)
           if ok
             then do
-              feedSource
+              feedSourceH
                 (workerEngine w)
                 (wrTopic r)
                 (wrKey r)
-                (wrValue r)
+                (Just (wrValue r))
+                (wrHeaders r)
                 (wrTimestamp r)
                 (wrPartition r)
                 (wrOffset r)

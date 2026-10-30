@@ -59,48 +59,22 @@ timestamped_window_store_keeps_record_ts =
 
 foreach_async_does_not_block :: Spec
 foreach_async_does_not_block =
-  it "foreachStreamAsync: callback runs without blocking caller" $ do
-    -- Use the topology test driver to push a couple of records
-    -- through a topology that calls foreachStreamAsync. The
-    -- callback signals an MVar — we just verify the MVar
-    -- eventually fires; the JVM contract is that the foreach
-    -- doesn't block the worker, not any particular ordering.
+  it "foreachStreamAsync: callbacks run concurrently; a commit waits for them" $ do
+    -- the callbacks block until released: processing doesn't wait for
+    -- them, the commit does
     seenRef <- newIORef (0 :: Int)
+    gate <- newEmptyMVar
     b <- newStreamsBuilder
-    s <-
-      streamFromTopic
-        b
-        (topicName "in")
-        (consumed textSerde textSerde)
-    foreachStreamAsync (\_ -> modifyIORef' seenRef (+ 1)) s
+    s <- streamFromTopic b (topicName "in") (consumed textSerde textSerde)
+    foreachStreamAsync (\_ -> readMVar gate >> atomicModifyIORef' seenRef (\n -> (n + 1, ()))) s
     topo <- buildTopology b
     driver <- newDriver topo "fea"
-    pipeInput
-      driver
-      (topicName "in")
-      (Just "k1")
-      "v"
-      (Timestamp 0)
-      0
-    pipeInput
-      driver
-      (topicName "in")
-      (Just "k2")
-      "v"
-      (Timestamp 1)
-      0
-    -- Yield a few times so the async callbacks have a chance.
-    let waitN 0 = pure ()
-        waitN n = do
-          v <- readIORef seenRef
-          if v >= 2
-            then pure ()
-            else do
-              Control.Concurrent.yield
-              waitN (n - 1 :: Int)
-    waitN 10_000
-    n <- readIORef seenRef
-    (if (n >= 2) then pure () else expectationFailure ("expected >=2 callback fires; got " <> show n))
+    pipeInput driver (topicName "in") (Just "k1") "v" (Timestamp 0) 0
+    pipeInput driver (topicName "in") (Just "k2") "v" (Timestamp 1) 0
+    readIORef seenRef `shouldReturn` 0
+    putMVar gate ()
+    commitDriver driver
+    readIORef seenRef `shouldReturn` 2
     closeDriver driver
 
 

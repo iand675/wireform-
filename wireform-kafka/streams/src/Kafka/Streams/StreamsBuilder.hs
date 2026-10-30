@@ -25,9 +25,12 @@ module Kafka.Streams.StreamsBuilder (
   readTopology,
   withTopology_,
   addReadOnlyStateStore,
+  sharedRepartitionNode,
 ) where
 
 import Data.IORef
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Kafka.Streams.Serde qualified
@@ -44,6 +47,10 @@ data StreamsBuilder = StreamsBuilder
   { sbTopology :: !(IORef Topo.Topology)
   , sbNodeCount :: !(IORef Int)
   , sbStoreCount :: !(IORef Int)
+  , sbRepartitions :: !(IORef (Map (Topo.NodeName, Maybe Text) Topo.NodeName))
+  {- ^ The repartition source made for each (key-changed node, name):
+  every grouping or join of that node reads through the same topic
+  -}
   }
 
 
@@ -53,7 +60,30 @@ newStreamsBuilder = do
   t <- newIORef Topo.emptyTopology
   n <- newIORef 0
   s <- newIORef 0
-  pure StreamsBuilder {sbTopology = t, sbNodeCount = n, sbStoreCount = s}
+  r <- newIORef Map.empty
+  pure StreamsBuilder {sbTopology = t, sbNodeCount = n, sbStoreCount = s, sbRepartitions = r}
+
+
+{- | The repartition source node for @parent@ under @name@: made by
+@make@ the first time, the same node every time after (the JVM's
+KIP-295 repartition merging, always on: two aggregations of one
+re-keyed stream read one topic, once). A name already used for
+another node's repartition is a topology error, as two writers of one
+topic would deliver every record to both readers.
+-}
+sharedRepartitionNode :: StreamsBuilder -> Topo.NodeName -> Maybe Text -> IO Topo.NodeName -> IO (Either Text Topo.NodeName)
+sharedRepartitionNode b parent name make = do
+  known <- readIORef (sbRepartitions b)
+  case Map.lookup (parent, name) known of
+    Just src -> pure (Right src)
+    Nothing
+      | Just n <- name
+      , any (\(p, m) -> m == Just n && p /= parent) (Map.keys known) ->
+          pure (Left ("repartition name " <> n <> " is used for two different streams"))
+      | otherwise -> do
+          src <- make
+          modifyIORef' (sbRepartitions b) (Map.insert (parent, name) src)
+          pure (Right src)
 
 
 -- | Snapshot the builder into a 'Topology'.

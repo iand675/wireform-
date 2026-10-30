@@ -35,7 +35,7 @@ threads =
 running_within_budget_is_healthy :: Spec
 running_within_budget_is_healthy =
   it "running with lag within budget is healthy + ready" $ do
-    let lag = lagReport [LagInfo (TaskId 0 0) 990 1000] -- behind 10
+    let lag = lagReport [LagInfo (TaskId 0 0) 990 1000 False] -- behind 10
         rep = healthReportFrom defaultHealthConfig StreamsRunning threads (Just lag)
     healthStatus rep `shouldBe` Healthy
     healthReady rep `shouldBe` True
@@ -44,7 +44,7 @@ running_within_budget_is_healthy =
 running_over_budget_is_degraded :: Spec
 running_over_budget_is_degraded =
   it "running with lag over budget is degraded + not ready" $ do
-    let lag = lagReport [LagInfo (TaskId 0 0) 0 1000000] -- behind 1e6
+    let lag = lagReport [LagInfo (TaskId 0 0) 0 1000000 False] -- behind 1e6
         rep = healthReportFrom defaultHealthConfig StreamsRunning threads (Just lag)
     healthStatus rep `shouldBe` Degraded
     healthReady rep `shouldBe` False

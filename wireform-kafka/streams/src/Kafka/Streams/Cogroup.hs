@@ -37,13 +37,20 @@ module Kafka.Streams.Cogroup (
 import Data.IORef
 import Data.Int (Int64)
 import Kafka.Streams.KGroupedStream (
-  CountedTableLocal (..),
   KGroupedStream,
+  aggregateSerde,
   kgsBuilder,
-  kgsParent,
+  kgsKey,
+  groupedInput,
  )
+import Kafka.Streams.KStream (mkPassThrough)
+import Kafka.Streams.KTable (KTable (..), bindTableCache, writeRow)
+import Kafka.Streams.Serde (Serde)
 import Kafka.Streams.Materialized (
   Materialized (..),
+  materializedKV,
+  materializedS,
+  materializedW,
  )
 import Kafka.Streams.Processor (
   Processor (..),
@@ -61,6 +68,7 @@ import Kafka.Streams.State.Store (
   StoreBuilderW,
   StoreName,
   WindowStore (..),
+  WindowedKey (..),
  )
 import Kafka.Streams.State.Window.InMemory (
   inMemoryWindowStoreBuilder,
@@ -99,6 +107,13 @@ data CogroupedStream k a = CogroupedStream
   }
 
 
+-- | The grouping key's serde (every source shares the key type).
+cogroupKeySerde :: CogroupedStream k a -> Serde k
+cogroupKeySerde cgs = case cgs.sources of
+  CogroupSource kgs _ : _ -> kgsKey kgs
+  [] -> error "cogroup: no sources"
+
+
 -- | Start a cogroup with one source.
 cogroup
   :: KGroupedStream k v
@@ -135,7 +150,7 @@ aggregateCogrouped
   => IO a -- initialiser
   -> Materialized k a
   -> CogroupedStream k a
-  -> IO (CountedTableLocal k a)
+  -> IO (KTable k a)
 aggregateCogrouped initial m cgs = do
   let b = cgs.builder
   storeNm <-
@@ -144,7 +159,7 @@ aggregateCogrouped initial m cgs = do
       pure
       (matName m)
   let supplier =
-        inMemoryKeyValueStoreBuilder storeNm
+        materializedKV m storeNm (cogroupKeySerde cgs) (aggregateSerde m)
           :: StoreBuilderKV k a
   -- For each source we register the per-side processor immediately,
   -- and only export the side's NODE NAME outside the existential.
@@ -157,15 +172,24 @@ aggregateCogrouped initial m cgs = do
           pure nm
       )
       cgs.sources
+  -- every side's updates are the table's: merge them
+  mergeNm <- freshNodeName b "KSTREAM-COGROUP-MERGE"
   withTopology_ b $ \t ->
-    Topo.addStateStoreKV supplier ownerNms t
+    Topo.addProcessorWith
+      Topo.ProcessorSpec
+        { Topo.processorSpecName = mergeNm
+        , Topo.processorSpecParents = ownerNms
+        , Topo.processorSpecSupplier = Topo.AnyProcessor (mkPassThrough @k @a "KSTREAM-COGROUP-MERGE")
+        , Topo.processorSpecStores = []
+        }
+      (Topo.addStateStoreKV supplier ownerNms t)
   pure
-    CountedTableLocal
-      { ctlNode = case ownerNms of
-          [] -> error "aggregateCogrouped: no sources"
-          (nm : _) -> nm
-      , ctlStore = storeNm
-      , ctlBuilder = b
+    KTable
+      { ktableNode = mergeNm
+      , ktableStore = storeNm
+      , ktableBuilder = b
+      , ktableKeySerde = cogroupKeySerde cgs
+      , ktableValueSerde = aggregateSerde m
       }
 
 
@@ -178,12 +202,13 @@ addCogrupSideToTopology
   -> IO a
   -> CogroupSource k a
   -> IO ()
-addCogrupSideToTopology b nm storeNm initial (CogroupSource kgs agg) =
+addCogrupSideToTopology b nm storeNm initial (CogroupSource kgs agg) = do
+  input <- groupedInput kgs
   withTopology_ b $
     Topo.addProcessorWith
       Topo.ProcessorSpec
         { Topo.processorSpecName = nm
-        , Topo.processorSpecParents = [kgsParent kgs]
+        , Topo.processorSpecParents = [input]
         , Topo.processorSpecSupplier =
             Topo.AnyProcessor (cogroupSideProc @k storeNm initial agg)
         , Topo.processorSpecStores = [storeNm]
@@ -209,8 +234,11 @@ cogroupSideProc sn initial agg = do
       , procInit = \ctx -> do
           writeIORef ctxRef (Just ctx)
           getStateStore ctx sn >>= \case
-            Just (AnyKeyValueStore kvs) ->
-              writeIORef storeRef (Just (Unsafe.unsafeCoerce kvs))
+            Just (AnyKeyValueStore kvs0) -> do
+              let kvs = Unsafe.unsafeCoerce kvs0 :: KeyValueStore k a
+              -- every side feeds the merge node, so any can forward the flushes
+              bindTableCache ctx kvs
+              writeIORef storeRef (Just kvs)
             _ -> error $ "cogroup: store missing: " <> show sn
       , procClose = pure ()
       , procProcess = \r -> case recordKey r of
@@ -223,8 +251,7 @@ cogroupSideProc sn initial agg = do
                 mPrev <- kvsGet kvs k
                 !cur <- maybe initial pure mPrev
                 let !next = agg k (recordValue r) cur
-                kvsPut kvs k next
-                forwardRecord ctx r {recordValue = next}
+                writeRow ctx kvs r k (Just next) mPrev
               _ -> pure ()
       }
 
@@ -290,24 +317,30 @@ aggregateWindowedCogrouped initial m twcg = do
       pure
       (matName m)
   let supplier =
-        inMemoryWindowStoreBuilder storeNm sz ret
+        materializedW m storeNm sz ret (cogroupKeySerde cgs) (error "aggregate: pass Materialized with a value serde for the aggregate type")
           :: StoreBuilderW k a
   ownerNms <-
     traverse
       ( \src -> do
           nm <- freshNodeName b "KSTREAM-COGROUP-WIN-SIDE"
-          addCogroupWindowedSide b nm storeNm sz initial src
+          addCogroupWindowedSide b nm storeNm ws initial src
           pure nm
       )
       cgs.sources
+  -- every side's window updates are the table's: merge them
+  mergeNm <- freshNodeName b "KSTREAM-COGROUP-WIN-MERGE"
   withTopology_ b $ \t ->
-    Topo.addStateStoreW supplier ownerNms t
+    Topo.addProcessorWith
+      Topo.ProcessorSpec
+        { Topo.processorSpecName = mergeNm
+        , Topo.processorSpecParents = ownerNms
+        , Topo.processorSpecSupplier = Topo.AnyProcessor (mkPassThrough @(WindowedKey k) @a "KSTREAM-COGROUP-WIN-MERGE")
+        , Topo.processorSpecStores = []
+        }
+      (Topo.addStateStoreW supplier ownerNms t)
   pure
     Kafka.Streams.TimeWindowedKStream.WindowedTableHandle
-      { Kafka.Streams.TimeWindowedKStream.wthNode =
-          case ownerNms of
-            [] -> error "aggregateWindowedCogrouped: no sources"
-            (nm : _) -> nm
+      { Kafka.Streams.TimeWindowedKStream.wthNode = mergeNm
       , Kafka.Streams.TimeWindowedKStream.wthStore = storeNm
       , Kafka.Streams.TimeWindowedKStream.wthBuilder = b
       , Kafka.Streams.TimeWindowedKStream.wthWindows = ws
@@ -318,68 +351,27 @@ aggregateWindowedCogrouped initial m twcg = do
 
 addCogroupWindowedSide
   :: forall k a
-   . Ord k
-  => StreamsBuilder
+   . StreamsBuilder
   -> Topo.NodeName -- side processor name
   -> StoreName
-  -> Int64 -- window size (ms)
+  -> Kafka.Streams.Window.Windows
   -> IO a
   -> CogroupSource k a
   -> IO ()
-addCogroupWindowedSide b nm storeNm sz initial (CogroupSource kgs agg) =
+addCogroupWindowedSide b nm storeNm ws initial (CogroupSource kgs agg) = do
+  input <- groupedInput kgs
   withTopology_ b $
     Topo.addProcessorWith
       Topo.ProcessorSpec
         { Topo.processorSpecName = nm
-        , Topo.processorSpecParents = [kgsParent kgs]
+        , Topo.processorSpecParents = [input]
         , Topo.processorSpecSupplier =
             Topo.AnyProcessor
-              (cogroupWindowedSideProc @k storeNm sz initial agg)
+              -- the side's records, folded into every open window they fall in
+              ( Kafka.Streams.TimeWindowedKStream.windowedUpdateProc
+                  storeNm
+                  ws
+                  (\k v prev -> agg k v <$> maybe initial pure prev)
+              )
         , Topo.processorSpecStores = [storeNm]
         }
-
-
-{- | The processor body for a single side of a windowed cogroup.
-For each incoming record, computes the window the record's
-timestamp falls into, fetches the per-window accumulator,
-applies the side's aggregator, writes back.
--}
-cogroupWindowedSideProc
-  :: forall k v a
-   . Ord k
-  => StoreName
-  -> Int64 -- window size (ms)
-  -> IO a
-  -> (k -> v -> a -> a)
-  -> IO (Processor k v)
-cogroupWindowedSideProc sn sz initial agg = do
-  ctxRef <- newIORef Nothing
-  storeRef <- newIORef (Nothing :: Maybe (WindowStore k a))
-  pure
-    Processor
-      { procName = processorName "KSTREAM-COGROUP-WIN-SIDE"
-      , procInit = \ctx -> do
-          writeIORef ctxRef (Just ctx)
-          getStateStore ctx sn >>= \case
-            Just (AnyWindowStore wsv) ->
-              writeIORef storeRef (Just (Unsafe.unsafeCoerce wsv))
-            _ -> error $ "cogroup-windowed: store missing: " <> show sn
-      , procClose = pure ()
-      , procProcess = \r -> case recordKey r of
-          Nothing -> pure ()
-          Just k -> do
-            mctx <- readIORef ctxRef
-            mst <- readIORef storeRef
-            case (mctx, mst) of
-              (Just ctx, Just wsv) -> do
-                -- Bucket the record's timestamp into its window
-                -- start (tumbling-style: floor to window-size).
-                let Timestamp tsMs = recordTimestamp r
-                    !windowStart = Timestamp ((tsMs `div` sz) * sz)
-                mPrev <- wsFetch wsv k windowStart
-                !cur <- maybe initial pure mPrev
-                let !next = agg k (recordValue r) cur
-                wsPut wsv k next windowStart
-                forwardRecord ctx r {recordValue = next}
-              _ -> pure ()
-      }

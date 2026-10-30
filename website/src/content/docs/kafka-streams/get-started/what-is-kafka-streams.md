@@ -48,7 +48,7 @@ This example reads login events, filters to suspicious IPs, groups by user, coun
 
 **Stateless** operators see each record in isolation. A `filter` or `map` doesn't need to remember anything between records.
 
-**Stateful** operators need memory. A `count` needs to remember previous counts. A windowed average needs to remember recent values. Kafka Streams handles state recovery by writing state changes to a **changelog topic** (a hidden Kafka topic), replaying the changelog on restart to rebuild state, and maintaining **standby replicas** on other instances for fast failover.
+**Stateful** operators need memory. A `count` needs to remember previous counts. A windowed average needs to remember recent values. Kafka Streams handles state recovery by writing state changes to a **changelog topic** (a hidden Kafka topic), and replaying the changelog to rebuild state wherever the task runs next.
 
 ## How Kafka Streams differs from other approaches
 
@@ -89,7 +89,6 @@ The library uses (1) for state recovery (state changes go to a changelog topic),
 | **Joins** | Combine streams and tables: stream-stream, stream-table, table-table |
 | **Windows** | Time-based grouping: tumbling (fixed intervals), hopping (overlapping), session (activity gaps) |
 | **Exactly-once** | Atomic processing: input, output, and state update together |
-| **Standby tasks** | Hot replicas for fast failover |
 | **Interactive queries** | Read your state stores directly from your service |
 
 ## Extended features
@@ -97,7 +96,7 @@ The library uses (1) for state recovery (state changes go to a changelog topic),
 For advanced use cases, optional extensions are available:
 
 - **Async I/O**: Call external APIs without blocking processing
-- **Snapshot stores**: Fast recovery from large state
+- **Snapshot stores**: State checkpointed to an object store (a separate library; the runtime still restores from changelogs)
 - **Two-phase commit sinks**: Exactly-once writes to databases, S3, etc.
 
 Start with the base library; add extensions when you need them.

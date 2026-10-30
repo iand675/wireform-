@@ -31,7 +31,7 @@ recovery today.
 
 The publish + restore loop is driven by
 'Kafka.Streams.Runtime.Snapshot' (a separate module that
-owns the lifecycle thread + EOSCoordinator integration).
+owns the lifecycle thread).
 This module is the data-plane piece.
 -}
 module Kafka.Streams.State.KeyValue.Snapshot (

@@ -107,7 +107,7 @@ repartition_passes_records_through =
     pipeInput driver (topicName "in") Nothing (bytes "c") (t 0) 0
 
     out <- readOutput driver (topicName "out")
-    map (unbytes . crValue) out `shouldBe` ["a", "b", "c"]
+    map (unbytes . crValueBytes) out `shouldBe` ["a", "b", "c"]
     closeDriver driver
 
 
@@ -141,8 +141,8 @@ split_stream_routes_by_predicate =
 
     outA <- readOutput driver (topicName "out-a")
     outB <- readOutput driver (topicName "out-b")
-    map (unbytes . crValue) outA `shouldBe` ["alpha", "able"]
-    map (unbytes . crValue) outB `shouldBe` ["bravo", "banana"]
+    map (unbytes . crValueBytes) outA `shouldBe` ["alpha", "able"]
+    map (unbytes . crValueBytes) outB `shouldBe` ["bravo", "banana"]
     closeDriver driver
 
 
@@ -175,8 +175,8 @@ split_stream_default_branch_catches_residue =
 
     outA <- readOutput driver (topicName "out-a")
     outR <- readOutput driver (topicName "out-rest")
-    map (unbytes . crValue) outA `shouldBe` ["alpha", "able"]
-    map (unbytes . crValue) outR `shouldBe` ["bravo", "charlie"]
+    map (unbytes . crValueBytes) outA `shouldBe` ["alpha", "able"]
+    map (unbytes . crValueBytes) outR `shouldBe` ["bravo", "charlie"]
     closeDriver driver
 
 
@@ -206,7 +206,7 @@ split_stream_no_default_drops_unmatched =
       ["alpha", "bravo", "able", "charlie"]
 
     out <- readOutput driver (topicName "out-a")
-    map (unbytes . crValue) out `shouldBe` ["alpha", "able"]
+    map (unbytes . crValueBytes) out `shouldBe` ["alpha", "able"]
     closeDriver driver
 
 
@@ -228,7 +228,7 @@ merge_streams_n_combines_three =
     pipeInput driver (topicName "in1") Nothing (bytes "d") (t 0) 0
 
     out <- readOutput driver (topicName "out")
-    map (unbytes . crValue) out `shouldBe` ["a", "b", "c", "d"]
+    map (unbytes . crValueBytes) out `shouldBe` ["a", "b", "c", "d"]
     closeDriver driver
 
 
@@ -251,6 +251,6 @@ to_extracted_routes_per_record =
 
     outA <- readOutput driver (topicName "out-a")
     outO <- readOutput driver (topicName "out-other")
-    map (unbytes . crValue) outA `shouldBe` ["alpha", "ant"]
-    map (unbytes . crValue) outO `shouldBe` ["bravo", "charlie"]
+    map (unbytes . crValueBytes) outA `shouldBe` ["alpha", "ant"]
+    map (unbytes . crValueBytes) outO `shouldBe` ["bravo", "charlie"]
     closeDriver driver

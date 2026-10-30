@@ -143,7 +143,7 @@ mkRecord ix k v =
     { RB.recordTimestampDelta = 0
     , RB.recordOffsetDelta = fromIntegral ix
     , RB.recordKey = k
-    , RB.recordValue = v
+    , RB.recordValue = Just v
     , RB.recordHeaders = []
     }
 
@@ -153,7 +153,8 @@ genRecord = do
   ofs <- Gen.int32 (Range.linear (-1000) 1000)
   ts <- Gen.int64 (Range.linear (-1000) 1000)
   k <- Gen.maybe (Gen.bytes (Range.linear 0 32))
-  v <- Gen.bytes (Range.linear 0 256)
+  -- 'Nothing' exercises null values (tombstones) on the wire.
+  v <- Gen.maybe (Gen.bytes (Range.linear 0 256))
   hs <- Gen.list (Range.linear 0 4) genHeader
   pure
     RB.Record

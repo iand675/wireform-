@@ -1,43 +1,37 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE ExistentialQuantification #-}
-{-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
 {- |
 Module      : Kafka.Streams.KGroupedTable
-Description : Aggregation over a KTable's change-log
+Description : Aggregation over a KTable's changelog
 
 Mirrors @org.apache.kafka.streams.kstream.KGroupedTable<K,V>@.
-Where 'Kafka.Streams.KGroupedStream' aggregates an
-append-only stream, 'KGroupedTable' aggregates a /changelog/:
-every input record represents either an insertion, an update,
-or a delete (tombstone) for the same key, and the aggregator
-must run a /subtractor/ first to remove the previous value's
-contribution before adding the new one. Without the
-subtractor a key's running total would double-count on every
-update.
+Where 'Kafka.Streams.KGroupedStream' aggregates an append-only
+stream, 'KGroupedTable' aggregates a /changelog/: a table row that
+changes moves its contribution, so each change is applied as a
+subtraction of the row's old value (from the group the old value
+belonged to) and an addition of its new one (to its new group).
 
 == Wiring
 
 @
-table        = builder.tableFromTopic ...
-grouped      = table.groupBy(\\k v -> (k', v))
-table'       = grouped.count(materialized)
-             | grouped.reduce(adder, subtractor, materialized)
-             | grouped.aggregate(initializer, adder, subtractor, materialized)
+table   = builder.tableFromTopic ...
+grouped = groupTableBy (\\k v -> (k', v')) g table
+counts  = countKGroupedTable m grouped
+        | reduceKGroupedTable adder subtractor m grouped
+        | aggregateKGroupedTable initializer adder subtractor m grouped
 @
 
-The DSL stays close to the JVM contract: 'reduceKGroupedTable'
-and 'aggregateKGroupedTable' take both an adder and a
-subtractor and apply them in subtractor-then-adder order on
-every input record that's a true update (i.e. the previous
-value for the same key was non-tombstone).
+'groupTableBy' maps a change's old and new row to their groups and
+sends them, as a subtraction and an addition, through a repartition
+topic keyed by group (the JVM's @KTableRepartitionMap@), so every
+group is aggregated by the one task that owns it.
 -}
 module Kafka.Streams.KGroupedTable (
   KGroupedTable (..),
@@ -51,19 +45,21 @@ module Kafka.Streams.KGroupedTable (
 
 import Data.IORef
 import Data.Int (Int64)
-import Kafka.Streams.Grouped (Grouped (..), grouped)
-import Kafka.Streams.KGroupedStream (
-  CountedTableLocal (..),
- )
+import Data.Maybe (fromMaybe)
+import Data.Text qualified as T
+import Kafka.Streams.Consumed (consumed, consumedExtractor)
+import Kafka.Streams.Grouped (Grouped (..))
+import Kafka.Streams.KGroupedStream (aggregateSerde)
 import Kafka.Streams.KTable (
+  Change (..),
   KTable (..),
-  ktableBuilder,
-  ktableKeySerde,
-  ktableNode,
-  ktableValueSerde,
+  bindTableCache,
+  changeSerde,
+  writeRow,
  )
 import Kafka.Streams.Materialized (
   Materialized (..),
+  materializedKV,
  )
 import Kafka.Streams.Processor (
   Processor (..),
@@ -71,10 +67,7 @@ import Kafka.Streams.Processor (
   getStateStore,
   processorName,
  )
-import Kafka.Streams.Serde (Serde)
-import Kafka.Streams.State.KeyValue.InMemory (
-  inMemoryKeyValueStoreBuilder,
- )
+import Kafka.Streams.Serde (Serde, int64Serde)
 import Kafka.Streams.State.Store (
   AnyStateStore (..),
   KeyValueStore (..),
@@ -88,249 +81,139 @@ import Kafka.Streams.StreamsBuilder (
   withTopology_,
  )
 import Kafka.Streams.Topology qualified as Topo
-import Kafka.Streams.Types (Record (..))
+import Kafka.Streams.Types (Record (..), topicName)
 import Unsafe.Coerce qualified as Unsafe
 
 
-{- | A KTable's change-log grouped by a derived key, ready to
-be aggregated with subtractor-aware combinators.
-
-The intermediate carrier stores three things: the upstream
-KTable node to attach to, the typed key/value serdes for the
-aggregation result, and the builder.
+{- | A table's changelog regrouped by a derived key: the source node
+reading the repartition topic, which forwards a 'Change' per group
+(an old row's subtraction, or a new row's addition).
 -}
 data KGroupedTable k v = KGroupedTable
   { parent :: !Topo.NodeName
   , key :: !(Serde k)
   , value :: !(Serde v)
   , builder :: !StreamsBuilder
-  , keyMap :: !(k -> v -> (k, v))
-  {- ^ Re-key function applied per input record. The JVM
-  @KTable.groupBy@ takes a @KeyValueMapper@; we expose
-  the same shape and capture it here so the aggregation
-  processor doesn't need an extra explicit re-key node.
-  -}
   }
 
 
-{- | @KTable.groupBy(KeyValueMapper, Grouped)@ — produces a
-'KGroupedTable' for subtractor-aware aggregation. The
-re-key function returns @(k', v')@; downstream aggregations
-operate on those.
-
-Named 'groupTableBy' (rather than @groupBy@ or
-@groupByKTable@) to keep the namespace clean against the
-existing 'Kafka.Streams.KStream.groupByKTable' which
-performs a different operation (re-key a KTable into a
-KStream).
+{- | @KTable.groupBy(KeyValueMapper, Grouped)@. @f@ maps a row to its
+group key and the value it contributes. The repartition topic is
+@\<name\>-repartition@ ('groupedName', else a fresh node name).
 -}
 groupTableBy
-  :: (Ord k, Ord k')
+  :: forall k v k' v'
+   . (Ord k, Ord k')
   => (k -> v -> (k', v'))
   -> Grouped k' v'
   -> KTable k v
-  -> KGroupedTable k' v'
-groupTableBy f g parentT =
-  KGroupedTable
-    { parent = ktableNode parentT
-    , key = groupedKeySerde g
-    , value = groupedValueSerde g
-    , builder = ktableBuilder parentT
-    , keyMap = Unsafe.unsafeCoerce f
-    -- f's actual type is k -> v -> (k', v'); we re-key
-    -- inside the aggregation processor and let the engine's
-    -- type erasure carry the typed values.
-    }
+  -> IO (KGroupedTable k' v')
+groupTableBy f g t = do
+  let b = ktableBuilder t
+      ks = groupedKeySerde g
+      cs = changeSerde (groupedValueSerde g)
+  selectNm <- freshNodeName b "KTABLE-SELECT"
+  sinkNm <- freshNodeName b "KTABLE-REPARTITION-SINK"
+  sourceNm <- freshNodeName b "KTABLE-REPARTITION-SOURCE"
+  let base = fromMaybe (Topo.unNodeName selectNm) (groupedName g)
+      topic = topicName (base <> "-repartition")
+  withTopology_ b $ \tp ->
+    let !t1 =
+          Topo.addProcessorWith
+            Topo.ProcessorSpec
+              { Topo.processorSpecName = selectNm
+              , Topo.processorSpecParents = [ktableNode t]
+              , Topo.processorSpecSupplier = Topo.AnyProcessor (selectProcessor @k @v @k' @v' f)
+              , Topo.processorSpecStores = []
+              }
+            tp
+        !t2 = Topo.addInternalTopic topic Topo.InternalTopicSpec {Topo.itsPartitions = Nothing} t1
+        !t3 = Topo.addSink sinkNm topic ks cs [selectNm] t2
+        !t4 = Topo.addSource sourceNm [topic] ks cs (consumedExtractor (consumed ks cs)) t3
+    in t4
+  pure
+    KGroupedTable
+      { parent = sourceNm
+      , key = ks
+      , value = groupedValueSerde g
+      , builder = b
+      }
+
+
+{- | Each change becomes a subtraction of the old row from its group,
+then an addition of the new row to its group (two records even when
+the group is the same, applied in that order by the aggregation).
+-}
+selectProcessor :: forall k v k' v'. (k -> v -> (k', v')) -> IO (Processor k (Change v))
+selectProcessor f = do
+  ref <- newIORef Nothing
+  pure
+    Processor
+      { procName = processorName "KTABLE-SELECT"
+      , procInit = writeIORef ref . Just
+      , procClose = pure ()
+      , procProcess = \r -> do
+          mctx <- readIORef ref
+          case (mctx, recordKey r) of
+            (Just ctx, Just k) -> do
+              let Change new old = recordValue r
+                  send (gk, gv) c = forwardRecord ctx r {recordKey = Just gk, recordValue = c gv}
+              mapM_ (\o -> send (f k o) (\gv -> Change Nothing (Just gv) :: Change v')) old
+              mapM_ (\n -> send (f k n) (\gv -> Change (Just gv) Nothing :: Change v')) new
+            _ -> pure ()
+      }
 
 
 ----------------------------------------------------------------------
 -- Aggregations
 ----------------------------------------------------------------------
 
-{- | @KTable.groupBy(...).count(Materialized)@. The subtractor
-is implicit (-1) and the adder is implicit (+1). Mirrors
-@KGroupedTable.count@.
+{- | @KGroupedTable.count(Materialized)@: rows per group (an update
+moves its row from the old group to the new one).
 -}
 countKGroupedTable
   :: forall k v
    . Ord k
   => Materialized k Int64
   -> KGroupedTable k v
-  -> IO (CountedTableLocal k Int64)
-countKGroupedTable =
+  -> IO (KTable k Int64)
+countKGroupedTable m =
   aggregateKGroupedTable
     (pure 0)
-    (\_ _ acc -> acc + 1) -- add a record
-    (\_ _ acc -> acc - 1) -- subtract the prior version
+    (\_ _ acc -> acc + 1)
+    (\_ _ acc -> acc - 1)
+    m {matValueSerde = Just (fromMaybe int64Serde (matValueSerde m))}
 
 
-{- | @KTable.groupBy(...).reduce(adder, subtractor, Materialized)@.
-Mirrors @KGroupedTable.reduce@: on every input record, the
-subtractor removes the previous value's contribution (if
-any) and then the adder folds the new value in. The first
-record per key bypasses the subtractor and seeds the store
-with the value as-is — the JVM contract.
+{- | @KGroupedTable.reduce(adder, subtractor, Materialized)@, as the
+JVM's @KTableReduce@: the subtractor removes an old row from its
+group's value, the adder folds a new row in (a group's first row
+becomes its value), and a group whose value is gone is deleted.
 -}
 reduceKGroupedTable
   :: forall k v
    . Ord k
   => (v -> v -> v)
-  -- ^ adder    (oldAgg new -> newAgg)
+  -- ^ adder (aggregate, new row)
   -> (v -> v -> v)
-  -- ^ subtractor (oldAgg old -> partial)
+  -- ^ subtractor (aggregate, old row)
   -> Materialized k v
   -> KGroupedTable k v
-  -> IO (CountedTableLocal k v)
-reduceKGroupedTable add sub m kgt = do
-  let b = kgt.builder
-  storeNm <-
-    maybe
-      (freshStoreName b "KTABLE-REDUCE-STORE")
-      pure
-      (matName m)
-  prevNm <- freshStoreName b "KTABLE-REDUCE-PREV"
-  let outBuilder =
-        inMemoryKeyValueStoreBuilder storeNm
-          :: StoreBuilderKV k v
-      prevBuilder =
-        inMemoryKeyValueStoreBuilder prevNm
-          :: StoreBuilderKV k v
-  procNm <- freshNodeName b "KTABLE-REDUCE"
-  withTopology_ b $ \t ->
-    let !t1 =
-          Topo.addProcessorWith
-            Topo.ProcessorSpec
-              { Topo.processorSpecName = procNm
-              , Topo.processorSpecParents = [kgt.parent]
-              , Topo.processorSpecSupplier =
-                  Topo.AnyProcessor
-                    ( reduceKGroupedTableProc @k @v
-                        (kgt.keyMap)
-                        add
-                        sub
-                        storeNm
-                        prevNm
-                    )
-              , Topo.processorSpecStores = [storeNm, prevNm]
-              }
-            t
-        !t2 = Topo.addStateStoreKV outBuilder [procNm] t1
-        !t3 = Topo.addStateStoreKV prevBuilder [procNm] t2
-    in t3
-  pure
-    CountedTableLocal
-      { ctlNode = procNm
-      , ctlStore = storeNm
-      , ctlBuilder = b
-      }
+  -> IO (KTable k v)
+reduceKGroupedTable add sub m kgt =
+  groupedAggregate "KTABLE-REDUCE" m kgt kgt.value $ \_ change prev ->
+    let afterSub = case (changeOld change, prev) of
+          (Just o, Just agg) -> Just (sub agg o)
+          _ -> prev
+    in pure $ case changeNew change of
+         Just n -> Just (maybe n (`add` n) afterSub)
+         Nothing -> afterSub
 
 
-reduceKGroupedTableProc
-  :: forall k v
-   . Ord k
-  => (k -> v -> (k, v))
-  -> (v -> v -> v)
-  -> (v -> v -> v)
-  -> StoreName
-  -> StoreName
-  -> IO (Processor k v)
-reduceKGroupedTableProc keyMap add sub outNm prevNm = do
-  ctxRef <- newIORef Nothing
-  outRef <- newIORef (Nothing :: Maybe (KeyValueStore k v))
-  prevRef <- newIORef (Nothing :: Maybe (KeyValueStore k v))
-  pure
-    Processor
-      { procName = processorName "KTABLE-REDUCE"
-      , procInit = \ctx -> do
-          writeIORef ctxRef (Just ctx)
-          getStateStore ctx outNm >>= \case
-            Just (AnyKeyValueStore kvs) ->
-              writeIORef outRef (Just (Unsafe.unsafeCoerce kvs))
-            _ ->
-              error $
-                "KGroupedTable.reduce: out store missing: "
-                  <> show outNm
-          getStateStore ctx prevNm >>= \case
-            Just (AnyKeyValueStore kvs) ->
-              writeIORef prevRef (Just (Unsafe.unsafeCoerce kvs))
-            _ ->
-              error $
-                "KGroupedTable.reduce: prev store missing: "
-                  <> show prevNm
-      , procClose = pure ()
-      , procProcess = \r -> case recordKey r of
-          Nothing -> pure ()
-          Just kIn -> do
-            mctx <- readIORef ctxRef
-            mout <- readIORef outRef
-            mprev <- readIORef prevRef
-            case (mctx, mout, mprev) of
-              (Just ctx, Just outS, Just prevS) -> do
-                mOldV <- kvsGet prevS kIn
-                let !(kNewG, vNew) = keyMap kIn (recordValue r)
-                    mOldGroup = (\v -> keyMap kIn v) <$> mOldV
-                    kOldG = fst <$> mOldGroup
-                case kOldG of
-                  Just oldG | oldG /= kNewG -> do
-                    let Just (_, vOldG) = mOldGroup
-                    mOldAcc <- kvsGet outS oldG
-                    let !accOld' = case mOldAcc of
-                          Just acc -> sub acc vOldG
-                          Nothing -> vOldG -- shouldn't happen,
-                          -- but defensive
-                    kvsPut outS oldG accOld'
-                    forwardRecord
-                      ctx
-                      ( Record
-                          (Just oldG)
-                          accOld'
-                          (recordTimestamp r)
-                          (recordHeaders r)
-                      )
-                    mNewAcc <- kvsGet outS kNewG
-                    let !accNew = case mNewAcc of
-                          Nothing -> vNew
-                          Just acc -> add acc vNew
-                    kvsPut outS kNewG accNew
-                    forwardRecord
-                      ctx
-                      ( Record
-                          (Just kNewG)
-                          accNew
-                          (recordTimestamp r)
-                          (recordHeaders r)
-                      )
-                  _ -> do
-                    mAgg <- kvsGet outS kNewG
-                    let !next = case mAgg of
-                          Nothing -> vNew
-                          Just acc -> case mOldGroup of
-                            Nothing -> add acc vNew
-                            Just (_oldG, vOldG) ->
-                              add (sub acc vOldG) vNew
-                    kvsPut outS kNewG next
-                    forwardRecord
-                      ctx
-                      ( Record
-                          (Just kNewG)
-                          next
-                          (recordTimestamp r)
-                          (recordHeaders r)
-                      )
-                kvsPut prevS kIn vNew
-              _ -> pure ()
-      }
-
-
-{- | @KTable.groupBy(...).aggregate(initializer, adder,
-subtractor, Materialized)@. The aggregator runs the
-subtractor on the /previous/ input value (the value of the
-same key the last time it was seen, or 'Nothing' for the
-very first record) and then the adder on the /new/ value.
-For tombstone records (recordValue r is the user-supplied
-"null" sentinel; we don't have a wire-level null distinct
-from a real value, so users must encode tombstones via the
-value type), only the subtractor fires.
+{- | @KGroupedTable.aggregate(initializer, adder, subtractor,
+Materialized)@, as the JVM's @KTableAggregate@: the subtractor
+removes an old row from its group's aggregate, the adder folds a
+new row into it (starting from the initializer).
 -}
 aggregateKGroupedTable
   :: forall k v a
@@ -343,150 +226,76 @@ aggregateKGroupedTable
   -- ^ subtractor
   -> Materialized k a
   -> KGroupedTable k v
-  -> IO (CountedTableLocal k a)
-aggregateKGroupedTable initial add sub m kgt = do
-  let b = kgt.builder
-  storeNm <-
-    maybe
-      (freshStoreName b "KTABLE-AGGREGATE-STORE")
-      pure
-      (matName m)
-  -- Two stores: the materialised output @storeNm@ +
-  -- a hidden @prevNm@ that remembers the last value seen
-  -- per key (so we know what to subtract on the next
-  -- update).
-  prevNm <- freshStoreName b "KTABLE-AGGREGATE-PREV"
-  let outBuilder =
-        inMemoryKeyValueStoreBuilder storeNm
-          :: StoreBuilderKV k a
-      prevBuilder =
-        inMemoryKeyValueStoreBuilder prevNm
-          :: StoreBuilderKV k v
-  procNm <- freshNodeName b "KTABLE-AGGREGATE"
-  withTopology_ b $ \t ->
-    let !t1 =
-          Topo.addProcessorWith
-            Topo.ProcessorSpec
-              { Topo.processorSpecName = procNm
-              , Topo.processorSpecParents = [kgt.parent]
-              , Topo.processorSpecSupplier =
-                  Topo.AnyProcessor
-                    ( aggregateKGroupedTableProc @k @v @a
-                        (kgt.keyMap)
-                        initial
-                        add
-                        sub
-                        storeNm
-                        prevNm
-                    )
-              , Topo.processorSpecStores = [storeNm, prevNm]
-              }
-            t
-        !t2 = Topo.addStateStoreKV outBuilder [procNm] t1
-        !t3 = Topo.addStateStoreKV prevBuilder [procNm] t2
-    in t3
-  pure
-    CountedTableLocal
-      { ctlNode = procNm
-      , ctlStore = storeNm
-      , ctlBuilder = b
-      }
+  -> IO (KTable k a)
+aggregateKGroupedTable initial add sub m kgt =
+  groupedAggregate "KTABLE-AGGREGATE" m kgt (aggregateSerde m) $ \k change prev -> do
+    let afterSub = case (changeOld change, prev) of
+          (Just o, Just agg) -> Just (sub k o agg)
+          _ -> prev
+    case changeNew change of
+      Just n -> do
+        base <- maybe initial pure afterSub
+        pure (Just (add k n base))
+      Nothing -> pure afterSub
 
 
-aggregateKGroupedTableProc
+{- | The aggregation node: reads the regrouped changes, applies
+@step@ (key, change, the group's current value) and forwards the
+group's change.
+-}
+groupedAggregate
   :: forall k v a
    . Ord k
-  => (k -> v -> (k, v))
-  -> IO a
-  -> (k -> v -> a -> a)
-  -> (k -> v -> a -> a)
-  -> StoreName -- output store
-  -> StoreName -- prev-value store
-  -> IO (Processor k v)
-aggregateKGroupedTableProc keyMap initial add sub outNm prevNm = do
-  ctxRef <- newIORef Nothing
-  outRef <- newIORef (Nothing :: Maybe (KeyValueStore k a))
-  prevRef <- newIORef (Nothing :: Maybe (KeyValueStore k v))
+  => T.Text
+  -> Materialized k a
+  -> KGroupedTable k v
+  -> Serde a
+  -> (k -> Change v -> Maybe a -> IO (Maybe a))
+  -> IO (KTable k a)
+groupedAggregate label m kgt vs step = do
+  let b = kgt.builder
+  storeNm <- maybe (freshStoreName b (label <> "-STORE")) pure (matName m)
+  procNm <- freshNodeName b label
+  let supplier = materializedKV m storeNm kgt.key vs :: StoreBuilderKV k a
+      proc_ = do
+        ref <- newIORef Nothing
+        pure
+          Processor
+            { procName = processorName label
+            , procInit = \ctx -> do
+                kvs <- getStateStore ctx storeNm >>= \case
+                  Just (AnyKeyValueStore kvs) -> pure (Unsafe.unsafeCoerce kvs :: KeyValueStore k a)
+                  _ -> error (T.unpack label <> ": store not found: " <> show storeNm)
+                bindTableCache ctx kvs
+                writeIORef ref (Just (ctx, kvs))
+            , procClose = pure ()
+            , procProcess = \r -> do
+                mst <- readIORef ref
+                case (mst, recordKey r) of
+                  (Just (ctx, kvs), Just k) -> do
+                    prev <- kvsGet kvs k
+                    next <- step k (recordValue r) prev
+                    writeRow ctx kvs r k next prev
+                  _ -> pure ()
+            }
+  withTopology_ b $ \t ->
+    Topo.addStateStoreKV
+      supplier
+      [procNm]
+      ( Topo.addProcessorWith
+          Topo.ProcessorSpec
+            { Topo.processorSpecName = procNm
+            , Topo.processorSpecParents = [kgt.parent]
+            , Topo.processorSpecSupplier = Topo.AnyProcessor proc_
+            , Topo.processorSpecStores = []
+            }
+          t
+      )
   pure
-    Processor
-      { procName = processorName "KTABLE-AGGREGATE"
-      , procInit = \ctx -> do
-          writeIORef ctxRef (Just ctx)
-          getStateStore ctx outNm >>= \case
-            Just (AnyKeyValueStore kvs) ->
-              writeIORef outRef (Just (Unsafe.unsafeCoerce kvs))
-            _ ->
-              error $
-                "KGroupedTable.aggregate: out store missing: "
-                  <> show outNm
-          getStateStore ctx prevNm >>= \case
-            Just (AnyKeyValueStore kvs) ->
-              writeIORef prevRef (Just (Unsafe.unsafeCoerce kvs))
-            _ ->
-              error $
-                "KGroupedTable.aggregate: prev store missing: "
-                  <> show prevNm
-      , procClose = pure ()
-      , procProcess = \r -> case recordKey r of
-          Nothing -> pure ()
-          Just kIn -> do
-            mctx <- readIORef ctxRef
-            mout <- readIORef outRef
-            mprev <- readIORef prevRef
-            case (mctx, mout, mprev) of
-              (Just ctx, Just outS, Just prevS) -> do
-                mOldV <- kvsGet prevS kIn
-                let !(kNewG, vNew) = keyMap kIn (recordValue r)
-                    mOldGroup = (\v -> keyMap kIn v) <$> mOldV
-                    kOldG = fst <$> mOldGroup
-                case kOldG of
-                  Just oldG | oldG /= kNewG -> do
-                    -- Group changed: subtract from old group, add
-                    -- to new group, emit two records.
-                    let Just (_, vOldG) = mOldGroup
-                    mOldAcc <- kvsGet outS oldG
-                    !accO0 <- maybe initial pure mOldAcc
-                    let !accOld' = sub oldG vOldG accO0
-                    kvsPut outS oldG accOld'
-                    forwardRecord
-                      ctx
-                      ( Record
-                          (Just oldG)
-                          accOld'
-                          (recordTimestamp r)
-                          (recordHeaders r)
-                      )
-                    mNewAcc <- kvsGet outS kNewG
-                    !accN0 <- maybe initial pure mNewAcc
-                    let !accNew = add kNewG vNew accN0
-                    kvsPut outS kNewG accNew
-                    forwardRecord
-                      ctx
-                      ( Record
-                          (Just kNewG)
-                          accNew
-                          (recordTimestamp r)
-                          (recordHeaders r)
-                      )
-                  _ -> do
-                    -- Same group (or first record): subtract+add on
-                    -- the single output key.
-                    mAcc <- kvsGet outS kNewG
-                    !acc0 <- maybe initial pure mAcc
-                    let !accAfterSub = case mOldGroup of
-                          Nothing -> acc0
-                          Just (_oldG, vOldGrouped) ->
-                            sub kNewG vOldGrouped acc0
-                        !accNew = add kNewG vNew accAfterSub
-                    kvsPut outS kNewG accNew
-                    forwardRecord
-                      ctx
-                      ( Record
-                          (Just kNewG)
-                          accNew
-                          (recordTimestamp r)
-                          (recordHeaders r)
-                      )
-                kvsPut prevS kIn vNew
-              _ -> pure ()
+    KTable
+      { ktableNode = procNm
+      , ktableStore = storeNm
+      , ktableBuilder = b
+      , ktableKeySerde = kgt.key
+      , ktableValueSerde = vs
       }

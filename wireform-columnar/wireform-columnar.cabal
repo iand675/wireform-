@@ -16,7 +16,7 @@ maintainer: ian@iankduncan.com
 copyright: 2026 Ian Duncan
 category: Data, Codec, Serialization
 build-type: Simple
-tested-with: GHC == 9.6.4, GHC == 9.8.4
+tested-with: GHC == 9.10.3, GHC == 9.12.4, GHC == 9.14.1
 
 source-repository head
   type:     git
@@ -47,7 +47,7 @@ library
   exposed-modules:
     Wireform.Columnar
   build-depends:
-      base                >= 4.16 && < 5
+      base                >= 4.20 && < 5
     , wireform-columnar-core
     , wireform-arrow
     , wireform-parquet

@@ -105,9 +105,6 @@ tests =
             , telemetry_id_truncates_long_inputs
             , telemetry_id_pads_short_inputs
             , streams_runtime_telemetry_id
-            , streams_runtime_user_assignor_default_nothing
-            , streams_runtime_user_assignor_invoked_when_set
-            , streams_application_state_starts_empty
             ]
       ]
 
@@ -124,7 +121,7 @@ mkRec t p o =
     , C.offset = fromIntegral o
     , C.timestamp = 0
     , C.key = Nothing
-    , C.value = ""
+    , C.value = Just ""
     , C.headers = []
     }
 
@@ -425,11 +422,11 @@ task_assignor_default =
           Map.fromList
             [
               ( pidA
-              , TA.KafkaStreamsState pidA 1 Map.empty Set.empty Set.empty Nothing
+              , TA.KafkaStreamsState pidA 1 Map.empty Set.empty Set.empty Nothing Map.empty
               )
             ,
               ( pidB
-              , TA.KafkaStreamsState pidB 1 Map.empty Set.empty Set.empty Nothing
+              , TA.KafkaStreamsState pidB 1 Map.empty Set.empty Set.empty Nothing Map.empty
               )
             ]
         tasks = Map.empty
@@ -613,6 +610,7 @@ task_assignor_plugin_invocable =
                     , TA.kssPreviousActiveTasks = Set.empty
                     , TA.kssPreviousStandbyTasks = Set.empty
                     , TA.kssRackId = Nothing
+                    , TA.kssTaskLags = Map.empty
                     }
             , TA.asAssignmentConfigs = TA.defaultAssignmentConfigs
             }
@@ -621,8 +619,7 @@ task_assignor_plugin_invocable =
     -- Even with no tasks, the single registered ProcessId still
     -- gets an (empty) KafkaStreamsAssignment entry — this
     -- confirms the assignor surface is end-to-end invocable
-    -- (the runtime hook 'streamsRunUserAssignor' consumes the
-    -- same shape).
+    -- (the group leader consumes the same shape).
     Map.keysSet (TA.taAssignments out) `shouldBe` Set.singleton pid
 
 
@@ -715,57 +712,3 @@ streams_runtime_telemetry_id =
     bs `shouldBe` Tel.clientInstanceIdFromText "ti-app"
 
 
-streams_runtime_user_assignor_default_nothing :: Spec
-streams_runtime_user_assignor_default_nothing =
-  it "streamsRunUserAssignor returns Nothing when no plug-in set" $ do
-    ks <-
-      mkTinyKafkaStreams
-        Kafka.Streams.Config.defaultStreamsConfig
-          { Kafka.Streams.Config.applicationId = "no-plugin"
-          , Kafka.Streams.Config.bootstrapServers = ["mock:0"]
-          }
-    r <- Kafka.Streams.Runtime.streamsRunUserAssignor ks
-    case r of
-      Nothing -> pure ()
-      Just _ -> (False) `shouldBe` True
-
-
-streams_runtime_user_assignor_invoked_when_set :: Spec
-streams_runtime_user_assignor_invoked_when_set =
-  it "streamsRunUserAssignor invokes the configured TaskAssignor" $ do
-    fired <- newIORef False
-    let probe =
-          TA.defaultTaskAssignor
-            { TA.taAssign = \app -> do
-                writeIORef fired True
-                TA.taAssign TA.defaultTaskAssignor app
-            }
-    ks <-
-      mkTinyKafkaStreams
-        Kafka.Streams.Config.defaultStreamsConfig
-          { Kafka.Streams.Config.applicationId = "with-plugin"
-          , Kafka.Streams.Config.bootstrapServers = ["mock:0"]
-          , Kafka.Streams.Config.taskAssignor = Just probe
-          }
-    r <- Kafka.Streams.Runtime.streamsRunUserAssignor ks
-    seen <- readIORef fired
-    case r of
-      Nothing -> (False) `shouldBe` True
-      Just _ -> pure ()
-    seen `shouldBe` True
-
-
-streams_application_state_starts_empty :: Spec
-streams_application_state_starts_empty =
-  it "streamsApplicationState reflects the local-only initial view" $ do
-    ks <-
-      mkTinyKafkaStreams
-        Kafka.Streams.Config.defaultStreamsConfig
-          { Kafka.Streams.Config.applicationId = "as-app"
-          , Kafka.Streams.Config.bootstrapServers = ["mock:0"]
-          }
-    app <- Kafka.Streams.Runtime.streamsApplicationState ks
-    -- Brand-new runtime: no owned partitions ⇒ no tasks, exactly
-    -- one local client registered.
-    Map.size (TA.asAllTasks app) `shouldBe` 0
-    Map.size (TA.asKafkaStreamsStates app) `shouldBe` 1

@@ -33,16 +33,16 @@ jobs:
       - uses: haskell-actions/setup@v2
         id: setup
         with:
-          ghc-version: '9.6.4'
+          ghc-version: '9.10.3'
           cabal-version: 'latest'
 
       - name: Cache cabal store
         uses: actions/cache@v4
         with:
           path: ${{ steps.setup.outputs.cabal-store }}
-          key: ${{ runner.os }}-haddock-ghc-9.6.4-${{ hashFiles('**/*.cabal', 'cabal.project') }}
+          key: ${{ runner.os }}-haddock-ghc-9.10.3-${{ hashFiles('**/*.cabal', 'cabal.project') }}
           restore-keys: |
-            ${{ runner.os }}-haddock-ghc-9.6.4-
+            ${{ runner.os }}-haddock-ghc-9.10.3-
 
       - name: Install system dependencies
         # wireform-kafka uses pkg-config-depends for libsnappy /

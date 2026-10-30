@@ -40,9 +40,16 @@ module Kafka.Streams.Internal.Engine (
   engineStreamTime,
   engineWallClock,
   attachWatermarkCoordinator,
+  setPartitionCountLookup,
   reportPollCycle,
-  engineMetrics,
+  EngineCounts (..),
+  readEngineCounts,
   buildEngine,
+  buildEngineWith,
+  activateEngine,
+  EngineOptions (..),
+  defaultEngineOptions,
+  ChangelogTarget (..),
   feedSource,
   feedSourceH,
   advanceWallClock,
@@ -54,6 +61,7 @@ module Kafka.Streams.Internal.Engine (
   drainPreCommit,
   closeEngine,
   storeByName,
+  engineOwnStores,
   streamTimeOfEngine,
   wallClockTimeOfEngine,
   takeCommitRequested,
@@ -66,7 +74,8 @@ module Kafka.Streams.Internal.Engine (
 ) where
 
 import Control.Exception (SomeException, throwIO, try)
-import Control.Monad (forM, forM_)
+import Kafka.Streams.Internal.Log qualified as SLog
+import Control.Monad (forM, forM_, unless, when)
 import Data.ByteString (ByteString)
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HashSet
@@ -74,24 +83,26 @@ import Data.IORef
 import Data.Int (Int64)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
+import Kafka.Streams.Internal.Text (decimalText)
 import Data.Time.Clock qualified as Clock
+import Data.Vector.Unboxed.Mutable qualified as UMV
 import GHC.Exts (Any)
 import Kafka.Streams.Errors (
   DeserializationException (..),
   DeserializationHandler (..),
   DeserializationResponse (..),
+  InvalidPartitionsException (..),
+  StreamsException (..),
  )
+import Kafka.Streams.Internal.Changelog qualified as CL
+import Kafka.Streams.State.KeyValue.Caching qualified as Cache
 import Kafka.Streams.Internal.RecordCollector (
   CollectedRecord (..),
   RecordCollector (..),
  )
-import Kafka.Streams.Metrics (
-  MetricsRegistry,
-  noopMetricsRegistry,
- )
-import Kafka.Streams.Metrics qualified as Met
 import Kafka.Streams.Processor (
   Cancellable (..),
   Processor (..),
@@ -102,17 +113,22 @@ import Kafka.Streams.Processor (
   TaskId (..),
  )
 import Kafka.Streams.Processor qualified
+import Kafka.Streams.Produced (StreamPartitioner (..))
 import Kafka.Streams.Serde (Serde (..))
 import Kafka.Streams.State.Store (
   AnyStateStore (..),
   KeyValueStore (..),
+  KeyOrder (..),
   SessionStore (..),
   StateStore (..),
   StoreBuilder (..),
   StoreBuilderKV (..),
   StoreBuilderS (..),
   StoreBuilderW (..),
+  LoggingConfig (..),
+  StoreContext (..),
   StoreName,
+  StoreSerdes,
   WindowStore (..),
   unStoreName,
  )
@@ -135,6 +151,8 @@ import Kafka.Streams.Types (
  )
 import Kafka.Streams.Types qualified
 import Kafka.Streams.Watermark qualified as Watermark
+import System.Directory (getTemporaryDirectory)
+import System.FilePath ((</>))
 import Unsafe.Coerce (unsafeCoerce)
 
 
@@ -174,7 +192,65 @@ data StoreEntry = StoreEntry
   , storeEntryAny :: !AnyStateStore
   , storeEntryClose :: !(IO ())
   , storeEntryFlush :: !(IO ())
+  , storeEntryFlushCache :: !(IO Bool)
+  -- ^ Flush the store's record cache, if it has one; whether anything was dirty
+  , storeEntryRestore :: !(Maybe (ByteString -> Maybe ByteString -> IO (Either Text ())))
+  {- ^ Apply one changelog record (key bytes, null-able value bytes)
+  to the store underneath its change-logging layer, so a restore is
+  not logged again. 'Nothing' for a store without serdes, which
+  cannot be restored.
+  -}
   }
+
+
+-- | Where one store's writes are logged: a topic and this task's partition of it.
+data ChangelogTarget = ChangelogTarget
+  { ctTopic :: !TopicName
+  , ctPartition :: !Int
+  }
+  deriving stock (Eq, Show)
+
+
+-- | How the runtime customises an engine beyond the topology itself.
+data EngineOptions = EngineOptions
+  { eoChangelog :: !(StoreName -> Maybe ChangelogTarget)
+  {- ^ The changelog each store logs its writes to. 'Nothing' (and
+  any store whose 'LoggingConfig' disables logging) is not logged.
+  -}
+  , eoTaskDirectory :: !(Maybe FilePath)
+  {- ^ The task's state directory, handed to every store builder
+  ('StoreContext'). 'Nothing': a fresh place under the system temp
+  directory, as the in-process test drivers want.
+  -}
+  , eoSharedStores :: !(Map StoreName StoreEntry)
+  {- ^ Stores owned outside this engine (the global stores), visible
+  to its processors by name. The engine never flushes or closes
+  them.
+  -}
+  , eoStoresOnly :: !Bool
+  {- ^ Build the stores and nothing else: no processor is initialised
+  and no source or sink is wired (a standby task, which only keeps its
+  stores current from the changelogs)
+  -}
+  , eoCacheBytes :: !(Maybe (IO Int))
+  {- ^ Give the stores that ask for one a record cache
+  ("Kafka.Streams.State.KeyValue.Caching"), holding at most this many
+  bytes over all of them. 'Nothing': no caches, every update is
+  forwarded and logged at once.
+  -}
+  }
+
+
+-- | No changelogs, no shared stores: the in-process drivers' engine.
+defaultEngineOptions :: EngineOptions
+defaultEngineOptions =
+  EngineOptions
+    { eoChangelog = const Nothing
+    , eoTaskDirectory = Nothing
+    , eoSharedStores = Map.empty
+    , eoStoresOnly = False
+    , eoCacheBytes = Nothing
+    }
 
 
 data ProcessorRecord = ProcessorRecord
@@ -206,7 +282,8 @@ data SourceInput = SourceInput
   , siPartition :: !Int
   , siOffset :: !Int64
   , siKey :: !(Maybe ByteString)
-  , siValue :: !ByteString
+  , siValue :: !(Maybe ByteString)
+  -- ^ 'Nothing' is a null value (a tombstone)
   , siTimestamp :: !Timestamp
   , siHeaders :: !Headers
   }
@@ -220,6 +297,9 @@ data Engine = Engine
   , engineForwarders :: !(IORef (Map Topo.NodeName NodeForwarder))
   , engineSources :: !(IORef (Map Topo.NodeName SourceHandler))
   , engineStores :: !(IORef (Map StoreName StoreEntry))
+  -- ^ This engine's own stores and the shared ones
+  , engineShared :: !(Set.Set StoreName)
+  -- ^ Names in 'engineStores' owned elsewhere ('eoSharedStores')
   , engineProcessors :: !(IORef (Map Topo.NodeName ProcessorRecord))
   , engineStreamTime :: !(IORef StreamTime)
   , engineWallClock :: !(IORef Timestamp)
@@ -227,7 +307,10 @@ data Engine = Engine
   , engineCurrentHeaders :: !(IORef (Maybe Kafka.Streams.Types.Headers))
   , enginePunctuators :: !(IORef [PunctuatorEntry])
   , engineDeserHandler :: !DeserializationHandler
-  , engineMetrics :: !MetricsRegistry
+  , engineCounters :: !(UMV.IOVector Int)
+  {- ^ Records processed / dropped, punctuations, commits ('EngineCounts'),
+  written only by the task's thread
+  -}
   , engineCommitRequested :: !(IORef Bool)
   , engineAsyncDrains :: !(IORef [IO ()])
   {- ^ Riffle: pre-commit drain registry. Processors that own
@@ -245,6 +328,13 @@ data Engine = Engine
   Drains run synchronously on the stream thread in
   registration order. An exception from any drain
   propagates as a 'commitEngine' failure.
+  -}
+  , enginePartitionCount :: !(IORef (Maybe (Text -> IO (Either String Int))))
+  {- ^ Topic partition-count lookup for sinks that carry a
+  'StreamPartitioner' (installed by the broker-backed runtime via
+  'setPartitionCountLookup'). 'Nothing' (in-process drivers with
+  no partition metadata) leaves every record's partition to the
+  producer.
   -}
   , engineWatermarkCoord :: !(IORef (Maybe Watermark.WatermarkCoordinator))
   {- ^ Riffle \xc2\xa75: optional cross-source watermark coordinator.
@@ -273,27 +363,64 @@ buildEngine
   -> RecordCollector
   -> DeserializationHandler
   -> IO Engine
-buildEngine validated tid appId collector deserHandler = do
+buildEngine = buildEngineWith defaultEngineOptions
+
+
+-- | 'buildEngine' with changelogs and shared stores ('EngineOptions').
+buildEngineWith
+  :: EngineOptions
+  -> Topo.TopologyValid
+  -> TaskId
+  -> Text
+  -> RecordCollector
+  -> DeserializationHandler
+  -> IO Engine
+buildEngineWith opts validated tid appId collector deserHandler = do
   let topo = Topo.topologyValidGraph validated
 
-  storeEntries <- forM (Map.toList (Topo.topoStores topo)) $ \(_nm, ab) ->
-    realiseStore ab
+  streamRef <- newIORef initialStreamTime
+  let changelogSink sn = case eoChangelog opts sn of
+        Nothing -> Nothing
+        Just ct -> Just $ \kb mvb -> do
+          StreamTime ts <- readIORef streamRef
+          collectorSend
+            collector
+            CollectedRecord
+              { crTopic = ctTopic ct
+              , crKey = Just kb
+              , crValue = mvb
+              , crTimestamp = ts
+              , crHeaders = emptyHeaders
+              , crPartition = Just (ctPartition ct)
+              }
+  dir <- case eoTaskDirectory opts of
+    Just d -> pure d
+    Nothing -> do
+      tmp <- getTemporaryDirectory
+      pure (tmp </> "wireform-streams" </> T.unpack appId </> T.unpack (taskIdToText tid))
+  let ctx = StoreContext {scDirectory = dir, scTaskName = taskIdToText tid}
+  budget <- traverse Cache.newCacheBudget (eoCacheBytes opts)
+  storeEntries <- forM (Map.toList (Topo.topoStores topo)) $ \(nm, ab) ->
+    realiseStore ctx budget (changelogSink nm) ab
   storesRef <-
     newIORef
-      (Map.fromList [(storeEntryName se, se) | se <- storeEntries])
+      ( Map.union
+          (Map.fromList (map (\se -> (storeEntryName se, se)) storeEntries))
+          (eoSharedStores opts)
+      )
 
   forwardersRef <- newIORef Map.empty
   procsRef <- newIORef Map.empty
   sourcesRef <- newIORef Map.empty
-  streamRef <- newIORef initialStreamTime
   wallRef <- nowAsTimestamp >>= newIORef
   currentMdRef <- newIORef Nothing
   currentHsRef <- newIORef Nothing
   pesRef <- newIORef []
-  metrics <- noopMetricsRegistry
+  counters <- UMV.replicate countersSize 0
   commitReqRef <- newIORef False
   drainsRef <- newIORef []
   wmCoordRef <- newIORef Nothing
+  partCountRef <- newIORef Nothing
 
   let engine =
         Engine
@@ -304,6 +431,7 @@ buildEngine validated tid appId collector deserHandler = do
           , engineForwarders = forwardersRef
           , engineSources = sourcesRef
           , engineStores = storesRef
+          , engineShared = Map.keysSet (eoSharedStores opts) Set.\\ Map.keysSet (Topo.topoStores topo)
           , engineProcessors = procsRef
           , engineStreamTime = streamRef
           , engineWallClock = wallRef
@@ -311,12 +439,24 @@ buildEngine validated tid appId collector deserHandler = do
           , engineCurrentHeaders = currentHsRef
           , enginePunctuators = pesRef
           , engineDeserHandler = deserHandler
-          , engineMetrics = metrics
+          , engineCounters = counters
           , engineCommitRequested = commitReqRef
           , engineAsyncDrains = drainsRef
+          , enginePartitionCount = partCountRef
           , engineWatermarkCoord = wmCoordRef
           }
 
+  unless (eoStoresOnly opts) (activateEngine engine)
+  pure engine
+
+
+{- | Instantiate the processors, sinks and sources of an engine built
+with 'eoStoresOnly' (a standby becoming active): its stores, and
+what they hold, are kept.
+-}
+activateEngine :: Engine -> IO ()
+activateEngine engine = do
+  let topo = engineTopology engine
   -- Wire processors first so children-of references resolve.
   forM_ (Map.toList (Topo.topoProcessors topo)) $ \(nm, spec) ->
     instantiateProcessor engine nm spec
@@ -324,51 +464,98 @@ buildEngine validated tid appId collector deserHandler = do
     instantiateSink engine nm spec
   forM_ (Map.toList (Topo.topoSources topo)) $ \(nm, spec) ->
     instantiateSource engine nm spec
-  pure engine
 
 
 ----------------------------------------------------------------------
 -- Stores
 ----------------------------------------------------------------------
 
-realiseStore :: Topo.AnyStoreBuilder -> IO StoreEntry
-realiseStore = \case
+{- | Build one store. With a changelog sink and serdes, and logging
+left on, every write is also logged ('CL.logKeyValueStore' and
+friends); restore always goes to the unlogged store. A key-value store
+that asks for a record cache gets one when there is a budget: it
+then logs at flush, from the bytes it serialised.
+-}
+realiseStore :: StoreContext -> Maybe Cache.CacheBudget -> Maybe CL.ChangelogSink -> Topo.AnyStoreBuilder -> IO StoreEntry
+realiseStore ctx mBudget mSink = \case
   Topo.AsKeyValueBuilder b -> do
-    s <- sbKvBuild b
+    s <- sbKvBuild b ctx
+    (store, flushCache) <- case (mBudget, sbKvCaching b) of
+      (Just budget, Just KeyOrder) -> do
+        let logTo = case (mSink, sbKvSerdes b) of
+              (Just sink, Just sd) | loggingEnabled (sbKvLogging b) -> Just (sd, sink)
+              _ -> Nothing
+        cs <- Cache.cachedKeyValueStore budget logTo s
+        pure (Cache.csStore cs, Cache.csFlush cs)
+      _ -> pure (logged (sbKvLogging b) (sbKvSerdes b) CL.logKeyValueStore s, pure False)
     pure
       StoreEntry
         { storeEntryName = sbKvName b
-        , storeEntryAny = AnyKeyValueStore s
+        , storeEntryAny = AnyKeyValueStore store
         , storeEntryClose = storeClose (kvsBase s)
         , storeEntryFlush = storeFlush (kvsBase s)
+        , storeEntryFlushCache = flushCache
+        , storeEntryRestore = (\sd -> CL.restoreKeyValue sd s) <$> sbKvSerdes b
         }
   Topo.AsWindowBuilder b -> do
-    s <- sbWBuild b
+    s <- sbWBuild b ctx
+    (store, flushCache) <- case (mBudget, sbWCaching b) of
+      (Just budget, Just KeyOrder) -> do
+        let logTo = case (mSink, sbWSerdes b) of
+              (Just sink, Just sd) | loggingEnabled (sbWLogging b) -> Just (sd, sink)
+              _ -> Nothing
+        cw <- Cache.cachedWindowStore budget logTo s
+        pure (Cache.cwStore cw, Cache.cwFlush cw)
+      _ -> pure (logged (sbWLogging b) (sbWSerdes b) CL.logWindowStore s, pure False)
     pure
       StoreEntry
         { storeEntryName = sbWName b
-        , storeEntryAny = AnyWindowStore s
+        , storeEntryAny = AnyWindowStore store
         , storeEntryClose = storeClose (wsBase s)
         , storeEntryFlush = storeFlush (wsBase s)
+        , storeEntryFlushCache = flushCache
+        , storeEntryRestore = (\sd -> CL.restoreWindow sd s) <$> sbWSerdes b
         }
   Topo.AsSessionBuilder b -> do
-    s <- sbSBuild b
+    s <- sbSBuild b ctx
+    (store, flushCache) <- case (mBudget, sbSCaching b) of
+      (Just budget, Just KeyOrder) -> do
+        let logTo = case (mSink, sbSSerdes b) of
+              (Just sink, Just sd) | loggingEnabled (sbSLogging b) -> Just (sd, sink)
+              _ -> Nothing
+        cs <- Cache.cachedSessionStore budget logTo s
+        pure (Cache.csStoreS cs, Cache.csFlushS cs)
+      _ -> pure (logged (sbSLogging b) (sbSSerdes b) CL.logSessionStore s, pure False)
     pure
       StoreEntry
         { storeEntryName = sbSName b
-        , storeEntryAny = AnySessionStore s
+        , storeEntryAny = AnySessionStore store
         , storeEntryClose = storeClose (ssBase s)
         , storeEntryFlush = storeFlush (ssBase s)
+        , storeEntryFlushCache = flushCache
+        , storeEntryRestore = (\sd -> CL.restoreSession sd s) <$> sbSSerdes b
         }
   Topo.AsRawBuilder b -> do
-    s <- sbBuild b
+    s <- sbBuild b ctx
     pure
       StoreEntry
         { storeEntryName = sbName b
         , storeEntryAny = AnyKeyValueStore (rawAsKeyValuePlaceholder s)
         , storeEntryClose = storeClose s
         , storeEntryFlush = storeFlush s
+        , storeEntryFlushCache = pure False
+        , storeEntryRestore = Nothing
         }
+  where
+    logged
+      :: LoggingConfig
+      -> Maybe (StoreSerdes k v)
+      -> (StoreSerdes k v -> CL.ChangelogSink -> st -> st)
+      -> st
+      -> st
+    logged lc msd wrap s = case (mSink, msd) of
+      (Just sink, Just sd) | loggingEnabled lc -> wrap sd sink s
+      _ -> s
 
 
 rawAsKeyValuePlaceholder :: StateStore -> KeyValueStore () ()
@@ -384,6 +571,7 @@ rawAsKeyValuePlaceholder ss =
     , kvsApproxEntries = pure 0
     , kvsReverseRange = \_ _ -> opaque
     , kvsReverseAll = opaque
+    , kvsCache = Nothing
     }
   where
     opaque :: IO a
@@ -444,32 +632,107 @@ instantiateSink engine nm spec = do
 
 
 sinkForwarder :: Engine -> Topo.SinkSpec -> NodeForwarder
-sinkForwarder engine spec = \rec ->
+sinkForwarder engine spec =
   case (Topo.sinkKeySerde spec, Topo.sinkValueSerde spec) of
-    (Topo.AnySerde ks, Topo.AnySerde vs) -> do
+    (Topo.AnySerde ks, Topo.AnySerde vs) ->
       let !erasedK = unsafeCoerce ks :: Serde Erased
           !erasedV = unsafeCoerce vs :: Serde Erased
-          !keyB = serialize erasedK <$> recordKey rec
-          !valB = serialize erasedV (recordValue rec)
-          -- Stamp the serdes' header contributions (e.g. schema-identity
-          -- headers) onto the outgoing record, mirroring the typed
-          -- producer path ('Kafka.Client.Producer.publish'). Headers
-          -- already on the record (carried from upstream, including any
-          -- trace-context headers) are preserved and the serde headers
-          -- appended; built-in serdes contribute 'mempty'.
-          !keyHdrs = maybe mempty (serializeHeaders erasedK) (recordKey rec)
-          !valHdrs = serializeHeaders erasedV (recordValue rec)
-          !outHdrs = recordHeaders rec <> keyHdrs <> valHdrs
-          out =
-            CollectedRecord
-              { crTopic = Topo.sinkTopic spec
-              , crKey = keyB
-              , crValue = valB
-              , crTimestamp = recordTimestamp rec
-              , crHeaders = outHdrs
-              , crPartition = Nothing
-              }
-      collectorSend (engineCollector engine) out
+          !topic = Topo.sinkTopic spec
+          -- Resolved once per sink, so a sink without a partitioner
+          -- never touches the partition-count lookup.
+          choosePartition :: Record Erased Erased -> IO (Maybe Int)
+          choosePartition = case Topo.sinkPartitioner spec of
+            Nothing -> \_ -> pure Nothing
+            Just (Topo.AnyStreamPartitioner sp) ->
+              sinkPartition
+                engine
+                (unTopicName topic)
+                (unsafeCoerce sp :: StreamPartitioner Erased Erased)
+          -- A nullable sink's values are @Maybe v@ ('Nothing': a tombstone).
+          nullable = Topo.sinkNullableValues spec
+          present :: Record Erased Erased -> Maybe Erased
+          present rec
+            | nullable = unsafeCoerce (recordValue rec) :: Maybe Erased
+            | otherwise = Just (recordValue rec)
+      in \rec -> do
+           let !keyB = serialize erasedK <$> recordKey rec
+               !mVal = present rec
+               !valB = serialize erasedV <$> mVal
+               -- Stamp the serdes' header contributions (e.g. schema-identity
+               -- headers) onto the outgoing record, mirroring the typed
+               -- producer path ('Kafka.Client.Producer.publish'). Headers
+               -- already on the record (carried from upstream, including any
+               -- trace-context headers) are preserved and the serde headers
+               -- appended; built-in serdes contribute 'mempty'.
+               !keyHdrs = maybe mempty (serializeHeaders erasedK) (recordKey rec)
+               !valHdrs = maybe mempty (serializeHeaders erasedV) mVal
+               !outHdrs = recordHeaders rec <> keyHdrs <> valHdrs
+           -- a tombstone's partition is the producer's (by key)
+           !part <- maybe (pure Nothing) (\v -> choosePartition rec {recordValue = v}) mVal
+           collectorSend
+             (engineCollector engine)
+             CollectedRecord
+               { crTopic = topic
+               , crKey = keyB
+               , crValue = valB
+               , crTimestamp = recordTimestamp rec
+               , crHeaders = outHdrs
+               , crPartition = part
+               }
+
+
+{- | Run a sink's 'StreamPartitioner' against the topic's current
+partition count. Mirrors the JVM @RecordCollectorImpl.send@: no
+partition metadata for the topic is a 'StreamsException'; a partition
+outside @[0, n)@ is an 'InvalidPartitionsException', a failure of the
+record (the runtime routes it through the processing-exception
+handler like any other processor failure).
+-}
+sinkPartition
+  :: Engine
+  -> Text
+  -> StreamPartitioner Erased Erased
+  -> Record Erased Erased
+  -> IO (Maybe Int)
+sinkPartition engine topic sp rec = do
+  mLookup <- readIORef (enginePartitionCount engine)
+  case mLookup of
+    Nothing -> pure Nothing
+    Just lookupCount -> do
+      eN <- lookupCount topic
+      case eN of
+        Left err ->
+          sinkFail ("could not get partition information: " <> T.pack err)
+        Right n
+          | n <= 0 -> sinkFail "topic reports no partitions"
+          | otherwise -> do
+              mp <- runStreamPartitioner sp topic (recordKey rec) (recordValue rec) n
+              case mp of
+                Just p
+                  | p < 0 || p >= n ->
+                      throwIO . InvalidPartitionsException $
+                        ( "sink topic " <> topic <> ": StreamPartitioner returned partition "
+                            <> decimalText p
+                            <> " outside [0, "
+                            <> decimalText n
+                            <> ")"
+                        )
+                _ -> pure mp
+  where
+    sinkFail msg =
+      throwIO
+        StreamsException
+          { streamsErrorMessage = msg
+          , streamsErrorContext = Just ("sink topic " <> topic)
+          }
+
+
+{- | Install the partition-count lookup sinks with a
+'StreamPartitioner' consult (see 'enginePartitionCount').
+-}
+setPartitionCountLookup :: Engine -> (Text -> IO (Either String Int)) -> IO ()
+setPartitionCountLookup engine f =
+  writeIORef (enginePartitionCount engine) (Just f)
 
 
 ----------------------------------------------------------------------
@@ -505,17 +768,31 @@ handleSource
   -> IO ()
 handleSource engine spec children si = do
   let mErasedKey = decodeKeyErased (Topo.sourceKeySerde spec) (siKey si)
-      eErasedVal = decodeValErased (Topo.sourceValueSerde spec) (siValue si)
+      -- A table source forwards @Maybe v@; a stream source has no
+      -- value to give a null-valued record and drops it.
+      eErasedVal = case siValue si of
+        Nothing
+          | Topo.sourceNullValues spec -> Right (Just (erase (Nothing :: Maybe Erased), Nothing))
+          | otherwise -> Right Nothing
+        Just bs -> case decodeValErased (Topo.sourceValueSerde spec) bs of
+          Left e -> Left e
+          Right v
+            | Topo.sourceNullValues spec -> Right (Just (erase (Just v), Just v))
+            | otherwise -> Right (Just (v, Just v))
   case (mErasedKey, eErasedVal) of
-    (Right mk, Right v) -> do
+    (Right _, Right Nothing) ->
+      bump engine ixDropped
+    (Right mk, Right (Just (v, mRaw))) -> do
       st <- readIORef (engineStreamTime engine)
-      ts <-
-        runErasedExtractor
-          (Topo.sourceExtractor spec)
-          mk
-          v
-          (siTimestamp si)
-          st
+      ts <- case mRaw of
+        Just raw ->
+          runErasedExtractor
+            (Topo.sourceExtractor spec)
+            mk
+            raw
+            (siTimestamp si)
+            st
+        Nothing -> pure (siTimestamp si)
       atomicModifyIORef' (engineStreamTime engine) $ \cur ->
         (advanceStreamTime ts cur, ())
       -- Riffle \xc2\xa75: if a watermark coordinator is wired and
@@ -549,20 +826,12 @@ handleSource engine spec children si = do
               , recordHeaders = siHeaders si
               }
       writeIORef (engineCurrentHeaders engine) (Just (siHeaders si))
-      Met.incCounter (engineMetrics engine) Met.processTotal
-      -- Task-id-tagged variant for finer-grained inspection
-      -- (mirrors the Java client's task-tagged metric names).
-      Met.incCounter
-        (engineMetrics engine)
-        ( "stream-task-metrics:process-total{task="
-            <> taskIdToText (engineTaskId engine)
-            <> "}"
-        )
+      bump engine ixProcessed
       mapM_ (\fw -> fw rec) children
       writeIORef (engineCurrentMd engine) Nothing
       writeIORef (engineCurrentHeaders engine) Nothing
     _ -> do
-      Met.incCounter (engineMetrics engine) Met.droppedRecordsTotal
+      bump engine ixDropped
       handleDeserError engine si mErasedKey eErasedVal
 
 
@@ -624,14 +893,26 @@ handleDeserError engine si keyR valR = do
           , partition = fromIntegral (siPartition si)
           , offset = fromIntegral (siOffset si)
           , key = siKey si
-          , value = siValue si
+          , value = maybe mempty id (siValue si)
           , reason = reason
           }
   resp <- runDeserializationHandler (engineDeserHandler engine) ex
   case resp of
     DeserContinueProcessing -> pure ()
     DeserFailFast ->
-      error $ "Kafka.Streams: deserialization failure: " <> T.unpack reason
+      throwIO
+        StreamsException
+          { streamsErrorMessage =
+              "deserialization failure on "
+                <> unTopicName (siTopic si)
+                <> "-"
+                <> decimalText (siPartition si)
+                <> "@"
+                <> decimalText (siOffset si)
+                <> ": "
+                <> reason
+          , streamsErrorContext = Just "deserialization"
+          }
 
 
 ----------------------------------------------------------------------
@@ -686,9 +967,9 @@ makeContext engine selfNm =
                 Kafka.Streams.Types.topicName
                   (Kafka.Streams.Processor.seTopic emit)
             , crKey = Kafka.Streams.Processor.seKey emit
-            , crValue = Kafka.Streams.Processor.seValue emit
+            , crValue = Just (Kafka.Streams.Processor.seValue emit)
             , crTimestamp = Kafka.Streams.Processor.seTimestamp emit
-            , crHeaders = emptyHeaders
+            , crHeaders = Kafka.Streams.Processor.seHeaders emit
             , crPartition = Nothing
             }
     , ctxRecordHeaders = readIORef (engineCurrentHeaders engine)
@@ -742,7 +1023,7 @@ feedSource
   -> Int64
   -> IO ()
 feedSource engine topic key value ts part off =
-  feedSourceH engine topic key value emptyHeaders ts part off
+  feedSourceH engine topic key (Just value) emptyHeaders ts part off
 
 
 {- | Like 'feedSource' but carries record headers from the source
@@ -754,7 +1035,8 @@ feedSourceH
   :: Engine
   -> TopicName
   -> Maybe ByteString
-  -> ByteString
+  -> Maybe ByteString
+  -- ^ value; 'Nothing' is a null value (a tombstone)
   -> Headers
   -> Timestamp
   -> Int
@@ -941,7 +1223,7 @@ fireDue engine pt now = do
     fireOnce pe
       | peNextFireMs pe <= now = do
           runPunctuator (pePunctuator pe) (Timestamp now)
-          Met.incCounter (engineMetrics engine) Met.punctuateTotal
+          bump engine ixPunctuated
           let !next = peNextFireMs pe + fromIntegral (peIntervalMs pe)
               -- If the next-fire is still behind now (because we
               -- jumped a huge gap in stream time), snap it to
@@ -964,7 +1246,7 @@ used in metric names.
 -}
 taskIdToText :: TaskId -> Text
 taskIdToText (TaskId topo part) =
-  T.pack (show topo) <> "_" <> T.pack (show part)
+  decimalText topo <> "_" <> decimalText part
 
 
 {- | Atomically read and reset the "commit requested by processor"
@@ -986,13 +1268,55 @@ commitEngine engine = do
   -- as the source offsets they were produced from.
   drainPreCommit engine
   m <- readIORef (engineStores engine)
-  forM_ (Map.elems m) $ \se -> do
-    eflush <- try (storeEntryFlush se) :: IO (Either SomeException ())
-    case eflush of
-      Left e -> putStrLn ("[streams] store flush failed: " <> show e)
-      _ -> pure ()
+  let own = Map.elems (Map.withoutKeys m (engineShared engine))
+      -- A flush forwards downstream, which can dirty another store's
+      -- cache: go round until they are all clean (the topology is a
+      -- DAG, so this ends).
+      flushCaches = do
+        dirty <- or <$> mapM storeEntryFlushCache own
+        when dirty flushCaches
+  flushCaches
+  -- A store that cannot flush cannot commit: the failure propagates
+  -- so the runtime does not commit offsets past unpersisted state.
+  forM_ own storeEntryFlush
   collectorFlush (engineCollector engine)
-  Met.incCounter (engineMetrics engine) Met.commitTotal
+  bump engine ixCommitted
+
+
+-- | What a task's engine has done since it was built.
+data EngineCounts = EngineCounts
+  { ecProcessed :: {-# UNPACK #-} !Int
+  -- ^ Records handed to the topology
+  , ecDropped :: {-# UNPACK #-} !Int
+  -- ^ Records skipped: no value where one is required, or a deserialization failure handled by continuing
+  , ecPunctuated :: {-# UNPACK #-} !Int
+  , ecCommitted :: {-# UNPACK #-} !Int
+  }
+  deriving stock (Eq, Show)
+
+
+ixProcessed, ixDropped, ixPunctuated, ixCommitted, countersSize :: Int
+ixProcessed = 0
+ixDropped = 1
+ixPunctuated = 2
+ixCommitted = 3
+countersSize = 4
+
+
+bump :: Engine -> Int -> IO ()
+bump engine = UMV.unsafeModify (engineCounters engine) (+ 1)
+{-# INLINE bump #-}
+
+
+-- | Read from any thread (each count is one aligned word).
+readEngineCounts :: Engine -> IO EngineCounts
+readEngineCounts engine = do
+  let c = engineCounters engine
+  EngineCounts
+    <$> UMV.unsafeRead c ixProcessed
+    <*> UMV.unsafeRead c ixDropped
+    <*> UMV.unsafeRead c ixPunctuated
+    <*> UMV.unsafeRead c ixCommitted
 
 
 {- | Run every registered pre-commit drain in /registration order/.
@@ -1002,11 +1326,10 @@ forwarding they perform (via 'ProcessorContext.ctxForward') is
 not thread-safe. Each drain blocks until its background workers
 have caught up, then forwards any pending output downstream.
 
-Called automatically as the first step of 'commitEngine'.
-Exposed publicly for callers (and tests) that need an explicit
-drain boundary outside of a full commit cycle — e.g. the
-'Kafka.Streams.Runtime.EOS.EOSCoordinator' production runtime
-can invoke this directly between @beginTxn@ and @commitOffsets@.
+Called automatically as the first step of 'commitEngine' (so,
+under exactly-once, inside the commit's transaction). Exposed for
+callers (and tests) that need an explicit drain boundary outside a
+commit.
 -}
 drainPreCommit :: Engine -> IO ()
 drainPreCommit engine = do
@@ -1020,7 +1343,7 @@ drainPreCommit engine = do
       case r of
         Right () -> pure ()
         Left e -> do
-          putStrLn ("[streams] pre-commit drain failed: " <> show e)
+          SLog.logError ("pre-commit drain failed: " <> show e)
           -- Re-throw so 'commitEngine' surfaces the failure to
           -- the runtime; EOS-mode runtimes will abort the
           -- transaction rather than commit an inconsistent
@@ -1035,24 +1358,29 @@ closeEngine engine = do
     eclose <- try (prClose pr) :: IO (Either SomeException ())
     case eclose of
       Left e ->
-        putStrLn $
-          "[streams] processor close failed ("
+        SLog.logWarn $
+          "processor close failed ("
             <> T.unpack (unProcessorName (prName pr))
             <> "): "
             <> show e
       _ -> pure ()
   ses <- readIORef (engineStores engine)
-  forM_ (Map.elems ses) $ \se -> do
+  forM_ (Map.elems (Map.withoutKeys ses (engineShared engine))) $ \se -> do
     eclose <- try (storeEntryClose se) :: IO (Either SomeException ())
     case eclose of
       Left e ->
-        putStrLn $
-          "[streams] store close failed ("
+        SLog.logWarn $
+          "store close failed ("
             <> T.unpack (unStoreName (storeEntryName se))
             <> "): "
             <> show e
       _ -> pure ()
   collectorClose (engineCollector engine)
+
+
+-- | The stores this engine built (not the shared ones).
+engineOwnStores :: Engine -> IO (Map StoreName StoreEntry)
+engineOwnStores engine = (`Map.withoutKeys` engineShared engine) <$> readIORef (engineStores engine)
 
 
 storeByName :: Engine -> StoreName -> IO (Maybe StoreEntry)

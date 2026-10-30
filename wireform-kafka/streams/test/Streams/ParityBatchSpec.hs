@@ -73,7 +73,7 @@ properties_style_config =
     bootstrapServers cfg `shouldBe` ["h1:9092", "h2:9092"]
     numStreamThreads cfg `shouldBe` 4
     processingGuarantee cfg `shouldBe` ExactlyOnceV2
-    commitIntervalMs cfg `shouldBe` 5000
+    commitIntervalMs cfg `shouldBe` Just 5000
 
 
 properties_style_unknown_key_is_ignored :: Spec

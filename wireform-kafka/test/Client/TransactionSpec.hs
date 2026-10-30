@@ -13,7 +13,9 @@ import Data.IORef (readIORef)
 import Hedgehog qualified as H
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
+import Kafka.Client.AdminClient qualified as Admin
 import Kafka.Client.Consumer (TopicPartition (..))
+import Kafka.Client.Internal.TransactionCoordinator (TxnGroupMember (..))
 import Kafka.Client.Transaction
 import Kafka.Network.Connection (BrokerAddress (..), ConnectionManager)
 import Kafka.Network.Connection qualified as Conn
@@ -25,6 +27,9 @@ import TestUtil.BrokerGate (brokerCase, brokerProperty)
 
 {- | Helper: Create a test transaction with mock infrastructure
 This allows us to test state machine logic without real network connections
+
+Every case uses its own transactional id: the cases run concurrently,
+and two producers sharing one id fence each other on a real broker.
 -}
 createTestTransaction :: TransactionalId -> IO Transaction
 createTestTransaction txnId = do
@@ -38,6 +43,7 @@ createTestTransaction txnId = do
   createTransaction
     txnId
     connMgr
+    Conn.defaultConnectionConfig
     versionCache
     "test-client"
     (BrokerAddress "localhost" 9092)
@@ -82,14 +88,14 @@ transactionSpec =
             ]
       , describe "Offset Commits (requires broker)" $
           sequence_
-            [ brokerCase "unit_commitOffsetsInTransaction" unit_commitOffsetsInTransaction
+            [ brokerCase "unit_sendOffsetsToTransaction" unit_commitOffsetsInTransaction
             , brokerCase "unit_cannotCommitOffsetsOutsideTransaction" unit_cannotCommitOffsetsOutsideTransaction
             ]
       , describe "Idempotency (requires broker)" $
           sequence_
             [ brokerCase "unit_sequenceNumbersIncrement" unit_sequenceNumbersIncrement
             , brokerCase "unit_sequenceNumbersPerPartition" unit_sequenceNumbersPerPartition
-            , brokerProperty "prop_sequenceNumbersMonotonic" prop_sequenceNumbersMonotonic
+            , brokerProperty "prop_sequenceNumbersMonotonic" 20 prop_sequenceNumbersMonotonic
             ]
       ]
 
@@ -100,7 +106,7 @@ transactionSpec =
 
 unit_createTransaction :: IO ()
 unit_createTransaction = do
-  let txnId = TransactionalId "test-txn"
+  let txnId = TransactionalId "test-txn-1"
   txn <- createTestTransaction txnId
 
   -- Verify initial state
@@ -121,14 +127,14 @@ unit_createTransaction = do
 
 unit_initialState :: IO ()
 unit_initialState = do
-  txn <- createTestTransaction (TransactionalId "test-txn")
+  txn <- createTestTransaction (TransactionalId "test-txn-2")
   state <- getTransactionState txn
   state `shouldBe` Uninitialized
 
 
 unit_stateTransitions :: IO ()
 unit_stateTransitions = do
-  txn <- createTestTransaction (TransactionalId "test-txn")
+  txn <- createTestTransaction (TransactionalId "test-txn-3")
 
   -- Uninitialized -> Ready
   success1 <- transitionState txn Ready
@@ -157,7 +163,7 @@ unit_stateTransitions = do
 
 unit_invalidTransitions :: IO ()
 unit_invalidTransitions = do
-  txn <- createTestTransaction (TransactionalId "test-txn")
+  txn <- createTestTransaction (TransactionalId "test-txn-4")
 
   -- Cannot go from Uninitialized to InTransaction
   success1 <- transitionState txn InTransaction
@@ -178,7 +184,7 @@ prop_stateTransitionsThreadSafe = H.property $ do
 
   H.annotate $ "Testing with " ++ show numThreads ++ " concurrent threads"
 
-  txn <- H.evalIO $ createTestTransaction (TransactionalId "test-txn")
+  txn <- H.evalIO $ createTestTransaction (TransactionalId "test-txn-5")
 
   -- Initialize first
   _ <- H.evalIO $ transitionState txn Ready
@@ -203,7 +209,7 @@ prop_stateTransitionsThreadSafe = H.property $ do
 
 unit_initTransactions :: IO ()
 unit_initTransactions = do
-  txn <- createTestTransaction (TransactionalId "test-txn")
+  txn <- createTestTransaction (TransactionalId "test-txn-6")
 
   result <- initTransactions txn
   case result of
@@ -221,7 +227,7 @@ unit_initTransactions = do
 
 unit_beginTransaction :: IO ()
 unit_beginTransaction = do
-  txn <- createTestTransaction (TransactionalId "test-txn")
+  txn <- createTestTransaction (TransactionalId "test-txn-7")
 
   -- Must init first
   _ <- initTransactions txn
@@ -236,7 +242,7 @@ unit_beginTransaction = do
 
 unit_commitTransaction :: IO ()
 unit_commitTransaction = do
-  txn <- createTestTransaction (TransactionalId "test-txn")
+  txn <- createTestTransaction (TransactionalId "test-txn-8")
 
   -- Init and begin
   _ <- initTransactions txn
@@ -252,7 +258,7 @@ unit_commitTransaction = do
 
 unit_abortTransaction :: IO ()
 unit_abortTransaction = do
-  txn <- createTestTransaction (TransactionalId "test-txn")
+  txn <- createTestTransaction (TransactionalId "test-txn-9")
 
   -- Init and begin
   _ <- initTransactions txn
@@ -268,7 +274,7 @@ unit_abortTransaction = do
 
 unit_cannotBeginTwice :: IO ()
 unit_cannotBeginTwice = do
-  txn <- createTestTransaction (TransactionalId "test-txn")
+  txn <- createTestTransaction (TransactionalId "test-txn-10")
   _ <- initTransactions txn
   _ <- beginTransaction txn
 
@@ -282,7 +288,7 @@ unit_cannotBeginTwice = do
 
 unit_cannotCommitWithoutBegin :: IO ()
 unit_cannotCommitWithoutBegin = do
-  txn <- createTestTransaction (TransactionalId "test-txn")
+  txn <- createTestTransaction (TransactionalId "test-txn-11")
   _ <- initTransactions txn
 
   -- Try to commit without begin
@@ -295,7 +301,7 @@ unit_cannotCommitWithoutBegin = do
 
 unit_cannotAbortWithoutBegin :: IO ()
 unit_cannotAbortWithoutBegin = do
-  txn <- createTestTransaction (TransactionalId "test-txn")
+  txn <- createTestTransaction (TransactionalId "test-txn-12")
   _ <- initTransactions txn
 
   -- Try to abort without begin
@@ -312,7 +318,7 @@ unit_cannotAbortWithoutBegin = do
 
 unit_withTransactionCommitsOnSuccess :: IO ()
 unit_withTransactionCommitsOnSuccess = do
-  txn <- createTestTransaction (TransactionalId "test-txn")
+  txn <- createTestTransaction (TransactionalId "test-txn-13")
   _ <- initTransactions txn
 
   result <- withTransaction txn $ do
@@ -328,7 +334,7 @@ unit_withTransactionCommitsOnSuccess = do
 
 unit_withTransactionAbortsOnException :: IO ()
 unit_withTransactionAbortsOnException = do
-  txn <- createTestTransaction (TransactionalId "test-txn")
+  txn <- createTestTransaction (TransactionalId "test-txn-14")
   _ <- initTransactions txn
 
   result <- withTransaction txn $ do
@@ -344,7 +350,7 @@ unit_withTransactionAbortsOnException = do
 
 unit_withTransactionNested :: IO ()
 unit_withTransactionNested = do
-  txn <- createTestTransaction (TransactionalId "test-txn")
+  txn <- createTestTransaction (TransactionalId "test-txn-15")
   _ <- initTransactions txn
 
   -- Cannot nest transactions
@@ -368,7 +374,7 @@ unit_withTransactionNested = do
 
 unit_sendInTransaction :: IO ()
 unit_sendInTransaction = do
-  txn <- createTestTransaction (TransactionalId "test-txn")
+  txn <- createTestTransaction (TransactionalId "test-txn-16")
   _ <- initTransactions txn
   _ <- beginTransaction txn
 
@@ -382,7 +388,7 @@ unit_sendInTransaction = do
 
 unit_sendTracksPartitions :: IO ()
 unit_sendTracksPartitions = do
-  txn <- createTestTransaction (TransactionalId "test-txn")
+  txn <- createTestTransaction (TransactionalId "test-txn-17")
   _ <- initTransactions txn
   _ <- beginTransaction txn
 
@@ -403,7 +409,7 @@ unit_sendTracksPartitions = do
 
 unit_sendIncrementsSequence :: IO ()
 unit_sendIncrementsSequence = do
-  txn <- createTestTransaction (TransactionalId "test-txn")
+  txn <- createTestTransaction (TransactionalId "test-txn-18")
   _ <- initTransactions txn
   _ <- beginTransaction txn
 
@@ -424,7 +430,7 @@ unit_sendIncrementsSequence = do
 
 unit_cannotSendOutsideTransaction :: IO ()
 unit_cannotSendOutsideTransaction = do
-  txn <- createTestTransaction (TransactionalId "test-txn")
+  txn <- createTestTransaction (TransactionalId "test-txn-19")
   _ <- initTransactions txn
 
   let tp = TopicPartition "test-topic" 0
@@ -442,31 +448,34 @@ unit_cannotSendOutsideTransaction = do
 
 unit_commitOffsetsInTransaction :: IO ()
 unit_commitOffsetsInTransaction = do
-  txn <- createTestTransaction (TransactionalId "test-txn")
+  txn <- createTestTransaction (TransactionalId "test-txn-20")
   _ <- initTransactions txn
   _ <- beginTransaction txn
 
+  -- The coordinator only takes offsets for partitions that exist.
+  _ <-
+    Admin.withAdminClient ["localhost:9092"] Admin.defaultAdminClientConfig $ \admin ->
+      Admin.createTopics admin [Admin.NewTopic "wireform-txn-offsets" 2 1 []]
   let offsets =
         Map.fromList
-          [ (TopicPartition "topic1" 0, 100)
-          , (TopicPartition "topic1" 1, 200)
-          , (TopicPartition "topic2" 0, 50)
+          [ (TopicPartition "wireform-txn-offsets" 0, 100)
+          , (TopicPartition "wireform-txn-offsets" 1, 200)
           ]
 
-  result <- commitOffsetsInTransaction txn "consumer-group-1" offsets
+  result <- sendOffsetsToTransaction txn (BrokerAddress "localhost" 9092) standaloneMember (Map.toList offsets)
 
   case result of
-    Left err -> expectationFailure $ "commitOffsetsInTransaction failed: " ++ show err
+    Left err -> expectationFailure $ "sendOffsetsToTransaction failed: " ++ show err
     Right () -> return ()
 
 
 unit_cannotCommitOffsetsOutsideTransaction :: IO ()
 unit_cannotCommitOffsetsOutsideTransaction = do
-  txn <- createTestTransaction (TransactionalId "test-txn")
+  txn <- createTestTransaction (TransactionalId "test-txn-21")
   _ <- initTransactions txn
 
   let offsets = Map.fromList [(TopicPartition "topic1" 0, 100)]
-  result <- commitOffsetsInTransaction txn "consumer-group-1" offsets
+  result <- sendOffsetsToTransaction txn (BrokerAddress "localhost" 9092) standaloneMember (Map.toList offsets)
 
   case result of
     Left (TransactionNotInProgress _) -> return ()
@@ -480,7 +489,7 @@ unit_cannotCommitOffsetsOutsideTransaction = do
 
 unit_sequenceNumbersIncrement :: IO ()
 unit_sequenceNumbersIncrement = do
-  txn <- createTestTransaction (TransactionalId "test-txn")
+  txn <- createTestTransaction (TransactionalId "test-txn-22")
   _ <- initTransactions txn
   _ <- beginTransaction txn
 
@@ -495,7 +504,7 @@ unit_sequenceNumbersIncrement = do
 
 unit_sequenceNumbersPerPartition :: IO ()
 unit_sequenceNumbersPerPartition = do
-  txn <- createTestTransaction (TransactionalId "test-txn")
+  txn <- createTestTransaction (TransactionalId "test-txn-23")
   _ <- initTransactions txn
   _ <- beginTransaction txn
 
@@ -520,7 +529,7 @@ prop_sequenceNumbersMonotonic = H.property $ do
 
   H.annotate $ "Sending " ++ show numSends ++ " records"
 
-  txn <- H.evalIO $ createTestTransaction (TransactionalId "test-txn")
+  txn <- H.evalIO $ createTestTransaction (TransactionalId "test-txn-24")
   _ <- H.evalIO $ initTransactions txn
   _ <- H.evalIO $ beginTransaction txn
 
@@ -544,5 +553,20 @@ prop_sequenceNumbersMonotonic = H.property $ do
   -- Extract the values
   let values = map (\(Just v) -> v) seqNumbers
 
+  H.evalIO $ Conn.closeAllConnections (txnConnectionManager txn)
+
   -- Should be monotonically increasing from 1 to numSends
   H.assert (values == [1 .. fromIntegral numSends])
+
+
+{- | A member outside any consumer group (generation -1, no member id),
+which the coordinator accepts for a plain transactional offset commit.
+-}
+standaloneMember :: TxnGroupMember
+standaloneMember =
+  TxnGroupMember
+    { tgmGroupId = "consumer-group-1"
+    , tgmGenerationId = -1
+    , tgmMemberId = ""
+    , tgmGroupInstanceId = Nothing
+    }

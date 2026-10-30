@@ -18,8 +18,6 @@ tests =
     sequence_
       [ optimize_topology_is_identity_when_off
       , optimize_topology_with_default_config
-      , lag_listener_receives_published_snapshot
-      , lag_listener_default_does_nothing
       ]
 
 
@@ -35,11 +33,7 @@ optimize_topology_is_identity_when_off :: Spec
 optimize_topology_is_identity_when_off =
   it "optimizeTopology is the identity when no toggles are enabled" $ do
     topo <- mkSimpleTopo
-    let cfg =
-          OptimizationConfig
-            { optMergeRepartitionTopics = False
-            , optReuseSourceKTable = False
-            }
+    let cfg = noOptimisations
         topo' = optimizeTopology cfg topo
     -- Same node count after optimisation (currently a no-op).
     length (topoOrder topo') `shouldBe` length (topoOrder topo)
@@ -69,25 +63,3 @@ mkRuntime = do
         v
 
 
-lag_listener_receives_published_snapshot :: Spec
-lag_listener_receives_published_snapshot =
-  it "publishLag dispatches to the registered listener" $ do
-    ks <- mkRuntime
-    received <- newIORef ([] :: [LagInfo])
-    setLagListener ks (writeIORef received)
-
-    let snapshot =
-          [ LagInfo (TaskId 0 0) 100 200
-          , LagInfo (TaskId 0 1) 300 305
-          ]
-    publishLag ks snapshot
-    readIORef received >>= (`shouldBe` snapshot)
-    closeKafkaStreams ks
-
-
-lag_listener_default_does_nothing :: Spec
-lag_listener_default_does_nothing =
-  it "default lag listener is a no-op (no exception when called)" $ do
-    ks <- mkRuntime
-    publishLag ks [LagInfo (TaskId 0 0) 0 0]
-    closeKafkaStreams ks

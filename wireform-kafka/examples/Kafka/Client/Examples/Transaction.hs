@@ -41,6 +41,7 @@ runDemo = do
         Transaction.createTransaction
           (Transaction.TransactionalId txnId)
           connMgr
+          Conn.defaultConnectionConfig
           vCache
           "demo-client"
           (Conn.BrokerAddress "localhost" 9092)

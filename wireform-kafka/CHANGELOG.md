@@ -10,6 +10,100 @@ and this project adheres to the
 
 ### Added
 
+- **Kafka Streams runtime, rebuilt on a `StreamDriver` seam**
+  (`Kafka.Streams.Runtime.{Driver,NativeDriver,MockBroker}`): one task
+  per subtopology and partition with co-partitioned routing,
+  timestamp-ordered processing and back-pressure; changelogged stores
+  restored before processing (checkpoints for persistent stores);
+  repartition topics and global tables; exactly-once v2 (one
+  transaction per commit, abort recovery from the changelogs, state
+  wipe after an unclean stop); KTable change semantics (deletes and
+  retractions reach every derived table, re-grouped aggregations, the
+  KIP-213 foreign-key join); `MockBroker`, an in-memory cluster that
+  runs the real runtime end to end, with fault injection.
+- **Streams group assignor** (`Kafka.Streams.Runtime.GroupAssignor`,
+  protocol `streams`): lag-aware, sticky, thread-proportional dealing of
+  whole tasks; `num.standby.replicas` standby tasks kept current from the
+  changelogs and promoted warm; KIP-441 warmups and probing rebalances;
+  KIP-535 discovery (`applicationServer`, `streamsMetadata`,
+  `queryMetadataForKey`, stale IQ reads from standbys). On the client:
+  `Kafka.Client.Assignor` custom assignors with assignment user data,
+  `Consumer.setAssignmentStrategy` / `setAssignmentHook`.
+- **Suppress buffers are time-ordered**: `suppressWindowed`,
+  `suppressWindowedShed` and `suppressUntilTimeLimit` scanned their
+  whole buffer on every record and stream-time tick; they now keep a
+  (time, key) index (rebuilt from the store after a restore) and evict
+  only what is due. As on the JVM, a record is buffered before the due
+  entries go, a window is emitted once stream time reaches its end plus
+  grace, and an emitted record carries its last update's timestamp. The
+  buffer cap counts the restored entries too. Windowed suppression ran
+  with an error-thunk key serde for its changelog; it now has
+  `windowedSerde`.
+- **Windowed aggregations**: the aggregators forward each update keyed
+  by its window themselves (the stream conversion rescanned the key's
+  windows on every update and kept an ever-growing map of what it had
+  sent); a record still updates its open windows when some of its
+  hopping windows have closed (it was all or nothing); a windowed
+  cogroup uses its windows (it bucketed into tumbling windows) and
+  forwards every side's updates (only the first side's reached the
+  stream); every window update is forwarded, as on the JVM, not only
+  changed values. Session aggregates drop records past the grace
+  period, and their stream is keyed by `SessionKey` with `Nothing`
+  for each session merged into a larger one (`sessionKeySerde`).
+- **`SINGLE_STORE_SELF_JOIN`** (KIP-862): an inner window join of a
+  stream with itself runs on one store and processor when
+  `optSingleStoreSelfJoin` is set, with output identical to the
+  two-store join. `topologyOptimization` (`topology.optimization`, a
+  level or a comma-separated list) is applied by the instance. A node
+  now forwards to its children in the order they were added (it was
+  the reverse), as the JVM does.
+- **Stream-stream joins follow the JVM**: the right side matches the
+  mirror of the left side's window (asymmetric `before` / `after` were
+  applied the same way on both sides); records with the same key and
+  timestamp are all kept (they overwrote each other); a joined record
+  carries the later timestamp; stores keep records for the grace
+  period too; both sides share one stream time; left and outer joins
+  hold unmatched records until their window closes and emit them only
+  then (KIP-633) instead of emitting `(v, Nothing)` at once. The
+  `Joined` serdes and name are used for the join stores.
+- **Rack-aware assignment** (KIP-925, KIP-708): `clientRack`,
+  `clientTags` and `rackAwareAssignment` (`client.rack`, `client.tag.*`,
+  `rack.aware.assignment.*`). With `min_traffic` or
+  `balance_subtopology` the leader re-deals active tasks by a min-cost
+  flow (`Kafka.Streams.Runtime.MinCostFlow`) toward the racks of their
+  partitions' replicas (`sdPartitionRacks`), keeping task counts and
+  never moving a task cold; standbys prefer clients with tag values the
+  task's other replicas lack. User task assignors see the racks, tags
+  and costs. Default costs are the JVM's (traffic 10, non-overlap 1).
+- **Record caches** (`statestoreCacheMaxBytes`, JVM
+  `statestore.cache.max.bytes`, default 10 MiB split over the active
+  tasks): the DSL's table stores buffer writes per key, and the store,
+  its changelog and the operators downstream get the latest value of
+  each key once per commit (earlier when a task's share fills up), as
+  one change with the store's previous value. Reads and interactive
+  queries see the buffered writes. `withCachingDisabled` (and
+  `statestoreCacheMaxBytes = 0`) forwards every update at once, as
+  before; `withCachingEnabledKV` caches a Processor API store.
+  Replaces the free-standing `cachingKeyValueStore`. Windowed
+  aggregations' stores are cached per window the same way
+  (`withCachingEnabledW` for a Processor API window store), and session
+  aggregations' per session (`withCachingEnabledS`): a session created
+  and merged away between two flushes is neither stored, logged nor
+  retracted downstream.
+- **Pattern sources at runtime**: `streamFromPattern` /
+  `sourcePattern` topics are resolved against the cluster when the
+  instance starts (whole-name match, internal topics left out) and again
+  every `metadataMaxAgeMs` (`metadata.max.age.ms`); a change re-plans the
+  instance in place (commit, clean close, new plan, rejoin) with its
+  state carried over. `StreamDriver` gains `sdListTopics`.
+- **Commit participants** (`Kafka.Streams.Runtime.Commit`): two-phase
+  sinks (`twoPhaseParticipant`) prepare with every commit, are recorded
+  in `<app>-twophase-commits` inside the transaction, commit after it,
+  and are settled at the next start after a crash.
+- **Streams metrics from the running instance** (`streamsMetrics`):
+  per-task unboxed counters plus commits, aborts, recoveries,
+  rebalances, restored and standby records; `localTaskLags`.
+
 - **`wireform-kafka-protocol` sublibrary.** Codegen-emitted
   `Kafka.Protocol.Generated.*` wire records (and
   `Kafka.Protocol.{Primitives,Message,Wire.*}`) live in a dedicated
@@ -58,19 +152,27 @@ and this project adheres to the
   configured `client.id` / `application.id`. Switches to the
   broker-assigned id when the `GetTelemetrySubscriptions`
   pipeline lands. (Consumer already had this in v3e.)
-- **KIP-924 `TaskAssignor` plug-in wiring.**
-  `Kafka.Streams.Config.StreamsConfig.taskAssignor`
-  (`Maybe TaskAssignor`) carries a user-supplied assignor
-  through the runtime; `Kafka.Streams.Runtime.streamsRunUserAssignor`
-  constructs the `ApplicationState` from the live runtime
-  view and invokes the plug-in. The leader-side rebalance
-  still defaults to the built-in cooperative-sticky
-  assignor; the assignment source can flip over to the
-  plug-in in a follow-up without changing the public
-  interface.
+- **KIP-924 `TaskAssignor`.** `StreamsConfig.taskAssignor`
+  replaces the streams group assignor's dealing at every
+  rebalance; the result is validated (`AssignmentError`, incl.
+  `MissingActiveTask`) and an invalid one falls back to the
+  built-in assignment. `KafkaStreamsState` carries per-task lags.
 
 ### Changed
 
+- **Kafka Streams.** `groupTableBy` returns a re-grouped table with
+  subtract/add semantics; table operators forward `Change`s;
+  aggregations return `KTable`s. Orphan-topic detection derives the
+  expected topics from the planner. The ops demos run the real runtime
+  on `MockBroker`.
+- **Removed (Kafka Streams).** `Runtime.EOS` (`EOSCoordinator`,
+  `runCommitCycle`, `withTwoPhaseSinks`), the `Kafka.Streams.Mock.*`
+  simulated runtime and `MultiInstanceMockHarness`, `Runtime.{Task,
+  StandbyTask,StandbyDriver,ProbingRebalance}`, `reportWarmupLag`,
+  `streamsRunUserAssignor`, `setLagListener` / `publishLag`,
+  `groupByKTable`, and the config knobs the runtime never read
+  (dispatch mode, cache size, task timeout, assignor class, DSL store,
+  rack awareness, window size, upgrade.from).
 - **Module consolidation.** Folded the JVM-equivalence SDK
   shims and admin long-tail RPCs back into their primary
   modules so the public surface has one obvious home per
@@ -138,18 +240,6 @@ and this project adheres to the
   built `Printed` to a `KStream`. Bracket-form
   `withPrintedFile` / `withPrintedRotatingFile` for
   deterministic shutdown.
-- **`Kafka.Streams.Runtime.MultiInstanceMockHarness`** — live
-  multi-instance rebalance harness over the in-process
-  `MockCluster`. `newMockSet` spins up N
-  `MockStreamsDriver`s sharing the same group, `tickAll` /
-  `tickAllUntilQuiet` / `refreshAll` drive them step-by-step,
-  `crashInstance` evicts a member and triggers reassignment.
-  `Streams.MultiInstanceRebalanceSpec` adds 4 cases (assignor
-  covers + disjoint, sink routing end-to-end, partition
-  migration on instance loss, Hedgehog property over
-  arbitrary (instances, partitions)). Closes the
-  multi-instance code-side parity gap; an OS-level
-  multi-process broker fixture is still follow-up CI work.
 - **Schema Registry compatibility-mode probing.**
   `Kafka.Streams.Serde.SchemaRegistry.SchemaRegistryClient`
   gained two new methods: `srCompatibilityMode` (read the

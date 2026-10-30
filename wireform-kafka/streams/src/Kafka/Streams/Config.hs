@@ -12,10 +12,8 @@ against the original key name so users porting code can grep across.
 module Kafka.Streams.Config (
   -- * Config
   StreamsConfig (..),
-  DslStore (..),
-  RackAwareStrategy (..),
-  DispatchMode (..),
   defaultStreamsConfig,
+  effectiveCommitIntervalMs,
 
   -- * Processing semantics
   ProcessingGuarantee (..),
@@ -35,13 +33,22 @@ import Data.List (foldl')
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Read qualified as TR
 import GHC.Generics (Generic)
+import Kafka.Client.AdminClient qualified as KA
+import Kafka.Client.Consumer qualified as KC
+import Kafka.Client.Producer qualified as KP
 import Kafka.Streams.Errors (
   DeserializationHandler,
+  ProcessingExceptionHandler,
   ProductionHandler,
-  logAndContinue,
+  logAndFail,
+  logAndFailProcessing,
+  logAndFailProduction,
  )
-import Kafka.Streams.Processor.Assignment (TaskAssignor)
+import Kafka.Streams.Discovery (HostInfo, parseHostInfo)
+import Kafka.Streams.Processor.Assignment (RackAwareAssignmentConfigs (..), TaskAssignor, defaultRackAwareAssignmentConfigs)
+import Kafka.Streams.Topology.Optimization (OptimizationFlags, noOptimizations, parseOptimizationFlags)
 
 
 -- | What level of processing-guarantee should the runtime offer?
@@ -63,13 +70,29 @@ dropped):
   * 'numStandbyReplicas'        — @num.standby.replicas@
   * 'commitIntervalMs'          — @commit.interval.ms@
   * 'pollMs'                    — @poll.ms@
-  * 'cacheMaxBytesBuffering'    — @cache.max.bytes.buffering@
   * 'maxTaskIdleMs'             — @max.task.idle.ms@
   * 'processingGuarantee'       — @processing.guarantee@
   * 'replicationFactor'         — @replication.factor@
   * 'stateDir'                  — @state.dir@
   * 'defaultDeserHandler'       — @default.deserialization.exception.handler@
   * 'defaultProductionHandler'  — @default.production.exception.handler@
+  * 'defaultProcessingHandler'  — @processing.exception.handler@
+  * 'bufferedRecordsPerPartition' — @buffered.records.per.partition@
+  * 'applicationServer'         — @application.server@
+  * 'acceptableRecoveryLag', 'maxWarmupReplicas',
+    'probingRebalanceIntervalMs' — the KIP-441 keys
+  * 'metadataMaxAgeMs'          — @metadata.max.age.ms@ (pattern sources)
+  * 'statestoreCacheMaxBytes'   — @statestore.cache.max.bytes@ (record caches)
+  * 'topologyOptimization'      — @topology.optimization@
+  * 'clientRack', 'clientTags', 'rackAwareAssignment' — @client.rack@,
+    @client.tag.*@ and the @rack.aware.assignment.*@ keys
+
+The embedded clients are configured from these; 'consumerOverrides',
+'producerOverrides' and 'adminOverrides' adjust anything else on them
+(the JVM's @consumer.@ / @producer.@ / @admin.@ prefixed properties).
+
+Keys the runtime has no behaviour for are ignored by
+'streamsConfigFromMap', like any unknown key.
 -}
 data StreamsConfig = StreamsConfig
   { applicationId :: !Text
@@ -77,22 +100,52 @@ data StreamsConfig = StreamsConfig
   , clientId :: !Text
   , numStreamThreads :: !Int
   , numStandbyReplicas :: !Int
-  , commitIntervalMs :: !Int
+  {- ^ Standby replicas per stateful task, on other instances: stores
+  kept current from the changelogs, so a failover restores only what
+  they haven't applied yet
+  -}
+  , commitIntervalMs :: !(Maybe Int)
+  {- ^ 'Nothing': 30 s at least once, 100 ms exactly once (the JVM
+  defaults); see 'effectiveCommitIntervalMs'.
+  -}
   , pollMs :: !Int
-  , cacheMaxBytesBuffering :: !Int64
   , maxTaskIdleMs :: !Int
   , processingGuarantee :: !ProcessingGuarantee
   , replicationFactor :: !Int
   , stateDir :: !FilePath
   , defaultDeserHandler :: !DeserializationHandler
-  , defaultProductionHandler :: !(Maybe ProductionHandler)
-  , -- KIP-892 / Streams full-config-surface additions ------------
-    taskTimeoutMs :: !Int
-  {- ^ @task.timeout.ms@ — how long a task may stall on a
-  recoverable error before the runtime kills it. Default
-  300_000 (5 minutes), matching Java.
+  -- ^ Default: fail (the JVM's @LogAndFailExceptionHandler@)
+  , defaultProductionHandler :: !ProductionHandler
+  -- ^ Default: fail. Only consulted at least once; under exactly-once a failed send aborts the transaction.
+  , defaultProcessingHandler :: !ProcessingExceptionHandler
+  -- ^ Default: fail (KIP-1033's @LogAndFailProcessingExceptionHandler@)
+  , bufferedRecordsPerPartition :: !Int
+  -- ^ A partition is paused once this many of its records wait unprocessed
+  , consumerOverrides :: !(KC.ConsumerConfig -> KC.ConsumerConfig)
+  , producerOverrides :: !(KP.ProducerConfig -> KP.ProducerConfig)
+  , adminOverrides :: !(KA.AdminClientConfig -> KA.AdminClientConfig)
+  , clientRack :: !(Maybe Text)
+  {- ^ @client.rack@ — this instance's rack, for rack-aware assignment
+  ('rackAwareAssignment') and the consumer's follower fetching (KIP-392)
   -}
-  , acceptableRecoveryLag :: !Int64
+  , clientTags :: !(Map.Map Text Text)
+  -- ^ @client.tag.\<key\>@ — this instance's tags, for spreading standbys (KIP-708)
+  , rackAwareAssignment :: !RackAwareAssignmentConfigs
+  {- ^ @rack.aware.assignment.strategy@ (@none@, @min_traffic@,
+  @balance_subtopology@), @.traffic_cost@, @.non_overlap_cost@ and
+  @.tags@ (KIP-925, KIP-708). With a strategy, and every instance
+  setting 'clientRack', the group leader moves active tasks to
+  instances on the racks their partitions' replicas are on
+  ("Kafka.Streams.Runtime.GroupAssignor"); with tags, a task's standbys
+  go to instances with tag values its other replicas lack.
+  -}
+  , applicationServer :: !(Maybe HostInfo)
+  {- ^ This instance's endpoint for interactive queries, shared with every
+  instance through the assignment ('Kafka.Streams.Runtime.streamsMetadata',
+  'Kafka.Streams.Runtime.queryMetadataForKey')
+  -}
+  , -- KIP-441 probing rebalances ---------------------------------
+    acceptableRecoveryLag :: !Int64
   {- ^ @acceptable.recovery.lag@ — maximum changelog lag (in
   records) at which a warmup replica is considered "caught
   up" and may be promoted to active. Default 10_000.
@@ -106,94 +159,43 @@ data StreamsConfig = StreamsConfig
   re-issuing rebalances to check whether warmups are
   ready. Default 600_000 (10 minutes).
   -}
-  , taskAssignorClass :: !(Maybe Text)
-  {- ^ @task.assignor.class@ — fully-qualified class name (or
-  our @Text@ tag for an in-process assignor) the runtime
-  should use when computing assignments. 'Nothing' (the
-  default) selects the built-in cooperative-sticky
-  assignor.
+  , statestoreCacheMaxBytes :: !Int64
+  {- ^ @statestore.cache.max.bytes@ (also read from the older
+  @cache.max.bytes.buffering@) — what the record caches of the
+  instance's key-value stores may hold, split evenly over its active
+  tasks ("Kafka.Streams.State.KeyValue.Caching"). A cache flushes at
+  every commit and when its task's share is exceeded, so a key
+  updated many times between commits is forwarded and logged once.
+  @0@ turns caching off: every update is forwarded at once. Default
+  10 MiB.
+  -}
+  , topologyOptimization :: !OptimizationFlags
+  {- ^ @topology.optimization@ — the rewrites the instance applies to
+  its topology when it is created ("Kafka.Streams.Topology.Optimization",
+  'Kafka.Streams.Topology.optimizeTopology'). Default none.
+  -}
+  , metadataMaxAgeMs :: !Int
+  {- ^ @metadata.max.age.ms@ — how often the topic list is fetched
+  again for pattern sources. When the topics a pattern matches change,
+  the instance commits, closes its tasks, re-plans the topology over
+  the new topics and rejoins the group. Default 300_000 (5 minutes).
   -}
   , taskAssignor :: !(Maybe TaskAssignor)
-  {- ^ KIP-924 in-process 'TaskAssignor' plug-in. When set,
-  the streams runtime's leader-side assignment path
-  invokes this plug-in instead of the built-in
-  cooperative-sticky assignor. 'Nothing' (the default)
-  keeps the built-in assignor. The streams runtime
-  reaches into this via
-  'Kafka.Streams.Runtime.streamsRunUserAssignor', which
-  constructs the 'ApplicationState' from the live
-  runtime view and invokes 'taAssign' on the plug-in.
-  -}
-  , applicationServer :: !(Maybe Text)
-  {- ^ KIP-67 @application.server@ — host:port advertised in
-  JoinGroup subscription metadata so peers can discover
-  this instance for cross-instance interactive queries.
-  'Nothing' disables advertisement.
-  -}
-  , defaultDslStore :: !DslStore
-  {- ^ KIP-591 @default.dsl.store@ — which backend the DSL
-  uses when 'Materialized' doesn't pin one (in-memory or
-  RocksDB). Today only 'DslInMemoryStore' is honoured.
-  -}
-  , rackAwareAssignmentStrategy :: !RackAwareStrategy
-  -- ^ KIP-925 @rack.aware.assignment.strategy@.
-  , rackAwareTrafficCost :: !Int
-  -- ^ KIP-925 @rack.aware.assignment.traffic.cost@.
-  , rackAwareNonOverlapCost :: !Int
-  -- ^ KIP-925 @rack.aware.assignment.non.overlap.cost@.
-  , windowSizeMs :: !(Maybe Int64)
-  {- ^ KIP-585 @window.size.ms@ — default window size used by
-  the windowed-serde auto-resolver when no explicit
-  serde is supplied.
-  -}
-  , upgradeFrom :: !(Maybe Text)
-  {- ^ @upgrade.from@ — multi-version upgrade compatibility
-  knob (read by the assignor on a rolling upgrade).
-  -}
-  , dispatchMode :: !DispatchMode
-  {- ^ Riffle \xc2\xa72 — pick which 'Kafka.Streams.Runtime.WorkerPool'
-  constructor the runtime uses. Default
-  'DispatchPartition' preserves today's behaviour.
+  {- ^ KIP-924: the group leader deals the tasks with this instead of
+  the built-in assignor ("Kafka.Streams.Runtime.GroupAssignor"); an
+  invalid result (see 'Kafka.Streams.Processor.Assignment') falls
+  back to the built-in one. Every instance should set the same one:
+  whichever is the leader decides.
   -}
   }
 
 
-{- | Riffle \xc2\xa72 worker-pool dispatch mode. Picked at startup; the
-pool is built once and routes records by this scheme for its
-lifetime.
--}
-data DispatchMode
-  = {- | Current behaviour: 'newWorkerPool' with explicit
-    per-worker @(topic, partition)@ ownership.
-    -}
-    DispatchPartition
-  | {- | Current behaviour: 'newWorkerPoolHashed', routes by
-    @hash (topic, partition) mod workerCount@.
-    -}
-    DispatchHashed
-  | {- | Riffle behaviour: 'newWorkerPoolKeyGrouped' with a
-    'Kafka.Streams.Runtime.KeyGroup.KeyGroupConfig'. The
-    runtime hashes record keys to key-groups and dispatches
-    by the live 'KeyGroupAssignment'. Decouples parallelism
-    from partition count.
-    -}
-    DispatchKeyGroup
-  deriving stock (Eq, Show)
-
-
--- | KIP-591 @default.dsl.store@ enum.
-data DslStore
-  = DslInMemoryStore
-  | DslRocksDbStore
-  deriving stock (Eq, Show)
-
-
--- | KIP-925 rack-aware assignment-strategy enum.
-data RackAwareStrategy
-  = RackAwareNone
-  | RackAwareMinTrafficCost
-  | RackAwareBalanceSubtopology
-  deriving stock (Eq, Show)
+-- | The commit interval in effect ('commitIntervalMs' or its guarantee's default).
+effectiveCommitIntervalMs :: StreamsConfig -> Int
+effectiveCommitIntervalMs cfg = case (commitIntervalMs cfg, processingGuarantee cfg) of
+  (Just ms, _) -> ms
+  (Nothing, ExactlyOnceV2) -> 100
+  (Nothing, AtLeastOnceP) -> defaultCommitIntervalMs
 
 
 defaultCommitIntervalMs :: Int
@@ -219,30 +221,31 @@ defaultStreamsConfig =
     , clientId = "kafka-streams-client"
     , numStreamThreads = 1
     , numStandbyReplicas = 0
-    , commitIntervalMs = defaultCommitIntervalMs
+    , commitIntervalMs = Nothing
     , pollMs = defaultPollMs
-    , cacheMaxBytesBuffering = 10 * 1024 * 1024
     , maxTaskIdleMs = 0
     , processingGuarantee = AtLeastOnceP
     , replicationFactor = 1
     , stateDir = defaultStateDir
-    , defaultDeserHandler = logAndContinue
-    , defaultProductionHandler = Nothing
-    , taskTimeoutMs = 300_000
+    , defaultDeserHandler = logAndFail
+    , defaultProductionHandler = logAndFailProduction
+    , defaultProcessingHandler = logAndFailProcessing
+    , bufferedRecordsPerPartition = 1000
+    , consumerOverrides = id
+    , producerOverrides = id
+    , adminOverrides = id
+    , applicationServer = Nothing
     , acceptableRecoveryLag = 10_000
     , maxWarmupReplicas = 2
     , probingRebalanceIntervalMs = 600_000
-    , taskAssignorClass = Nothing
+    , topologyOptimization = noOptimizations
+    , metadataMaxAgeMs = 300_000
+    , clientRack = Nothing
+    , clientTags = Map.empty
+    , rackAwareAssignment = defaultRackAwareAssignmentConfigs
+    , statestoreCacheMaxBytes = 10 * 1024 * 1024
     , taskAssignor = Nothing
-    , applicationServer = Nothing
-    , defaultDslStore = DslInMemoryStore
-    , rackAwareAssignmentStrategy = RackAwareNone
-    , rackAwareTrafficCost = 1
-    , rackAwareNonOverlapCost = 10
-    , windowSizeMs = Nothing
-    , upgradeFrom = Nothing
-    , dispatchMode = DispatchPartition
-    }
+      }
 
 
 ----------------------------------------------------------------------
@@ -268,8 +271,8 @@ Recognised keys (matching Java):
   * @num.standby.replicas@
   * @commit.interval.ms@
   * @poll.ms@
-  * @cache.max.bytes.buffering@
   * @max.task.idle.ms@
+  * @buffered.records.per.partition@
   * @processing.guarantee@         — @"at_least_once"@ or @"exactly_once_v2"@
   * @replication.factor@
   * @state.dir@
@@ -290,11 +293,11 @@ streamsConfigFromMap m = foldl' step defaultStreamsConfig (Map.toAscList m)
       "num.standby.replicas" ->
         maybe cfg (\n -> cfg {numStandbyReplicas = n}) (readT v)
       "commit.interval.ms" ->
-        maybe cfg (\n -> cfg {commitIntervalMs = n}) (readT v)
+        maybe cfg (\n -> cfg {commitIntervalMs = Just n}) (readT v)
       "poll.ms" ->
         maybe cfg (\n -> cfg {pollMs = n}) (readT v)
-      "cache.max.bytes.buffering" ->
-        maybe cfg (\n -> cfg {cacheMaxBytesBuffering = n}) (readT v)
+      "buffered.records.per.partition" ->
+        maybe cfg (\n -> cfg {bufferedRecordsPerPartition = n}) (readT v)
       "max.task.idle.ms" ->
         maybe cfg (\n -> cfg {maxTaskIdleMs = n}) (readT v)
       "processing.guarantee" -> case v of
@@ -304,41 +307,36 @@ streamsConfigFromMap m = foldl' step defaultStreamsConfig (Map.toAscList m)
       "replication.factor" ->
         maybe cfg (\n -> cfg {replicationFactor = n}) (readT v)
       "state.dir" -> cfg {stateDir = T.unpack v}
-      "task.timeout.ms" ->
-        maybe cfg (\n -> cfg {taskTimeoutMs = n}) (readT v)
+      "application.server" -> either (const cfg) (\h -> cfg {applicationServer = Just h}) (parseHostInfo v)
+      "client.rack" -> cfg {clientRack = if T.null v then Nothing else Just v}
+      "rack.aware.assignment.strategy" -> cfg {rackAwareAssignment = (rackAwareAssignment cfg) {raStrategy = v}}
+      "rack.aware.assignment.traffic_cost" ->
+        maybe cfg (\n -> cfg {rackAwareAssignment = (rackAwareAssignment cfg) {raTrafficCost = n}}) (readT v)
+      "rack.aware.assignment.non_overlap_cost" ->
+        maybe cfg (\n -> cfg {rackAwareAssignment = (rackAwareAssignment cfg) {raNonOverlapCost = n}}) (readT v)
+      "rack.aware.assignment.tags" ->
+        cfg {rackAwareAssignment = (rackAwareAssignment cfg) {raAssignmentTags = filter (not . T.null) (map T.strip (T.splitOn "," v))}}
+      _
+        | Just tag <- T.stripPrefix "client.tag." k ->
+            cfg {clientTags = Map.insert tag v (clientTags cfg)}
       "acceptable.recovery.lag" ->
         maybe cfg (\n -> cfg {acceptableRecoveryLag = n}) (readT v)
       "max.warmup.replicas" ->
         maybe cfg (\n -> cfg {maxWarmupReplicas = n}) (readT v)
       "probing.rebalance.interval.ms" ->
         maybe cfg (\n -> cfg {probingRebalanceIntervalMs = n}) (readT v)
-      "task.assignor.class" -> cfg {taskAssignorClass = Just v}
-      "application.server" -> cfg {applicationServer = Just v}
-      "default.dsl.store" -> case v of
-        "in_memory" -> cfg {defaultDslStore = DslInMemoryStore}
-        "ROCKS_DB" -> cfg {defaultDslStore = DslRocksDbStore}
-        "rocksdb" -> cfg {defaultDslStore = DslRocksDbStore}
-        _ -> cfg
-      "rack.aware.assignment.strategy" -> case v of
-        "MIN_TRAFFIC" -> cfg {rackAwareAssignmentStrategy = RackAwareMinTrafficCost}
-        "BALANCE_SUBTOPOLOGY" -> cfg {rackAwareAssignmentStrategy = RackAwareBalanceSubtopology}
-        "NONE" -> cfg {rackAwareAssignmentStrategy = RackAwareNone}
-        _ -> cfg
-      "rack.aware.assignment.traffic.cost" ->
-        maybe cfg (\n -> cfg {rackAwareTrafficCost = n}) (readT v)
-      "rack.aware.assignment.non.overlap.cost" ->
-        maybe cfg (\n -> cfg {rackAwareNonOverlapCost = n}) (readT v)
+      "topology.optimization" ->
+        maybe cfg (\f -> cfg {topologyOptimization = f}) (parseOptimizationFlags v)
+      "metadata.max.age.ms" ->
+        maybe cfg (\n -> cfg {metadataMaxAgeMs = n}) (readT v)
       "statestore.cache.max.bytes" ->
-        -- Renamed-from cache.max.bytes.buffering in 3.4. We
-        -- accept both names; the field is the same.
-        maybe cfg (\n -> cfg {cacheMaxBytesBuffering = n}) (readT v)
-      "window.size.ms" ->
-        maybe cfg (\n -> cfg {windowSizeMs = Just n}) (readT v)
-      "upgrade.from" -> cfg {upgradeFrom = Just v}
+        maybe cfg (\n -> cfg {statestoreCacheMaxBytes = n}) (readT v)
+      "cache.max.bytes.buffering" ->
+        maybe cfg (\n -> cfg {statestoreCacheMaxBytes = n}) (readT v)
       _ -> cfg
 
 
-readT :: Read a => T.Text -> Maybe a
-readT t = case reads (T.unpack t) of
-  [(n, "")] -> Just n
+readT :: Integral a => T.Text -> Maybe a
+readT t = case TR.signed TR.decimal (T.strip t) of
+  Right (n, rest) | T.null rest -> Just n
   _ -> Nothing

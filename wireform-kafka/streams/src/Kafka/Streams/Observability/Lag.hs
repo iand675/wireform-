@@ -4,10 +4,10 @@
 Module      : Kafka.Streams.Observability.Lag
 Description : Aggregate per-task lag into an operational report
 
-The runtime publishes raw 'LagInfo' rows (current vs. end offset
-per task) to whatever listener is installed via
-'Kafka.Streams.Runtime.setLagListener'. This module turns that flat
-list into an operational summary — total / max lag, how many tasks
+'Kafka.Streams.Runtime.localTaskLags' reads 'LagInfo' rows (each
+local task's state against its changelogs: running, restoring or
+standby). This module turns that flat list into an operational
+summary — total / max lag, how many tasks
 are caught up, a severity classification against a threshold — and
 renders it as JSON (for a @\/lag@ endpoint) or a fixed-width table
 (for a CLI / log line).

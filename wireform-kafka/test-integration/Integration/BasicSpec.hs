@@ -210,6 +210,7 @@ consumerTests =
     sequence_
       [ it "Can create and close consumer" testCreateConsumer
       , it "Can manually assign partitions" testConsumerAssign
+      , it "Fails to assign a partition the broker can't answer for" testConsumerAssignMissing
       , it "Can poll for records" testConsumerPoll
       , it "Can subscribe + receive an assignment" testConsumerSubscribe
       ]
@@ -242,6 +243,24 @@ testConsumerAssign = do
         Right () -> do
           putStrLn $ "Assigned " ++ show (length assignment) ++ " partition(s)"
           (length assignment) `shouldBe` 1
+
+
+{- | A partition that doesn't exist is retried until
+@default.api.timeout.ms@ and then fails the call; it is never
+silently left out of the assignment.
+-}
+testConsumerAssignMissing :: IO ()
+testConsumerAssignMissing = do
+  let config = Consumer.defaultConsumerConfig {Consumer.consumerDefaultApiTimeoutMs = 500}
+  result <- Consumer.createConsumer ["localhost:9092"] "" config
+  case result of
+    Left err -> expectationFailure $ "Failed to create consumer: " ++ err
+    Right consumer -> do
+      r <- Consumer.assign consumer [Consumer.TopicPartition testTopic 0, Consumer.TopicPartition testTopic 9999]
+      assignment <- Consumer.assignment consumer
+      Consumer.closeConsumer consumer
+      r `shouldSatisfy` either (const True) (const False)
+      assignment `shouldBe` []
 
 
 testConsumerPoll :: IO ()
@@ -349,7 +368,7 @@ testProduceConsumeIntegration = do
               case pollResult of
                 Left err -> expectationFailure $ "Failed to poll: " ++ err
                 Right records -> do
-                  let ours = filter (\r -> r.value == payload) records
+                  let ours = filter (\r -> r.value == Just payload) records
                   when (null ours) $
                     putStrLn $
                       "Polled " ++ show (length records) ++ " unrelated record(s)"

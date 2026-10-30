@@ -269,7 +269,8 @@ data Record = Record
   -- ^ Offset delta from batch base offset
   , recordKey :: !(Maybe ByteString)
   -- ^ Record key (nullable)
-  , recordValue :: !ByteString
+  , recordValue :: !(Maybe ByteString)
+  -- ^ Record value; 'Nothing' is a null value (a tombstone)
   -- ^ Record value
   , recordHeaders :: ![RecordHeader]
   -- ^ Record headers
@@ -393,7 +394,7 @@ calculateBatchSize RecordBatch {..} =
     recordWireUpperBound :: Record -> Int
     recordWireUpperBound Record {..} =
       let !keyLen = maybe 0 BS.length recordKey
-          !valLen = BS.length recordValue
+          !valLen = maybe 0 BS.length recordValue
           !hdrBytes =
             sum
               [ 5

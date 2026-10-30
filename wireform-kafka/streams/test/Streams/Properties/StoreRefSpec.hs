@@ -61,7 +61,7 @@ withKVStore sName k = do
   let nm = storeName sName
       builder = inMemoryKeyValueStoreBuilder nm :: Store.StoreBuilderKV T.Text Int
   -- Materialise the store directly (no engine).
-  kvs <- Store.sbKvBuild builder
+  kvs <- Store.sbKvBuild builder (Store.StoreContext "." "0_0")
   mctx <- newMockProcessorContext "test-app" (TaskId 0 0)
   registerStateStore mctx nm (AnyKeyValueStore kvs)
   let ref = kvRefOfBuilder builder

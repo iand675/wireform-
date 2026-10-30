@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Test.Driver.ClientServer (
@@ -294,11 +293,9 @@ data FirstTestFailure =
 instance Exception FirstTestFailure where
   displayException = show
 
-#if MIN_VERSION_base(4,20,0)
   -- The backtrace to the 'FirstTestFailure' /itself/ is merely distracting
   -- (we're interested only in the backtrace of the actual test failure)
   backtraceDesired _ = False
-#endif
 
 firstFailureInClient, firstFailureInServer :: ExactException -> FirstTestFailure
 firstFailureInClient = FirstFailureInClient

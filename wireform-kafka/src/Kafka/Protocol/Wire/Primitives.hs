@@ -109,7 +109,7 @@ import Data.Vector qualified as Vector
 import Data.Vector.Mutable qualified as VM
 import Data.Word (Word32, Word8)
 import Foreign.Marshal.Utils qualified
-import Foreign.Ptr (Ptr, plusPtr)
+import Foreign.Ptr (Ptr, minusPtr, plusPtr)
 import Kafka.Protocol.Primitives qualified as P
 import Kafka.Protocol.Wire
 
@@ -642,7 +642,13 @@ replicateMVec
   -> Ptr Word8
   -> Ptr Word8
   -> IO (Vector.Vector a, Ptr Word8)
-replicateMVec n peekElt p endPtr = do
+replicateMVec n peekElt p endPtr
+  -- Every element takes at least one byte, so a count beyond the
+  -- bytes left is corrupt. Refuse it before allocating: a vector
+  -- of a garbage length (up to 2^31 boxed slots) is one
+  -- uninterruptible primop that stalls every thread at the next GC.
+  | n > endPtr `minusPtr` p = throwIO (WireTruncated ("array of " <> show n <> " elements in " <> show (endPtr `minusPtr` p) <> " bytes"))
+  | otherwise = do
   -- Pre-allocate a mutable vector to avoid the @[a] -> Vector a@
   -- copy that the legacy 'Vector.replicateM' would have done. The
   -- threading of the cursor is sequential so we walk in-place.

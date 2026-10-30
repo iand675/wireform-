@@ -153,7 +153,7 @@ runWith optCfg ops inputs = do
     inputs
   out <- readOutput driver (topicName "out")
   closeDriver driver
-  pure (map (\r -> (fmap unbytes (crKey r), unbytes (crValue r))) out)
+  pure (map (\r -> (fmap unbytes (crKey r), unbytes (crValueBytes r))) out)
 
 
 ----------------------------------------------------------------------

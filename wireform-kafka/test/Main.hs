@@ -29,6 +29,7 @@ import Client.ConsumerConfigSpec qualified
 import Client.ConsumerGroupV2Spec qualified
 import Client.ConsumerSnapshotsSpec qualified
 import Client.EnvSpec qualified
+import Client.FetchSelectionSpec qualified
 import Client.FilterSpec qualified
 import Client.FutureSpec qualified
 import Client.GroupSpec qualified
@@ -54,6 +55,7 @@ import Client.PartitionerSpec qualified
 import Client.PipelineSpec qualified
 import Client.ProducerConsumerLifecycleSpec qualified
 import Client.ProducerRetrySpec qualified
+import Client.TelemetryLogSpec qualified
 import Client.ProducerTimeoutSpec qualified
 import Client.ProducerTransactionWiringSpec qualified
 import Client.RackAwareSpec qualified
@@ -243,10 +245,12 @@ clientTests =
       , Client.ConfigParitySpec.tests
       , Client.ConfigValidationSpec.tests
       , Client.EnvSpec.tests
+      , Client.FetchSelectionSpec.tests
       , Client.HeartbeatRejoinSpec.tests
       , Codegen.WireGeneratorSpec.tests
       , Protocol.WireCodecParitySpec.tests
       , Client.ProducerRetrySpec.tests
+      , Client.TelemetryLogSpec.tests
       , Client.PipelineSpec.tests
       , Client.SubscribeSpec.tests
       , Network.ConnectionLivenessSpec.tests

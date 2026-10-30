@@ -23,6 +23,9 @@ Mirrors @org.apache.kafka.streams.kstream.KGroupedStream<K,V>@.
 module Kafka.Streams.KGroupedStream (
   KGroupedStream,
   kgsParent,
+  kgsRepartition,
+  groupedInput,
+  groupedInputOf,
   kgsKey,
   kgsValue,
   kgsBuilder,
@@ -35,29 +38,29 @@ module Kafka.Streams.KGroupedStream (
   countStream,
   reduceStream,
   aggregateStream,
+  aggregateSerde,
 
   -- * Windowed
   windowedByTime,
   windowedBySession,
   TimeWindowedKStream (..),
   SessionWindowedKStream (..),
-  CountedTableLocal (..),
 ) where
 
 import Data.IORef
 import Data.Int (Int64)
+import Data.Maybe (fromMaybe)
 import Kafka.Streams.Grouped (Grouped (..))
+import Kafka.Streams.KTable (KTable (..), bindTableCache, writeRow)
+import Data.Text qualified as T
 import Kafka.Streams.KStream (
-  KStream,
-  kstreamBuilder,
-  kstreamKeySerde,
-  kstreamParent,
-  kstreamValueSerde,
-  selectKey,
+  KStream (..),
+  sharedRepartition,
   selectKeyWith,
  )
 import Kafka.Streams.Materialized (
   Materialized (..),
+  materializedKV,
  )
 import Kafka.Streams.Processor (
   Processor (..),
@@ -65,10 +68,7 @@ import Kafka.Streams.Processor (
   getStateStore,
   processorName,
  )
-import Kafka.Streams.Serde (Serde)
-import Kafka.Streams.State.KeyValue.InMemory (
-  inMemoryKeyValueStoreBuilder,
- )
+import Kafka.Streams.Serde (Serde, int64Serde)
 import Kafka.Streams.State.Store (
   AnyStateStore (..),
   KeyValueStore (..),
@@ -93,13 +93,18 @@ data KGroupedStream k v = KGroupedStream
   , kgsKey :: !(Serde k)
   , kgsValue :: !(Serde v)
   , kgsBuilder :: !StreamsBuilder
+  , kgsRepartition :: !(Maybe (Maybe T.Text))
+  {- ^ @Just name@ when the key may have changed since the stream was
+  last partitioned by it: each aggregation then reads through a
+  repartition topic (named after the 'Grouped' name when given).
+  -}
   }
 
 
-{- | Group records by their existing key. No repartition is
-needed in the single-task driver model; the broker-backed
-runtime emits a repartition node automatically when the key
-has been altered upstream.
+{- | Group records by their existing key. When the key may have
+changed upstream (a 'Kafka.Streams.KStream.selectKey', a 'map'),
+the aggregation reads through a repartition topic so each key is
+aggregated by the task owning its partition.
 
 /JVM equivalent:/ @KStream.groupByKey(Grouped)@.
 -}
@@ -110,6 +115,8 @@ groupByKey g s =
     , kgsKey = groupedKeySerde g
     , kgsValue = groupedValueSerde g
     , kgsBuilder = kstreamBuilder s
+    , kgsRepartition =
+        if kstreamKeyChanged s then Just (groupedName g) else Nothing
     }
 
 
@@ -134,7 +141,39 @@ groupByStream f g s = do
       , kgsKey = groupedKeySerde g
       , kgsValue = groupedValueSerde g
       , kgsBuilder = kstreamBuilder s'
+      , kgsRepartition = Just (groupedName g)
       }
+
+
+{- | The node an aggregation of @kgs@ reads from: its parent, or a
+repartition of it when the key may have changed.
+-}
+groupedInput :: KGroupedStream k v -> IO Topo.NodeName
+groupedInput kgs =
+  groupedInputOf (kgsBuilder kgs) (kgsParent kgs) (kgsKey kgs) (kgsValue kgs) (kgsRepartition kgs)
+
+
+-- | 'groupedInput' from the pieces (shared by the windowed streams).
+groupedInputOf
+  :: StreamsBuilder
+  -> Topo.NodeName
+  -> Serde k
+  -> Serde v
+  -> Maybe (Maybe T.Text)
+  -> IO Topo.NodeName
+groupedInputOf _ parent _ _ Nothing = pure parent
+groupedInputOf b parent ks vs (Just mName) = do
+  s' <-
+    sharedRepartition
+      mName
+      KStream
+        { kstreamBuilder = b
+        , kstreamParent = parent
+        , kstreamKeyChanged = True
+        , kstreamKeySerde = ks
+        , kstreamValueSerde = vs
+        }
+  pure (kstreamParent s')
 
 
 ----------------------------------------------------------------------
@@ -153,7 +192,7 @@ countStream
    . Ord k
   => Materialized k Int64
   -> KGroupedStream k v
-  -> IO (CountedTableLocal k Int64)
+  -> IO (KTable k Int64)
 countStream m kgs = do
   storeNm <-
     maybe
@@ -161,15 +200,16 @@ countStream m kgs = do
       pure
       (matName m)
   let supplier =
-        inMemoryKeyValueStoreBuilder storeNm
+        materializedKV m storeNm (kgsKey kgs) int64Serde
           :: StoreBuilderKV k Int64
   nodeNm <- freshNodeName (kgsBuilder kgs) "KSTREAM-AGGREGATE"
+  input <- groupedInput kgs
   withTopology_ (kgsBuilder kgs) $ \t ->
     let !t1 =
           Topo.addProcessorWith
             Topo.ProcessorSpec
               { Topo.processorSpecName = nodeNm
-              , Topo.processorSpecParents = [kgsParent kgs]
+              , Topo.processorSpecParents = [input]
               , Topo.processorSpecSupplier =
                   Topo.AnyProcessor (countProcessor @k @v @Int64 storeNm)
               , Topo.processorSpecStores = []
@@ -177,12 +217,7 @@ countStream m kgs = do
             t
         !t2 = Topo.addStateStoreKV supplier [nodeNm] t1
     in t2
-  pure
-    CountedTableLocal
-      { ctlNode = nodeNm
-      , ctlStore = storeNm
-      , ctlBuilder = kgsBuilder kgs
-      }
+  pure (aggregateTable kgs nodeNm storeNm int64Serde)
 
 
 {- | Combine values for the same key with a binary reducer.
@@ -195,21 +230,23 @@ reduceStream
   => (v -> v -> v)
   -> Materialized k v
   -> KGroupedStream k v
-  -> IO (CountedTableLocal k v)
+  -> IO (KTable k v)
 reduceStream combine m kgs = do
   storeNm <-
     maybe
       (freshStoreName (kgsBuilder kgs) "KSTREAM-REDUCE-STORE")
       pure
       (matName m)
-  let supplier = inMemoryKeyValueStoreBuilder storeNm :: StoreBuilderKV k v
+  let supplier =
+        materializedKV m storeNm (kgsKey kgs) (kgsValue kgs) :: StoreBuilderKV k v
   nodeNm <- freshNodeName (kgsBuilder kgs) "KSTREAM-REDUCE"
+  input <- groupedInput kgs
   withTopology_ (kgsBuilder kgs) $ \t ->
     let !t1 =
           Topo.addProcessorWith
             Topo.ProcessorSpec
               { Topo.processorSpecName = nodeNm
-              , Topo.processorSpecParents = [kgsParent kgs]
+              , Topo.processorSpecParents = [input]
               , Topo.processorSpecSupplier =
                   Topo.AnyProcessor (reduceProcessor @k @v storeNm combine)
               , Topo.processorSpecStores = []
@@ -217,12 +254,7 @@ reduceStream combine m kgs = do
             t
         !t2 = Topo.addStateStoreKV supplier [nodeNm] t1
     in t2
-  pure
-    CountedTableLocal
-      { ctlNode = nodeNm
-      , ctlStore = storeNm
-      , ctlBuilder = kgsBuilder kgs
-      }
+  pure (aggregateTable kgs nodeNm storeNm (kgsValue kgs))
 
 
 {- | Stateful fold: seed an accumulator and update it per
@@ -239,21 +271,24 @@ aggregateStream
   -- ^ aggregator (Java @Aggregator<K,V,A>@)
   -> Materialized k a
   -> KGroupedStream k v
-  -> IO (CountedTableLocal k a)
+  -> IO (KTable k a)
 aggregateStream initial agg m kgs = do
   storeNm <-
     maybe
       (freshStoreName (kgsBuilder kgs) "KSTREAM-AGGREGATE-STORE")
       pure
       (matName m)
-  let supplier = inMemoryKeyValueStoreBuilder storeNm :: StoreBuilderKV k a
+  let supplier =
+        materializedKV m storeNm (kgsKey kgs) (aggregateSerde m)
+          :: StoreBuilderKV k a
   nodeNm <- freshNodeName (kgsBuilder kgs) "KSTREAM-AGGREGATE"
+  input <- groupedInput kgs
   withTopology_ (kgsBuilder kgs) $ \t ->
     let !t1 =
           Topo.addProcessorWith
             Topo.ProcessorSpec
               { Topo.processorSpecName = nodeNm
-              , Topo.processorSpecParents = [kgsParent kgs]
+              , Topo.processorSpecParents = [input]
               , Topo.processorSpecSupplier =
                   Topo.AnyProcessor
                     (aggregateProcessor @k @v @a storeNm initial agg)
@@ -262,12 +297,7 @@ aggregateStream initial agg m kgs = do
             t
         !t2 = Topo.addStateStoreKV supplier [nodeNm] t1
     in t2
-  pure
-    CountedTableLocal
-      { ctlNode = nodeNm
-      , ctlStore = storeNm
-      , ctlBuilder = kgsBuilder kgs
-      }
+  pure (aggregateTable kgs nodeNm storeNm (aggregateSerde m))
 
 
 ----------------------------------------------------------------------
@@ -301,10 +331,10 @@ reduceProcessor sn combine = do
           writeIORef ctxRef (Just ctx)
           st <- getStateStore ctx sn
           case st of
-            Just (AnyKeyValueStore kvs) ->
-              writeIORef
-                storeRef
-                (Just (unsafeCastKV kvs :: KeyValueStore k v))
+            Just (AnyKeyValueStore kvs0) -> do
+              let kvs = unsafeCastKV kvs0 :: KeyValueStore k v
+              bindTableCache ctx kvs
+              writeIORef storeRef (Just kvs)
             _ -> error $ "KGroupedStream.reduce: store not found: " <> show sn
       , procClose = pure ()
       , procProcess = \r -> do
@@ -316,8 +346,7 @@ reduceProcessor sn combine = do
               let !next = case mPrev of
                     Nothing -> recordValue r
                     Just p -> combine p (recordValue r)
-              kvsPut kvs k next
-              forwardRecord ctx r {recordValue = next}
+              writeRow ctx kvs r k (Just next) mPrev
             _ -> pure ()
       }
 
@@ -339,8 +368,10 @@ aggregateProcessor sn initial agg = do
           writeIORef ctxRef (Just ctx)
           st <- getStateStore ctx sn
           case st of
-            Just (AnyKeyValueStore kvs) ->
-              writeIORef storeRef (Just (unsafeCastKV kvs))
+            Just (AnyKeyValueStore kvs0) -> do
+              let kvs = unsafeCastKV kvs0 :: KeyValueStore k a
+              bindTableCache ctx kvs
+              writeIORef storeRef (Just kvs)
             _ -> error $ "aggregate: store not found: " <> show sn
       , procClose = pure ()
       , procProcess = \r -> do
@@ -353,8 +384,7 @@ aggregateProcessor sn initial agg = do
                 Nothing -> initial
                 Just p -> pure p
               let !next = agg k (recordValue r) cur
-              kvsPut kvs k next
-              forwardRecord ctx r {recordValue = next}
+              writeRow ctx kvs r k (Just next) mPrev
             _ -> pure ()
       }
 
@@ -388,6 +418,7 @@ windowedByTime ws kgs =
     , twksValue = kgsValue kgs
     , twksBuilder = kgsBuilder kgs
     , twksWindows = ws
+    , twksRepartition = kgsRepartition kgs
     }
 
 
@@ -406,6 +437,7 @@ windowedBySession sw kgs =
     , swksValue = kgsValue kgs
     , swksBuilder = kgsBuilder kgs
     , swksWindows = sw
+    , swksRepartition = kgsRepartition kgs
     }
 
 
@@ -419,6 +451,8 @@ data TimeWindowedKStream k v = TimeWindowedKStream
   , twksValue :: !(Serde v)
   , twksBuilder :: !StreamsBuilder
   , twksWindows :: !Windows
+  , twksRepartition :: !(Maybe (Maybe T.Text))
+  -- ^ As 'kgsRepartition'
   }
 
 
@@ -428,6 +462,8 @@ data SessionWindowedKStream k v = SessionWindowedKStream
   , swksValue :: !(Serde v)
   , swksBuilder :: !StreamsBuilder
   , swksWindows :: !SessionWindows
+  , swksRepartition :: !(Maybe (Maybe T.Text))
+  -- ^ As 'kgsRepartition'
   }
 
 
@@ -435,15 +471,23 @@ data SessionWindowedKStream k v = SessionWindowedKStream
 -- Returned aggregate handle
 ----------------------------------------------------------------------
 
-{- | Result of an aggregation. Carries the materialised store name so
-callers can later 'queryKeyValueStore' or convert to a 'KStream'.
--}
-data CountedTableLocal k v = CountedTableLocal
-  { ctlNode :: !Topo.NodeName
-  , ctlStore :: !StoreName
-  , ctlBuilder :: !StreamsBuilder
-  }
+-- | The table an aggregation of @kgs@ produces: keyed like @kgs@, valued by @vs@.
+aggregateTable :: KGroupedStream k v -> Topo.NodeName -> StoreName -> Serde a -> KTable k a
+aggregateTable kgs nodeNm storeNm vs =
+  KTable
+    { ktableNode = nodeNm
+    , ktableStore = storeNm
+    , ktableBuilder = kgsBuilder kgs
+    , ktableKeySerde = kgsKey kgs
+    , ktableValueSerde = vs
+    }
 
--- We re-export the aggregation result as 'KTable' from the
--- 'Kafka.Streams.KTable' module; here we keep the local name so
--- the test driver can introspect.
+
+{- | An aggregate's value serde: the 'Materialized' one. Lazy: only a
+changelog write or a sink that needs the bytes forces the error.
+-}
+aggregateSerde :: Materialized k a -> Serde a
+aggregateSerde m =
+  fromMaybe
+    (error "aggregate: give the Materialized a value serde (withValueSerde) for the aggregate type")
+    (matValueSerde m)

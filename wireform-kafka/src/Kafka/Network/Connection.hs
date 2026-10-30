@@ -113,6 +113,7 @@ import Kafka.Network.Connection.Internal (
   Connection (..),
  )
 import Kafka.Network.Connection.Internal qualified as I
+import Kafka.Telemetry.Log qualified as KLog
 import Kafka.Network.TlsOffload (
   OffloadBrokerKey (..),
   TlsOffloadConfig (..),
@@ -442,6 +443,7 @@ buildPlainConnection sock = do
   duplex <- newDuplexTransport cfg sock
   cursor <- newIORef 0
   closed <- newIORef False
+  reqLock <- newMVar ()
   pure
     I.Connection
       { I.connDuplex = duplex
@@ -450,6 +452,7 @@ buildPlainConnection sock = do
       , I.connCtx = Nothing
       , I.connCursor = cursor
       , I.connClosed = closed
+      , I.connRequestLock = reqLock
       }
 
 
@@ -463,6 +466,7 @@ buildTlsConnection sock ctx sslConn = do
   duplex <- newTlsDuplexTransport cfg sslConn
   cursor <- newIORef 0
   closed <- newIORef False
+  reqLock <- newMVar ()
   pure
     I.Connection
       { I.connDuplex = duplex
@@ -471,6 +475,7 @@ buildTlsConnection sock ctx sslConn = do
       , I.connCtx = Just ctx
       , I.connCursor = cursor
       , I.connClosed = closed
+      , I.connRequestLock = reqLock
       }
 
 
@@ -486,18 +491,12 @@ connect addr config = go 0
         Left (e :: SomeException)
           | attemptNum < connMaxRetries config -> do
               delayMicros <- calculateBackoffDelay attemptNum config
-              putStrLn $
-                "Connection attempt "
-                  ++ show (attemptNum + 1)
-                  ++ " to "
-                  ++ brokerHost addr
-                  ++ ":"
-                  ++ show (brokerPort addr)
-                  ++ " failed: "
-                  ++ show e
-                  ++ ". Retrying in "
-                  ++ show (delayMicros `div` 1000)
-                  ++ "ms..."
+              KLog.logWarn KLog.kafkaInstrumentationLibrary "broker connection attempt failed, retrying" $
+                KLog.serverAttrs (brokerHost addr) (fromIntegral (brokerPort addr))
+                  <> [ KLog.attrInt "kafka.connection.attempt" (attemptNum + 1)
+                     , KLog.attrInt "kafka.connection.retry_backoff_ms" (delayMicros `div` 1000)
+                     , KLog.attrShow "exception.message" e
+                     ]
               threadDelay delayMicros
               go (attemptNum + 1)
           | otherwise ->
@@ -539,18 +538,12 @@ connectTls addr config = case connTlsSettings config of
         Left (e :: SomeException)
           | attemptNum < connMaxRetries config -> do
               delayMicros <- calculateBackoffDelay attemptNum config
-              putStrLn $
-                "TLS connection attempt "
-                  ++ show (attemptNum + 1)
-                  ++ " to "
-                  ++ brokerHost addr
-                  ++ ":"
-                  ++ show (brokerPort addr)
-                  ++ " failed: "
-                  ++ show e
-                  ++ ". Retrying in "
-                  ++ show (delayMicros `div` 1000)
-                  ++ "ms..."
+              KLog.logWarn KLog.kafkaInstrumentationLibrary "broker TLS connection attempt failed, retrying" $
+                KLog.serverAttrs (brokerHost addr) (fromIntegral (brokerPort addr))
+                  <> [ KLog.attrInt "kafka.connection.attempt" (attemptNum + 1)
+                     , KLog.attrInt "kafka.connection.retry_backoff_ms" (delayMicros `div` 1000)
+                     , KLog.attrShow "exception.message" e
+                     ]
               threadDelay delayMicros
               go tlsCfg (attemptNum + 1)
           | otherwise ->
@@ -656,21 +649,13 @@ connectOffload addr config offload = go 0
           if attemptNum < connMaxRetries config
             then do
               delayMicros <- calculateBackoffDelay attemptNum config
-              putStrLn $
-                "TLS-offload connection attempt "
-                  ++ show (attemptNum + 1)
-                  ++ " to "
-                  ++ brokerHost addr
-                  ++ ":"
-                  ++ show (brokerPort addr)
-                  ++ " (offload="
-                  ++ T.unpack (TlsOffload.tlsOffloadLabel offload)
-                  ++ ")"
-                  ++ " failed: "
-                  ++ err
-                  ++ ". Retrying in "
-                  ++ show (delayMicros `div` 1000)
-                  ++ "ms..."
+              KLog.logWarn KLog.kafkaInstrumentationLibrary "broker TLS-offload connection attempt failed, retrying" $
+                KLog.serverAttrs (brokerHost addr) (fromIntegral (brokerPort addr))
+                  <> [ KLog.attrInt "kafka.connection.attempt" (attemptNum + 1)
+                     , KLog.attrInt "kafka.connection.retry_backoff_ms" (delayMicros `div` 1000)
+                     , KLog.attrText "exception.message" (T.pack err)
+                     , KLog.attrText "tls.offload" (TlsOffload.tlsOffloadLabel offload)
+                     ]
               threadDelay delayMicros
               go (attemptNum + 1)
             else

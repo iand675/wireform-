@@ -148,6 +148,9 @@ viaSidecar = defaultConnectionConfig
 ## Observability
 
 - **OpenTelemetry**: spans for producer/consumer/transaction operations
+- **OpenTelemetry logs**: the client's and the Streams runtime's diagnostics
+  are OTel log records (`Kafka.Telemetry.Log`), through the global logger
+  provider; nothing is printed
 - **Stats JSON**: librdkafka-compatible format
 - **Interceptors**: per-record hooks
 

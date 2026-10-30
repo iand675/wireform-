@@ -144,6 +144,7 @@ library
         Kafka.Client.ConsumerGroupV2
         Kafka.Client.Filter
         Kafka.Client.Future
+        Kafka.Client.Assignor
         Kafka.Client.Group
         Kafka.Client.MetadataCacheControl
         Kafka.Client.RackAware
@@ -397,6 +398,7 @@ library
         Kafka.Protocol.Wire.Codec
         Kafka.Protocol.Wire.Primitives
         Kafka.Protocol.Wire.SliceVector
+        Kafka.Telemetry.Log
         Kafka.Telemetry.Metrics
         Kafka.Telemetry.OpenTelemetry
         Kafka.Telemetry.Push
@@ -404,8 +406,8 @@ library
         Kafka.Telemetry.StatsJson
         Kafka.Time
     build-depends:
-        base                      >= 4.16  && < 5,
-        aeson                     >= 2.0   && < 2.3,
+        base                      >= 4.20  && < 5,
+        aeson                     >= 2.0   && < 2.4,
         async                     >= 2.2   && < 3,
         atomic-primops            >= 0.8   && < 0.9,
         base64-bytestring         >= 1.2   && < 1.3,
@@ -422,7 +424,7 @@ library
         directory                 >= 1.3   && < 1.4,
         filepath                  >= 1.4   && < 1.6,
         hashable                  >= 1.3   && < 1.6,
-        hs-opentelemetry-api      >= 0.2   && < 1.1,
+        hs-opentelemetry-api      >= 1.0   && < 1.1,
         http-types                >= 0.12  && < 0.13,
         list-t                    >= 1.0   && < 1.1,
         memory                    >= 0.18  && < 0.19,
@@ -466,6 +468,7 @@ library wireform-kafka-streams
         Kafka.Streams.Processor.Assignment
         Kafka.Streams.Processor.Mock
         Kafka.Streams.Topology
+        Kafka.Streams.Topology.Subtopology
         Kafka.Streams.Topology.Free
         Kafka.Streams.Topology.Free.Arrow
         Kafka.Streams.Topology.Free.Optimize
@@ -489,11 +492,6 @@ library wireform-kafka-streams
         Kafka.Streams.State.Ref
         Kafka.Streams.EmitPolicy
         Kafka.Streams.Query
-        Kafka.Streams.Mock.Cluster
-        Kafka.Streams.Mock.Fault
-        Kafka.Streams.Mock.Producer
-        Kafka.Streams.Mock.Consumer
-        Kafka.Streams.Mock.StreamsDriver
         Kafka.Streams.State.Store
         Kafka.Streams.State.KeyValue.InMemory
         Kafka.Streams.State.KeyValue.Persistent
@@ -505,6 +503,12 @@ library wireform-kafka-streams
         Kafka.Streams.State.Session.InMemory
         Kafka.Streams.Internal.RecordCollector
         Kafka.Streams.Internal.Engine
+        Kafka.Streams.Internal.Log
+        Kafka.Streams.Internal.Text
+        Kafka.Streams.Internal.Serdes
+        Kafka.Streams.Internal.Changelog
+        Kafka.Streams.Internal.WindowJoin
+        Kafka.Streams.Runtime.MinCostFlow
         Kafka.Streams.Driver
         Kafka.Streams.Materialized
         Kafka.Streams.Consumed
@@ -528,18 +532,20 @@ library wireform-kafka-streams
         Kafka.Streams.Suppress
         Kafka.Streams.DslStoreSuppliers
         Kafka.Streams.Runtime
-        Kafka.Streams.Runtime.EOS
-        Kafka.Streams.Runtime.Task
         Kafka.Streams.Runtime.Standby
         Kafka.Streams.Runtime.Assignor
+        Kafka.Streams.Runtime.GroupAssignor
         Kafka.Streams.Runtime.WorkerPool
-        Kafka.Streams.Runtime.ProbingRebalance
-        Kafka.Streams.Runtime.StandbyTask
-        Kafka.Streams.Runtime.StandbyDriver
         Kafka.Streams.Runtime.RevocationGrace
         Kafka.Streams.Runtime.NativeDriver
+        Kafka.Streams.Runtime.Driver
+        Kafka.Streams.Runtime.MockBroker
+        Kafka.Streams.Runtime.Plan
+        Kafka.Streams.Runtime.Tasks
+        Kafka.Streams.Runtime.Commit
+        Kafka.Streams.Runtime.GlobalStore
+        Kafka.Streams.Runtime.StateDir
         Kafka.Streams.Runtime.MultiInstanceHarness
-        Kafka.Streams.Runtime.MultiInstanceMockHarness
         Kafka.Streams.State.Transactional
         Kafka.Streams.Topology.Optimization
         Kafka.Streams.Topology.StableNames
@@ -561,9 +567,9 @@ library wireform-kafka-streams
         Kafka.Streams.Replay
         Kafka.Streams.Backfill
     build-depends:
-        base                      >= 4.16  && < 5,
-        aeson                     >= 2.0   && < 2.3,
-        hs-opentelemetry-api      >= 0.2   && < 1.1,
+        base                      >= 4.20  && < 5,
+        aeson                     >= 2.0   && < 2.4,
+        hs-opentelemetry-api      >= 1.0   && < 1.1,
         async                     >= 2.2   && < 3,
         binary                    >= 0.8   && < 0.11,
         bytestring                >= 0.11  && < 0.13,
@@ -575,6 +581,7 @@ library wireform-kafka-streams
         list-t                    >= 1.0   && < 1.1,
         mtl                       >= 2.2   && < 2.4,
         profunctors               >= 5.6   && < 5.7,
+        regex-tdfa                >= 1.3   && < 1.4,
         stm                       >= 2.5   && < 2.6,
         stm-containers            >= 1.2   && < 1.3,
         text                      >= 2.0   && < 2.2,
@@ -601,6 +608,17 @@ test-suite wireform-kafka-streams-test
         cpp-options: -DENABLE_ROCKSDB
     other-modules:
         Streams.SerdeSpec
+        Streams.ChangelogSpec
+        Streams.RuntimeHarness
+        Streams.TaskRuntimeSpec
+        Streams.TwoPhaseRuntimeSpec
+        Streams.GroupAssignorSpec
+        Streams.StandbyRuntimeSpec
+        Streams.PatternRuntimeSpec
+        Streams.TableChangeSpec
+        Streams.ParityBatchSpec
+        Streams.RuntimeBehaviourSpec
+        Streams.RuntimeRecordFidelitySpec
         Streams.TimeSpec
         Streams.StateStoreSpec
         Streams.WindowSpec
@@ -613,8 +631,6 @@ test-suite wireform-kafka-streams-test
         Streams.AggregationSpec
         Streams.InteractiveQueriesSpec
         Streams.CacheSpec
-        Streams.EOSSpec
-        Streams.MultiTaskSpec
         Streams.StandbySpec
         Streams.AssignorSpec
         Streams.StreamConvSpec
@@ -626,21 +642,14 @@ test-suite wireform-kafka-streams-test
         Streams.MetricsSpec
         Streams.NamedSpec
         Streams.WorkerPoolSpec
-        Streams.EOSRuntimeSpec
         Streams.ExtensionsSpec
         Streams.TestUtilsSpec
         Streams.StateListenerSpec
         Streams.QuerySpec
-        Streams.ParityBatchSpec
         Streams.MoreParitySpec
         Streams.EndToEndChainSpec
         Streams.MorePartiyTwoSpec
         Streams.MoreParityThreeSpec
-        Streams.MockClusterSpec
-        Streams.MockFailureModesSpec
-        Streams.MockAdvancedSpec
-        Streams.MockDriverModesSpec
-        Streams.ProbingRebalanceSpec
         Streams.RevocationGraceSpec
         Streams.StableNamesSpec
         Streams.TopologyOptimizationSpec
@@ -648,24 +657,17 @@ test-suite wireform-kafka-streams-test
         Streams.TransactionalStoreSpec
         Streams.StreamsConfigSurfaceSpec
         Streams.ForeignKeyJoinDSLSpec
-        Streams.RuntimeDriverSpec
-        Streams.ExceptionHandlerSpec
         Streams.KGroupedTableSpec
         Streams.StoresExtraSpec
         Streams.QueryAndDiscoverySpec
         Streams.ProcessorAndStoreExtrasSpec
-        Streams.DynamicThreadsSpec
         Streams.BoundedSuppressSpec
         Streams.WindowedSuppressIntegrationSpec
         Streams.IdleHeartbeatSpec
         Streams.RackAwareAssignorSpec
-        Streams.ProbingRebalanceRuntimeSpec
-        Streams.StandbyTaskSpec
-        Streams.StandbyDriverSpec
         Streams.RemoteIQSpec
         Streams.IdiomaticDSLSpec
         Streams.DSLFacadeSpec
-        Streams.MultiInstanceRebalanceSpec
         Streams.RotatingFileSinkSpec
         Streams.SchemaRegistryCompatSpec
         Streams.SdkParitySpec
@@ -684,15 +686,14 @@ test-suite wireform-kafka-streams-test
         Streams.Properties.KVStoreSMSpec
         Streams.Properties.OptimizerEqSpec
         Streams.Properties.WindowMathSpec
-        Streams.Properties.EOSChaosSpec
         Streams.Properties.WorkerPoolSMSpec
         Streams.Properties.ObservabilityTopologySpec
         Streams.Properties.OrphanTopicsSpec
         Streams.Properties.ChangelogReplaySpec
         Streams.Properties.WatermarkSpec
         Streams.Properties.WorkerPoolConcurrentSpec
-        Streams.Properties.AtLeastOnceRedeliverySpec
         Streams.Properties.TwoPhaseSinkSpec
+        Streams.Properties.DeliverySpec
         Streams.Properties.WatermarkCoordSpec
         Streams.Properties.TTLSpec
         Streams.Properties.SchemaVersionedSpec
@@ -710,7 +711,7 @@ test-suite wireform-kafka-streams-test
         base,
         wireform-kafka:wireform-kafka-streams,
         wireform-kafka,
-        aeson                     >= 2.0   && < 2.3,
+        aeson                     >= 2.0   && < 2.4,
         async                     >= 2.2   && < 3,
         bytestring,
         containers,
@@ -736,6 +737,8 @@ test-suite wireform-kafka-streams-integration
     hs-source-dirs: streams/test-integration
     ghc-options: -threaded -rtsopts -with-rtsopts=-N
     other-modules:
+        Streams.Integration.Live
+        Streams.Integration.NativeDriver
         Streams.Integration.RoundTrip
     -- Skipped at run time unless WIREFORM_KAFKA_BROKER=host:port is set.
     build-depends:
@@ -743,8 +746,11 @@ test-suite wireform-kafka-streams-integration
         wireform-kafka:wireform-kafka-streams,
         wireform-kafka,
         bytestring,
+        containers,
         sydtest,
-        text
+        temporary,
+        text,
+        time
 
 executable wireform-kafka-client-examples
     import: defaults
@@ -803,8 +809,10 @@ executable wireform-kafka-streams-examples
         wireform-kafka,
         bytestring,
         containers,
+        filepath,
         hs-opentelemetry-api      >= 1.0   && < 1.1,
         stm,
+        temporary,
         text
 
 library wireform-kafka-codegen
@@ -817,8 +825,8 @@ library wireform-kafka-codegen
         Kafka.Protocol.Codegen.Generator
         Kafka.Protocol.Codegen.WireGenerator
     build-depends:
-        base                      >= 4.16  && < 5,
-        aeson                     >= 2.0   && < 2.3,
+        base                      >= 4.20  && < 5,
+        aeson                     >= 2.0   && < 2.4,
         bytestring                >= 0.11  && < 0.13,
         containers                >= 0.6   && < 0.9,
         directory                 >= 1.3   && < 1.4,
@@ -941,9 +949,11 @@ test-suite wireform-kafka-test
         Client.ConfigParitySpec
         Client.ConfigValidationSpec
         Client.EnvSpec
+        Client.FetchSelectionSpec
         Client.HeartbeatRejoinSpec
         Codegen.WireGeneratorSpec
         Client.ProducerRetrySpec
+        Client.TelemetryLogSpec
         Client.PipelineSpec
         Client.SubscribeSpec
         Network.ConnectionLivenessSpec
@@ -974,6 +984,7 @@ test-suite wireform-kafka-test
         Serde.ProtoBufSpec
         TestUtil.BrokerGate
     build-depends:
+        hs-opentelemetry-api,
         base,
         wireform-core,
         wireform-kafka,
@@ -1097,6 +1108,7 @@ benchmark wireform-kafka-bench
     build-depends:
         base,
         wireform-kafka,
+        wireform-kafka-protocol,
         async,
         binary,
         bytestring,

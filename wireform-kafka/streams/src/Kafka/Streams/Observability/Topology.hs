@@ -121,17 +121,17 @@ topologyDescriptionWith cfg topo =
           )
 
 
-{- | Render the topology paired with a live 'MetricsRegistry'
-snapshot. Each node grows a @"metrics"@ object with the
-registry's counters scoped by node name (Java SDK convention).
+{- | Render the topology with a snapshot of @metrics@
+('Kafka.Streams.Runtime.streamsMetrics', or 'Met.registrySource')
+under a top-level @"metrics"@ object.
 -}
 liveTopologyDescription
   :: Topo.Topology
-  -> Met.MetricsRegistry
+  -> Met.MetricsSource
   -> RenderConfig
   -> IO A.Value
 liveTopologyDescription topo metrics cfg = do
-  dump <- Met.dumpMetrics metrics
+  dump <- metrics
   let base = topologyDescriptionWith cfg topo
       metricsObj =
         A.Object

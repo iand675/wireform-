@@ -48,10 +48,8 @@ module Kafka.Streams.State.Transactional (
 ) where
 
 import Control.Concurrent.STM
-import Data.Foldable (foldl')
 import Data.Hashable (Hashable)
 import Data.Int (Int64)
-import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Kafka.Streams.State.Store (
   KeyValueIterator (..),
@@ -109,6 +107,7 @@ txnStore
 txnStore ts@TransactionalStore {..} =
   KeyValueStore
     { kvsBase = kvsBase tsUnderlying
+    , kvsCache = Nothing
     , kvsApproxEntries = approxEntriesWithBuffer ts
     , kvsRange = \lo hi -> do
         base <- kvsRange tsUnderlying lo hi >>= drainIter
@@ -214,8 +213,7 @@ underlying-only count would mislead during a long-running
 transaction.
 -}
 approxEntriesWithBuffer
-  :: (Ord k, Hashable k)
-  => TransactionalStore k v
+  :: TransactionalStore k v
   -> IO Int64
 approxEntriesWithBuffer TransactionalStore {..} = do
   underN <- kvsApproxEntries tsUnderlying
@@ -248,7 +246,7 @@ the buffer (by overwrite collapse), order doesn't affect the
 final state.
 -}
 txnCommit
-  :: (Eq k, Hashable k)
+  :: Hashable k
   => TransactionalStore k v -> IO ()
 txnCommit TransactionalStore {..} = do
   pairs <- atomically $ ListT.toList (StmMap.listT tsBuffer)
@@ -261,7 +259,7 @@ txnCommit TransactionalStore {..} = do
 
 -- | Discard the buffered writes.
 txnAbort
-  :: (Eq k, Hashable k)
+  :: Hashable k
   => TransactionalStore k v -> IO ()
 txnAbort TransactionalStore {..} = atomically (resetBuffer tsBuffer)
 
@@ -276,7 +274,7 @@ txnPendingCount TransactionalStore {..} = atomically $ do
 
 
 resetBuffer
-  :: (Eq k, Hashable k)
+  :: Hashable k
   => StmMap.Map k v
   -> STM ()
 resetBuffer m = do

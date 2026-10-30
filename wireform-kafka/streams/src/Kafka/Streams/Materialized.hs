@@ -9,11 +9,17 @@ module Kafka.Streams.Materialized (
   materializedAs,
   materializedWithSupplier,
   withCachingDisabled,
+  withCachingEnabled,
   withLoggingDisabled,
   withRetention,
   withStoreSupplier,
   withKeySerde,
   withValueSerde,
+
+  -- * Store construction (DSL internal)
+  materializedKV,
+  materializedW,
+  materializedS,
 
   -- * Queryable store info
   queryableStoreName,
@@ -22,10 +28,28 @@ module Kafka.Streams.Materialized (
 ) where
 
 import Data.Int (Int64)
+import Data.Maybe (fromMaybe)
 import Kafka.Streams.Serde (Serde)
+import Kafka.Streams.State.KeyValue.InMemory (inMemoryKeyValueStoreBuilder)
+import Kafka.Streams.State.Session.InMemory (inMemorySessionStoreBuilder)
+import Kafka.Streams.State.Window.InMemory (inMemoryWindowStoreBuilder)
 import Kafka.Streams.State.Store (
   KeyValueStore,
+  StoreContext,
+  StoreBuilderKV (..),
+  StoreBuilderS,
+  StoreBuilderW,
   StoreName,
+  defaultLoggingConfig,
+  withCachingEnabledKV,
+  withCachingEnabledW,
+  withCachingEnabledS,
+  withLoggingDisabledKV,
+  withLoggingDisabledS,
+  withLoggingDisabledW,
+  withStoreSerdesKV,
+  withStoreSerdesS,
+  withStoreSerdesW,
  )
 
 
@@ -41,12 +65,12 @@ data Materialized k v = Materialized
   , matCachingEnabled :: !Bool
   , matLoggingEnabled :: !Bool
   , matRetentionMs :: !(Maybe Int64)
-  , matStoreSupplier :: !(Maybe (StoreName -> IO (KeyValueStore k v)))
+  , matStoreSupplier :: !(Maybe (StoreName -> StoreContext -> IO (KeyValueStore k v)))
   {- ^ User-supplied store builder. When set, DSL operators that
   materialise this 'Materialized' will use the supplied
   function instead of the default in-memory builder. This is
   the hook point for plugging in a 'PersistentKeyValueStore',
-  'CachingKeyValueStore', 'VersionedKeyValueStore', or
+  'VersionedKeyValueStore', or
   'TimestampedKeyValueStore'.
   -}
   }
@@ -77,7 +101,7 @@ factory is given the store's chosen name (whether explicit via
 backing 'KeyValueStore'.
 -}
 materializedWithSupplier
-  :: (StoreName -> IO (KeyValueStore k v))
+  :: (StoreName -> StoreContext -> IO (KeyValueStore k v))
   -> Materialized k v
 materializedWithSupplier f = materialized {matStoreSupplier = Just f}
 
@@ -96,14 +120,24 @@ withValueSerde s m = m {matValueSerde = Just s}
 'Materialized' value.
 -}
 withStoreSupplier
-  :: (StoreName -> IO (KeyValueStore k v))
+  :: (StoreName -> StoreContext -> IO (KeyValueStore k v))
   -> Materialized k v
   -> Materialized k v
 withStoreSupplier f m = m {matStoreSupplier = Just f}
 
 
+{- | No record cache: every update to the store is forwarded and
+logged at once (as with @statestore.cache.max.bytes = 0@). Key-value,
+window and session stores are cached by default
+("Kafka.Streams.State.KeyValue.Caching").
+-}
 withCachingDisabled :: Materialized k v -> Materialized k v
 withCachingDisabled m = m {matCachingEnabled = False}
+
+
+-- | The default: a record cache in front of the store (key-value stores).
+withCachingEnabled :: Materialized k v -> Materialized k v
+withCachingEnabled m = m {matCachingEnabled = True}
 
 
 withLoggingDisabled :: Materialized k v -> Materialized k v
@@ -112,6 +146,78 @@ withLoggingDisabled m = m {matLoggingEnabled = False}
 
 withRetention :: Int64 -> Materialized k v -> Materialized k v
 withRetention r m = m {matRetentionMs = Just r}
+
+
+{- | The key-value store a DSL operator materialises for @m@: the
+'matStoreSupplier' backend when one is given (in-memory otherwise),
+changelogged unless 'withLoggingDisabled', with @m@'s serdes or the
+operator's own as the changelog serdes.
+-}
+materializedKV
+  :: Ord k
+  => Materialized k v
+  -> StoreName
+  -> Serde k
+  -- ^ The operator's key serde (used unless @m@ sets one)
+  -> Serde v
+  -- ^ The operator's value serde (used unless @m@ sets one)
+  -> StoreBuilderKV k v
+materializedKV m nm defK defV =
+  let base = case matStoreSupplier m of
+        Just mk ->
+          StoreBuilderKV
+            { sbKvName = nm
+            , sbKvLogging = defaultLoggingConfig
+            , sbKvSerdes = Nothing
+            , sbKvBuild = mk nm
+            , sbKvCaching = Nothing
+            }
+        Nothing -> inMemoryKeyValueStoreBuilder nm
+      logged = if matLoggingEnabled m then base else withLoggingDisabledKV base
+      cached = if matCachingEnabled m then withCachingEnabledKV logged else logged
+  in withStoreSerdesKV
+       (fromMaybe defK (matKeySerde m))
+       (fromMaybe defV (matValueSerde m))
+       cached
+
+
+{- | The window store a windowed DSL aggregation materialises for
+@m@ ('materializedKV' for windows): 'withRetention' overrides the
+windows' own retention.
+-}
+materializedW
+  :: Ord k
+  => Materialized k v
+  -> StoreName
+  -> Int64
+  -- ^ window size (ms)
+  -> Int64
+  -- ^ the windows' retention (ms)
+  -> Serde k
+  -> Serde v
+  -> StoreBuilderW k v
+materializedW m nm size retention defK defV =
+  let base = inMemoryWindowStoreBuilder nm size (fromMaybe retention (matRetentionMs m))
+      logged = if matLoggingEnabled m then base else withLoggingDisabledW base
+      cached = if matCachingEnabled m then withCachingEnabledW logged else logged
+  in withStoreSerdesW (fromMaybe defK (matKeySerde m)) (fromMaybe defV (matValueSerde m)) cached
+
+
+-- | 'materializedW' for session stores.
+materializedS
+  :: Ord k
+  => Materialized k v
+  -> StoreName
+  -> Int64
+  -- ^ the session windows' retention (ms)
+  -> Serde k
+  -> Serde v
+  -> StoreBuilderS k v
+materializedS m nm retention defK defV =
+  let base = inMemorySessionStoreBuilder nm (fromMaybe retention (matRetentionMs m))
+      logged = if matLoggingEnabled m then base else withLoggingDisabledS base
+      cached = if matCachingEnabled m then withCachingEnabledS logged else logged
+  in withStoreSerdesS (fromMaybe defK (matKeySerde m)) (fromMaybe defV (matValueSerde m)) cached
 
 
 ----------------------------------------------------------------------

@@ -13,13 +13,12 @@ Mirrors Java's @TimeWindowedSerializer\/Deserializer@. Encodes a
 -}
 module Kafka.Streams.Serde.Windowed (
   windowedSerde,
+  sessionKeySerde,
 ) where
 
-import Data.Bits (shiftL, shiftR, (.|.))
-import Data.ByteString (ByteString)
+import Data.Bits (shiftL, (.|.))
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
-import Data.Int (Int64)
 import Data.Text qualified as T
 import Data.Word (Word32)
 import Kafka.Streams.Serde (
@@ -27,7 +26,7 @@ import Kafka.Streams.Serde (
   Serde (..),
   int64Serde,
  )
-import Kafka.Streams.State.Store (WindowedKey (..))
+import Kafka.Streams.State.Store (SessionKey (..), WindowedKey (..))
 import Kafka.Streams.Time (Timestamp (..))
 import Wireform.Builder qualified as BB
 
@@ -42,6 +41,11 @@ downstream clash risk.
 -}
 instance HasSerde k => HasSerde (WindowedKey k) where
   serde = windowedSerde serde
+
+
+-- | As for 'WindowedKey': the inner key's serde, framed ('sessionKeySerde').
+instance HasSerde k => HasSerde (SessionKey k) where
+  serde = sessionKeySerde serde
 
 
 windowedSerde :: forall k. Serde k -> Serde (WindowedKey k)
@@ -82,5 +86,27 @@ windowedSerde inner =
                    k <- deserialize inner kBytes
                    ts <- deserialize int64Serde tsBs
                    Right (WindowedKey k (Timestamp ts))
+    , serializeHeaders = const mempty
+    }
+
+
+{- | A session's key: the inner key's bytes, then the session's end and
+start (8 bytes big-endian each), as the JVM's @SessionKeySchema@ lays
+them out.
+-}
+sessionKeySerde :: forall k. Serde k -> Serde (SessionKey k)
+sessionKeySerde inner =
+  Serde
+    { serialize = \(SessionKey k (Timestamp start) (Timestamp end)) ->
+        BS.concat [serialize inner k, serialize int64Serde end, serialize int64Serde start]
+    , deserialize = \b ->
+        if BS.length b < 16
+          then Left "sessionKeySerde: payload too short"
+          else do
+            let (kBytes, times) = BS.splitAt (BS.length b - 16) b
+            k <- deserialize inner kBytes
+            end <- deserialize int64Serde (BS.take 8 times)
+            start <- deserialize int64Serde (BS.drop 8 times)
+            Right (SessionKey k (Timestamp start) (Timestamp end))
     , serializeHeaders = const mempty
     }

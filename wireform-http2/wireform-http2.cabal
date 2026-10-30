@@ -78,7 +78,7 @@ library
       -O2
       -funfolding-use-threshold=200
     build-depends:
-        base                >= 4.17 && < 5
+        base                >= 4.20 && < 5
       , async
       , array
       , bytestring

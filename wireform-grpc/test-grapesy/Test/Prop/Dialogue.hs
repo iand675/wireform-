@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP               #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Test.Prop.Dialogue (tests) where
@@ -115,11 +114,9 @@ data RegressionTestFailed = RegressionTestFailed {
 instance Exception RegressionTestFailed where
   displayException = show
 
-#if MIN_VERSION_base(4,20,0)
   -- The backtrace to where we report that the regression failed only distracts;
   -- we're interested in the backtrace of the exception itself.
   backtraceDesired _ = False
-#endif
 
 {-------------------------------------------------------------------------------
   Regression tests

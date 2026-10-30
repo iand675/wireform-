@@ -34,6 +34,7 @@ import Kafka.Streams.Metrics (
   MetricsRegistry,
   addCounter,
   newMetricsRegistry,
+  registrySource,
   observeDuration,
   setGauge,
  )
@@ -87,9 +88,9 @@ runDemo = do
 
   -- (2) Lag report --------------------------------------------------
   let lags =
-        [ LagInfo (TaskId 0 0) 980 1000
-        , LagInfo (TaskId 0 1) 1000 1000
-        , LagInfo (TaskId 1 0) 500 1500
+        [ LagInfo (TaskId 0 0) 980 1000 False
+        , LagInfo (TaskId 0 1) 1000 1000 False
+        , LagInfo (TaskId 1 0) 500 1500 False
         ]
       rep = lagReport lags
   bullet "Lag report:"
@@ -113,7 +114,7 @@ runDemo = do
   collector <- newCollector
   setGlobalMeterProvider (collectingProvider collector)
   meter <- streamsMeter
-  registration <- registerStreamsMetrics meter reg
+  registration <- registerStreamsMetrics meter (registrySource reg)
   bullet
     ( "Registered "
         <> show (smrInstrumentCount registration)

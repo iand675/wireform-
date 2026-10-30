@@ -33,6 +33,10 @@ module Kafka.Streams.State.Store (
   -- * Key-value store
   KeyValueStore (..),
   kvsPutAll,
+  StoreCache (..),
+  FlushListener,
+  WindowCache (..),
+  SessionCache (..),
   KeyValueIterator (..),
   kvIteratorFromList,
   kvIteratorToList,
@@ -49,11 +53,17 @@ module Kafka.Streams.State.Store (
 
   -- * Builders
   StoreBuilder (..),
+  StoreContext (..),
   StoreBuilderKV (..),
+  KeyOrder (..),
   StoreBuilderW (..),
   StoreBuilderS (..),
   LoggingConfig (..),
   defaultLoggingConfig,
+  StoreSerdes (..),
+  withStoreSerdesKV,
+  withStoreSerdesW,
+  withStoreSerdesS,
 
   -- * Builder logging knobs (KIP-258 / KIP-150 surface)
   withLoggingEnabledKV,
@@ -62,6 +72,12 @@ module Kafka.Streams.State.Store (
   withLoggingDisabledW,
   withLoggingEnabledS,
   withLoggingDisabledS,
+
+  -- * Record cache
+  withCachingEnabledKV,
+  withCachingDisabledKV,
+  withCachingEnabledW,
+  withCachingEnabledS,
 
   -- * KIP-295 source-changelog reuse
   withSourceTopicChangelogKV,
@@ -81,8 +97,9 @@ import Data.String (IsString (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.Generics (Generic)
+import Kafka.Streams.Serde (Serde)
 import Kafka.Streams.Time (Timestamp)
-import Kafka.Streams.Types (TopicName)
+import Kafka.Streams.Types (Headers, TopicName)
 
 
 {- | Globally-unique store name. Must match the Java rule
@@ -186,6 +203,29 @@ data KeyValueStore k v = KeyValueStore
   -}
   , kvsReverseAll :: !(IO (KeyValueIterator k v))
   -- ^ Like 'kvsAll' but in descending key order.
+  , kvsCache :: !(Maybe (StoreCache k v))
+  {- ^ The record cache in front of the store, when it has one
+  ("Kafka.Streams.State.KeyValue.Caching"). A table processor then
+  writes with 'scWrite' and forwards its changes from 'scOnFlush'
+  instead of right away. Plain 'kvsPut' / 'kvsDelete' are buffered
+  too.
+  -}
+  }
+
+
+{- | What a cache flush hands on for each dirty key: the key, its new
+value ('Nothing': deleted), the value the store held before, and the
+timestamp and headers of the last write.
+-}
+type FlushListener k v = k -> Maybe v -> Maybe v -> Timestamp -> Headers -> IO ()
+
+
+-- | A store's record cache, as its table processor sees it.
+data StoreCache k v = StoreCache
+  { scWrite :: !(k -> Maybe v -> Timestamp -> Headers -> IO ())
+  -- ^ Buffer a write ('Nothing': a delete) made for a record with this timestamp and headers
+  , scOnFlush :: !(FlushListener k v -> IO ())
+  -- ^ Install what each flushed entry is handed to (the processor forwards it)
   }
 
 
@@ -225,6 +265,20 @@ data WindowStore k v = WindowStore
   , wsFetchRange :: !(k -> Timestamp -> Timestamp -> IO (WindowStoreIterator v))
   , wsFetchAllRange :: !(Timestamp -> Timestamp -> IO (KeyValueIterator (WindowedKey k) v))
   , wsAll :: !(IO (KeyValueIterator (WindowedKey k) v))
+  , wsCache :: !(Maybe (WindowCache k v))
+  -- ^ The record cache in front of the store, when it has one (as 'kvsCache')
+  }
+
+
+-- | A window store's record cache, as its aggregation processor sees it.
+data WindowCache k v = WindowCache
+  { wcWrite :: !(k -> v -> Timestamp -> Timestamp -> Headers -> IO ())
+  {- ^ Buffer the aggregate of @k@'s window starting at the first
+  timestamp, written for a record with the second timestamp and these
+  headers
+  -}
+  , wcOnFlush :: !((k -> Timestamp -> v -> Timestamp -> Headers -> IO ()) -> IO ())
+  -- ^ Install what each flushed window (key, start, value, timestamp, headers) is handed to
   }
 
 
@@ -249,6 +303,17 @@ data SessionStore k v = SessionStore
   , ssFetchSession :: !(SessionKey k -> IO (Maybe v))
   , ssFindSessions :: !(k -> Timestamp -> Timestamp -> IO (KeyValueIterator (SessionKey k) v))
   , ssFindAllSessions :: !(Timestamp -> Timestamp -> IO (KeyValueIterator (SessionKey k) v))
+  , ssCache :: !(Maybe (SessionCache k v))
+  -- ^ The record cache in front of the store, when it has one (as 'kvsCache')
+  }
+
+
+-- | A session store's record cache, as its aggregation processor sees it.
+data SessionCache k v = SessionCache
+  { scsWrite :: !(SessionKey k -> Maybe v -> Timestamp -> Headers -> IO ())
+  -- ^ Buffer a session's new aggregate ('Nothing': the session is removed)
+  , scsOnFlush :: !((SessionKey k -> Maybe v -> Maybe v -> Timestamp -> Headers -> IO ()) -> IO ())
+  -- ^ Install what each flushed session (new, and old as the store held it) is handed to
   }
 
 
@@ -293,15 +358,43 @@ defaultLoggingConfig =
     }
 
 
+{- | Where a store instance lives: what a builder is given each time
+the runtime builds one for a task.
+-}
+data StoreContext = StoreContext
+  { scDirectory :: !FilePath
+  {- ^ The task's own state directory
+  (@\<state.dir\>/\<application.id\>/\<task\>@). A persistent store keeps
+  its files here, so tasks never share them.
+  -}
+  , scTaskName :: !Text
+  -- ^ The task, as @\<subtopology\>_\<partition\>@
+  }
+
+
 {- | Builder for a generic state store. The builder is what the
 'StreamsBuilder' / 'Topology' carries; the runtime calls
-'sbBuild' once per partition assignment to obtain a private store
-instance.
+'sbBuild' once per task to obtain a private store instance.
 -}
 data StoreBuilder = StoreBuilder
   { sbName :: !StoreName
   , sbLogging :: !LoggingConfig
-  , sbBuild :: !(IO StateStore)
+  , sbBuild :: !(StoreContext -> IO StateStore)
+  }
+
+
+{- | Key / value serdes a store's changelog is written and restored
+with (the JVM's @Stores.keyValueStoreBuilder(supplier, keySerde,
+valueSerde)@). A logged store without them cannot run against a
+broker: the runtime refuses to start and names it.
+-}
+data StoreSerdes k v = StoreSerdes
+  { storeKeySerde :: ~(Serde k)
+  , storeValueSerde :: ~(Serde v)
+  {- ^ Lazy: a DSL operator that cannot infer its output serde
+  stores an error thunk asking for a 'Kafka.Streams.Materialized'
+  serde, which must only fire if the changelog is actually written.
+  -}
   }
 
 
@@ -309,24 +402,76 @@ data StoreBuilder = StoreBuilder
 data StoreBuilderKV k v = StoreBuilderKV
   { sbKvName :: !StoreName
   , sbKvLogging :: !LoggingConfig
-  , sbKvBuild :: !(IO (KeyValueStore k v))
+  , sbKvSerdes :: !(Maybe (StoreSerdes k v))
+  , sbKvBuild :: !(StoreContext -> IO (KeyValueStore k v))
+  , sbKvCaching :: !(Maybe (KeyOrder k))
+  {- ^ Put a record cache in front of the store (the order is for
+  merging the cache into range reads). The DSL's 'Materialized'
+  stores have one unless 'withCachingDisabled'; the runtime sizes them
+  from @statestore.cache.max.bytes@.
+  -}
   }
+
+
+-- | Evidence that store keys are ordered.
+data KeyOrder k where
+  KeyOrder :: Ord k => KeyOrder k
+
+
+-- | Front the store with a record cache (@StoreBuilder.withCachingEnabled@).
+withCachingEnabledKV :: Ord k => StoreBuilderKV k v -> StoreBuilderKV k v
+withCachingEnabledKV b = b {sbKvCaching = Just KeyOrder}
+
+
+withCachingDisabledKV :: StoreBuilderKV k v -> StoreBuilderKV k v
+withCachingDisabledKV b = b {sbKvCaching = Nothing}
 
 
 -- | Typed window-store builder.
 data StoreBuilderW k v = StoreBuilderW
   { sbWName :: !StoreName
   , sbWLogging :: !LoggingConfig
-  , sbWBuild :: !(IO (WindowStore k v))
+  , sbWSerdes :: !(Maybe (StoreSerdes k v))
+  , sbWBuild :: !(StoreContext -> IO (WindowStore k v))
+  , sbWCaching :: !(Maybe (KeyOrder k))
+  -- ^ Put a record cache in front of the store (as 'sbKvCaching')
   }
+
+
+-- | Front the window store with a record cache.
+withCachingEnabledW :: Ord k => StoreBuilderW k v -> StoreBuilderW k v
+withCachingEnabledW b = b {sbWCaching = Just KeyOrder}
 
 
 -- | Typed session-store builder.
 data StoreBuilderS k v = StoreBuilderS
   { sbSName :: !StoreName
   , sbSLogging :: !LoggingConfig
-  , sbSBuild :: !(IO (SessionStore k v))
+  , sbSSerdes :: !(Maybe (StoreSerdes k v))
+  , sbSBuild :: !(StoreContext -> IO (SessionStore k v))
+  , sbSCaching :: !(Maybe (KeyOrder k))
+  -- ^ Put a record cache in front of the store (as 'sbKvCaching')
   }
+
+
+-- | Front the session store with a record cache.
+withCachingEnabledS :: Ord k => StoreBuilderS k v -> StoreBuilderS k v
+withCachingEnabledS b = b {sbSCaching = Just KeyOrder}
+
+
+-- | Attach changelog serdes to a key-value store builder.
+withStoreSerdesKV :: Serde k -> Serde v -> StoreBuilderKV k v -> StoreBuilderKV k v
+withStoreSerdesKV ks vs b = b {sbKvSerdes = Just (StoreSerdes ks vs)}
+
+
+-- | Attach changelog serdes to a window store builder.
+withStoreSerdesW :: Serde k -> Serde v -> StoreBuilderW k v -> StoreBuilderW k v
+withStoreSerdesW ks vs b = b {sbWSerdes = Just (StoreSerdes ks vs)}
+
+
+-- | Attach changelog serdes to a session store builder.
+withStoreSerdesS :: Serde k -> Serde v -> StoreBuilderS k v -> StoreBuilderS k v
+withStoreSerdesS ks vs b = b {sbSSerdes = Just (StoreSerdes ks vs)}
 
 
 {- | Existential wrapper used by the topology to keep

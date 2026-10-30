@@ -61,7 +61,8 @@ genRecord = do
   timestampDelta <- Gen.int64 (Range.linear 0 10000)
   offsetDelta <- Gen.int32 (Range.linear 0 1000)
   key <- Gen.maybe (Gen.bytes (Range.linear 0 100))
-  value <- genBulkBytes (Range.linear 0 10000)
+  -- 'Nothing' exercises null values (tombstones) on the wire.
+  value <- Gen.maybe (genBulkBytes (Range.linear 0 10000))
   headersCount <- Gen.int (Range.linear 0 10)
   headers <- Gen.list (Range.singleton headersCount) genRecordHeader
   return $ RB.Record timestampDelta offsetDelta key value headers
@@ -295,7 +296,7 @@ prop_compression_reduces_size :: Property
 prop_compression_reduces_size = property $ do
   -- Create a batch with highly compressible data (repeated pattern)
   let repeatedValue = BS.replicate 1000 42
-  let records = V.replicate 10 (RB.Record 0 0 Nothing repeatedValue [])
+  let records = V.replicate 10 (RB.Record 0 0 Nothing (Just repeatedValue) [])
   let attrs = RB.mkAttributes Compression.Gzip RB.CreateTime False False False
   let batch = RB.mkSimpleBatch 0 0 records
   let batchWithGzip = batch {RB.batchAttributes = attrs}

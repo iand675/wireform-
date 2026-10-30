@@ -89,4 +89,4 @@ runDemo mode = do
         "  "
           <> show (crKey cr)
           <> " -> "
-          <> BSC.unpack (crValue cr)
+          <> BSC.unpack (crValueBytes cr)

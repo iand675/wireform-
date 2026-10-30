@@ -198,6 +198,7 @@ tieredKeyValueStore cfg = do
   pure
     ( KeyValueStore
         { kvsBase = kvsBase hot
+        , kvsCache = Nothing
         , kvsApproxEntries = kvsApproxEntries hot
         , kvsGet = \k -> do
             mhot <- kvsGet hot k

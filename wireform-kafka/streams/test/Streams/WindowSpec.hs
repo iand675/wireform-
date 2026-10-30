@@ -5,6 +5,7 @@ module Streams.WindowSpec (tests) where
 
 import Data.ByteString.Char8 qualified as BSC
 import Data.Int (Int64)
+import Data.List qualified
 import Data.Text (Text)
 import Data.Text qualified as T
 import Hedgehog (assert, forAll, property, (===))
@@ -32,6 +33,8 @@ import Kafka.Streams.Window (
   windowOverlaps,
  )
 import Test.Syd
+import Kafka.Streams.Serde.Windowed (sessionKeySerde, windowedSerde)
+import Kafka.Streams.State.Store (SessionKey (..), WindowedKey (..))
 import Test.Syd.Hedgehog ()
 
 
@@ -128,6 +131,12 @@ tests =
           sequence_
             [ session_aggregation_merges
             , session_aggregation_separate_sessions
+            , it "a merge retracts the merged sessions; a late record is dropped" session_retractions
+            ]
+      , describe "Windowed aggregations (driver)" $
+          sequence_
+            [ it "a record updates its open windows and skips the closed ones" hopping_partial_close
+            , it "a windowed cogroup forwards every side's updates, over its windows" cogroup_windowed
             ]
       ]
 
@@ -192,3 +201,83 @@ session_aggregation_separate_sessions =
         length rows `shouldBe` 2
       Nothing -> error "session store missing"
     closeDriver driver
+
+
+-- | Output records as (key, window start, value).
+windowedOut :: TopologyTestDriver -> IO [(Text, Int64, Int64)]
+windowedOut driver = do
+  out <- readOutput driver (topicName "out")
+  pure $
+    map
+      ( \cr -> case (deserialize (windowedSerde textSerde) <$> crKey cr, deserialize int64Serde (crValueBytes cr)) of
+          (Just (Right (WindowedKey k (Timestamp st))), Right n) -> (k, st, n)
+          other -> error ("undecodable windowed record: " <> show (fmap (fmap (const ())) (fst other)))
+      )
+      out
+
+
+hopping_partial_close :: IO ()
+hopping_partial_close = do
+  b <- newStreamsBuilder
+  src <- streamFromTopic b (topicName "in") (consumed textSerde textSerde)
+  h <- countWindowed (withValueSerde int64Serde materialized) (windowedByTime (hoppingWindows (millis 100) (millis 50)) (groupByKey (grouped textSerde textSerde) src))
+  st <- streamFromWindowedHandle h textSerde int64Serde
+  toTopic (topicName "out") (produced (windowedSerde textSerde) int64Serde) st
+  topo <- buildTopology b
+  driver <- newDriver topo "hopping"
+  -- in [150, 250) and [200, 300)
+  pipeInput driver (topicName "in") (Just (bytes "k")) (bytes "a") (Timestamp 200) 0
+  -- in [100, 200), closed at stream time 200 (grace 0), and [150, 250), open
+  pipeInput driver (topicName "in") (Just (bytes "k")) (bytes "b") (Timestamp 160) 0
+  out <- windowedOut driver
+  out `shouldBe` [("k", 150, 1), ("k", 200, 1), ("k", 150, 2)]
+  closeDriver driver
+
+
+cogroup_windowed :: IO ()
+cogroup_windowed = do
+  b <- newStreamsBuilder
+  s1 <- streamFromTopic b (topicName "one") (consumed textSerde textSerde)
+  s2 <- streamFromTopic b (topicName "two") (consumed textSerde textSerde)
+  let g = grouped textSerde textSerde
+      cg = addCogrouped (cogroup (groupByKey g s1) (\_ _ a -> a + 1)) (groupByKey g s2) (\_ _ a -> a + (10 :: Int64))
+  h <- aggregateWindowedCogrouped (pure 0) (withValueSerde int64Serde materialized) (windowedByCogroup (hoppingWindows (millis 100) (millis 50)) cg)
+  st <- streamFromWindowedHandle h textSerde int64Serde
+  toTopic (topicName "out") (produced (windowedSerde textSerde) int64Serde) st
+  topo <- buildTopology b
+  driver <- newDriver topo "cogroup-windowed"
+  -- t = 60 is in [0, 100) and [50, 150)
+  pipeInput driver (topicName "one") (Just (bytes "k")) (bytes "x") (Timestamp 60) 0
+  pipeInput driver (topicName "two") (Just (bytes "k")) (bytes "y") (Timestamp 70) 0
+  out <- windowedOut driver
+  Data.List.sort out `shouldBe` [("k", 0, 1), ("k", 0, 11), ("k", 50, 1), ("k", 50, 11)]
+  closeDriver driver
+
+
+session_retractions :: IO ()
+session_retractions = do
+  b <- newStreamsBuilder
+  src <- streamFromTopic b (topicName "in") (consumed textSerde textSerde)
+  h <- countSessionWindowed (withValueSerde int64Serde materialized) (windowedBySession (sessionWindows (millis 100)) (groupByKey (grouped textSerde textSerde) src))
+  st <- streamFromSessionWindowedHandle h textSerde int64Serde
+  toTopicNullable (topicName "out") (produced (sessionKeySerde textSerde) int64Serde) st
+  topo <- buildTopology b
+  driver <- newDriver topo "session-retract"
+  let feed ts = pipeInput driver (topicName "in") (Just (bytes "k")) (bytes "v") (Timestamp ts) 0
+  feed 0
+  feed 50
+  feed 500
+  -- merges with [0, 50], which ended before stream time 500 (grace 0): dropped
+  feed 10
+  out <- readOutput driver (topicName "out")
+  let decode cr = case deserialize (sessionKeySerde textSerde) <$> crKey cr of
+        Just (Right (SessionKey _ (Timestamp s0) (Timestamp e0))) ->
+          ((s0, e0), either (error . T.unpack) id . deserialize int64Serde <$> crValue cr, unTimestamp (crTimestamp cr))
+        _ -> error "undecodable session key"
+  map decode out
+    `shouldBe` [ ((0, 0), Just 1, 0)
+               , ((0, 0), Nothing, 0)
+               , ((0, 50), Just 2, 50)
+               , ((500, 500), Just 1, 500)
+               ]
+  closeDriver driver

@@ -159,7 +159,7 @@ let
     in map fn sorted;
 
   # Generate steps across a GHC version matrix. Each element of
-  # `ghcVersions` is a string like "ghc98"; `fn` receives
+  # `ghcVersions` is a string like "ghc910"; `fn` receives
   # { ghc, ghcVersion } and returns a step.
   withGhcMatrix = ghcVersions: fn:
     builtins.concatMap (ghc: let

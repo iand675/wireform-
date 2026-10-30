@@ -242,7 +242,8 @@ remoteKeyValueStore
 remoteKeyValueStore name client = do
   pure
     KeyValueStore
-      { kvsBase =
+      { kvsCache = Nothing
+      , kvsBase =
           StateStore
             { storeStoreName = name
             , storePersistent = True -- the remote durably holds the data

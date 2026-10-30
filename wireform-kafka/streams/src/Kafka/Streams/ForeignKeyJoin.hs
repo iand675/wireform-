@@ -1,7 +1,5 @@
-{-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -11,55 +9,28 @@
 Module      : Kafka.Streams.ForeignKeyJoin
 Description : KTable-KTable foreign-key join (KIP-213)
 
-Joins a left 'KTable' on a /derived/ key — extracted from the
-left value — into a right 'KTable' that is partitioned on that
-derived key. The join result is itself a 'KTable', materialised
-into a fresh store.
+Joins each row of a left 'KTable' (keyed by @k@) with the row of a
+right 'KTable' (keyed by @fk@) that a function of the left value
+names. The two tables are partitioned differently (by @k@ and by
+@fk@), so the join is the KIP-213 protocol over two internal topics:
 
-== KIP-213 implementation notes
+  1. /Subscription/ (@\<name\>-subscription-registration@, keyed by
+     @fk@, co-partitioned with the right table): a left row
+     subscribes its key to its foreign key, carrying a hash of the
+     left value; when the row's foreign key changes or the row is
+     deleted, it unsubscribes from the old one.
+  2. The right side keeps, per foreign key, the subscribed left keys
+     and their hashes. A subscription is answered with the right row
+     as it is now; a right-row change is sent to every subscriber.
+  3. /Response/ (@\<name\>-subscription-response@, keyed by @k@,
+     co-partitioned with the left table): the left side joins the
+     response with its current left row, unless the response carries
+     the hash of a left value that has since been replaced (that
+     value's own subscription answers instead).
 
-The Java semantics drive a four-topic protocol (subscription,
-subscription-response, foreign-key state, output). In a
-single-task in-process runtime the partitioning collapses, but
-the /tracking/ does not: when the left side updates @(k, v)@ to
-a new foreign key @fk@, we must remember that @k@ is now
-subscribed to @fk@ (and unsubscribe from the previous @fk@), so
-that subsequent right-side updates on @fk@ re-emit the join
-for @k@.
-
-This combinator follows the KIP-213 contract end-to-end:
-
-  * Each left record carries a /subscription token/ derived
-    from the value's hash. The right side stores the token
-    alongside the subscription set.
-  * When the right side emits a responder for a subscriber, it
-    verifies the token still matches the live left value's
-    token. A mismatch (the left value has been replaced and a
-    fresh subscription is pending) drops the responder; the
-    pending subscription will trigger the correct emit when it
-    processes its own join.
-
-In a single-task synchronous topology the token verification is
-redundant but harmless (the right-side processor always sees
-the live left state). In a future multi-task wiring it is the
-correctness invariant: subscription / responder messages flow
-through internal topics and timing skew across tasks is real.
-
-== State stores used
-
-  * @subscriptions@ — @fk -> 'Map' k 'SubscriptionToken'@:
-    which left keys have subscribed to a given foreign key,
-    paired with the token that was current at subscription
-    time.
-  * @left-state@ — @k -> v_left@: the latest left-side value
-    per left key (used by right-side updates to recompute
-    joins).
-  * @left-token@ — @k -> 'SubscriptionToken'@: the latest token
-    seen for the left key. Compared against subscription
-    tokens during right-side responder verification.
-  * @last-fk@ — @k -> fk@: the foreign key the left key was
-    last subscribed to. Used for unsubscribe-on-change.
-  * Materialised output store: the join result.
+A deleted left row deletes its join row at once. An inner join has no
+row while the right side has none; a left join has one for every left
+row.
 -}
 module Kafka.Streams.ForeignKeyJoin (
   foreignKeyJoinKTable,
@@ -68,22 +39,30 @@ module Kafka.Streams.ForeignKeyJoin (
   leftForeignKeyJoinKTableWith,
 ) where
 
-import Data.Hashable (Hashable, hash)
+import Data.Bits (shiftL, (.&.), (.|.))
+import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
+import Data.Hashable (hashWithSalt)
 import Data.IORef
+import Data.Int (Int64)
+import Data.Kind (Type)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Text qualified as T
-import GHC.Generics (Generic)
+import Data.Maybe (fromMaybe)
+import Data.Text (Text)
+import Kafka.Client.Internal.Murmur2 qualified as Murmur2
+import Kafka.Streams.Consumed (consumed, consumedExtractor)
+import Kafka.Streams.Internal.Serdes (int64BE, mapSerde, readInt64BE)
 import Kafka.Streams.Joined qualified as Joined
 import Kafka.Streams.KTable (
+  Change (..),
   KTable (..),
-  ktableBuilder,
-  ktableKeySerde,
-  ktableNode,
-  ktableStore,
+  bindTableCache,
+  writeRow,
  )
 import Kafka.Streams.Materialized (
   Materialized (..),
+  materializedKV,
  )
 import Kafka.Streams.Processor (
   Processor (..),
@@ -92,15 +71,15 @@ import Kafka.Streams.Processor (
   getStateStore,
   processorName,
  )
-import Kafka.Streams.Serde (HasSerde (..))
-import Kafka.Streams.State.KeyValue.InMemory (
-  inMemoryKeyValueStoreBuilder,
- )
+import Kafka.Streams.Produced (StreamPartitioner (..))
+import Kafka.Streams.Serde (HasSerde (..), Serde (..))
+import Kafka.Streams.State.KeyValue.InMemory (inMemoryKeyValueStoreBuilder)
 import Kafka.Streams.State.Store (
   AnyStateStore (..),
   KeyValueStore (..),
   StoreBuilderKV,
   StoreName,
+  withStoreSerdesKV,
  )
 import Kafka.Streams.StreamsBuilder (
   freshNodeName,
@@ -108,45 +87,30 @@ import Kafka.Streams.StreamsBuilder (
   withTopology_,
  )
 import Kafka.Streams.Topology qualified as Topo
-import Kafka.Streams.Types (Record (..))
+import Kafka.Streams.Types (Record (..), TopicName, topicName)
 import Unsafe.Coerce qualified as Unsafe
 
 
-{- | Internal: token derived from a left value's hash. Stamped on
-every subscription so the right side can detect (and drop) a
-responder that refers to a left value the publisher has since
-replaced.
--}
-newtype SubscriptionToken = SubscriptionToken {unToken :: Int}
-  deriving stock (Eq, Ord, Show, Generic)
-
-
-mkToken :: Hashable v => v -> SubscriptionToken
-mkToken v = SubscriptionToken (hash v)
-
-
-{- | Inner foreign-key KTable-KTable join. Implements KIP-213 with
-subscription token verification.
--}
+-- | Inner foreign-key KTable-KTable join.
 foreignKeyJoinKTable
   :: forall k v fk vr v'
-   . (Ord k, Ord fk, Hashable v, HasSerde v')
-  => (v -> fk) -- foreign-key extractor
-  -> (v -> vr -> v') -- joiner
+   . (Ord k, Ord fk, HasSerde v')
+  => (v -> fk)
+  -- ^ foreign-key extractor
+  -> (v -> vr -> v')
+  -- ^ joiner
   -> Materialized k v'
   -> KTable k v
   -> KTable fk vr
   -> IO (KTable k v')
 foreignKeyJoinKTable extractor joiner =
-  buildFKJoin "FK-JOIN" extractor (FKModeInner joiner)
+  buildFKJoin Joined.tableJoined extractor (\v mr -> joiner v <$> mr)
 
 
-{- | Left foreign-key KTable-KTable join. The joiner gets a 'Maybe'
-on the right side; left records always emit at least once.
--}
+-- | Left foreign-key join: a row for every left row (the right side as a 'Maybe').
 leftForeignKeyJoinKTable
   :: forall k v fk vr v'
-   . (Ord k, Ord fk, Hashable v, HasSerde v')
+   . (Ord k, Ord fk, HasSerde v')
   => (v -> fk)
   -> (v -> Maybe vr -> v')
   -> Materialized k v'
@@ -154,32 +118,17 @@ leftForeignKeyJoinKTable
   -> KTable fk vr
   -> IO (KTable k v')
 leftForeignKeyJoinKTable extractor joiner =
-  buildFKJoin "FK-LEFTJOIN" extractor (FKModeLeft joiner)
+  buildFKJoin Joined.tableJoined extractor (\v mr -> Just (joiner v mr))
 
 
-{- | 'foreignKeyJoinKTable' that accepts a 'Joined.TableJoined'
-(KIP-545) for naming + partitioner overrides.
-
-== Current behaviour
-
-The 'Joined.TableJoined' configuration is /accepted/ but only
-partially applied in the in-process driver:
-
-  * The 'Joined.name' override is recorded but the inner
-    processor names are still auto-generated. (A real-broker
-    runtime that honors 'TableJoined' end-to-end is on the
-    follow-up list.)
-  * The left/right partitioner overrides are ignored — the
-    in-process driver doesn't materialise broker partitions,
-    so per-side partitioning is moot.
-
-The point of accepting the argument now is API parity: callers
-can plumb 'TableJoined' through without rewriting their
-topologies when the runtime gains full support.
+{- | 'foreignKeyJoinKTable' with a 'Joined.TableJoined' (KIP-545): its
+name names the internal topics, and its partitioners say how the left
+and right tables are partitioned, so the response and subscription
+topics are written the same way.
 -}
 foreignKeyJoinKTableWith
   :: forall k v fk vr v'
-   . (Ord k, Ord fk, Hashable v, HasSerde v')
+   . (Ord k, Ord fk, HasSerde v')
   => Joined.TableJoined k fk
   -> (v -> fk)
   -> (v -> vr -> v')
@@ -187,13 +136,13 @@ foreignKeyJoinKTableWith
   -> KTable k v
   -> KTable fk vr
   -> IO (KTable k v')
-foreignKeyJoinKTableWith _tj extractor joiner =
-  buildFKJoin "FK-JOIN" extractor (FKModeInner joiner)
+foreignKeyJoinKTableWith tj extractor joiner =
+  buildFKJoin tj extractor (\v mr -> joiner v <$> mr)
 
 
 leftForeignKeyJoinKTableWith
   :: forall k v fk vr v'
-   . (Ord k, Ord fk, Hashable v, HasSerde v')
+   . (Ord k, Ord fk, HasSerde v')
   => Joined.TableJoined k fk
   -> (v -> fk)
   -> (v -> Maybe vr -> v')
@@ -201,361 +150,290 @@ leftForeignKeyJoinKTableWith
   -> KTable k v
   -> KTable fk vr
   -> IO (KTable k v')
-leftForeignKeyJoinKTableWith _tj extractor joiner =
-  buildFKJoin "FK-LEFTJOIN" extractor (FKModeLeft joiner)
+leftForeignKeyJoinKTableWith tj extractor joiner =
+  buildFKJoin tj extractor (\v mr -> Just (joiner v mr))
 
 
--- | Mode + joiner closure carried into the side processors.
-data FKMode v vr v' where
-  FKModeInner :: (v -> vr -> v') -> FKMode v vr v'
-  FKModeLeft :: (v -> Maybe vr -> v') -> FKMode v vr v'
+----------------------------------------------------------------------
+-- Messages
+----------------------------------------------------------------------
+
+data Subscription k = Subscription
+  { subSubscribe :: !Bool
+  -- ^ 'False': unsubscribe
+  , subHash :: !Int64
+  , subKey :: !k
+  }
+
+
+-- | op byte, 8-byte hash, then the left key's bytes.
+subscriptionSerde :: Serde k -> Serde (Subscription k)
+subscriptionSerde ks =
+  Serde
+    { serialize = \s -> BS.cons (if subSubscribe s then 1 else 0) (int64BE (subHash s) <> serialize ks (subKey s))
+    , deserialize = \bs -> case BS.uncons bs of
+        Just (op, rest) | Just h <- readInt64BE rest -> Subscription (op == 1) h <$> deserialize ks (BS.drop 8 rest)
+        _ -> Left "truncated foreign-key subscription"
+    , serializeHeaders = const mempty
+    }
+
+
+data Response vr = Response
+  { respHash :: !Int64
+  , respRight :: !(Maybe vr)
+  }
+
+
+-- | 8-byte hash, a presence byte, then the right value's bytes.
+responseSerde :: Serde vr -> Serde (Response vr)
+responseSerde vs =
+  Serde
+    { serialize = \r ->
+        int64BE (respHash r) <> maybe (BS.singleton 0) (BS.cons 1 . serialize vs) (respRight r)
+    , deserialize = \bs -> case (readInt64BE bs, BS.uncons (BS.drop 8 bs)) of
+        (Just h, Just (0, _)) -> Right (Response h Nothing)
+        (Just h, Just (_, rest)) -> Response h . Just <$> deserialize vs rest
+        _ -> Left "truncated foreign-key response"
+    , serializeHeaders = const mempty
+    }
+
+
+hashSerde :: Serde Int64
+hashSerde =
+  Serde
+    { serialize = int64BE
+    , deserialize = maybe (Left "truncated hash") Right . readInt64BE
+    , serializeHeaders = const mempty
+    }
+
+
+-- | Per foreign key: the subscribed left keys and their values' hashes.
+type Subscribers k = Map k Int64
+
+
+-- | A 64-bit hash of a left value's bytes (two independent 32-bit halves).
+valueHash :: ByteString -> Int64
+valueHash bs =
+  (fromIntegral (Murmur2.murmur2 bs) `shiftL` 32)
+    .|. (fromIntegral (hashWithSalt 0x5bd1e995 bs) .&. 0xffffffff)
+
+
+----------------------------------------------------------------------
+-- Topology
+----------------------------------------------------------------------
+
+-- | A sink partitioned like the table it is co-partitioned with ('Joined.TableJoined').
+partitionedSink
+  :: Maybe (Text -> Maybe key -> Int -> Int)
+  -> Topo.NodeName
+  -> TopicName
+  -> Serde key
+  -> Serde val
+  -> [Topo.NodeName]
+  -> Topo.Topology
+  -> Topo.Topology
+partitionedSink mp nm tp ks vs parents = case mp of
+  Nothing -> Topo.addSink nm tp ks vs parents
+  Just f -> Topo.addSinkPartitioned nm tp ks vs (StreamPartitioner (\t mk _ n -> pure (Just (f t mk n)))) parents
+
+
+addProc :: Topo.NodeName -> [Topo.NodeName] -> [StoreName] -> IO (Processor k v) -> Topo.Topology -> Topo.Topology
+addProc nm parents stores p =
+  Topo.addProcessorWith
+    Topo.ProcessorSpec
+      { Topo.processorSpecName = nm
+      , Topo.processorSpecParents = parents
+      , Topo.processorSpecSupplier = Topo.AnyProcessor p
+      , Topo.processorSpecStores = stores
+      }
 
 
 buildFKJoin
   :: forall k v fk vr v'
-   . (Ord k, Ord fk, Hashable v, HasSerde v')
-  => String -- prefix (debug only)
+   . (Ord k, Ord fk, HasSerde v')
+  => Joined.TableJoined k fk
   -> (v -> fk)
-  -> FKMode v vr v'
+  -> (v -> Maybe vr -> Maybe v')
+  -- ^ the join row for a left value and the right row
   -> Materialized k v'
   -> KTable k v
   -> KTable fk vr
   -> IO (KTable k v')
-buildFKJoin _prefix extractor mode m kl kr = do
+buildFKJoin tj extractor row m kl kr = do
   let b = ktableBuilder kl
-  outNm <-
-    maybe
-      (freshStoreName b "KTABLE-FK-OUT")
-      pure
-      (matName m)
-  subsNm <- freshStoreName b "KTABLE-FK-SUBS"
-  leftNm <- freshStoreName b "KTABLE-FK-LEFT"
-  tokenNm <- freshStoreName b "KTABLE-FK-TOKEN"
-  lastFKNm <- freshStoreName b "KTABLE-FK-LASTFK"
-
-  let outBuilder =
-        inMemoryKeyValueStoreBuilder outNm
-          :: StoreBuilderKV k v'
+      lk = ktableKeySerde kl
+      rk = ktableKeySerde kr
+      hashOf v = valueHash (serialize (ktableValueSerde kl) v)
+      outSerde = fromMaybe serde (matValueSerde m)
+  joinNm <- freshNodeName b "KTABLE-FK-JOIN"
+  let base = fromMaybe (Topo.unNodeName joinNm) tj.name
+  outNm <- maybe (freshStoreName b "KTABLE-FK-JOIN-STORE") pure (matName m)
+  subsNm <- freshStoreName b "KTABLE-FK-JOIN-SUBSCRIPTION-STORE"
+  let subTopic = topicName (base <> "-subscription-registration")
+      respTopic = topicName (base <> "-subscription-response")
+      subSerde = subscriptionSerde lk
+      respSerde = responseSerde (ktableValueSerde kr)
+      outBuilder = materializedKV m outNm lk outSerde :: StoreBuilderKV k v'
       subsBuilder =
-        inMemoryKeyValueStoreBuilder subsNm
-          :: StoreBuilderKV fk (Map k SubscriptionToken)
-      leftBuilder =
-        inMemoryKeyValueStoreBuilder leftNm
-          :: StoreBuilderKV k v
-      tokenBuilder =
-        inMemoryKeyValueStoreBuilder tokenNm
-          :: StoreBuilderKV k SubscriptionToken
-      lastFKBuilder =
-        inMemoryKeyValueStoreBuilder lastFKNm
-          :: StoreBuilderKV k fk
-  leftProcNm <- freshNodeName b "KTABLE-FK-LEFT-PROC"
-  rightProcNm <- freshNodeName b "KTABLE-FK-RIGHT-PROC"
-  -- Unifier passthrough: the left and right side processors both
-  -- emit to it; downstream nodes (and 'toKStreamFromKTable')
-  -- treat THIS node as the FK-join's output anchor. Without it
-  -- downstream sinks would only see records from one of the two
-  -- side processors.
-  emitNm <- freshNodeName b "KTABLE-FK-EMIT"
-
-  withTopology_ b $ \t ->
-    let !t1 =
-          Topo.addProcessorWith
-            Topo.ProcessorSpec
-              { Topo.processorSpecName = leftProcNm
-              , Topo.processorSpecParents = [ktableNode kl]
-              , Topo.processorSpecSupplier =
-                  Topo.AnyProcessor
-                    ( mkLeftSideProc @k @v @fk @vr @v'
-                        extractor
-                        mode
-                        (ktableStore kr)
-                        outNm
-                        subsNm
-                        leftNm
-                        tokenNm
-                        lastFKNm
-                    )
-              , Topo.processorSpecStores =
-                  [outNm, subsNm, leftNm, tokenNm, lastFKNm, ktableStore kr]
-              }
-            t
-        !t2 =
-          Topo.addProcessorWith
-            Topo.ProcessorSpec
-              { Topo.processorSpecName = rightProcNm
-              , Topo.processorSpecParents = [ktableNode kr]
-              , Topo.processorSpecSupplier =
-                  Topo.AnyProcessor
-                    ( mkRightSideProc @k @v @fk @vr @v'
-                        mode
-                        outNm
-                        subsNm
-                        leftNm
-                        tokenNm
-                    )
-              , Topo.processorSpecStores =
-                  [outNm, subsNm, leftNm, tokenNm, ktableStore kr]
-              }
-            t1
-        !t3 =
-          Topo.addProcessorWith
-            Topo.ProcessorSpec
-              { Topo.processorSpecName = emitNm
-              , Topo.processorSpecParents = [leftProcNm, rightProcNm]
-              , Topo.processorSpecSupplier =
-                  Topo.AnyProcessor (mkFKJoinEmit @k @v')
-              , Topo.processorSpecStores = []
-              }
-            t2
-        !t4 = Topo.addStateStoreKV outBuilder [leftProcNm, rightProcNm] t3
-        !t5 = Topo.addStateStoreKV subsBuilder [leftProcNm, rightProcNm] t4
-        !t6 = Topo.addStateStoreKV leftBuilder [leftProcNm, rightProcNm] t5
-        !t7 = Topo.addStateStoreKV tokenBuilder [leftProcNm, rightProcNm] t6
-        !t8 = Topo.addStateStoreKV lastFKBuilder [leftProcNm] t7
-    in t8
+        withStoreSerdesKV rk (mapSerde lk hashSerde) (inMemoryKeyValueStoreBuilder subsNm)
+          :: StoreBuilderKV fk (Subscribers k)
+      node suffix = freshNodeName b ("KTABLE-FK-JOIN-" <> suffix)
+  subscribeNm <- node "SUBSCRIBE"
+  subSinkNm <- node "SUBSCRIPTION-SINK"
+  subSourceNm <- node "SUBSCRIPTION-SOURCE"
+  registerNm <- node "SUBSCRIPTION-PROCESSOR"
+  rightNm <- node "RIGHT"
+  respMergeNm <- node "RESPONSE-MERGE"
+  respSinkNm <- node "RESPONSE-SINK"
+  respSourceNm <- node "RESPONSE-SOURCE"
+  respondNm <- node "RESPOND"
+  deleteNm <- node "DELETE"
+  outMergeNm <- node "OUTPUT"
+  withTopology_ b $ \t0 ->
+    let internal tp = Topo.addInternalTopic tp Topo.InternalTopicSpec {Topo.itsPartitions = Nothing}
+        -- left side: subscribe / unsubscribe, and deletes
+        t1 = addProc subscribeNm [ktableNode kl] [] (subscribeProcessor @k @v @fk extractor hashOf) t0
+        t2 = internal subTopic t1
+        t3 = partitionedSink tj.otherPartitioner subSinkNm subTopic rk subSerde [subscribeNm] t2
+        t4 = addProc deleteNm [ktableNode kl] [outNm] (deleteProcessor @k @v @v' outNm) t3
+        -- right side: the subscription store, and right-row changes
+        t5 = Topo.addSource subSourceNm [subTopic] rk subSerde (consumedExtractor (consumed rk subSerde)) t4
+        t6 = addProc registerNm [subSourceNm] [subsNm, ktableStore kr] (registerProcessor @k @fk @vr subsNm (ktableStore kr)) t5
+        t7 = addProc rightNm [ktableNode kr] [subsNm] (rightProcessor @k @fk @vr subsNm) t6
+        t8 = addProc respMergeNm [registerNm, rightNm] [] (passThrough @k @(Response vr)) t7
+        t9 = internal respTopic t8
+        t10 = partitionedSink tj.leftPartitioner respSinkNm respTopic lk respSerde [respMergeNm] t9
+        -- back on the left: join responses with the current left row
+        t11 = Topo.addSource respSourceNm [respTopic] lk respSerde (consumedExtractor (consumed lk respSerde)) t10
+        t12 = addProc respondNm [respSourceNm] [ktableStore kl, outNm] (respondProcessor @k @v @vr @v' (ktableStore kl) outNm hashOf row) t11
+        t13 = addProc outMergeNm [deleteNm, respondNm] [] (passThrough @k @(Change v')) t12
+        t14 = Topo.addStateStoreKV outBuilder [deleteNm, respondNm] t13
+    in Topo.addStateStoreKV subsBuilder [registerNm, rightNm] t14
   pure
     KTable
-      { ktableNode = emitNm
+      { ktableNode = outMergeNm
       , ktableStore = outNm
       , ktableBuilder = b
-      , ktableKeySerde = ktableKeySerde kl
-      , ktableValueSerde = serde
+      , ktableKeySerde = lk
+      , ktableValueSerde = outSerde
       }
 
 
-{- | Trivial passthrough used as the FK-join's output anchor so
-downstream consumers see emits from BOTH side processors.
--}
-mkFKJoinEmit :: forall k v. IO (Processor k v)
-mkFKJoinEmit = do
-  ctxRef <- newIORef Nothing
+----------------------------------------------------------------------
+-- Processors
+----------------------------------------------------------------------
+
+withContext :: Text -> (ProcessorContext -> IO (Record k x -> IO ())) -> IO (Processor k x)
+withContext nm setUp = do
+  ref <- newIORef Nothing
   pure
     Processor
-      { procName = processorName "KTABLE-FK-EMIT"
-      , procInit = \ctx -> writeIORef ctxRef (Just ctx)
+      { procName = processorName nm
+      , procInit = \ctx -> setUp ctx >>= writeIORef ref . Just
       , procClose = pure ()
-      , procProcess = \r -> do
-          mctx <- readIORef ctxRef
-          case mctx of
-            Nothing -> pure ()
-            Just ctx -> forwardRecord ctx r
+      , procProcess = \r -> readIORef ref >>= mapM_ ($ r)
       }
 
 
-----------------------------------------------------------------------
--- Side processors
-----------------------------------------------------------------------
-
-{- | Left-side processor: handles updates to the left KTable. Maintains
-the left value cache, the per-key subscription token, the foreign
-key the left key currently subscribes to, and the subscription set
-keyed by foreign key.
--}
-mkLeftSideProc
-  :: forall k v fk vr v'
-   . (Ord k, Ord fk, Hashable v)
-  => (v -> fk)
-  -> FKMode v vr v'
-  -> StoreName -- right table store (for synchronous lookup)
-  -> StoreName -- output store
-  -> StoreName -- subscriptions store: fk -> Map k SubscriptionToken
-  -> StoreName -- left-state store
-  -> StoreName -- per-left-key token store
-  -> StoreName -- last-fk store
-  -> IO (Processor k v)
-mkLeftSideProc extractor mode rightNm outNm subsNm leftNm tokenNm lastFKNm = do
-  ctxRef <- newIORef Nothing
-  rightRef <- newIORef (Nothing :: Maybe (KeyValueStore fk vr))
-  outRef <- newIORef (Nothing :: Maybe (KeyValueStore k v'))
-  subsRef <- newIORef (Nothing :: Maybe (KeyValueStore fk (Map k SubscriptionToken)))
-  leftRef <- newIORef (Nothing :: Maybe (KeyValueStore k v))
-  tokenRef <- newIORef (Nothing :: Maybe (KeyValueStore k SubscriptionToken))
-  lastFKRef <- newIORef (Nothing :: Maybe (KeyValueStore k fk))
-  pure
-    Processor
-      { procName = processorName "FK-JOIN-LEFT"
-      , procInit = \ctx -> do
-          writeIORef ctxRef (Just ctx)
-          bindStore ctx rightNm rightRef
-          bindStore ctx outNm outRef
-          bindStore ctx subsNm subsRef
-          bindStore ctx leftNm leftRef
-          bindStore ctx tokenNm tokenRef
-          bindStore ctx lastFKNm lastFKRef
-      , procClose = pure ()
-      , procProcess = \r -> case recordKey r of
-          Nothing -> pure ()
-          Just k -> do
-            mctx <- readIORef ctxRef
-            mright <- readIORef rightRef
-            mout <- readIORef outRef
-            msubs <- readIORef subsRef
-            mleft <- readIORef leftRef
-            mtoken <- readIORef tokenRef
-            mLastFK <- readIORef lastFKRef
-            case (mctx, mright, mout, msubs, mleft, mtoken, mLastFK) of
-              (Just ctx, Just right_, Just out_, Just subs_, Just left_, Just token_, Just lastFK_) -> do
-                let v = recordValue r
-                    newFK = extractor v
-                    newTok = mkToken v
-                -- Unsubscribe k from any old fk we previously subscribed to.
-                mOldFK <- kvsGet lastFK_ k
-                case mOldFK of
-                  Just oldFK | oldFK /= newFK -> do
-                    mOldMap <- kvsGet subs_ oldFK
-                    case mOldMap of
-                      Just sm -> do
-                        let !sm' = Map.delete k sm
-                        if Map.null sm'
-                          then () <$ kvsDelete subs_ oldFK
-                          else kvsPut subs_ oldFK sm'
-                      Nothing -> pure ()
-                  _ -> pure ()
-                -- Subscribe k to newFK with the new token.
-                mNewMap <- kvsGet subs_ newFK
-                let !curMap = case mNewMap of
-                      Just sm -> sm
-                      Nothing -> Map.empty
-                    !nextMap = Map.insert k newTok curMap
-                kvsPut subs_ newFK nextMap
-                kvsPut lastFK_ k newFK
-                kvsPut left_ k v
-                kvsPut token_ k newTok
-                -- Compute and emit join result.
-                mvr <- kvsGet right_ newFK
-                emitJoin mode ctx out_ k r v mvr
-              _ -> pure ()
-      }
-
-
-{- | Right-side processor: handles updates to the right KTable. For
-each subscriber, verifies the cached token matches the
-subscription's token before emitting. If the token check fails
-(the left value has been replaced and a new subscription is
-pending), the responder is silently dropped — the new subscription
-will trigger the correct emit.
--}
-mkRightSideProc
-  :: forall k v fk vr v'
-   . (Ord k, Ord fk)
-  => FKMode v vr v'
-  -> StoreName -- output store
-  -> StoreName -- subscriptions store
-  -> StoreName -- left-state store
-  -> StoreName -- per-left-key token store
-  -> IO (Processor fk vr)
-mkRightSideProc mode outNm subsNm leftNm tokenNm = do
-  ctxRef <- newIORef Nothing
-  outRef <- newIORef (Nothing :: Maybe (KeyValueStore k v'))
-  subsRef <- newIORef (Nothing :: Maybe (KeyValueStore fk (Map k SubscriptionToken)))
-  leftRef <- newIORef (Nothing :: Maybe (KeyValueStore k v))
-  tokenRef <- newIORef (Nothing :: Maybe (KeyValueStore k SubscriptionToken))
-  pure
-    Processor
-      { procName = processorName "FK-JOIN-RIGHT"
-      , procInit = \ctx -> do
-          writeIORef ctxRef (Just ctx)
-          bindStore ctx outNm outRef
-          bindStore ctx subsNm subsRef
-          bindStore ctx leftNm leftRef
-          bindStore ctx tokenNm tokenRef
-      , procClose = pure ()
-      , procProcess = \r -> case recordKey r of
-          Nothing -> pure ()
-          Just fk -> do
-            mctx <- readIORef ctxRef
-            mout <- readIORef outRef
-            msubs <- readIORef subsRef
-            mleft <- readIORef leftRef
-            mtoken <- readIORef tokenRef
-            case (mctx, mout, msubs, mleft, mtoken) of
-              (Just ctx, Just out_, Just subs_, Just left_, Just token_) -> do
-                let vr = recordValue r
-                    !ts = recordTimestamp r
-                    !hs = recordHeaders r
-                mMap <- kvsGet subs_ fk
-                case mMap of
-                  Nothing -> pure ()
-                  Just smap ->
-                    -- Iterate over subscribers; for each k verify
-                    -- the live token matches the subscription token
-                    -- before emitting. A mismatch means the left
-                    -- value has been mutated and a fresh
-                    -- subscription is pending.
-                    Map.foldrWithKey
-                      ( \k subTok next -> do
-                          mLiveTok <- kvsGet token_ k
-                          case mLiveTok of
-                            Just liveTok | liveTok == subTok -> do
-                              mLeftV <- kvsGet left_ k
-                              case mLeftV of
-                                Just lv ->
-                                  let !carrier = Record (Just k) vr ts hs :: Record k vr
-                                  in emitJoin mode ctx out_ k carrier lv (Just vr)
-                                Nothing -> pure ()
-                            _ -> pure ()
-                          next
-                      )
-                      (pure ())
-                      smap
-              _ -> pure ()
-      }
-
-
-----------------------------------------------------------------------
--- Helpers
-----------------------------------------------------------------------
-
-bindStore
-  :: forall k v
-   . ProcessorContext
-  -> StoreName
-  -> IORef (Maybe (KeyValueStore k v))
-  -> IO ()
-bindStore ctx sn ref =
+bindKV :: ProcessorContext -> StoreName -> IO (KeyValueStore a b)
+bindKV ctx sn =
   getStateStore ctx sn >>= \case
-    Just (AnyKeyValueStore kvs) ->
-      writeIORef ref (Just (Unsafe.unsafeCoerce kvs))
-    _ -> error $ "FK join: store missing: " <> show sn
+    Just (AnyKeyValueStore kvs) -> pure (Unsafe.unsafeCoerce kvs)
+    _ -> error ("foreign-key join: store missing: " <> show sn)
 
 
--- | Emit the join output for a single key, dispatching on the mode.
-emitJoin
-  :: forall k v vr v' rIn
-   . FKMode v vr v'
-  -> ProcessorContext
-  -> KeyValueStore k v'
-  -> k
-  -> Record k rIn -- carrier of timestamp/headers
-  -> v
-  -> Maybe vr
-  -> IO ()
-emitJoin mode ctx out_ k carrier v mvr =
-  case mode of
-    FKModeInner joiner ->
-      case mvr of
-        Just vr -> do
-          let !v' = joiner v vr
-          kvsPut out_ k v'
-          forwardRecord
-            ctx
-            ( Record
-                (Just k)
-                v'
-                (recordTimestamp carrier)
-                (recordHeaders carrier)
-                :: Record k v'
-            )
-        Nothing -> () <$ kvsDelete out_ k
-    FKModeLeft joiner -> do
-      let !v' = joiner v mvr
-      kvsPut out_ k v'
-      forwardRecord
-        ctx
-        ( Record
-            (Just k)
-            v'
-            (recordTimestamp carrier)
-            (recordHeaders carrier)
-            :: Record k v'
-        )
+passThrough :: forall k v. IO (Processor k v)
+passThrough = withContext "KTABLE-FK-JOIN-MERGE" (\ctx -> pure (forwardRecord ctx))
+
+
+-- | Left row changed: unsubscribe from a foreign key it left, subscribe to its current one.
+subscribeProcessor :: forall k v fk. Eq fk => (v -> fk) -> (v -> Int64) -> IO (Processor k (Change v))
+subscribeProcessor extractor hashOf =
+  withContext "KTABLE-FK-JOIN-SUBSCRIBE" $ \ctx -> pure $ \r -> case recordKey r of
+    Nothing -> pure ()
+    Just k -> do
+      let Change new old = recordValue r
+          newFk = extractor <$> new
+          send fk s = forwardRecord ctx r {recordKey = Just fk, recordValue = s}
+      case extractor <$> old of
+        Just ofk | Just ofk /= newFk -> send ofk (Subscription False 0 k)
+        _ -> pure ()
+      mapM_ (\v -> send (extractor v) (Subscription True (hashOf v) k)) new
+
+
+-- | A deleted left row deletes its join row at once.
+deleteProcessor :: forall k v (v' :: Type). StoreName -> IO (Processor k (Change v))
+deleteProcessor outNm =
+  withContext "KTABLE-FK-JOIN-DELETE" $ \ctx -> do
+    out <- bindKV ctx outNm :: IO (KeyValueStore k v')
+    -- this and the response processor both feed the merge node
+    bindTableCache ctx out
+    pure $ \r -> case (recordKey r, changeNew (recordValue r)) of
+      (Just k, Nothing) -> do
+        prev <- kvsGet out k
+        writeRow ctx out r k Nothing prev
+      _ -> pure ()
+
+
+-- | Keep the subscription store; answer a subscription with the right row as it is now.
+registerProcessor :: forall k fk (vr :: Type). Ord k => StoreName -> StoreName -> IO (Processor fk (Subscription k))
+registerProcessor subsNm rightNm =
+  withContext "KTABLE-FK-JOIN-SUBSCRIPTION-PROCESSOR" $ \ctx -> do
+    subs <- bindKV ctx subsNm :: IO (KeyValueStore fk (Subscribers k))
+    right <- bindKV ctx rightNm :: IO (KeyValueStore fk vr)
+    pure $ \r -> case recordKey r of
+      Nothing -> pure ()
+      Just fk -> do
+        let s = recordValue r
+        cur <- fromMaybe Map.empty <$> kvsGet subs fk
+        if subSubscribe s
+          then do
+            kvsPut subs fk (Map.insert (subKey s) (subHash s) cur)
+            rv <- kvsGet right fk
+            forwardRecord ctx r {recordKey = Just (subKey s), recordValue = Response (subHash s) rv}
+          else do
+            let rest = Map.delete (subKey s) cur
+            if Map.null rest then () <$ kvsDelete subs fk else kvsPut subs fk rest
+
+
+-- | A right row changed: tell every subscriber.
+rightProcessor :: forall (k :: Type) fk vr. StoreName -> IO (Processor fk (Change vr))
+rightProcessor subsNm =
+  withContext "KTABLE-FK-JOIN-RIGHT" $ \ctx -> do
+    subs <- bindKV ctx subsNm :: IO (KeyValueStore fk (Subscribers k))
+    pure $ \r -> case recordKey r of
+      Nothing -> pure ()
+      Just fk -> do
+        cur <- fromMaybe Map.empty <$> kvsGet subs fk
+        let new = changeNew (recordValue r)
+        mapM_
+          (\(k, h) -> forwardRecord ctx r {recordKey = Just k, recordValue = Response h new})
+          (Map.toList cur)
+
+
+-- | Join a response with the current left row, unless it answers a replaced left value.
+respondProcessor
+  :: forall k v vr v'
+   . StoreName
+  -> StoreName
+  -> (v -> Int64)
+  -> (v -> Maybe vr -> Maybe v')
+  -> IO (Processor k (Response vr))
+respondProcessor leftNm outNm hashOf row =
+  withContext "KTABLE-FK-JOIN-RESPOND" $ \ctx -> do
+    left <- bindKV ctx leftNm :: IO (KeyValueStore k v)
+    out <- bindKV ctx outNm :: IO (KeyValueStore k v')
+    -- this and the response processor both feed the merge node
+    bindTableCache ctx out
+    pure $ \r -> case recordKey r of
+      Nothing -> pure ()
+      Just k -> do
+        lv <- kvsGet left k
+        case lv of
+          Just v
+            | hashOf v == respHash (recordValue r) -> do
+                let new = row v (respRight (recordValue r))
+                prev <- kvsGet out k
+                writeRow ctx out r k new prev
+          -- a deleted or since-replaced left row: drop the stale answer
+          _ -> pure ()

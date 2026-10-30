@@ -71,7 +71,8 @@ mkStore
   -> WindowStore k v
 mkStore nm sizeMs retentionMs ref obs =
   WindowStore
-    { wsBase =
+    { wsCache = Nothing
+    , wsBase =
         StateStore
           { storeStoreName = nm
           , storePersistent = False
@@ -136,7 +137,9 @@ inMemoryWindowStoreBuilder
   -> StoreBuilderW k v
 inMemoryWindowStoreBuilder nm sz ret =
   StoreBuilderW
-    { sbWName = nm
+    { sbWCaching = Nothing
+    , sbWName = nm
     , sbWLogging = defaultLoggingConfig
-    , sbWBuild = inMemoryWindowStore nm sz ret
+    , sbWSerdes = Nothing
+    , sbWBuild = \_ -> inMemoryWindowStore nm sz ret
     }

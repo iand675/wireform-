@@ -82,6 +82,7 @@ module Kafka.Streams.Topology.Free.Graphviz (
 
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Lazy qualified as TL
@@ -519,7 +520,7 @@ primNode p0 = case p0 of
     ("Branch\n" <> T.pack (show (length ps)) <> " ways", "diamond")
   ToTableT _ -> ("ToTable", "box")
   ToStream -> ("ToStream", "ellipse")
-  Repartition pfx -> ("Repartition\n" <> pfx, "box")
+  Repartition pfx -> ("Repartition\n" <> fromMaybe "auto" pfx, "box")
   RepartitionWith _ -> ("RepartitionWith", "box")
   GroupByKey _ -> ("GroupByKey", "ellipse")
   GroupBy _ _ -> ("GroupBy", "ellipse")

@@ -10,6 +10,16 @@ import Data.Text qualified as T
 import Kafka.Streams.Imperative
 import Kafka.Streams.Joined (symmetricJoinWindows)
 import Test.Syd
+import Control.Monad (forM, forM_)
+import Control.Monad.IO.Class (liftIO)
+import Data.List (sort, sortOn)
+import Hedgehog qualified as H
+import Hedgehog.Gen qualified as Gen
+import Hedgehog.Range qualified as Range
+import Kafka.Streams.Joined (JoinWindows (..))
+import Test.Syd.Hedgehog ()
+import Data.Map.Strict qualified as Map
+import Kafka.Streams.Topology qualified as Topo
 
 
 tests :: Spec
@@ -36,6 +46,11 @@ tests =
       , fk_join_changing_fk_unsubscribes
       , fk_join_right_update_re_emits
       , fk_left_join_emits_when_no_right
+      , -- Window joins against a model
+        it "window inner join: every pair within the windows, in any arrival order (model)" prop_inner_join_model
+        , it "window left/outer join: matches, then the unmatched once their window closes (model)" prop_outer_join_model
+        , it "single-store self-join: the same output in the same order, on one store (KIP-862)" prop_self_join
+        , children_in_order
       ]
 
 
@@ -87,7 +102,7 @@ kstream_ktable_inner =
     pipeInput driver (topicName "events") (Just (bytes "u2")) (bytes "scroll") (t 2) 0
 
     out <- readOutput driver (topicName "out")
-    map (unbytes . crValue) out `shouldBe` ["alice:click", "bob:scroll"]
+    map (unbytes . crValueBytes) out `shouldBe` ["alice:click", "bob:scroll"]
     closeDriver driver
 
 
@@ -124,7 +139,7 @@ kstream_ktable_left =
     pipeInput driver (topicName "events") (Just (bytes "u2")) (bytes "y") (t 1) 0
 
     out <- readOutput driver (topicName "out")
-    map (unbytes . crValue) out `shouldBe` ["alice:x", "<unknown>:y"]
+    map (unbytes . crValueBytes) out `shouldBe` ["alice:x", "<unknown>:y"]
     closeDriver driver
 
 
@@ -159,7 +174,7 @@ kstream_ktable_table_updates_propagate =
     pipeInput driver (topicName "events") (Just (bytes "u1")) (bytes "y") (t 3) 0
 
     out <- readOutput driver (topicName "out")
-    map (unbytes . crValue) out `shouldBe` ["alice:x", "ALICE:y"]
+    map (unbytes . crValueBytes) out `shouldBe` ["alice:x", "ALICE:y"]
     closeDriver driver
 
 
@@ -202,7 +217,7 @@ kstream_kstream_inner_within_window =
     out <- readOutput driver (topicName "out")
     -- Order: L1 buffers left-side; R1 arrives, scans left, finds L1
     -- → "L1+R1"; L2 arrives, scans right, finds R1 → "L2+R1".
-    map (unbytes . crValue) out `shouldBe` ["L1+R1", "L2+R1"]
+    map (unbytes . crValueBytes) out `shouldBe` ["L1+R1", "L2+R1"]
     closeDriver driver
 
 
@@ -269,18 +284,24 @@ kstream_kstream_left_unmatched_emits_nothing =
     topo <- buildTopology b
     driver <- newDriver topo "kskj-app"
 
-    -- L1 has no right match yet → emits "L1+<none>".
+    -- L1 has no right match yet: it is held, not emitted.
     pipeInput driver (topicName "left") (Just (bytes "k")) (bytes "L1") (t 0) 0
-    -- R1 within window → finds L1 in the left store, emits "L1+R1".
+    -- R1 within window → finds L1 in the left store, emits "L1+R1";
+    -- L1 is matched, so it never comes out unmatched.
     pipeInput driver (topicName "right") (Just (bytes "k")) (bytes "R1") (t 20) 0
     -- L2 within window of R1 → emits "L2+R1".
     pipeInput driver (topicName "left") (Just (bytes "k")) (bytes "L2") (t 30) 0
-    -- L3 outside window of R1 → emits "L3+<none>".
+    -- L3 outside window of R1: held until its window (200 + 50) closes.
     pipeInput driver (topicName "left") (Just (bytes "k")) (bytes "L3") (t 200) 0
-
     out <- readOutput driver (topicName "out")
-    map (unbytes . crValue) out
-      `shouldBe` ["L1+<none>", "L1+R1", "L2+R1", "L3+<none>"]
+    map (unbytes . crValueBytes) out `shouldBe` ["L1+R1", "L2+R1"]
+    -- a joined record carries the later timestamp
+    map crTimestamp out `shouldBe` [t 20, t 30]
+    -- stream time passes 250: L3 comes out unmatched, before L4 is joined
+    pipeInput driver (topicName "left") (Just (bytes "k")) (bytes "L4") (t 251) 0
+    out' <- readOutput driver (topicName "out")
+    map (unbytes . crValueBytes) out' `shouldBe` ["L3+<none>"]
+    map crTimestamp out' `shouldBe` [t 200]
     closeDriver driver
 
 
@@ -314,11 +335,15 @@ kstream_kstream_outer_emits_both_sides =
     driver <- newDriver topo "ksko-app"
 
     pipeInput driver (topicName "left") (Just (bytes "k")) (bytes "L1") (t 0) 0
-    -- Right at t=200: outside L1's 50ms window AND L1 already buffered.
+    -- Right at t=200: outside L1's 50ms window. Stream time passing 50
+    -- closes L1's window: it comes out unmatched; R1 is held.
     pipeInput driver (topicName "right") (Just (bytes "k")) (bytes "R1") (t 200) 0
-
     out <- readOutput driver (topicName "out")
-    map (unbytes . crValue) out `shouldBe` ["L1/<>", "<>/R1"]
+    map (unbytes . crValueBytes) out `shouldBe` ["L1/<>"]
+    -- and R1 once stream time passes 250
+    pipeInput driver (topicName "left") (Just (bytes "k")) (bytes "L2") (t 300) 0
+    out' <- readOutput driver (topicName "out")
+    map (unbytes . crValueBytes) out' `shouldBe` ["<>/R1"]
     closeDriver driver
 
 
@@ -505,7 +530,7 @@ kstream_global_ktable_inner =
     pipeInput driver (topicName "events") (Just (bytes "e3")) (bytes "u2|scroll") (t 3) 0
 
     out <- readOutput driver (topicName "out")
-    map (unbytes . crValue) out `shouldBe` ["alice:click", "bob:scroll"]
+    map (unbytes . crValueBytes) out `shouldBe` ["alice:click", "bob:scroll"]
     closeDriver driver
 
 
@@ -543,7 +568,7 @@ kstream_global_ktable_left_no_match_emits_nothing =
     pipeInput driver (topicName "events") (Just (bytes "e2")) (bytes "u9|y") (t 2) 0
 
     out <- readOutput driver (topicName "out")
-    map (unbytes . crValue) out `shouldBe` ["alice:x", "<unknown>:y"]
+    map (unbytes . crValueBytes) out `shouldBe` ["alice:x", "<unknown>:y"]
     closeDriver driver
 
 
@@ -710,4 +735,145 @@ fk_left_join_emits_when_no_right =
     -- Now right arrives, re-emit.
     pipeInput driver (topicName "users") (Just (bytes "u1")) (bytes "alice") (t 1) 0
     rs.roKvGet "o1" >>= (`shouldBe` Just "alice:x")
+    closeDriver driver
+
+
+-- | One input record: side ('True' left), key, timestamp, value.
+data In = In {inLeft :: Bool, inKey :: Text, inTs :: Integer, inVal :: Text}
+  deriving stock (Show)
+
+
+genInputs :: H.Gen [In]
+genInputs = do
+  n <- Gen.int (Range.linear 0 25)
+  forM [1 .. n] $ \i -> do
+    left <- Gen.bool
+    k <- Gen.element ["a", "b"]
+    -- few timestamps, so duplicates (same key and timestamp) happen
+    ts <- Gen.integral (Range.linear 0 60)
+    pure (In left k ts ((if left then "L" else "R") <> T.pack (show i)))
+
+
+-- | Run a window join of kind @kind@ over the inputs, in order; the outputs as (key, value, timestamp).
+runJoin :: Text -> JoinWindows -> [In] -> IO [(Text, Text, Integer)]
+runJoin kind jw ins = do
+  b <- newStreamsBuilder
+  sl <- streamFromTopic b (topicName "left") (consumed textSerde textSerde)
+  sr <- streamFromTopic b (topicName "right") (consumed textSerde textSerde)
+  let jn = Kafka.Streams.Imperative.joined textSerde textSerde textSerde
+      side = maybe "-" id
+  j <- case kind of
+    "inner" -> joinKStreamKStream (\l r -> l <> "|" <> r) jw jn sl sr
+    "left" -> leftJoinKStreamKStream (\l r -> l <> "|" <> side r) jw jn sl sr
+    _ -> outerJoinKStreamKStream (\l r -> side l <> "|" <> side r) jw jn sl sr
+  toTopic (topicName "out") (produced textSerde textSerde) j
+  topo <- buildTopology b
+  driver <- newDriver topo "join-model"
+  forM_ ins $ \i ->
+    pipeInput driver (topicName (if inLeft i then "left" else "right")) (Just (bytes (inKey i))) (bytes (inVal i)) (t (inTs i)) 0
+  out <- readOutput driver (topicName "out")
+  closeDriver driver
+  pure (map (\cr -> (maybe "" unbytes (crKey cr), unbytes (crValueBytes cr), toInteger (unTimestamp (crTimestamp cr)))) out)
+
+
+-- | Every left/right pair a window join matches: a left record at @t@ meets the right ones in @[t - before, t + after]@.
+pairs :: JoinWindows -> [In] -> [(Text, Text, Integer)]
+pairs jw ins =
+  concatMap
+    ( \l ->
+        map
+          (\r -> (inKey l, inVal l <> "|" <> inVal r, max (inTs l) (inTs r)))
+          ( filter
+              ( \r ->
+                  not (inLeft r)
+                    && inKey r == inKey l
+                    && inTs r >= inTs l - toInteger jw.beforeMs
+                    && inTs r <= inTs l + toInteger jw.afterMs
+              )
+              ins
+          )
+    )
+    (filter inLeft ins)
+
+
+prop_inner_join_model :: H.Property
+prop_inner_join_model = H.property $ do
+  ins <- H.forAll genInputs
+  before <- H.forAll (Gen.integral (Range.linear 0 15))
+  after <- H.forAll (Gen.integral (Range.linear 0 15))
+  -- enough grace that nothing arrives too late
+  let jw = JoinWindows before after 1000
+  out <- liftIO (runJoin "inner" jw ins)
+  sort out H.=== sort (pairs jw ins)
+
+
+prop_outer_join_model :: H.Property
+prop_outer_join_model = H.property $ do
+  ins0 <- H.forAll genInputs
+  kind <- H.forAll (Gen.element ["left", "outer"])
+  w <- H.forAll (Gen.integral (Range.linear 0 15))
+  grace <- H.forAll (Gen.integral (Range.linear 0 10))
+  -- in timestamp order, so nothing is late and nothing waits on a record
+  -- that comes after its window closed; then one far-off record on
+  -- another key closes every window
+  let ins = sortOnTs ins0
+      flush = In True "zz" 100_000 "F"
+      jw = JoinWindows w w grace
+      matched = pairs jw ins
+      hasMatch x = any (\y -> inLeft y /= inLeft x && inKey y == inKey x && abs (inTs y - inTs x) <= toInteger w) ins
+      unmatched =
+        map
+          (\x -> (inKey x, if inLeft x then inVal x <> "|-" else "-|" <> inVal x, inTs x))
+          (filter (\x -> not (hasMatch x) && (inLeft x || kind == "outer")) ins)
+  out <- liftIO (runJoin kind jw (ins <> [flush]))
+  sort out H.=== sort (matched <> unmatched)
+  where
+    sortOnTs = map snd . sortOn fst . zipWith (\i x -> ((inTs x, i :: Int), x)) [0 ..]
+
+
+-- | A stream joined with itself, optimised to one store or not; its output and store count.
+runSelfJoin :: Bool -> JoinWindows -> [In] -> IO ([(Text, Text, Integer)], Int)
+runSelfJoin single jw ins = do
+  b <- newStreamsBuilder
+  st <- streamFromTopic b (topicName "in") (consumed textSerde textSerde)
+  j <- joinKStreamKStream (\l r -> l <> "|" <> r) jw (Kafka.Streams.Imperative.joined textSerde textSerde textSerde) st st
+  toTopic (topicName "out") (produced textSerde textSerde) j
+  topo0 <- buildTopology b
+  let topo = if single then Topo.optimizeTopology Topo.noOptimisations {Topo.optSingleStoreSelfJoin = True} topo0 else topo0
+  driver <- newDriver topo "self-join"
+  forM_ ins $ \i -> pipeInput driver (topicName "in") (Just (bytes (inKey i))) (bytes (inVal i)) (t (inTs i)) 0
+  out <- readOutput driver (topicName "out")
+  closeDriver driver
+  pure (map (\cr -> (maybe "" unbytes (crKey cr), unbytes (crValueBytes cr), toInteger (unTimestamp (crTimestamp cr)))) out, Map.size (Topo.topoStores topo))
+
+
+prop_self_join :: H.Property
+prop_self_join = H.property $ do
+  ins <- H.forAll genInputs
+  before <- H.forAll (Gen.integral (Range.linear 0 15))
+  after <- H.forAll (Gen.integral (Range.linear 0 15))
+  -- small graces drop some out-of-order records, as both forms must
+  grace <- H.forAll (Gen.integral (Range.linear 0 30))
+  let jw = JoinWindows before after grace
+  (twoStores, n2) <- liftIO (runSelfJoin False jw ins)
+  (oneStore, n1) <- liftIO (runSelfJoin True jw ins)
+  oneStore H.=== twoStores
+  (n2, n1) H.=== (2, 1)
+
+
+children_in_order :: Spec
+children_in_order =
+  it "a node forwards to its children in the order they were added" $ do
+    b <- newStreamsBuilder
+    st <- streamFromTopic b (topicName "in") (consumed textSerde textSerde)
+    one <- mapValues (<> "1") st
+    two <- mapValues (<> "2") st
+    toTopic (topicName "out") (produced textSerde textSerde) one
+    toTopic (topicName "out") (produced textSerde textSerde) two
+    topo <- buildTopology b
+    driver <- newDriver topo "children"
+    pipeInput driver (topicName "in") (Just (bytes "k")) (bytes "x") (t 0) 0
+    pipeInput driver (topicName "in") (Just (bytes "k")) (bytes "y") (t 1) 0
+    out <- readOutput driver (topicName "out")
+    map (unbytes . crValueBytes) out `shouldBe` ["x1", "x2", "y1", "y2"]
     closeDriver driver

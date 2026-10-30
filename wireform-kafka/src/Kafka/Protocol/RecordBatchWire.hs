@@ -294,7 +294,7 @@ writeCompressedBody p RecordBatch {..} nRec compressedRecords = do
 recordWireSize :: Record -> Int
 recordWireSize Record {..} =
   let !keyLen = maybe 0 BS.length recordKey
-      !valLen = BS.length recordValue
+      !valLen = maybe 0 BS.length recordValue
       !hdrCount = length recordHeaders
       !hdrSize = foldl' (\acc h -> acc + headerWireSize h) 0 recordHeaders
       -- 5-byte VarInt cap on every length / delta + 1 byte attrs.
@@ -443,9 +443,11 @@ pokeRecord !p Record {..} = do
     Just k -> do
       p' <- pokeVarInt pc (fromIntegral (BS.length k))
       pokeByteString p' k
-  pe <- do
-    p' <- pokeVarInt pd (fromIntegral (BS.length recordValue))
-    pokeByteString p' recordValue
+  pe <- case recordValue of
+    Nothing -> pokeVarInt pd (-1)
+    Just v -> do
+      p' <- pokeVarInt pd (fromIntegral (BS.length v))
+      pokeByteString p' v
   pf <- pokeVarInt pe (fromIntegral (length recordHeaders))
   pg <- foldHeaders pf recordHeaders
   let !bodyEnd = pg
@@ -669,6 +671,10 @@ readRecords
   -> Ptr Word8
   -> IO (V.Vector Record)
 readRecords fp basePtr n start endPtr = do
+  -- A record takes at least a byte: more than the bytes left is a
+  -- corrupt count, refused before it sizes an allocation.
+  when (n > endPtr `minusPtr` start) $
+    errOut ("record count " ++ show n ++ " exceeds the " ++ show (endPtr `minusPtr` start) ++ "-byte body")
   mv <- MV.unsafeNew n
   let go !i !p
         | i >= n = pure ()
@@ -704,11 +710,6 @@ peekRecord fp basePtr p endPtr = do
   (offDelta, p3) <- peekVarInt p2 endPtr
   (mKey, p4) <- peekVarBytesSlice fp basePtr p3 endPtr
   (mVal, p5) <- peekVarBytesSlice fp basePtr p4 endPtr
-  -- A null value (length=-1) round-trips to 'BS.empty'; preserve
-  -- that so encode/decode is invertible.
-  let !value = case mVal of
-        Nothing -> BS.empty
-        Just v -> v
   (hdrCount, p6) <- peekVarInt p5 endPtr
   (hdrs, p7) <- readHeaders fp basePtr (fromIntegral hdrCount) p6 endPtr
   pure
@@ -716,7 +717,7 @@ peekRecord fp basePtr p endPtr = do
         { recordTimestampDelta = tsDelta
         , recordOffsetDelta = offDelta
         , recordKey = mKey
-        , recordValue = value
+        , recordValue = mVal
         , recordHeaders = hdrs
         }
     , p7
@@ -1045,21 +1046,22 @@ slicedRecordKey SlicedRecordBatch {..} i =
            )
 
 
-{- | Read the i-th record's value. The v2 record format allows
-null values; we return 'BS.empty' in that case to match the
-legacy 'decodeRecordBatchWire' behaviour.
+{- | Read the i-th record's value; 'Nothing' for a null value (a
+tombstone, length @-1@ on the wire).
 -}
 {-# INLINE slicedRecordValue #-}
-slicedRecordValue :: SlicedRecordBatch -> Int -> ByteString
+slicedRecordValue :: SlicedRecordBatch -> Int -> Maybe ByteString
 slicedRecordValue SlicedRecordBatch {..} i =
   let !(off, len) = VU.unsafeIndex (SV.sliceVectorOffsets sbValueSlices) i
   in if len < 0
-       then BS.empty
+       then Nothing
        else
-         BSI.fromForeignPtr
-           (SV.sliceVectorBuffer sbValueSlices)
-           (fromIntegral off)
-           (fromIntegral len)
+         Just
+           ( BSI.fromForeignPtr
+               (SV.sliceVectorBuffer sbValueSlices)
+               (fromIntegral off)
+               (fromIntegral len)
+           )
 
 
 -- | Number of headers attached to the i-th record (KIP-82).
@@ -1275,6 +1277,8 @@ readSlicedRecords
        , VU.Vector (Int32, Int32) -- header value (offset, length)
        )
 readSlicedRecords basePtr n start endPtr = do
+  when (n > endPtr `minusPtr` start) $
+    errOut ("record count " ++ show n ++ " exceeds the " ++ show (endPtr `minusPtr` start) ++ "-byte body")
   mvOff <- VUM.unsafeNew n
   mvTs <- VUM.unsafeNew n
   mvKey <- VUM.unsafeNew n

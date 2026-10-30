@@ -12,6 +12,11 @@ abstractions but compiled down to plain 'TVar's. The runtime pokes
 counters / gauges / timers at well-known points in the engine
 lifecycle; users can read snapshots via 'dumpMetrics'.
 
+A running instance keeps its counters in the tasks themselves
+(unboxed, no allocation per record) and snapshots them on demand:
+'Kafka.Streams.Runtime.streamsMetrics' is a 'MetricsSource', as is
+'registrySource' over a registry of your own.
+
 The metric naming scheme mirrors the Java client:
 
 @
@@ -54,6 +59,17 @@ module Kafka.Streams.Metrics (
   storeGetTotal,
   storeDeleteTotal,
   droppedRecordsTotal,
+  threadCommitTotal,
+  threadCommitFailedTotal,
+  threadCommitAbortedTotal,
+  taskRecoveriesTotal,
+  rebalanceTotal,
+  restoredRecordsTotal,
+  standbyRecordsTotal,
+
+  -- * Sources
+  MetricsSource,
+  registrySource,
 ) where
 
 import Control.Concurrent.STM
@@ -214,3 +230,28 @@ storeDeleteTotal = "stream-state-metrics:delete-total"
 
 droppedRecordsTotal :: Text
 droppedRecordsTotal = "stream-task-metrics:dropped-records-total"
+
+
+threadCommitTotal, threadCommitFailedTotal, threadCommitAbortedTotal :: Text
+threadCommitTotal = "stream-thread-metrics:commit-total"
+threadCommitFailedTotal = "stream-thread-metrics:commit-failed-total"
+threadCommitAbortedTotal = "stream-thread-metrics:commit-aborted-total"
+
+
+taskRecoveriesTotal, rebalanceTotal, restoredRecordsTotal, standbyRecordsTotal :: Text
+taskRecoveriesTotal = "stream-thread-metrics:task-recoveries-total"
+rebalanceTotal = "stream-thread-metrics:rebalance-total"
+restoredRecordsTotal = "stream-state-metrics:restore-total"
+standbyRecordsTotal = "stream-state-metrics:standby-update-total"
+
+
+----------------------------------------------------------------------
+-- Sources
+----------------------------------------------------------------------
+
+-- | A snapshot of metrics, re-read on every call.
+type MetricsSource = IO (Map Text MetricValue)
+
+
+registrySource :: MetricsRegistry -> MetricsSource
+registrySource = dumpMetrics

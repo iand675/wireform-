@@ -74,9 +74,10 @@ package flatparse
 -- wireform-html / wireform-rewriter pattern-match the Text data
 -- constructor with @ByteArray ba#@ from @Data.Array.Byte@. That
 -- only type-checks against text-2.1+ where @Data.Text.Array.Array
--- = Data.Array.Byte.ByteArray@; on text-2.0.x (which GHC 9.6.4
--- ships) Array is its own newtype and the pattern fails to unify.
--- Force the solver to pick text-2.1+ on every GHC.
+-- = Data.Array.Byte.ByteArray@; on text-2.0.x Array is its own
+-- newtype and the pattern fails to unify. Every supported GHC (9.10+)
+-- ships text-2.1+, so this only stops the solver reinstalling an
+-- older text.
 constraints: text >= 2.1
            , crypton >= 1.0 && < 1.2
 

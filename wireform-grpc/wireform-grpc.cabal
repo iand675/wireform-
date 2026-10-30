@@ -18,7 +18,7 @@ extra-source-files: data/route_guide_db.json
                     data/interop.pem
                     data/interop.key
                     data/interop-ca.pem
-tested-with:        GHC==8.10.7
+tested-with:        GHC == 9.10.3, GHC == 9.12.4, GHC == 9.14.1
                   , GHC==9.2.8
                   , GHC==9.4.8
                   , GHC==9.6.6
@@ -38,7 +38,7 @@ common lang
       -Widentities
       -Wmissing-export-lists
   build-depends:
-      base >= 4.14 && < 4.22
+      base >= 4.20 && < 5
   default-language:
       Haskell2010
   default-extensions:
@@ -149,7 +149,7 @@ library
       Network.GRPC.Util.Backtrace
 
   build-depends:
-    , aeson                     >= 1.5     && < 2.3
+    , aeson                     >= 1.5     && < 2.4
     , async                     >= 2.2     && < 2.3
     , binary                    >= 0.8     && < 0.9
     , bytestring                >= 0.10.12 && < 0.13
@@ -181,9 +181,6 @@ library
     , unordered-containers      >= 0.2     && < 0.3
     , utf8-string               >= 1.0     && < 1.1
     , vector                    >= 0.13    && < 0.14
-
--- Test suites and benchmarks are disabled while migrating from proto-lens to wireform.
--- They depend on proto-lens generated code that needs to be regenerated.
 
 test-suite wireform-grpc-interop
   import:             lang, common-executable-flags

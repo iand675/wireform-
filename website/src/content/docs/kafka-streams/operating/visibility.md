@@ -15,9 +15,9 @@ Kafka, Streams, and Riffle terminology is defined in the [Glossary](../glossary/
 
 :::note[TL;DR]
 
-- Commit boundary is `commitIntervalMs` (default 30 s), not a `COMMIT` statement. Downstream consumers see up to that much staleness.
-- IQ reads see the live in-memory store, not necessarily atomically with the EOS commit cycle.
-- State partitions across instances. Query routing uses `StreamsMetadata` + `KeyQueryMetadata`.
+- Commit boundary is `commitIntervalMs` (default 30 s at least once, 100 ms under exactly-once), not a `COMMIT` statement. Downstream `read_committed` consumers see up to that much staleness.
+- IQ reads see the live store, including writes an EOS abort will roll back.
+- State partitions across instances. Set `applicationServer` and every instance learns who hosts what: `queryMetadataForKey` names the instance (and the standbys) holding a key, `streamsMetadata` every instance's partitions and stores. Forwarding the query is your code.
 - Event time and processing time differ. Windowed aggregations use event-time; rate metrics use wall-clock.
 - Side effects in `peek` / `foreach` / `mapValuesM` replay on rewind. Use two-phase commit sinks or idempotency tokens for exactly-once external effects.
 
@@ -29,7 +29,7 @@ Kafka, Streams, and Riffle terminology is defined in the [Glossary](../glossary/
 | ------------- | ---------------------- |
 | Atomicity | Per-record processing is atomic on a single task; per-commit-cycle atomicity is EOS |
 | Consistency | **Eventual**: derived state catches up to the log |
-| Isolation | Read-uncommitted by default; read-committed with `isolation.level = read_committed`; transactional stores buffer writes until commit |
+| Isolation | Downstream consumers: read-uncommitted by default, read-committed with `isolation.level = read_committed`. IQ: always the live (uncommitted) store |
 | Durability | Kafka log is durable; derived state is durable after changelog flush |
 
 Five operationally-interesting differences: **commit boundary**, **read path freshness**, **multi-instance distribution**, **event-time vs processing-time**, and **replay-on-failure**.
@@ -38,10 +38,10 @@ Five operationally-interesting differences: **commit boundary**, **read path fre
 
 In SQL, the commit boundary is `COMMIT`. Reads after see the write.
 
-In Kafka Streams, the commit boundary is **`commitIntervalMs`** (or sooner if cache fills). Between commits:
+In Kafka Streams, the commit boundary is **`commitIntervalMs`** (or sooner when a processor calls `ctxRequestCommit`, and before every rebalance). Between commits:
 
-- Producer accumulates records in its transactional batch
-- State store buffers writes in memory and (under EOS) in its transactional buffer
+- Producer sends output and changelog records inside the open transaction (under EOS)
+- The record caches of table stores hold their latest writes; they reach the store, its changelog and the operators downstream at the commit (or earlier, when a task's share of `statestoreCacheMaxBytes` runs out). Uncached stores apply writes immediately
 - Consumer position moves forward but offset commit hasn't fired
 
 A downstream consumer with `isolation.level = read_committed` sees nothing until commit. A consumer with `read_uncommitted` sees records as written, including potential aborts: `READ UNCOMMITTED` semantics.
@@ -50,7 +50,7 @@ Within a stream thread, a processor that writes then reads sees its own write im
 
 ### Why this matters operationally
 
-- 30 s `commitIntervalMs` (default) means downstream `read_committed` consumers see up to 30 s staleness.
+- Under EOS the default 100 ms `commitIntervalMs` bounds downstream `read_committed` staleness; a longer interval raises it to match.
 
 ```mermaid
 sequenceDiagram
@@ -60,20 +60,18 @@ sequenceDiagram
   participant IQ as Interactive query
   participant Down as read_committed consumer
   Up->>Eng: record at t=0
-  Eng->>Store: put (buffered in txn store)
+  Eng->>Store: put (applied immediately)
   IQ->>Store: get
-  Store-->>IQ: pre-commit value
+  Store-->>IQ: new, uncommitted value
   Note over Eng: ...more records...
-  Eng->>Eng: commit cycle at t=30s
+  Eng->>Eng: commit at t=100ms
   Eng->>Down: records become visible
-  Eng->>Store: storeCommit drains txn buffer
-  IQ->>Store: get
-  Store-->>IQ: committed value
+  Note over Store: an abort instead would restore the store from its changelog
 ```
 
 If downstream SLAs are tight, shorten the interval or accept the staleness budget.
 
-- Interactive queries read from the **uncommitted** store view by default. See "Read path freshness" below.
+- Interactive queries read the **uncommitted** store. See "Read path freshness" below.
 
 ## 2. Read path freshness
 
@@ -87,71 +85,59 @@ Semantics:
 What you don't get:
 
 - **Read-after-write across threads.** A processor's `put` is immediate, but query thread visibility depends on IORef ordering. In practice this is microseconds, but not a contract.
-- **Read-committed semantics under EOS.** Transactional stores buffer writes until `storeCommit`. IQ through the underlying store sees pre-commit values; through the overlay sees buffered values. Default `queryKVStore` exposes the underlying store (committed-only).
+- **Read-committed semantics under EOS.** IQ sees every write as the processor makes it. If the transaction aborts, the store is restored from its changelog and the value rolls back. (`Kafka.Streams.State.Transactional` is a standalone write-buffering overlay; the runtime's stores don't use it.)
 
-For **strict** committed-only semantics, query through the transactional overlay's `getCommitted` after confirming `commitTotal` advanced.
-
-For **fresh** reads including in-flight writes, accept the EOS abort risk: the value might roll back on next cycle abort. Most consumers tolerate this.
+For **committed-only** reads, consume the store's output topic (or its changelog) with `read_committed` instead of querying. Most IQ callers tolerate the abort risk.
 
 ## 3. Multi-instance distribution
 
 A SQL database is a logical singleton. You connect to it, and you read whatever the latest committed value is, regardless of which backend was the writer.
 
-A Kafka Streams state store is **partitioned and replicated**. A
-key lives on exactly one instance's active task; standbys hold a
-warm replica. A query for that key must route to the active
-instance.
+A Kafka Streams state store is **partitioned**, with its changelog
+as the replica. A key lives on exactly one instance's task (and on its
+standbys, `numStandbyReplicas`, which trail it). A query for that key
+must route to that instance.
 
-The routing primitives:
+Every instance that sets `applicationServer` (its query endpoint,
+`HostInfo`) advertises it when it joins the group, and the assignment
+tells every instance which host runs and which holds a standby of
+each task:
 
-- `Kafka.Streams.Discovery.StreamsMetadata` advertises per-instance
-  ownership.
-- `Kafka.Streams.Discovery.KeyQueryMetadata` answers "for this
-  (store, key), which instance is the active and which are the
-  standbys".
-- `Kafka.Streams.Discovery.HostInfo` is the `host:port` an instance
-  advertises via `application.server`.
+```haskell
+-- where does key k of store "counts" live?
+mk <- queryMetadataForKey streams (storeName "counts") (serialize textSerde k)
+case mk of
+  Just km -> forwardTo (activeHost km) -- or a standby: standbyHosts km
+  Nothing -> retryLater                -- no assignment yet, or nobody runs the task
+```
+
+`queryMetadataForKey` hashes the key with the default partitioner over
+the store's tasks; `streamsMetadata` lists every advertising instance
+with its stores and active and standby partitions. Both reflect this
+instance's last assignment (`currentAssignment`).
 
 A query against the wrong instance returns `StoreNotFound`. There
 is no automatic redirect within the library: the query proxy is
 your code.
 
-### Standby reads
-
-A standby's state lags the active by up to `acceptableRecoveryLag`
-records. Reading from a standby gives you:
-
-- **Lower contention** with the stream thread on the active.
-- **Stale data** bounded by lag.
-
-Whether that trade-off is worth it depends on the use case. Read
-queries that are part of a user-visible request flow usually go to
-the active; bulk analytical scans usually go to standbys.
-
-The library doesn't enforce a routing policy: you decide.
-`KeyQueryMetadata.standbyHosts` returns every standby for a key;
-pick by your own policy (round-robin, latency-aware, freshness-
-preferring).
-
 ### Rebalance-window unavailability
 
 During a rebalance, the partition (and therefore its state) is in
-flux. KIP-848's incremental reconciliation guarantees no
-double-ownership but does mean there's a window where the task is
-owned by no member. IQ during that window returns either
-`StoreNotFound` or a stale read from a standby.
+flux: the previous owner closes its task, the new owner restores the
+store from the changelog before it serves anything, and until the
+instance is `StreamsRunning` again `queryKVStoreWithParameters`
+returns nothing unless `staleStoresEnabled`. IQ during that window
+returns `StoreNotFound` or nothing.
 
 A query layer should handle this:
 
 ```
 on IQ:
-  fetch StreamsMetadata
-  route to KeyQueryMetadata.activeHost
-  on StoreNotFound or rebalance-error:
-    fall back to KeyQueryMetadata.standbyHosts in order
-    if all fail:
-      backoff + refresh metadata
-      retry up to N times
+  route to the instance that owns the key's partition
+  on StoreNotFound or not running:
+    backoff + refresh ownership
+    retry up to N times
+    (or query with staleStoresEnabled if a stale answer beats none)
 ```
 
 ## 4. Event-time vs processing-time
@@ -229,8 +215,8 @@ Kafka Streams **may [replay](../glossary/#replay) records on failure**:
   the last committed offset and replays from there. Side effects
   in `peek` / `foreach` / `mapValuesM` happen again.
 - Exactly-once-V2: the producer transaction either commits or
-  aborts atomically. State-store writes drain in step with the
-  producer commit. **External side effects that aren't inside a
+  aborts atomically. State-store changelog writes are part of the
+  transaction, and an abort restores the stores from them. **External side effects that aren't inside a
   two-phase-commit sink replay on abort.**
 
 The alternative is dropping records on partial failure, but replay has consequences
@@ -277,12 +263,12 @@ SELECT status FROM transfers WHERE id = ?;
 
 A read on `[transfers-out KTable]` for the transfer id may return:
 
-- The current value, if the commit cycle has fired since the
-  record was processed.
-- The previous value (or "not found"), if processing happened but
-  the commit cycle hasn't fired yet.
-- The previous value, if a rebalance is in flight and the active
-  is mid-transfer.
+- The new value, as soon as the record was processed, even
+  before the commit (an abort would roll it back).
+- The previous value (or "not found"), if the record hasn't been
+  processed yet.
+- Nothing, if a rebalance is in flight and the new owner is still
+  restoring the store.
 - Inconsistent values across instances during a brief rebalance
   window.
 

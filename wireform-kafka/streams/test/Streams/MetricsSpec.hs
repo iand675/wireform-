@@ -7,7 +7,7 @@ import Data.ByteString.Char8 qualified as BSC
 import Data.Text (Text)
 import Data.Text qualified as T
 import Kafka.Streams.Imperative
-import Kafka.Streams.Internal.Engine (engineMetrics)
+import Kafka.Streams.Internal.Engine (EngineCounts (..), readEngineCounts)
 import Test.Syd
 
 
@@ -77,8 +77,7 @@ engine_increments_processTotal =
     pipeInput driver (topicName "in") Nothing (bytes "b") (t 1) 0
     pipeInput driver (topicName "in") Nothing (bytes "c") (t 2) 0
 
-    let m = engineMetrics (driverEngine driver)
-    readCounter m processTotal >>= (`shouldBe` 3)
+    ecProcessed <$> readEngineCounts (driverEngine driver) `shouldReturn` 3
     closeDriver driver
 
 
@@ -91,11 +90,11 @@ engine_increments_commitTotal =
     topo <- buildTopology b
     driver <- newDriver topo "m-app"
 
-    let m = engineMetrics (driverEngine driver)
-    readCounter m commitTotal >>= (`shouldBe` 0)
+    let commits = ecCommitted <$> readEngineCounts (driverEngine driver)
+    commits `shouldReturn` 0
     commitDriver driver
     commitDriver driver
-    readCounter m commitTotal >>= (`shouldBe` 2)
+    commits `shouldReturn` 2
     closeDriver driver
 
 
@@ -125,9 +124,9 @@ engine_increments_punctuateTotal =
     topo <- buildTopology bld
     driver <- newDriver topo "m-app"
 
-    let met = engineMetrics (driverEngine driver)
+    let punctuations = ecPunctuated <$> readEngineCounts (driverEngine driver)
     advanceWallClockTime driver 250 -- crosses 100ms; fires once
-    readCounter met punctuateTotal >>= (`shouldBe` 1)
+    punctuations `shouldReturn` 1
     advanceWallClockTime driver 200
-    readCounter met punctuateTotal >>= (`shouldBe` 2)
+    punctuations `shouldReturn` 2
     closeDriver driver

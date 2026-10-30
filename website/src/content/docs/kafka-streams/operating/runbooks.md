@@ -32,14 +32,14 @@ Kafka, Streams, and Riffle terminology is defined in the [Glossary](../glossary/
 :::
 
 :::note[TL;DR]
-- Most-common incidents covered: rebalance storm, `CommitFatal` after `commit2PC`, standby that never promotes, orphan internal topics, producer fenced, async-I/O stall, deserialisation flood, unbounded state-dir growth, slow commit cycle, IQ during rebalance.
+- Most-common incidents covered: rebalance storm, transactions that keep aborting, slow restores, orphan internal topics, producer fenced, async-I/O stall, deserialisation flood, unbounded state-dir growth, slow commit cycle, IQ during rebalance.
 - Each runbook is structured the same way: alert → diagnosis → resolve → prevent.
 - Use the quick metric-reference at the bottom when you don't know what to look at first.
 :::
 
 ## Rebalance storm
 
-**Alert:** `task-restart-total` rate spike across multiple
+**Alert:** `stream-thread-metrics:rebalance-total` rate spike across multiple
 instances, throughput drops, `state-transition: RUNNING ->
 REBALANCING -> RUNNING` flapping in logs.
 
@@ -52,9 +52,10 @@ settle, usually within minutes of each other. Common causes:
    blips, or saturated CPU. Its heartbeats time out, the group
    kicks it, it rejoins, repeat.
 2. **Probing-rebalance loop.** `probingRebalanceIntervalMs` is
-   set short and `acceptableRecoveryLag` is set tight; warmups
-   pass the threshold, the probing rebalance fires, the new
-   ownership is fragile and triggers another probe immediately.
+   short while warmups keep being assigned (an assignment with
+   warmups makes every member rejoin after the interval); a
+   `maxWarmupReplicas` far below the number of tasks that want to
+   move stretches that over many probes.
 3. **Memory pressure.** RocksDB compaction stalling the instance
    long enough to miss heartbeats.
 4. **Misconfigured `session.timeout.ms` on the consumer side**
@@ -73,8 +74,7 @@ settle, usually within minutes of each other. Common causes:
 4. **For RocksDB compaction pressure:** check
    `storePutTotal` versus underlying disk write throughput; the
    ratio tells you whether you're write-throttled. Mitigations
-   include moving the state directory to faster storage,
-   reducing `numStandbyReplicas` temporarily, or shedding load
+   include moving the state directory to faster storage, or shedding load
    via `pauseKafkaStreams` on the worst-affected instance until
    compaction catches up.
 5. **For consumer-config skew:** confirm
@@ -93,102 +93,104 @@ settle, usually within minutes of each other. Common causes:
 
 ---
 
-## `CommitFatal` after `commit2PC`
+## Transactions keep aborting (exactly-once)
 
-**Alert:** `commit-cycle-fatal` counter > 0 with reason
-`commit2PC: …`.
+**Alert:** repeated `[streams] commit aborted, recovering every task: …`
+log lines; output on `read_committed` consumers stalls.
 
 ### Diagnosis
 
-The producer transaction committed (records are durable on
-Kafka), but the external 2PC sink failed to finalise. The
-in-flight `SinkTxnId` is stranded in the prepared state on the
-external system. The runtime is killed on this outcome.
+Under exactly-once a commit that can't complete (a failed send, a
+failed flush, `sendOffsetsToTransaction` rejected, `commitTransaction`
+failing) aborts the transaction and recovers every task: each is wiped,
+restored from its changelogs and rewound to the last committed
+offsets. One abort is harmless; a loop means the same commit keeps
+failing. The reason is in the log line:
+
+1. **`send to <topic>: …`**: a sink or changelog write is rejected,
+   e.g. a record over `max.message.bytes`, a missing topic with
+   auto-creation off, or an authorisation error. It fails again after
+   every rewind.
+2. **`send offsets to transaction: ILLEGAL_GENERATION …`**: the group
+   rebalanced under the instance (it was too slow to rejoin, or a
+   zombie). The rebalance resolves it.
+3. **`commit transaction: …`** with broker errors: transaction
+   coordinator or broker trouble.
+4. **`prepare <sink>: …`**: a [commit participant](../glossary/#commit-participant)
+   (a two-phase sink) can't prepare; its external system is down or
+   rejecting the batch.
 
 ### Resolve
 
-1. **Confirm the runtime is dead.** The supervisor should already
-   be restarting it. Don't `unpause` or otherwise interfere
-   before the restart.
-2. **On restart, the runtime calls `tpsRecover`** for every
-   configured sink. The sink returns a list of `SinkTxnId`s
-   currently in the prepared state.
-3. **For each token, the runtime calls the sink's recovery logic**
-  : `CommitFromToken` (finish the half-committed txn),
-   `AbortFromToken` (roll it back), or `UnknownLeaveAsIs` (log
-   and leave).
-4. **Verify the recovery decision is correct.** Cross-reference
-   the consumer offsets at `applicationId-<task>` with the
-   prepared-txn list on the external system. If a prepared txn's
-   producer cycle did commit (offsets advanced past it), the
-   correct action is `CommitFromToken`.
-5. **If `UnknownLeaveAsIs` came back, escalate.** Manual review:
-   inspect the external system's prepared state, confirm what
-   was supposed to happen, finish or roll back by hand.
+1. **For (1):** fix the record or the topic (raise the size limit,
+   create the topic, grant the ACL). The poison record is reprocessed
+   after each rewind, so the loop only stops once it can be written.
+2. **For (2):** see "Rebalance storm".
+3. **For (3):** check the brokers' transaction coordinator and
+   `__transaction_state` health.
+4. **For (4):** fix the external system; the input is reprocessed
+   and staged again into the next cycle.
 
 ### Prevent
 
-- Ensure `tpsRecover` is implemented correctly for every
-  production sink: not just returning `[]`.
-- Make `tpsCommit` and `tpsAbort` strictly idempotent so a
-  duplicate call after a partial recovery is a no-op.
-- Alert on `commit-cycle-fatal` separately from
-  `commit-cycle-aborted`; the latter is normal noise, the
-  former is operator-required.
-
-See [Exactly-once across Kafka and other systems](./exactly-once/#the-four-reference-sinks)
-for the contract details.
+- Alert on the abort rate, not on single aborts.
+- Keep every store's logging on under exactly-once: an aborted task
+  restores only what its changelogs hold.
 
 ---
 
-## Standby never promotes; lag stays high
+## Restores take too long after a rebalance or restart
 
-**Alert:** Per-task warmup lag for a standby has been above
-`acceptableRecoveryLag` for longer than
-`2 × probingRebalanceIntervalMs`.
+**Alert:** instances stay in `StreamsRebalancing` long after a
+rebalance; `onRestoreStart` / `onRestoreEnd` (from
+`setStateRestoreListener`) far apart.
 
 ### Diagnosis
 
-The standby's changelog-replay loop can't keep up with the active's
-production rate. Common causes:
+A task that moves (or starts after a wipe) restores every logged store
+before it processes anything, with its source partitions paused.
+Restore reads from where the task's standby got to (if it lands on
+one), else its checkpoint (persistent stores only), else the log start,
+up to the end offset (the last stable offset under exactly-once).
+Common causes of slow restores:
 
-1. **Network bandwidth saturation.** The standby is reading the
-   changelog at a rate lower than the active is writing it.
-2. **Local disk throughput.** State writes during replay are
-   slower than the changelog read.
-3. **`numStandbyReplicas` is too high** for the cluster's
-   write capacity. Each replica triples the changelog read fan-
-   out.
-4. **The active's commit-cycle is faster than the standby can
-   catch up between cycles.** Symptom: lag oscillates around a
-   floor but never crosses it.
+1. **Large changelogs.** The changelog isn't compacted (a store whose
+   changelog was created by hand with `cleanup.policy=delete`) or the
+   key space is huge.
+2. **In-memory stores** always restore from the log start; nothing is
+   checkpointed for them.
+3. **Unclean exactly-once stops** wipe `<state.dir>/<application.id>`
+   on the next start, so everything restores.
+4. **Network or disk throughput** of the restoring instance.
+5. **No standbys** (`numStandbyReplicas = 0`), or the task landed on an
+   instance without one: `localTaskLags` on each instance shows which
+   standbys exist and how far behind they are.
 
 ### Resolve
 
-1. **Identify the affected standby.** `LagListener` snapshots
-   tell you which task and which store.
-2. **Compare standby-replay throughput to active-write
-   throughput.** If the gap is structural (active produces faster
-   than standby can drain even at idle), the standby will never
-   catch up.
-3. **For network / disk saturation:** move the standby to an
-   instance with more headroom, or reduce `numStandbyReplicas`
-   for this task. Both require config changes + restart.
-4. **For commit-cycle skew:** raise `commitIntervalMs` on the
-   active so batches are larger; the standby's replay cost per
-   commit goes down.
-5. **As a last resort:** use Riffle's `SnapshotPointer` standby
-   mode. The standby stops replicating bytes and instead tracks
-   `(snapshotId, advancedTo)`. Promotion fetches the snapshot
-   blob + replays the tail. Trade-off: promotion takes longer
-   (snapshot fetch time) but steady-state cost is zero.
+1. **Identify the store and partition.** `onBatchRestored` reports
+   progress per store and changelog partition.
+2. **For (1):** compact the changelog (`cleanup.policy=compact`, which
+   the runtime sets on the changelogs it creates).
+3. **For (2):** use a persistent store
+   (`persistentKeyValueStoreBuilder`) so a task coming back to the
+   same machine only restores the tail after its checkpoint.
+4. **For (3):** stop instances with `closeKafkaStreams` (which
+   commits and leaves the clean-shutdown marker) instead of killing
+   them.
+5. **For (5):** set `numStandbyReplicas = 1`; a failover then restores
+   only what the standby hadn't applied. Keep `acceptableRecoveryLag`
+   tight so tasks only move to instances that are caught up (the others
+   warm up first).
 
 ### Prevent
 
-- Provision the standby instances with at least equal disk and
-  network capacity to the active.
-- Right-size `numStandbyReplicas` for your write capacity, not
-  just your storage capacity.
+- With standbys, failover time is the standby's lag (watch
+  `localTaskLags` and `stream-state-metrics:standby-update-total`);
+  without them, budget it as changelog size divided by restore
+  throughput.
+- Give instances stable state directories (persistent volumes) so
+  checkpoints survive restarts.
 
 ---
 
@@ -237,33 +239,30 @@ repartition) and its disk usage continues.
 
 ### Diagnosis
 
-Under [EOS-V2](../glossary/#eos--eos-v2--eos-v3) the broker [fences a producer](../glossary/#fenced-producer) when a newer producer
-with the same `transactional.id` has been observed. This usually
-means:
+Under [EOS-V2](../glossary/#eos--eos-v2--eos-v3) each instance's
+producer has its own `transactional.id`
+(`<application.id>-<random uuid>`), so two live instances never fence
+each other by id; a zombie is fenced by the group generation instead
+(its `sendOffsetsToTransaction` is rejected and its transaction
+aborted). A [`ProducerFencedException`](../glossary/#fenced-producer)
+therefore usually means:
 
-1. **Two instances of the same `(applicationId, taskId)` are
-   somehow alive.** Almost always a misconfigured rollout or a
-   zombie from a previous deploy.
-2. **A network partition resolved with both sides thinking they
-   own the task.** KIP-848's incremental reconciliation makes
-   this very rare but not impossible.
-3. **`transactional.id.expiration.ms` on the broker has elapsed**
+1. **`transactional.id.expiration.ms` on the broker has elapsed**
    for an idle producer; the broker forgets it; the instance
    tries to commit and gets fenced.
+2. **Something else is using the same transactional id**, e.g. a
+   `producerOverrides` that pins `producerTransactional` to a fixed
+   value shared by several instances.
 
 ### Resolve
 
-1. The runtime will already have transitioned the affected task
-   to `ERROR` and (depending on
-   `setUncaughtExceptionHandler`) either restarted the thread,
-   shut down the client, or shut down the application. Default
-   per the runtime is to log and try to recover the task.
-2. **Identify the zombie.** `metadataForLocalThreads` on every
-   instance shows what they think they own. The instance whose
-   ownership doesn't match the rebalance log is the zombie.
-3. **Kill the zombie.** SIGTERM the OS process. The group
-   rebalance will reassign cleanly.
-4. **If the cause was broker-side TXN expiration:** raise
+1. The runtime aborts and recovers its tasks; if it can't abort, it
+   re-initialises the transactional producer. If that fails too, the
+   stream thread stops and `setUncaughtExceptionHandler` decides
+   (the default, `replaceThreadOnException`, recovers and retries).
+2. **If a pinned transactional id is shared:** remove the override;
+   the runtime picks a unique one per process.
+3. **If the cause was broker-side TXN expiration:** raise
    `transactional.id.expiration.ms` on the broker for this
    workload, or shorten the EOS commit interval so the producer
    isn't ever idle long enough to expire.
@@ -348,12 +347,12 @@ deserialiser can't parse. (The [railway-oriented programming](../concepts/railwa
 1. **Identify the offending source.** Look at the
    `DeserializationException` payload to see the bad record;
    trace it to its producer.
-2. **Stop the bleeding.** If you're losing important records,
-   switch the deserialiser handler from `logAndContinue` to
-   `failFast` so the stream stops processing. The records remain
-   on the topic and can be re-processed once the bug is fixed.
-   (Be careful: with `failFast`, your consumer group stops
-   making progress until the bad records are dealt with.)
+2. **Decide between stopping and skipping.** The default
+   deserialization handler (`logAndFail`) stops the stream thread at
+   the first bad record, so nothing is skipped and the group stops
+   making progress until the records are dealt with. If the records
+   are expendable, switch `defaultDeserHandler` to `logAndContinue`
+   (they are dropped and counted in `droppedRecordsTotal`).
 3. **Fix the producer.** Either roll the producer back, or
    re-publish through Schema Registry with the correct
    compatibility check.
@@ -388,8 +387,8 @@ of unbounded growth:
    retention budget assumes.
 3. **A KTable is built off a topic with very high unique-key
    cardinality** and you didn't realise.
-4. **Old standby task directories** from a prior deploy were
-   never cleaned up.
+4. **Old task directories** (`<state.dir>/<application.id>/<task>`)
+   from a prior deploy or a topology change were never cleaned up.
 
 ### Resolve
 
@@ -403,9 +402,10 @@ of unbounded growth:
 3. **For (2):** confirm the grace period matches the window
    retention. A 1-hour window with a 7-day grace materialises 7
    days of state.
-4. **For (4):** `cleanUp` wipes the local directory; the runtime
-   re-warms from the changelog or snapshot on next start. Safe
-   when standbys exist; loses work otherwise.
+4. **For (4):** `cleanUp` (while the instance is stopped) wipes
+   `<state.dir>/<application.id>`; every task restores from its
+   changelogs on the next start. Nothing is lost, but the restart is
+   as slow as a full restore.
 
 ### Prevent
 
@@ -421,48 +421,47 @@ of unbounded growth:
 
 ---
 
-## EOS commit cycle taking longer than `commitIntervalMs`
+## EOS commit taking longer than `commitIntervalMs`
 
-**Alert:** `commit-duration` p99 approaches `commitIntervalMs`.
+**Alert:** commits fall behind their interval; output on
+`read_committed` consumers arrives in bursts.
 
 ### Diagnosis
 
-The commit cycle (`runCommitCycle`) walks six steps:
-`beginTxn → flush → commitOffsets → preCommit2PC → commitTxn →
-commit2PC → storeCommit`. Any of them can take time. Most likely:
+A commit (`Kafka.Streams.Runtime.Tasks.tmCommit`) runs every task's
+pre-commit drains, flushes every task's stores (writing their
+changelogs), flushes the producer, prepares every commit participant,
+sends the offsets to the transaction, commits it, and commits the
+participants. Likely costs:
 
-1. **`flush` is slow** because there are many records in the
-   transactional buffer (high commit interval, large per-record
-   processing cost).
-2. **`commitTxn` round-trip to the broker is slow** (network
-   latency, broker load).
-3. **`commit2PC` is slow** because the external sink's commit
-   operation is expensive (e.g. Iceberg manifest commit on a
-   large dataset).
-4. **`storeCommit` is slow** because the KIP-892 transactional
-   buffer has accumulated many writes.
+1. **Pre-commit drains** waiting on slow async-I/O calls.
+2. **The producer flush** when a lot of output (or changelog traffic:
+   every update of an uncached store is logged, and the record caches
+   flush the latest value of every key they hold) piled up in the
+   interval.
+3. **The transaction round trips** to a loaded transaction
+   coordinator.
+4. **Commit participants** (two-phase sinks) with slow prepare or
+   commit calls.
 
 ### Resolve
 
-1. **Per-step timing.** `Kafka.Streams.Metrics` exposes per-step
-   counters. Identify which step dominates.
-2. **For (1):** consider lowering `commitIntervalMs` so each
-   cycle has fewer records. Trade-off: more commit overhead per
-   record, but better tail latency.
-3. **For (2):** check broker health; this is rarely the
-   bottleneck if the broker is healthy.
-4. **For (3):** raise `commitIntervalMs` so 2PC commits are
-   amortised over more records. Be aware this widens the
-   reprocessing window on a fault.
-5. **For (4):** tune cache size (`cacheMaxBytesBuffering`) so
-   writes coalesce more aggressively before they hit the store.
+1. **For (1):** see "Async I/O backpressure" above; drain time is
+   bounded by the slowest in-flight call.
+2. **For (2):** cut changelog volume (fewer intermediate stores,
+   `withLoggingDisabled` on stores that are recomputable), or raise
+   `commitIntervalMs` so each transaction amortises its round trips
+   over more records. Raising it delays output visibility and widens
+   the replay window of an abort.
+3. **For (3):** check broker health.
+4. **For (4):** time the sink's `tpsPrepare` / `tpsCommit`; they run
+   on the stream thread, once per cycle.
 
 ### Prevent
 
-- Benchmark the commit cycle under your expected throughput at
-  load-test time; size `commitIntervalMs` accordingly.
-- For 2PC sinks, the commit is structurally per-cycle; size
-  cycles for the sink's commit cost, not the per-record cost.
+- Benchmark the commit under your expected throughput at
+  load-test time; size `commitIntervalMs` accordingly (the EOS
+  default is 100 ms).
 
 ---
 
@@ -476,29 +475,30 @@ rolling deploy.
 During a rebalance, a partition (and its state store) is
 transiently unowned. Queries routed to the previous owner get
 `StoreNotFound`; queries routed to the new owner get the same
-until the store has been re-bound (instant with standby + KIP-848,
-slow without).
+until its task has restored the store from the changelog. Unless
+`staleStoresEnabled`, `queryKVStoreWithParameters` answers nothing
+until the instance is `StreamsRunning` again.
 
 ### Resolve
 
 1. **In the query layer, retry with backoff and refresh
-   metadata.** `Kafka.Streams.Discovery.StreamsMetadata` updates
-   as the rebalance completes; a retry after `~1s` usually
-   succeeds.
-2. **Optionally fall through to a standby** for the duration of
-   the rebalance. `KeyQueryMetadata.standbyHosts` returns every
-   live standby; a stale read is usually better than a 404.
-3. **If the rebalance is taking minutes**, see "Standby never
-   promotes; lag stays high" above: that's actually the
-   underlying issue.
+   metadata.** `streamsMetadata` / `queryMetadataForKey` reflect the
+   new assignment as soon as the rebalance completes; a retry after
+   `~1s` usually succeeds. With standbys, `queryMetadataForKey` also
+   names the standby hosts, which can answer stale reads meanwhile.
+2. **If a stale read beats a 404**, query with `staleStoresEnabled`
+   (it answers from whatever the local tasks hold, restoring or not).
+3. **If the rebalance is taking minutes**, see "Restores take too
+   long" above: that's actually the underlying issue.
 
 ### Prevent
 
 - Build the query layer with the rebalance-window assumption
   baked in. A naïve "one shot, fail on 404" client will be
   brittle.
-- Use `numStandbyReplicas >= 1` so the rebalance is
-  metadata-only and the unavailability window is sub-second.
+- Keep restores short (compacted changelogs, persistent stores with
+  checkpoints on stable volumes): the unavailability window is the
+  restore time.
 
 ---
 
@@ -514,12 +514,12 @@ Quick reference for which metric to look at first:
 
 | Symptom | First metric | Then |
 | ------- | ------------ | ---- |
-| "Things are slow" | `process-latency` (p50, p99) per node | Drill into the slowest node |
-| "Throughput dropped" | `processTotal` rate per node | If a single node, check its `process-latency`; if global, check `commit-cycle-aborted` |
-| "Records seem to disappear" | `droppedRecordsTotal` | Check `DeserializationException` log channel |
-| "Rebalance loop" | `task-restart-total` | Check `setRebalanceListener` log |
-| "EOS issues" | `commit-cycle-aborted` and `-fatal` | The reason field tells you which step failed |
-| "Standby not promoting" | per-task warmup lag from `LagListener` | Check standby replay throughput vs active write rate |
+| "Things are slow" | `process-total` rate per task (`streamsMetrics`) | A task far behind the others is the hot partition; all of them slow points at a slow processor or store |
+| "Throughput dropped" | `process-total` rate | If one task, check its partition's lag; if every task, check `commit-aborted-total` and `task-recoveries-total` |
+| "Records seem to disappear" | `dropped-records-total` | Check `DeserializationException` log channel |
+| "Rebalance loop" | `rebalance-total` | Check `setRebalanceListener` log |
+| "EOS issues" | `commit-aborted-total`, then the `commit aborted` log lines | The reason says which step failed |
+| "Stuck rebalancing" | `restore-total`, `StateRestoreListener` events | Check restore throughput and changelog size |
 
 ---
 

@@ -23,7 +23,7 @@ maintainer: ian@iankduncan.com
 copyright: 2026 Ian Duncan
 category: Testing, Simulation
 build-type: Simple
-tested-with: GHC == 9.6.4, GHC == 9.8.4
+tested-with: GHC == 9.10.3, GHC == 9.12.4, GHC == 9.14.1
 
 source-repository head
   type:     git
@@ -69,13 +69,13 @@ library
     Sim.Workload
     Sim
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     containers >= 0.6 && < 0.9,
     splitmix >= 0.1 && < 0.2,
     bytestring >= 0.11 && < 0.13,
     text >= 2.0 && < 2.2,
     deepseq >= 1.4 && < 1.6,
-    aeson >= 2.1 && < 2.3,
+    aeson >= 2.1 && < 2.4,
     async >= 2.2 && < 2.3,
     stm >= 2.5 && < 2.6
 
@@ -86,7 +86,7 @@ test-suite wireform-dst-test
   main-is: Main.hs
   ghc-options: -threaded -rtsopts "-with-rtsopts=-N"
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-dst,
     containers >= 0.6 && < 0.9,
     bytestring >= 0.11 && < 0.13,
@@ -101,7 +101,7 @@ executable example-register-partition
   main-is: RegisterPartition.hs
   ghc-options: -threaded -rtsopts "-with-rtsopts=-N"
   build-depends:
-    base >= 4.16 && < 5,
+    base >= 4.20 && < 5,
     wireform-dst,
     containers >= 0.6 && < 0.9,
     bytestring >= 0.11 && < 0.13,

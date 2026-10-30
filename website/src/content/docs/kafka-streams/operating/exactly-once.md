@@ -1,13 +1,19 @@
 ---
 title: Exactly-once across Kafka and other systems
-description: How EOS-v2 works in wireform-kafka-streams, and the two-phase commit sink contract that extends it to Postgres, Iceberg, S3, HTTP, or any other non-Kafka system.
+description: How EOS-v2 works in wireform-kafka-streams (one transaction per commit, abort recovery from changelogs), and two-phase commit sinks that commit external systems with it.
 sidebar:
   order: 5
 ---
 
-Exactly-once semantics (EOS) on Kafka itself is well understood. The library uses a transactional producer, `TxnOffsetCommit`, and KIP-892 transactional state stores. You enable this with `processingGuarantee = ExactlyOnceP`.
+Exactly-once semantics (EOS) on Kafka itself is well understood: a
+transactional producer whose transaction carries the output records,
+the state stores' changelog writes and the consumed offsets. You
+enable it with `processingGuarantee = ExactlyOnceV2`.
 
-However, this only covers writes to Kafka topics. Writes to Postgres, S3, Iceberg, or HTTP endpoints require the two-phase commit sink contract to maintain exactly-once guarantees across systems.
+This only covers writes to Kafka topics. Writes to Postgres, S3,
+Iceberg or HTTP endpoints need a two-phase-commit protocol on top:
+a `TwoPhaseSink` registered as a commit participant prepares with
+every commit and commits once Kafka has.
 
 :::tip[Unfamiliar terms?]
 Kafka, Streams, and Riffle terminology is defined in the [Glossary](../glossary/).
@@ -15,74 +21,130 @@ Kafka, Streams, and Riffle terminology is defined in the [Glossary](../glossary/
 
 :::note[TL;DR]
 
-- The commit cycle has six ordered steps: `beginTxn → flush → commitOffsets → preCommit2PC → commitTxn → commit2PC → storeCommit`.
-- A `TwoPhaseSink` has five operations: `tpsStage`, `tpsPrepare`, `tpsCommit`, `tpsAbort`, `tpsRecover`. All must be idempotent.
-- Failure at `commit2PC` (after Kafka already committed) is the only fatal case. The stranded `SinkTxnId` is resolved by `tpsRecover` on next boot.
-- Reference sinks ship in core (in-memory, filesystem, HTTP echo). Production adapters for JDBC, Iceberg, S3 live in separate packages.
-- Async I/O operators get EOS for free. The pre-commit drain hook ensures all in-flight requests complete before commit.
+- Under `ExactlyOnceV2` each instance runs one transactional producer
+  (`transactional.id = <application.id>-<random uuid>`), initialised
+  once at start; consumers and restore readers read `read_committed`.
+- Every commit interval (default **100 ms** under EOS, 30 s at least
+  once; `commitIntervalMs = Nothing` picks it) is one transaction:
+  output records, changelog writes, and the consumed offsets via
+  `sendOffsetsToTransaction`, fenced by the group generation (KIP-447).
+- An aborted transaction rewinds every task: closed dirty, its state
+  directory wiped, restored from the changelogs up to the last stable
+  offset, its partitions repositioned at the last committed offsets.
+  Losing a partition (fenced out of the group) aborts the shared
+  transaction, so the tasks that are kept are rewound too.
+- After an unclean stop, the next start wipes
+  `<state.dir>/<application.id>` and restores from the changelogs.
+- Async I/O operators drain into the same transaction (the pre-commit
+  drain hook).
+- External systems take part through `CommitParticipant`s
+  (`Kafka.Streams.Runtime.Commit`; `twoPhaseParticipant` builds one
+  from a `TwoPhaseSink`): prepared after the flush, recorded as
+  committed in `<application.id>-twophase-commits` inside the
+  transaction, committed after it; prepared cycles left by a crash
+  are settled at the next start.
 
 :::
 
-## The commit cycle
+## The commit
 
-The orchestrator lives in `Kafka.Streams.Runtime.EOS.runCommitCycle`.
-Every commit (default cadence: `commitIntervalMs = 30_000`) walks
-through six ordered steps. The `EOSCoordinator` record is the
-pluggable surface that production code wires to a real
-transactional producer; tests wire it to a recorder. The shape:
+The runtime's commit lives in `Kafka.Streams.Runtime.Tasks.tmCommit`.
+It runs on the stream thread every commit interval, when a processor
+asks (`ctxRequestCommit`), right before every rebalance (the
+consumer's pre-rejoin hook, while the old generation can still
+commit) and at close:
 
 ```mermaid
 flowchart LR
-  begin["beginTxn"] --> flush["flush\n(run processors; send via transactional producer)"]
-  flush --> off["commitOffsets\n(TxnOffsetCommit;\noffsets land inside the txn)"]
-  off --> pre["preCommit2PC\n(external sinks → 'prepared')"]
-  pre --> ctxn["commitTxn\n(producer commits;\nrecords + offsets visible)"]
-  ctxn --> c2pc["commit2PC\n(external sinks finalise)"]
-  c2pc --> sc["storeCommit\n(transactional stores\ndrain to underlying stores)"]
+  drain["pre-commit drains\n(async I/O results forwarded)"] --> flush["flush every task's stores\n(changelog writes)"]
+  flush --> pf["producer flush\n(every send acknowledged)"]
+  pf --> off["sendOffsetsToTransaction\n(consumed offsets, group generation)"]
+  off --> ctxn["commitTransaction\n(output + changelogs + offsets visible)"]
 ```
 
-The `runCommitCycle` source in `Kafka.Streams.Runtime.EOS` is the
-ground truth for the failure semantics. The summary:
+The transaction is opened lazily by the first send of the interval,
+so an idle instance commits nothing. Under at least once the same
+steps run without a transaction: the producer is flushed, failed sends
+go to the production-exception handler, and the offsets are committed
+with an explicit `OffsetCommit`.
 
-| Failure point | Outcome | Recovery |
-| ------------- | ------- | -------- |
-| `beginTxn` | `CommitFatal` | Runtime fails fast; supervisor restarts and re-initialises the producer |
-| `flush` | `CommitAborted` | Producer txn aborted, state-store buffers discarded, 2PC sinks aborted, cycle retries next interval |
-| `commitOffsets` | `CommitAborted` | Same |
-| `preCommit2PC` | `CommitAborted` | Producer txn aborted, every sink that already prepared is aborted via `abort2PC` |
-| `commitTxn` | `CommitAborted` | Sinks that prepared are aborted; the producer txn is aborted by the broker as well |
-| `commit2PC` | **`CommitFatal`** | The producer txn is durable but at least one sink failed to finalise. Runtime is killed; on next start the sink's `tpsRecover` resolves the stranded transactions |
-| `storeCommit` | `CommitFatal` | KIP-892 store-side commit failed after the wire commit succeeded. Runtime is killed; manual investigation |
+| Failure | Outcome | Recovery |
+| ------- | ------- | -------- |
+| A send fails, the flush fails, `sendOffsetsToTransaction` is fenced (`ILLEGAL_GENERATION`), or `commitTransaction` fails | `CommitAborted` | The transaction is aborted (or, if the abort itself fails, the producer is re-initialised, which aborts it on the broker) and every task is recovered (below) |
+| At least once: the offset commit fails (typically a rebalance) | `CommitFailed` | Nothing is lost: the records are processed again by whoever owns the partition next |
+| A store can't flush, or (at least once) the production handler says fail | thrown | The stream thread stops; the uncaught-exception handler decides (`replaceThreadOnException`, the default, recovers every task and carries on) |
 
-The two `CommitFatal` cases are the only ones that put the runtime
-into "operator must look" territory. Everything else is
-auto-recoverable on the next cycle.
+### Recovering a task
 
-The same picture as a flow:
+`tmRecoverAll` is what makes an abort harmless. Every task is closed
+without a checkpoint, its directory under
+`<state.dir>/<application.id>` is deleted, and it is rebuilt in the
+restoring state: its source partitions are paused and repositioned at
+the last committed offsets, and every logged store is replayed from
+its changelog by a `read_committed` reader up to the last stable
+offset, so the aborted writes never come back. When the restore is
+done the partitions resume and the records after the last commit are
+processed again, this time into a new transaction.
+
+### Unclean stops
+
+Local state is only trustworthy under EOS if the process stopped at a
+commit boundary. A clean close (`closeKafkaStreams` that reached the
+loop's final commit) leaves a marker file in
+`<state.dir>/<application.id>`; the next start consumes it. A start
+that finds no marker wipes the directory and restores everything from
+the changelogs (`Kafka.Streams.Runtime.StateDir.prepareStateDir`).
+At least once never wipes.
+
+### Fencing
+
+The transactional id is fresh per process, so producers are not
+fenced by id (EOS v2). A zombie instance is fenced by the group
+instead: its `sendOffsetsToTransaction` carries its member id and
+generation, which the coordinator rejects once the group has moved on,
+and the abort follows.
+
+## Two-phase commit sinks
+
+### Commit participants
+
+A `CommitParticipant` (`Kafka.Streams.Runtime.Commit`) is an external
+system that commits and aborts with the runtime's commits. Register
+it with `addCommitParticipant` before starting. Each commit with
+participants is a **cycle** with an id `<instance>/<n>` (`n`
+increasing per run of an instance). Under exactly-once:
 
 ```mermaid
-flowchart TD
-  start([Cycle starts]) --> step1[beginTxn]
-  step1 -->|fail| fatal1[CommitFatal\nsupervisor restart]
-  step1 -->|ok| step2[flush]
-  step2 -->|fail| abort[Abort path:\nabortTxn + storeAbort + abort2PC]
-  step2 -->|ok| step3[commitOffsets]
-  step3 -->|fail| abort
-  step3 -->|ok| step4[preCommit2PC]
-  step4 -->|fail| abort
-  step4 -->|ok| step5[commitTxn]
-  step5 -->|fail| abort
-  step5 -->|ok| step6[commit2PC]
-  step6 -->|fail| fatal2["CommitFatal\nstranded SinkTxnId;\ntpsRecover on restart"]
-  step6 -->|ok| step7[storeCommit]
-  step7 -->|fail| fatal3[CommitFatal\nmanual investigation]
-  step7 -->|ok| done([CommitSucceeded])
-  abort --> retry([CommitAborted\nretry next interval])
+flowchart LR
+  flush["flush stores\n+ producer"] --> prep["cpPrepare\n(every participant)"]
+  prep --> mark["cycle marker\n(in the transaction)"]
+  mark --> off["sendOffsetsToTransaction"]
+  off --> ctxn["commitTransaction"]
+  ctxn --> cc["cpCommit\n(every participant)"]
 ```
 
-## The two-phase commit sink contract
+The marker is a record (key: instance, value: `n`) in the compacted
+`<application.id>-twophase-commits` topic. It is part of the Kafka
+transaction, so it exists exactly when the transaction committed.
+Under at least once the order is prepare, marker (flushed), commit,
+then the offset commit: a crash in between replays input, which
+produces duplicates, never loss.
 
-The contract is defined in `Kafka.Streams.Sinks.TwoPhase` as the
+| Failure | Outcome |
+| ------- | ------- |
+| A participant's prepare fails | The participants that already prepared abort the cycle; the transaction aborts and every task is recovered |
+| The marker, the offsets or `commitTransaction` fail | Every participant aborts the cycle; the transaction aborts and every task is recovered |
+| A participant's commit fails (Kafka already committed) | The stream thread stops and the uncaught-exception handler decides; the cycle is committed by the recovery at the next start |
+
+At start, before any task runs, the runtime reads the topic (the last
+committed cycle of each instance) and settles every cycle a
+participant still holds prepared (`cpRecover`): at or below its
+instance's last committed cycle, it is committed; above it, aborted.
+An id the runtime can't parse is logged and left alone.
+
+### The `TwoPhaseSink` contract
+
+`Kafka.Streams.Sinks.TwoPhase` defines the sink side as the
 `TwoPhaseSink r` record:
 
 ```haskell
@@ -92,132 +154,75 @@ data TwoPhaseSink r = TwoPhaseSink
   , tpsPrepare :: !(SinkTxnId -> [r] -> IO SinkOutcome)
   , tpsCommit  :: !(SinkTxnId -> IO SinkOutcome)
   , tpsAbort   :: !(SinkTxnId -> IO SinkOutcome)
+  , tpsDiscardStaged :: !(IO ())
   , tpsRecover :: !(IO [SinkTxnId])
   }
 ```
 
-The five operations map to a Flink-style two-phase-commit sink:
+`twoPhaseParticipant` turns one into a `CommitParticipant`, with the
+cycle id as the `SinkTxnId`:
 
-| Operation | When the runtime calls it | Sink must |
-| --------- | ------------------------- | --------- |
-| `tpsStage` | Per record, on the stream thread | Buffer or speculatively write; **never** make visible |
-| `tpsPrepare` | Once per commit cycle, before the producer commit | Promote the buffered batch to a "prepared" state; do not commit yet |
-| `tpsCommit` | Once per commit cycle, after the producer commit succeeds | Atomically make the prepared batch visible |
-| `tpsAbort` | Once per commit cycle, on any abort path | Discard the prepared batch |
-| `tpsRecover` | Once at startup | Return every `SinkTxnId` currently in the prepared-but-not-committed state on the external system |
+| Operation | When it runs | Sink must |
+| --------- | ------------ | --------- |
+| `tpsStage` | Per record, from the topology's `sinkTwoPhase` node | Buffer or speculatively write; **never** make visible |
+| `tpsPrepare` | Once per cycle, after the flush (with no extra rows: everything arrives through `tpsStage`) | Make what was staged since the last cycle durable under the cycle id, but invisible |
+| `tpsCommit` | Once per cycle, after Kafka committed it; again at recovery | Atomically make the prepared batch visible |
+| `tpsAbort` | On any abort path; at recovery | Discard the prepared batch |
+| `tpsDiscardStaged` | Whenever the runtime rewinds to the last commit (an aborted cycle, a replaced stream thread, under EOS a lost partition) | Drop everything staged since the last `tpsPrepare`: those records are processed, and staged, again |
+| `tpsRecover` | Once at start | Return every `SinkTxnId` prepared on the external system and neither committed nor aborted |
 
-`SinkOutcome` distinguishes three result classes (a [railway-oriented programming](../concepts/railway-oriented-programming/) trichotomy in three constructors):
+`SinkOutcome` has three constructors:
 
 - `SinkOK`: proceed.
-- `SinkRetryable Text`: transient failure; the runtime aborts the
-  whole cycle (`CommitAborted`) and retries on the next interval.
-- `SinkFatal Text`: invariant broken; the runtime promotes the
-  cycle to `CommitFatal` and waits for an operator.
+- `SinkRetryable Text` or `SinkFatal Text` from `tpsPrepare`: the
+  cycle aborts and the tasks rewind, so the input is processed (and
+  staged) again into the next cycle.
+- Either failure from `tpsCommit`: the stream thread stops, as above.
 
-Every operation must be **[idempotent](../glossary/#idempotent--idempotency)**: retries on `SinkRetryable`
-or process restarts can replay any of them. Reference
-implementations in the same module enforce idempotence by treating
-"this txn is already done" as `SinkOK`.
+Every operation must be **[idempotent](../glossary/#idempotent--idempotency)**:
+a crash and the recovery can replay any of them. The reference sinks
+treat "this txn is already done" as `SinkOK`.
 
-## How prepare-then-commit actually keeps things atomic
-
-The order of operations gives you atomicity even though the two
-systems are separate:
-
-1. The sink's `tpsPrepare` writes the batch to the external system
-   in a state that no downstream reader sees. The reference
-   `filesystemTwoPhaseSink` writes it to `prepared/<txn>.batch`;
-   the JDBC adapter writes rows tagged with a "pending" flag; the
-   Iceberg adapter writes data files but does not commit the
-   manifest; the S3 adapter writes to a `__pending__/` prefix.
-2. The producer commits. Once `commitTxn` returns, the consumer
-   offsets + the produced records are durable. From this point on
-   the system is committed to finalising every sink.
-3. The sink's `tpsCommit` flips the visibility atomically. The
-   `filesystemTwoPhaseSink` renames `prepared/<txn>.batch` to
-   `committed/<txn>.batch` (atomic on POSIX). JDBC removes the
-   pending flag; Iceberg commits the manifest; S3 renames out of
-   `__pending__/`.
-
-If the process crashes between (2) and (3), `tpsRecover` on the
-next start surfaces the stranded `SinkTxnId`s. The runtime knows
-from the consumer-group offsets whether the corresponding cycle
-committed:
-
-- If the producer txn for that `SinkTxnId` committed, run
-  `tpsCommit` to finalise the sink (`RecoveryDecision = CommitFromToken`).
-- If the producer txn aborted, run `tpsAbort` to roll back
-  (`AbortFromToken`).
-- If neither (because the runtime can't tell), log and leave it
-  for a human (`UnknownLeaveAsIs`).
-
-## Wiring a sink into the coordinator
-
-Use `withTwoPhaseSinks` to compose a list of sinks onto an
-existing `EOSCoordinator`. The signature:
-
-The sink's lifecycle inside one commit cycle:
-
-```mermaid
-sequenceDiagram
-  participant Eng as Engine (stream thread)
-  participant Sink as TwoPhaseSink
-  participant Coord as EOSCoordinator
-  participant Br as Broker
-  Eng->>Sink: tpsStage(record)  ⨯ N
-  Coord->>Sink: tpsPrepare(txnId, [extraRows])
-  Sink-->>Coord: SinkOK
-  Coord->>Br: commitTxn
-  Br-->>Coord: ok
-  Coord->>Sink: tpsCommit(txnId)
-  Sink-->>Coord: SinkOK
-  Note over Sink: Rows visible downstream
-```
-
-On restart after a crash between `commitTxn` and `tpsCommit`:
-
-```mermaid
-sequenceDiagram
-  participant Sink as TwoPhaseSink
-  participant Run as Runtime (boot)
-  Run->>Sink: tpsRecover
-  Sink-->>Run: [stranded SinkTxnId1, ...]
-  Run->>Run: Cross-reference committed offsets
-  Run->>Sink: tpsCommit(SinkTxnId1)\nor tpsAbort(SinkTxnId1)
-  Sink-->>Run: SinkOK
-```
+### Wiring
 
 ```haskell
-withTwoPhaseSinks
-  :: EOSCoordinator
-  -> [TwoPhaseSink r]
-  -> (SinkTxnId -> Text -> IO [r])
-       -- fetch rows queued for tpsName under SinkTxnId
-  -> IO Text
-       -- generator for fresh SinkTxnId labels
-  -> IO EOSCoordinator
-```
-
-Typical wiring:
-
-```haskell
-import qualified Kafka.Streams.Runtime.EOS as EOS
 import qualified Kafka.Streams.Sinks.TwoPhase as TPS
+import qualified Kafka.Streams.Topology as Topo
+import qualified Kafka.Streams.Topology.Free as F
+import qualified Kafka.Streams.Runtime as R
 
-withSinks :: Transaction -> [TPS.TwoPhaseSink Row] -> IO EOS.EOSCoordinator
-withSinks txn sinks = do
-  let base = EOS.newRealEOSCoordinator txn
-  TPS.withTwoPhaseSinks base sinks rowsFor nextTxnLabel
-  where
-    rowsFor _txn _name = pure []        -- if all rows arrive via tpsStage
-    nextTxnLabel       = newTxnLabel    -- e.g. <appId>-<instance>-<counter>
+main :: IO ()
+main = do
+  sink <- TPS.filesystemTwoPhaseSink "/var/lib/my-app/out" encodeRecord "orders-out"
+  raw  <- F.buildTopologyFrom (source >>> F.sinkTwoPhase sink)
+  topo <- either (fail . show) pure (Topo.validateTopology raw)
+  ks <- R.newKafkaStreams cfg topo
+  R.addCommitParticipant ks (TPS.twoPhaseParticipant sink)
+  R.startKafkaStreams ks
 ```
 
-A `SinkTxnId` is the unit of recoverability. Make it stable across
-restarts: derive it from `applicationId-instanceId-cycleCounter`
-or any other persistent monotonic generator. If you reset the
-generator on restart, the runtime can't correlate prepared txns
-with their producer counterparts on recovery.
+Register the participant before `startKafkaStreams`: recovery runs at
+start. Keep the sink's prepared state somewhere that survives the
+process (the filesystem sink's directory, a database table), or a
+crash between `commitTransaction` and `tpsCommit` loses the batch.
+
+### Why prepare-then-commit is atomic
+
+1. `tpsPrepare` writes the batch to the external system in a state no
+   downstream reader sees. The reference `filesystemTwoPhaseSink`
+   writes `prepared/<txn>.batch`; a JDBC adapter would write rows
+   tagged pending; an Iceberg adapter would write data files without
+   committing the manifest.
+2. Kafka commits: the output, the changelogs, the offsets and the
+   cycle marker become visible together.
+3. `tpsCommit` flips the batch visible atomically (the filesystem sink
+   renames `prepared/<txn>.batch` to `committed/<txn>.batch`, atomic on
+   POSIX).
+
+A crash between (2) and (3) leaves the batch prepared; the marker says
+the cycle committed, so the recovery commits it. A crash before (2)
+leaves no marker, so the recovery aborts it, and the input is
+processed again from the last committed offsets.
 
 ## The four reference sinks
 
@@ -248,33 +253,31 @@ callback with the full batch. This is the shape a 2PC HTTP sink
 takes when the upstream endpoint supports prepare/commit
 endpoints (e.g. `POST /prepare/{txn}` then `POST /commit/{txn}`).
 
-### Production adapters (separate packages)
+### Production adapters
 
-The real JDBC, Iceberg, S3, and HTTP adapters live outside the
-core because each pulls in its own driver. The structure is the
-same:
+There are no production adapters in the repository yet; a JDBC,
+Iceberg, S3 or HTTP sink would live in its own package because each
+pulls in its own driver. The shape each would take:
 
 | Adapter | Prepare | Commit | Abort | Recover |
 | ------- | ------- | ------ | ----- | ------- |
-| JDBC (`wireform-jdbc`) | `INSERT` rows with `txn_id` column set | `UPDATE rows SET pending = false WHERE txn_id = ?` | `DELETE FROM rows WHERE txn_id = ?` | `SELECT DISTINCT txn_id FROM rows WHERE pending` |
-| Iceberg (`wireform-iceberg`) | Write data files; defer manifest | Commit manifest pointing at data files | Delete the orphan data files | List pending data files not referenced by any manifest |
-| S3 (`wireform-s3`) | Upload objects under `__pending__/<txn>/` | Rename / copy objects out of `__pending__/` | Delete `__pending__/<txn>/` | List `__pending__/` prefixes |
+| JDBC | `INSERT` rows with `txn_id` column set | `UPDATE rows SET pending = false WHERE txn_id = ?` | `DELETE FROM rows WHERE txn_id = ?` | `SELECT DISTINCT txn_id FROM rows WHERE pending` |
+| Iceberg | Write data files; defer manifest | Commit manifest pointing at data files | Delete the orphan data files | List pending data files not referenced by any manifest |
+| S3 | Upload objects under `__pending__/<txn>/` | Rename / copy objects out of `__pending__/` | Delete `__pending__/<txn>/` | List `__pending__/` prefixes |
 | HTTP | `POST /prepare/{txn}` with body | `POST /commit/{txn}` | `POST /abort/{txn}` | `GET /pending` returning prepared txn ids |
 
 ## Choosing the cadence
 
-The 2PC overhead is one prepare + one commit roundtrip per
-`commitIntervalMs`. Defaults:
+Under EOS, `commitIntervalMs` bounds both end-to-end latency (output
+becomes visible to `read_committed` readers only at a commit) and how
+much work an abort throws away. The default under EOS is 100 ms, the
+JVM's.
 
 | `commitIntervalMs` | Behaviour |
 | ------------------ | --------- |
-| 100 | EOS-V1 fast cadence: high overhead, low end-to-end latency. Each sink sees ~10 commits/sec, so commit cost matters |
-| 30_000 (default) | Standard EOS-V2 cadence: one prepare/commit pair every 30 s. Batch sizes are large, per-record commit overhead is small |
-| 300_000 | Long-tail cadence: useful when the sink's commit operation is expensive (e.g. Iceberg manifest commit). Trade off: a fault discards up to 5 minutes of in-flight work |
-
-A sink whose `tpsCommit` takes a meaningful fraction of
-`commitIntervalMs` is a sign that the cadence is too tight. Raise
-`commitIntervalMs` and let batches accumulate.
+| `Nothing` (default) | 100 ms under EOS, 30 s at least once |
+| `Just 1_000` | Fewer, larger transactions; output visible about a second late |
+| `Just 30_000` | Long transactions: an abort replays up to 30 s of input, and readers wait as long |
 
 ## Common pitfalls
 
@@ -290,8 +293,8 @@ existence first.
 
 `tpsRecover` returning `[]` on every start is a sign you're not
 actually checking the external system. A correct implementation
-lists everything currently in the prepared state on the downstream
-and asks the runtime to commit or abort each one.
+lists everything currently in the prepared state on the downstream;
+the runtime commits or aborts each one.
 
 ### Side effects in `peek` / `foreach` under EOS
 
@@ -311,54 +314,52 @@ choices, in order of strength:
    token per record (e.g. the upstream Kafka `(topic, partition,
    offset)` tuple), check the store inside the processor before
    firing the side effect, write the token to the store after.
-   The store write is part of the EOS-V3 transactional drain so
-   it commits atomically with the offsets. On a replay, the
+   The store write reaches its changelog inside the same
+   transaction as the offsets, and an abort restores the store from
+   the changelog, so the token and the offsets agree. On a replay, the
    processor sees the token and skips. Same pattern the JVM
    docs recommend.
 3. **Best-effort + reconciliation.** Accept that the side effect
    replays on rewind; design downstream to deduplicate. Lowest
    cost; weakest guarantee.
 
-### Mixing transactional and non-transactional stores
+### Stores without a changelog
 
-If a topology has both an EOS-V2 transactional state store and a
-side effect that is *not* under a 2PC sink, the store and the side
-effect can drift on a fault. Either put everything under EOS
-(transactional store + 2PC sink) or accept at-least-once for the
-whole topology.
+A store with logging disabled (`withLoggingDisabled`) can't be
+restored, so after an abort or an unclean stop it starts empty. Under
+EOS keep logging on for every store whose contents matter.
 
-### `CommitFatal` after `commit2PC`
+### A sink that fails to commit
 
-This is the "wire committed, sink failed to finalise" case. The
-runtime does not retry: the in-flight `SinkTxnId` is stranded on
-the external system, and the next startup is where it gets
-resolved. If the sink's `tpsRecover` and recovery decision logic
-are correct, the only operator action needed is to confirm the
-recovery happened. If they're buggy, you may have a permanently
-half-committed sink that needs manual fixing.
-
-Watch for the `CommitFatal` outcome in metrics (via
-`Kafka.Streams.Metrics`) and alert on it.
+When `tpsCommit` fails after Kafka committed, the stream thread stops
+(and, with the default `replaceThreadOnException`, carries on); the
+batch stays prepared until the recovery at the **next start** commits
+it. Until then it is invisible downstream. If the sink's `tpsRecover`
+is correct, the only operator action needed is a restart; if it's
+buggy, you may have a permanently half-committed sink that needs
+manual fixing. Alert on `commit <sink> for <cycle>` failures in the
+log.
 
 ## Verifying EOS in tests
 
-The integration test suite drives the commit cycle through the
-`Kafka.Streams.Mock.Cluster` harness. The pattern:
+`Kafka.Streams.Runtime.MockBroker` is an in-memory cluster with
+transactions, `read_committed` visibility and fault injection, so the
+real runtime can be driven through an abort:
 
-1. Build a topology with a 2PC sink.
-2. Schedule a fault injection at a specific commit-cycle step.
-3. Run a deterministic sequence of records.
-4. Assert that:
-   - Every committed sink row corresponds to a producer txn that
-     also committed.
-   - No sink row appears without its producer txn.
-   - On restart, `tpsRecover` is called and the half-committed
-     state is resolved correctly.
+1. `newMockBroker`, `mockCreateTopic` the inputs, start the topology
+   with `startKafkaStreamsWith ks =<< mockDriverFor broker cfg` and
+   `processingGuarantee = ExactlyOnceV2`.
+2. `mockProduce` input; once some output is committed,
+   `mockFailTransactionCommits broker n` (or `mockFailSends`) to make
+   the next commits fail.
+3. Assert on `mockVisibleRecords` (what a `read_committed` reader
+   sees): every key's output appears exactly once, nothing from the
+   aborted transactions; `mockRecords` still shows the aborted writes.
 
-The `Streams.Properties.EOSChaosSpec` suite drives every commit
-step against a pure model, including the `getOffsets` exception
-path, `abortTxn` returning Left, and `storeAbort` returning Left.
-Use it as a template for your own sink's chaos tests.
+`Streams.TaskRuntimeSpec` ("exactly-once: an aborted transaction leaves
+no trace in committed output") is the template. The sink contract on
+its own is covered by `Streams.Properties.TwoPhaseSinkSpec`
+(`runSinkCommitCycle` drives one cycle without the runtime).
 
 ## Related reading
 
@@ -368,4 +369,4 @@ Use it as a template for your own sink's chaos tests.
 - [Visibility versus ACID databases](./visibility/): how
   "exactly once into Kafka" differs from "atomic commit in
   Postgres".
-- [Runbooks](./runbooks/): what to do when `commit2PC` fails.
+- [Runbooks](./runbooks/): what to do when commits abort.
