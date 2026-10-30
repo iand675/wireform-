@@ -136,6 +136,7 @@ test-suite wireform-core-test
     Wireform.Ring.Test
     Wireform.Parser.Test
     Wireform.Transport.SendTest
+    Wireform.Transport.SendBoundaryTest
     Wireform.Base64.Test
     Wireform.FFI.Test
   build-depends:
@@ -143,6 +144,8 @@ test-suite wireform-core-test
     bytestring,
     wireform-core,
     sydtest,
+    sydtest-hedgehog,
+    hedgehog >= 1.0 && < 1.8,
     QuickCheck
 
 benchmark parser-bench

@@ -48,7 +48,12 @@ module Wireform.Builder.FastBuilder (
 
   -- * Ring-direct sink (zero-copy builder → send ring)
   RingSinkState (..),
+  RingSpill (..),
+  SpillBuf (..),
   finalizeRingSink,
+
+  -- * Exceptions
+  FixedBufferOverflow (..),
 
   -- * Basic builders
   primBounded,
@@ -176,8 +181,8 @@ data DataSink
     HandleSink !IO.Handle !Int {-next buffer size-} !(IORef Queue)
   | {- | The buffer has a known-exact size. No 'IORef', no growth.
     Used by 'toStrictByteStringExact' when the output size is
-    known in advance. If the builder overflows, behaviour is
-    undefined (but in practice 'getBytes_' will 'error').
+    known in advance. A request that does not fit in what is left
+    throws 'FixedBufferOverflow'.
     -}
     FixedBuffer
   | {- | Bytes are accumulated in a buffer, then fed to a streaming
@@ -189,7 +194,9 @@ data DataSink
     When the builder overflows, the already-written bytes are
     published to the ring consumer and the builder continues
     writing into newly-available ring space — no intermediate
-    'S.ByteString' allocation or memcpy.
+    'S.ByteString' allocation or memcpy.  A single request larger
+    than the ring is served from a scratch buffer instead (see
+    'RingSpill').
     -}
     RingSink !(IORef RingSinkState)
 
@@ -271,7 +278,34 @@ data RingSinkState = RingSinkState
   {- ^ Read the consumer's current tail position.  Used to check
   whether the ring has room without publishing first.
   -}
+  , rsSpill :: !RingSpill
+  {- ^ Scratch buffer for requests larger than the ring.  While
+  'SpillActive', the builder's region is the scratch buffer, not
+  the ring, and 'rsHead' is the ring position its bytes go to.
+  -}
   }
+
+
+{- | A pinned scratch buffer and its capacity.  Kept across spills
+within one builder run so repeated oversized requests reuse it.
+-}
+data SpillBuf = SpillBuf !(ForeignPtr Word8) {-# UNPACK #-} !Int
+
+
+{- | Spill state of a 'RingSink'.
+
+A request for more contiguous bytes than the ring holds cannot be
+served from the ring, so 'getBytes_' hands the builder a scratch
+buffer instead and marks it active.  The next overflow, insert or
+'finalizeRingSink' copies the scratch bytes into the ring in
+ring-sized chunks and resumes writing into the ring.
+-}
+data RingSpill
+  = NoSpill
+  | -- | A scratch buffer from an earlier spill, free for reuse.
+    SpillIdle {-# UNPACK #-} !SpillBuf
+  | -- | The builder is currently writing into this buffer.
+    SpillActive {-# UNPACK #-} !SpillBuf
 
 
 {- | Publish the final bytes written by a builder into the ring.
@@ -282,15 +316,102 @@ the last unpublished bytes.  Returns the final head position.
 finalizeRingSink :: IORef RingSinkState -> Ptr Word8 -> IO Word64
 finalizeRingSink rsRef finalCur = do
   rs <- readIORef rsRef
-  let !off = fromIntegral (rsHead rs) .&. rsMask rs
-      !startPtr = rsBase rs `plusPtr` off
-      !written = finalCur `minusPtr` startPtr
-      !finalHead = rsHead rs + fromIntegral written
-  -- Publish everything from the last-published position to
-  -- the builder's final cursor in a single call.
-  when (finalHead > rsPublished rs) $
-    rsPublishHead rs finalHead
-  pure finalHead
+  case rsSpill rs of
+    SpillActive _ -> do
+      -- 'ringCopyIn' publishes as it goes, so nothing is left over.
+      rs' <- settleRingSink rs finalCur
+      writeIORef rsRef rs'
+      pure (rsHead rs')
+    _ -> do
+      let !off = fromIntegral (rsHead rs) .&. rsMask rs
+          !startPtr = rsBase rs `plusPtr` off
+          !written = finalCur `minusPtr` startPtr
+          !finalHead = rsHead rs + fromIntegral written
+      -- Publish everything from the last-published position to
+      -- the builder's final cursor in a single call.
+      when (finalHead > rsPublished rs) $
+        rsPublishHead rs finalHead
+      pure finalHead
+
+
+{- | Fold the builder's cursor back into the ring state.  Afterwards
+'rsHead' is the ring position just past everything the builder has
+written, and no spill is active.  An active spill is copied into
+the ring (publishing as it goes); otherwise this is pure cursor
+arithmetic.
+-}
+settleRingSink :: RingSinkState -> Ptr Word8 -> IO RingSinkState
+settleRingSink rs cur = case rsSpill rs of
+  SpillActive buf@(SpillBuf fp _) -> do
+    let !base = unsafeForeignPtrToPtr fp
+    rs' <- ringCopyIn rs base (cur `minusPtr` base)
+    touchForeignPtr fp
+    pure rs' {rsSpill = SpillIdle buf}
+  _ -> do
+    let !off = fromIntegral (rsHead rs) .&. rsMask rs
+        !written = cur `minusPtr` (rsBase rs `plusPtr` off)
+    pure rs {rsHead = rsHead rs + fromIntegral written}
+{-# INLINE settleRingSink #-}
+
+
+{- | Copy @len@ bytes from @src@ into the ring at 'rsHead' (which must
+be settled).  Pending bytes are published first, then each
+ring-sized chunk as it lands, so the consumer drains between chunks.
+-}
+ringCopyIn :: RingSinkState -> Ptr Word8 -> Int -> IO RingSinkState
+ringCopyIn rs src len
+  | len <= 0 = pure rs
+  | otherwise = do
+      when (rsHead rs > rsPublished rs) $
+        rsPublishHead rs (rsHead rs)
+      let !ringSz = rsRingSize rs
+          loop !srcOff !hd
+            | srcOff >= len = pure hd
+            | otherwise = do
+                let !chunk = min (len - srcOff) ringSz
+                    !wh = hd + fromIntegral chunk
+                rsEnsureRoom rs wh
+                let !dst = rsBase rs `plusPtr` (fromIntegral hd .&. rsMask rs)
+                copyBytes dst (src `plusPtr` srcOff) chunk
+                rsPublishHead rs wh
+                loop (srcOff + chunk) wh
+      hd' <- loop 0 (rsHead rs)
+      pure rs {rsHead = hd', rsPublished = hd'}
+{-# NOINLINE ringCopyIn #-}
+
+
+{- | Make @sz@ contiguous bytes at the (settled) 'rsHead' available
+to the builder.  Publishes pending bytes and waits only when the
+consumer's tail says the ring lacks room.  Requires
+@sz <= rsRingSize@.
+-}
+openRingRegion :: RingSinkState -> Int -> IO RingSinkState
+openRingRegion rs sz = do
+  let !wantHead = rsHead rs + fromIntegral sz
+  tl <- rsLoadTail rs
+  if wantHead - tl <= fromIntegral (rsRingSize rs)
+    then pure rs
+    else do
+      when (rsHead rs > rsPublished rs) $
+        rsPublishHead rs (rsHead rs)
+      rsEnsureRoom rs wantHead
+      pure rs {rsPublished = rsHead rs}
+
+
+-- | Ring address of the (settled) 'rsHead'.
+ringHeadPtr :: RingSinkState -> Ptr Word8
+ringHeadPtr rs = rsBase rs `plusPtr` (fromIntegral (rsHead rs) .&. rsMask rs)
+{-# INLINE ringHeadPtr #-}
+
+
+{- | A scratch buffer of at least @n@ bytes, reusing the idle one
+when it is large enough.
+-}
+acquireSpill :: RingSpill -> Int -> IO SpillBuf
+acquireSpill (SpillIdle buf@(SpillBuf _ cap)) n | cap >= n = pure buf
+acquireSpill _ n = do
+  fp <- S.mallocByteString n
+  pure (SpillBuf fp n)
 
 
 {- | A streaming byte transform — middleware that processes chunks
@@ -417,6 +538,22 @@ instance Show SuspendBuilderException where
 
 
 instance E.Exception SuspendBuilderException
+
+
+{- | A builder running into a fixed, exact-size buffer (see
+'toStrictByteStringExact') asked for more room than was left,
+i.e. the caller's size estimate was too small.
+-}
+data FixedBufferOverflow = FixedBufferOverflow
+  { fixedBufferRequested :: !Int
+  -- ^ Bytes the builder asked for.
+  , fixedBufferAvailable :: !Int
+  -- ^ Bytes left in the buffer at that point.
+  }
+  deriving stock (Show, Eq)
+
+
+instance E.Exception FixedBufferOverflow
 
 
 ----------------------------------------------------------------
@@ -743,7 +880,8 @@ builder completes.
 
 __Precondition:__ the builder must produce exactly @cap@ bytes.
 If it produces fewer, the trailing bytes are uninitialised.
-If it produces more, behaviour is undefined.
+If it asks for more room than is left, it throws
+'FixedBufferOverflow'.
 -}
 toStrictByteStringExact :: Int -> Builder -> S.ByteString
 toStrictByteStringExact !sz builder = unsafePerformIO $ do
@@ -987,11 +1125,9 @@ byteStringCopy !bstr = mkBuilder $ do
 {- | Out-of-line overflow path for 'byteStringCopy'.
 
 A 'RingSink' can offer at most @ringSize@ contiguous bytes, so a
-copy larger than the ring is chunked via the insert path instead
-of asking 'getBytes' for an impossible region.  Which path
-'byteString' picks depends on 'maximalCopySize' (~8 KiB) while
-the ring size depends on the page size, so on 4 KiB-page hosts a
-payload in @(ringSize, maximalCopySize)@ lands here.
+copy larger than the ring goes through the insert path, which
+copies straight into the ring in chunks.  'getBytes' would also
+cope (via its spill buffer) but would copy the bytes twice.
 -}
 byteStringCopySlow_ :: S.ByteString -> Builder
 byteStringCopySlow_ bstr = mkBuilder $ do
@@ -1051,9 +1187,15 @@ byteStringInsert_ bstr = mkBuilder $ do
       when (r < S.length bstr) $
         growBuffer bufRef (S.length bstr)
       useBuilder $ byteStringCopyNoCheck bstr
-    FixedBuffer ->
-      -- FixedBuffer: buffer is exact-sized, so this large insert
-      -- must still fit. Just copy it in.
+    FixedBuffer -> do
+      r <- remainingBytes
+      when (r < S.length bstr) $
+        io $
+          E.throwIO
+            FixedBufferOverflow
+              { fixedBufferRequested = S.length bstr
+              , fixedBufferAvailable = r
+              }
       useBuilder $ byteStringCopyNoCheck bstr
     HandleSink h _nextCap queueRef -> do
       cur <- getCur
@@ -1074,46 +1216,18 @@ byteStringInsert_ bstr = mkBuilder $ do
       setCur (sqBase sq)
     RingSink rsRef -> do
       cur <- getCur
-      rs <- io $ readIORef rsRef
-      let !off = fromIntegral (rsHead rs) .&. rsMask rs
-          !startPtr = rsBase rs `plusPtr` off
-          !written = cur `minusPtr` startPtr
-          !newHead = rsHead rs + fromIntegral written
-          !bsLen = S.length bstr
-          !ringSz = rsRingSize rs
-      -- Publish accumulated builder bytes before the BS copy.
-      when (written > 0) $ io $ do
-        when (newHead > rsPublished rs) $
-          rsPublishHead rs newHead
-      -- Copy the BS into the ring, chunking at ringSize if
-      -- the BS is larger than the ring can hold contiguously.
-      io $ S.unsafeUseAsCString bstr $ \src -> do
-        let loop !srcOff !hd !remaining
-              | remaining <= 0 = pure hd
-              | otherwise = do
-                  let !chunk = min remaining ringSz
-                      !wh = hd + fromIntegral chunk
-                  rsEnsureRoom rs wh
-                  let !dstOff = fromIntegral hd .&. rsMask rs
-                      !dst = rsBase rs `plusPtr` dstOff
-                  copyBytes dst (castPtr src `plusPtr` srcOff) chunk
-                  rsPublishHead rs wh
-                  loop (srcOff + chunk) wh (remaining - chunk)
-        afterBs <- loop 0 newHead bsLen
-        let !pub = afterBs
-        writeIORef
-          rsRef
-          rs
-            { rsHead = afterBs
-            , rsPublished = pub
-            }
-      -- Set up a fresh region for subsequent builder writes.
-      rs' <- io $ readIORef rsRef
-      let !contChunk = min ringSz (rsChunkSize rs')
-          !contWant = rsHead rs' + fromIntegral contChunk
-      io $ rsEnsureRoom rs' contWant
-      let !contOff = fromIntegral (rsHead rs') .&. rsMask rs'
-          !contPtr = rsBase rs' `plusPtr` contOff
+      -- Settle the builder's bytes (flushing any active spill),
+      -- copy the BS in ring-sized chunks, then open a fresh
+      -- region for subsequent builder writes.
+      rs0 <- io $ readIORef rsRef
+      let !contChunk = min (rsRingSize rs0) (rsChunkSize rs0)
+      contPtr <- io $ do
+        rs1 <- settleRingSink rs0 cur
+        rs2 <- S.unsafeUseAsCString bstr $ \src ->
+          ringCopyIn rs1 (castPtr src) (S.length bstr)
+        rs3 <- openRingRegion rs2 contChunk
+        writeIORef rsRef rs3
+        pure (ringHeadPtr rs3)
       setCur contPtr
       setEnd (contPtr `plusPtr` contChunk)
 {-# NOINLINE byteStringInsert_ #-}
@@ -1175,7 +1289,14 @@ getBytes_ n = mkBuilder $ do
         BoundedGrowingBuffer fptr bound ->
           growBufferBounded dRef fptr bound (I# n)
     GrowingBuffer bufRef -> growBuffer bufRef (I# n)
-    FixedBuffer -> error "Wireform.Builder: FixedBuffer overflow (size estimate too small)"
+    FixedBuffer -> do
+      r <- remainingBytes
+      io $
+        E.throwIO
+          FixedBufferOverflow
+            { fixedBufferRequested = I# n
+            , fixedBufferAvailable = r
+            }
     HandleSink h nextCap queueRef -> do
       cur <- getCur
       io $ flushQueue h queueRef cur
@@ -1211,53 +1332,24 @@ getBytes_ n = mkBuilder $ do
           setEnd (newBase `plusPtr` I# n)
     RingSink rsRef -> do
       cur <- getCur
-      rs <- io $ readIORef rsRef
-      -- The ring provides at most ringSize contiguous bytes.
-      -- ensureBytes requests larger than that are a programming
-      -- error — use byteStringInsert (triggered automatically
-      -- by byteString / byteStringThreshold) for large payloads.
-      when (I# n > rsRingSize rs) $
-        io $
-          error $
-            "Wireform.Builder: RingSink getBytes request ("
-              ++ show (I# n)
-              ++ ") exceeds ring size ("
-              ++ show (rsRingSize rs)
-              ++ "); use byteString/byteStringInsert for large payloads"
-      let !off = fromIntegral (rsHead rs) .&. rsMask rs
-          !startPtr = rsBase rs `plusPtr` off
-          !written = cur `minusPtr` startPtr
-          !newHead = rsHead rs + fromIntegral written
-      -- Try to extend without publishing: the ring may already
-      -- have room beyond what we initially reserved.
-      let !chunkSz =
-            min
-              (rsRingSize rs)
-              (max (I# n) (rsChunkSize rs))
-          !wantHead = newHead + fromIntegral chunkSz
-      tl <- io $ rsLoadTail rs
-      let !ringCap = fromIntegral (rsRingSize rs) :: Word64
-      published' <-
-        if wantHead - tl <= ringCap
-          then
-            io $ pure (rsPublished rs)
-          else do
-            io $ do
-              when (newHead > rsPublished rs) $
-                rsPublishHead rs newHead
-              rsEnsureRoom rs wantHead
-            io $ pure newHead
-      let !newOff = fromIntegral newHead .&. rsMask rs
-          !newPtr = rsBase rs `plusPtr` newOff
-      io $
-        writeIORef
-          rsRef
-          rs
-            { rsHead = newHead
-            , rsPublished = published'
-            }
-      setCur newPtr
-      setEnd (newPtr `plusPtr` chunkSz)
+      rs <- io $ readIORef rsRef >>= \rs0 -> settleRingSink rs0 cur
+      if I# n > rsRingSize rs
+        then do
+          -- No ring region can hold this contiguously: spill into a
+          -- scratch buffer; the next settle copies it into the ring.
+          buf@(SpillBuf fp cap) <- io $ acquireSpill (rsSpill rs) (I# n)
+          io $ writeIORef rsRef rs {rsSpill = SpillActive buf}
+          let !base = unsafeForeignPtrToPtr fp
+          setCur base
+          setEnd (base `plusPtr` cap)
+        else do
+          -- Offer a full chunk; publish only if the ring lacks room.
+          let !chunkSz = min (rsRingSize rs) (max (I# n) (rsChunkSize rs))
+          rs' <- io $ openRingRegion rs chunkSz
+          io $ writeIORef rsRef rs'
+          let !newPtr = ringHeadPtr rs'
+          setCur newPtr
+          setEnd (newPtr `plusPtr` chunkSz)
 {-# NOINLINE getBytes_ #-}
 
 

@@ -55,6 +55,7 @@ import Wireform.Builder qualified as B
 import Wireform.Builder.FastBuilder (
   DataSink (RingSink),
   RingSinkState (..),
+  RingSpill (NoSpill),
   finalizeRingSink,
   runBuilder,
  )
@@ -343,6 +344,7 @@ sendBuilderDirect t b = do
         , rsPublishHead = sendPublishHead t
         , rsEnsureRoom = ensureRoom t
         , rsLoadTail = sendLoadTail t
+        , rsSpill = NoSpill
         }
   finalCur <- runBuilder b (RingSink rsRef) ptr (ptr `plusPtr` chunkSz)
   _ <- finalizeRingSink rsRef finalCur

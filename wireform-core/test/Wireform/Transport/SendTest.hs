@@ -1,7 +1,14 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-module Wireform.Transport.SendTest (spec) where
+module Wireform.Transport.SendTest (
+  spec,
+
+  -- * Shared with "Wireform.Transport.SendBoundaryTest"
+  withTestTransport,
+  readChunks,
+  ringSizeAt,
+) where
 
 import Control.Exception (catch)
 import Data.Bits ((.&.))
