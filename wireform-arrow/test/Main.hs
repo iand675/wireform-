@@ -999,10 +999,11 @@ dictReplacementRoundTrip = do
     keysToList c = maybe [] (VG.toList . toMaybeVector) (asPrim PInt32 c)
 
 
+-- | Without the codec's cabal flag the writer silently falls back to an
+-- uncompressed body and the round trip would pass without exercising
+-- compression, so an unavailable codec is skipped outright.
 bodyCompressionRoundTrip :: BodyCompressionCodec -> Schema -> V.Vector ColumnArray -> IO ()
 bodyCompressionRoundTrip codec sch cols
-  -- Without the codec the writer falls back to an uncompressed body,
-  -- so the round trip would pass without exercising compression.
   | not (bodyCompressionAvailable codec) =
       putStrLn $ "SKIP: body compression " ++ show codec ++ " (not built in; enable the zstd / lz4 cabal flags)"
   | otherwise = do
