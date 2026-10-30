@@ -38,6 +38,7 @@ import Arrow.Record qualified as AR
 import Arrow.Stream (
   DictHandling (..),
   WriteOptions (..),
+  bodyCompressionAvailable,
   decodeArrowStream,
   defaultWriteOptions,
   encodeArrowStream,
@@ -998,25 +999,31 @@ dictReplacementRoundTrip = do
     keysToList c = maybe [] (VG.toList . toMaybeVector) (asPrim PInt32 c)
 
 
+-- | Without the codec's cabal flag the writer would silently fall back
+-- to uncompressed and the round-trip would pass without testing
+-- anything, so skip outright instead.
 bodyCompressionRoundTrip :: BodyCompressionCodec -> Schema -> V.Vector ColumnArray -> IO ()
-bodyCompressionRoundTrip codec sch cols = do
-  let !opts = defaultWriteOptions {writeBodyCompression = Just codec}
-      !encoded = encodeArrowStream opts sch [cols]
-  case encoded >>= \bytes -> (,) bytes <$> decodeArrowStream defaultReadOptions bytes of
-    Left e -> failTest $ "body-compression round-trip: " ++ e
-    Right (bytes, (_sch', batches))
-      | [got] <- batches
-      , got == cols ->
-          putStrLn $
-            "OK: body compression "
-              ++ show codec
-              ++ " ("
-              ++ show (BS.length bytes)
-              ++ " bytes)"
-      | otherwise ->
-          failTest $
-            "body-compression mismatch: got "
-              ++ show batches
+bodyCompressionRoundTrip codec sch cols
+  | not (bodyCompressionAvailable codec) =
+      putStrLn $ "SKIP: body compression " ++ show codec ++ " (codec not compiled in)"
+  | otherwise = do
+      let !opts = defaultWriteOptions {writeBodyCompression = Just codec}
+          !encoded = encodeArrowStream opts sch [cols]
+      case encoded >>= \bytes -> (,) bytes <$> decodeArrowStream defaultReadOptions bytes of
+        Left e -> failTest $ "body-compression round-trip: " ++ e
+        Right (bytes, (_sch', batches))
+          | [got] <- batches
+          , got == cols ->
+              putStrLn $
+                "OK: body compression "
+                  ++ show codec
+                  ++ " ("
+                  ++ show (BS.length bytes)
+                  ++ " bytes)"
+          | otherwise ->
+              failTest $
+                "body-compression mismatch: got "
+                  ++ show batches
 
 
 streamingRoundTrip :: Schema -> [V.Vector ColumnArray] -> IO ()

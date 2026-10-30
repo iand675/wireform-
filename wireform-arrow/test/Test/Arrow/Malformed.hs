@@ -83,6 +83,7 @@ import Arrow.FlatBufferIPC (
   buildDictionaryBatchMessage,
   buildRecordBatchMessage,
   buildSchemaMessage,
+  bodyCompressionAvailable,
   compressBufferEither,
   decodeSparseTensorFrame,
   decodeTensorFrame,
@@ -208,7 +209,7 @@ builtCorpus = concatMap encodeShape shapes ++ concatMap viaWrite (take 2 shapes)
       in [ Seed (nm ++ suffix) StreamEnc (built nm (encodeArrowStream opts sch batches))
          , Seed (nm ++ suffix) FileEnc (built nm (encodeArrowFile opts sch batches))
          ]
-    codecs = [("", Nothing), (" (zstd)", Just BodyZstd), (" (lz4)", Just LZ4Frame)]
+    codecs = ("", Nothing) : [(suffix, Just codec) | (suffix, codec) <- [(" (zstd)", BodyZstd), (" (lz4)", LZ4Frame)], bodyCompressionAvailable codec]
     viaWrite (nm, sch, batches) =
       [ Seed (nm ++ " via Arrow.Write") StreamEnc (built nm (Write.writeArrowStream sch (V.fromList batches)))
       , Seed (nm ++ " via Arrow.Write") FileEnc (built nm (Write.writeArrowFile sch (V.fromList batches)))
@@ -1049,6 +1050,14 @@ prop_bufferValidator = withTests 1 . property $ do
   validateRecordBatchBuffers (batch [Buffer 0 threeGiB, Buffer threeGiB 8]) (threeGiB + 64) === True
 
 
+{- | The body-compression codecs compiled into this build (cabal flags
+@zstd@ / @lz4@). The compression properties quantify over these only,
+so a build without the flags skips them instead of failing.
+-}
+availableCodecs :: [BodyCompressionCodec]
+availableCodecs = filter bodyCompressionAvailable [BodyZstd, LZ4Frame]
+
+
 {- | One non-null int64 column of 8 rows whose data buffer is a
 compressed envelope claiming @claim@ uncompressed bytes; the payload
 really holds 64 bytes of @0x07@.
@@ -1069,10 +1078,10 @@ rejected without inflating anything. The honest claim decodes.
 prop_decompressionClaims :: Property
 prop_decompressionClaims = withTests 1 . property $ do
   mapM_ (\(codec, claim) -> rejectsEverywhere (compressedClaim codec claim)) $
-    concatMap (\codec -> map ((,) codec) [2 ^ (40 :: Int), maxBound, 600, 65, 63, -2]) [BodyZstd, LZ4Frame]
+    concatMap (\codec -> map ((,) codec) [2 ^ (40 :: Int), maxBound, 600, 65, 63, -2]) availableCodecs
   mapM_
     (\codec -> fmap snd (decodeArrowStream defaultReadOptions (compressedClaim codec 64)) === Right [V.singleton (primColumn PInt64 (VS.replicate 8 0x0707070707070707))])
-    [BodyZstd, LZ4Frame]
+    availableCodecs
 
 
 {- | Two non-null int64 columns of 8 rows whose data buffers are
@@ -1133,7 +1142,7 @@ prop_readerBudgets = withTests 1 . property $ do
         mustAcceptBytes "decompression" compressed defaultReadOptions {roMaxDecompressedBytes = 2 * 64}
         mustRejectBytes "decompression" compressed defaultReadOptions {roMaxDecompressedBytes = 2 * 64 - 1}
     )
-    [BodyZstd, LZ4Frame]
+    availableCodecs
 
 
 -- * Sanity: the corpus itself is valid
