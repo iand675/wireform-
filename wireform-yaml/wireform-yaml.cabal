@@ -11,6 +11,7 @@ description:
 category: Data, Codec, Serialization
 homepage: https://github.com/iand675/wireform-
 bug-reports: https://github.com/iand675/wireform-/issues
+tested-with: GHC == 9.10.3, GHC == 9.12.4, GHC == 9.14.1
 license: BSD-3-Clause
 license-file: LICENSE
 author: Ian Duncan
