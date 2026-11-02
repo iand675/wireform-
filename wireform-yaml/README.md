@@ -4,7 +4,7 @@
 
 
 > [!CAUTION]
-> wireform is in heavy development and has not been published to Hackage yet. APIs may change.
+> This is an experimental, pre-1.0 package. APIs may change between releases.
 
 [YAML 1.2](https://yaml.org/spec/1.2.2/) for Haskell. Encode and
 decode the dynamic [`YAML.Value`](src/YAML/Value.hs), derive typeclass
@@ -35,13 +35,14 @@ testing discipline with every other format.
 ```cabal
 build-depends:
   base,
-  wireform-yaml,
-  wireform-derive,    -- only if you want the cross-format annotation deriver
+  wireform-yaml ^>= 0.1.0.0,
+  wireform-derive ^>= 0.2.0.0, -- if importing the shared modifier vocabulary
 ```
 
 The package is part of the [wireform](https://github.com/iand675/wireform-)
-monorepo. Clone the repo and `cabal build wireform-yaml` to compile
-locally. Compiling with the LLVM backend (`-fllvm`) adds compile time
+monorepo and requires GHC 9.10 or later. Clone the repo and
+`cabal build wireform-yaml` to compile locally. Compiling with the LLVM
+backend (`-fllvm`) adds compile time
 but measurably improves runtime performance.
 
 ## Hello world
@@ -150,7 +151,7 @@ file without touching the rest.
 ## Annotation-driven deriving
 
 `YAML.Derive` consumes the cross-format `Wireform.Derive.Modifier`
-vocabulary from [`wireform-derive`](../wireform-derive/README.md), so
+vocabulary from [`wireform-derive`](https://hackage.haskell.org/package/wireform-derive), so
 the same annotated record can produce YAML, JSON, and any other
 backend's instances:
 

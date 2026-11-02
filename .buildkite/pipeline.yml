@@ -5,6 +5,8 @@ steps:
   - label: ":pipeline: Generate Pipeline"
     key: "generate"
     command: ".buildkite/generate.sh"
+    plugins:
+      - jcollie/install-nix#af1bcfc10d2a7c018b53908434439496ddf1ef6d: {}
     agents:
       queue: "nix"
     artifact_paths:

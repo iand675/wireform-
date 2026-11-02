@@ -2,12 +2,30 @@ cabal-version: 3.0
 name: wireform-yaml
 version: 0.1.0.0
 synopsis: Spec-conformant YAML 1.2 encoding/decoding
+description:
+  YAML 1.2 codecs with a dynamic value model, generic and Template Haskell
+  derivation, and an aeson bridge. Supports block and flow collections,
+  tags, anchors, aliases, literal and folded scalars, and document streams.
+  An annotated syntax tree supports source-preserving edits. Decoders bound
+  nesting depth and alias expansion.
+category: Data, Codec, Serialization
+homepage: https://github.com/iand675/wireform-
+bug-reports: https://github.com/iand675/wireform-/issues
 license: BSD-3-Clause
 license-file: LICENSE
 author: Ian Duncan
 maintainer: ian@iankduncan.com
 copyright: 2026 Ian Duncan
 build-type: Simple
+extra-doc-files:
+  README.md
+  CHANGELOG.md
+  bench-results/charts/*.svg
+
+source-repository head
+  type: git
+  location: https://github.com/iand675/wireform-.git
+  subdir: wireform-yaml
 
 common defaults
   ghc-options:
@@ -52,7 +70,7 @@ library
     YAML.Decode.Flow
   build-depends:
     base >= 4.20 && < 5,
-    wireform-derive,
+    wireform-derive ^>= 0.2.0.0,
     mtl >= 2.2 && < 2.4,
     hashable >= 1.4 && < 1.6,
     unordered-containers >= 0.2 && < 0.3,
@@ -110,7 +128,7 @@ test-suite wireform-yaml-test
     base,
     deepseq,
     wireform-yaml,
-    wireform-derive,
+    wireform-derive ^>= 0.2.0.0,
     aeson >= 2.2 && < 2.4,
     bytestring,
     scientific,

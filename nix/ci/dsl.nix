@@ -36,7 +36,11 @@ let
     , priority        ? null
     , skip            ? false
     , matrix          ? null
-    , plugins         ? []
+    # Queue names select agents; they do not install Nix. Bootstrap every
+    # command worker, including fresh workers assigned after generation.
+    , plugins         ? [
+        { "jcollie/install-nix#af1bcfc10d2a7c018b53908434439496ddf1ef6d" = {}; }
+      ]
     , if_             ? null
     , allow_dependency_failure ? false
     , concurrency       ? null
