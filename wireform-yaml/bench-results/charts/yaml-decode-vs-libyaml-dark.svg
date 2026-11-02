@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 400" width="720" height="400" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif" font-size="12">
   <rect x="0" y="0" width="720" height="400" fill="#0d1117"/>
   <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#e6edf3">wireform-yaml decode vs libyaml across input sizes</text>
-  <text x="360" y="44" text-anchor="middle" font-size="11" fill="#7d8590">lower is better · µs · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5</text>
+  <text x="360" y="44" text-anchor="middle" font-size="11" fill="#7d8590">lower is better · µs · ghc-9.10.3 on darwin-aarch64, criterion 1.6.5</text>
   <g stroke="#30363d" stroke-width="1">
     <line x1="80" y1="320" x2="700" y2="320"/>
     <line x1="80" y1="60" x2="80" y2="320"/>
@@ -19,28 +19,28 @@
     <text x="72" y="64" text-anchor="end" font-size="10" fill="#7d8590">200</text>
   </g>
   <g>
-    <rect x="92.4" y="319.3" width="47.6" height="0.7" rx="2" fill="#58a6ff"/>
-    <rect x="142" y="313.0" width="47.6" height="7.0" rx="2" fill="#ff7b72"/>
-    <rect x="216.4" y="308.6" width="47.6" height="11.4" rx="2" fill="#58a6ff"/>
-    <rect x="266" y="283.6" width="47.6" height="36.4" rx="2" fill="#ff7b72"/>
-    <rect x="340.4" y="310.0" width="47.6" height="10.0" rx="2" fill="#58a6ff"/>
-    <rect x="390" y="265.4" width="47.6" height="54.6" rx="2" fill="#ff7b72"/>
-    <rect x="464.4" y="303.6" width="47.6" height="16.4" rx="2" fill="#58a6ff"/>
-    <rect x="514" y="307.2" width="47.6" height="12.8" rx="2" fill="#ff7b72"/>
-    <rect x="588.4" y="272.4" width="47.6" height="47.6" rx="2" fill="#58a6ff"/>
-    <rect x="638" y="181.2" width="47.6" height="138.8" rx="2" fill="#ff7b72"/>
+    <rect x="92.4" y="319.4" width="47.6" height="0.6" rx="2" fill="#58a6ff"/>
+    <rect x="142" y="312.0" width="47.6" height="8.0" rx="2" fill="#ff7b72"/>
+    <rect x="216.4" y="311.3" width="47.6" height="8.7" rx="2" fill="#58a6ff"/>
+    <rect x="266" y="275.0" width="47.6" height="45.0" rx="2" fill="#ff7b72"/>
+    <rect x="340.4" y="310.2" width="47.6" height="9.8" rx="2" fill="#58a6ff"/>
+    <rect x="390" y="262.6" width="47.6" height="57.4" rx="2" fill="#ff7b72"/>
+    <rect x="464.4" y="313.9" width="47.6" height="6.1" rx="2" fill="#58a6ff"/>
+    <rect x="514" y="305.4" width="47.6" height="14.6" rx="2" fill="#ff7b72"/>
+    <rect x="588.4" y="271.2" width="47.6" height="48.8" rx="2" fill="#58a6ff"/>
+    <rect x="638" y="161.1" width="47.6" height="158.9" rx="2" fill="#ff7b72"/>
   </g>
   <g>
-    <text x="116.2" y="315.3" text-anchor="middle" font-size="10" fill="#e6edf3">0.560</text>
-    <text x="165.8" y="309.0" text-anchor="middle" font-size="10" fill="#e6edf3">5.42</text>
-    <text x="240.2" y="304.6" text-anchor="middle" font-size="10" fill="#e6edf3">8.78</text>
-    <text x="289.8" y="279.6" text-anchor="middle" font-size="10" fill="#e6edf3">28.0</text>
-    <text x="364.2" y="306.0" text-anchor="middle" font-size="10" fill="#e6edf3">7.69</text>
-    <text x="413.8" y="261.4" text-anchor="middle" font-size="10" fill="#e6edf3">42.0</text>
-    <text x="488.2" y="299.6" text-anchor="middle" font-size="10" fill="#e6edf3">12.6</text>
-    <text x="537.8" y="303.2" text-anchor="middle" font-size="10" fill="#e6edf3">9.85</text>
-    <text x="612.2" y="268.4" text-anchor="middle" font-size="10" fill="#e6edf3">36.6</text>
-    <text x="661.8" y="177.2" text-anchor="middle" font-size="10" fill="#e6edf3">107</text>
+    <text x="116.2" y="315.4" text-anchor="middle" font-size="10" fill="#e6edf3">0.440</text>
+    <text x="165.8" y="308.0" text-anchor="middle" font-size="10" fill="#e6edf3">6.14</text>
+    <text x="240.2" y="307.3" text-anchor="middle" font-size="10" fill="#e6edf3">6.73</text>
+    <text x="289.8" y="271.0" text-anchor="middle" font-size="10" fill="#e6edf3">34.6</text>
+    <text x="364.2" y="306.2" text-anchor="middle" font-size="10" fill="#e6edf3">7.51</text>
+    <text x="413.8" y="258.6" text-anchor="middle" font-size="10" fill="#e6edf3">44.2</text>
+    <text x="488.2" y="309.9" text-anchor="middle" font-size="10" fill="#e6edf3">4.71</text>
+    <text x="537.8" y="301.4" text-anchor="middle" font-size="10" fill="#e6edf3">11.2</text>
+    <text x="612.2" y="267.2" text-anchor="middle" font-size="10" fill="#e6edf3">37.5</text>
+    <text x="661.8" y="157.1" text-anchor="middle" font-size="10" fill="#e6edf3">122</text>
   </g>
   <g>
     <text x="142" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">tiny</text>

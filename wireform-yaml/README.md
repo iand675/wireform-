@@ -258,15 +258,15 @@ cabal bench wireform-yaml:wireform-yaml-bench
   <img src="bench-results/charts/yaml-decode-vs-libyaml-light.svg" alt="wireform-yaml decode vs libyaml across input sizes">
 </picture>
 
-| Operation | wireform-yaml | yaml (libyaml) | ratio |
-| :-------- | ------------: | -------------: | ----: |
-| tiny      |       0.56 µs |        5.42 µs | 9.68x |
-| small     |       8.78 µs |       27.10 µs | 3.19x |
-| flow      |       7.69 µs |        42.0 µs | 5.47x |
-| literal   |       12.6 µs |        9.85 µs | 0.78x |
-| big       |       36.6 µs |         107 µs | 2.92x |
+| Operation | wireform-yaml | yaml (libyaml) |  ratio |
+| :-------- | ------------: | -------------: | -----: |
+| tiny      |       0.44 µs |        6.14 µs | 13.95x |
+| small     |       6.73 µs |        34.6 µs |  5.15x |
+| flow      |       7.51 µs |        44.2 µs |  5.88x |
+| literal   |       4.71 µs |        11.2 µs |  2.38x |
+| big       |       37.5 µs |         122 µs |  3.26x |
 
-<sub>Last run 2026-11-02 13:42:14 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-11-02 14:35:47 UTC. ghc-9.10.3 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:yaml-decode-vs-libyaml -->
 
 <!-- BEGIN_AUTOGEN bench:yaml-decode-vs-hsyaml -->
@@ -277,13 +277,13 @@ cabal bench wireform-yaml:wireform-yaml-bench
 
 | Operation | wireform-yaml |  HsYAML |   ratio |
 | :-------- | ------------: | ------: | ------: |
-| tiny      |       0.56 µs | 86.2 µs | 153.86x |
-| small     |       8.78 µs |  838 µs |  95.42x |
-| flow      |       7.69 µs | 1025 µs | 133.31x |
-| literal   |       12.6 µs |  964 µs |  76.59x |
-| big       |       36.6 µs | 3261 µs |  89.14x |
+| tiny      |       0.44 µs |  119 µs | 270.86x |
+| small     |       6.73 µs | 1068 µs | 158.75x |
+| flow      |       7.51 µs | 1322 µs | 176.03x |
+| literal   |       4.71 µs | 1504 µs | 319.30x |
+| big       |       37.5 µs | 5027 µs | 133.95x |
 
-<sub>Last run 2026-11-02 13:42:14 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-11-02 14:35:47 UTC. ghc-9.10.3 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:yaml-decode-vs-hsyaml -->
 
 ### Escaped strings and derived records
@@ -296,11 +296,11 @@ cabal bench wireform-yaml:wireform-yaml-bench
 
 | Operation      | wireform-yaml | yaml (libyaml) | ratio |
 | :------------- | ------------: | -------------: | ----: |
-| escaped decode |       13.8 µs |        10.9 µs | 0.80x |
-| record decode  |       1.73 µs |        8.84 µs | 5.11x |
-| record encode  |       1.14 µs |        4.04 µs | 3.54x |
+| escaped decode |       7.12 µs |        13.6 µs | 1.91x |
+| record decode  |       1.85 µs |        11.9 µs | 6.43x |
+| record encode  |       1.25 µs |        5.36 µs | 4.29x |
 
-<sub>Last run 2026-11-02 13:42:14 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-11-02 14:35:47 UTC. ghc-9.10.3 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:yaml-extra-vs-libyaml -->
 
 The record fixture uses the actual `deriveYAML` output. Every benchmark fixture

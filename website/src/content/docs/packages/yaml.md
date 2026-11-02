@@ -120,7 +120,7 @@ is 244-408x faster.
   <g class="wf-light">
     <rect x="0" y="0" width="720" height="400" fill="#ffffff"/>
     <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">wireform-yaml decode vs libyaml across input sizes</text>
-    <text x="360" y="44" text-anchor="middle" font-size="11" fill="#656d76">lower is better · µs · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5</text>
+    <text x="360" y="44" text-anchor="middle" font-size="11" fill="#656d76">lower is better · µs · ghc-9.10.3 on darwin-aarch64, criterion 1.6.5</text>
     <g stroke="#d0d7de" stroke-width="1">
       <line x1="80" y1="320" x2="700" y2="320"/>
       <line x1="80" y1="60" x2="80" y2="320"/>
@@ -138,28 +138,28 @@ is 244-408x faster.
       <text x="72" y="64" text-anchor="end" font-size="10" fill="#656d76">200</text>
     </g>
     <g>
-      <rect x="92.4" y="319.3" width="47.6" height="0.7" rx="2" fill="#0969da"/>
-      <rect x="142" y="313.0" width="47.6" height="7.0" rx="2" fill="#cf222e"/>
-      <rect x="216.4" y="308.6" width="47.6" height="11.4" rx="2" fill="#0969da"/>
-      <rect x="266" y="283.6" width="47.6" height="36.4" rx="2" fill="#cf222e"/>
-      <rect x="340.4" y="310.0" width="47.6" height="10.0" rx="2" fill="#0969da"/>
-      <rect x="390" y="265.4" width="47.6" height="54.6" rx="2" fill="#cf222e"/>
-      <rect x="464.4" y="303.6" width="47.6" height="16.4" rx="2" fill="#0969da"/>
-      <rect x="514" y="307.2" width="47.6" height="12.8" rx="2" fill="#cf222e"/>
-      <rect x="588.4" y="272.4" width="47.6" height="47.6" rx="2" fill="#0969da"/>
-      <rect x="638" y="181.2" width="47.6" height="138.8" rx="2" fill="#cf222e"/>
+      <rect x="92.4" y="319.4" width="47.6" height="0.6" rx="2" fill="#0969da"/>
+      <rect x="142" y="312.0" width="47.6" height="8.0" rx="2" fill="#cf222e"/>
+      <rect x="216.4" y="311.3" width="47.6" height="8.7" rx="2" fill="#0969da"/>
+      <rect x="266" y="275.0" width="47.6" height="45.0" rx="2" fill="#cf222e"/>
+      <rect x="340.4" y="310.2" width="47.6" height="9.8" rx="2" fill="#0969da"/>
+      <rect x="390" y="262.6" width="47.6" height="57.4" rx="2" fill="#cf222e"/>
+      <rect x="464.4" y="313.9" width="47.6" height="6.1" rx="2" fill="#0969da"/>
+      <rect x="514" y="305.4" width="47.6" height="14.6" rx="2" fill="#cf222e"/>
+      <rect x="588.4" y="271.2" width="47.6" height="48.8" rx="2" fill="#0969da"/>
+      <rect x="638" y="161.1" width="47.6" height="158.9" rx="2" fill="#cf222e"/>
     </g>
     <g>
-      <text x="116.2" y="315.3" text-anchor="middle" font-size="10" fill="#1f2328">0.560</text>
-      <text x="165.8" y="309.0" text-anchor="middle" font-size="10" fill="#1f2328">5.42</text>
-      <text x="240.2" y="304.6" text-anchor="middle" font-size="10" fill="#1f2328">8.78</text>
-      <text x="289.8" y="279.6" text-anchor="middle" font-size="10" fill="#1f2328">28.0</text>
-      <text x="364.2" y="306.0" text-anchor="middle" font-size="10" fill="#1f2328">7.69</text>
-      <text x="413.8" y="261.4" text-anchor="middle" font-size="10" fill="#1f2328">42.0</text>
-      <text x="488.2" y="299.6" text-anchor="middle" font-size="10" fill="#1f2328">12.6</text>
-      <text x="537.8" y="303.2" text-anchor="middle" font-size="10" fill="#1f2328">9.85</text>
-      <text x="612.2" y="268.4" text-anchor="middle" font-size="10" fill="#1f2328">36.6</text>
-      <text x="661.8" y="177.2" text-anchor="middle" font-size="10" fill="#1f2328">107</text>
+      <text x="116.2" y="315.4" text-anchor="middle" font-size="10" fill="#1f2328">0.440</text>
+      <text x="165.8" y="308.0" text-anchor="middle" font-size="10" fill="#1f2328">6.14</text>
+      <text x="240.2" y="307.3" text-anchor="middle" font-size="10" fill="#1f2328">6.73</text>
+      <text x="289.8" y="271.0" text-anchor="middle" font-size="10" fill="#1f2328">34.6</text>
+      <text x="364.2" y="306.2" text-anchor="middle" font-size="10" fill="#1f2328">7.51</text>
+      <text x="413.8" y="258.6" text-anchor="middle" font-size="10" fill="#1f2328">44.2</text>
+      <text x="488.2" y="309.9" text-anchor="middle" font-size="10" fill="#1f2328">4.71</text>
+      <text x="537.8" y="301.4" text-anchor="middle" font-size="10" fill="#1f2328">11.2</text>
+      <text x="612.2" y="267.2" text-anchor="middle" font-size="10" fill="#1f2328">37.5</text>
+      <text x="661.8" y="157.1" text-anchor="middle" font-size="10" fill="#1f2328">122</text>
     </g>
     <g>
       <text x="142" y="338" text-anchor="middle" font-size="11" fill="#1f2328">tiny</text>
@@ -182,7 +182,7 @@ is 244-408x faster.
   <g class="wf-dark">
     <rect x="0" y="0" width="720" height="400" fill="#0d1117"/>
     <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#e6edf3">wireform-yaml decode vs libyaml across input sizes</text>
-    <text x="360" y="44" text-anchor="middle" font-size="11" fill="#7d8590">lower is better · µs · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5</text>
+    <text x="360" y="44" text-anchor="middle" font-size="11" fill="#7d8590">lower is better · µs · ghc-9.10.3 on darwin-aarch64, criterion 1.6.5</text>
     <g stroke="#30363d" stroke-width="1">
       <line x1="80" y1="320" x2="700" y2="320"/>
       <line x1="80" y1="60" x2="80" y2="320"/>
@@ -200,28 +200,28 @@ is 244-408x faster.
       <text x="72" y="64" text-anchor="end" font-size="10" fill="#7d8590">200</text>
     </g>
     <g>
-      <rect x="92.4" y="319.3" width="47.6" height="0.7" rx="2" fill="#58a6ff"/>
-      <rect x="142" y="313.0" width="47.6" height="7.0" rx="2" fill="#ff7b72"/>
-      <rect x="216.4" y="308.6" width="47.6" height="11.4" rx="2" fill="#58a6ff"/>
-      <rect x="266" y="283.6" width="47.6" height="36.4" rx="2" fill="#ff7b72"/>
-      <rect x="340.4" y="310.0" width="47.6" height="10.0" rx="2" fill="#58a6ff"/>
-      <rect x="390" y="265.4" width="47.6" height="54.6" rx="2" fill="#ff7b72"/>
-      <rect x="464.4" y="303.6" width="47.6" height="16.4" rx="2" fill="#58a6ff"/>
-      <rect x="514" y="307.2" width="47.6" height="12.8" rx="2" fill="#ff7b72"/>
-      <rect x="588.4" y="272.4" width="47.6" height="47.6" rx="2" fill="#58a6ff"/>
-      <rect x="638" y="181.2" width="47.6" height="138.8" rx="2" fill="#ff7b72"/>
+      <rect x="92.4" y="319.4" width="47.6" height="0.6" rx="2" fill="#58a6ff"/>
+      <rect x="142" y="312.0" width="47.6" height="8.0" rx="2" fill="#ff7b72"/>
+      <rect x="216.4" y="311.3" width="47.6" height="8.7" rx="2" fill="#58a6ff"/>
+      <rect x="266" y="275.0" width="47.6" height="45.0" rx="2" fill="#ff7b72"/>
+      <rect x="340.4" y="310.2" width="47.6" height="9.8" rx="2" fill="#58a6ff"/>
+      <rect x="390" y="262.6" width="47.6" height="57.4" rx="2" fill="#ff7b72"/>
+      <rect x="464.4" y="313.9" width="47.6" height="6.1" rx="2" fill="#58a6ff"/>
+      <rect x="514" y="305.4" width="47.6" height="14.6" rx="2" fill="#ff7b72"/>
+      <rect x="588.4" y="271.2" width="47.6" height="48.8" rx="2" fill="#58a6ff"/>
+      <rect x="638" y="161.1" width="47.6" height="158.9" rx="2" fill="#ff7b72"/>
     </g>
     <g>
-      <text x="116.2" y="315.3" text-anchor="middle" font-size="10" fill="#e6edf3">0.560</text>
-      <text x="165.8" y="309.0" text-anchor="middle" font-size="10" fill="#e6edf3">5.42</text>
-      <text x="240.2" y="304.6" text-anchor="middle" font-size="10" fill="#e6edf3">8.78</text>
-      <text x="289.8" y="279.6" text-anchor="middle" font-size="10" fill="#e6edf3">28.0</text>
-      <text x="364.2" y="306.0" text-anchor="middle" font-size="10" fill="#e6edf3">7.69</text>
-      <text x="413.8" y="261.4" text-anchor="middle" font-size="10" fill="#e6edf3">42.0</text>
-      <text x="488.2" y="299.6" text-anchor="middle" font-size="10" fill="#e6edf3">12.6</text>
-      <text x="537.8" y="303.2" text-anchor="middle" font-size="10" fill="#e6edf3">9.85</text>
-      <text x="612.2" y="268.4" text-anchor="middle" font-size="10" fill="#e6edf3">36.6</text>
-      <text x="661.8" y="177.2" text-anchor="middle" font-size="10" fill="#e6edf3">107</text>
+      <text x="116.2" y="315.4" text-anchor="middle" font-size="10" fill="#e6edf3">0.440</text>
+      <text x="165.8" y="308.0" text-anchor="middle" font-size="10" fill="#e6edf3">6.14</text>
+      <text x="240.2" y="307.3" text-anchor="middle" font-size="10" fill="#e6edf3">6.73</text>
+      <text x="289.8" y="271.0" text-anchor="middle" font-size="10" fill="#e6edf3">34.6</text>
+      <text x="364.2" y="306.2" text-anchor="middle" font-size="10" fill="#e6edf3">7.51</text>
+      <text x="413.8" y="258.6" text-anchor="middle" font-size="10" fill="#e6edf3">44.2</text>
+      <text x="488.2" y="309.9" text-anchor="middle" font-size="10" fill="#e6edf3">4.71</text>
+      <text x="537.8" y="301.4" text-anchor="middle" font-size="10" fill="#e6edf3">11.2</text>
+      <text x="612.2" y="267.2" text-anchor="middle" font-size="10" fill="#e6edf3">37.5</text>
+      <text x="661.8" y="157.1" text-anchor="middle" font-size="10" fill="#e6edf3">122</text>
     </g>
     <g>
       <text x="142" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">tiny</text>
@@ -244,15 +244,15 @@ is 244-408x faster.
 </svg>
 
 
-| Operation | wireform-yaml | yaml (libyaml) | ratio |
-| :-------- | ------------: | -------------: | ----: |
-| tiny      |       0.56 µs |        5.42 µs | 9.68x |
-| small     |       8.78 µs |       27.10 µs | 3.19x |
-| flow      |       7.69 µs |        42.0 µs | 5.47x |
-| literal   |       12.6 µs |        9.85 µs | 0.78x |
-| big       |       36.6 µs |         107 µs | 2.92x |
+| Operation | wireform-yaml | yaml (libyaml) |  ratio |
+| :-------- | ------------: | -------------: | -----: |
+| tiny      |       0.44 µs |        6.14 µs | 13.95x |
+| small     |       6.73 µs |        34.6 µs |  5.15x |
+| flow      |       7.51 µs |        44.2 µs |  5.88x |
+| literal   |       4.71 µs |        11.2 µs |  2.38x |
+| big       |       37.5 µs |         122 µs |  3.26x |
 
-<sub>Last run 2026-11-02 13:42:14 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-11-02 14:35:47 UTC. ghc-9.10.3 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:yaml-decode-vs-libyaml -->
 
 ### wireform-yaml vs HsYAML (pure Haskell)
@@ -264,7 +264,7 @@ is 244-408x faster.
   <g class="wf-light">
     <rect x="0" y="0" width="720" height="400" fill="#ffffff"/>
     <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">wireform-yaml decode vs HsYAML (pure Haskell) across input sizes</text>
-    <text x="360" y="44" text-anchor="middle" font-size="11" fill="#656d76">lower is better · µs · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5</text>
+    <text x="360" y="44" text-anchor="middle" font-size="11" fill="#656d76">lower is better · µs · ghc-9.10.3 on darwin-aarch64, criterion 1.6.5</text>
     <g stroke="#d0d7de" stroke-width="1">
       <line x1="80" y1="320" x2="700" y2="320"/>
       <line x1="80" y1="60" x2="80" y2="320"/>
@@ -273,37 +273,37 @@ is 244-408x faster.
       <g/>
       <text x="72" y="324" text-anchor="end" font-size="10" fill="#656d76">0</text>
       <line x1="80" y1="255" x2="700" y2="255" stroke="#d0d7de" stroke-width="1" stroke-dasharray="2 3"/>
-      <text x="72" y="259" text-anchor="end" font-size="10" fill="#656d76">1250</text>
+      <text x="72" y="259" text-anchor="end" font-size="10" fill="#656d76">2500</text>
       <line x1="80" y1="190" x2="700" y2="190" stroke="#d0d7de" stroke-width="1" stroke-dasharray="2 3"/>
-      <text x="72" y="194" text-anchor="end" font-size="10" fill="#656d76">2500</text>
+      <text x="72" y="194" text-anchor="end" font-size="10" fill="#656d76">5000</text>
       <line x1="80" y1="125" x2="700" y2="125" stroke="#d0d7de" stroke-width="1" stroke-dasharray="2 3"/>
-      <text x="72" y="129" text-anchor="end" font-size="10" fill="#656d76">3750</text>
+      <text x="72" y="129" text-anchor="end" font-size="10" fill="#656d76">7500</text>
       <line x1="80" y1="60" x2="700" y2="60" stroke="#d0d7de" stroke-width="1" stroke-dasharray="2 3"/>
-      <text x="72" y="64" text-anchor="end" font-size="10" fill="#656d76">5000</text>
+      <text x="72" y="64" text-anchor="end" font-size="10" fill="#656d76">10000</text>
     </g>
     <g>
       <rect x="92.4" y="320.0" width="47.6" height="0.0" rx="2" fill="#0969da"/>
-      <rect x="142" y="315.5" width="47.6" height="4.5" rx="2" fill="#cf222e"/>
-      <rect x="216.4" y="319.5" width="47.6" height="0.5" rx="2" fill="#0969da"/>
-      <rect x="266" y="276.4" width="47.6" height="43.6" rx="2" fill="#cf222e"/>
-      <rect x="340.4" y="319.6" width="47.6" height="0.4" rx="2" fill="#0969da"/>
-      <rect x="390" y="266.7" width="47.6" height="53.3" rx="2" fill="#cf222e"/>
-      <rect x="464.4" y="319.3" width="47.6" height="0.7" rx="2" fill="#0969da"/>
-      <rect x="514" y="269.9" width="47.6" height="50.1" rx="2" fill="#cf222e"/>
-      <rect x="588.4" y="318.1" width="47.6" height="1.9" rx="2" fill="#0969da"/>
-      <rect x="638" y="150.4" width="47.6" height="169.6" rx="2" fill="#cf222e"/>
+      <rect x="142" y="316.9" width="47.6" height="3.1" rx="2" fill="#cf222e"/>
+      <rect x="216.4" y="319.8" width="47.6" height="0.2" rx="2" fill="#0969da"/>
+      <rect x="266" y="292.2" width="47.6" height="27.8" rx="2" fill="#cf222e"/>
+      <rect x="340.4" y="319.8" width="47.6" height="0.2" rx="2" fill="#0969da"/>
+      <rect x="390" y="285.6" width="47.6" height="34.4" rx="2" fill="#cf222e"/>
+      <rect x="464.4" y="319.9" width="47.6" height="0.1" rx="2" fill="#0969da"/>
+      <rect x="514" y="280.9" width="47.6" height="39.1" rx="2" fill="#cf222e"/>
+      <rect x="588.4" y="319.0" width="47.6" height="1.0" rx="2" fill="#0969da"/>
+      <rect x="638" y="189.3" width="47.6" height="130.7" rx="2" fill="#cf222e"/>
     </g>
     <g>
-      <text x="116.2" y="316.0" text-anchor="middle" font-size="10" fill="#1f2328">0.560</text>
-      <text x="165.8" y="311.5" text-anchor="middle" font-size="10" fill="#1f2328">86.2</text>
-      <text x="240.2" y="315.5" text-anchor="middle" font-size="10" fill="#1f2328">8.78</text>
-      <text x="289.8" y="272.4" text-anchor="middle" font-size="10" fill="#1f2328">838</text>
-      <text x="364.2" y="315.6" text-anchor="middle" font-size="10" fill="#1f2328">7.69</text>
-      <text x="413.8" y="262.7" text-anchor="middle" font-size="10" fill="#1f2328">1025</text>
-      <text x="488.2" y="315.3" text-anchor="middle" font-size="10" fill="#1f2328">12.6</text>
-      <text x="537.8" y="265.9" text-anchor="middle" font-size="10" fill="#1f2328">964</text>
-      <text x="612.2" y="314.1" text-anchor="middle" font-size="10" fill="#1f2328">36.6</text>
-      <text x="661.8" y="146.4" text-anchor="middle" font-size="10" fill="#1f2328">3261</text>
+      <text x="116.2" y="316.0" text-anchor="middle" font-size="10" fill="#1f2328">0.440</text>
+      <text x="165.8" y="312.9" text-anchor="middle" font-size="10" fill="#1f2328">119</text>
+      <text x="240.2" y="315.8" text-anchor="middle" font-size="10" fill="#1f2328">6.73</text>
+      <text x="289.8" y="288.2" text-anchor="middle" font-size="10" fill="#1f2328">1068</text>
+      <text x="364.2" y="315.8" text-anchor="middle" font-size="10" fill="#1f2328">7.51</text>
+      <text x="413.8" y="281.6" text-anchor="middle" font-size="10" fill="#1f2328">1322</text>
+      <text x="488.2" y="315.9" text-anchor="middle" font-size="10" fill="#1f2328">4.71</text>
+      <text x="537.8" y="276.9" text-anchor="middle" font-size="10" fill="#1f2328">1504</text>
+      <text x="612.2" y="315.0" text-anchor="middle" font-size="10" fill="#1f2328">37.5</text>
+      <text x="661.8" y="185.3" text-anchor="middle" font-size="10" fill="#1f2328">5027</text>
     </g>
     <g>
       <text x="142" y="338" text-anchor="middle" font-size="11" fill="#1f2328">tiny</text>
@@ -326,7 +326,7 @@ is 244-408x faster.
   <g class="wf-dark">
     <rect x="0" y="0" width="720" height="400" fill="#0d1117"/>
     <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#e6edf3">wireform-yaml decode vs HsYAML (pure Haskell) across input sizes</text>
-    <text x="360" y="44" text-anchor="middle" font-size="11" fill="#7d8590">lower is better · µs · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5</text>
+    <text x="360" y="44" text-anchor="middle" font-size="11" fill="#7d8590">lower is better · µs · ghc-9.10.3 on darwin-aarch64, criterion 1.6.5</text>
     <g stroke="#30363d" stroke-width="1">
       <line x1="80" y1="320" x2="700" y2="320"/>
       <line x1="80" y1="60" x2="80" y2="320"/>
@@ -335,37 +335,37 @@ is 244-408x faster.
       <g/>
       <text x="72" y="324" text-anchor="end" font-size="10" fill="#7d8590">0</text>
       <line x1="80" y1="255" x2="700" y2="255" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
-      <text x="72" y="259" text-anchor="end" font-size="10" fill="#7d8590">1250</text>
+      <text x="72" y="259" text-anchor="end" font-size="10" fill="#7d8590">2500</text>
       <line x1="80" y1="190" x2="700" y2="190" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
-      <text x="72" y="194" text-anchor="end" font-size="10" fill="#7d8590">2500</text>
+      <text x="72" y="194" text-anchor="end" font-size="10" fill="#7d8590">5000</text>
       <line x1="80" y1="125" x2="700" y2="125" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
-      <text x="72" y="129" text-anchor="end" font-size="10" fill="#7d8590">3750</text>
+      <text x="72" y="129" text-anchor="end" font-size="10" fill="#7d8590">7500</text>
       <line x1="80" y1="60" x2="700" y2="60" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
-      <text x="72" y="64" text-anchor="end" font-size="10" fill="#7d8590">5000</text>
+      <text x="72" y="64" text-anchor="end" font-size="10" fill="#7d8590">10000</text>
     </g>
     <g>
       <rect x="92.4" y="320.0" width="47.6" height="0.0" rx="2" fill="#58a6ff"/>
-      <rect x="142" y="315.5" width="47.6" height="4.5" rx="2" fill="#ff7b72"/>
-      <rect x="216.4" y="319.5" width="47.6" height="0.5" rx="2" fill="#58a6ff"/>
-      <rect x="266" y="276.4" width="47.6" height="43.6" rx="2" fill="#ff7b72"/>
-      <rect x="340.4" y="319.6" width="47.6" height="0.4" rx="2" fill="#58a6ff"/>
-      <rect x="390" y="266.7" width="47.6" height="53.3" rx="2" fill="#ff7b72"/>
-      <rect x="464.4" y="319.3" width="47.6" height="0.7" rx="2" fill="#58a6ff"/>
-      <rect x="514" y="269.9" width="47.6" height="50.1" rx="2" fill="#ff7b72"/>
-      <rect x="588.4" y="318.1" width="47.6" height="1.9" rx="2" fill="#58a6ff"/>
-      <rect x="638" y="150.4" width="47.6" height="169.6" rx="2" fill="#ff7b72"/>
+      <rect x="142" y="316.9" width="47.6" height="3.1" rx="2" fill="#ff7b72"/>
+      <rect x="216.4" y="319.8" width="47.6" height="0.2" rx="2" fill="#58a6ff"/>
+      <rect x="266" y="292.2" width="47.6" height="27.8" rx="2" fill="#ff7b72"/>
+      <rect x="340.4" y="319.8" width="47.6" height="0.2" rx="2" fill="#58a6ff"/>
+      <rect x="390" y="285.6" width="47.6" height="34.4" rx="2" fill="#ff7b72"/>
+      <rect x="464.4" y="319.9" width="47.6" height="0.1" rx="2" fill="#58a6ff"/>
+      <rect x="514" y="280.9" width="47.6" height="39.1" rx="2" fill="#ff7b72"/>
+      <rect x="588.4" y="319.0" width="47.6" height="1.0" rx="2" fill="#58a6ff"/>
+      <rect x="638" y="189.3" width="47.6" height="130.7" rx="2" fill="#ff7b72"/>
     </g>
     <g>
-      <text x="116.2" y="316.0" text-anchor="middle" font-size="10" fill="#e6edf3">0.560</text>
-      <text x="165.8" y="311.5" text-anchor="middle" font-size="10" fill="#e6edf3">86.2</text>
-      <text x="240.2" y="315.5" text-anchor="middle" font-size="10" fill="#e6edf3">8.78</text>
-      <text x="289.8" y="272.4" text-anchor="middle" font-size="10" fill="#e6edf3">838</text>
-      <text x="364.2" y="315.6" text-anchor="middle" font-size="10" fill="#e6edf3">7.69</text>
-      <text x="413.8" y="262.7" text-anchor="middle" font-size="10" fill="#e6edf3">1025</text>
-      <text x="488.2" y="315.3" text-anchor="middle" font-size="10" fill="#e6edf3">12.6</text>
-      <text x="537.8" y="265.9" text-anchor="middle" font-size="10" fill="#e6edf3">964</text>
-      <text x="612.2" y="314.1" text-anchor="middle" font-size="10" fill="#e6edf3">36.6</text>
-      <text x="661.8" y="146.4" text-anchor="middle" font-size="10" fill="#e6edf3">3261</text>
+      <text x="116.2" y="316.0" text-anchor="middle" font-size="10" fill="#e6edf3">0.440</text>
+      <text x="165.8" y="312.9" text-anchor="middle" font-size="10" fill="#e6edf3">119</text>
+      <text x="240.2" y="315.8" text-anchor="middle" font-size="10" fill="#e6edf3">6.73</text>
+      <text x="289.8" y="288.2" text-anchor="middle" font-size="10" fill="#e6edf3">1068</text>
+      <text x="364.2" y="315.8" text-anchor="middle" font-size="10" fill="#e6edf3">7.51</text>
+      <text x="413.8" y="281.6" text-anchor="middle" font-size="10" fill="#e6edf3">1322</text>
+      <text x="488.2" y="315.9" text-anchor="middle" font-size="10" fill="#e6edf3">4.71</text>
+      <text x="537.8" y="276.9" text-anchor="middle" font-size="10" fill="#e6edf3">1504</text>
+      <text x="612.2" y="315.0" text-anchor="middle" font-size="10" fill="#e6edf3">37.5</text>
+      <text x="661.8" y="185.3" text-anchor="middle" font-size="10" fill="#e6edf3">5027</text>
     </g>
     <g>
       <text x="142" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">tiny</text>
@@ -390,13 +390,13 @@ is 244-408x faster.
 
 | Operation | wireform-yaml |  HsYAML |   ratio |
 | :-------- | ------------: | ------: | ------: |
-| tiny      |       0.56 µs | 86.2 µs | 153.86x |
-| small     |       8.78 µs |  838 µs |  95.42x |
-| flow      |       7.69 µs | 1025 µs | 133.31x |
-| literal   |       12.6 µs |  964 µs |  76.59x |
-| big       |       36.6 µs | 3261 µs |  89.14x |
+| tiny      |       0.44 µs |  119 µs | 270.86x |
+| small     |       6.73 µs | 1068 µs | 158.75x |
+| flow      |       7.51 µs | 1322 µs | 176.03x |
+| literal   |       4.71 µs | 1504 µs | 319.30x |
+| big       |       37.5 µs | 5027 µs | 133.95x |
 
-<sub>Last run 2026-11-02 13:42:14 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-11-02 14:35:47 UTC. ghc-9.10.3 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:yaml-decode-vs-hsyaml -->
 
 ### Escaped strings and derived records
@@ -408,7 +408,7 @@ is 244-408x faster.
   <g class="wf-light">
     <rect x="0" y="0" width="720" height="400" fill="#ffffff"/>
     <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">Escaped strings and derived records vs libyaml</text>
-    <text x="360" y="44" text-anchor="middle" font-size="11" fill="#656d76">lower is better · µs · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5</text>
+    <text x="360" y="44" text-anchor="middle" font-size="11" fill="#656d76">lower is better · µs · ghc-9.10.3 on darwin-aarch64, criterion 1.6.5</text>
     <g stroke="#d0d7de" stroke-width="1">
       <line x1="80" y1="320" x2="700" y2="320"/>
       <line x1="80" y1="60" x2="80" y2="320"/>
@@ -426,20 +426,20 @@ is 244-408x faster.
       <text x="72" y="64" text-anchor="end" font-size="10" fill="#656d76">20.0</text>
     </g>
     <g>
-      <rect x="119.3" y="141.2" width="62" height="178.8" rx="2" fill="#0969da"/>
-      <rect x="183.3" y="177.6" width="62" height="142.4" rx="2" fill="#cf222e"/>
-      <rect x="326.0" y="297.5" width="62" height="22.5" rx="2" fill="#0969da"/>
-      <rect x="390.0" y="205.1" width="62" height="114.9" rx="2" fill="#cf222e"/>
-      <rect x="532.7" y="305.2" width="62" height="14.8" rx="2" fill="#0969da"/>
-      <rect x="596.7" y="267.5" width="62" height="52.5" rx="2" fill="#cf222e"/>
+      <rect x="119.3" y="227.4" width="62" height="92.6" rx="2" fill="#0969da"/>
+      <rect x="183.3" y="143.2" width="62" height="176.8" rx="2" fill="#cf222e"/>
+      <rect x="326.0" y="296.0" width="62" height="24.0" rx="2" fill="#0969da"/>
+      <rect x="390.0" y="165.3" width="62" height="154.7" rx="2" fill="#cf222e"/>
+      <rect x="532.7" y="303.8" width="62" height="16.2" rx="2" fill="#0969da"/>
+      <rect x="596.7" y="250.3" width="62" height="69.7" rx="2" fill="#cf222e"/>
     </g>
     <g>
-      <text x="150.3" y="137.2" text-anchor="middle" font-size="10" fill="#1f2328">13.8</text>
-      <text x="214.3" y="173.6" text-anchor="middle" font-size="10" fill="#1f2328">11.0</text>
-      <text x="357.0" y="293.5" text-anchor="middle" font-size="10" fill="#1f2328">1.73</text>
-      <text x="421.0" y="201.1" text-anchor="middle" font-size="10" fill="#1f2328">8.84</text>
-      <text x="563.7" y="301.2" text-anchor="middle" font-size="10" fill="#1f2328">1.14</text>
-      <text x="627.7" y="263.5" text-anchor="middle" font-size="10" fill="#1f2328">4.04</text>
+      <text x="150.3" y="223.4" text-anchor="middle" font-size="10" fill="#1f2328">7.12</text>
+      <text x="214.3" y="139.2" text-anchor="middle" font-size="10" fill="#1f2328">13.6</text>
+      <text x="357.0" y="292.0" text-anchor="middle" font-size="10" fill="#1f2328">1.85</text>
+      <text x="421.0" y="161.3" text-anchor="middle" font-size="10" fill="#1f2328">11.9</text>
+      <text x="563.7" y="299.8" text-anchor="middle" font-size="10" fill="#1f2328">1.25</text>
+      <text x="627.7" y="246.3" text-anchor="middle" font-size="10" fill="#1f2328">5.36</text>
     </g>
     <g>
       <text x="183.3" y="338" text-anchor="middle" font-size="11" fill="#1f2328">escaped decode</text>
@@ -460,7 +460,7 @@ is 244-408x faster.
   <g class="wf-dark">
     <rect x="0" y="0" width="720" height="400" fill="#0d1117"/>
     <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#e6edf3">Escaped strings and derived records vs libyaml</text>
-    <text x="360" y="44" text-anchor="middle" font-size="11" fill="#7d8590">lower is better · µs · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5</text>
+    <text x="360" y="44" text-anchor="middle" font-size="11" fill="#7d8590">lower is better · µs · ghc-9.10.3 on darwin-aarch64, criterion 1.6.5</text>
     <g stroke="#30363d" stroke-width="1">
       <line x1="80" y1="320" x2="700" y2="320"/>
       <line x1="80" y1="60" x2="80" y2="320"/>
@@ -478,20 +478,20 @@ is 244-408x faster.
       <text x="72" y="64" text-anchor="end" font-size="10" fill="#7d8590">20.0</text>
     </g>
     <g>
-      <rect x="119.3" y="141.2" width="62" height="178.8" rx="2" fill="#58a6ff"/>
-      <rect x="183.3" y="177.6" width="62" height="142.4" rx="2" fill="#ff7b72"/>
-      <rect x="326.0" y="297.5" width="62" height="22.5" rx="2" fill="#58a6ff"/>
-      <rect x="390.0" y="205.1" width="62" height="114.9" rx="2" fill="#ff7b72"/>
-      <rect x="532.7" y="305.2" width="62" height="14.8" rx="2" fill="#58a6ff"/>
-      <rect x="596.7" y="267.5" width="62" height="52.5" rx="2" fill="#ff7b72"/>
+      <rect x="119.3" y="227.4" width="62" height="92.6" rx="2" fill="#58a6ff"/>
+      <rect x="183.3" y="143.2" width="62" height="176.8" rx="2" fill="#ff7b72"/>
+      <rect x="326.0" y="296.0" width="62" height="24.0" rx="2" fill="#58a6ff"/>
+      <rect x="390.0" y="165.3" width="62" height="154.7" rx="2" fill="#ff7b72"/>
+      <rect x="532.7" y="303.8" width="62" height="16.2" rx="2" fill="#58a6ff"/>
+      <rect x="596.7" y="250.3" width="62" height="69.7" rx="2" fill="#ff7b72"/>
     </g>
     <g>
-      <text x="150.3" y="137.2" text-anchor="middle" font-size="10" fill="#e6edf3">13.8</text>
-      <text x="214.3" y="173.6" text-anchor="middle" font-size="10" fill="#e6edf3">11.0</text>
-      <text x="357.0" y="293.5" text-anchor="middle" font-size="10" fill="#e6edf3">1.73</text>
-      <text x="421.0" y="201.1" text-anchor="middle" font-size="10" fill="#e6edf3">8.84</text>
-      <text x="563.7" y="301.2" text-anchor="middle" font-size="10" fill="#e6edf3">1.14</text>
-      <text x="627.7" y="263.5" text-anchor="middle" font-size="10" fill="#e6edf3">4.04</text>
+      <text x="150.3" y="223.4" text-anchor="middle" font-size="10" fill="#e6edf3">7.12</text>
+      <text x="214.3" y="139.2" text-anchor="middle" font-size="10" fill="#e6edf3">13.6</text>
+      <text x="357.0" y="292.0" text-anchor="middle" font-size="10" fill="#e6edf3">1.85</text>
+      <text x="421.0" y="161.3" text-anchor="middle" font-size="10" fill="#e6edf3">11.9</text>
+      <text x="563.7" y="299.8" text-anchor="middle" font-size="10" fill="#e6edf3">1.25</text>
+      <text x="627.7" y="246.3" text-anchor="middle" font-size="10" fill="#e6edf3">5.36</text>
     </g>
     <g>
       <text x="183.3" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">escaped decode</text>
@@ -514,11 +514,11 @@ is 244-408x faster.
 
 | Operation      | wireform-yaml | yaml (libyaml) | ratio |
 | :------------- | ------------: | -------------: | ----: |
-| escaped decode |       13.8 µs |        10.9 µs | 0.80x |
-| record decode  |       1.73 µs |        8.84 µs | 5.11x |
-| record encode  |       1.14 µs |        4.04 µs | 3.54x |
+| escaped decode |       7.12 µs |        13.6 µs | 1.91x |
+| record decode  |       1.85 µs |        11.9 µs | 6.43x |
+| record encode  |       1.25 µs |        5.36 µs | 4.29x |
 
-<sub>Last run 2026-11-02 13:42:14 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-11-02 14:35:47 UTC. ghc-9.10.3 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:yaml-extra-vs-libyaml -->
 
 The record fixture uses the actual `deriveYAML` output. Every benchmark fixture

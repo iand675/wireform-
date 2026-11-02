@@ -14,25 +14,25 @@
     {
       "name": "wireform-yaml",
       "values": [
-        0.74,
-        11.93,
-        9.84,
-        4.69,
-        43.37
+        0.44,
+        6.73,
+        7.51,
+        4.71,
+        37.53
       ]
     },
     {
       "name": "yaml (libyaml)",
       "values": [
-        8.19,
-        44.34,
-        68.23,
-        15.82,
-        150.25
+        6.14,
+        34.63,
+        44.17,
+        11.23,
+        122.21
       ]
     }
   ],
   "baseline": "wireform-yaml",
-  "capturedAt": "2026-11-02T14:18:47Z",
-  "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
+  "capturedAt": "2026-11-02T14:35:47Z",
+  "toolchain": "ghc-9.10.3 on darwin-aarch64, criterion 1.6.5"
 }

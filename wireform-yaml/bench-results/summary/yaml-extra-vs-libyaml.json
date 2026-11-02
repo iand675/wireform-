@@ -12,21 +12,21 @@
     {
       "name": "wireform-yaml",
       "values": [
-        7.39,
-        2.51,
-        1.58
+        7.12,
+        1.85,
+        1.25
       ]
     },
     {
       "name": "yaml (libyaml)",
       "values": [
-        13.58,
-        13.76,
-        5.56
+        13.6,
+        11.9,
+        5.36
       ]
     }
   ],
   "baseline": "wireform-yaml",
-  "capturedAt": "2026-11-02T14:18:48Z",
-  "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
+  "capturedAt": "2026-11-02T14:35:47Z",
+  "toolchain": "ghc-9.10.3 on darwin-aarch64, criterion 1.6.5"
 }

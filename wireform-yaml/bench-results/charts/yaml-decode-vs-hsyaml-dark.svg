@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 400" width="720" height="400" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif" font-size="12">
   <rect x="0" y="0" width="720" height="400" fill="#0d1117"/>
   <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#e6edf3">wireform-yaml decode vs HsYAML (pure Haskell) across input sizes</text>
-  <text x="360" y="44" text-anchor="middle" font-size="11" fill="#7d8590">lower is better · µs · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5</text>
+  <text x="360" y="44" text-anchor="middle" font-size="11" fill="#7d8590">lower is better · µs · ghc-9.10.3 on darwin-aarch64, criterion 1.6.5</text>
   <g stroke="#30363d" stroke-width="1">
     <line x1="80" y1="320" x2="700" y2="320"/>
     <line x1="80" y1="60" x2="80" y2="320"/>
@@ -10,37 +10,37 @@
     <g/>
     <text x="72" y="324" text-anchor="end" font-size="10" fill="#7d8590">0</text>
     <line x1="80" y1="255" x2="700" y2="255" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
-    <text x="72" y="259" text-anchor="end" font-size="10" fill="#7d8590">1250</text>
+    <text x="72" y="259" text-anchor="end" font-size="10" fill="#7d8590">2500</text>
     <line x1="80" y1="190" x2="700" y2="190" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
-    <text x="72" y="194" text-anchor="end" font-size="10" fill="#7d8590">2500</text>
+    <text x="72" y="194" text-anchor="end" font-size="10" fill="#7d8590">5000</text>
     <line x1="80" y1="125" x2="700" y2="125" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
-    <text x="72" y="129" text-anchor="end" font-size="10" fill="#7d8590">3750</text>
+    <text x="72" y="129" text-anchor="end" font-size="10" fill="#7d8590">7500</text>
     <line x1="80" y1="60" x2="700" y2="60" stroke="#30363d" stroke-width="1" stroke-dasharray="2 3"/>
-    <text x="72" y="64" text-anchor="end" font-size="10" fill="#7d8590">5000</text>
+    <text x="72" y="64" text-anchor="end" font-size="10" fill="#7d8590">10000</text>
   </g>
   <g>
     <rect x="92.4" y="320.0" width="47.6" height="0.0" rx="2" fill="#58a6ff"/>
-    <rect x="142" y="315.5" width="47.6" height="4.5" rx="2" fill="#ff7b72"/>
-    <rect x="216.4" y="319.5" width="47.6" height="0.5" rx="2" fill="#58a6ff"/>
-    <rect x="266" y="276.4" width="47.6" height="43.6" rx="2" fill="#ff7b72"/>
-    <rect x="340.4" y="319.6" width="47.6" height="0.4" rx="2" fill="#58a6ff"/>
-    <rect x="390" y="266.7" width="47.6" height="53.3" rx="2" fill="#ff7b72"/>
-    <rect x="464.4" y="319.3" width="47.6" height="0.7" rx="2" fill="#58a6ff"/>
-    <rect x="514" y="269.9" width="47.6" height="50.1" rx="2" fill="#ff7b72"/>
-    <rect x="588.4" y="318.1" width="47.6" height="1.9" rx="2" fill="#58a6ff"/>
-    <rect x="638" y="150.4" width="47.6" height="169.6" rx="2" fill="#ff7b72"/>
+    <rect x="142" y="316.9" width="47.6" height="3.1" rx="2" fill="#ff7b72"/>
+    <rect x="216.4" y="319.8" width="47.6" height="0.2" rx="2" fill="#58a6ff"/>
+    <rect x="266" y="292.2" width="47.6" height="27.8" rx="2" fill="#ff7b72"/>
+    <rect x="340.4" y="319.8" width="47.6" height="0.2" rx="2" fill="#58a6ff"/>
+    <rect x="390" y="285.6" width="47.6" height="34.4" rx="2" fill="#ff7b72"/>
+    <rect x="464.4" y="319.9" width="47.6" height="0.1" rx="2" fill="#58a6ff"/>
+    <rect x="514" y="280.9" width="47.6" height="39.1" rx="2" fill="#ff7b72"/>
+    <rect x="588.4" y="319.0" width="47.6" height="1.0" rx="2" fill="#58a6ff"/>
+    <rect x="638" y="189.3" width="47.6" height="130.7" rx="2" fill="#ff7b72"/>
   </g>
   <g>
-    <text x="116.2" y="316.0" text-anchor="middle" font-size="10" fill="#e6edf3">0.560</text>
-    <text x="165.8" y="311.5" text-anchor="middle" font-size="10" fill="#e6edf3">86.2</text>
-    <text x="240.2" y="315.5" text-anchor="middle" font-size="10" fill="#e6edf3">8.78</text>
-    <text x="289.8" y="272.4" text-anchor="middle" font-size="10" fill="#e6edf3">838</text>
-    <text x="364.2" y="315.6" text-anchor="middle" font-size="10" fill="#e6edf3">7.69</text>
-    <text x="413.8" y="262.7" text-anchor="middle" font-size="10" fill="#e6edf3">1025</text>
-    <text x="488.2" y="315.3" text-anchor="middle" font-size="10" fill="#e6edf3">12.6</text>
-    <text x="537.8" y="265.9" text-anchor="middle" font-size="10" fill="#e6edf3">964</text>
-    <text x="612.2" y="314.1" text-anchor="middle" font-size="10" fill="#e6edf3">36.6</text>
-    <text x="661.8" y="146.4" text-anchor="middle" font-size="10" fill="#e6edf3">3261</text>
+    <text x="116.2" y="316.0" text-anchor="middle" font-size="10" fill="#e6edf3">0.440</text>
+    <text x="165.8" y="312.9" text-anchor="middle" font-size="10" fill="#e6edf3">119</text>
+    <text x="240.2" y="315.8" text-anchor="middle" font-size="10" fill="#e6edf3">6.73</text>
+    <text x="289.8" y="288.2" text-anchor="middle" font-size="10" fill="#e6edf3">1068</text>
+    <text x="364.2" y="315.8" text-anchor="middle" font-size="10" fill="#e6edf3">7.51</text>
+    <text x="413.8" y="281.6" text-anchor="middle" font-size="10" fill="#e6edf3">1322</text>
+    <text x="488.2" y="315.9" text-anchor="middle" font-size="10" fill="#e6edf3">4.71</text>
+    <text x="537.8" y="276.9" text-anchor="middle" font-size="10" fill="#e6edf3">1504</text>
+    <text x="612.2" y="315.0" text-anchor="middle" font-size="10" fill="#e6edf3">37.5</text>
+    <text x="661.8" y="185.3" text-anchor="middle" font-size="10" fill="#e6edf3">5027</text>
   </g>
   <g>
     <text x="142" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">tiny</text>
