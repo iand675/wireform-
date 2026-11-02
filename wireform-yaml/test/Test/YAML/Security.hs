@@ -14,8 +14,13 @@ module Test.YAML.Security (tests) where
 
 import Data.Either (isLeft)
 import Data.List (isInfixOf)
+import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Lazy qualified as TL
+import Data.Text.Lazy.Builder qualified as TB
+import Data.Text.Lazy.Builder.Int qualified as BI
 import Test.Syd
+import YAML.Decode qualified as D
 import YAML.Decode qualified as Y
 import YAML.Value qualified as YV
 
@@ -30,6 +35,7 @@ tests =
       , flowCycleResolution
       , normalAliasesAllowed
       , normalNestingAllowed
+      , limitTests
       ]
 
 
@@ -160,3 +166,31 @@ normalNestingAllowed = it "moderate nesting is allowed" $ do
             <> ": "
             <> e
         )
+
+
+limitTests :: Spec
+limitTests = describe "limits" $ do
+  it "bounds both flow and mixed block/flow nesting" $ do
+    let nested = T.replicate 2000 "[" <> "0" <> T.replicate 2000 "]"
+    D.decode nested `shouldSatisfy` isLeft
+    D.decode ("items: " <> nested) `shouldSatisfy` isLeft
+    let block = T.unlines ((\i -> T.replicate (2 * i) " " <> "a:") <$> [0 .. 899])
+    D.decode (block <> T.replicate 1800 " " <> T.replicate 200 "[" <> "0" <> T.replicate 200 "]") `shouldSatisfy` isLeft
+    D.decode (T.replicate 200 "[" <> "0" <> T.replicate 200 "]") `shouldSatisfy` either (const False) (const True)
+  it "rejects alias amplification after legal name rebinding" $ do
+    let layer i =
+          let (old, new) = if odd i then ("a", "b") else ("b", "a")
+          in "&" <> new <> " [" <> T.intercalate ", " (replicate 9 ("*" <> old) <> ["&" <> old <> " 0"]) <> "]"
+        source = "[" <> T.intercalate ", " ("&a [0]" : (layer <$> [1 .. 10 :: Int])) <> "]"
+    D.decode source `shouldSatisfy` isLeft
+  it "bounds total document expansion as well as individual anchors" $ do
+    let layer (i, prior) = "&a" <> numberText i <> " [" <> T.intercalate "," (replicate 9 ("*a" <> numberText prior)) <> "]"
+        anchors = "&a0 [0]" : (layer <$> zip [1 .. 6 :: Int] [0 .. 5])
+        source = "[" <> T.intercalate "," (anchors <> replicate 100 "*a6") <> "]"
+    D.decode source `shouldSatisfy` isLeft
+  it "rejects indentation that cannot fit the parser state instead of wrapping it" $
+    D.decode ("outer:\n" <> T.replicate 1048575 " " <> "key: value\n") `shouldSatisfy` isLeft
+
+
+numberText :: Int -> Text
+numberText = TL.toStrict . TB.toLazyText . BI.decimal

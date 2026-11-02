@@ -12,7 +12,9 @@ import Hedgehog.Range qualified as Range
 import Test.Syd
 import Test.Syd.Hedgehog ()
 import YAML.Decode (decode)
+import YAML.Decode qualified as D
 import YAML.Encode (encode)
+import YAML.Encode qualified as E
 import YAML.Pretty qualified as P
 import YAML.Value
 
@@ -25,6 +27,7 @@ tests =
         [ it "scalar roundtrip" prop_scalarRoundtrip
         , it "value roundtrip" prop_valueRoundtrip
         , it "pretty value roundtrip across layout options" prop_prettyRoundtrip
+        , modifyMaxSuccess (const 100) largeIntegerTests
         ]
 
 
@@ -73,3 +76,10 @@ prop_prettyRoundtrip = property $ do
   value <- forAll (genValue 3)
   opts <- forAll (Gen.element [P.defaultOptions, P.compactOptions, P.defaultOptions {P.roIndent = 4}, P.defaultOptions {P.roCompactSeqOfMap = False}, P.defaultOptions {P.roStringStyleHint = P.HintAlwaysSingle}, P.defaultOptions {P.roStringStyleHint = P.HintAlwaysDouble}])
   tripping value (P.render opts) decode
+
+
+largeIntegerTests :: Spec
+largeIntegerTests = do
+  it "round-trips large integers across signs" $ property $ do
+    n <- forAll (Gen.integral (Range.linear (negate (2 ^ (256 :: Int))) (2 ^ (256 :: Int))))
+    tripping (YInt n) E.encode D.decode

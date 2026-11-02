@@ -91,17 +91,18 @@ test-suite wireform-yaml-test
   main-is: Main.hs
   other-modules:
     Test.YAML.Annotated
-    Test.YAML.Decode
-    Test.YAML.Encode
-    Test.YAML.Regression
-    Test.YAML.Roundtrip
-    Test.YAML.SecondPass
-    Test.YAML.ThirdPass
-    Test.YAML.Security
+    Test.YAML.Class
     Test.YAML.Conformance
+    Test.YAML.Decode
     Test.YAML.Derive
-    Test.YAML.Derive.Types
     Test.YAML.Derive.Instances
+    Test.YAML.Derive.Types
+    Test.YAML.Encode
+    Test.YAML.Helpers
+    Test.YAML.JSON
+    Test.YAML.Pretty
+    Test.YAML.Roundtrip
+    Test.YAML.Security
   default-extensions:
     ScopedTypeVariables
     TemplateHaskell
