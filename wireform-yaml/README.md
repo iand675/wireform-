@@ -15,7 +15,8 @@ pretty-print back to YAML, bridge to JSON, and pass the official
 point the test harness at a clone of it.
 
 YAML 1.2 covers block-style and flow-style scalars, sequences, and
-mappings; anchors and aliases (with merge-key semantics); explicit
+mappings; anchors and aliases (with merge-key semantics and a document-wide
+expansion budget); explicit
 tags; the four scalar styles (plain, single-quoted, double-quoted,
 literal-folded); multi-document streams; and the JSON-compatible flow
 subset. wireform-yaml implements the spec close enough to read and
@@ -47,6 +48,9 @@ but measurably improves runtime performance.
 
 ```haskell
 {-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE DerivingStrategies #-}
 
 import GHC.Generics (Generic)
@@ -84,8 +88,8 @@ image: ghcr.io/example/api:1.4.2
 | Module                 | Role                                                      |
 |------------------------|-----------------------------------------------------------|
 | `YAML.Value`           | Dynamic untyped `Value` ADT (scalars, sequences, mappings, tags, anchors) plus the `Document` and `Stream` wrappers for multi-document inputs |
-| `YAML.Encode`          | Loader: `ByteString` / `Text` to `Value` / `Document` / `Stream`, with full anchor and alias resolution |
-| `YAML.Decode`          | The typed-decoder side that lifts `Value` into Haskell records |
+| `YAML.Encode`          | Emitter: `Value` / `Document` / `Stream` to YAML `Text` or `ByteString` |
+| `YAML.Decode`          | Loader: `ByteString` / `Text` to `Value` / `Document` / `Stream`, with anchor and alias resolution |
 | `YAML.Encoding`        | Builder used by `ToYAML` instances                        |
 | `YAML.Pretty`          | Render `Value` / `Document` / `Stream` back to YAML text with configurable scalar style, indent, and flow / block preference (`render`, `renderBS`, `renderDocument`, `renderStream`, `defaultOptions`, `compactOptions`) |
 | `YAML.Class`           | Public `ToYAML` / `FromYAML` typeclasses + `encodeYAML` / `encodeYAMLBS` / `decodeYAML` / `decodeYAMLBS` |
@@ -112,8 +116,8 @@ custom tags), so type information that JSON would discard survives
 the round-trip.
 
 For multi-document YAML streams (`---` separated), use the `Document`
-and `Stream` wrappers in `YAML.Value` plus the corresponding loader
-entry points in `YAML.Encode`.
+and `Stream` wrappers in `YAML.Value`, `decodeStream` / `decodeStreamBS`,
+and `encodeStream`. Single-document entry points reject extra documents.
 
 ## Annotated AST
 
@@ -128,9 +132,16 @@ import qualified YAML.Decode.Annotated as YDA
 import qualified YAML.Pretty           as YP
 
 case YDA.decodeAnnotated input of
-  Right doc -> putStrLn (T.unpack (YP.renderAnnotatedDocument YP.defaultOptions doc Nothing))
+  Right (doc, original) -> putStrLn (T.unpack (YP.renderAnnotatedDocument YP.defaultOptions doc (Just original)))
   Left  err -> putStrLn err
 ```
+
+Edits preserve untouched flow-node tokens, quoting, and comments as well as
+block-entry text. Changed flow collections may be laid out over multiple lines
+to retain their comments. Parsed aliases keep their binding identities: changing
+an anchor updates its live references, while deleting or moving a definition
+materializes references that would otherwise become invalid. Editing through an
+alias makes an independent copy.
 
 Common consumers: language servers, schema-driven config editors,
 formatters, and any tool that has to make a small change to a YAML
@@ -163,13 +174,26 @@ DYAML.deriveYAML  ''DeploymentSpec
 DAeson.deriveJSON ''DeploymentSpec
 ```
 
+Record constructors inside sums use a mapping for `contents`, so their field
+renames, defaults, optional fields, and skipped fields work just like standalone
+records. Positional constructors retain scalar or sequence `contents`.
+
 ## JSON bridge
 
 `YAML.JSON` round-trips between `YAML.Value` and `Data.Aeson.Value`.
 The bridge is intentionally lossy: YAML's data model is a strict
 superset of JSON's, so non-string mapping keys are stringified, and
 explicit tags and anchors are dropped. See the module haddock for the
-exact mapping table.
+exact mapping table. Non-finite YAML floats become JSON `null`.
+YAML integers use arbitrary-precision `Integer`; bounded Haskell integer
+decoders reject overflow, negative unsigned values, and fractional inputs.
+ByteString decoder entry points detect UTF-8, UTF-16, and UTF-32 and reject
+malformed encodings. Native records and maps reject ambiguous field names after
+tag metadata is removed. The ByteString serialization instance uses a text scalar
+for valid UTF-8 and a sequence of byte-valued integers for arbitrary binary data.
+
+The parser bounds nesting and logical alias expansion (10 million nodes), rejects
+cyclic/forward aliases, and limits tracked indentation to 1,048,574 spaces.
 
 ## Testing
 
@@ -196,10 +220,17 @@ Point `YAML_TEST_SUITE` at a local clone and the harness will walk
 every case it finds:
 
 ```bash
-git clone https://github.com/yaml/yaml-test-suite /tmp/yaml-test-suite
+git clone --branch data https://github.com/yaml/yaml-test-suite /tmp/yaml-test-suite
 YAML_TEST_SUITE=/tmp/yaml-test-suite \
   cabal test wireform-yaml:wireform-yaml-test
 ```
+
+The event-only upstream fixtures `X38W` and `2JQS` contain duplicate keys.
+The harness asserts that value composition rejects them; it does not treat
+valid parser events as permission to construct a mapping with duplicate keys.
+All available JSON companions are compared across every document. Each accepted
+fixture also round-trips structurally through the fast emitter, both pretty
+layouts, and annotated normalization; collection-valued keys are checked directly.
 
 When the env var is unset the harness reports a no-op skip group so
 CI stays green out of the box. A built-in mini-suite drawn from the
@@ -227,15 +258,15 @@ cabal bench wireform-yaml:wireform-yaml-bench
   <img src="bench-results/charts/yaml-decode-vs-libyaml-light.svg" alt="wireform-yaml decode vs libyaml across input sizes">
 </picture>
 
-| Operation | wireform-yaml | yaml (libyaml) |  ratio |
-| :-------- | ------------: | -------------: | -----: |
-| tiny      |       0.25 µs |        7.68 µs | 30.72x |
-| small     |       3.87 µs |        39.6 µs | 10.22x |
-| flow      |       4.11 µs |        60.4 µs | 14.70x |
-| literal   |       4.18 µs |        13.8 µs |  3.29x |
-| big       |       15.0 µs |         137 µs |  9.12x |
+| Operation | wireform-yaml | yaml (libyaml) | ratio |
+| :-------- | ------------: | -------------: | ----: |
+| tiny      |       0.56 µs |        5.42 µs | 9.68x |
+| small     |       8.78 µs |       27.10 µs | 3.19x |
+| flow      |       7.69 µs |        42.0 µs | 5.47x |
+| literal   |       12.6 µs |        9.85 µs | 0.78x |
+| big       |       36.6 µs |         107 µs | 2.92x |
 
-<sub>Last run 2026-06-27 11:56:42 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-11-02 13:42:14 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:yaml-decode-vs-libyaml -->
 
 <!-- BEGIN_AUTOGEN bench:yaml-decode-vs-hsyaml -->
@@ -246,14 +277,43 @@ cabal bench wireform-yaml:wireform-yaml-bench
 
 | Operation | wireform-yaml |  HsYAML |   ratio |
 | :-------- | ------------: | ------: | ------: |
-| tiny      |       0.25 µs |  108 µs | 432.84x |
-| small     |       3.87 µs | 1044 µs | 269.82x |
-| flow      |       4.11 µs | 1286 µs | 312.92x |
-| literal   |       4.18 µs | 1175 µs | 281.21x |
-| big       |       15.0 µs | 3961 µs | 263.87x |
+| tiny      |       0.56 µs | 86.2 µs | 153.86x |
+| small     |       8.78 µs |  838 µs |  95.42x |
+| flow      |       7.69 µs | 1025 µs | 133.31x |
+| literal   |       12.6 µs |  964 µs |  76.59x |
+| big       |       36.6 µs | 3261 µs |  89.14x |
 
-<sub>Last run 2026-06-27 11:56:42 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-11-02 13:42:14 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:yaml-decode-vs-hsyaml -->
+
+### Escaped strings and derived records
+
+<!-- BEGIN_AUTOGEN bench:yaml-extra-vs-libyaml -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="bench-results/charts/yaml-extra-vs-libyaml-dark.svg">
+  <img src="bench-results/charts/yaml-extra-vs-libyaml-light.svg" alt="Escaped strings and derived records vs libyaml">
+</picture>
+
+| Operation      | wireform-yaml | yaml (libyaml) | ratio |
+| :------------- | ------------: | -------------: | ----: |
+| escaped decode |       13.8 µs |        10.9 µs | 0.80x |
+| record decode  |       1.73 µs |        8.84 µs | 5.11x |
+| record encode  |       1.14 µs |        4.04 µs | 3.54x |
+
+<sub>Last run 2026-11-02 13:42:14 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<!-- END_AUTOGEN bench:yaml-extra-vs-libyaml -->
+
+The record fixture uses the actual `deriveYAML` output. Every benchmark fixture
+is checked for successful decoding before timing; the HsYAML comparison forces
+the parsed contents as well as the outer document list.
+
+ASCII validation scans eight bytes at a time and skips line normalization when
+there are no carriage returns. Unicode and unusual controls retain lexical
+validation. Literal scalars measure their final chomped length and copy their
+UTF-8 lines into one exact buffer, so discarded trailing blank lines are neither
+copied nor retained. Escaped scalars likewise write directly into a bounded
+UTF-8 buffer. Optimized Core shows bulk byte copies, direct byte writes, and
+unboxed offset loops without per-escape result allocation.
 
 For cross-language comparisons:
 
@@ -265,7 +325,8 @@ For cross-language comparisons:
   established library) and [`saphyr`](https://crates.io/crates/saphyr)
   (a newer, faster alternative).
 
-> Numbers TBD: run the harness above and drop a results table in.
+The committed tables above are generated from Criterion measurements. The harness
+also exercises floating-point boundaries and the generated native-record codec.
 
 ## License
 

@@ -2,16 +2,15 @@
 
 The 'Value' ADT models the YAML 1.2 representation graph:
 
-* Three scalar shapes corresponding to the YAML 1.2 /core schema/
-  ('YNull', 'YBool', 'YInt', 'YFloat') plus the always-present
-  string scalar ('YString').
+* Scalars corresponding to the YAML 1.2 /core schema/:
+  'YNull', 'YBool', 'YInt', 'YFloat', and 'YString'.
 * 'YSeq' for sequences (\"YAML lists\").
 * 'YMap' for mappings (\"YAML dicts\"). Insertion order is preserved
   in the underlying 'Vector'; YAML mappings are unordered in the
   data model but downstream consumers (round-tripping in particular)
   typically want the source order.
-* 'YAnchor' wraps a sub-value with an optional anchor identifier and
-  tag URI so that anchor / alias relationships and explicit tags
+* 'YAnchored' and 'YTagged' wrap sub-values with anchor identifiers and
+  tag URIs so that anchor / alias relationships and explicit tags
   round-trip cleanly. An un-anchored, untagged scalar lives
   directly as 'YString' / 'YInt' / etc. without a wrapper.
 
@@ -41,7 +40,6 @@ module YAML.Value (
 ) where
 
 import Control.DeepSeq (NFData)
-import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Vector (Vector)
 import Data.Vector qualified as V
@@ -64,15 +62,13 @@ newtype Tag = Tag {unTag :: Text}
 
 {- | YAML representation node.
 
-'YString' carries an explicit 'Maybe' style tag so the emitter can
-preserve the user's choice of plain / single-quoted / double-quoted /
-block literal / block folded form when round-tripping. Decoders
-that don't care can ignore it.
+Integers have arbitrary precision. Presentation details such as quoting
+and comments live in 'YAML.Annotated.AValue', rather than this data model.
 -}
 data Value
   = YNull
   | YBool !Bool
-  | YInt !Int64
+  | YInt !Integer
   | YFloat !Double
   | YString !Text
   | YSeq !(Vector Value)
@@ -81,10 +77,12 @@ data Value
     YTagged !Tag !Value
   | {- | A node introduced with @&anchor@. Subsequent @*anchor@
     references in the source resolve to the same logical node;
-    decoders expand aliases by default so this constructor is
-    present only when the caller asked for an unresolved view.
+    decoders expand aliases while retaining anchor metadata on the
+    definition and on each resolved reference.
     -}
     YAnchored !Anchor !Value
+  | -- | An alias reference. Decoders resolve these before returning a value.
+    YAlias !Anchor
   deriving stock (Show, Eq, Generic)
   deriving anyclass (NFData)
 
@@ -119,7 +117,7 @@ bool :: Bool -> Value
 bool = YBool
 
 
-int :: Int64 -> Value
+int :: Integer -> Value
 int = YInt
 
 

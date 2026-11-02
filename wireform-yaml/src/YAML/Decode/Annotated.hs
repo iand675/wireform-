@@ -26,7 +26,7 @@ module YAML.Decode.Annotated (
 ) where
 
 import Data.ByteString qualified as BS
-import Data.Char (isDigit, isSpace)
+import Data.Char (isDigit)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -37,6 +37,7 @@ import YAML.Annotated (
   AMapEntry (..),
   AStream (..),
   AValue (..),
+  Chomping (..),
   Comment (..),
   MapStyle (..),
   ScalarStyle (..),
@@ -44,8 +45,12 @@ import YAML.Annotated (
   SrcSpan (..),
   Trivia (..),
  )
+import YAML.Annotated qualified
 import YAML.Decode qualified as YD
-import YAML.Value (Document (..), Stream (..), Value (..))
+import YAML.Decode.Flow (annotateFlow)
+import YAML.Internal (isYamlSpace, stripYaml, stripYamlStart, wordsYaml)
+import YAML.Value (Document (..), Value (..))
+import YAML.Value qualified
 
 
 -- ---------------------------------------------------------------------------
@@ -58,32 +63,35 @@ needs it to copy unchanged sub-trees verbatim.
 -}
 decodeAnnotated :: Text -> Either String (ADocument, Text)
 decodeAnnotated src = do
-  Stream docs <- YD.decodeStream src
+  (AStream docs, original) <- decodeAnnotatedStream src
   case V.toList docs of
-    [d] -> pure (annotateDocument src d, src)
-    [] ->
-      pure
-        ( ADocument
-            False
-            False
-            (annotatePlain YNull)
-            []
-            []
-        , src
-        )
-    _ ->
-      Left
-        "decodeAnnotated: source contains multiple documents; \
-        \use decodeAnnotatedStream"
+    [d] -> pure (d, original)
+    [] -> pure (ADocument False False (annotatePlain YNull) [] (Just (SrcSpan 0 (BS.length (TE.encodeUtf8 src)))) [] [], src)
+    _ -> Left "decodeAnnotated: source contains multiple documents; use decodeAnnotatedStream"
 
 
-{- | Decode a multi-document YAML stream into annotated documents
-plus the original source text.
--}
+-- | Decode documents with spans relative to the original stream.
 decodeAnnotatedStream :: Text -> Either String (AStream, Text)
 decodeAnnotatedStream src = do
-  Stream docs <- YD.decodeStream src
-  pure (AStream (V.map (annotateDocument src) docs), src)
+  docs <- YD.decodeLocatedDocuments src
+  pure (AStream (V.fromList (fmap annotateLocated docs)), src)
+  where
+    annotateLocated located =
+      let offset = YD.locatedOffset located
+          doc = annotateDocument (YD.locatedSource located) (YD.locatedDocument located) (YD.locatedAnnotatedBody located)
+          shift (SrcSpan a b) = SrcSpan (a + offset) (b + offset)
+          shiftValue av =
+            av
+              { avSpan = shift <$> avSpan av
+              , avNodeSpan = shift <$> avNodeSpan av
+              , avBody = case avBody av of
+                  ASeq xs style -> ASeq (V.map shiftValue xs) style
+                  AMap es style -> AMap (V.map (\e -> e {amKey = shiftValue (amKey e), amValue = shiftValue (amValue e)}) es) style
+                  ATagged tag inner -> ATagged tag (shiftValue inner)
+                  AAnchored anchor inner -> AAnchored anchor (shiftValue inner)
+                  body -> body
+              }
+      in doc {adBody = shiftValue (adBody doc), adOriginalSpan = shift <$> adOriginalSpan doc}
 
 
 decodeAnnotatedDocument :: Text -> Either String ADocument
@@ -95,35 +103,68 @@ decodeAnnotatedDocument src = fst <$> decodeAnnotated src
 -- ---------------------------------------------------------------------------
 
 -- | Wrap a parsed 'Document' with annotations.
-annotateDocument :: Text -> Document -> ADocument
-annotateDocument src (Document start end body) =
+annotateDocument :: Text -> Document -> AValue -> ADocument
+annotateDocument src (Document start end body) presentation =
   let !srcLen = BS.length (TE.encodeUtf8 src)
       !lineIdx = buildLineIndex src
-      !av = annotateBody src lineIdx body
+      !av = annotateBody src lineIdx presentation
       !av' = av {avSpan = Just (SrcSpan 0 srcLen)}
   in ADocument
        { adDirectivesEnd = start
        , adExplicitEnd = end
        , adBody = av'
        , adLeading = []
-       , adTrailing = []
+       , adOriginalSpan = Just (SrcSpan 0 srcLen)
+       , adTrailing = trailingComments body src
+       , adDirectives = filter (T.isPrefixOf "%") (takeWhile (\line -> T.null (stripYaml line) || T.isPrefixOf "#" line || T.isPrefixOf "%" line) (logicalLines src))
        }
 
 
+-- Keep trailing standalone comments when an edit disables whole-document copying.
+trailingComments :: Value -> Text -> [Comment]
+trailingComments value src
+  | isBlockScalar value = []
+  | otherwise = reverse (go (reverse (logicalLines src)))
+  where
+    -- A root block scalar may contain comment-looking lines at column zero.
+    -- Its header is the first content line, possibly preceded by properties.
+    isBlockScalar (YTagged _ inner) = isBlockScalar inner
+    isBlockScalar (YAnchored _ inner) = isBlockScalar inner
+    isBlockScalar (YString _) = case dropWhile isPrologue (logicalLines src) of
+      line : _ -> case dropWhile isProperty (wordsYaml line) of
+        header : _ -> T.isPrefixOf "|" header || T.isPrefixOf ">" header
+        [] -> False
+      [] -> False
+    isBlockScalar _ = False
+    isProperty word = T.isPrefixOf "!" word || T.isPrefixOf "&" word
+    isPrologue line =
+      let stripped = stripYaml line
+      in T.null stripped || T.isPrefixOf "#" stripped || T.isPrefixOf "%" stripped || stripped == "---"
+    go [] = []
+    go (line : rest)
+      | T.null (stripYaml line) = go rest
+      | stripYaml line == "..." = go rest
+      | Just body <- T.stripPrefix "#" line =
+          Comment (T.dropWhile (== ' ') body) 0 : go rest
+      | otherwise = []
+
+
 -- | Wrap top-level structures with per-entry spans + trivia.
-annotateBody :: Text -> LineIndex -> Value -> AValue
-annotateBody src lineIdx = \case
-  YMap kvs
-    | not (V.null kvs)
-    , Just entries <- locateMapEntries src lineIdx (V.toList kvs) ->
-        let aEntries = V.fromList entries
-        in AValue (AMap aEntries MapBlock) emptyTrivia Nothing False
-  YSeq xs
-    | not (V.null xs)
-    , Just items <- locateSeqItems src lineIdx (V.toList xs) ->
-        let aItems = V.fromList items
-        in AValue (ASeq aItems SeqBlock) emptyTrivia Nothing False
-  v -> annotatePlain v
+annotateBody :: Text -> LineIndex -> AValue -> AValue
+annotateBody src lineIdx value
+  | Just annotated <- annotateFlow src value = annotated
+  | otherwise = case avBody value of
+      AMap pairs _
+        | not (V.null pairs)
+        , Just entries <- locateMapEntries src lineIdx ((\entry -> (amKey entry, amValue entry)) <$> V.toList pairs) ->
+            value {avBody = AMap (V.fromList entries) MapBlock}
+      ASeq items _
+        | not (V.null items)
+        , Just entries <- locateSeqItems src lineIdx (V.toList items) ->
+            value {avBody = ASeq (V.fromList entries) SeqBlock}
+      ATagged tag inner -> value {avBody = ATagged tag (annotateBody src lineIdx inner)}
+      AAnchored anchor inner -> value {avBody = AAnchored anchor (annotateBody src lineIdx inner)}
+      _ -> styleNode src value
 
 
 -- ---------------------------------------------------------------------------
@@ -131,7 +172,7 @@ annotateBody src lineIdx = \case
 -- ---------------------------------------------------------------------------
 
 annotatePlain :: Value -> AValue
-annotatePlain v = AValue (bodyOf v) emptyTrivia Nothing False
+annotatePlain v = AValue (bodyOf v) emptyTrivia Nothing Nothing "" (-1) False
   where
     bodyOf = \case
       YNull -> ANull
@@ -154,6 +195,7 @@ annotatePlain v = AValue (bodyOf v) emptyTrivia Nothing False
           MapBlock
       YTagged tg inner -> ATagged tg (annotatePlain inner)
       YAnchored a inner -> AAnchored a (annotatePlain inner)
+      YAlias a -> AAlias a
 
 
 emptyTrivia :: Trivia
@@ -164,6 +206,18 @@ defaultScalarStyle :: Text -> ScalarStyle
 defaultScalarStyle t
   | T.any (\c -> c == '\n' || c == '\r') t = SSDoubleQuoted
   | otherwise = SSPlain
+
+
+logicalLines :: Text -> [Text]
+logicalLines = T.lines . T.replace "\r" "\n" . T.replace "\r\n" "\n"
+
+
+propertyOnly :: Text -> Bool
+propertyOnly source =
+  let strip text
+        | T.isPrefixOf "!" text || T.isPrefixOf "&" text = strip (stripYamlStart (T.dropWhile (\c -> c /= ' ' && c /= '\t') text))
+        | otherwise = T.null text || T.isPrefixOf "#" text
+  in (T.isPrefixOf "!" source || T.isPrefixOf "&" source) && strip source
 
 
 -- ---------------------------------------------------------------------------
@@ -182,11 +236,16 @@ data LineIndex = LineIndex !(V.Vector Int)
 
 buildLineIndex :: Text -> LineIndex
 buildLineIndex src =
-  let bs = TE.encodeUtf8 src
-      n = BS.length bs
-      starts = 0 : indicesAfter (BS.elemIndices 0x0A bs)
-      indicesAfter = map (+ 1)
-  in LineIndex (V.fromList (starts ++ [n]))
+  let bytes = TE.encodeUtf8 src
+      size = BS.length bytes
+      starts position
+        | position >= size = []
+        | BS.index bytes position == 13 =
+            let next = if position + 1 < size && BS.index bytes (position + 1) == 10 then position + 2 else position + 1
+            in next : starts next
+        | BS.index bytes position == 10 = (position + 1) : starts (position + 1)
+        | otherwise = starts (position + 1)
+  in LineIndex (V.fromList (0 : starts 0 <> [size]))
 {-# INLINE buildLineIndex #-}
 
 
@@ -216,7 +275,7 @@ verbatim in that case.
 locateMapEntries
   :: Text
   -> LineIndex
-  -> [(Value, Value)]
+  -> [(AValue, AValue)]
   -> Maybe [AMapEntry]
 locateMapEntries src lineIdx kvs = go 1 [] 0 kvs
   where
@@ -232,7 +291,7 @@ locateMapEntries src lineIdx kvs = go 1 [] 0 kvs
           case lineSliceUtf8 src lineIdx lno of
             Nothing -> Nothing
             Just lt ->
-              let stripped = T.stripStart lt
+              let stripped = stripYamlStart lt
                   indent = T.length lt - T.length stripped
               in -- Skip directive / doc-marker lines.
                  case T.uncons stripped of
@@ -250,6 +309,7 @@ locateMapEntries src lineIdx kvs = go 1 [] 0 kvs
                           (pendingComments ++ [cmt])
                           pendingBlanks
                           remaining
+                   _ | propertyOnly stripped -> go (lno + 1) pendingComments pendingBlanks remaining
                    Just ('%', _) ->
                      go (lno + 1) pendingComments pendingBlanks remaining
                    Just ('-', rest)
@@ -293,7 +353,7 @@ locateMapEntries src lineIdx kvs = go 1 [] 0 kvs
                                      pendingBlanks
                                      Nothing
                                  keyAv =
-                                   (annotatePlain kv)
+                                   (styleNode (maybe stripped fst (YD.splitMappingLine stripped)) kv)
                                      { avTrivia = trivia
                                      }
                                  valAv =
@@ -328,7 +388,7 @@ locateMapEntries src lineIdx kvs = go 1 [] 0 kvs
 -- ---------------------------------------------------------------------------
 
 locateSeqItems
-  :: Text -> LineIndex -> [Value] -> Maybe [AValue]
+  :: Text -> LineIndex -> [AValue] -> Maybe [AValue]
 locateSeqItems src lineIdx items = go 1 [] 0 items
   where
     LineIndex starts = lineIdx
@@ -341,7 +401,7 @@ locateSeqItems src lineIdx items = go 1 [] 0 items
           case lineSliceUtf8 src lineIdx lno of
             Nothing -> Nothing
             Just lt ->
-              let stripped = T.stripStart lt
+              let stripped = stripYamlStart lt
                   indent = T.length lt - T.length stripped
               in case T.uncons stripped of
                    _
@@ -358,8 +418,10 @@ locateSeqItems src lineIdx items = go 1 [] 0 items
                           (pendingComments ++ [cmt])
                           pendingBlanks
                           remaining
+                   _ | propertyOnly stripped -> go (lno + 1) pendingComments pendingBlanks remaining
                    Just ('%', _) ->
                      go (lno + 1) pendingComments pendingBlanks remaining
+                   _ | stripped == "---" || stripped == "..." -> go (lno + 1) pendingComments pendingBlanks remaining
                    Just ('-', after) | T.null after || T.head after == ' ' ->
                      case remaining of
                        [] -> Nothing
@@ -388,7 +450,7 @@ locateSeqItems src lineIdx items = go 1 [] 0 items
                                      Trivia
                                        pendingComments
                                        pendingBlanks
-                                       Nothing
+                                       (case avBody vv of AMap _ _ -> Nothing; ASeq _ _ -> Nothing; _ -> parseEolComment src lineIdx lno)
                                  , avSpan =
                                      Just
                                        ( SrcSpan
@@ -410,29 +472,138 @@ scanEntryLines :: Text -> LineIndex -> Int -> (Int, Maybe Comment)
 scanEntryLines src lineIdx@(LineIndex starts) start = go start
   where
     !lineCount = V.length starts - 1
+    scalarEntry = maybe False isScalarHeader (lineSliceUtf8 src lineIdx (start - 1))
+    isScalarHeader source =
+      let row = stripYamlStart source
+          item = if T.isPrefixOf "- " row then T.drop 2 row else row
+          value = maybe item snd (YD.splitMappingLine item)
+          stripProps text = if T.isPrefixOf "!" text || T.isPrefixOf "&" text then stripProps (stripYamlStart (T.dropWhile (\c -> c /= ' ' && c /= '\t') text)) else text
+      in case T.uncons (stripProps (stripYamlStart value)) of Just (c, _) -> c == '|' || c == '>'; Nothing -> False
     go !lno
       | lno > lineCount = (lineCount + 1, Nothing)
       | otherwise =
           case lineSliceUtf8 src lineIdx lno of
             Nothing -> (lno, Nothing)
             Just lt ->
-              let stripped = T.stripStart lt
+              let stripped = stripYamlStart lt
                   indent = T.length lt - T.length stripped
-              in if not (T.null stripped) && indent > 0
+                  laterIndented = lookAhead (lno + 1)
+              in if (not (T.null stripped) && indent > 0) || (T.null stripped && (scalarEntry || laterIndented))
                    then go (lno + 1)
                    else (lno, Nothing)
+    lookAhead line
+      | line > lineCount = False
+      | otherwise = case lineSliceUtf8 src lineIdx line of
+          Just text
+            | T.null (stripYaml text) -> lookAhead (line + 1)
+            | otherwise -> T.length text > T.length (stripYamlStart text)
+          Nothing -> False
 
 
-{- | If the parsed value is itself a complex (map / seq) container
-whose layout might be useful to preserve, we still attach a
-span (so verbatim copy works for the unmodified case) but fall
-back to plain annotation for the children. Going deeper would
-need a recursive structural scan.
--}
-annotateContainedValue :: Text -> LineIndex -> Value -> Maybe SrcSpan -> AValue
-annotateContainedValue _src _lineIdx v sp =
-  let av = annotatePlain v
-  in av {avSpan = sp}
+-- Recursively annotate each entry using a dedented source view, then translate
+-- its byte spans back into the original document. This preserves comments and
+-- quoting at every block level, including compact sequence-of-mapping items.
+annotateContainedValue :: Text -> LineIndex -> AValue -> Maybe SrcSpan -> AValue
+annotateContainedValue src _ value Nothing = styleNode src value
+annotateContainedValue src _ value span_@(Just (SrcSpan begin end)) =
+  let chunk = TE.decodeUtf8 (BS.take (end - begin) (BS.drop begin (TE.encodeUtf8 src)))
+      chunkIndex@(LineIndex originalStarts) = buildLineIndex chunk
+      rows = (\line -> maybe "" id (lineSliceUtf8 chunk chunkIndex line)) <$> [1 .. V.length originalStarts - 1]
+      first = case rows of line : _ -> line; [] -> ""
+      stripped = stripYamlStart first
+      isItem = stripped == "-" || T.isPrefixOf "- " stripped
+      payload =
+        if isItem
+          then stripYamlStart (T.drop 1 stripped)
+          else maybe stripped (stripYamlStart . snd) (YD.splitMappingLine stripped)
+      firstRemoved = BS.length (TE.encodeUtf8 first) - BS.length (TE.encodeUtf8 payload)
+      remainder = drop 1 rows
+      significant = filter (\line -> not (T.null (stripYaml line)) && not (T.isPrefixOf "#" (stripYamlStart line))) remainder
+      base = case significant of line : _ -> T.length line - T.length (stripYamlStart line); [] -> 0
+      inline = not (T.null payload) && not (T.isPrefixOf "#" payload)
+      -- A compact map starts immediately after a sequence dash. Otherwise
+      -- inline content is a scalar/flow node; block children start next line.
+      compact = isItem && inline && case avBody value of AMap _ _ -> True; _ -> False
+      useFirst = inline || compact
+      removed line = min base (T.length (T.takeWhile (== ' ') line))
+      normalizedRows = (if useFirst then [payload] else []) <> ((\line -> T.drop (removed line) line) <$> remainder)
+      rowNumbers = (if useFirst then [0] else []) <> [1 .. length rows - 1]
+      prefixes = (if useFirst then [firstRemoved] else []) <> (removed <$> remainder)
+      view = T.intercalate "\n" normalizedRows
+      viewStarts = V.fromList (scanl (\offset line -> offset + BS.length (TE.encodeUtf8 line) + 1) 0 normalizedRows)
+      sourceStarts = V.fromList ((begin +) . (originalStarts V.!) <$> rowNumbers)
+      prefixBytes = V.fromList prefixes
+      translate isEnd offset
+        | V.null sourceStarts = begin
+        | otherwise =
+            let row = min (V.length sourceStarts - 1) (findRow offset 0 (V.length viewStarts - 1))
+                column = offset - viewStarts V.! row
+                prefix = if isEnd && column == 0 && row > 0 then 0 else prefixBytes V.! row
+            in sourceStarts V.! row + prefix + column
+      findRow offset low high
+        | low >= high = low
+        | otherwise =
+            let middle = (low + high + 1) `quot` 2
+            in if viewStarts V.! middle <= offset then findRow offset middle high else findRow offset low (middle - 1)
+      shift (SrcSpan a b) = SrcSpan (translate False a) (translate True b)
+      relocate av =
+        av
+          { avSpan = shift <$> avSpan av
+          , avNodeSpan = shift <$> avNodeSpan av
+          , avBody = case avBody av of
+              AMap entries style -> AMap (V.map (\entry -> entry {amKey = relocate (amKey entry), amValue = relocate (amValue entry)}) entries) style
+              ASeq items style -> ASeq (V.map relocate items) style
+              ATagged tag inner -> ATagged tag (relocate inner)
+              AAnchored anchor inner -> AAnchored anchor (relocate inner)
+              body -> body
+          }
+      annotated = annotateBody view (buildLineIndex view) value
+      childEnds = case avBody annotated of
+        AMap entries _ -> srcEnd <$> V.toList (V.mapMaybe (avSpan . amValue) entries)
+        ASeq items _ -> srcEnd <$> V.toList (V.mapMaybe avSpan items)
+        _ -> []
+      suffix = case childEnds of
+        [] -> ""
+        positions -> TE.decodeUtf8 (BS.drop (maximum positions) (TE.encodeUtf8 view))
+  in (relocate annotated) {avSpan = span_, avTrailingText = if isFlow annotated then avTrailingText annotated else suffix}
+  where
+    isFlow av = case avBody av of
+      AMap _ MapFlow -> True
+      ASeq _ SeqFlow -> True
+      ATagged _ inner -> isFlow inner
+      AAnchored _ inner -> isFlow inner
+      _ -> False
+
+
+styleNode :: Text -> AValue -> AValue
+styleNode source av = av {avBody = apply (avBody av)}
+  where
+    line = case filter (\text -> let t = stripYaml text in not (T.null t) && not (T.isPrefixOf "#" t) && not (T.isPrefixOf "%" t) && t /= "---") (logicalLines source) of
+      first : _ -> stripYamlStart first
+      [] -> ""
+    content = stripProperties line
+    stripProperties text
+      | T.isPrefixOf "!" text || T.isPrefixOf "&" text = stripProperties (stripYamlStart (T.dropWhile (\c -> c /= ' ' && c /= '\t') text))
+      | otherwise = text
+    chomp
+      | T.isInfixOf "-" content = Strip
+      | T.isInfixOf "+" content = Keep
+      | otherwise = Clip
+    apply (AString text _) =
+      AString
+        text
+        ( case T.uncons content of
+            Just ('\'', _) -> SSSingleQuoted
+            Just ('"', _) -> SSDoubleQuoted
+            Just ('|', _) -> SSLiteral chomp
+            Just ('>', _) -> SSFolded chomp
+            _ -> defaultScalarStyle text
+        )
+    apply (AMap entries _) | T.isPrefixOf "{" content = AMap entries MapFlow
+    apply (ASeq items _) | T.isPrefixOf "[" content = ASeq items SeqFlow
+    apply (ATagged tag inner) = ATagged tag (styleNode content inner)
+    apply (AAnchored anchor inner) = AAnchored anchor (styleNode content inner)
+    apply body = body
 
 
 -- ---------------------------------------------------------------------------
@@ -458,39 +629,18 @@ lineSliceUtf8 src lineIdx lno = do
 line. Recognises plain / single-quoted / double-quoted scalar
 keys; bails out for anything more exotic.
 -}
-matchKeyOnLine :: Text -> Value -> Maybe Text
+matchKeyOnLine :: Text -> AValue -> Maybe Text
 matchKeyOnLine line key = do
-  keyText <- case key of
-    YString t -> Just t
-    YInt n -> Just (T.pack (show n))
-    YBool b -> Just (if b then T.pack "true" else T.pack "false")
-    YNull -> Just (T.pack "null")
-    _ -> Nothing
-  let plainOk =
-        T.isPrefixOf keyText line
-          && hasColonAfter (T.length keyText) line
-      sqOk =
-        T.isPrefixOf (squote keyText) line
-          && hasColonAfter (T.length keyText + 2) line
-      dqOk =
-        T.isPrefixOf (dquote keyText) line
-          && hasColonAfter (T.length keyText + 2) line
-  if plainOk || sqOk || dqOk then Just line else Nothing
+  (raw, _) <- YD.splitMappingLine line
+  case avBody key of
+    AResolvedAlias _ (YAML.Value.Anchor name) _ | raw == "*" <> name -> Just line
+    _ -> do
+      parsed <- either (const Nothing) Just (YD.decode raw)
+      if unwrapKey parsed == unwrapKey (YAML.Annotated.astripAnnotations key) then Just line else Nothing
   where
-    squote t = T.cons '\'' (t `T.snoc` '\'')
-    dquote t = T.cons '"' (t `T.snoc` '"')
-
-
-{- | True if the character at @i@ is a colon followed by a space
-or end-of-line.
--}
-hasColonAfter :: Int -> Text -> Bool
-hasColonAfter i t =
-  case T.uncons (T.drop i t) of
-    Just (':', rest) -> case T.uncons rest of
-      Just (c, _) -> isSpace c
-      Nothing -> True
-    _ -> False
+    unwrapKey (YTagged _ value) = unwrapKey value
+    unwrapKey (YAnchored _ value) = unwrapKey value
+    unwrapKey value = value
 
 
 stripCommentBody :: Text -> Text
@@ -512,7 +662,7 @@ parseEolComment src lineIdx lno = do
                    | not inSq
                    , not inDq
                    , i > 0
-                   , isSpace (T.index lt (i - 1)) ->
+                   , isYamlSpace (T.index lt (i - 1)) ->
                        Just
                          ( Comment
                              (stripCommentBody (T.drop (i + 1) lt))

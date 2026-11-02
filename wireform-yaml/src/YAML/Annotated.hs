@@ -11,9 +11,9 @@ allowing programmatic modification.
 The intended workflow is:
 
 @
-Right adoc <- 'YAML.Decode.Annotated.decodeAnnotated' yamlText
-let adoc' = 'updateAt' [\"server\", \"port\"] ('aInt' 8081) adoc
-let yamlText' = 'YAML.Encode.Annotated.render' 'YAML.Pretty.defaultOptions' adoc'
+Right (adoc, original) <- 'YAML.Decode.Annotated.decodeAnnotated' yamlText
+let adoc' = adoc { 'adBody' = 'updateAt' [\"server\", \"port\"] ('aInt' 8081) ('adBody' adoc) }
+let yamlText' = 'YAML.Pretty.renderAnnotatedDocument' 'YAML.Pretty.defaultOptions' adoc' (Just original)
 @
 
 The renderer copies original source bytes for sub-trees that haven't
@@ -57,6 +57,7 @@ module YAML.Annotated (
   astripAnnotations,
   isDirty,
   markDirty,
+  prepareForRendering,
 
   -- * Modification helpers
   setKey,
@@ -70,9 +71,10 @@ module YAML.Annotated (
 ) where
 
 import Control.DeepSeq (NFData)
-import Data.Int (Int64)
+import Control.Monad.State.Strict (State, evalState, get, modify')
+import Data.HashMap.Strict qualified as HM
+import Data.HashSet qualified as HS
 import Data.Text (Text)
-import Data.Text qualified as T
 import Data.Vector (Vector)
 import Data.Vector qualified as V
 import GHC.Generics (Generic)
@@ -195,6 +197,12 @@ data AValue = AValue
   produced this value, if any. 'Nothing' means the value
   was constructed fresh and has no original-source backing.
   -}
+  , avNodeSpan :: !(Maybe SrcSpan)
+  -- ^ Exact flow-node token range, excluding its surrounding entry and trivia.
+  , avTrailingText :: !Text
+  -- ^ Container-ending trivia retained when children are edited.
+  , avAnchorId :: {-# UNPACK #-} !Int
+  -- ^ Original binding identity on an anchor definition; negative for fresh nodes.
   , avDirty :: !Bool
   {- ^ Set to 'True' when a sub-tree has been modified; the
   renderer falls back to fresh emission for any node with
@@ -209,7 +217,7 @@ data AValue = AValue
 data ABody
   = ANull
   | ABool !Bool
-  | AInt !Int64
+  | AInt !Integer
   | AFloat !Double
   | AString !Text !ScalarStyle
   | ASeq !(Vector AValue) !SeqStyle
@@ -217,10 +225,15 @@ data ABody
   | ATagged !Tag !AValue
   | AAnchored !Anchor !AValue
   | {- | A @*alias@ reference. The annotated layer keeps it
-    explicit; the projection to 'YAML.Value.Value' resolves
-    it.
+    explicit; projection to 'YAML.Value.Value' preserves the
+    reference as 'YAML.Value.YAlias'.
     -}
     AAlias !Anchor
+  | {- | An original alias with its immutable binding identity and resolved
+    target. The target permits safe materialization if its definition is deleted
+    or moved after this reference during an edit.
+    -}
+    AResolvedAlias {-# UNPACK #-} !Int !Anchor !AValue
   deriving stock (Show, Eq, Generic)
   deriving anyclass (NFData)
 
@@ -253,10 +266,14 @@ data ADocument = ADocument
   {- ^ Comments before the document body (after any preceding
   @---@ marker).
   -}
+  , adOriginalSpan :: !(Maybe SrcSpan)
+  -- ^ Original document bytes, including framing and trailing trivia.
   , adTrailing :: ![Comment]
   {- ^ Comments after the body (before any @...@ marker or the
   next document).
   -}
+  , adDirectives :: ![Text]
+  -- ^ Original directive lines, retained when edited content is re-emitted.
   }
   deriving stock (Show, Eq, Generic)
   deriving anyclass (NFData)
@@ -273,7 +290,7 @@ newtype AStream = AStream {aStreamDocs :: Vector ADocument}
 -- ---------------------------------------------------------------------------
 
 freshAValue :: ABody -> AValue
-freshAValue b = AValue b emptyTrivia Nothing False
+freshAValue b = AValue b emptyTrivia Nothing Nothing "" (-1) False
 
 
 aNull :: AValue
@@ -284,7 +301,7 @@ aBool :: Bool -> AValue
 aBool b = freshAValue (ABool b)
 
 
-aInt :: Int64 -> AValue
+aInt :: Integer -> AValue
 aInt n = freshAValue (AInt n)
 
 
@@ -312,7 +329,7 @@ aSeq xs = freshAValue (ASeq (V.fromList xs) SeqBlock)
 aMap :: [(AValue, AValue)] -> AValue
 aMap kvs =
   freshAValue
-    (AMap (V.fromList [AMapEntry k v Nothing | (k, v) <- kvs]) MapBlock)
+    (AMap (V.fromList ((\(k, v) -> AMapEntry k v Nothing) <$> kvs)) MapBlock)
 
 
 aTagged :: Tag -> AValue -> AValue
@@ -344,10 +361,73 @@ markDirty v = v {avDirty = True}
 {-# INLINE markDirty #-}
 
 
+{- | Preserve references to definitions that still precede them. References to
+deleted or displaced definitions become independent copies of their targets;
+immutable identities keep legal anchor-name rebinding unambiguous.
+-}
+prepareForRendering :: AValue -> AValue
+prepareForRendering root
+  | not (hasAliases root) = root
+  | otherwise = evalState (go root) HM.empty
+  where
+    definitions = collect Nothing HM.empty root
+    hasAliases value = case avBody value of
+      AResolvedAlias _ _ _ -> True
+      ATagged _ inner -> hasAliases inner
+      AAnchored _ inner -> hasAliases inner
+      ASeq items _ -> V.any hasAliases items
+      AMap entries _ -> V.any (\entry -> hasAliases (amKey entry) || hasAliases (amValue entry)) entries
+      _ -> False
+    collect outerTag found value = case avBody value of
+      AAnchored _ inner ->
+        let target = maybe inner (`aTagged` inner) outerTag
+            updated = if avAnchorId value < 0 then found else HM.insert (avAnchorId value) target found
+        in collect Nothing updated inner
+      ATagged tag inner -> collect (Just tag) found inner
+      ASeq items _ -> V.foldl' (collect Nothing) found items
+      AMap entries _ -> V.foldl' (\acc entry -> collect Nothing (collect Nothing acc (amKey entry)) (amValue entry)) found entries
+      _ -> found
+    go :: AValue -> State (HM.HashMap Text Int) AValue
+    go value = case avBody value of
+      AResolvedAlias identity anchor snapshot -> do
+        active <- get
+        if HM.lookup (unAnchor anchor) active == Just identity
+          then pure value
+          else pure (materialize HS.empty (HM.lookupDefault snapshot identity definitions)) {avTrivia = avTrivia value}
+      AAnchored anchor inner -> do
+        modify' (HM.insert (unAnchor anchor) (avAnchorId value))
+        updated <- go inner
+        pure value {avBody = AAnchored anchor updated, avDirty = avDirty value || avDirty updated}
+      ATagged tag inner -> do
+        updated <- go inner
+        pure value {avBody = ATagged tag updated, avDirty = avDirty value || avDirty updated}
+      ASeq items style -> do
+        updated <- V.mapM go items
+        pure value {avBody = ASeq updated style, avDirty = avDirty value || V.any avDirty updated}
+      AMap entries style -> do
+        updated <- V.mapM (\entry -> do key <- go (amKey entry); item <- go (amValue entry); pure entry {amKey = key, amValue = item}) entries
+        pure value {avBody = AMap updated style, avDirty = avDirty value || V.any (\entry -> avDirty (amKey entry) || avDirty (amValue entry)) updated}
+      _ -> pure value
+    materialize visited value = case avBody value of
+      AAnchored _ inner -> materialize visited inner
+      AResolvedAlias identity _ snapshot ->
+        let target = if HS.member identity visited then snapshot else HM.lookupDefault snapshot identity definitions
+        in materialize (HS.insert identity visited) target
+      body ->
+        value
+          { avSpan = Nothing
+          , avDirty = True
+          , avAnchorId = -1
+          , avBody = case body of
+              ATagged tag inner -> ATagged tag (materialize visited inner)
+              ASeq items style -> ASeq (materialize visited <$> items) style
+              AMap entries style -> AMap ((\entry -> entry {amKey = materialize visited (amKey entry), amValue = materialize visited (amValue entry)}) <$> entries) style
+              other -> other
+          }
+
+
 {- | Project an 'AValue' down to the unannotated 'YAML.Value.Value'
-representation. Aliases project to 'YAML.Value.YString' bearing
-the alias name; resolve them via the parser's anchor map if you
-need full alias semantics.
+representation. Explicit aliases project to 'YAML.Value.YAlias'.
 -}
 astripAnnotations :: AValue -> YV.Value
 astripAnnotations a = case avBody a of
@@ -367,7 +447,8 @@ astripAnnotations a = case avBody a of
       )
   ATagged tg v -> YV.YTagged tg (astripAnnotations v)
   AAnchored an v -> YV.YAnchored an (astripAnnotations v)
-  AAlias (Anchor n) -> YV.YString (T.pack "*" <> n)
+  AAlias anchor -> YV.YAlias anchor
+  AResolvedAlias _ anchor _ -> YV.YAlias anchor
 
 
 -- ---------------------------------------------------------------------------
@@ -389,20 +470,74 @@ it. If the key isn't present the original mapping is returned.
 updateKey :: Text -> (AValue -> Maybe AValue) -> AValue -> AValue
 updateKey k f m = case avBody m of
   AMap entries style ->
-    let (changed, entries') = updateEntries entries
-    in if changed
-         then markDirty m {avBody = AMap entries' style}
-         else m
+    if V.any (matchesKey k . amKey) entries
+      then markDirty m {avBody = AMap (V.mapMaybe updateEntry entries) style}
+      else m
+  ATagged tag inner -> modifyInner (ATagged tag) (updateKey k f) m inner
+  AAnchored anchor inner -> modifyInner (AAnchored anchor) (updateKey k f) m inner
+  AResolvedAlias _ _ target -> editAlias (updateKey k f) m target
   _ -> m
   where
-    updateEntries es = V.foldr go (False, V.empty) es
-      where
-        go entry (cAcc, accVec) = case avBody (amKey entry) of
-          AString kt _ | kt == k ->
-            case f (amValue entry) of
-              Just v' -> (True, V.cons (entry {amValue = markDirty v'}) accVec)
-              Nothing -> (True, accVec) -- delete
-          _ -> (cAcc, V.cons entry accVec)
+    updateEntry entry
+      | matchesKey k (amKey entry) = (\value -> entry {amValue = preserveStyle (amValue entry) value}) <$> f (amValue entry)
+      | otherwise = Just entry
+
+
+matchesKey :: Text -> AValue -> Bool
+matchesKey key value = case avBody value of
+  AString text _ -> text == key
+  ATagged _ inner -> matchesKey key inner
+  AAnchored _ inner -> matchesKey key inner
+  AResolvedAlias _ _ target -> matchesKey key target
+  _ -> False
+
+
+modifyInner :: (AValue -> ABody) -> (AValue -> AValue) -> AValue -> AValue -> AValue
+modifyInner wrap f outer inner =
+  let changed = f inner
+  in if avDirty changed then markDirty outer {avBody = wrap changed} else outer
+
+
+editAlias :: (AValue -> AValue) -> AValue -> AValue -> AValue
+editAlias change reference target =
+  let updated = change target
+  in if avDirty updated then markDirty updated {avTrivia = avTrivia reference, avSpan = Nothing} else reference
+
+
+preserveStyle :: AValue -> AValue -> AValue
+preserveStyle old new =
+  let styled = case (avBody old, avBody new) of
+        (AString _ style, AString text SSPlain) -> new {avBody = AString text style}
+        (AAnchored anchor inner, _) | not (hasAnchor new) -> (aAnchored anchor (preserveStyle inner (detachSelf (avAnchorId old) new))) {avAnchorId = avAnchorId old}
+        (AAnchored anchor _, _) -> inheritIdentity anchor (avAnchorId old) new
+        (ATagged _ inner, _) -> preserveStyle inner new
+        _ -> new
+  in markDirty styled {avTrivia = avTrivia old, avTrailingText = avTrailingText old}
+  where
+    hasAnchor value = case avBody value of
+      AAnchored _ _ -> True
+      ATagged _ inner -> hasAnchor inner
+      _ -> False
+    inheritIdentity anchor identity value = case avBody value of
+      AAnchored name _ | name == anchor -> value {avAnchorId = identity}
+      ATagged tag inner -> value {avBody = ATagged tag (inheritIdentity anchor identity inner)}
+      _ -> value
+    detachSelf identity value
+      | not (dependsOn identity value) = value
+      | otherwise = case avBody value of
+          AResolvedAlias _ _ target -> detachSelf identity target
+          ATagged tag inner -> markDirty value {avBody = ATagged tag (detachSelf identity inner)}
+          AAnchored anchor inner -> markDirty value {avBody = AAnchored anchor (detachSelf identity inner)}
+          ASeq items style -> markDirty value {avBody = ASeq (detachSelf identity <$> items) style}
+          AMap entries style -> markDirty value {avBody = AMap ((\entry -> entry {amKey = detachSelf identity (amKey entry), amValue = detachSelf identity (amValue entry)}) <$> entries) style}
+          _ -> value
+    dependsOn identity value = case avBody value of
+      AResolvedAlias original _ target -> original == identity || dependsOn identity target
+      ATagged _ inner -> dependsOn identity inner
+      AAnchored _ inner -> dependsOn identity inner
+      ASeq items _ -> V.any (dependsOn identity) items
+      AMap entries _ -> V.any (\entry -> dependsOn identity (amKey entry) || dependsOn identity (amValue entry)) entries
+      _ -> False
 
 
 -- | Delete a key from a mapping. No-op if absent.
@@ -417,7 +552,7 @@ already exists the existing value is left in place; use
 appendKey :: Text -> AValue -> AValue -> AValue
 appendKey k v m = case avBody m of
   AMap entries style
-    | any (sameKey k) (V.toList entries) -> m
+    | V.any (matchesKey k . amKey) entries -> m
     | otherwise ->
         let entry =
               AMapEntry
@@ -428,11 +563,10 @@ appendKey k v m = case avBody m of
              m
                { avBody = AMap (V.snoc entries entry) style
                }
+  ATagged tag inner -> modifyInner (ATagged tag) (appendKey k v) m inner
+  AAnchored anchor inner -> modifyInner (AAnchored anchor) (appendKey k v) m inner
+  AResolvedAlias _ _ target -> editAlias (appendKey k v) m target
   _ -> m
-  where
-    sameKey kk e = case avBody (amKey e) of
-      AString s _ -> s == kk
-      _ -> False
 
 
 {- | Walk a path of mapping keys and apply 'setKey' at the leaf.
@@ -455,8 +589,11 @@ setIndex i x s = case avBody s of
     , i < V.length items ->
         markDirty
           s
-            { avBody = ASeq (items V.// [(i, markDirty x)]) style
+            { avBody = ASeq (items V.// [(i, preserveStyle (items V.! i) x)]) style
             }
+  ATagged tag inner -> modifyInner (ATagged tag) (setIndex i x) s inner
+  AAnchored anchor inner -> modifyInner (AAnchored anchor) (setIndex i x) s inner
+  AResolvedAlias _ _ target -> editAlias (setIndex i x) s target
   _ -> s
 
 
@@ -468,6 +605,9 @@ appendItem x s = case avBody s of
       s
         { avBody = ASeq (V.snoc items (markDirty x)) style
         }
+  ATagged tag inner -> modifyInner (ATagged tag) (appendItem x) s inner
+  AAnchored anchor inner -> modifyInner (AAnchored anchor) (appendItem x) s inner
+  AResolvedAlias _ _ target -> editAlias (appendItem x) s target
   _ -> s
 
 
@@ -479,4 +619,7 @@ deleteIndex i s = case avBody s of
     , i < V.length items ->
         let items' = V.ifilter (\j _ -> j /= i) items
         in markDirty s {avBody = ASeq items' style}
+  ATagged tag inner -> modifyInner (ATagged tag) (deleteIndex i) s inner
+  AAnchored anchor inner -> modifyInner (AAnchored anchor) (deleteIndex i) s inner
+  AResolvedAlias _ _ target -> editAlias (deleteIndex i) s target
   _ -> s

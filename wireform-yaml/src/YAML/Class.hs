@@ -15,15 +15,18 @@ module YAML.Class (
   decodeYAMLBS,
   GToYAML (..),
   GFromYAML (..),
+  validateFieldNames,
 ) where
 
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BSL
 import Data.Functor.Compose (Compose (..))
 import Data.Functor.Const (Const (..))
 import Data.Functor.Identity (Identity (..))
 import Data.Functor.Product qualified as FProduct
 import Data.Functor.Sum qualified as FSum
+import Data.HashSet qualified as HS
 import Data.Int (Int16, Int32, Int64, Int8)
 import Data.IntMap.Strict (IntMap)
 import Data.IntMap.Strict qualified as IntMap
@@ -45,10 +48,14 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TEnc
 import Data.Text.Lazy qualified as TL
+import Data.Text.Lazy.Builder qualified as TB
+import Data.Text.Lazy.Builder.Int qualified as BI
+import Data.Text.Lazy.Builder.RealFloat qualified as BF
 import Data.Vector (Vector)
 import Data.Vector qualified as V
 import Data.Version (Version, makeVersion, versionBranch)
 import Data.Word (Word16, Word32, Word64, Word8)
+import GHC.Float (double2Float, float2Double)
 import GHC.Generics
 import Numeric.Natural (Natural)
 import YAML.Decode qualified as YD
@@ -95,7 +102,7 @@ decodeYAMLBS b = YD.decodeBS b >>= fromYAML
 instance ToYAML YV.Value where toYAML = id
 
 
-instance FromYAML YV.Value where fromYAML = Right . YV.unwrap
+instance FromYAML YV.Value where fromYAML = Right
 
 
 instance ToYAML Text where
@@ -105,8 +112,8 @@ instance ToYAML Text where
 instance FromYAML Text where
   fromYAML v = case YV.unwrap v of
     YV.YString t -> Right t
-    YV.YInt n -> Right (T.pack (show n))
-    YV.YFloat d -> Right (T.pack (show d))
+    YV.YInt n -> Right (TL.toStrict (TB.toLazyText (BI.decimal n)))
+    YV.YFloat d -> Right (TL.toStrict (TB.toLazyText (BF.realFloat d)))
     YV.YBool b -> Right (if b then "true" else "false")
     YV.YNull -> Right T.empty
     _ -> Left "FromYAML Text: expected scalar"
@@ -125,10 +132,11 @@ intToYAML :: Integral a => a -> YV.Value
 intToYAML = YV.YInt . fromIntegral
 
 
-intFrom :: Num a => YV.Value -> Either String a
+intFrom :: forall a. (Integral a, Bounded a) => YV.Value -> Either String a
 intFrom v = case YV.unwrap v of
-  YV.YInt n -> Right (fromIntegral n)
-  YV.YFloat d -> Right (fromIntegral (truncate d :: Int64))
+  YV.YInt n
+    | n >= toInteger (minBound :: a), n <= toInteger (maxBound :: a) -> Right (fromInteger n)
+    | otherwise -> Left "FromYAML Int: integer out of range"
   _ -> Left "FromYAML Int: expected YInt"
 
 
@@ -192,12 +200,12 @@ instance ToYAML Word64 where toYAML = intToYAML
 instance FromYAML Word64 where fromYAML = intFrom
 
 
-instance ToYAML Integer where toYAML = YV.YInt . fromInteger
+instance ToYAML Integer where toYAML = YV.YInt
 
 
 instance FromYAML Integer where
   fromYAML v = case YV.unwrap v of
-    YV.YInt n -> Right (fromIntegral n)
+    YV.YInt n -> Right n
     _ -> Left "FromYAML Integer: expected YInt"
 
 
@@ -220,12 +228,12 @@ instance FromYAML Double where
     _ -> Left "FromYAML Double: expected YFloat"
 
 
-instance ToYAML Float where toYAML = YV.YFloat . realToFrac
+instance ToYAML Float where toYAML = YV.YFloat . float2Double
 
 
 instance FromYAML Float where
   fromYAML v = case YV.unwrap v of
-    YV.YFloat d -> Right (realToFrac d)
+    YV.YFloat d -> Right (double2Float d)
     YV.YInt n -> Right (fromIntegral n)
     _ -> Left "FromYAML Float: expected YFloat"
 
@@ -248,21 +256,24 @@ instance FromYAML TL.Text where
   fromYAML v = TL.fromStrict <$> fromYAML v
 
 
-{- | YAML has no native binary type; bytes are encoded as their UTF-8
-decoding when valid, otherwise rejected on decode.
+{- | Valid UTF-8 bytes use a text scalar. Arbitrary binary data uses a sequence
+of byte-valued integers, so this pure instance is total and round-trippable.
 -}
 instance ToYAML ByteString where
-  toYAML = YV.YString . TEnc.decodeUtf8
+  toYAML bytes = case TEnc.decodeUtf8' bytes of
+    Right text -> YV.YString text
+    Left _ -> YV.YSeq (V.generate (BS.length bytes) (YV.YInt . toInteger . BS.index bytes))
 
 
 instance FromYAML ByteString where
   fromYAML v = case YV.unwrap v of
     YV.YString t -> Right (TEnc.encodeUtf8 t)
-    _ -> Left "FromYAML ByteString: expected YString"
+    YV.YSeq bytes -> BS.pack . V.toList <$> V.mapM (intFrom @Word8) bytes
+    _ -> Left "FromYAML ByteString: expected text or a byte sequence"
 
 
 instance ToYAML BSL.ByteString where
-  toYAML = YV.YString . TEnc.decodeUtf8 . BSL.toStrict
+  toYAML = toYAML . BSL.toStrict
 
 
 instance FromYAML BSL.ByteString where
@@ -366,11 +377,10 @@ instance ToYAML v => ToYAML (Map Text v) where
 instance FromYAML v => FromYAML (Map Text v) where
   fromYAML v = case YV.unwrap v of
     YV.YMap kvs -> do
-      pairs <- traverse decodePair (V.toList kvs)
-      Right (Map.fromList pairs)
+      V.foldM decodePair Map.empty kvs
       where
-        decodePair (k, val) = case YV.unwrap k of
-          YV.YString s -> (,) s <$> fromYAML val
+        decodePair values (k, val) = case YV.unwrap k of
+          YV.YString s -> Map.alterF (\case Nothing -> Just <$> fromYAML val; Just _ -> Left "FromYAML Map: duplicate text key after unwrapping tags") s values
           _ -> Left "FromYAML (Map Text v): non-string key"
     _ -> Left "FromYAML (Map Text v): expected YMap"
 
@@ -384,11 +394,12 @@ instance ToYAML v => ToYAML (IntMap v) where
 instance FromYAML v => FromYAML (IntMap v) where
   fromYAML v = case YV.unwrap v of
     YV.YMap kvs -> do
-      pairs <- traverse decodePair (V.toList kvs)
-      Right (IntMap.fromList pairs)
+      V.foldM decodePair IntMap.empty kvs
       where
-        decodePair (k, val) = case YV.unwrap k of
-          YV.YInt n -> (,) (fromIntegral n) <$> fromYAML val
+        decodePair values (k, val) = case YV.unwrap k of
+          YV.YInt _ -> do
+            key <- fromYAML k :: Either String Int
+            IntMap.alterF (\case Nothing -> Just <$> fromYAML val; Just _ -> Left "FromYAML IntMap: duplicate integer key") key values
           _ -> Left "FromYAML IntMap: non-integer key"
     _ -> Left "FromYAML IntMap: expected YMap"
 
@@ -648,10 +659,24 @@ instance GToYAMLFields f => GToYAML (M1 C c f) where
 
 instance GFromYAMLFields f => GFromYAML (M1 C c f) where
   gFromYAML v = case YV.unwrap v of
-    YV.YMap kvs ->
+    YV.YMap kvs -> do
+      validateFieldNames kvs
       let lkup nm = lookupField nm kvs
-      in M1 <$> gFromYAMLFields lkup
+      M1 <$> gFromYAMLFields lkup
     _ -> Left "GFromYAML: expected YMap for record type"
+
+
+{- | Tags can distinguish YAML mapping keys whose native Text field names are
+equal. Reject that ambiguity before a record decoder chooses a field.
+-}
+validateFieldNames :: Vector (YV.Value, YV.Value) -> Either String ()
+validateFieldNames fields = () <$ V.foldM add HS.empty fields
+  where
+    add names (key, _) = case YV.unwrap key of
+      YV.YString name
+        | HS.member name names -> Left "FromYAML: duplicate field name after unwrapping tags"
+        | otherwise -> Right (HS.insert name names)
+      _ -> Right names
 
 
 lookupField :: Text -> Vector (YV.Value, YV.Value) -> Maybe YV.Value

@@ -24,8 +24,9 @@ module YAML.Derive (
   deriveFromYAML,
 ) where
 
-import Data.Coerce (coerce)
+import Data.Coerce (Coercible, coerce)
 import Data.Foldable (foldlM)
+import Data.List (nub)
 import Data.Text qualified as Text
 import Data.Vector qualified as V
 import Language.Haskell.TH
@@ -47,12 +48,13 @@ deriveYAML nm = (++) <$> deriveToYAML nm <*> deriveFromYAML nm
 deriveToYAML :: Name -> Q [Dec]
 deriveToYAML nm = do
   ti <- reifyTypeInfo nm
+  context <- instanceContext ''Y.ToYAML ti
   body <- toYAMLBody ti
   let typ = applyTypeArgs (ConT (typeInfoName ti)) (typeInfoVarTypes ti)
       decl =
         InstanceD
           Nothing
-          []
+          context
           (AppT (ConT ''Y.ToYAML) typ)
           [FunD 'Y.toYAML [Clause [] (NormalB body) []]]
   pure [decl]
@@ -61,15 +63,53 @@ deriveToYAML nm = do
 deriveFromYAML :: Name -> Q [Dec]
 deriveFromYAML nm = do
   ti <- reifyTypeInfo nm
+  context <- instanceContext ''Y.FromYAML ti
   body <- fromYAMLBody ti
   let typ = applyTypeArgs (ConT (typeInfoName ti)) (typeInfoVarTypes ti)
       decl =
         InstanceD
           Nothing
-          []
+          context
           (AppT (ConT ''Y.FromYAML) typ)
           [FunD 'Y.fromYAML [Clause [] (NormalB body) []]]
   pure [decl]
+
+
+-- Constrain the variables used by serialized fields. An applied type variable
+-- (f a) needs a constraint on the application, rather than the higher-kinded f.
+instanceContext :: Name -> TypeInfo -> Q Cxt
+instanceContext cls ti = do
+  constraints <- case typeInfoShape ti of
+    TypeShapeNewtype constructor -> pure (concatMap ordinary (conInfoFields constructor))
+    TypeShapeRecord constructor -> concat <$> traverse fieldConstraints (conInfoFields constructor)
+    TypeShapeEnum _ -> pure []
+    TypeShapeSum constructors -> concat <$> traverse (\constructor -> if conInfoIsRecord constructor then concat <$> traverse fieldConstraints (conInfoFields constructor) else pure (concatMap ordinary (conInfoFields constructor))) constructors
+  pure (nub (typeInfoContext ti <> constraints))
+  where
+    ordinary = (AppT (ConT cls) <$>) . variables . fieldInfoType
+    fieldConstraints field@(FieldInfo selector typ) = case selector of
+      Nothing -> pure (ordinary field)
+      Just name -> do
+        modifier <- reifyModifierInfoFor backendYAML name
+        pure $
+          if miSkip modifier
+            then []
+            else case miCoerce modifier of
+              Nothing -> ordinary field
+              Just target
+                | null (variables typ) -> []
+                | otherwise ->
+                    let wireType = if miRequired modifier == Just False then AppT (ConT ''Maybe) (ConT target) else ConT target
+                    in [AppT (AppT (ConT ''Coercible) typ) wireType]
+    variables typ
+      | variableHead typ = [typ]
+    variables (AppT left right) = variables left <> variables right
+    variables (SigT typ _) = variables typ
+    variables (ParensT typ) = variables typ
+    variables _ = []
+    variableHead (VarT _) = True
+    variableHead (AppT typ _) = variableHead typ
+    variableHead _ = False
 
 
 -- ---------------------------------------------------------------------------
@@ -120,7 +160,7 @@ toYAMLField varExp (FieldInfo mSel _) = do
       let getter = appE (varE selName) varExp
           encoded = case miCoerce mi of
             Nothing -> [|Y.toYAML $getter|]
-            Just _ -> [|Y.toYAML (coerce $getter)|]
+            Just target -> [|Y.toYAML $(sigE [|coerce $getter|] (pure (if miRequired mi == Just False then AppT (ConT ''Maybe) (ConT target) else ConT target)))|]
       pair <- [|(YV.YString $(pure keyExp), $encoded)|]
       pure [pair]
 
@@ -150,7 +190,21 @@ toYAMLSum cs = do
 
 
 sumCtorToYAML :: ConInfo -> Q Match
-sumCtorToYAML c = do
+sumCtorToYAML c
+  | conInfoIsRecord c
+  , not (null (conInfoFields c)) = do
+      modifier <- reifyModifierInfoFor backendYAML (conInfoName c)
+      tag <- renderWireKey modifier (Text.pack (nameBase (conInfoName c)))
+      record <- newName "record"
+      pairs <- recordToYAMLPairs (varE record) c
+      body <- [|YV.YMap (V.fromList [(YV.YString "tag", YV.YString $(pure tag)), (YV.YString "contents", YV.YMap (V.fromList $(pure pairs)))])|]
+      let pattern_ = AsP record (ConP (conInfoName c) [] (replicate (length (conInfoFields c)) WildP))
+      pure (Match pattern_ (NormalB body) [])
+  | otherwise = sumCtorToYAMLPositional c
+
+
+sumCtorToYAMLPositional :: ConInfo -> Q Match
+sumCtorToYAMLPositional c = do
   mi <- reifyModifierInfoFor backendYAML (conInfoName c)
   keyExp <- renderWireKey mi (Text.pack (nameBase (conInfoName c)))
   fieldNames <- mapM (\_ -> newName "f") (conInfoFields c)
@@ -221,7 +275,7 @@ fromYAMLRecord c = do
         (pure unwrapped)
         [ match
             (conP 'YV.YMap [varP kvs])
-            (normalB (pure bodyE))
+            (normalB [|Y.validateFieldNames $(varE kvs) >> $(pure bodyE)|])
             []
         , match
             wildP
@@ -269,27 +323,20 @@ fieldParser kvs (FieldInfo mSel _) = do
       let selBase = Text.pack (nameBase selName)
       keyExp <- renderWireKey mi selBase
       let isOptional = miRequired mi == Just False
-      base <-
-        if isOptional
-          then
-            [|
-              case lookupYAMLField $(pure keyExp) $(varE kvs) of
-                Nothing -> Right Nothing
-                Just v -> fmap Just (Y.fromYAML v)
-              |]
-          else
-            [|
-              case lookupYAMLField $(pure keyExp) $(varE kvs) of
-                Nothing ->
-                  Left
-                    ( "YAML.Derive: missing field "
-                        ++ Text.unpack $(pure keyExp)
-                    )
-                Just v -> Y.fromYAML v
-              |]
-      case miCoerce mi of
-        Nothing -> pure base
-        Just _ -> [|fmap coerce $(pure base)|]
+          targetType target = if isOptional then AppT (ConT ''Maybe) (ConT target) else ConT target
+      missing <- case miDefaults mi of
+        Just def -> [|Right $(varE def)|]
+        Nothing | isOptional -> [|Right Nothing|]
+        Nothing -> [|Left ("YAML.Derive: missing field " ++ Text.unpack $(pure keyExp))|]
+      input <- newName "input"
+      present <- case miCoerce mi of
+        Nothing -> [|Y.fromYAML $(varE input)|]
+        Just target -> [|coerce <$> $(sigE [|Y.fromYAML $(varE input)|] (pure (AppT (AppT (ConT ''Either) (ConT ''String)) (targetType target))))|]
+      [|
+        case lookupYAMLField $(pure keyExp) $(varE kvs) of
+          Nothing -> $(pure missing)
+          Just $(varP input) -> $(pure present)
+        |]
 
 
 -- | Linear scan for a key in a 'YV.YMap'.
@@ -379,6 +426,7 @@ fromYAMLSum cs = do
             ( normalB
                 [|
                   do
+                    Y.validateFieldNames $(varE kvs)
                     $(varP tagVar) <-
                       case lookupYAMLField (Text.pack "tag") $(varE kvs) of
                         Just t -> case YV.unwrap t of
@@ -404,33 +452,52 @@ sumDispatch tagVar cVar c = do
   mi <- reifyModifierInfoFor backendYAML (conInfoName c)
   keyExp <- renderWireKey mi (Text.pack (nameBase (conInfoName c)))
   let guardExp = InfixE (Just (VarE tagVar)) (VarE '(==)) (Just keyExp)
-  body <- case conInfoFields c of
-    [] ->
-      let conNameStr = nameBase (conInfoName c)
-      in [|
-           case $(varE cVar) of
-             Nothing -> Right $(conE (conInfoName c))
-             Just _ ->
-               Left
-                 ( "YAML.Derive: "
-                     ++ conNameStr
-                     ++ " is nullary; unexpected 'contents'"
-                 )
-           |]
-    [_one] ->
-      let conNameStr = nameBase (conInfoName c)
-      in [|
-           case $(varE cVar) of
-             Just inner -> fmap $(conE (conInfoName c)) (Y.fromYAML inner)
-             Nothing ->
-               Left
-                 ( "YAML.Derive: "
-                     ++ conNameStr
-                     ++ " missing 'contents'"
-                 )
-           |]
-    many -> sumNAry cVar (conInfoName c) (length many)
+  body <-
+    if conInfoIsRecord c && not (null (conInfoFields c))
+      then recordSumParser cVar c
+      else case conInfoFields c of
+        [] ->
+          let conNameStr = nameBase (conInfoName c)
+          in [|
+               case $(varE cVar) of
+                 Nothing -> Right $(conE (conInfoName c))
+                 Just _ ->
+                   Left
+                     ( "YAML.Derive: "
+                         ++ conNameStr
+                         ++ " is nullary; unexpected 'contents'"
+                     )
+               |]
+        [_one] ->
+          let conNameStr = nameBase (conInfoName c)
+          in [|
+               case $(varE cVar) of
+                 Just inner -> fmap $(conE (conInfoName c)) (Y.fromYAML inner)
+                 Nothing ->
+                   Left
+                     ( "YAML.Derive: "
+                         ++ conNameStr
+                         ++ " missing 'contents'"
+                     )
+               |]
+        many -> sumNAry cVar (conInfoName c) (length many)
   pure (NormalG guardExp, body)
+
+
+recordSumParser :: Name -> ConInfo -> Q Exp
+recordSumParser contents constructor = do
+  fields <- newName "fields"
+  parser <- recordParser fields constructor
+  [|
+    do
+      $(varP fields) <- case $(varE contents) of
+        Nothing -> Right V.empty
+        Just inner -> case YV.unwrap inner of
+          YV.YMap entries -> Right entries
+          _ -> Left "YAML.Derive: record constructor contents must be a mapping"
+      Y.validateFieldNames $(varE fields)
+      $(pure parser)
+    |]
 
 
 sumNAry :: Name -> Name -> Int -> Q Exp

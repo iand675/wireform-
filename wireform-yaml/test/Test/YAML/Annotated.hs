@@ -185,7 +185,7 @@ modifyPreservesComments =
 -- | The pretty-printer wraps long flow collections.
 prettyMaxLineWidth :: Spec
 prettyMaxLineWidth = it "max line width wraps long flows" $ do
-  let manyItems = YSeq (V.fromList [YInt i | i <- [1 .. 30]])
+  let manyItems = YSeq (V.fromList (YInt <$> [1 .. 30]))
       narrow = (P.compactOptions {P.roMaxLineWidth = 20})
       out = render narrow manyItems
   -- Should contain at least one newline inside the brackets

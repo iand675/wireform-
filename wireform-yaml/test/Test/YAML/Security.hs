@@ -75,9 +75,7 @@ deepBlockRefused = it "deep block nesting is refused" $ do
       src =
         T.intercalate
           "\n"
-          [ T.replicate (2 * i) " " <> "a:"
-          | i <- [0 .. depth - 1]
-          ]
+          ((\i -> T.replicate (2 * i) " " <> "a:") <$> [0 .. depth - 1])
           <> "\n"
           <> T.replicate (2 * depth) " "
           <> "leaf"
@@ -149,9 +147,7 @@ normalNestingAllowed = it "moderate nesting is allowed" $ do
       src =
         T.intercalate
           "\n"
-          [ T.replicate (2 * i) " " <> "a:"
-          | i <- [0 .. depth - 1]
-          ]
+          ((\i -> T.replicate (2 * i) " " <> "a:") <$> [0 .. depth - 1])
           <> "\n"
           <> T.replicate (2 * depth) " "
           <> "leaf"

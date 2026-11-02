@@ -368,6 +368,14 @@
           ]
         },
         {
+          "path": "wireform-yaml/bench-results/summary/yaml-extra-vs-libyaml.json",
+          "map": [
+            "wireform-yaml|escaped decode=decode/escaped", "yaml (libyaml)|escaped decode=decode-libyaml/escaped",
+            "wireform-yaml|record decode=decode-record/wireform-yaml", "yaml (libyaml)|record decode=decode-record/libyaml",
+            "wireform-yaml|record encode=encode-record/wireform-yaml", "yaml (libyaml)|record encode=encode-record/libyaml"
+          ]
+        },
+        {
           "path": "wireform-yaml/bench-results/summary/yaml-decode-vs-hsyaml.json",
           "map": [
             "wireform-yaml|tiny=decode/tiny", "HsYAML|tiny=decode-hsyaml/tiny",

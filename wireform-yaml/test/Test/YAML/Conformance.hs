@@ -23,14 +23,15 @@ external suite.
 -}
 module Test.YAML.Conformance (tests) where
 
-import Control.Exception (SomeException, try)
+import Control.DeepSeq (force)
+import Control.Exception (SomeException, evaluate, try)
 import Control.Monad (filterM)
 import Data.Aeson qualified as A
-import Data.Aeson.Key qualified as AK
-import Data.Aeson.KeyMap qualified as AKM
+import Data.Aeson.Decoding (toEitherValue)
+import Data.Aeson.Decoding.ByteString.Lazy (lbsToTokens)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BSL
-import Data.Scientific qualified as Sci
+import Data.Foldable (traverse_)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Vector qualified as V
@@ -40,10 +41,13 @@ import System.Directory (
   listDirectory,
  )
 import System.Environment (lookupEnv)
-import System.FilePath ((</>))
+import System.FilePath (takeFileName, (</>))
 import Test.Syd
 import YAML.Decode qualified as YD
+import YAML.Decode.Annotated qualified as YA
+import YAML.Encode qualified as YE
 import YAML.JSON qualified as YJ
+import YAML.Pretty qualified as YP
 import YAML.Value qualified as YV
 
 
@@ -166,13 +170,13 @@ externalSuite = do
     Just dir -> do
       exists <- doesDirectoryExist dir
       if not exists
-        then pure (describe "yaml-test-suite (path missing)" $ sequence_ [])
+        then pure (it "YAML_TEST_SUITE must exist" (expectationFailure ("missing conformance path: " ++ dir) :: IO ()))
         else do
           cases <- discoverCases dir
           pure
             ( describe
                 ("yaml-test-suite (" ++ show (length cases) ++ " cases)")
-                (mapM_ (mkCase dir) cases)
+                (if null cases then it "suite contains cases" (expectationFailure "no in.yaml cases found; use yaml-test-suite data branch" :: IO ()) else mapM_ (mkCase dir) cases)
             )
 
 
@@ -213,23 +217,59 @@ mkCase _root caseDir = it caseDir $ do
       jsonPath = caseDir </> "in.json"
   isErr <- doesFileExist errPath
   bytes <- BS.readFile inPath
-  let txt = TE.decodeUtf8Lenient bytes
   res <-
-    try (pure $! YD.decodeStream txt)
+    try (evaluate (force (YD.decodeStreamBS bytes)))
       :: IO (Either SomeException (Either String YV.Stream))
   case (isErr, res) of
     (True, Right (Left _)) -> pure ()
     (True, Right (Right _)) -> expectationFailure "expected parse error, got success"
-    (True, Left _) -> pure ()
-    (False, Right (Right s)) -> compareToExpectedJSON jsonPath s
-    (False, Right (Left e)) -> expectationFailure $ "decode failed: " ++ e
+    (True, Left e) -> expectationFailure $ "exception instead of parse error: " ++ show e
+    (False, Right (Right s))
+      | takeFileName caseDir `elem` ["X38W", "2JQS"] -> expectationFailure "duplicate keys must fail composition"
+      | otherwise -> do
+          compareToExpectedJSON jsonPath s
+          checkEmittedForms bytes s
+    (False, Right (Left e))
+      | takeFileName caseDir `elem` ["X38W", "2JQS"] ->
+          -- Event-only fixtures with duplicate collection/null keys are valid
+          -- parser events, but cannot form a mapping value with unique keys.
+          e `shouldBe` "YAML: duplicate mapping key"
+      | otherwise -> expectationFailure $ "decode failed: " ++ e
     (False, Left e) -> expectationFailure $ "exception: " ++ show e
 
 
+-- Check every valid upstream value through each public renderer as well as the
+-- decoder. JSON alone cannot detect corruption of collection-valued keys.
+checkEmittedForms :: BS.ByteString -> YV.Stream -> IO ()
+checkEmittedForms bytes stream = do
+  traverse_
+    check
+    [ ("encode", YE.encodeStream stream)
+    , ("pretty", YP.renderStream YP.defaultOptions stream)
+    , ("compact", YP.renderStream YP.compactOptions stream)
+    ]
+  case TE.decodeUtf8' bytes of
+    Left _ -> pure ()
+    Right source -> case YA.decodeAnnotatedStream source of
+      Left err -> expectationFailure err
+      Right (annotated, original) -> check ("normalized annotations", YP.renderAnnotatedStream (YP.defaultOptions {YP.roPreserveOriginalText = False}) annotated (Just original))
+  where
+    expected = representation stream
+    check (label, text) = case YD.decodeStream text of
+      Left err -> expectationFailure (label <> ": " <> err <> "\n" <> T.unpack text)
+      Right result -> representation result `shouldBe` expected
+    representation = show . V.map (strip . YV.docBody) . YV.unStream
+    strip = \case
+      YV.YAnchored _ inner -> strip inner
+      YV.YTagged _ inner -> strip inner
+      YV.YSeq xs -> YV.YSeq (strip <$> xs)
+      YV.YMap entries -> YV.YMap ((\(k, v) -> (strip k, strip v)) <$> entries)
+      value -> value
+
+
 {- | When the case ships an @in.json@ companion, compare it against
-the JSON projection of our parse result. The YAML test suite uses
-a single-document JSON form for one-document streams, so we only
-compare that subset.
+the JSON projection of every parsed document. Numeric and string
+values stay distinct, and multi-document results are checked in full.
 -}
 compareToExpectedJSON :: FilePath -> YV.Stream -> IO ()
 compareToExpectedJSON jsonPath stream = do
@@ -238,46 +278,19 @@ compareToExpectedJSON jsonPath stream = do
     then pure ()
     else do
       raw <- BSL.readFile jsonPath
-      case A.eitherDecode raw of
-        Left _ -> pure () -- Some cases ship malformed JSON; ignore.
+      case decodeJSONStream raw of
+        Left err -> expectationFailure ("invalid expected JSON: " ++ err)
         Right expected ->
-          case V.toList (YV.unStream stream) of
-            [doc] -> do
-              let actual = YJ.yamlToJSON (YV.docBody doc)
-              if jsonEq actual expected
-                then pure ()
-                else actual `shouldBe` expected
-            _ -> pure () -- multi-doc streams have no @in.json@.
+          fmap (YJ.yamlToJSON . YV.docBody) (V.toList (YV.unStream stream)) `shouldBe` expected
 
 
-{- | Forgiving JSON equality: numeric scalars compare by parsed
-value (so @1.0@ vs @1@ is OK, and tiny float rounding doesn't
-trip us up).
--}
-jsonEq :: A.Value -> A.Value -> Bool
-jsonEq (A.Object oA) (A.Object oB)
-  | AKM.size oA /= AKM.size oB = False
-  | otherwise = all matchKey (AKM.toList oA)
+-- The upstream data branch stores one JSON value per YAML document, including
+-- pretty-printed and scalar values. Decode the whole stream, retaining types.
+decodeJSONStream :: BSL.ByteString -> Either String [A.Value]
+decodeJSONStream bytes
+  | BSL.null rest = Right []
+  | otherwise = do
+      (value, remaining) <- toEitherValue (lbsToTokens rest)
+      (value :) <$> decodeJSONStream remaining
   where
-    matchKey (k, va) = case AKM.lookup k oB of
-      Just vb -> jsonEq va vb
-      Nothing -> False
-jsonEq (A.Array xs) (A.Array ys)
-  | V.length xs /= V.length ys = False
-  | otherwise = all (uncurry jsonEq) (zip (V.toList xs) (V.toList ys))
-jsonEq (A.Number a) (A.Number b) = a == b
-jsonEq (A.Number a) (A.String s) =
-  case readsT s of
-    Just b -> Sci.toRealFloat a == (b :: Double)
-    Nothing -> False
-jsonEq (A.String s) (A.Number b) =
-  case readsT s of
-    Just a -> (a :: Double) == Sci.toRealFloat b
-    Nothing -> False
-jsonEq a b = a == b
-
-
-readsT :: T.Text -> Maybe Double
-readsT t = case reads (T.unpack t) :: [(Double, String)] of
-  [(d, "")] -> Just d
-  _ -> Nothing
+    rest = BSL.dropWhile (\c -> c == 32 || c == 9 || c == 10 || c == 13) bytes

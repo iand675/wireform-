@@ -5,8 +5,9 @@
 Renders a 'YAML.Value.Value' (or a 'Document' / 'Stream') to its
 block-style YAML representation, choosing flow style only for
 empty containers and as a fallback. The output is /round-trippable/:
-any 'Value' goes through 'encode' and back through
-'YAML.Decode.decode' to the same 'Value'.
+well-formed acyclic values with unique mapping keys retain their data through
+'encode' and 'YAML.Decode.decode'. Decoding expands alias references; the
+annotated surface retains their presentation identities for editing.
 
 The emitter follows the YAML 1.2 core schema (so plain scalars that
 happen to look like a bool / null / int / float are quoted to keep
@@ -17,25 +18,28 @@ module YAML.Encode (
   encodeBS,
   encodeDocument,
   encodeStream,
+  safePlain,
+  plainSyntaxSafe,
+  buildTag,
+  mustEscape,
+  explicitKey,
 ) where
 
 import Data.ByteString (ByteString)
 import Data.Char (isControl, isDigit, ord)
-import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.Lazy qualified as TL
 import Data.Text.Lazy.Builder (
   Builder,
-  fromString,
   fromText,
   singleton,
   toLazyText,
  )
 import Data.Text.Lazy.Builder.Int qualified as BI
+import Data.Text.Lazy.Builder.RealFloat qualified as BF
 import Data.Vector qualified as V
-import Numeric (showHex)
 import YAML.Value
 
 
@@ -58,7 +62,7 @@ encodeDocument = TL.toStrict . toLazyText . buildDoc
 
 encodeStream :: Stream -> Text
 encodeStream (Stream docs) =
-  TL.toStrict (toLazyText (V.foldl' (\acc d -> acc <> buildDoc d) mempty docs))
+  TL.toStrict (toLazyText (V.ifoldl' (\acc i d -> acc <> buildDoc (d {docDirectivesEnd = i > 0 || docDirectivesEnd d})) mempty docs))
 
 
 -- ---------------------------------------------------------------------------
@@ -74,7 +78,7 @@ buildDoc (Document directives explicitEnd body) =
 
 
 buildTopLevel :: Value -> Builder
-buildTopLevel v = case unwrap v of
+buildTopLevel v = case v of
   YMap kvs
     | V.null kvs -> fromText "{}\n"
     | otherwise -> buildBlockMap 0 kvs
@@ -96,8 +100,8 @@ buildBlockMap !ind kvs = V.foldl' step mempty kvs
 
 kvLine :: Int -> Value -> Value -> Builder
 kvLine !ind k v =
-  let !keyB = buildKey k
-      !inner = unwrap v
+  let !keyB = buildKey ind k
+      !inner = v
   in case inner of
        YMap kvs
          | V.null kvs -> keyB <> fromText ": {}\n"
@@ -119,7 +123,7 @@ buildBlockSeq !ind xs = V.foldl' step mempty xs
 
 seqLine :: Int -> Value -> Builder
 seqLine !ind v =
-  let !inner = unwrap v
+  let !inner = v
   in case inner of
        YMap kvs
          | V.null kvs -> fromText "- {}\n"
@@ -164,11 +168,24 @@ indent !n
 are folded through the flow-style emitter inside an explicit-key
 @?@ marker.
 -}
-buildKey :: Value -> Builder
-buildKey k = case unwrap k of
-  YMap _ -> fromText "? " <> buildFlow k
-  YSeq _ -> fromText "? " <> buildFlow k
-  _ -> buildScalar (unwrap k)
+buildKey :: Int -> Value -> Builder
+buildKey ind key
+  | explicitKey key = fromText "? " <> buildFlow key <> singleton '\n' <> indent ind
+  | otherwise = buildScalar key
+
+
+-- A conservative bound accounts for escape expansion as well as the 1024
+-- character limit on an implicit key. Complex keys use the unrestricted form.
+explicitKey :: Value -> Bool
+explicitKey = \case
+  YMap _ -> True
+  YSeq _ -> True
+  YTagged _ _ -> True
+  YAnchored _ _ -> True
+  YAlias _ -> True
+  YString text -> T.length text > 100
+  YInt number -> number >= 10 ^ (100 :: Int) || number <= negate (10 ^ (100 :: Int))
+  _ -> False
 
 
 -- ---------------------------------------------------------------------------
@@ -180,7 +197,7 @@ buildScalar = \case
   YNull -> fromText "null"
   YBool True -> fromText "true"
   YBool False -> fromText "false"
-  YInt n -> BI.decimal (toInteger (n :: Int64))
+  YInt n -> BI.decimal n
   YFloat d
     | isNaN d -> fromText ".nan"
     | isInfinite d && d > 0 -> fromText ".inf"
@@ -194,10 +211,7 @@ buildScalar = \case
 it is unambiguously a YAML float (i.e. always contains @.@ or @e@).
 -}
 renderFloat :: Double -> Builder
-renderFloat d =
-  let !s = T.pack (show d)
-      hasDot = T.any (\c -> c == '.' || c == 'e' || c == 'E') s
-  in if hasDot then fromText s else fromText s <> fromText ".0"
+renderFloat = BF.realFloat
 {-# INLINE renderFloat #-}
 
 
@@ -206,14 +220,33 @@ renderFloat d =
 -- ---------------------------------------------------------------------------
 
 buildFlow :: Value -> Builder
-buildFlow v = case unwrap v of
+buildFlow v = case v of
+  YTagged tag inner ->
+    buildTag tag
+      <> singleton ' '
+      <> buildFlow inner
+  YAnchored (Anchor name) inner -> singleton '&' <> fromText name <> singleton ' ' <> buildFlow inner
+  YAlias (Anchor name) -> singleton '*' <> fromText name
   YMap kvs ->
     singleton '{' <> commaSep (V.map kvFlow kvs) <> singleton '}'
   YSeq xs ->
     singleton '[' <> commaSep (V.map buildFlow xs) <> singleton ']'
   scalar -> buildScalar scalar
   where
-    kvFlow (k, val) = buildFlow k <> fromText ": " <> buildFlow val
+    kvFlow (k, val) = (if explicitKey k then fromText "? " else mempty) <> buildFlow k <> fromText ": " <> buildFlow val
+
+
+{- | Emit a resolved tag without accidentally introducing a named handle.
+Tags are URI spellings: percent escapes are retained as supplied.
+-}
+buildTag :: Tag -> Builder
+buildTag (Tag tag)
+  | tag == "!" = singleton '!'
+  | Just suffix <- T.stripPrefix "tag:yaml.org,2002:" tag, shorthandSafe suffix = fromText "!!" <> fromText suffix
+  | Just suffix <- T.stripPrefix "!" tag, shorthandSafe suffix = fromText tag
+  | otherwise = fromText "!<" <> fromText tag <> singleton '>'
+  where
+    shorthandSafe suffix = not (T.null suffix) && not (T.any (`T.elem` "!,[]{}") suffix)
 
 
 commaSep :: V.Vector Builder -> Builder
@@ -262,7 +295,7 @@ escapeDQ c = case c of
   '\f' -> fromText "\\f"
   '\x1B' -> fromText "\\e"
   _
-    | isControl c ->
+    | mustEscape c ->
         let cp = ord c
         in if cp <= 0xFF
              then fromText "\\x" <> hex 2 cp
@@ -274,12 +307,9 @@ escapeDQ c = case c of
 
 
 hex :: Int -> Int -> Builder
-hex pad n =
-  let s = showHex n ""
-      need = pad - length s
-  in if need > 0
-       then fromText (T.replicate need "0") <> fromString s
-       else fromString s
+hex width value =
+  let digits number | number < 16 = 1 | otherwise = 1 + digits (number `quot` 16)
+  in fromText (T.replicate (max 0 (width - digits value)) "0") <> BI.hexadecimal value
 
 
 singleQuoted :: Text -> Builder
@@ -297,14 +327,23 @@ singleQuoted t =
   confuse the block scanner.
 -}
 safePlain :: Text -> Bool
-safePlain t
+safePlain t = not (parsesAsScalar t) && plainSyntaxSafe t
+
+
+{- | Conservative syntax check shared with the pretty-printer. Schema-like
+words may be unquoted only when the caller deliberately permits coercion.
+-}
+plainSyntaxSafe :: Text -> Bool
+plainSyntaxSafe t
   | T.null t = False
-  | parsesAsScalar t = False
+  | t == "..." = False
   | startBad (T.head t) = False
   | endsWithSpace = False
   | T.any unsafePlainChar t = False
-  | T.any isControl t = False
+  | T.any mustEscape t = False
   | T.isInfixOf ": " t = False
+  | T.isInfixOf ":\t" t = False
+  | T.isSuffixOf ":" t = False
   | T.isInfixOf " #" t = False
   | otherwise = True
   where
@@ -356,6 +395,7 @@ string value so the round-trip is faithful.
 -}
 parsesAsScalar :: Text -> Bool
 parsesAsScalar t = case T.toLower t of
+  "<<" -> True
   "null" -> True
   "~" -> True
   "" -> True
@@ -418,4 +458,8 @@ needsDoubleQuote :: Text -> Bool
 needsDoubleQuote = T.any badForSingle
   where
     badForSingle c =
-      isControl c && c /= '\t'
+      mustEscape c && c /= '\t'
+
+
+mustEscape :: Char -> Bool
+mustEscape c = isControl c || c == '\xFEFF' || c == '\xFFFE' || c == '\xFFFF'

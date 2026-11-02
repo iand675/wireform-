@@ -6,7 +6,7 @@ dynamic value model, the typeclasses, and the deriver — in one go.
 @
 import YAML
 
-let bs = encode (TextString "hello")
+let bs = encode (YString "hello")
 case decode bs of
   Right val -> pure val
   Left  err -> fail err
@@ -31,7 +31,7 @@ module YAML (
   -- * Typeclass-based codec + deriving
   module YAML.Class,
   module YAML.Derive,
-  ) where
+) where
 
 import YAML.Class
 import YAML.Decode
@@ -39,3 +39,6 @@ import YAML.Derive
 import YAML.Encode
 import YAML.Encoding
 import YAML.Value
+
+
+-- Keep optional JSON and presentation APIs in their dedicated modules.

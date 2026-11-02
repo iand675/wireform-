@@ -47,9 +47,15 @@ library
     YAML.JSON
     YAML.Pretty
     YAML.Value
+  other-modules:
+    YAML.Internal
+    YAML.Decode.Flow
   build-depends:
     base >= 4.20 && < 5,
     wireform-derive,
+    mtl >= 2.2 && < 2.4,
+    hashable >= 1.4 && < 1.6,
+    unordered-containers >= 0.2 && < 0.3,
     bytestring >= 0.11 && < 0.13,
     text >= 2.0 && < 2.2,
     vector >= 0.13 && < 0.14,
@@ -74,6 +80,8 @@ benchmark wireform-yaml-bench
     HsYAML,
     yaml,
     aeson,
+    deepseq,
+    containers,
     criterion >= 1.5
 
 test-suite wireform-yaml-test
@@ -85,7 +93,10 @@ test-suite wireform-yaml-test
     Test.YAML.Annotated
     Test.YAML.Decode
     Test.YAML.Encode
+    Test.YAML.Regression
     Test.YAML.Roundtrip
+    Test.YAML.SecondPass
+    Test.YAML.ThirdPass
     Test.YAML.Security
     Test.YAML.Conformance
     Test.YAML.Derive
@@ -96,14 +107,16 @@ test-suite wireform-yaml-test
     TemplateHaskell
   build-depends:
     base,
+    deepseq,
     wireform-yaml,
     wireform-derive,
-    aeson >= 2.1 && < 2.4,
+    aeson >= 2.2 && < 2.4,
     bytestring,
     scientific,
     text,
     vector,
     containers,
+    unordered-containers,
     directory,
     filepath,
     sydtest,

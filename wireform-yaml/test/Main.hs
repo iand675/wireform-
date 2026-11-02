@@ -7,8 +7,11 @@ import Test.YAML.Conformance qualified
 import Test.YAML.Decode qualified
 import Test.YAML.Derive qualified
 import Test.YAML.Encode qualified
+import Test.YAML.Regression qualified
 import Test.YAML.Roundtrip qualified
+import Test.YAML.SecondPass qualified
 import Test.YAML.Security qualified
+import Test.YAML.ThirdPass qualified
 
 
 main :: IO ()
@@ -22,7 +25,10 @@ main = do
   sydTest $
     describe "wireform-yaml" $
       sequence_
-        [ Test.YAML.Decode.tests
+        [ Test.YAML.ThirdPass.tests
+        , Test.YAML.SecondPass.tests
+        , Test.YAML.Regression.tests
+        , Test.YAML.Decode.tests
         , Test.YAML.Encode.tests
         , Test.YAML.Roundtrip.tests
         , Test.YAML.Annotated.tests

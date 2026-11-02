@@ -34,22 +34,21 @@ module YAML.Pretty (
 
 import Control.DeepSeq (NFData)
 import Data.ByteString qualified as BS
-import Data.Char (isControl, isDigit, isPrint, ord)
+import Data.Char (isControl, isPrint, ord)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.Lazy qualified as TL
 import Data.Text.Lazy.Builder (
   Builder,
-  fromString,
   fromText,
   singleton,
   toLazyText,
  )
 import Data.Text.Lazy.Builder.Int qualified as BI
+import Data.Text.Lazy.Builder.RealFloat qualified as BF
 import Data.Vector qualified as V
 import GHC.Generics (Generic)
-import Numeric (showHex)
 import YAML.Annotated (
   ABody (..),
   ADocument (..),
@@ -62,7 +61,11 @@ import YAML.Annotated (
   SeqStyle (..),
   SrcSpan (..),
   Trivia (..),
+  prepareForRendering,
  )
+import YAML.Decode qualified as YD
+import YAML.Encode qualified as YE
+import YAML.Internal (stripYamlStart)
 import YAML.Value (
   Anchor (..),
   Document (..),
@@ -174,7 +177,7 @@ compactOptions =
 
 -- | Render a 'Value' to 'Text' using the given options.
 render :: RenderOptions -> Value -> Text
-render opts v = TL.toStrict (toLazyText (build opts v))
+render opts v = TL.toStrict (toLazyText (build (validIndent opts) v))
 
 
 renderBS :: RenderOptions -> Value -> BS.ByteString
@@ -182,31 +185,20 @@ renderBS opts = TE.encodeUtf8 . render opts
 
 
 renderDocument :: RenderOptions -> Document -> Text
-renderDocument opts (Document _ _ body) =
-  TL.toStrict (toLazyText (build opts body))
+renderDocument opts (Document start end body) =
+  render (opts {roDocStartMarker = start || roDocStartMarker opts, roDocEndMarker = end || roDocEndMarker opts}) body
 
 
 renderStream :: RenderOptions -> Stream -> Text
-renderStream opts (Stream docs)
-  | V.null docs = T.empty
-  | V.length docs == 1 = renderDocument opts (V.head docs)
-  | otherwise =
-      TL.toStrict
-        ( toLazyText
-            (V.foldl' step mempty (V.indexed docs))
-        )
+renderStream opts (Stream docs) = TL.toStrict (toLazyText (V.ifoldl' step mempty docs))
   where
-    step acc (i, d) =
-      let !marker =
-            if i == 0 && not (roDocStartMarker opts)
-              then mempty
-              else fromText "---\n"
-          !body = build opts (YV.docBody d)
-          !end =
-            if YV.docExplicitEnd d
-              then fromText "...\n"
-              else mempty
-      in acc <> marker <> body <> end
+    step acc i doc =
+      acc
+        <> fromText
+          ( renderDocument
+              (opts {roDocStartMarker = i > 0 || roDocStartMarker opts, roTrailingNewline = i < V.length docs - 1 || roTrailingNewline opts})
+              doc
+          )
 
 
 {- | Render an 'AValue' tree. Uses the original source bytes for
@@ -214,40 +206,106 @@ sub-trees that haven't been modified (when
 'roPreserveOriginalText' is on); falls back to the pretty-
 printer otherwise.
 -}
+data SourceText = SourceText
+  { originalText :: !Text
+  , originalBytes :: !BS.ByteString
+  }
+
+
+sourceText :: Text -> SourceText
+sourceText text = SourceText text (TE.encodeUtf8 text)
+
+
 renderAnnotated :: RenderOptions -> AValue -> Maybe Text -> Text
-renderAnnotated opts av msrc =
-  TL.toStrict (toLazyText (buildAValue opts msrc 0 ChildOfDoc av))
+renderAnnotated requested av original =
+  let options = freshOptions requested
+      body = buildAValue options (sourceText <$> original) 0 ChildOfDoc (prepareForRendering av) {avDirty = True}
+      rendered = frameValue options body
+  in preserveLineEndings requested original (TL.toStrict (toLazyText rendered))
 
 
 renderAnnotatedDocument :: RenderOptions -> ADocument -> Maybe Text -> Text
-renderAnnotatedDocument opts (ADocument start end body leading trailing) msrc =
-  TL.toStrict
-    ( toLazyText
-        ( (if start || roDocStartMarker opts then fromText "---\n" else mempty)
-            <> emitComments 0 leading
-            <> buildAValue opts msrc 0 ChildOfDoc body
-            <> emitComments 0 trailing
-            <> (if end || roDocEndMarker opts then fromText "...\n" else mempty)
-        )
-    )
+renderAnnotatedDocument opts doc original = renderAnnotatedDocumentWithSource opts doc (sourceText <$> original)
+
+
+renderAnnotatedDocumentWithSource :: RenderOptions -> ADocument -> Maybe SourceText -> Text
+renderAnnotatedDocumentWithSource opts doc@(ADocument start end body _ original _ _) msrc
+  | roPreserveOriginalText opts
+  , not (avDirty body)
+  , not (roDocStartMarker opts && not start)
+  , not (roDocEndMarker opts && not end)
+  , Just sp <- original
+  , Just src <- msrc
+  , Just text <- spanSlice src sp =
+      text
+  | otherwise = renderAnnotatedDocumentFresh opts doc msrc
+
+
+renderAnnotatedDocumentFresh :: RenderOptions -> ADocument -> Maybe SourceText -> Text
+renderAnnotatedDocumentFresh requested (ADocument start end originalBody leading original trailing directives) msrc =
+  preserveLineEndings requested documentSource $
+    TL.toStrict
+      ( toLazyText
+          ( finish
+              ( foldMap (\line -> fromText line <> singleton '\n') directives
+                  <> (if start || roDocStartMarker opts || not (null directives) then fromText "---\n" else mempty)
+                  <> emitComments 0 leading
+                  <> emittedBody
+                  <> emitComments 0 trailing
+                  <> (if end || roDocEndMarker opts then fromText "...\n" else mempty)
+              )
+          )
+      )
+  where
+    documentSource =
+      msrc >>= \source -> case original of
+        Just span_ -> spanSlice source span_
+        Nothing -> Just (originalText source)
+    body = prepareForRendering originalBody
+    opts = freshOptions requested
+    rawBody = buildAValue opts msrc 0 ChildOfDoc (case original of Just _ -> body {avDirty = True}; Nothing -> body)
+    emittedBody = if roTrailingNewline opts || end || roDocEndMarker opts || not (null trailing) then ensureNewline rawBody else rawBody
+    finish = if roTrailingNewline opts then id else dropFinalNewline
+
+
+-- Removing the final physical newline of a copied literal can change its value.
+-- When regenerating without a final newline, emit scalars with escaped breaks.
+freshOptions :: RenderOptions -> RenderOptions
+freshOptions opts
+  | roTrailingNewline opts = validIndent opts
+  | otherwise = (validIndent opts) {roPreserveOriginalText = False}
+
+
+validIndent :: RenderOptions -> RenderOptions
+validIndent opts = opts {roIndent = max 1 (roIndent opts)}
+
+
+preserveLineEndings :: RenderOptions -> Maybe Text -> Text -> Text
+preserveLineEndings opts (Just source) output
+  | roPreserveOriginalText opts
+  , Just ending <- uniformEnding source =
+      T.replace "\n" ending (T.replace "\r" "\n" (T.replace "\r\n" "\n" output))
+  where
+    uniformEnding text
+      | T.isInfixOf "\r\n" text, not (T.any (\c -> c == '\r' || c == '\n') (T.replace "\r\n" "" text)) = Just "\r\n"
+      | T.any (== '\r') text, not (T.any (== '\n') text) = Just "\r"
+      | otherwise = Nothing
+preserveLineEndings _ _ output = output
 
 
 renderAnnotatedStream :: RenderOptions -> AStream -> Maybe Text -> Text
 renderAnnotatedStream opts (AStream docs) msrc
-  | V.null docs = T.empty
+  | V.null docs = if roPreserveOriginalText opts then maybe T.empty id msrc else T.empty
   | V.length docs == 1 =
-      renderAnnotatedDocument opts (V.head docs) msrc
+      renderAnnotatedDocumentWithSource opts (V.head docs) cachedSource
   | otherwise = TL.toStrict (toLazyText (V.foldl' step mempty (V.indexed docs)))
   where
+    cachedSource = sourceText <$> msrc
     step acc (i, d) =
-      let marker =
-            if i == 0 && not (adDirectivesEnd d)
-              then mempty
-              else fromText "---\n"
-          body =
-            fromText
-              (renderAnnotatedDocument opts d msrc)
-      in acc <> marker <> body
+      let docOpts = opts {roDocStartMarker = roDocStartMarker opts || (i > 0 && not (adExplicitEnd (docs V.! (i - 1)))), roTrailingNewline = i < V.length docs - 1 || roTrailingNewline opts}
+          text = renderAnnotatedDocumentWithSource docOpts d cachedSource
+          separator = if i < V.length docs - 1 && not (T.isSuffixOf "\n" text || T.isSuffixOf "\r" text) then singleton '\n' else mempty
+      in acc <> fromText text <> separator
 
 
 -- ---------------------------------------------------------------------------
@@ -255,17 +313,27 @@ renderAnnotatedStream opts (AStream docs) msrc
 -- ---------------------------------------------------------------------------
 
 build :: RenderOptions -> Value -> Builder
-build opts v0 =
-  let body = buildValue opts 0 ChildOfDoc v0
-      body' =
-        body
-          <> ( if roTrailingNewline opts && not (endsWithNL body)
-                 then singleton '\n'
-                 else mempty
-             )
-  in (if roDocStartMarker opts then fromText "---\n" else mempty)
-       <> body'
-       <> (if roDocEndMarker opts then fromText "...\n" else mempty)
+build opts v0 = frameValue opts (buildValue opts 0 ChildOfDoc v0)
+
+
+frameValue :: RenderOptions -> Builder -> Builder
+frameValue opts body =
+  let body' = if roTrailingNewline opts || roDocEndMarker opts then ensureNewline body else body
+      framed =
+        (if roDocStartMarker opts then fromText "---\n" else mempty)
+          <> body'
+          <> (if roDocEndMarker opts then fromText "...\n" else mempty)
+  in if roTrailingNewline opts then framed else dropFinalNewline framed
+
+
+ensureNewline :: Builder -> Builder
+ensureNewline body = if endsWithNL body then body else body <> singleton '\n'
+
+
+dropFinalNewline :: Builder -> Builder
+dropFinalNewline builder =
+  let text = toLazyText builder
+  in fromText (TL.toStrict (maybe text id (TL.stripSuffix "\n" text)))
 
 
 -- A 'ChildContext' tells emitters how the value is being placed
@@ -295,8 +363,8 @@ approxFlowLength = go
     go = \case
       YNull -> 4
       YBool b -> if b then 4 else 5
-      YInt n -> length (show n)
-      YFloat d -> length (show d)
+      YInt n -> fromIntegral (TL.length (toLazyText (BI.decimal n)))
+      YFloat d -> fromIntegral (TL.length (toLazyText (formatDouble d)))
       YString t -> 2 + T.length t -- worst case: quoted
       YSeq xs
         | V.null xs -> 2
@@ -312,6 +380,7 @@ approxFlowLength = go
               + V.sum (V.map (\(k, v) -> go k + go v) kvs)
       YTagged _ x -> 6 + go x
       YAnchored _ x -> 6 + go x
+      YAlias (Anchor name) -> 1 + T.length name
 {-# INLINE approxFlowLength #-}
 
 
@@ -349,33 +418,21 @@ buildValue opts !ind ctx v = case v of
   YMap kvs
     | V.null kvs -> contextSeparator ctx <> fromText "{}\n"
     | otherwise -> emitMap opts ind ctx kvs (roDefaultMapStyle opts)
-  YTagged tg inner ->
-    contextSeparator ctx
-      <> tagPrefix tg
-      <> singleton ' '
-      <> buildValueFlat opts ind inner
-  YAnchored (Anchor n) inner ->
-    contextSeparator ctx
-      <> singleton '&'
-      <> fromText n
-      <> singleton ' '
-      <> buildValueFlat opts ind inner
+  property -> contextSeparator ctx <> emitFlowValue opts ind property <> singleton '\n'
 
 
 {- | Builder used inline (after the colon / dash separator) on the
 same line as the parent's marker.
 -}
 buildValueFlat :: RenderOptions -> Int -> Value -> Builder
-buildValueFlat opts ind v = case v of
-  YNull -> fromText "null\n"
-  _ -> buildValue opts ind ChildOfMapValueInline v
+buildValueFlat opts ind = buildValue opts ind ChildOfMapValueInline
 
 
 contextSeparator :: ChildContext -> Builder
 contextSeparator = \case
   ChildOfDoc -> mempty
   ChildOfMapValueInline -> singleton ' '
-  ChildOfSeqItem -> singleton ' '
+  ChildOfSeqItem -> mempty
 
 
 -- ----- Sequences -----
@@ -387,6 +444,7 @@ emitSeq opts ind ctx xs style
   | otherwise =
       ( case ctx of
           ChildOfMapValueInline -> singleton '\n'
+          ChildOfSeqItem -> singleton '\n'
           _ -> mempty
       )
         <> V.foldl' step mempty xs
@@ -421,13 +479,14 @@ shouldFlowSeq opts ind xs style =
 buildSeqItem :: RenderOptions -> Int -> Value -> Builder
 buildSeqItem opts ind v
   | roCompactSeqOfMap opts
-  , YMap kvs <- YV.unwrap v
+  , roDefaultMapStyle opts == MapBlock
+  , YMap kvs <- v
   , not (V.null kvs) =
       emitCompactSeqMap opts ind kvs
-  | YSeq xs <- YV.unwrap v
+  | YSeq xs <- v
   , not (V.null xs) =
-      emitSeq opts ind ChildOfSeqItem xs (roDefaultSeqStyle opts)
-  | otherwise = buildValueFlat opts ind v
+      singleton '\n' <> emitSeq opts ind ChildOfDoc xs (roDefaultSeqStyle opts)
+  | otherwise = buildValue opts ind ChildOfSeqItem v
 
 
 emitCompactSeqMap :: RenderOptions -> Int -> V.Vector (Value, Value) -> Builder
@@ -451,6 +510,7 @@ emitMap opts ind ctx kvs style
   | otherwise =
       ( case ctx of
           ChildOfMapValueInline -> singleton '\n'
+          ChildOfSeqItem -> singleton '\n'
           _ -> mempty
       )
         <> V.foldl' step mempty kvs
@@ -473,23 +533,31 @@ shouldFlowMap opts ind kvs = \case
 emitMapEntry :: RenderOptions -> Int -> Int -> Value -> Value -> Builder
 emitMapEntry opts childInd indentForLine k v =
   spaces indentForLine
-    <> emitMapKey opts indentForLine k
+    <> emitBlockKey opts childInd k
     <> fromText ":"
-    <> buildValueFlat opts childInd v
+    <> buildValueFlat opts (childInd + roIndent opts) v
+
+
+emitBlockKey :: RenderOptions -> Int -> Value -> Builder
+emitBlockKey opts ind key
+  | YE.explicitKey key = fromText "? " <> emitFlowValue opts (ind + 2) key <> singleton '\n' <> spaces ind
+  | otherwise = emitMapKey opts ind key
 
 
 emitMapKey :: RenderOptions -> Int -> Value -> Builder
-emitMapKey opts _ k = case YV.unwrap k of
+emitMapKey opts ind k = case k of
   YString t -> emitPlainOrQuotedKey opts t
   YInt n -> BI.decimal n
   YBool b -> fromText (if b then "true" else "false")
   YNull -> fromText "null"
-  YFloat d -> fromString (show d)
-  other -> emitFlowValue opts other
+  YFloat d -> formatDouble d
+  other -> emitFlowValue opts ind other
 
 
 emitPlainOrQuotedKey :: RenderOptions -> Text -> Builder
 emitPlainOrQuotedKey opts t
+  | roStringStyleHint opts == HintAlwaysDouble = doubleQuoted t
+  | roStringStyleHint opts == HintAlwaysSingle, not (T.any YE.mustEscape t) = singleQuoted t
   | needsQuoting opts t = doubleQuoted t
   | otherwise = fromText t
 
@@ -497,30 +565,34 @@ emitPlainOrQuotedKey opts t
 -- ----- Scalars -----
 
 emitScalar :: RenderOptions -> Int -> ChildContext -> Value -> Builder
-emitScalar opts _ind ctx v =
-  contextSeparator ctx <> emitScalarBody opts v <> singleton '\n'
+emitScalar opts ind ctx (YString text)
+  | useLiteral opts text = contextSeparator ctx <> literalFor opts ind ctx text
+emitScalar opts ind ctx v =
+  contextSeparator ctx <> emitScalarBody opts ind v <> singleton '\n'
 
 
-emitScalarBody :: RenderOptions -> Value -> Builder
-emitScalarBody opts = \case
+emitScalarBody :: RenderOptions -> Int -> Value -> Builder
+emitScalarBody opts ind = \case
   YNull -> fromText "null"
   YBool b -> fromText (if b then "true" else "false")
   YInt n -> BI.decimal n
   YFloat d -> formatDouble d
   YString t -> emitString opts t
-  v -> emitFlowValue opts v
+  v -> emitFlowValue opts ind v
 
 
 emitString :: RenderOptions -> Text -> Builder
-emitString opts t = case roStringStyleHint opts of
-  HintAlwaysDouble -> doubleQuoted t
-  HintAlwaysSingle -> singleQuoted t
-  HintLiteralBlock | needsBlock -> literalBlock t
-  _ -> case classifyString opts t of
-    KsPlain -> fromText t
-    KsDouble -> doubleQuoted t
-    KsSingle -> singleQuoted t
-    KsLiteral -> literalBlock t
+emitString opts t
+  | T.any YE.mustEscape t = doubleQuoted t
+  | otherwise = case roStringStyleHint opts of
+      HintAlwaysDouble -> doubleQuoted t
+      HintAlwaysSingle -> singleQuoted t
+      HintLiteralBlock | needsBlock -> literalBlock t
+      _ -> case classifyString opts t of
+        KsPlain -> fromText t
+        KsDouble -> doubleQuoted t
+        KsSingle -> singleQuoted t
+        KsLiteral -> literalBlock t
   where
     needsBlock = T.any (== '\n') t
 
@@ -531,9 +603,9 @@ data KeyStr = KsPlain | KsDouble | KsSingle | KsLiteral
 classifyString :: RenderOptions -> Text -> KeyStr
 classifyString opts t
   | T.null t = KsDouble
-  | T.any (\c -> c == '\n' || c == '\r') t = KsLiteral
+  | T.any (\c -> c == '\n' || c == '\r') t = KsDouble
   | hasUnsafeChar = KsDouble
-  | roQuoteAmbiguousScalars opts && parsesAsLiteral = KsDouble
+  | parsesAsLiteral = KsDouble
   | otherwise = KsPlain
   where
     hasUnsafeChar =
@@ -545,30 +617,15 @@ classifyString opts t
 
 
 needsQuoting :: RenderOptions -> Text -> Bool
-needsQuoting _opts t
-  | T.null t = True
-  | T.head t `elem` (":#{}[],&*!|>%@`'\"" :: String) = True
-  | T.any (\c -> isControl c && c /= '\t') t = True
-  | otherwise =
-      let trimmed = T.strip t
-      in trimmed == "null"
-           || trimmed == "Null"
-           || trimmed == "NULL"
-           || trimmed == "true"
-           || trimmed == "True"
-           || trimmed == "TRUE"
-           || trimmed == "false"
-           || trimmed == "False"
-           || trimmed == "FALSE"
-           || trimmed == "~"
-           || looksNumeric trimmed
-           || T.any (\c -> c == ':' || c == '#') t
+needsQuoting opts text = not (YE.plainSyntaxSafe text) || (roQuoteAmbiguousScalars opts && not (YE.safePlain text))
 
 
-looksNumeric :: Text -> Bool
-looksNumeric t = case T.uncons t of
-  Just (c, _) -> c == '+' || c == '-' || c == '.' || isDigit c
-  Nothing -> False
+useLiteral :: RenderOptions -> Text -> Bool
+useLiteral opts text =
+  T.any (== '\n') text
+    && not (T.any (\c -> c == '\r' || (YE.mustEscape c && c /= '\n' && c /= '\t')) text)
+    && roStringStyleHint opts `elem` [HintAuto, HintLiteralBlock]
+    && roTrailingNewline opts
 
 
 doubleQuoted :: Text -> Builder
@@ -586,7 +643,7 @@ escapeDQ = T.foldr step mempty
       '\t' -> fromText "\\t" <> acc
       _
         | isControl c || not (isPrint c) ->
-            fromString (printf "\\u%04x" (ord c)) <> acc
+            hexEscape (ord c) <> acc
       _ -> singleton c <> acc
 
 
@@ -595,32 +652,57 @@ singleQuoted t = singleton '\'' <> fromText (T.replace "'" "''" t) <> singleton 
 
 
 literalBlock :: Text -> Builder
-literalBlock t =
-  fromText "|\n"
-    <> mconcat
-      [ spaces 2 <> fromText line <> singleton '\n'
-      | line <- T.splitOn (T.singleton '\n') t
-      ]
+literalBlock = literalBlockAt 0 2
+
+
+literalFor :: RenderOptions -> Int -> ChildContext -> Text -> Builder
+literalFor opts ind ctx text =
+  let base = case ctx of
+        ChildOfDoc -> 0
+        ChildOfMapValueInline -> max 0 (ind - roIndent opts)
+        ChildOfSeqItem -> max 0 (ind - 2)
+      width = max 1 (min 9 (roIndent opts))
+  in literalBlockAt base width text
+
+
+literalBlockAt :: Int -> Int -> Text -> Builder
+literalBlockAt base width text =
+  let trailing = T.length (T.takeWhileEnd (== '\n') text)
+      chomp
+        | trailing == 0 = "-"
+        | trailing > 1 || T.all (== '\n') text = "+"
+        | otherwise = ""
+      body = if trailing == 0 then text else T.dropEnd 1 text
+      rows = if T.null text then [] else T.splitOn "\n" body
+      needsHint = case T.uncons (T.dropWhile (== '\n') text) of
+        Just (c, _) -> c == ' ' || c == '\t'
+        Nothing -> False
+  in singleton '|'
+       <> (if needsHint then BI.decimal width else mempty)
+       <> fromText chomp
+       <> singleton '\n'
+       <> foldMap (\line -> (if T.null line then mempty else spaces (base + width) <> fromText line) <> singleton '\n') rows
 
 
 -- ----- Flow style -----
 
-emitFlowValue :: RenderOptions -> Value -> Builder
-emitFlowValue opts = \case
+emitFlowValue :: RenderOptions -> Int -> Value -> Builder
+emitFlowValue opts ind = \case
   YNull -> fromText "null"
   YBool b -> fromText (if b then "true" else "false")
   YInt n -> BI.decimal n
   YFloat d -> formatDouble d
   YString t -> emitFlowString opts t
-  YSeq xs -> emitFlowSeq opts 0 xs
-  YMap kvs -> emitFlowMap opts 0 kvs
+  YSeq xs -> emitFlowSeq opts ind xs
+  YMap kvs -> emitFlowMap opts ind kvs
   YTagged tg x ->
-    tagPrefix tg <> singleton ' ' <> emitFlowValue opts x
+    tagPrefix tg <> singleton ' ' <> emitFlowValue opts ind x
+  YAlias (Anchor n) -> singleton '*' <> fromText n
   YAnchored (Anchor n) x ->
     singleton '&'
       <> fromText n
       <> singleton ' '
-      <> emitFlowValue opts x
+      <> emitFlowValue opts ind x
 
 
 emitFlowSeq :: RenderOptions -> Int -> V.Vector Value -> Builder
@@ -635,8 +717,7 @@ emitFlowSeq opts ind xs
       in if approx <= roMaxLineWidth opts
            then
              singleton '['
-               <> mconcat
-                 (V.toList (V.imap (sep emitFlowValue opts) xs))
+               <> V.ifoldl' (\acc i x -> acc <> (if i == 0 then mempty else fromText ", ") <> emitFlowValue opts ind x) mempty xs
                <> singleton ']'
            else multiLineFlowSeq opts ind xs
 
@@ -651,7 +732,7 @@ multiLineFlowSeq opts ind xs =
     step acc (i, x) =
       acc
         <> spaces (ind + roIndent opts)
-        <> emitFlowValue opts x
+        <> emitFlowValue opts (ind + roIndent opts) x
         <> (if i < V.length xs - 1 then singleton ',' else mempty)
         <> singleton '\n'
 
@@ -674,18 +755,18 @@ emitFlowMap opts ind kvs
       in if approx <= roMaxLineWidth opts
            then
              singleton '{'
-               <> mconcat
-                 (V.toList (V.imap (flowKV opts) kvs))
+               <> V.ifoldl' (\acc i pair -> acc <> flowKV opts ind i pair) mempty kvs
                <> singleton '}'
            else multiLineFlowMap opts ind kvs
 
 
-flowKV :: RenderOptions -> Int -> (Value, Value) -> Builder
-flowKV opts i (k, v) =
+flowKV :: RenderOptions -> Int -> Int -> (Value, Value) -> Builder
+flowKV opts ind i (k, v) =
   (if i == 0 then mempty else fromText ", ")
-    <> emitFlowValue opts k
+    <> (if YE.explicitKey k then fromText "? " else mempty)
+    <> emitFlowValue opts ind k
     <> fromText ": "
-    <> emitFlowValue opts v
+    <> emitFlowValue opts ind v
 
 
 multiLineFlowMap :: RenderOptions -> Int -> V.Vector (Value, Value) -> Builder
@@ -698,20 +779,12 @@ multiLineFlowMap opts ind kvs =
     step acc (i, (k, v)) =
       acc
         <> spaces (ind + roIndent opts)
-        <> emitFlowValue opts k
+        <> (if YE.explicitKey k then fromText "? " else mempty)
+        <> emitFlowValue opts (ind + roIndent opts) k
         <> fromText ": "
-        <> emitFlowValue opts v
+        <> emitFlowValue opts (ind + roIndent opts) v
         <> (if i < V.length kvs - 1 then singleton ',' else mempty)
         <> singleton '\n'
-
-
-sep
-  :: (RenderOptions -> Value -> Builder)
-  -> RenderOptions
-  -> Int
-  -> Value
-  -> Builder
-sep f opts i x = (if i == 0 then mempty else fromText ", ") <> f opts x
 
 
 emitFlowString :: RenderOptions -> Text -> Builder
@@ -726,14 +799,11 @@ formatDouble d
   | isNaN d = fromText ".nan"
   | isInfinite d && d > 0 = fromText ".inf"
   | isInfinite d = fromText "-.inf"
-  | otherwise = fromString (show d)
+  | otherwise = BF.realFloat d
 
 
 tagPrefix :: Tag -> Builder
-tagPrefix (Tag t)
-  | T.isPrefixOf "tag:yaml.org,2002:" t =
-      fromText "!!" <> fromText (T.drop 18 t)
-  | otherwise = fromText "!<" <> fromText t <> singleton '>'
+tagPrefix = YE.buildTag
 
 
 -- ---------------------------------------------------------------------------
@@ -742,7 +812,7 @@ tagPrefix (Tag t)
 
 buildAValue
   :: RenderOptions
-  -> Maybe Text
+  -> Maybe SourceText
   -> Int
   -> ChildContext
   -> AValue
@@ -758,23 +828,24 @@ buildAValue opts msrc !ind ctx av
       contextSeparator ctx <> fromText slice
   | otherwise =
       emitAComments ind (triviaLeading (avTrivia av))
-        <> buildABody opts msrc ind ctx av
+        <> withFinalComment (triviaTrailing (avTrivia av)) (buildABody opts msrc ind ctx av)
+        <> (if flowBody av then mempty else indentTrivia ind (avTrailingText av))
 
 
-spanSlice :: Text -> SrcSpan -> Maybe Text
-spanSlice src (SrcSpan s e)
-  | s < 0 || e <= s = Nothing
+spanSlice :: SourceText -> SrcSpan -> Maybe Text
+spanSlice source (SrcSpan s e)
+  | s < 0 || e < s = Nothing
   | otherwise =
-      let bs = TE.encodeUtf8 src
+      let bs = originalBytes source
           n = BS.length bs
       in if e > n
            then Nothing
-           else Just (TE.decodeUtf8 (BS.take (e - s) (BS.drop s bs)))
+           else either (const Nothing) Just (TE.decodeUtf8' (BS.take (e - s) (BS.drop s bs)))
 
 
 buildABody
   :: RenderOptions
-  -> Maybe Text
+  -> Maybe SourceText
   -> Int
   -> ChildContext
   -> AValue
@@ -785,24 +856,78 @@ buildABody opts msrc ind ctx av = case avBody av of
   AInt n -> emitScalar opts ind ctx (YInt n)
   AFloat d -> emitScalar opts ind ctx (YFloat d)
   AString t s -> emitAString opts ind ctx t s
+  ASeq _ SeqFlow -> contextSeparator ctx <> emitAFlowNode opts msrc ind av {avDirty = True} <> singleton '\n'
+  AMap _ MapFlow -> contextSeparator ctx <> emitAFlowNode opts msrc ind av {avDirty = True} <> singleton '\n'
   ASeq xs s -> emitASeq opts msrc ind ctx xs s
   AMap es s -> emitAMap opts msrc ind ctx es s
   ATagged tg inner ->
     contextSeparator ctx
       <> tagPrefix tg
-      <> singleton ' '
       <> buildAValue opts msrc ind ChildOfMapValueInline inner
   AAnchored (Anchor n) inner ->
     contextSeparator ctx
       <> singleton '&'
       <> fromText n
-      <> singleton ' '
       <> buildAValue opts msrc ind ChildOfMapValueInline inner
   AAlias (Anchor n) ->
     contextSeparator ctx
       <> singleton '*'
       <> fromText n
       <> singleton '\n'
+  AResolvedAlias _ (Anchor n) _ ->
+    contextSeparator ctx <> singleton '*' <> fromText n <> singleton '\n'
+
+
+flowBody :: AValue -> Bool
+flowBody av = case avBody av of
+  ASeq _ SeqFlow -> True
+  AMap _ MapFlow -> True
+  _ -> False
+
+
+-- Flow children retain their own token spans: an entry span may also contain
+-- a block key or sequence dash, which cannot be copied inside braces.
+emitAFlowNode :: RenderOptions -> Maybe SourceText -> Int -> AValue -> Builder
+emitAFlowNode opts source ind av
+  | roPreserveOriginalText opts
+  , not (avDirty av)
+  , Just span_ <- avNodeSpan av
+  , Just original <- source
+  , Just text <- spanSlice original span_
+  , not (T.any (\char -> char == '\n' || char == '\r') text) =
+      fromText text
+  | otherwise = case avBody av of
+      AString text SSSingleQuoted | not (T.any YE.mustEscape text) -> singleQuoted text
+      AString text SSDoubleQuoted -> doubleQuoted text
+      AString text _ -> emitFlowString opts text
+      ASeq values _ -> collection '[' ']' ((\value -> (avTrivia value, emitAFlowNode opts source childIndent value)) <$> values)
+      AMap entries _ -> collection '{' '}' (entry <$> entries)
+      ATagged tag inner -> tagPrefix tag <> singleton ' ' <> emitAFlowNode opts source ind inner
+      AAnchored (Anchor name) inner -> singleton '&' <> fromText name <> singleton ' ' <> emitAFlowNode opts source ind inner
+      AAlias (Anchor name) -> singleton '*' <> fromText name
+      AResolvedAlias _ (Anchor name) _ -> singleton '*' <> fromText name
+      _ -> emitFlowValue opts ind (astripAnnotationsForFlow av)
+  where
+    childIndent = ind + roIndent opts
+    entry item =
+      let key = amKey item
+          value = amValue item
+          trailing = case triviaTrailing (avTrivia value) of Just comment -> Just comment; Nothing -> amTrailing item
+          trivia = (avTrivia key) {triviaLeading = triviaLeading (avTrivia key) <> triviaLeading (avTrivia value), triviaTrailing = trailing}
+          explicit = YE.explicitKey (astripAnnotationsForFlow key)
+      in (trivia, (if explicit then fromText "? " else mempty) <> emitAFlowNode opts source childIndent key <> fromText ": " <> emitAFlowNode opts source childIndent value)
+    collection open close rows
+      | V.null rows && T.null (avTrailingText av) = singleton open <> singleton close
+      | multiline =
+          singleton open
+            <> singleton '\n'
+            <> V.ifoldl' (\acc index (trivia, content) -> acc <> emitTrivia childIndent trivia <> withFinalComment (triviaTrailing trivia) (spaces childIndent <> content <> (if index + 1 < V.length rows then singleton ',' else mempty) <> singleton '\n')) mempty rows
+            <> indentTrivia childIndent (avTrailingText av)
+            <> spaces ind
+            <> singleton close
+      | otherwise = singleton open <> V.ifoldl' (\acc index (_, content) -> acc <> (if index == 0 then mempty else fromText ", ") <> content) mempty rows <> singleton close
+      where
+        multiline = not (T.null (avTrailingText av)) || V.any (\(trivia, content) -> not (null (triviaLeading trivia)) || triviaTrailing trivia /= Nothing || triviaBlankLines trivia > 0 || TL.any (== '\n') (toLazyText content)) rows
 
 
 emitAString
@@ -812,26 +937,21 @@ emitAString
   -> Text
   -> ScalarStyle
   -> Builder
-emitAString opts _ind ctx t style =
-  contextSeparator ctx
-    <> renderScalarStyled opts t style
-    <> singleton '\n'
-
-
-renderScalarStyled :: RenderOptions -> Text -> ScalarStyle -> Builder
-renderScalarStyled opts t = \case
-  SSPlain
-    | needsQuoting opts t -> doubleQuoted t
-    | otherwise -> fromText t
-  SSDoubleQuoted -> doubleQuoted t
-  SSSingleQuoted -> singleQuoted t
-  SSLiteral _ -> literalBlock t
-  SSFolded _ -> literalBlock t -- folded round-trips as literal for now
+emitAString opts ind ctx text style
+  | blockStyle && useLiteral (opts {roStringStyleHint = HintLiteralBlock}) text = contextSeparator ctx <> literalFor opts ind ctx text
+  | otherwise = contextSeparator ctx <> styled <> singleton '\n'
+  where
+    blockStyle = case style of SSLiteral _ -> True; SSFolded _ -> True; _ -> False
+    styled = case style of
+      SSSingleQuoted | not (T.any YE.mustEscape text) -> singleQuoted text
+      SSDoubleQuoted -> doubleQuoted text
+      SSPlain | not (needsQuoting opts text) -> fromText text
+      _ -> doubleQuoted text
 
 
 emitASeq
   :: RenderOptions
-  -> Maybe Text
+  -> Maybe SourceText
   -> Int
   -> ChildContext
   -> V.Vector AValue
@@ -847,36 +967,41 @@ emitASeq opts msrc ind ctx xs SeqBlock
   | otherwise =
       ( case ctx of
           ChildOfMapValueInline -> singleton '\n'
+          ChildOfSeqItem -> singleton '\n'
           _ -> mempty
       )
         <> V.foldl' step mempty xs
   where
     step !acc x = case verbatimEntry opts msrc x of
-      Just slice ->
+      Just slice
+        | sequenceEntry slice ->
+            acc
+              <> emitTrivia ind (avTrivia x)
+              <> copyEntry ind ind slice
+      _ ->
         acc
           <> emitTrivia ind (avTrivia x)
-          <> fromText slice
-      Nothing ->
-        acc
-          <> emitTrivia ind (avTrivia x)
-          <> spaces ind
-          <> fromText "- "
-          <> buildAValueSeqItem opts msrc (ind + 2) x
+          <> withTrailingComment
+            (triviaTrailing (avTrivia x))
+            (spaces ind <> fromText "- " <> buildAValueSeqItem opts msrc (ind + 2) x {avDirty = True})
 
 
 buildAValueSeqItem
-  :: RenderOptions -> Maybe Text -> Int -> AValue -> Builder
-buildAValueSeqItem opts msrc ind av
+  :: RenderOptions -> Maybe SourceText -> Int -> AValue -> Builder
+buildAValueSeqItem opts msrc ind original
   | roCompactSeqOfMap opts
   , AMap es s <- avBody av
+  , s == MapBlock
   , not (V.null es) =
       emitACompactSeqMap opts msrc ind es s
   | otherwise = buildAValue opts msrc ind ChildOfSeqItem av
+  where
+    av = original {avTrivia = (avTrivia original) {triviaLeading = [], triviaBlankLines = 0, triviaTrailing = Nothing}}
 
 
 emitACompactSeqMap
   :: RenderOptions
-  -> Maybe Text
+  -> Maybe SourceText
   -> Int
   -> V.Vector AMapEntry
   -> MapStyle
@@ -886,18 +1011,25 @@ emitACompactSeqMap opts msrc ind es _ =
   in V.foldl' (entryRow 0) mempty e0
        <> V.foldl' (entryRow ind) mempty rest
   where
-    entryRow indForLine acc e =
-      acc
-        <> spaces indForLine
-        <> emitAMapKey opts (amKey e)
-        <> fromText ":"
-        <> buildAValue opts msrc ind ChildOfMapValueInline (amValue e)
-        <> emitTrailingComment (amTrailing e)
+    entryRow indForLine acc entry =
+      let trivia = emitTrivia indForLine (avTrivia (amKey entry))
+      in case verbatimEntry opts msrc (amValue entry) of
+           Just slice | not (avDirty (amKey entry)), matchingKey (amKey entry) slice -> acc <> trivia <> copyEntry indForLine ind slice
+           _ ->
+             acc
+               <> trivia
+               <> withTrailingComment
+                 (amTrailing entry)
+                 ( spaces indForLine
+                     <> emitAMapKey opts ind (amKey entry)
+                     <> fromText ":"
+                     <> buildAValue opts msrc (ind + roIndent opts) ChildOfMapValueInline (amValue entry) {avDirty = True}
+                 )
 
 
 emitAMap
   :: RenderOptions
-  -> Maybe Text
+  -> Maybe SourceText
   -> Int
   -> ChildContext
   -> V.Vector AMapEntry
@@ -917,6 +1049,7 @@ emitAMap opts msrc ind ctx es MapBlock
   | otherwise =
       ( case ctx of
           ChildOfMapValueInline -> singleton '\n'
+          ChildOfSeqItem -> singleton '\n'
           _ -> mempty
       )
         <> V.foldl' step mempty es
@@ -925,51 +1058,111 @@ emitAMap opts msrc ind ctx es MapBlock
       let kAv = amKey e
           vAv = amValue e
       in case verbatimEntry opts msrc vAv of
-           Just slice ->
+           Just slice
+             | not (avDirty kAv)
+             , matchingKey kAv slice ->
+                 acc
+                   <> emitTrivia ind (avTrivia kAv)
+                   <> copyEntry ind ind slice
+           _ ->
              acc
                <> emitTrivia ind (avTrivia kAv)
-               <> fromText slice
-           Nothing ->
-             acc
-               <> emitTrivia ind (avTrivia kAv)
-               <> spaces ind
-               <> emitAMapKey opts kAv
-               <> fromText ":"
-               <> buildAValue
-                 opts
-                 msrc
-                 (ind + roIndent opts)
-                 ChildOfMapValueInline
-                 vAv
-               <> emitTrailingComment (amTrailing e)
+               <> withTrailingComment
+                 (amTrailing e)
+                 ( spaces ind
+                     <> emitAMapKey opts ind kAv
+                     <> fromText ":"
+                     <> buildAValue opts msrc (ind + roIndent opts) ChildOfMapValueInline vAv {avDirty = True}
+                 )
 
 
 {- | Returns 'Just' the original entry slice (including its
 trailing newline) when the entry's value has an unmodified
 span and the renderer is configured to preserve original text.
 -}
-verbatimEntry :: RenderOptions -> Maybe Text -> AValue -> Maybe Text
+indentTrivia :: Int -> Text -> Builder
+indentTrivia ind text =
+  let rows = T.splitOn "\n" text
+  in fromText (T.intercalate "\n" ((\row -> if T.null row then row else T.replicate ind " " <> row) <$> rows))
+
+
+data SourceEntry = SourceEntry
+  { entryText :: !Text
+  , entryIndent :: {-# UNPACK #-} !Int
+  , entryLeading :: {-# UNPACK #-} !Int
+  }
+
+
+sequenceEntry :: SourceEntry -> Bool
+sequenceEntry entry =
+  let text = stripYamlStart (entryText entry)
+  in text == "-" || T.isPrefixOf "- " text || T.isPrefixOf "-\t" text || T.isPrefixOf "-\n" text || T.isPrefixOf "-\r" text
+
+
+matchingKey :: AValue -> SourceEntry -> Bool
+matchingKey key entry = case YD.splitMappingLine (T.takeWhile (\c -> c /= '\n' && c /= '\r') (stripYamlStart (entryText entry))) of
+  Nothing -> False
+  Just (raw, _) -> case avBody key of
+    AString text _ | raw == text, YE.safePlain text -> True
+    AResolvedAlias _ (Anchor name) _ -> raw == "*" <> name
+    _ -> case YD.decode raw of
+      Left _ -> False
+      Right original -> stripAnchors original == stripAnchors (astripAnnotationsForFlow key)
+  where
+    stripAnchors (YAnchored _ inner) = stripAnchors inner
+    stripAnchors (YTagged tag inner) = YTagged tag (stripAnchors inner)
+    stripAnchors value = value
+
+
+copyEntry :: Int -> Int -> SourceEntry -> Builder
+copyEntry firstIndent targetIndent entry
+  | sourceIndent == targetIndent = spaces firstIndent <> fromText (T.drop leading text)
+  | otherwise =
+      let rows = T.splitOn "\n" (T.replace "\r" "\n" (T.replace "\r\n" "\n" text))
+          restRow row
+            | T.null row = row
+            | otherwise = T.replicate targetIndent " " <> T.drop (min sourceIndent (T.length (T.takeWhile (== ' ') row))) row
+          adjusted = case rows of
+            [] -> []
+            first : rest -> (T.replicate firstIndent " " <> T.drop leading first) : (restRow <$> rest)
+      in fromText (T.intercalate "\n" adjusted)
+  where
+    text = entryText entry
+    sourceIndent = entryIndent entry
+    leading = entryLeading entry
+
+
+verbatimEntry :: RenderOptions -> Maybe SourceText -> AValue -> Maybe SourceEntry
 verbatimEntry opts msrc av
   | roPreserveOriginalText opts
   , not (avDirty av)
   , Just sp <- avSpan av
-  , Just src <- msrc
-  , Just sl <- spanSlice src sp =
-      Just sl
+  , Just source <- msrc
+  , Just text <- spanSlice source sp =
+      let findBreak !position
+            | position < 0 = -1
+            | let byte = BS.index (originalBytes source) position, byte == 10 || byte == 13 = position
+            | otherwise = findBreak (position - 1)
+          lastBreak = findBreak (srcStart sp - 1)
+          column = srcStart sp - lastBreak - 1
+          leading = T.length (T.takeWhile (== ' ') text)
+      in Just (SourceEntry text (column + leading) leading)
   | otherwise = Nothing
 
 
-emitAMapKey :: RenderOptions -> AValue -> Builder
-emitAMapKey opts av = case avBody av of
-  AString t SSPlain -> emitPlainOrQuotedKey opts t
-  AString t SSDoubleQuoted -> doubleQuoted t
-  AString t SSSingleQuoted -> singleQuoted t
-  AString t _ -> emitPlainOrQuotedKey opts t
-  AInt n -> BI.decimal n
-  ABool b -> fromText (if b then "true" else "false")
-  ANull -> fromText "null"
-  AFloat d -> formatDouble d
-  _ -> emitFlowValue opts (astripAnnotationsForFlow av)
+emitAMapKey :: RenderOptions -> Int -> AValue -> Builder
+emitAMapKey opts ind av
+  | YE.explicitKey (astripAnnotationsForFlow av) = fromText "? " <> emitFlowValue opts (ind + 2) (astripAnnotationsForFlow av) <> singleton '\n' <> spaces ind
+  | otherwise = case avBody av of
+      AString t SSPlain -> emitPlainOrQuotedKey opts t
+      AString t SSDoubleQuoted -> doubleQuoted t
+      AString t SSSingleQuoted | not (T.any YE.mustEscape t) -> singleQuoted t
+      AString t _ -> emitPlainOrQuotedKey opts t
+      AInt n -> BI.decimal n
+      ABool b -> fromText (if b then "true" else "false")
+      ANull -> fromText "null"
+      AFloat d -> formatDouble d
+      _ -> emitFlowValue opts ind (astripAnnotationsForFlow av)
 
 
 astripAnnotationsForFlow :: AValue -> Value
@@ -994,26 +1187,30 @@ astripAnnotationsForFlow = astrip
           )
       ATagged tg x -> YTagged tg (astrip x)
       AAnchored a x -> YAnchored a (astrip x)
-      AAlias (Anchor n) -> YString (T.cons '*' n)
+      AAlias anchor -> YAlias anchor
+      AResolvedAlias _ anchor _ -> YAlias anchor
 
 
-emitTrailingComment :: Maybe Comment -> Builder
-emitTrailingComment Nothing = mempty
-emitTrailingComment (Just c) =
-  fromText "  # " <> fromText (commentText c) <> singleton '\n'
+withTrailingComment :: Maybe Comment -> Builder -> Builder
+withTrailingComment Nothing row = row
+withTrailingComment (Just comment) row =
+  let (first, rest) = TL.breakOn "\n" (toLazyText row)
+  in fromText (TL.toStrict first)
+       <> fromText "  # "
+       <> fromText (commentText comment)
+       <> (if TL.null rest then singleton '\n' else fromText (TL.toStrict rest))
+
+
+withFinalComment :: Maybe Comment -> Builder -> Builder
+withFinalComment Nothing value = value
+withFinalComment (Just comment) value =
+  let text = toLazyText value
+      body = case TL.unsnoc text of Just (prefix, '\n') -> prefix; _ -> text
+  in fromText (TL.toStrict body) <> fromText "  # " <> fromText (commentText comment) <> singleton '\n'
 
 
 emitAComments :: Int -> [Comment] -> Builder
-emitAComments _ [] = mempty
-emitAComments ind cs =
-  mconcat
-    [ spaces (max ind (commentColumn c))
-        <> singleton '#'
-        <> singleton ' '
-        <> fromText (commentText c)
-        <> singleton '\n'
-    | c <- cs
-    ]
+emitAComments ind = foldMap (\comment -> spaces (max ind (commentColumn comment)) <> fromText "# " <> fromText (commentText comment) <> singleton '\n')
 
 
 -- | Emit blank lines + leading comments before an entry.
@@ -1027,10 +1224,12 @@ emitComments :: Int -> [Comment] -> Builder
 emitComments = emitAComments
 
 
--- printf-ish for hex escapes (avoid pulling in Text.Printf for one
--- call site).
-printf :: String -> Int -> String
-printf "\\u%04x" n = "\\u" <> pad4 (showHex n "")
-  where
-    pad4 s = replicate (4 - length s) '0' <> s
-printf fmt _ = fmt
+-- Write escapes directly to the builder; supplementary scalars need eight digits.
+hexEscape :: Int -> Builder
+hexEscape codepoint =
+  let width = if codepoint > 0xFFFF then 8 else 4
+      prefix = if width == 8 then "\\U" else "\\u"
+      digits n
+        | n < 16 = 1
+        | otherwise = 1 + digits (n `quot` 16)
+  in fromText prefix <> fromText (T.replicate (width - digits codepoint) "0") <> BI.hexadecimal codepoint

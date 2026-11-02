@@ -2,6 +2,7 @@
 
 module Test.YAML.Derive (tests) where
 
+import Data.Either (isLeft)
 import Data.Vector qualified as V
 import Test.Syd
 import Test.YAML.Derive.Instances ()
@@ -14,10 +15,62 @@ tests :: Spec
 tests =
   describe "YAML.Derive" $
     sequence_
-      [ recordTests
+      [ describe "defaults and coercion" $ do
+          it "derives coercion constraints for polymorphic record fields" $
+            Y.decodeYAML (Y.encodeYAML (CoercedBox (Wrapped 7))) `shouldBe` Right (CoercedBox (Wrapped 7))
+          it "derives coercion constraints for optional polymorphic record fields" $
+            mapM_ (\value -> Y.decodeYAML (Y.encodeYAML value) `shouldBe` Right value) [OptionalCoercedBox (Just (Wrapped 9)), OptionalCoercedBox Nothing]
+          it "uses defaults for missing ordinary fields" $
+            Y.decodeYAML "{}" `shouldBe` Right (DefaultRecord 3)
+          it "decodes provided fields instead of their default" $
+            Y.decodeYAML "retries: 9" `shouldBe` Right (DefaultRecord 9)
+          it "combines optional defaults and coercion" $ do
+            Y.decodeYAML "{}" `shouldBe` Right (OptionalCoerced (Just (Wrapped 5)))
+            Y.decodeYAML "optional-wrapped: null" `shouldBe` Right (OptionalCoerced Nothing)
+          it "round-trips present and absent coerced optional fields" $
+            mapM_ (\value -> Y.decodeYAML (Y.encodeYAML value) `shouldBe` Right value) [OptionalCoerced Nothing, OptionalCoerced (Just (Wrapped 9))]
+          it "round-trips through the annotated coercion target" $
+            Y.decodeYAML (Y.encodeYAML (CoercedRecord (Wrapped 7))) `shouldBe` Right (CoercedRecord (Wrapped 7))
+      , describe "optional fields" $ do
+          it "round-trips null and present values" $
+            mapM_ (\v -> Y.decodeYAML (Y.encodeYAML v) `shouldBe` Right v) [OptionalRecord Nothing, OptionalRecord (Just 3)]
+          it "accepts an absent optional field" $
+            Y.decodeYAML "{}" `shouldBe` Right (OptionalRecord Nothing)
+      , describe "record constructors in sums" $ do
+          it "encodes record contents as a mapping with field modifiers" $ do
+            let value = NamedRecord "test" 7 "secret"
+            case Y.toYAML value of
+              YV.YMap entries -> case YV.lookupKey "contents" (YV.YMap entries) of
+                Just contents -> do
+                  YV.lookupKey "name" contents `shouldBe` Just (YV.YString "test")
+                  YV.lookupKey "record-private" contents `shouldBe` Nothing
+                Nothing -> expectationFailure "missing contents"
+              _ -> expectationFailure "expected mapping"
+          it "applies defaults and skipped-field defaults to record sum contents" $
+            Y.decodeYAML "tag: named-record\ncontents: {name: test}\n" `shouldBe` Right (NamedRecord "test" 3 "<redacted>")
+          it "round-trips record and nullary constructors" $
+            mapM_ (\value -> Y.decodeYAML (Y.encodeYAML value) `shouldBe` Right value) [NoRecord, NamedRecord "test" 7 "<redacted>"]
+      , describe "native field names" $ do
+          it "rejects ambiguous tagged field names in TH records" $
+            (Y.decodeYAML "!a boxed: 1\n!b boxed: 2\n" :: Either String (Box Int)) `shouldSatisfy` isLeft
+          it "rejects ambiguous tagged field names in generic records" $
+            (Y.decodeYAML "!a genericCount: 1\n!b genericCount: 2\n" :: Either String GenericRecord) `shouldSatisfy` isLeft
+          it "decodes ordinary generic records" $
+            Y.decodeYAML "genericCount: 3" `shouldBe` Right (GenericRecord 3)
+      , recordTests
       , newtypeTests
       , enumTests
       , sumTests
+      , describe "polymorphic types" $ do
+          it "derives constraints for record fields" $
+            Y.decodeYAML (Y.encodeYAML (Box (3 :: Int))) `shouldBe` Right (Box (3 :: Int))
+          it "constrains applied higher-kinded parameters" $
+            Y.decodeYAML (Y.encodeYAML (WrappedF (Just (3 :: Int)))) `shouldBe` Right (WrappedF (Just (3 :: Int)))
+          it "supports recursive polymorphic sums" $ do
+            let tree = Branch (Leaf (3 :: Int)) (Just (Leaf 4))
+            Y.decodeYAML (Y.encodeYAML tree) `shouldBe` Right tree
+          it "leaves phantom parameters unconstrained" $
+            Y.toYAML (Phantom :: Phantom (Int -> Int)) `shouldBe` YV.YString "phantom"
       ]
 
 

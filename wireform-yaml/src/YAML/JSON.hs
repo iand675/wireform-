@@ -8,6 +8,7 @@ cannot represent directly. We follow the same conventions other
 * Mapping keys are coerced to text via 'showKey'. Keys that are
   already 'YV.YString' pass through verbatim; numeric, boolean and
   null keys are stringified.
+* Non-finite floats and unresolved aliases become JSON null.
 * Tags / anchors are stripped (they are part of the YAML
   representation graph, not the data model).
 -}
@@ -22,7 +23,13 @@ import Data.Aeson.KeyMap qualified as AKM
 import Data.Scientific qualified as Sci
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Lazy qualified as TL
+import Data.Text.Lazy.Builder qualified as TB
+import Data.Text.Lazy.Builder.Int qualified as BI
+import Data.Text.Lazy.Builder.RealFloat qualified as BF
+import Data.Text.Lazy.Builder.Scientific (scientificBuilder)
 import Data.Vector qualified as V
+import YAML.Decode qualified as YD
 import YAML.Value qualified as YV
 
 
@@ -31,12 +38,15 @@ yamlToJSON v = case v of
   YV.YNull -> A.Null
   YV.YBool b -> A.Bool b
   YV.YInt n -> A.Number (fromIntegral n)
-  YV.YFloat d -> A.Number (Sci.fromFloatDigits d)
+  YV.YFloat d
+    | isNaN d || isInfinite d -> A.Null
+    | otherwise -> A.Number (Sci.fromFloatDigits d)
   YV.YString t -> A.String t
   YV.YSeq xs -> A.Array (V.map yamlToJSON xs)
   YV.YMap kvs -> A.Object (AKM.fromList (V.toList (V.map mkPair kvs)))
   YV.YTagged tag inner -> applyTag tag inner
   YV.YAnchored _ inner -> yamlToJSON inner
+  YV.YAlias _ -> A.Null
   where
     mkPair (k, val) = (AK.fromText (showKey k), yamlToJSON val)
 
@@ -48,31 +58,19 @@ empty scalar"; without this rule round-tripping
 @!!str@-tagged null values gives the wrong JSON shape.
 -}
 applyTag :: YV.Tag -> YV.Value -> A.Value
-applyTag (YV.Tag t) v = case (t, YV.unwrap v) of
-  ("tag:yaml.org,2002:str", YV.YNull) -> A.String (T.pack "")
-  ("tag:yaml.org,2002:str", YV.YSeq _) -> yamlToJSON v
-  ("tag:yaml.org,2002:str", YV.YMap _) -> yamlToJSON v
-  ("tag:yaml.org,2002:str", inner) -> A.String (forceString inner)
-  ("tag:yaml.org,2002:int", YV.YString s) ->
-    case reads (T.unpack s) :: [(Integer, String)] of
-      [(i, "")] -> A.Number (fromIntegral i)
+applyTag tag@(YV.Tag t) v
+  | t == "tag:yaml.org,2002:str" = case YV.unwrap v of
+      YV.YNull -> A.String T.empty
+      YV.YString text -> A.String text
+      YV.YBool b -> A.String (if b then "true" else "false")
+      YV.YInt n -> A.String (builderText (BI.decimal n))
+      YV.YFloat d -> A.String (builderText (BF.realFloat d))
       _ -> yamlToJSON v
-  ("tag:yaml.org,2002:float", YV.YString s) ->
-    case reads (T.unpack s) :: [(Double, String)] of
-      [(d, "")] -> A.Number (Sci.fromFloatDigits d)
-      _ -> yamlToJSON v
-  ("tag:yaml.org,2002:bool", YV.YString s)
-    | s == T.pack "true" -> A.Bool True
-    | s == T.pack "false" -> A.Bool False
-  ("tag:yaml.org,2002:null", _) -> A.Null
-  _ -> yamlToJSON v
-  where
-    forceString YV.YNull = T.pack ""
-    forceString (YV.YString s) = s
-    forceString (YV.YBool b) = if b then T.pack "true" else T.pack "false"
-    forceString (YV.YInt n) = T.pack (show n)
-    forceString (YV.YFloat d) = T.pack (show d)
-    forceString _ = T.pack ""
+  | otherwise = maybe (yamlToJSON v) yamlToJSON (YD.resolveExplicitTag tag v)
+
+
+builderText :: TB.Builder -> Text
+builderText = TL.toStrict . TB.toLazyText
 
 
 showKey :: YV.Value -> Text
@@ -80,7 +78,7 @@ showKey v = case yamlToJSON v of
   A.String s -> s
   A.Null -> T.pack ""
   A.Bool b -> if b then T.pack "true" else T.pack "false"
-  A.Number n -> T.pack (show n)
+  A.Number n -> builderText (scientificBuilder n)
   _ -> T.pack "<complex>"
 
 
@@ -92,7 +90,7 @@ jsonToYAML = \case
   A.Number n ->
     case Sci.floatingOrInteger n of
       Left d -> YV.YFloat (d :: Double)
-      Right i -> YV.YInt (fromIntegral (i :: Integer))
+      Right i -> YV.YInt (i :: Integer)
   A.Array xs -> YV.YSeq (V.map jsonToYAML xs)
   A.Object o ->
     YV.YMap (V.fromList (fmap mkPair (AKM.toList o)))
