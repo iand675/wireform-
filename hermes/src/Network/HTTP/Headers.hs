@@ -60,7 +60,11 @@ instance Show HeaderMap where
 
 
 lookupRawHeader :: HeaderFieldName -> HeaderMap -> Maybe (NonEmpty BS.ByteString)
-lookupRawHeader name (HeaderMap m) = fmap NE.reverse $ name `Map.lookup` m
+lookupRawHeader name (HeaderMap m) = fmap inInsertionOrder $ name `Map.lookup` m
+  where
+    -- Most headers have a single value. Return those without reversing.
+    inInsertionOrder vs@(_ NE.:| []) = vs
+    inInsertionOrder vs = NE.reverse vs
 
 
 lookupHeader :: forall a. KnownHeader a => HeaderMap -> Either (ParseFailure a) (Maybe a)
@@ -102,12 +106,9 @@ This is the format used by the @http-types@ and @wai@, so it's useful for
 integrating with those libraries.
 -}
 headerMapFromList :: [(CI BS.ByteString, BS.ByteString)] -> HeaderMap
-headerMapFromList = foldl' f (HeaderMap mempty)
+headerMapFromList = HeaderMap . Map.fromListWith (<>) . map toEntry
   where
-    f (HeaderMap m) (name, value) = HeaderMap $ Map.alter g (unsafeUnknownHeaderFromBytestring $ foldedCase name) m
-      where
-        g Nothing = Just $ value NE.:| []
-        g (Just (x NE.:| xs)) = Just $ value NE.:| (x : xs)
+    toEntry (name, value) = (unsafeUnknownHeaderFromBytestring (foldedCase name), value NE.:| [])
 
 
 headerMapToList :: HeaderMap -> [(CI BS.ByteString, BS.ByteString)]
