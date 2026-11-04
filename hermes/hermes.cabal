@@ -427,3 +427,20 @@ test-suite hermes-tests
     , time
     , containers
   default-language: Haskell2010
+
+benchmark hermes-bench
+  type: exitcode-stdio-1.0
+  main-is: Main.hs
+  hs-source-dirs: bench
+  default-extensions:
+      OverloadedStrings
+      TypeApplications
+  ghc-options: -O2 -Wall -rtsopts
+  build-depends:
+      base
+    , bytestring
+    , case-insensitive
+    , criterion         >= 1.5 && < 1.7
+    , deepseq
+    , hermes
+  default-language: Haskell2010
