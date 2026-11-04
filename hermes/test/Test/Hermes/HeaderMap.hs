@@ -12,5 +12,5 @@ tests :: Spec
 tests = describe "HeaderMap" $ do
   let headers = headerMapFromList [("cache-control", "a"), ("cache-control", "b")]
 
-  it "keeps insertion order" $
+  it "headerMapFromList preserves order on lookup" $
     lookupRawHeader hCacheControl headers `shouldBe` Just ("a" :| ["b"])
