@@ -73,6 +73,7 @@ import Arrow.Column (
   pattern ColPrim,
  )
 import Arrow.Column.Internal qualified as I
+import Arrow.Read.Columns (decodeRecordBatch)
 import Arrow.File qualified as File
 import Arrow.Read.Columns (ReadOptions (..), defaultReadOptions)
 import Arrow.FlatBufferIPC (
@@ -159,6 +160,7 @@ tests = do
       , ("buffer descriptor validation bounds", prop_bufferValidator)
       , ("compressed buffer length claims", prop_decompressionClaims)
       , ("decode budgets bound rows, values, unbacked rows and decompression", prop_readerBudgets)
+      , ("map keys and entries cannot contain nulls", prop_mapNulls)
       , ("mutated writer output over zero-copy decode never throws from any accessor", prop_zeroCopyAccessorFuzz)
       ]
 
@@ -963,6 +965,69 @@ le64 n = BS.pack (map (\s -> fromIntegral (fromIntegral n `shiftR` s :: Word64))
 
 
 -- * Hand-built hostile metadata
+
+{- | A one-row map with one int32 key/value pair. The key's schema is
+non-nullable, but its node and validity bitmap agree on an actual null.
+Construct the IPC metadata directly so the writer's schema validation
+cannot hide the reader regression (Arrow GH-54936).
+-}
+prop_mapNulls :: Property
+prop_mapNulls = withTests 1 . property $ do
+  let sch =
+        schemaOf
+          [ nested
+              "m"
+              False
+              (AMap False)
+              [ nested
+                  "entries"
+                  False
+                  AStruct
+                  [plain "key" False (AInt 32 True), plain "value" True (AInt 32 True)]
+              ]
+          ]
+      body =
+        le32 0
+          <> le32 1
+          <> BS.replicate 16 0
+          <> le32 7
+          <> BS.replicate 4 0
+          <> BS.replicate 8 0
+          <> le32 42
+          <> BS.replicate 4 0
+      buffers =
+        VS.fromList
+          [Buffer 0 0, Buffer 0 8, Buffer 8 1, Buffer 16 1, Buffer 24 4, Buffer 32 1, Buffer 40 4]
+      batch entryNulls keyNulls valueNulls =
+        RecordBatchDef
+          1
+          (VS.fromList [FieldNode 1 0, FieldNode 1 entryNulls, FieldNode 1 keyNulls, FieldNode 1 valueNulls])
+          buffers
+          V.empty
+          Nothing
+      requireRejected name result = case result of
+        Left _ -> success
+        Right _ -> annotate (name ++ " accepted a map with null entries or keys") >> failure
+      checkNullRejection rb = do
+        requireRejected "decodeRecordBatch" (decodeRecordBatch defaultReadOptions sch rb body)
+        let stream = serialize StreamEnc sch [(SFBatch rb body, Nothing)]
+            file = serialize FileEnc sch [(SFBatch rb body, Nothing)]
+        requireRejected "decodeArrowStream" (decodeArrowStream defaultReadOptions stream)
+        requireRejected "openStreamReader" (openStreamReader defaultReadOptions stream >>= streamReaderToList)
+        requireRejected "decodeArrowFile" (decodeArrowFile defaultReadOptions file)
+        requireRejected "openFileReader" (openFileReader defaultReadOptions file >>= fileReaderToList)
+  -- Keep the layout itself honest: rejection must be about nulls, not
+  -- a malformed buffer descriptor or an unrelated decoder error.
+  case decodeRecordBatch defaultReadOptions sch (batch 0 0 0) body of
+    Left err -> annotate ("valid map fixture rejected: " ++ err) >> failure
+    Right cols -> V.length cols === 1
+  -- Values may be null even though entries and keys may not.
+  case decodeRecordBatch defaultReadOptions sch (batch 0 0 1) body of
+    Left err -> annotate ("map with a null value rejected: " ++ err) >> failure
+    Right cols -> V.length cols === 1
+  checkNullRejection (batch 0 1 0)
+  checkNullRejection (batch 1 0 0)
+
 
 {- | A schema message whose struct fields each list the same child
 twice, @depth@ levels deep: a few hundred bytes describing @2^depth@

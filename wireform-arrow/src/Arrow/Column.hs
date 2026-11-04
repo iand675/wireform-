@@ -1446,9 +1446,14 @@ mkFixedSizeList w n v c
   | otherwise = (\v' -> I.ColFixedSizeList w n v' c) <$> checkValidity "Arrow.Column.mkFixedSizeList" n v
 
 
--- | Validity, offsets, keys, values (offsets checked against both children).
+{- | Validity, offsets, non-null keys, values (offsets checked against
+both children). Null keys are forbidden by the Arrow Map layout.
+-}
 mkMap :: Maybe Validity -> VS.Vector Int32 -> ColumnArray -> ColumnArray -> Either String ColumnArray
 mkMap v offs k x = do
+  if nullCount k /= 0
+    then Left "Arrow.Column.mkMap: map keys must not contain nulls"
+    else Right ()
   validateOffsets "Arrow.Column.mkMap" (min (columnLength k) (columnLength x)) offs
   v' <- checkValidity "Arrow.Column.mkMap" (offsetRows offs) v
   Right (I.ColMap v' offs k x)

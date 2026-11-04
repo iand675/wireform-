@@ -390,6 +390,8 @@ checkField path0 f col = case fieldDictionary f of
           checkField path cf (sliceColumnArray 0 (n * w) c)
     mapOf offs k v = case V.toList kids of
       [entries] | [kf, vf] <- V.toList (fieldChildren entries) -> do
+        expect (not (fieldNullable entries)) "map entries field must be non-nullable"
+        expect (not (fieldNullable kf)) "map key field must be non-nullable"
         expect (columnLength k == columnLength v) ("map keys have " ++ show (columnLength k) ++ " rows, values " ++ show (columnLength v))
         withOffsets offs (columnLength k) $ \r -> do
           checkField (fieldName entries : path) kf (sliceRange r k)

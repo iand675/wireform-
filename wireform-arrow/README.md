@@ -633,7 +633,7 @@ link with `-rtsopts` and run with `+RTS -A64m` (or bake it in with
 | encode nullable utf8                        |  43.5 µs |        12.5 µs | 0.29x |
 | encode mixed 6-col                          |   413 µs |        61.7 µs | 0.15x |
 | encode list<int32>                          |  93.9 µs |        26.8 µs | 0.29x |
-| encode struct<int32,double,bool>            | 62.10 µs |        16.4 µs | 0.26x |
+| encode struct<int32,double,bool>            |  63.0 µs |        16.4 µs | 0.26x |
 | encode dictionary<utf8>                     |  31.4 µs |        6.05 µs | 0.19x |
 | encode lazy int64                           |  39.3 µs |        0.63 µs | 0.02x |
 | encode lazy double                          |  39.5 µs |        0.61 µs | 0.02x |
@@ -642,12 +642,12 @@ link with `-rtsopts` and run with `+RTS -A64m` (or bake it in with
 | encode lazy nullable utf8                   |  43.5 µs |        0.69 µs | 0.02x |
 | encode lazy mixed 6-col                     |   413 µs |        2.07 µs | 0.01x |
 | encode lazy list<int32>                     |  93.9 µs |        0.91 µs | 0.01x |
-| encode lazy struct<int32,double,bool>       | 62.10 µs |        1.36 µs | 0.02x |
+| encode lazy struct<int32,double,bool>       |  63.0 µs |        1.36 µs | 0.02x |
 | encode lazy dictionary<utf8>                |  31.4 µs |        1.12 µs | 0.04x |
 | decode int64                                |  13.1 µs |        0.48 µs | 0.04x |
 | decode double                               |  13.1 µs |        0.46 µs | 0.04x |
 | decode nullable int64                       |  13.4 µs |        0.75 µs | 0.06x |
-| decode utf8                                 |   125 µs |       47.10 µs | 0.38x |
+| decode utf8                                 |   125 µs |        48.0 µs | 0.38x |
 | decode nullable utf8                        |   123 µs |        47.8 µs | 0.39x |
 | decode mixed 6-col                          |   293 µs |        97.4 µs | 0.33x |
 | decode list<int32>                          |   110 µs |        6.08 µs | 0.06x |
@@ -742,7 +742,7 @@ row structs), since arrow-rs has no record deriving:
 | stream decode (Arrow.Stream)      |   277 µs |        96.8 µs | 0.35x |
 | file encode (Arrow.Stream)        |   397 µs |        64.2 µs | 0.16x |
 | file encode lazy (Arrow.Stream)   |   397 µs |        3.69 µs | 0.01x |
-| file decode (Arrow.Stream)        |   277 µs |        97.3 µs | 0.35x |
+| file decode (Arrow.Stream)        |   277 µs |        97.4 µs | 0.35x |
 | file read (Arrow.File)            |   277 µs |        97.8 µs | 0.35x |
 | typed encode (Arrow.Record)       |  1645 µs |        1470 µs | 0.89x |
 | typed decode (Arrow.Record)       |  3076 µs |        2944 µs | 0.96x |

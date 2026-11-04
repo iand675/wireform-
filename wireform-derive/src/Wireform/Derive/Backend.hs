@@ -19,6 +19,7 @@ module Wireform.Derive.Backend (
   backendThrift,
   backendJSON,
   backendEDN,
+  backendEDI,
   backendTOML,
   backendYAML,
   backendXML,
@@ -101,6 +102,11 @@ backendJSON = Backend "json"
 -- | Extensible Data Notation (Clojure / EDN).
 backendEDN :: Backend
 backendEDN = Backend "edn"
+
+
+-- | Electronic Data Interchange segment streams.
+backendEDI :: Backend
+backendEDI = Backend "edi"
 
 
 -- | TOML.

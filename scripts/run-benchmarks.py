@@ -72,13 +72,15 @@ def run(cmd: list[str], **kw) -> int:
         return 127
 
 
-def cabal(args: list[str]) -> list[str]:
+def cabal(args: list[str], *, project_file: str | None = None, use_nix: bool = True) -> list[str]:
+    if project_file:
+        args = [args[0], f"--project-file={project_file}", *args[1:]]
     # Prefer a nix dev shell when present (matches collect-stats.sh), else
     # plain cabal on PATH. Already inside the dev shell (direnv or
     # `nix develop`): run cabal directly. A nested `nix develop` re-evaluates
     # the git flake, which ignores untracked files and rebuilds every
     # workspace package through nix.
-    if os.environ.get("IN_NIX_SHELL"):
+    if not use_nix or os.environ.get("IN_NIX_SHELL"):
         return ["cabal", *args]
     if os.path.exists(os.path.join(ROOT, "flake.nix")) and which("nix"):
         return ["nix", "develop", "--command", "cabal", *args]
@@ -161,6 +163,9 @@ def main() -> int:
     ap.add_argument("--distill-only", action="store_true", help="skip build+run; distill existing raw JSON")
     ap.add_argument("--no-strict", action="store_true", help="don't fail on unmatched summary cells")
     ap.add_argument("--dry-run", action="store_true", help="distill in dry-run (don't write summaries)")
+    ap.add_argument("--benchmark-options", default="", help="extra Haskell Criterion options, e.g. --regress allocated:iters")
+    ap.add_argument("--project-file", help="explicit Cabal project file for focused builds")
+    ap.add_argument("--no-nix", action="store_true", help="use the compiler and cabal already on PATH")
     ap.add_argument("--render", action="store_true", help="render charts+READMEs+docs and run check at the end")
     args = ap.parse_args()
 
@@ -192,12 +197,12 @@ def main() -> int:
         if kind == "cabal":
             if not args.distill_only:
                 if not args.no_build:
-                    if run(cabal(["build", target]), cwd=ROOT) != 0:
+                    if run(cabal(["build", target], project_file=args.project_file, use_nix=not args.no_nix), cwd=ROOT) != 0:
                         failures.append(f"build {target}")
                         continue
                 # criterion writes relative to the package cwd, so pass an abs path.
                 rc = run(
-                    cabal(["bench", target, f"--benchmark-options=--json {raw_path}"]),
+                    cabal(["bench", target, f"--benchmark-options=--json {raw_path} {args.benchmark_options}"], project_file=args.project_file, use_nix=not args.no_nix),
                     cwd=ROOT,
                 )
                 if rc != 0:
@@ -244,10 +249,10 @@ def main() -> int:
 
     if args.render and not failures and not args.dry_run:
         print("==> render charts + READMEs + docs")
-        run(cabal(["run", "-v0", "wireform-stats:exe:regen-stats", "--", "render-bench-charts"]), cwd=ROOT)
-        run(cabal(["run", "-v0", "wireform-stats:exe:regen-stats", "--", "render"]), cwd=ROOT)
+        run(cabal(["run", "-v0", "wireform-stats:exe:regen-stats", "--", "render-bench-charts"], project_file=args.project_file, use_nix=not args.no_nix), cwd=ROOT)
+        run(cabal(["run", "-v0", "wireform-stats:exe:regen-stats", "--", "render"], project_file=args.project_file, use_nix=not args.no_nix), cwd=ROOT)
         print("==> check")
-        rc = run(cabal(["run", "-v0", "wireform-stats:exe:regen-stats", "--", "check"]), cwd=ROOT)
+        rc = run(cabal(["run", "-v0", "wireform-stats:exe:regen-stats", "--", "check"], project_file=args.project_file, use_nix=not args.no_nix), cwd=ROOT)
         if rc != 0:
             failures.append("regen-stats check")
 
