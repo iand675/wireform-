@@ -180,6 +180,41 @@
       ]
     },
     {
+      "target": "wireform-edi:bench:wireform-edi-bench",
+      "raw": "edi",
+      "summaries": [
+        {
+          "path": "wireform-edi/bench-results/summary/edi-rust-codec.json",
+          "series": [
+            "wireform-edi"
+          ],
+          "map": [
+            "wireform-edi|encode *=*/encode",
+            "wireform-edi|decode *=*/decode"
+          ]
+        }
+      ]
+    },
+    {
+      "target": "interop/edifact-rs:bench:edifact",
+      "raw": "edifact-rs",
+      "summaries": [
+        {
+          "path": "wireform-edi/bench-results/summary/edi-rust-codec.json",
+          "series": [
+            "edifact-rs"
+          ],
+          "map": [
+            "edifact-rs|encode *=*/encode",
+            "edifact-rs|decode *=*/decode"
+          ]
+        }
+      ],
+      "kind": "cargo",
+      "cargoManifest": "interop/edifact-rs/Cargo.toml",
+      "cargoBench": "edifact"
+    },
+    {
       "target": "wireform-fory:bench:wireform-fory-bench",
       "raw": "fory",
       "summaries": [
@@ -201,6 +236,52 @@
         {
           "path": "wireform-ion/bench-results/summary/ion-encode-decode.json",
           "map": ["encode|single Person=encode/Person", "decode|single Person=decode/Person"]
+        },
+        {
+          "path": "wireform-ion/bench-results/summary/ion-rust-codec.json",
+          "series": ["wireform-ion"],
+          "map": [
+            "wireform-ion|encode *=codec encode/*",
+            "wireform-ion|decode *=codec decode/*"
+          ]
+        },
+        {
+          "path": "wireform-ion/bench-results/summary/ion-rust-typed.json",
+          "series": ["wireform-ion"],
+          "map": ["wireform-ion|encode *=encode/*", "wireform-ion|decode *=decode/*"]
+        }
+      ]
+    },
+    {
+      "kind": "cargo",
+      "target": "interop/ion-rs:bench:ion_binary",
+      "cargoManifest": "interop/ion-rs/Cargo.toml",
+      "cargoBench": "ion_binary",
+      "raw": "ion-rs",
+      "summaries": [
+        {
+          "path": "wireform-ion/bench-results/summary/ion-rust-codec.json",
+          "series": ["ion-rs"],
+          "map": ["ion-rs|encode *=encode/*", "ion-rs|decode *=decode/*"]
+        }
+      ]
+    },
+    {
+      "kind": "cargo",
+      "target": "interop/ion-rs:bench:ion_typed",
+      "cargoManifest": "interop/ion-rs/Cargo.toml",
+      "cargoBench": "ion_typed",
+      "raw": "ion-rs-typed",
+      "summaries": [
+        {
+          "path": "wireform-ion/bench-results/summary/ion-rust-typed.json",
+          "series": [
+            "ion-rs serde"
+          ],
+          "map": [
+            "ion-rs serde|encode *=encode/*",
+            "ion-rs serde|decode *=decode/*"
+          ]
         }
       ]
     },

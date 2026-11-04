@@ -1,0 +1,41 @@
+{
+  "id": "ion-rust-codec",
+  "title": "Ion 1.0 binary codecs — owned dynamic values",
+  "unit": "Nanos",
+  "higherIsBetter": false,
+  "groups": [
+    "encode Person",
+    "decode Person",
+    "encode [Person] x 100",
+    "decode [Person] x 100",
+    "encode symbols x 100",
+    "decode symbols x 100"
+  ],
+  "series": [
+    {
+      "name": "wireform-ion",
+      "values": [
+        515.48,
+        386.52,
+        5718.63,
+        15558.52,
+        16061.25,
+        30877.4
+      ]
+    },
+    {
+      "name": "ion-rs",
+      "values": [
+        956.68,
+        1729.46,
+        6413.11,
+        38016.14,
+        17538.32,
+        89302.43
+      ]
+    }
+  ],
+  "baseline": "ion-rs",
+  "toolchain": "GHC 9.10.3 -O2 -fasm, Criterion 1.6.5.0; ion-rs 1.1.0, criterion.rs 0.7; darwin-aarch64",
+  "capturedAt": "2026-11-04T13:06:38Z"
+}

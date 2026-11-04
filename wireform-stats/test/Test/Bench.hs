@@ -18,6 +18,24 @@ tests =
       [ it "summary JSON round-trips" jsonRoundTrip
       , it "summaryToTable: header columns + row count" tableShape
       , it "summaryToBarChart: series + groups preserved" chartShape
+      , it "compares the other series when the baseline is second" $ do
+          let table = Bench.summaryToTable sampleSummary {Bench.bsBaseline = Just "cborg"}
+          map last (Tbl.tableRows table) `shouldBe` ["0.78x", "0.80x"]
+      , it "uses the first series as the default baseline" $ do
+          let explicit = Bench.summaryToTable sampleSummary
+              implicit = Bench.summaryToTable sampleSummary {Bench.bsBaseline = Nothing}
+          map last (Tbl.tableRows implicit) `shouldBe` map last (Tbl.tableRows explicit)
+      , it "does not invent a ratio for a missing baseline or comparison" $ do
+          let missing = Bench.summaryToTable sampleSummary {Bench.bsBaseline = Just "unknown"}
+              single = Bench.summaryToTable sampleSummary {Bench.bsSeries = take 1 (Bench.bsSeries sampleSummary)}
+          map last (Tbl.tableRows missing) `shouldBe` ["-", "-"]
+          map last (Tbl.tableRows single) `shouldBe` ["-", "-"]
+      , it "carries rounded duration fractions into the integer part" $ do
+          let table = Bench.summaryToTable sampleSummary {Bench.bsSeries = [Bench.BenchSeries "wireform-cbor" [9.999, 19.999]]}
+          map (take 2) (Tbl.tableRows table) `shouldBe` [["encode", "10.00 ns"], ["decode", "20.0 ns"]]
+      , it "rounds near-parity ratios to 1.00x" $ do
+          let table = Bench.summaryToTable sampleSummary {Bench.bsSeries = [Bench.BenchSeries "wireform-cbor" [1000, 1000], Bench.BenchSeries "cborg" [999.9, 1999.9]]}
+          map last (Tbl.tableRows table) `shouldBe` ["1.00x", "2.00x"]
       ]
 
 

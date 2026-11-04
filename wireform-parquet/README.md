@@ -242,7 +242,7 @@ cabal bench wireform-parquet:parquet-bench
 | Operation | C kernel | pure Haskell | ratio |
 | :-------- | -------: | -----------: | ----: |
 | 8 B       |  12.1 ns |      10.3 ns | 0.85x |
-| 64 B      |  18.1 ns |     42.10 ns | 2.37x |
+| 64 B      |  18.1 ns |      43.0 ns | 2.37x |
 | 1 KiB     |  79.9 ns |       457 ns | 5.71x |
 | 64 KiB    |  4387 ns |     28291 ns | 6.45x |
 

@@ -395,7 +395,9 @@ genRaw ty n = case ty of
     lens <- replicateM n (Gen.int (Range.linear 0 3))
     base <- Gen.int (Range.linear 0 3)
     let total = base + sum lens
-    (km, keys) <- genColumnOf (TPrim (SomePrimType PInt32)) total
+    keyValues <- replicateM total (Gen.int32 Range.linearBounded)
+    let km = map (VInt . toInteger) keyValues
+        keys = primColumn PInt32 (VS.fromList keyValues)
     (vm, vals) <- genColumnOf vt total
     valid <- genValid n
     let offs = scanl (+) base lens
@@ -880,6 +882,8 @@ prop_mkRejects = withTests 300 . property $ do
   let child = fromTexts (V.fromList texts)
   assert (isLeft (mkList Nothing (VS.fromList [0, fromIntegral n + 1]) child))
   assert (isRight (mkList Nothing (VS.fromList [0, fromIntegral n]) child))
+  assert (isLeft (mkMap Nothing (VS.fromList [0, 1]) (fromMaybes PInt32 (V.singleton Nothing)) (ColNull 1)))
+  assert (isRight (mkMap Nothing (VS.fromList [0, 1]) (primColumn PInt32 (VS.singleton 7)) (ColNull 1)))
   assert (isLeft (mkFixedSizeList 2 n Nothing child))
   assert (isLeft (mkStruct (n + 1) Nothing (V.singleton ("a", child))))
   assert (isLeft (mkDenseUnion (VS.fromList [0]) (VS.fromList [fromIntegral n]) (V.singleton child)))

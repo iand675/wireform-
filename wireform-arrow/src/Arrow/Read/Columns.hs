@@ -41,7 +41,7 @@ module Arrow.Read.Columns (
   validateRecordBatchBuffers,
 ) where
 
-import Arrow.Column (columnLength, placeholderColumn)
+import Arrow.Column (columnLength, nullCount, placeholderColumn)
 import Arrow.Column.Internal (
   ColumnArray,
   IntegralPrim (..),
@@ -83,6 +83,7 @@ import Foreign.Storable (Storable (..), peekByteOff, pokeByteOff)
 import GHC.Generics (Generic)
 import System.IO.Unsafe (unsafeDupablePerformIO)
 import Wireform.FFI (validateArrowBuffers)
+
 
 #ifdef HAVE_ZSTD
 import qualified Codec.Compression.Zstd as Zstd
@@ -750,12 +751,20 @@ fixedSizeList ctx size f fn len cur
 
 
 {- | Map: validity, offsets, then the entries struct (key, value),
-which may hold no nulls of its own (arrow-rs @MapArray@).
+which may hold no nulls of its own. Keys must also have no nulls
+(Arrow Schema.fbs @Map@; arrow-rs @MapArray@). Null counts are already
+validated while loading the child, so this adds no per-row scan.
 -}
 mapCol :: Ctx -> Field -> FieldNode -> Int -> Cur -> Either String Out
 mapCol ctx f fn len cur = do
   let !bi = curBuf cur
   entries <- singleChild "map" f
+  case entries of
+    Field {fieldType = AStruct, fieldNullable = False, fieldChildren = children}
+      | V.length children == 2
+      , not (fieldNullable (V.unsafeIndex children 0)) ->
+          Right ()
+    _ -> Left "Arrow.Read.Columns: map entries and key fields must be non-nullable"
   v <- validityAt ctx "map" len fn bi
   offs <- offsetsAt @Int32 ctx "map" len (bi + 1)
   Out ent cur' <- field ctx entries (adv 1 2 cur)
@@ -763,7 +772,10 @@ mapCol ctx f fn len cur = do
     I.ColStruct n Nothing kv
       | V.length kv == 2 -> do
           I.validateOffsets "map" n offs
-          Right (Out (I.ColMap v offs (snd (V.unsafeIndex kv 0)) (snd (V.unsafeIndex kv 1))) cur')
+          let key = snd (V.unsafeIndex kv 0)
+          if nullCount key /= 0
+            then Left "Arrow.Read.Columns: map keys must not contain nulls"
+            else Right (Out (I.ColMap v offs key (snd (V.unsafeIndex kv 1))) cur')
     _ -> Left "Arrow.Read.Columns: map entries must be a struct of exactly (key, value) without nulls"
 
 
