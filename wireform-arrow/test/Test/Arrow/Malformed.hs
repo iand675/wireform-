@@ -669,7 +669,11 @@ prop_overwrites corpus = mutationProperty 5 corpus $ \len ->
 
 
 prop_splices :: [Seed] -> Property
-prop_splices corpus = mutationProperty 5 corpus $ \len ->
+-- Length-changing file mutations invalidate footer offsets even when their
+-- stream-shaped prefix survived. Do not require malformed files to be accepted:
+-- bit flips, overwrites, descriptor/schema mutations and zero-copy mutations
+-- independently require materializer coverage. Keep all 3000 structural cases.
+prop_splices corpus = mutationProperty 0 corpus $ \len ->
   Gen.choice
     [ Insert <$> genPos len <*> Gen.bytes (Range.linear 1 64)
     , Delete <$> genPos len <*> Gen.int (Range.linear 1 64)

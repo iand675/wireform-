@@ -63,6 +63,8 @@ import Data.Vector.Generic qualified as VG
 import Data.Vector.Storable qualified as VS
 import Data.Word (Word16, Word32, Word64, Word8)
 import Test.Arrow.Core qualified as Core
+import Test.Arrow.Decimal qualified as Decimal
+import Test.Arrow.Features qualified as Features
 import Test.Arrow.Malformed qualified as Malformed
 import Test.Arrow.Props qualified as Props
 import Test.Arrow.Sections qualified as Sections
@@ -101,6 +103,8 @@ data CustomerOpt = CustomerOpt
 main :: IO ()
 main = do
   putStrLn "wireform-arrow writer/reader round-trip suite"
+  Decimal.tests
+  Features.tests
 
   -- Every column: build a single-batch Arrow stream containing just
   -- that column, serialise it, parse it, materialise, and assert
@@ -149,6 +153,9 @@ main = do
             [IntervalMonthDayNano 1 3 1000, IntervalMonthDayNano 2 4 (-500)]
         )
     )
+
+  roundTripPrim "Decimal32" (primColumn (PDecimal32 9 2) (VS.fromList [-999999999,0,123,999999999]))
+  roundTripPrim "Decimal64" (primColumn (PDecimal64 18 4) (VS.fromList [-999999999999999999,0,123,999999999999999999]))
 
   roundTripPrim
     "Decimal128"
@@ -1599,6 +1606,8 @@ inferArrowType = \case
   ColTime64 _ _ -> ATime Microsecond 64
   ColTimestamp _ _ -> ATimestamp Nanosecond Nothing
   ColDuration _ _ -> ADuration Nanosecond
+  ColDecimal32 p s _ _ -> ADecimal32 p s
+  ColDecimal64 p s _ _ -> ADecimal64 p s
   ColDecimal128 p s _ _ -> ADecimal p s
   ColDecimal256 p s _ _ -> ADecimal256 p s
   ColIntervalYearMonth _ _ -> AInterval YearMonth

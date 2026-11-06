@@ -27,6 +27,7 @@ module Arrow.FlatBufferIPC.Write
   , Frame (..)
   , EncodedBatch (..)
   , encodeBatch
+  , encodeBatchWithEndianness
   , schemaFrame
   , batchFrame
   , dictionaryFrame
@@ -84,7 +85,7 @@ import System.IO.Unsafe (unsafePerformIO)
 import Arrow.Column (ColumnArray)
 import Arrow.FlatBufferIPC.Common
 import Arrow.Types
-import Arrow.Write.Columns (BatchPlan (..), planBatch)
+import Arrow.Write.Columns (BatchPlan (..), planBatchWithEndianness)
 import FlatBuffers.Builder
   ( Builder
   , alignUp
@@ -139,6 +140,8 @@ writeType b ty = case ty of
   ABinary           -> emptyT 4
   AUtf8             -> emptyT 5
   ABool             -> emptyT 6
+  ADecimal32 p s   -> decimal 32 p s
+  ADecimal64 p s   -> decimal 64 p s
   ADecimal p s      -> do
     u <- writeTable b
            [ Just (scalar 4 (\bb -> prependI32 bb (fromIntegral p)))
@@ -209,6 +212,13 @@ writeType b ty = case ty of
   AListView       -> emptyT 25
   ALargeListView  -> emptyT 26
   where
+    decimal width precision scale = do
+      u <- writeTable b
+             [ Just (scalar 4 (\bb -> prependI32 bb (fromIntegral precision)))
+             , Just (scalar 4 (\bb -> prependI32 bb (fromIntegral scale)))
+             , Just (scalar 4 (\bb -> prependI32 bb width))
+             ]
+      pure (7, u)
     emptyT !tag = do
       u <- writeTable b []
       pure (tag, u)
@@ -330,14 +340,25 @@ writeSchema b sch = do
   fieldUOffs <- mapM (writeField b) (V.toList (arrowFields sch))
   fieldsVec  <- writeVectorOfOffsets b fieldUOffs
   customMd   <- writeKeyValueVector b (arrowMetadata sch)
+  features   <- if V.null (arrowFeatures sch)
+                  then pure Nothing
+                  else Just <$> writeVectorInt64 b (map featureValue (V.toList (arrowFeatures sch)))
   writeTable b
     [ case arrowEndianness sch of
         Little -> Nothing
         Big    -> Just (scalar 2 (\bb -> prependI16 bb 1))
     , Just (voff fieldsVec)
     , case customMd of { Nothing -> Nothing; Just uo -> Just (voff uo) }
-    , Nothing -- features
+    , fmap voff features
     ]
+
+-- | Keep the wire values explicit: future features use powers of two,
+-- so their values need not match Haskell Enum indices.
+featureValue :: Feature -> Int64
+featureValue feature = case feature of
+  FeatureUnused -> 0
+  FeatureDictionaryReplacement -> 1
+  FeatureCompressedBody -> 2
 
 -- ============================================================
 -- RecordBatch / DictionaryBatch messages (direct, front to back)
@@ -473,6 +494,8 @@ codecTag = \case
 --
 -- File-identifier is /not/ emitted for Arrow Messages; the
 -- encapsulating stream framing distinguishes message boundaries.
+-- This low-level assembler assumes valid schema parameters. Checked
+-- column writers in Arrow.Stream reject invalid decimal precision/scale.
 buildSchemaMessage :: Schema -> ByteString
 buildSchemaMessage sch = unsafePerformIO $ do
   b <- newBuilder
@@ -707,13 +730,20 @@ data EncodedBatch = EncodedBatch
 
 
 {- | Plan a batch (see 'Arrow.Write.Columns.planBatch') and compress its
-pieces when a codec is requested. A codec that was not compiled in
+pieces when a codec is requested. Body words use little-endian order;
+use 'encodeBatchWithEndianness' for a big-endian schema.
+A codec that was not compiled in
 (see 'bodyCompressionAvailable') is ignored, so the batch is always a
 valid uncompressed one.
 -}
 encodeBatch :: Maybe BodyCompressionCodec -> V.Vector Field -> V.Vector ColumnArray -> Either String EncodedBatch
-encodeBatch mCodec0 fields cols = do
-  plan <- planBatch fields cols
+encodeBatch = encodeBatchWithEndianness Little
+
+
+-- | Encode a column batch in the declared schema byte order.
+encodeBatchWithEndianness :: Endianness -> Maybe BodyCompressionCodec -> V.Vector Field -> V.Vector ColumnArray -> Either String EncodedBatch
+encodeBatchWithEndianness endian mCodec0 fields cols = do
+  plan <- planBatchWithEndianness endian fields cols
   let !mCodec = case mCodec0 of
         Just codec | bodyCompressionAvailable codec -> Just codec
         _ -> Nothing
@@ -936,7 +966,7 @@ buildRecordBatchBytesWith
   -> V.Vector ColumnArray
   -> Either String (RecordBatchDef, ByteString)
 buildRecordBatchBytesWith mCodec sch cols = do
-  eb <- encodeBatch mCodec (arrowFields sch) cols
+  eb <- encodeBatchWithEndianness (arrowEndianness sch) mCodec (arrowFields sch) cols
   Right (ebDef eb, concatPieces (ebBodyLength eb) (ebPieces eb))
 
 
@@ -949,7 +979,7 @@ concatPieces total pieces = BSI.unsafeCreate total $ \p -> do
 -- | A stream from column batches (no schema checks; see "Arrow.Stream" for the checked writer).
 writeArrowStreamFBFromColumns :: Schema -> V.Vector (V.Vector ColumnArray) -> Either String ByteString
 writeArrowStreamFBFromColumns sch batches = do
-  ebs <- traverse (encodeBatch Nothing (arrowFields sch)) (V.toList batches)
+  ebs <- traverse (encodeBatchWithEndianness (arrowEndianness sch) Nothing (arrowFields sch)) (V.toList batches)
   Right (renderStream (schemaFrame sch : map batchFrame ebs))
 
 

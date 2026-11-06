@@ -25,6 +25,7 @@ module Arrow.Column.Internal (
   PrimType (..),
   withPrim,
   primWidth,
+  swapPattern,
   primTypeName,
   samePrimTag,
   samePrimType,
@@ -98,11 +99,15 @@ data PrimType a where
   PIntervalYearMonth :: PrimType Int32
   PIntervalDayTime :: PrimType IntervalDayTime
   PIntervalMonthDayNano :: PrimType IntervalMonthDayNano
+  PDecimal32 :: {-# UNPACK #-} !Int -> {-# UNPACK #-} !Int -> PrimType Int32
+  PDecimal64 :: {-# UNPACK #-} !Int -> {-# UNPACK #-} !Int -> PrimType Int64
   PDecimal128 :: {-# UNPACK #-} !Int -> {-# UNPACK #-} !Int -> PrimType Decimal128
   PDecimal256 :: {-# UNPACK #-} !Int -> {-# UNPACK #-} !Int -> PrimType Decimal256
 
 
 deriving stock instance Show (PrimType a)
+
+
 deriving stock instance Eq (PrimType a)
 
 
@@ -131,6 +136,8 @@ withPrim t k = case t of
   PIntervalYearMonth -> k
   PIntervalDayTime -> k
   PIntervalMonthDayNano -> k
+  PDecimal32 _ _ -> k
+  PDecimal64 _ _ -> k
   PDecimal128 _ _ -> k
   PDecimal256 _ _ -> k
 {-# INLINE withPrim #-}
@@ -159,6 +166,8 @@ primWidth = \case
   PIntervalYearMonth -> 4
   PIntervalDayTime -> 8
   PIntervalMonthDayNano -> 16
+  PDecimal32 _ _ -> 4
+  PDecimal64 _ _ -> 8
   PDecimal128 _ _ -> 16
   PDecimal256 _ _ -> 32
 {-# INLINE primWidth #-}
@@ -187,6 +196,8 @@ primTypeName = \case
   PIntervalYearMonth -> "IntervalYearMonth"
   PIntervalDayTime -> "IntervalDayTime"
   PIntervalMonthDayNano -> "IntervalMonthDayNano"
+  PDecimal32 _ _ -> "Decimal32"
+  PDecimal64 _ _ -> "Decimal64"
   PDecimal128 _ _ -> "Decimal128"
   PDecimal256 _ _ -> "Decimal256"
 
@@ -216,6 +227,8 @@ samePrimTag a b = case (a, b) of
   (PIntervalYearMonth, PIntervalYearMonth) -> Just Refl
   (PIntervalDayTime, PIntervalDayTime) -> Just Refl
   (PIntervalMonthDayNano, PIntervalMonthDayNano) -> Just Refl
+  (PDecimal32 _ _, PDecimal32 _ _) -> Just Refl
+  (PDecimal64 _ _, PDecimal64 _ _) -> Just Refl
   (PDecimal128 _ _, PDecimal128 _ _) -> Just Refl
   (PDecimal256 _ _, PDecimal256 _ _) -> Just Refl
   _ -> Nothing
@@ -224,6 +237,8 @@ samePrimTag a b = case (a, b) of
 -- | Same tag including decimal precision and scale.
 samePrimType :: PrimType a -> PrimType b -> Bool
 samePrimType a b = case (a, b) of
+  (PDecimal32 p s, PDecimal32 p' s') -> p == p' && s == s'
+  (PDecimal64 p s, PDecimal64 p' s') -> p == p' && s == s'
   (PDecimal128 p s, PDecimal128 p' s') -> p == p' && s == s'
   (PDecimal256 p s, PDecimal256 p' s') -> p == p' && s == s'
   _ -> case samePrimTag a b of
@@ -264,6 +279,8 @@ primTypeFor = \case
   AInterval YearMonth -> some PIntervalYearMonth
   AInterval DayTime -> some PIntervalDayTime
   AInterval MonthDayNano -> some PIntervalMonthDayNano
+  ADecimal32 p s -> some (PDecimal32 p s)
+  ADecimal64 p s -> some (PDecimal64 p s)
   ADecimal p s -> some (PDecimal128 p s)
   ADecimal256 p s -> some (PDecimal256 p s)
   _ -> Nothing
@@ -396,6 +413,16 @@ columnBuffers = \case
     vb = maybe [] (\x -> [bitmapBytes (validityBits x)])
 
 
+-- | Byte-swap groups within each element (big-endian bodies).
+swapPattern :: PrimType a -> [Int]
+swapPattern = \case
+  PInt8 -> []
+  PUInt8 -> []
+  PIntervalDayTime -> [4, 4]
+  PIntervalMonthDayNano -> [4, 4, 8]
+  t -> [primWidth t]
+
+
 -- ============================================================
 -- Structural validators
 -- ============================================================
@@ -457,7 +484,8 @@ validateOffsets what limit offs
   | otherwise =
       kernelResult what "invalid offset" $
         unsafeDupablePerformIO $
-          VS.unsafeWith offs $ \p -> cOffsetsCheck p (VS.length offs) (fromIntegral limit)
+          VS.unsafeWith offs $
+            \p -> cOffsetsCheck p (VS.length offs) (fromIntegral limit)
 
 
 {- | UTF-8 data of a utf8 array whose offsets already passed
@@ -509,7 +537,8 @@ validateKeys what col dictLen = case col of
     go k v xs =
       kernelResult what ("dictionary key outside a dictionary of " ++ show dictLen ++ " values") $
         unsafeDupablePerformIO $
-          VS.unsafeWith xs $ \p -> withValidityPtr v $ \pv vo -> k p (VS.length xs) pv vo (fromIntegral dictLen)
+          VS.unsafeWith xs $
+            \p -> withValidityPtr v $ \pv vo -> k p (VS.length xs) pv vo (fromIntegral dictLen)
 
 
 {- | Run ends: a non-null 'PInt16' / 'PInt32' / 'PInt64' column,
@@ -530,7 +559,8 @@ validateRunEnds what col minEnd = case col of
     go k xs =
       kernelResult what ("run ends must be positive, strictly increasing and reach " ++ show minEnd) $
         unsafeDupablePerformIO $
-          VS.unsafeWith xs $ \p -> k p (VS.length xs) (fromIntegral minEnd)
+          VS.unsafeWith xs $
+            \p -> k p (VS.length xs) (fromIntegral minEnd)
 
 
 -- | List-view offsets and sizes: per valid row, in range of the child.
@@ -560,7 +590,8 @@ validateSparseUnionTypes :: String -> VS.Vector Int8 -> Int -> Either String ()
 validateSparseUnionTypes what types nChildren =
   kernelResult what "union child index out of range" $
     unsafeDupablePerformIO $
-      VS.unsafeWith types $ \pt -> K.keysInRangeI8 pt (VS.length types) nullPtr 0 (fromIntegral nChildren)
+      VS.unsafeWith types $
+        \pt -> K.keysInRangeI8 pt (VS.length types) nullPtr 0 (fromIntegral nChildren)
 
 
 {- | Binary or utf8 views: 16 bytes per row, every valid view
@@ -608,5 +639,3 @@ rebaseToZero o
           bytes = createAligned (n * sizeOf o0) $ \dst ->
             VS.unsafeWith o $ \src -> cRebaseOffsets (castPtr dst) src n (negate (fromIntegral o0))
       in (unsafeBytesToStorable bytes, ChildRange (fromIntegral o0) (fromIntegral (VS.unsafeLast o - o0)))
-
-

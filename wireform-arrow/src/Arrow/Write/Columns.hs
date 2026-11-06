@@ -1,6 +1,7 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 {- | Arrow IPC record batch layout: the plan pass that turns a batch of
 'ColumnArray's into Arrow field nodes and body pieces (spec layout,
@@ -20,10 +21,12 @@ high-level stream and file writers are in "Arrow.Stream" and
 module Arrow.Write.Columns (
   -- * Schema agreement
   validateColumns,
+  validateDecimalFields,
 
   -- * Layout
   BatchPlan (..),
   planBatch,
+  planBatchWithEndianness,
 ) where
 
 import Arrow.Column (
@@ -62,6 +65,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Vector qualified as V
 import Data.Vector.Storable qualified as VS
+import Foreign.Storable (Storable, sizeOf)
 
 
 -- ============================================================
@@ -91,10 +95,18 @@ total). O(columns + buffers) apart from the slice normalisation
 described in the module header.
 -}
 planBatch :: V.Vector Field -> V.Vector ColumnArray -> Either String BatchPlan
-planBatch fields cols
+planBatch = planBatchWithEndianness Little
+
+
+{- | Lay out columns in the schema's declared byte order. Little-endian
+pieces keep the normal zero-copy path; big-endian numeric pieces are
+copied once, before any body compression. Bitmaps and string bytes alias.
+-}
+planBatchWithEndianness :: Endianness -> V.Vector Field -> V.Vector ColumnArray -> Either String BatchPlan
+planBatchWithEndianness endian fields cols
   | V.length fields /= V.length cols = Left "Arrow.Write: column count differs from the schema's field count"
   | otherwise = do
-      Acc ns nn ps np vs <- V.ifoldM' (\acc i f -> planCol f (V.unsafeIndex cols i) acc) (Acc [] 0 [] 0 []) fields
+      Acc ns nn ps np vs <- V.ifoldM' (\acc i f -> planCol endian f (V.unsafeIndex cols i) acc) (Acc [] 0 [] 0 []) fields
       Right
         BatchPlan
           { bpLength = if V.null cols then 0 else fromIntegral (columnLength (V.unsafeHead cols))
@@ -162,10 +174,10 @@ childField f i = case fieldChildren f V.!? i of
   Nothing -> Left ("Arrow.Write: field " ++ show (fieldName f) ++ " has no child " ++ show i)
 
 
-planCol :: Field -> ColumnArray -> Acc -> Either String Acc
-planCol f col acc = case col of
+planCol :: Endianness -> Field -> ColumnArray -> Acc -> Either String Acc
+planCol endian f col acc = case col of
   I.ColNull n -> Right (node n n acc)
-  I.ColPrim t v xs -> Right (piece (withPrim t (storableToBytes xs)) (withValidity col v acc))
+  I.ColPrim t v xs -> Right (piece (endianPrim endian t (withPrim t (storableToBytes xs))) (withValidity col v acc))
   I.ColBool v bm -> Right (piece (bitmapPiece bm) (withValidity col v acc))
   I.ColUtf8 v o d -> Right (var v o d)
   I.ColBinary v o d -> Right (var v o d)
@@ -176,59 +188,95 @@ planCol f col acc = case col of
   I.ColBinaryView v views bufs -> Right (view v views bufs)
   I.ColStruct n v cs ->
     V.ifoldM'
-      (\a i (_, c) -> childField f i >>= \cf -> planCol cf (sliceColumnArray 0 n c) a)
+      (\a i (_, c) -> childField f i >>= \cf -> planCol endian cf (sliceColumnArray 0 n c) a)
       (withValidity col v acc)
       cs
   I.ColList v o c -> list v o c
   I.ColLargeList v o c -> list v o c
   I.ColListView v o s c -> do
     cf <- childField f 0
-    planCol cf c (piece (storableToBytes s) (piece (storableToBytes o) (withValidity col v acc)))
+    planCol endian cf c (piece (endianVector endian s) (piece (endianVector endian o) (withValidity col v acc)))
   I.ColLargeListView v o s c -> do
     cf <- childField f 0
-    planCol cf c (piece (storableToBytes s) (piece (storableToBytes o) (withValidity col v acc)))
+    planCol endian cf c (piece (endianVector endian s) (piece (endianVector endian o) (withValidity col v acc)))
   I.ColFixedSizeList w n v c -> do
     cf <- childField f 0
-    planCol cf (sliceColumnArray 0 (n * w) c) (withValidity col v acc)
+    planCol endian cf (sliceColumnArray 0 (n * w) c) (withValidity col v acc)
   I.ColMap v o k x -> do
     entries <- childField f 0
     kf <- childField entries 0
     xf <- childField entries 1
     let !(offs, r) = offsetsPiece o
-        !acc1 = piece BS.empty (node (childLength r) 0 (piece offs (withValidity col v acc)))
-    planCol kf (sliceRange r k) acc1 >>= planCol xf (sliceRange r x)
+        !acc1 = piece BS.empty (node (childLength r) 0 (piece (endianOffsets o offs) (withValidity col v acc)))
+    planCol endian kf (sliceRange r k) acc1 >>= planCol endian xf (sliceRange r x)
   I.ColDenseUnion t o cs ->
-    let !acc1 = piece (storableToBytes o) (piece (unionTypes f t) (node (VS.length t) 0 acc))
-    in V.ifoldM' (\a i c -> childField f i >>= \cf -> planCol cf c a) acc1 cs
+    let !acc1 = piece (endianVector endian o) (piece (unionTypes f t) (node (VS.length t) 0 acc))
+    in V.ifoldM' (\a i c -> childField f i >>= \cf -> planCol endian cf c a) acc1 cs
   I.ColSparseUnion t cs ->
     let !n = VS.length t
         !acc1 = piece (unionTypes f t) (node n 0 acc)
-    in V.ifoldM' (\a i c -> childField f i >>= \cf -> planCol cf (sliceColumnArray 0 n c) a) acc1 cs
+    in V.ifoldM' (\a i c -> childField f i >>= \cf -> planCol endian cf (sliceColumnArray 0 n c) a) acc1 cs
   I.ColDictionary _ keys _ -> case keys of
     I.ColPrim kt v ks -> do
       bytes <- keysPiece f kt ks
-      Right (piece bytes (withValidity col v acc))
+      Right (piece (endianFixed endian (dictionaryWidth f) bytes) (withValidity col v acc))
     _ -> Left ("Arrow.Write: dictionary " ++ show (fieldName f) ++ " has non-integer keys " ++ columnTag keys)
   I.ColRunEndEncoded {} ->
     rebaseRunEnds col >>= \case
       I.ColRunEndEncoded _ n re vals -> do
         rf <- childField f 0
         vf <- childField f 1
-        planCol rf re (node n 0 acc) >>= planCol vf vals
+        planCol endian rf re (node n 0 acc) >>= planCol endian vf vals
       other -> Left ("Arrow.Write: rebaseRunEnds returned " ++ columnTag other)
   where
+    endianOffsets :: Offset o => VS.Vector o -> ByteString -> ByteString
+    endianOffsets o = endianFixed endian (vectorWidth o)
+    endianViews bytes = if endian == Big then I.swapViewCopy False bytes else bytes
     var :: Offset o => Maybe Validity -> VS.Vector o -> ByteString -> Acc
     var v o d =
       let !(offs, r) = offsetsPiece o
-      in piece (bytesRange r d) (piece offs (withValidity col v acc))
+      in piece (bytesRange r d) (piece (endianOffsets o offs) (withValidity col v acc))
     list :: Offset o => Maybe Validity -> VS.Vector o -> ColumnArray -> Either String Acc
     list v o c = do
       cf <- childField f 0
       let !(offs, r) = offsetsPiece o
-      planCol cf (sliceRange r c) (piece offs (withValidity col v acc))
+      planCol endian cf (sliceRange r c) (piece (endianOffsets o offs) (withValidity col v acc))
     view v views bufs =
-      let !acc1 = piece (BS.take (16 * columnLength col) views) (withValidity col v acc)
+      let !acc1 = piece (endianViews (BS.take (16 * columnLength col) views)) (withValidity col v acc)
       in variadic (V.length bufs) (V.foldl' (flip piece) acc1 bufs)
+
+
+-- Numeric conversions are per buffer, outside the normal row path.
+endianPrim :: Endianness -> PrimType a -> ByteString -> ByteString
+endianPrim Little _ bytes = bytes
+endianPrim Big t bytes
+  | width <= 1 = bytes
+  | otherwise = I.swapCopy (I.swapPattern t) width (BS.length bytes `quot` width) bytes
+  where
+    width = primWidth t
+
+
+endianFixed :: Endianness -> Int -> ByteString -> ByteString
+endianFixed Little _ bytes = bytes
+endianFixed Big width bytes
+  | width <= 1 = bytes
+  | otherwise = I.swapCopy [width] width (BS.length bytes `quot` width) bytes
+
+
+vectorWidth :: forall a. Storable a => VS.Vector a -> Int
+vectorWidth _ = sizeOf (undefined :: a)
+
+
+endianVector :: Storable a => Endianness -> VS.Vector a -> ByteString
+endianVector endian values = endianFixed endian (vectorWidth values) (storableToBytes values)
+
+
+dictionaryWidth :: Field -> Int
+dictionaryWidth field = case fieldDictionary field of
+  Just encoding -> case deIndexType encoding of
+    AInt width _ -> width `quot` 8
+    _ -> 4
+  Nothing -> 4
 
 
 {- | Union type ids on the wire: the column holds child positions, the
@@ -314,20 +362,31 @@ validateColumns fields cols
         Nothing -> V.zipWithM_ (checkField []) fields cols
 
 
+{- | Check decimal parameters in every field, including nested/dictionary
+values, without requiring a batch. Used for schema-only IPC output too.
+-}
+validateDecimalFields :: V.Vector Field -> Either String ()
+validateDecimalFields = V.mapM_ $ \field -> do
+  validateDecimalType (fieldType field)
+  validateDecimalFields (fieldChildren field)
+
+
 -- | One column against its field; @path0@ names the enclosing fields (innermost first).
 checkField :: [Text] -> Field -> ColumnArray -> Either String ()
-checkField path0 f col = case fieldDictionary f of
-  Just de -> case col of
-    I.ColDictionary did keys vals
-      | did /= deId de -> bad ("dictionary id " ++ show did ++ ", the field declares " ++ show (deId de))
-      | not (integerKeys keys) -> bad ("dictionary keys must be an integer column, not " ++ columnTag keys)
-      | nullCount keys > 0 && not (fieldNullable f) -> bad "dictionary column with null rows under a non-nullable field"
-      | otherwise -> checkField path0 f {fieldDictionary = Nothing, fieldNullable = True} vals
-    _ -> mismatch
-  Nothing
-    | hasValidity && not (fieldNullable f) && nullCount col > 0 ->
-        bad (columnTag col ++ " column with " ++ show (nullCount col) ++ " nulls under a non-nullable field")
-    | otherwise -> shape
+checkField path0 f col = do
+  validateDecimalType (fieldType f)
+  case fieldDictionary f of
+    Just de -> case col of
+      I.ColDictionary did keys vals
+        | did /= deId de -> bad ("dictionary id " ++ show did ++ ", the field declares " ++ show (deId de))
+        | not (integerKeys keys) -> bad ("dictionary keys must be an integer column, not " ++ columnTag keys)
+        | nullCount keys > 0 && not (fieldNullable f) -> bad "dictionary column with null rows under a non-nullable field"
+        | otherwise -> checkField path0 f {fieldDictionary = Nothing, fieldNullable = True} vals
+      _ -> mismatch
+    Nothing
+      | hasValidity && not (fieldNullable f) && nullCount col > 0 ->
+          bad (columnTag col ++ " column with " ++ show (nullCount col) ++ " nulls under a non-nullable field")
+      | otherwise -> shape
   where
     path = fieldName f : path0
     bad msg = Left ("Arrow.Write: column " ++ show (T.intercalate "." (reverse path)) ++ ": " ++ msg)

@@ -117,6 +117,7 @@ tests =
     Group
       "Arrow.Props"
       [ ("stream round-trip preserves every row", prop_streamRoundTrip)
+      , ("big-endian strict/lazy stream/file and dictionary round-trips", prop_bigEndianRoundTrip)
       , ("file round-trip (encodeArrowFile / writeArrowFile / readArrowFileColumns)", prop_fileRoundTrip)
       , ("Arrow.Write.writeArrowStream round-trip", prop_writeStreamRoundTrip)
       , ("replacement-dictionary stream round-trip (eager and iterator)", prop_replaceDictsRoundTrip)
@@ -298,6 +299,29 @@ prop_streamRoundTrip = withTests 1000 . property $ do
   bytes <- evalEither (encodeArrowStream defaultWriteOptions sch batches)
   (_, got) <- evalEither (decodeArrowStream defaultReadOptions bytes)
   sameTable batches got
+
+
+-- Exercise the complete generated schema/layout vocabulary in the non-native
+-- byte order, including sliced offsets, composite intervals, decimals, views,
+-- nested dictionary values and replacement dictionaries.
+prop_bigEndianRoundTrip :: Property
+prop_bigEndianRoundTrip = withTests 1000 . property $ do
+  (base, batches) <- forAll genTable
+  codec <- forAll (Gen.element (Nothing : map Just (filter bodyCompressionAvailable [BodyZstd, LZ4Frame])))
+  let sch = base {arrowEndianness = Big}
+      opts = defaultWriteOptions {writeBodyCompression = codec}
+      outputs =
+        [ (False, encodeArrowStream opts sch batches)
+        , (False, BL.toStrict <$> encodeArrowStreamLazy opts sch batches)
+        , (True, encodeArrowFile opts sch batches)
+        , (True, BL.toStrict <$> encodeArrowFileLazy opts sch batches)
+        , (False, encodeArrowStream opts {writeDictHandling = DictReplaceOnChange} sch batches)
+        ]
+  forM_ outputs $ \(file, encoded) -> do
+    bytes <- evalEither encoded
+    (actualSchema, got) <- evalEither ((if file then decodeArrowFile else decodeArrowStream) defaultReadOptions bytes)
+    actualSchema === sch
+    sameTable batches got
 
 
 prop_fileRoundTrip :: Property

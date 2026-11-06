@@ -279,12 +279,28 @@ readSchemaTable bs schPos = do
     Just p  -> readChargedOffsets bs (schemaBudget bs) p
   (fields, budget1) <- readFields bs 0 budget0 fieldsVec
   (customMd, _) <- readKeyValues bs budget1 (slot 2)
+  features <- case slot 3 of
+    Nothing -> Right V.empty
+    Just p -> do
+      vecPos <- followUOffset bs p
+      (_, elems) <- readVectorOfStructs bs vecPos 8
+      V.mapM (\off -> peekI64 bs off >>= readFeature) elems
   Right Schema
     { arrowFields     = fields
     , arrowEndianness = endian
     , arrowMetadata   = customMd
-    , arrowFeatures   = V.empty  -- features round-trip on the wire is parsed by callers via getFeaturesIfPresent
+    , arrowFeatures   = features
     }
+
+-- | Unknown features may change stream semantics, so they cannot be silently
+-- discarded as if this implementation supported them. Values are Int64,
+-- as specified by Schema.fbs, rather than the usual byte-sized enums.
+readFeature :: Int64 -> Either String Feature
+readFeature value = case value of
+  0 -> Right FeatureUnused
+  1 -> Right FeatureDictionaryReplacement
+  2 -> Right FeatureCompressedBody
+  _ -> Left ("Arrow.FlatBufferIPC: unsupported schema feature " ++ show value)
 
 -- | Nesting limit for decoded schemas (arrow-cpp's IPC reader uses
 -- the same bound).
@@ -502,10 +518,14 @@ readType bs 7 (Just p) = do
   prec  <- case s 0 of { Nothing -> Right 0; Just b -> peekI32 bs b }
   scale <- case s 1 of { Nothing -> Right 0; Just b -> peekI32 bs b }
   bw    <- case s 2 of { Nothing -> Right 128; Just b -> peekI32 bs b }
-  case bw of
-    128 -> Right (ADecimal (fromIntegral prec) (fromIntegral scale))
-    256 -> Right (ADecimal256 (fromIntegral prec) (fromIntegral scale))
-    n   -> Left $ "Arrow.FlatBufferIPC: unsupported decimal bitWidth " ++ show n
+  decimal <- case bw of
+      32 -> Right (ADecimal32 (fromIntegral prec) (fromIntegral scale))
+      64 -> Right (ADecimal64 (fromIntegral prec) (fromIntegral scale))
+      128 -> Right (ADecimal (fromIntegral prec) (fromIntegral scale))
+      256 -> Right (ADecimal256 (fromIntegral prec) (fromIntegral scale))
+      n   -> Left $ "Arrow.FlatBufferIPC: unsupported decimal bitWidth " ++ show n
+  validateDecimalType decimal
+  Right decimal
 readType bs 8 (Just p) = do
   s <- resolveTable bs p
   u <- case s 0 of { Nothing -> Right 1; Just b -> peekI16 bs b }
@@ -823,12 +843,9 @@ decodeMessageFrame bs = do
     3 -> (\(rb, n) -> (RecordBatch rb, n)) <$> decodeRecordBatchMessage meta
     _ -> Left ("Arrow.FlatBufferIPC: unsupported message header_type " ++ show ht)
 
--- | Parse an Arrow IPC /file/ (per @format/File.fbs@), accepting
--- either the legacy stream-shaped output of 'writeArrowFileFB' or
--- the canonical pyarrow / arrow-cpp file with a trailing 'Footer'.
--- The strategy: skip the 8-byte @ARROW1\\0\\0@ header and parse the
--- contents as a stream. The trailing @Footer + length + ARROW1@
--- comes after the EOS marker so 'readArrowStreamFB' stops there.
+-- | Parse an Arrow IPC /file/ (per @format/File.fbs@) using its footer
+-- index. File padding may align messages to 64 bytes rather than 8, and
+-- a file must follow the footer's block lists rather than stream positions.
 readArrowFileFB
   :: ByteString
   -> Either String (Schema, [(RecordBatchDef, ByteString)])
@@ -842,13 +859,26 @@ readArrowFileFBWithDicts
   :: ByteString
   -> Either String (Schema, [DictBatch], [(RecordBatchDef, ByteString)])
 readArrowFileFBWithDicts bs = do
-  when' (BS.length bs < 14) $
-    Left "Arrow.FlatBufferIPC: input too small to be an Arrow file"
-  when' (BS.take 6 bs /= "ARROW1") $
-    Left "Arrow.FlatBufferIPC: missing leading ARROW1 magic"
-  when' (BS.takeEnd 6 bs /= "ARROW1") $
-    Left "Arrow.FlatBufferIPC: missing trailing ARROW1 magic"
-  readArrowStreamFBWithDicts (BS.drop 8 bs)
+  index <- readFileIndex bs
+  dicts <- V.mapM (block dictionary) (fiDictBlocks index)
+  batches <- V.mapM (block batch) (fiRecordBatches index)
+  Right (fiSchema index, V.toList dicts, V.toList batches)
+  where
+    dictionary message body = case message of
+      DictionaryBatch ident delta definition -> Right (DictBatch ident delta definition body)
+      _ -> Left "Arrow.FlatBufferIPC: file dictionary block has the wrong message type"
+    batch message body = case message of
+      RecordBatch definition -> Right (definition, body)
+      _ -> Left "Arrow.FlatBufferIPC: file record block has the wrong message type"
+    block consume descriptor = do
+      let offset = fromIntegral (abOffset descriptor)
+          metadataLength = fromIntegral (abMetaLen descriptor)
+          metadata = BS.take metadataLength (BS.drop offset bs)
+      (message, declaredBody) <- decodeMessageFrame metadata
+      when' (declaredBody < 0 || declaredBody > abBodyLen descriptor) $
+        Left "Arrow.FlatBufferIPC: file block body length contradicts its message"
+      let body = BS.take (fromIntegral declaredBody) (BS.drop (offset + metadataLength) bs)
+      consume message body
 
 -- ============================================================
 -- File footer index
@@ -901,14 +931,17 @@ parseFileIndex :: Int64 -> ByteString -> Either String FileIndex
 parseFileIndex fileSize footer = do
   when' (BS.length footer < 8) $
     Left "Arrow.FlatBufferIPC: footer too small"
+  when' (fileSize < 18 || fromIntegral (BS.length footer) > fileSize - 18) $
+    Left "Arrow.FlatBufferIPC: footer runs before the file header"
+  let dataEnd = fileSize - 10 - fromIntegral (BS.length footer)
   rootPos <- fromIntegral <$> peekU32 footer 0
   s <- resolveTable footer rootPos
   schField <- case s 1 of
     Nothing -> Left "Arrow.FlatBufferIPC: footer has no schema"
     Just b -> Right b
   sch <- followUOffset footer schField >>= readSchemaTable footer
-  dictBlocks <- readFooterBlocks fileSize footer (s 2)
-  rbBlocks <- readFooterBlocks fileSize footer (s 3)
+  dictBlocks <- readFooterBlocks dataEnd footer (s 2)
+  rbBlocks <- readFooterBlocks dataEnd footer (s 3)
   Right
     FileIndex
       { fiSchema = sch

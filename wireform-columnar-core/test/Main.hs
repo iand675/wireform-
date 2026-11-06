@@ -16,6 +16,7 @@ import Columnar.LZ4 qualified as LZ4
 import Columnar.Predicate qualified as Pred
 import Columnar.SIMD qualified as SIMD
 import Columnar.Stream qualified as IS
+import Control.Exception (SomeException, try)
 import Control.Monad (replicateM)
 import Data.Bits (shiftL, testBit, xor, (.&.), (.|.))
 import Data.ByteString qualified as BS
@@ -24,17 +25,22 @@ import Data.ByteString.Char8 qualified as BSC
 import Data.ByteString.Internal qualified as BSI
 import Data.ByteString.Lazy qualified as BL
 import Data.ByteString.Unsafe qualified as BSU
+import Data.Either (isLeft)
 import Data.Int (Int32, Int64)
 import Data.List (findIndex, sort)
 import Data.Maybe (fromMaybe, isJust, isNothing)
+import Data.Primitive.ByteArray (ByteArray, copyByteArrayToAddr, copyMutableByteArray, copyPtrToMutableByteArray, newByteArray, setByteArray, shrinkMutableByteArray, unsafeFreezeByteArray)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import Data.Word (Word32, Word8)
+import Data.Word (Word32, Word64, Word8)
 import Foreign.C.Types (CInt)
 import Foreign.Marshal.Alloc (allocaBytesAligned)
 import Foreign.Marshal.Array (withArray)
 import Foreign.Marshal.Utils (copyBytes)
 import Foreign.Ptr (Ptr, castPtr, nullPtr, plusPtr)
+import GHC.ByteOrder (ByteOrder (LittleEndian), targetByteOrder)
+import GHC.Float (castDoubleToWord64, castFloatToWord32)
+import LZORegression qualified
 import Hedgehog (forAll, property, (===))
 import Hedgehog qualified as H
 import Hedgehog.Gen qualified as Gen
@@ -63,7 +69,10 @@ main = do
       , predicateUnits
       , columnarIOUnits
       , lz4Tests
+      , LZORegression.tests
       , simdKernelProps
+      , byteStreamTransposeProps
+      , packedFloatProps
       ]
 
 
@@ -536,6 +545,21 @@ predicateUnits =
           Pred.combineDecisions Pred.PMaybeKeep Pred.PMaybeKeep `shouldBe` Pred.PMaybeKeep
       , it "pvLess on incomparable returns False" $
           Pred.pvLess (Pred.PVInt32 1) (Pred.PVText "x") `shouldBe` False
+      , it "incomparable scalar types are neither equal nor less-or-equal" $ do
+          Pred.pvEq (Pred.PVInt32 1) (Pred.PVText "x") `shouldBe` False
+          Pred.pvLessEq (Pred.PVInt32 1) (Pred.PVDouble 1) `shouldBe` False
+          Pred.evalRange
+            (Pred.PVInt32 1)
+            (Pred.PVInt32 2)
+            (Pred.PLt (Pred.PVDouble 100))
+            `shouldBe` Pred.PMaybeKeep
+          Pred.pvEq (Pred.PVDouble (0 / 0)) (Pred.PVDouble 1) `shouldBe` False
+      , it "inverted bounds cannot prove that matching rows are absent" $
+          Pred.evalRange
+            (Pred.PVInt32 100)
+            (Pred.PVInt32 0)
+            (Pred.PEq (Pred.PVInt32 50))
+            `shouldBe` Pred.PMaybeKeep
       ]
 
 
@@ -552,72 +576,72 @@ kernel can rely on alignment.
 -}
 simdKernelProps :: Spec
 simdKernelProps =
-  modifyMaxSuccess (const 300) $
-    describe
+  modifyMaxSuccess (const 300)
+    $ describe
       "Columnar.SIMD kernels"
-      $ sequence_
-        [ describe "offsets" $
-            sequence_
-              [ it "i32 matches the list model" $
-                  offsetsProp wI32 (\p -> SIMD.offsetsCheckI32 (castPtr p))
-              , it "i64 matches the list model" $
-                  offsetsProp wI64 (\p -> SIMD.offsetsCheckI64 (castPtr p))
-              ]
-        , it "utf8 boundaries (i32 and i64) match the list model" utf8BoundariesProp
-        , it "popCountBits matches the list model" popCountBitsProp
-        , describe "keysInRange" $
-            sequence_
-              [ it "i8" $ keysProp wI8 (\p -> SIMD.keysInRangeI8 (castPtr p))
-              , it "i16" $ keysProp wI16 (\p -> SIMD.keysInRangeI16 (castPtr p))
-              , it "i32" $ keysProp wI32 (\p -> SIMD.keysInRangeI32 (castPtr p))
-              , it "i64" $ keysProp wI64 (\p -> SIMD.keysInRangeI64 (castPtr p))
-              , it "u8" $ keysProp wU8 SIMD.keysInRangeU8
-              , it "u16" $ keysProp wU16 (\p -> SIMD.keysInRangeU16 (castPtr p))
-              , it "u32" $ keysProp wU32 (\p -> SIMD.keysInRangeU32 (castPtr p))
-              , it "u64" $ keysProp wU64 (\p -> SIMD.keysInRangeU64 (castPtr p))
-              ]
-        , it "copyBits writes the range and preserves every other bit" copyBitsProp
-        , describe "rebaseOffsets" $
-            sequence_
-              [ it "i32" $
-                  rebaseProp wI32 (pow2 29) (\d s -> SIMD.rebaseOffsetsI32 (castPtr d) (castPtr s))
-              , it "i64" $
-                  rebaseProp wI64 (pow2 61) (\d s -> SIMD.rebaseOffsetsI64 (castPtr d) (castPtr s))
-              ]
-        , describe "runEnds" $
-            sequence_
-              [ it "i16" $ runEndsProp wI16 (\p -> SIMD.runEndsCheckI16 (castPtr p))
-              , it "i32" $ runEndsProp wI32 (\p -> SIMD.runEndsCheckI32 (castPtr p))
-              , it "i64" $ runEndsProp wI64 (\p -> SIMD.runEndsCheckI64 (castPtr p))
-              ]
-        , describe "listView" $
-            sequence_
-              [ it "i32" $
-                  listViewProp wI32 (\o s -> SIMD.listViewCheckI32 (castPtr o) (castPtr s))
-              , it "i64" $
-                  listViewProp wI64 (\o s -> SIMD.listViewCheckI64 (castPtr o) (castPtr s))
-              ]
-        , it "denseUnionCheck matches the list model" denseUnionProp
-        , it "viewRefsCheck (binary and utf8) matches the list model" viewRefsProp
-        , describe "gather" $
-            sequence_
-              [ it "width 1" $ gatherProp 1 SIMD.gather1
-              , it "width 2" $ gatherProp 2 SIMD.gather2
-              , it "width 4" $ gatherProp 4 SIMD.gather4
-              , it "width 8" $ gatherProp 8 SIMD.gather8
-              , it "width 16" $ gatherProp 16 SIMD.gather16
-              ]
-        , it "gatherBits matches the list model" gatherBitsProp
-        , it "andBits matches the list model" andBitsProp
-        , describe "takeOffsets" $
-            sequence_
-              [ it "i32 (with overflow)" $
-                  takeOffsetsProp wI32 (pow2 28) (\d s -> SIMD.takeOffsetsI32 (castPtr d) (castPtr s))
-              , it "i64 (with overflow)" $
-                  takeOffsetsProp wI64 (pow2 60) (\d s -> SIMD.takeOffsetsI64 (castPtr d) (castPtr s))
-              ]
-        , it "takeBytes (i32 and i64) concatenates the selected rows" takeBytesProp
-        ]
+    $ sequence_
+      [ describe "offsets" $
+          sequence_
+            [ it "i32 matches the list model" $
+                offsetsProp wI32 (\p -> SIMD.offsetsCheckI32 (castPtr p))
+            , it "i64 matches the list model" $
+                offsetsProp wI64 (\p -> SIMD.offsetsCheckI64 (castPtr p))
+            ]
+      , it "utf8 boundaries (i32 and i64) match the list model" utf8BoundariesProp
+      , it "popCountBits matches the list model" popCountBitsProp
+      , describe "keysInRange" $
+          sequence_
+            [ it "i8" $ keysProp wI8 (\p -> SIMD.keysInRangeI8 (castPtr p))
+            , it "i16" $ keysProp wI16 (\p -> SIMD.keysInRangeI16 (castPtr p))
+            , it "i32" $ keysProp wI32 (\p -> SIMD.keysInRangeI32 (castPtr p))
+            , it "i64" $ keysProp wI64 (\p -> SIMD.keysInRangeI64 (castPtr p))
+            , it "u8" $ keysProp wU8 SIMD.keysInRangeU8
+            , it "u16" $ keysProp wU16 (\p -> SIMD.keysInRangeU16 (castPtr p))
+            , it "u32" $ keysProp wU32 (\p -> SIMD.keysInRangeU32 (castPtr p))
+            , it "u64" $ keysProp wU64 (\p -> SIMD.keysInRangeU64 (castPtr p))
+            ]
+      , it "copyBits writes the range and preserves every other bit" copyBitsProp
+      , describe "rebaseOffsets" $
+          sequence_
+            [ it "i32" $
+                rebaseProp wI32 (pow2 29) (\d s -> SIMD.rebaseOffsetsI32 (castPtr d) (castPtr s))
+            , it "i64" $
+                rebaseProp wI64 (pow2 61) (\d s -> SIMD.rebaseOffsetsI64 (castPtr d) (castPtr s))
+            ]
+      , describe "runEnds" $
+          sequence_
+            [ it "i16" $ runEndsProp wI16 (\p -> SIMD.runEndsCheckI16 (castPtr p))
+            , it "i32" $ runEndsProp wI32 (\p -> SIMD.runEndsCheckI32 (castPtr p))
+            , it "i64" $ runEndsProp wI64 (\p -> SIMD.runEndsCheckI64 (castPtr p))
+            ]
+      , describe "listView" $
+          sequence_
+            [ it "i32" $
+                listViewProp wI32 (\o s -> SIMD.listViewCheckI32 (castPtr o) (castPtr s))
+            , it "i64" $
+                listViewProp wI64 (\o s -> SIMD.listViewCheckI64 (castPtr o) (castPtr s))
+            ]
+      , it "denseUnionCheck matches the list model" denseUnionProp
+      , it "viewRefsCheck (binary and utf8) matches the list model" viewRefsProp
+      , describe "gather" $
+          sequence_
+            [ it "width 1" $ gatherProp 1 SIMD.gather1
+            , it "width 2" $ gatherProp 2 SIMD.gather2
+            , it "width 4" $ gatherProp 4 SIMD.gather4
+            , it "width 8" $ gatherProp 8 SIMD.gather8
+            , it "width 16" $ gatherProp 16 SIMD.gather16
+            ]
+      , it "gatherBits matches the list model" gatherBitsProp
+      , it "andBits matches the list model" andBitsProp
+      , describe "takeOffsets" $
+          sequence_
+            [ it "i32 (with overflow)" $
+                takeOffsetsProp wI32 (pow2 28) (\d s -> SIMD.takeOffsetsI32 (castPtr d) (castPtr s))
+            , it "i64 (with overflow)" $
+                takeOffsetsProp wI64 (pow2 60) (\d s -> SIMD.takeOffsetsI64 (castPtr d) (castPtr s))
+            ]
+      , it "takeBytes (i32 and i64) concatenates the selected rows" takeBytesProp
+      ]
 
 
 -- ---------- buffers ----------
@@ -722,7 +746,8 @@ corrupt g xs
   | otherwise =
       Gen.frequency
         [ (1, pure xs)
-        , ( 1
+        ,
+          ( 1
           , do
               i <- Gen.int (Range.constant 0 (length xs - 1))
               v <- g
@@ -779,7 +804,8 @@ genValidity :: Int -> H.Gen Validity
 genValidity n =
   Gen.frequency
     [ (1, pure Nothing)
-    , ( 3
+    ,
+      ( 3
       , do
           off <- genBitOff
           bits <- Gen.list (Range.singleton (8 * ceil8 (off + n))) (Gen.frequency [(4, pure True), (1, pure False)])
@@ -984,7 +1010,8 @@ genPayload :: Bool -> H.Gen BS.ByteString
 genPayload utf8Mode =
   Gen.frequency
     [ (if utf8Mode then 8 else 2, validText)
-    , ( 2
+    ,
+      ( 2
       , do
           a <- validText
           b <- Gen.element invalidUtf8Seqs
@@ -1029,7 +1056,8 @@ mutateViews nb bufs views
   | otherwise =
       Gen.frequency
         [ (1, pure views)
-        , ( 1
+        ,
+          ( 1
           , do
               i <- Gen.int (Range.constant 0 (length views - 1))
               let v = views !! i
@@ -1212,7 +1240,7 @@ gatherProp width kernel = property $ do
             readBytes dp (BS.length dstInit)
   out
     === mconcat (map (\i -> BS.take width (BS.drop (i * width) src)) idx)
-    <> BS.drop (n * width) dstInit
+      <> BS.drop (n * width) dstInit
 
 
 rebaseProp :: Width -> Integer -> (Ptr Word8 -> Ptr Word8 -> Int -> Int64 -> IO ()) -> H.Property
@@ -1309,3 +1337,291 @@ takeBytesProp = property $ do
         , run wI64 (\d o -> SIMD.takeBytesI64 d (castPtr o))
         ]
   outs === replicate 2 (expected <> guardBytes)
+
+
+-- The array entry points deliberately accept movable arrays, but only in
+-- bounded unsafe calls. Check the Haskell range checks as well as the C
+-- transpose, including vector byte offsets and untouched output suffixes.
+byteStreamTransposeProps :: Spec
+byteStreamTransposeProps =
+  modifyMaxSuccess (const 300) $
+    describe "Columnar.SIMD byte streams" $
+      sequence_
+        [ it "pointer and array entry points match independent byte lanes" byteStreamTransposeProp
+        , it "bounds array calls before reading or writing either buffer" $ do
+            empty <- newByteArray 0 >>= unsafeFreezeByteArray
+            mutable <- newByteArray 0
+            SIMD.splitByteStreams4Array empty 0 nullPtr 0
+            SIMD.splitByteStreams8Array empty 0 nullPtr 0
+            SIMD.joinByteStreams4Array nullPtr mutable 0
+            SIMD.joinByteStreams8Array nullPtr mutable 0
+            mapM_
+              ( \action -> do
+                  result <- try action :: IO (Either SomeException ())
+                  isLeft result `shouldBe` True
+              )
+              [ SIMD.splitByteStreams4Array empty 0 nullPtr 1
+              , SIMD.splitByteStreams8Array empty 0 nullPtr 1
+              , SIMD.splitByteStreams4Array empty (-1) nullPtr 0
+              , SIMD.splitByteStreams8Array empty maxBound nullPtr 0
+              , SIMD.splitByteStreams4Array empty 0 nullPtr (-1)
+              , SIMD.splitByteStreams8Array empty 0 nullPtr maxBound
+              , SIMD.joinByteStreams4Array nullPtr mutable 1
+              , SIMD.joinByteStreams8Array nullPtr mutable 1
+              , SIMD.joinByteStreams4Array nullPtr mutable (-1)
+              , SIMD.joinByteStreams8Array nullPtr mutable maxBound
+              ]
+        , it "checks mutable arrays again after shrinking" $ do
+            output4 <- newByteArray 64
+            withBytesAt 1 (BS.replicate 64 0x5a) $ \src -> do
+              SIMD.joinByteStreams4Array src output4 16
+              shrinkMutableByteArray output4 0
+              result <- try (SIMD.joinByteStreams4Array src output4 1) :: IO (Either SomeException ())
+              isLeft result `shouldBe` True
+            output8 <- newByteArray 64
+            withBytesAt 3 (BS.replicate 64 0xa5) $ \src -> do
+              SIMD.joinByteStreams8Array src output8 8
+              shrinkMutableByteArray output8 0
+              result <- try (SIMD.joinByteStreams8Array src output8 1) :: IO (Either SomeException ())
+              isLeft result `shouldBe` True
+        ]
+
+
+data ByteStreamResults = ByteStreamResults
+  { byteStreamPointerEncoded :: !BS.ByteString
+  , byteStreamArrayEncoded :: !BS.ByteString
+  , byteStreamPointerDecoded :: !BS.ByteString
+  , byteStreamArrayDecoded :: !BS.ByteString
+  }
+
+
+byteStreamTransposeProp :: H.Property
+byteStreamTransposeProp = property $ do
+  width <- forAll (Gen.element [4, 8])
+  n <- forAll (Gen.int (Range.linear 0 257))
+  offset <- forAll (Gen.int (Range.linear 0 31))
+  sourceAlign <- forAll genAlign
+  targetAlign <- forAll genAlign
+  source <- forAll (Gen.bytes (Range.singleton (width * n)))
+  suffix <- forAll (Gen.bytes (Range.linear 0 17))
+  let bytes = width * n
+      encoded = BS.pack (concatMap (\lane -> map (\row -> BS.index source (row * width + lane)) [0 .. n - 1]) [0 .. width - 1])
+      split = if width == 4 then SIMD.splitByteStreams4 else SIMD.splitByteStreams8
+      join = if width == 4 then SIMD.joinByteStreams4 else SIMD.joinByteStreams8
+      splitArray = if width == 4 then SIMD.splitByteStreams4Array else SIMD.splitByteStreams8Array
+      joinArray = if width == 4 then SIMD.joinByteStreams4Array else SIMD.joinByteStreams8Array
+  result <- H.evalIO $ do
+    input <- byteStreamArray (BS.replicate offset 0xa5 <> source)
+    pointerEncoded <- withBytesAt sourceAlign source $ \src ->
+      withBytesAt targetAlign (BS.replicate bytes 0x55 <> suffix) $ \dst -> do
+        split src dst n
+        readBytes dst (bytes + BS.length suffix)
+    arrayEncoded <- withBytesAt targetAlign (BS.replicate bytes 0x55 <> suffix) $ \dst -> do
+      splitArray input offset dst n
+      readBytes dst (bytes + BS.length suffix)
+    pointerDecoded <- withBytesAt sourceAlign encoded $ \src ->
+      withBytesAt targetAlign (BS.replicate bytes 0x55 <> suffix) $ \dst -> do
+        join src dst n
+        readBytes dst (bytes + BS.length suffix)
+    arrayDecoded <- do
+      output <- newByteArray (bytes + BS.length suffix)
+      setByteArray output 0 (bytes + BS.length suffix) (0xa5 :: Word8)
+      BSU.unsafeUseAsCString encoded $ \src -> joinArray (castPtr src) output n
+      frozen <- unsafeFreezeByteArray output
+      BSI.create (bytes + BS.length suffix) $ \dst -> copyByteArrayToAddr dst frozen 0 (bytes + BS.length suffix)
+    pure (ByteStreamResults pointerEncoded arrayEncoded pointerDecoded arrayDecoded)
+  byteStreamPointerEncoded result === encoded <> suffix
+  byteStreamArrayEncoded result === encoded <> suffix
+  byteStreamPointerDecoded result === source <> suffix
+  byteStreamArrayDecoded result === source <> BS.replicate (BS.length suffix) 0xa5
+
+
+byteStreamArray :: BS.ByteString -> IO ByteArray
+byteStreamArray bytes = do
+  array <- newByteArray (BS.length bytes)
+  BSU.unsafeUseAsCString bytes $ \src -> copyPtrToMutableByteArray array 0 (castPtr src :: Ptr Word8) (BS.length bytes)
+  unsafeFreezeByteArray array
+
+
+packedFloatProps :: Spec
+packedFloatProps =
+  modifyMaxSuccess (const 300) $
+    describe "Columnar.SIMD packed floating values" $
+      sequence_
+        [ it "matches independent packed bits, scaling and IEEE scatter" packedFloatProp
+        , it "checks packed range overflow against unbounded arithmetic" packedFloatRangeBounds
+        , it "rejects invalid extents before reading or writing" $ do
+            empty <- newByteArray 0
+            let frame32 = SIMD.PackedFloat32 0 7 1 1
+                frame64 = SIMD.PackedFloat64 0 7 1 1
+            SIMD.unpackFloat32Array frame32 nullPtr 0 empty 0 0 0
+            SIMD.unpackFloat64Array frame64 nullPtr 0 empty 0 0 0
+            SIMD.scatterFloat32Array nullPtr nullPtr empty 0 0 0
+            SIMD.scatterFloat64Array nullPtr nullPtr empty 0 0 0
+            mapM_
+              expectPackedFailure
+              [ SIMD.unpackFloat32Array frame32 nullPtr 0 empty 0 0 1
+              , SIMD.unpackFloat64Array frame64 nullPtr 0 empty 0 0 1
+              , SIMD.unpackFloat32Array frame32 nullPtr 0 empty (-1) 0 0
+              , SIMD.unpackFloat64Array frame64 nullPtr 0 empty maxBound 0 0
+              , SIMD.unpackFloat32Array (frame32 {SIMD.packedFloat32Width = -1}) nullPtr 0 empty 0 0 0
+              , SIMD.unpackFloat64Array (frame64 {SIMD.packedFloat64Width = 65}) nullPtr 0 empty 0 0 0
+              , SIMD.unpackFloat32Array frame32 nullPtr (-1) empty 0 0 0
+              , SIMD.unpackFloat64Array frame64 nullPtr 0 empty 0 (-1) 0
+              , SIMD.unpackFloat32Array frame32 nullPtr 0 empty 0 maxBound 1
+              , SIMD.unpackFloat64Array frame64 nullPtr 0 empty 0 0 maxBound
+              , SIMD.unpackFloat32Array (frame32 {SIMD.packedFloat32Width = 32}) nullPtr 0 empty 0 0 1
+              , SIMD.unpackFloat64Array (frame64 {SIMD.packedFloat64Width = 64}) nullPtr maxBound empty 0 maxBound 0
+              , SIMD.scatterFloat32Array nullPtr nullPtr empty 0 1 1
+              , SIMD.scatterFloat64Array nullPtr nullPtr empty 0 1 1
+              , SIMD.scatterFloat32Array nullPtr nullPtr empty 0 0 1
+              , SIMD.scatterFloat64Array nullPtr nullPtr empty 0 (-1) 0
+              , SIMD.scatterFloat32Array nullPtr nullPtr empty (-1) 0 0
+              , SIMD.scatterFloat64Array nullPtr nullPtr empty 0 0 maxBound
+              ]
+        , it "checks live array sizes after shrinking for unpack and scatter" $ do
+            let frame32 = SIMD.PackedFloat32 0 7 1 1
+                frame64 = SIMD.PackedFloat64 0 7 1 1
+            out32 <- newByteArray 4
+            out64 <- newByteArray 8
+            SIMD.unpackFloat32Array frame32 nullPtr 0 out32 0 0 1
+            SIMD.unpackFloat64Array frame64 nullPtr 0 out64 0 0 1
+            withBytesAt 1 (BS.pack [0, 0]) $ \positions -> withBytesAt 3 (BS.replicate 8 0) $ \values -> do
+              SIMD.scatterFloat32Array positions values out32 0 1 1
+              SIMD.scatterFloat64Array positions values out64 0 1 1
+              shrinkMutableByteArray out32 0
+              shrinkMutableByteArray out64 0
+              mapM_
+                expectPackedFailure
+                [ SIMD.unpackFloat32Array frame32 nullPtr 0 out32 0 0 1
+                , SIMD.unpackFloat64Array frame64 nullPtr 0 out64 0 0 1
+                , SIMD.scatterFloat32Array positions values out32 0 1 1
+                , SIMD.scatterFloat64Array positions values out64 0 1 1
+                ]
+        ]
+
+
+-- Count zero lets us exercise full-width positions with no source/output
+-- access, including products that wrap a Word or only overflow a signed Int.
+packedFloatRangeBounds :: IO ()
+packedFloatRangeBounds = do
+  empty <- newByteArray 0
+  mapM_
+    ( \physical ->
+        mapM_
+          ( \width -> do
+              let edge = maxBound `quot` max 1 width :: Int
+              mapM_
+                ( \first ->
+                    mapM_
+                      ( \len -> do
+                          let bits = toInteger first * toInteger width
+                              expected =
+                                width >= 0
+                                  && width <= physical * 8
+                                  && first >= 0
+                                  && len >= 0
+                                  && bits <= toInteger (maxBound :: Int)
+                                  && (bits + 7) `quot` 8 <= toInteger len
+                              action =
+                                if physical == 4
+                                  then SIMD.unpackFloat32Array (SIMD.PackedFloat32 width 0 1 1) nullPtr len empty 0 first 0
+                                  else SIMD.unpackFloat64Array (SIMD.PackedFloat64 width 0 1 1) nullPtr len empty 0 first 0
+                          result <- try action :: IO (Either SomeException ())
+                          isLeft result `shouldBe` not expected
+                      )
+                      [-1, 0, 1, 7, 8, maxBound]
+                )
+                [-1, 0, 1, 7, 8, edge - 1, edge, edge + 1, maxBound `quot` 2, maxBound]
+          )
+          [-1 .. physical * 8 + 1]
+    )
+    [4, 8]
+
+
+expectPackedFailure :: IO () -> IO ()
+expectPackedFailure action = do
+  result <- try action :: IO (Either SomeException ())
+  isLeft result `shouldBe` True
+
+
+data PackedException = PackedException
+  { packedPosition :: {-# UNPACK #-} !Int
+  , packedBits :: {-# UNPACK #-} !Word64
+  }
+  deriving stock (Show)
+
+
+data PackedResult = PackedResult
+  { packedDecoded :: !BS.ByteString
+  , packedScattered :: !BS.ByteString
+  }
+
+
+packedFloatProp :: H.Property
+packedFloatProp = property $ do
+  physical <- forAll (Gen.element [4, 8])
+  width <- forAll (Gen.int (Range.linear 0 (physical * 8)))
+  count <- forAll (Gen.int (Range.linear 0 257))
+  first <- forAll (Gen.int (Range.linear 0 15))
+  offset <- forAll (Gen.int (Range.linear 0 31))
+  alignment <- forAll genAlign
+  frame <- forAll (Gen.word64 Range.constantBounded)
+  source <- forAll (Gen.bytes (Range.singleton (((first + count) * width + 7) `quot` 8)))
+  exceptions <-
+    if count == 0
+      then pure []
+      else
+        forAll $
+          Gen.list (Range.linear 0 31) $
+            PackedException <$> Gen.int (Range.linear 0 (count - 1)) <*> Gen.word64 Range.constantBounded
+  let total = offset + physical * count + 13
+      native bits =
+        BL.toStrict $
+          BB.toLazyByteString $
+            if physical == 4
+              then if targetByteOrder == LittleEndian then BB.word32LE (fromIntegral bits) else BB.word32BE (fromIntegral bits)
+              else if targetByteOrder == LittleEndian then BB.word64LE bits else BB.word64BE bits
+      delta row =
+        foldl'
+          ( \acc bit ->
+              let index = (first + row) * width + bit
+              in if testBit (BS.index source (index `quot` 8)) (index `rem` 8) then acc .|. (1 `shiftL` bit) else acc
+          )
+          (0 :: Word64)
+          [0 .. width - 1]
+      decoded row =
+        native $
+          if physical == 4
+            then fromIntegral $ castFloatToWord32 $ ((fromIntegral (fromIntegral (frame + delta row) :: Int32) * 1e5) :: Float) * 1e-3
+            else castDoubleToWord64 $ ((fromIntegral (fromIntegral (frame + delta row) :: Int64) * 1e5) :: Double) * 1e-3
+      expected = BS.replicate offset 0xa5 <> BS.concat (map decoded [0 .. count - 1]) <> BS.replicate 13 0xa5
+      positions = BL.toStrict (BB.toLazyByteString (foldMap (BB.word16LE . fromIntegral . packedPosition) exceptions))
+      values =
+        BL.toStrict $
+          BB.toLazyByteString $
+            foldMap
+              (\entry -> if physical == 4 then BB.word32LE (fromIntegral (packedBits entry)) else BB.word64LE (packedBits entry))
+              exceptions
+      patched = foldl' (\bytes entry -> let start = offset + physical * packedPosition entry in BS.take start bytes <> native (packedBits entry) <> BS.drop (start + physical) bytes) expected exceptions
+  result <- H.evalIO $ do
+    output <- newByteArray total
+    setByteArray output 0 total (0xa5 :: Word8)
+    let snapshot = do
+          copy <- newByteArray total
+          copyMutableByteArray copy 0 output 0 total
+          frozen <- unsafeFreezeByteArray copy
+          BSI.create total (\dst -> copyByteArrayToAddr dst frozen 0 total)
+    withBytesAt alignment source $ \src ->
+      if physical == 4
+        then SIMD.unpackFloat32Array (SIMD.PackedFloat32 width (fromIntegral frame) 1e5 1e-3) src (BS.length source) output offset first count
+        else SIMD.unpackFloat64Array (SIMD.PackedFloat64 width frame 1e5 1e-3) src (BS.length source) output offset first count
+    before <- snapshot
+    withBytesAt alignment positions $ \pos -> withBytesAt alignment values $ \vals ->
+      if physical == 4
+        then SIMD.scatterFloat32Array pos vals output offset count (length exceptions)
+        else SIMD.scatterFloat64Array pos vals output offset count (length exceptions)
+    after <- snapshot
+    pure (PackedResult before after)
+  packedDecoded result === expected
+  packedScattered result === patched

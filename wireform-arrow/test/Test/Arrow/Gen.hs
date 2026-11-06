@@ -263,6 +263,8 @@ genFieldType =
     , pure ABinary
     , pure AUtf8
     , pure ABool
+    , ADecimal32 <$> Gen.int (Range.linear 1 9) <*> Gen.int (Range.linear 0 9)
+    , ADecimal64 <$> Gen.int (Range.linear 1 18) <*> Gen.int (Range.linear 0 18)
     , ADecimal <$> Gen.int (Range.linear 1 38) <*> Gen.int (Range.linear 0 10)
     , ADecimal256 <$> Gen.int (Range.linear 1 76) <*> Gen.int (Range.linear 0 10)
     , ADate <$> Gen.element [DateDay, DateMillisecond]
@@ -742,6 +744,8 @@ genPrimValue t = case t of
   PIntervalYearMonth -> genI32
   PIntervalDayTime -> IntervalDayTime <$> genI32 <*> genI32
   PIntervalMonthDayNano -> IntervalMonthDayNano <$> genI32 <*> genI32 <*> genI64
+  PDecimal32 _ _ -> genI32
+  PDecimal64 _ _ -> genI64
   PDecimal128 _ _ -> Decimal128 <$> genW64 <*> genW64
   PDecimal256 _ _ -> Decimal256 <$> genW64 <*> genW64 <*> genW64 <*> genW64
 
@@ -1063,6 +1067,8 @@ primValue t x = case t of
   PDouble -> VF64 (castDoubleToWord64 x)
   PIntervalDayTime -> let IntervalDayTime d m = x in VPair d m
   PIntervalMonthDayNano -> let IntervalMonthDayNano m d ns = x in VTriple m d ns
+  PDecimal32 _ _ -> VDecimal (toInteger x)
+  PDecimal64 _ _ -> VDecimal (toInteger x)
   PDecimal128 _ _ -> VDecimal (decimal128ToInteger x)
   PDecimal256 _ _ -> VDecimal (decimal256ToInteger x)
 

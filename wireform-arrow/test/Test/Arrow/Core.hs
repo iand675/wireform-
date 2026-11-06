@@ -16,6 +16,7 @@ module Test.Arrow.Core (tests) where
 import Arrow.Column
 import Arrow.Column.Internal (Bitmap (..), Validity (..), checkValidity, columnBuffers, concatBitmaps, copyBitmap, integralPrim, IntegralPrim (..), sliceBitmap, takeBitmap)
 import Arrow.Record qualified as AR
+import Control.Exception (ErrorCall, displayException, evaluate, try)
 import Control.Monad (forM, replicateM)
 import Control.Monad.ST (runST)
 import Data.Bits (setBit)
@@ -25,7 +26,7 @@ import Data.ByteString.Internal qualified as BSI
 import Data.Either (isLeft, isRight)
 import Data.Foldable (foldl')
 import Data.Int (Int32, Int64)
-import Data.List (sortOn)
+import Data.List (isInfixOf, sortOn)
 import Data.Maybe (catMaybes, isJust, isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -52,6 +53,8 @@ tests =
       , ("generated columns observe as their model", prop_observeModel)
       , ("typed accessors agree with the model and reject out-of-range rows", prop_accessors)
       , ("boxed conversions and Arrow.Record utf8D agree with the model on every kind they accept", prop_conversions)
+      , ("dense binary construction copies sliced rows and empty values", prop_denseBinary)
+      , ("binary and text construction check offset overflow before allocating", prop_denseBinaryOffsetLimit)
       , ("builders build what the from* conversions build, and reset on freeze", prop_builders)
       , ("Eq is reflexive and agrees with the model", prop_eq)
       , ("slice keeps the clamped window", prop_slice)
@@ -134,6 +137,8 @@ primTypes =
   , SomePrimType PIntervalYearMonth
   , SomePrimType PIntervalDayTime
   , SomePrimType PIntervalMonthDayNano
+  , SomePrimType (PDecimal32 9 2)
+  , SomePrimType (PDecimal64 18 4)
   , SomePrimType (PDecimal128 38 4)
   , SomePrimType (PDecimal256 76 10)
   ]
@@ -201,6 +206,8 @@ genPrim = \case
       <$> Gen.int32 Range.linearBounded
       <*> Gen.int32 Range.linearBounded
       <*> Gen.int64 Range.linearBounded
+  PDecimal32 _ _ -> int (Gen.int32 Range.linearBounded)
+  PDecimal64 _ _ -> int (Gen.int64 Range.linearBounded)
   PDecimal128 _ _ -> (\x -> (decimal128FromInteger x, VInt x)) <$> Gen.integral (Range.linearFrom 0 (negate (2 ^ (127 :: Int))) (2 ^ (127 :: Int) - 1))
   PDecimal256 _ _ -> (\x -> (decimal256FromInteger x, VInt x)) <$> Gen.integral (Range.linearFrom 0 (negate (2 ^ (255 :: Int))) (2 ^ (255 :: Int) - 1))
   where
@@ -230,6 +237,8 @@ primValue t x = case t of
   PIntervalYearMonth -> VInt (toInteger x)
   PIntervalDayTime -> let IntervalDayTime a b = x in VPair a b
   PIntervalMonthDayNano -> let IntervalMonthDayNano a b c = x in VTriple a b c
+  PDecimal32 _ _ -> VInt (toInteger x)
+  PDecimal64 _ _ -> VInt (toInteger x)
   PDecimal128 _ _ -> VInt (decimal128ToInteger x)
   PDecimal256 _ _ -> VInt (decimal256ToInteger x)
 
@@ -673,6 +682,36 @@ prop_conversions = withTests 500 . property $ do
             else assert (isLeft (toTextVector c))
   where
     int32s ch = maybe (Left ("not an int32 child: " ++ columnTag ch)) (Right . toMaybeVector) (asPrim PInt32 ch)
+
+
+prop_denseBinary :: Property
+prop_denseBinary = withTests 300 . property $ do
+  rows <- forAll (Gen.list (Range.linear 0 200) (Gen.bytes (Range.linear 0 100)))
+  padding <- forAll (Gen.bytes (Range.linear 1 16))
+  let sliced bytes = BS.take (BS.length bytes) (BS.drop (BS.length padding) (padding <> bytes <> padding))
+      checkRows values = do
+        let column = fromByteStrings (V.fromList (sliced <$> values))
+        fmap VG.toList (toBytesVector column) === Right (Just <$> values)
+        nullCount column === 0
+  checkRows rows
+  checkRows ((\n -> BS.replicate n (fromIntegral n)) <$> [0 .. 64])
+
+
+prop_denseBinaryOffsetLimit :: Property
+prop_denseBinaryOffsetLimit = withTests 1 . property $ do
+  -- The same 1 MiB allocation is shared by every input row: exercise a 2 GiB
+  -- total without allocating a 2 GiB input or output.
+  let bytes = BS.replicate (1024 * 1024) 0
+      rows = V.replicate 2048 bytes
+      nullable values = V.singleton Nothing <> (Just <$> values) <> V.singleton Nothing
+      checkLimit column = do
+        result <- evalIO (try (evaluate (columnLength column)) :: IO (Either ErrorCall Int))
+        case result of
+          Left err -> assert ("offset range" `isInfixOf` displayException err)
+          Right _ -> failure
+  checkLimit (fromByteStrings rows)
+  checkLimit (fromMaybeByteStrings (nullable rows))
+  checkLimit (fromMaybeTexts (nullable (V.replicate 2048 (TE.decodeUtf8 bytes))))
 
 
 prop_builders :: Property

@@ -2,6 +2,10 @@ cabal-version: 3.0
 name: wireform-flatbuffers
 version: 0.1.0.0
 synopsis: FlatBuffers zero-copy flat serialization
+description:
+  FlatBuffers table and vector codecs, schema parsing and code generation,
+  Template Haskell derivation, and buffer views.
+category: Data, Codec
 license: BSD-3-Clause
 license-file: LICENSE
 author: Ian Duncan
@@ -47,8 +51,8 @@ library
     FlatBuffers.Value
   build-depends:
     base >= 4.20 && < 5,
-    wireform-core,
-    wireform-derive,
+    wireform-core >= 0.3 && < 0.4,
+    wireform-derive == 0.2.*,
     bytestring >= 0.11 && < 0.13,
     text >= 2.0 && < 2.2,
     vector >= 0.13 && < 0.14,

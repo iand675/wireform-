@@ -120,15 +120,15 @@ import Arrow.FlatBufferIPC (
   decodeMessageFrame,
   parseFileIndex,
   readArrowFileFBWithDicts,
-  readFileIndex,
   readArrowStreamFBInterleaved,
+  readFileIndex,
  )
 import Arrow.FlatBufferIPC.Write (
   Frame,
-  bodyCompressionAvailable,
   batchFrame,
+  bodyCompressionAvailable,
   dictionaryFrame,
-  encodeBatch,
+  encodeBatchWithEndianness,
   renderFile,
   renderFileLazy,
   renderStream,
@@ -145,11 +145,11 @@ import Arrow.Types (
   RecordBatchDef,
   Schema (..),
  )
-import Arrow.Write.Columns (validateColumns)
+import Arrow.Write.Columns (validateColumns, validateDecimalFields)
 import Columnar.Stream qualified as IS
-import Data.Bits ((.&.), (.|.), complement, shiftL)
+import Data.Bits (complement, shiftL, (.&.), (.|.))
 import Data.ByteString (ByteString)
-import qualified Data.ByteString as BS
+import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 import Data.Foldable (foldlM)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
@@ -271,6 +271,7 @@ encodeArrowStreamLazy opts sch batches = renderStreamLazy <$> streamFrames opts 
 -- | Every frame of the stream except the end-of-stream marker.
 streamFrames :: WriteOptions -> Schema -> [V.Vector ColumnArray] -> Either String [Frame]
 streamFrames opts sch batches = do
+  validateDecimalFields (arrowFields sch)
   mapM_ (validateColumns (arrowFields sch)) batches
   case writeDictHandling opts of
     DictEmitOnce -> do
@@ -298,7 +299,7 @@ replaceDictFrames opts sch = go Map.empty []
           !changed = Map.keysSet (Map.filterWithKey (\did vs -> Map.lookup did lastDicts /= Just vs) curDicts)
           !emitDicts = Map.restrictKeys curDicts (withDependents plan changed)
       dictFrames <- buildDictFrames mCodec sch plan emitDicts
-      eb <- encodeBatch mCodec (arrowFields sch) cols
+      eb <- encodeBatchWithEndianness (arrowEndianness sch) mCodec (arrowFields sch) cols
       go (Map.union curDicts lastDicts) ((dictFrames ++ [batchFrame eb]) : acc) rest
 
 
@@ -334,6 +335,7 @@ encodeArrowFile
   -> [V.Vector ColumnArray]
   -> Either String ByteString
 encodeArrowFile opts sch batches = do
+  validateDecimalFields (arrowFields sch)
   mapM_ (validateColumns (arrowFields sch)) batches
   Compiled dicts rbs <- compileBatches opts sch batches
   Right (renderFile sch dicts rbs)
@@ -346,6 +348,7 @@ encodeArrowFileLazy
   -> [V.Vector ColumnArray]
   -> Either String BL.ByteString
 encodeArrowFileLazy opts sch batches = do
+  validateDecimalFields (arrowFields sch)
   mapM_ (validateColumns (arrowFields sch)) batches
   Compiled dicts rbs <- compileBatches opts sch batches
   Right (renderFileLazy sch dicts rbs)
@@ -381,7 +384,7 @@ compileBatches opts sch batches = do
       !plan = dictPlan sch
   (dictMap, rebased) <- unifyDictionaries plan batches
   dicts <- buildDictFrames mCodec sch plan dictMap
-  rbs <- traverse (fmap batchFrame . encodeBatch mCodec (arrowFields sch)) rebased
+  rbs <- traverse (fmap batchFrame . encodeBatchWithEndianness (arrowEndianness sch) mCodec (arrowFields sch)) rebased
   Right (Compiled dicts rbs)
 
 
@@ -412,7 +415,8 @@ dictPlan sch =
            Nothing -> ((order, ixTypes, nested), inner)
            Just de ->
              let !did = deId de
-             in ( ( if did `elem` order then order else did : order
+             in (
+                  ( if did `elem` order then order else did : order
                   , Map.insertWith narrower did (deIndexType de) ixTypes
                   , Map.insertWith Set.union did inner nested
                   )
@@ -457,7 +461,7 @@ buildDictFrames mCodec sch plan dictMap = traverse one (filter (`Map.member` dic
       Nothing -> Left ("Arrow.Stream: dictionary id " ++ show did ++ " has no field in the schema")
       Just f -> do
         let !valuesField = f {fieldDictionary = Nothing, fieldNullable = True}
-        eb <- encodeBatch mCodec (V.singleton valuesField) (V.singleton (Map.findWithDefault (I.ColNull 0) did dictMap))
+        eb <- encodeBatchWithEndianness (arrowEndianness sch) mCodec (V.singleton valuesField) (V.singleton (Map.findWithDefault (I.ColNull 0) did dictMap))
         Right (dictionaryFrame did False eb)
 
 
@@ -848,7 +852,7 @@ blockMessage bs (ArrowBlock off metaLen bodyLen)
   | otherwise = do
       (msg, declaredBody) <-
         decodeMessageFrame (BS.take (fromIntegral metaLen) (BS.drop (fromIntegral off) bs))
-      if declaredBody > bodyLen
+      if declaredBody < 0 || declaredBody > bodyLen
         then Left "Arrow.Stream: file section body is shorter than its message declares"
         else
           let !body = BS.take (fromIntegral bodyLen) (BS.drop (fromIntegral (off + fromIntegral metaLen)) bs)
@@ -1006,7 +1010,7 @@ readSection h (ArrowBlock off metaLen bodyLen)
         else case decodeMessageFrame meta of
           Left e -> pure (Left e)
           Right (msg, declaredBody)
-            | declaredBody > bodyLen ->
+            | declaredBody < 0 || declaredBody > bodyLen ->
                 pure (Left "Arrow.Stream: file section body is shorter than its message declares")
             | otherwise -> do
                 body <- BS.hGet h (fromIntegral bodyLen)

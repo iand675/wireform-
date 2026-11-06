@@ -1,4 +1,7 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE UnboxedTuples #-}
+{-# LANGUAGE UnliftedFFITypes #-}
 
 {- | FFI to @cbits/columnar_simd.c@: hot loops over packed bits, bitmaps and
 Arrow buffers, used by the Parquet and Arrow column readers.
@@ -86,6 +89,25 @@ module Columnar.SIMD (
   unpackBitsLsbUnsafe,
   memcpyFast,
 
+  -- * Byte-stream transposes
+  unsafeCallBytes,
+  splitByteStreams4,
+  splitByteStreams8,
+  joinByteStreams4,
+  joinByteStreams8,
+  splitByteStreams4Array,
+  splitByteStreams8Array,
+  joinByteStreams4Array,
+  joinByteStreams8Array,
+
+  -- * Packed signed integers with floating-point scaling
+  PackedFloat32 (..),
+  PackedFloat64 (..),
+  unpackFloat32Array,
+  unpackFloat64Array,
+  scatterFloat32Array,
+  scatterFloat64Array,
+
   -- * Validators
   offsetsCheckI32,
   offsetsCheckI64,
@@ -130,13 +152,15 @@ module Columnar.SIMD (
 import Data.ByteString qualified as BS
 import Data.ByteString.Unsafe (unsafeUseAsCStringLen)
 import Data.Int (Int16, Int32, Int64, Int8)
+import Data.Primitive.ByteArray (ByteArray (..), MutableByteArray (..), getSizeofMutableByteArray, sizeofByteArray)
 import Data.Vector qualified as V
 import Data.Vector.Storable qualified as VS
 import Data.Vector.Storable.Mutable qualified as VSM
 import Data.Vector.Unboxed qualified as VU
 import Data.Word (Word16, Word32, Word64, Word8)
-import Foreign.C.Types (CInt (..), CSize (..))
+import Foreign.C.Types (CDouble (..), CFloat (..), CInt (..), CSize (..), CUInt (..))
 import Foreign.Ptr (Ptr, castPtr)
+import GHC.Exts (ByteArray#, Int (I#), MutableByteArray#, RealWorld, and#, eqWord#, gtWord#, int2Word#, isTrue#, neWord#, timesWord2#, uncheckedShiftRL#, word2Int#)
 import System.IO.Unsafe (unsafeDupablePerformIO, unsafePerformIO)
 
 
@@ -287,111 +311,194 @@ foreign import ccall unsafe "hs_columnar_take_offsets_i64"
 foreign import ccall safe "hs_columnar_bitmap_popcount"
   c_bitmap_popcount_safe :: Ptr Word8 -> CSize -> Int64
 
+
 foreign import ccall safe "hs_columnar_memcpy_fast"
   c_memcpy_fast_safe :: Ptr Word8 -> Ptr Word8 -> CSize -> IO ()
+
 
 foreign import ccall safe "hs_columnar_offsets_i32"
   c_offsets_i32_safe :: Ptr Int32 -> CSize -> Int64 -> IO Int64
 
+
 foreign import ccall safe "hs_columnar_offsets_i64"
   c_offsets_i64_safe :: Ptr Int64 -> CSize -> Int64 -> IO Int64
+
 
 foreign import ccall safe "hs_columnar_utf8_boundaries_i32"
   c_utf8_boundaries_i32_safe :: Ptr Int32 -> CSize -> Ptr Word8 -> Int64 -> IO Int64
 
+
 foreign import ccall safe "hs_columnar_utf8_boundaries_i64"
   c_utf8_boundaries_i64_safe :: Ptr Int64 -> CSize -> Ptr Word8 -> Int64 -> IO Int64
+
 
 foreign import ccall safe "hs_columnar_popcount_bits"
   c_popcount_bits_safe :: Ptr Word8 -> CSize -> CSize -> IO Int64
 
+
 foreign import ccall safe "hs_columnar_keys_in_range_i8"
   c_keys_in_range_i8_safe :: Ptr Int8 -> CSize -> Ptr Word8 -> CSize -> Int64 -> IO Int64
+
 
 foreign import ccall safe "hs_columnar_keys_in_range_i16"
   c_keys_in_range_i16_safe :: Ptr Int16 -> CSize -> Ptr Word8 -> CSize -> Int64 -> IO Int64
 
+
 foreign import ccall safe "hs_columnar_keys_in_range_i32"
   c_keys_in_range_i32_safe :: Ptr Int32 -> CSize -> Ptr Word8 -> CSize -> Int64 -> IO Int64
+
 
 foreign import ccall safe "hs_columnar_keys_in_range_i64"
   c_keys_in_range_i64_safe :: Ptr Int64 -> CSize -> Ptr Word8 -> CSize -> Int64 -> IO Int64
 
+
 foreign import ccall safe "hs_columnar_keys_in_range_u8"
   c_keys_in_range_u8_safe :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Int64 -> IO Int64
+
 
 foreign import ccall safe "hs_columnar_keys_in_range_u16"
   c_keys_in_range_u16_safe :: Ptr Word16 -> CSize -> Ptr Word8 -> CSize -> Int64 -> IO Int64
 
+
 foreign import ccall safe "hs_columnar_keys_in_range_u32"
   c_keys_in_range_u32_safe :: Ptr Word32 -> CSize -> Ptr Word8 -> CSize -> Int64 -> IO Int64
+
 
 foreign import ccall safe "hs_columnar_keys_in_range_u64"
   c_keys_in_range_u64_safe :: Ptr Word64 -> CSize -> Ptr Word8 -> CSize -> Int64 -> IO Int64
 
+
 foreign import ccall safe "hs_columnar_copy_bits"
   c_copy_bits_safe :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> CSize -> IO ()
+
 
 foreign import ccall safe "hs_columnar_rebase_offsets_i32"
   c_rebase_offsets_i32_safe :: Ptr Int32 -> Ptr Int32 -> CSize -> Int64 -> IO ()
 
+
 foreign import ccall safe "hs_columnar_rebase_offsets_i64"
   c_rebase_offsets_i64_safe :: Ptr Int64 -> Ptr Int64 -> CSize -> Int64 -> IO ()
+
 
 foreign import ccall safe "hs_columnar_run_ends_i16"
   c_run_ends_i16_safe :: Ptr Int16 -> CSize -> Int64 -> IO Int64
 
+
 foreign import ccall safe "hs_columnar_run_ends_i32"
   c_run_ends_i32_safe :: Ptr Int32 -> CSize -> Int64 -> IO Int64
+
 
 foreign import ccall safe "hs_columnar_run_ends_i64"
   c_run_ends_i64_safe :: Ptr Int64 -> CSize -> Int64 -> IO Int64
 
+
 foreign import ccall safe "hs_columnar_list_view_i32"
   c_list_view_i32_safe :: Ptr Int32 -> Ptr Int32 -> CSize -> Ptr Word8 -> CSize -> Int64 -> IO Int64
+
 
 foreign import ccall safe "hs_columnar_list_view_i64"
   c_list_view_i64_safe :: Ptr Int64 -> Ptr Int64 -> CSize -> Ptr Word8 -> CSize -> Int64 -> IO Int64
 
+
 foreign import ccall safe "hs_columnar_dense_union"
   c_dense_union_safe :: Ptr Int8 -> Ptr Int32 -> CSize -> Ptr Int64 -> CSize -> IO Int64
+
 
 foreign import ccall safe "hs_columnar_view_refs"
   c_view_refs_safe
     :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr (Ptr Word8) -> Ptr Int64 -> CSize -> CInt -> IO Int64
 
+
 foreign import ccall safe "hs_columnar_gather_1"
   c_gather_1_safe :: Ptr Word8 -> Ptr Word8 -> Ptr Int -> CSize -> IO ()
+
 
 foreign import ccall safe "hs_columnar_gather_2"
   c_gather_2_safe :: Ptr Word8 -> Ptr Word8 -> Ptr Int -> CSize -> IO ()
 
+
 foreign import ccall safe "hs_columnar_gather_4"
   c_gather_4_safe :: Ptr Word8 -> Ptr Word8 -> Ptr Int -> CSize -> IO ()
+
 
 foreign import ccall safe "hs_columnar_gather_8"
   c_gather_8_safe :: Ptr Word8 -> Ptr Word8 -> Ptr Int -> CSize -> IO ()
 
+
 foreign import ccall safe "hs_columnar_gather_16"
   c_gather_16_safe :: Ptr Word8 -> Ptr Word8 -> Ptr Int -> CSize -> IO ()
+
 
 foreign import ccall safe "hs_columnar_gather_bits"
   c_gather_bits_safe :: Ptr Word8 -> Ptr Word8 -> CSize -> Ptr Int -> CSize -> IO Int64
 
+
 foreign import ccall safe "hs_columnar_and_bits"
   c_and_bits_safe :: Ptr Word8 -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> CSize -> IO Int64
+
 
 foreign import ccall safe "hs_columnar_take_offsets_i32"
   c_take_offsets_i32_safe :: Ptr Int32 -> Ptr Int32 -> Ptr Int -> CSize -> IO Int64
 
+
 foreign import ccall safe "hs_columnar_take_offsets_i64"
   c_take_offsets_i64_safe :: Ptr Int64 -> Ptr Int64 -> Ptr Int -> CSize -> IO Int64
+
 
 foreign import ccall safe "hs_columnar_take_bytes_i32"
   c_take_bytes_i32_safe :: Ptr Word8 -> Ptr Int32 -> Ptr Word8 -> Ptr Int -> CSize -> IO ()
 
+
 foreign import ccall safe "hs_columnar_take_bytes_i64"
   c_take_bytes_i64_safe :: Ptr Word8 -> Ptr Int64 -> Ptr Word8 -> Ptr Int -> CSize -> IO ()
+
+
+foreign import ccall unsafe "hs_columnar_split_bytes4"
+  c_split_bytes4 :: Ptr Word8 -> Ptr Word8 -> CSize -> IO ()
+
+
+foreign import ccall safe "hs_columnar_split_bytes4"
+  c_split_bytes4_safe :: Ptr Word8 -> Ptr Word8 -> CSize -> IO ()
+
+
+foreign import ccall unsafe "hs_columnar_split_bytes8"
+  c_split_bytes8 :: Ptr Word8 -> Ptr Word8 -> CSize -> IO ()
+
+
+foreign import ccall safe "hs_columnar_split_bytes8"
+  c_split_bytes8_safe :: Ptr Word8 -> Ptr Word8 -> CSize -> IO ()
+
+
+foreign import ccall unsafe "hs_columnar_join_bytes4"
+  c_join_bytes4 :: Ptr Word8 -> Ptr Word8 -> CSize -> IO ()
+
+
+foreign import ccall safe "hs_columnar_join_bytes4"
+  c_join_bytes4_safe :: Ptr Word8 -> Ptr Word8 -> CSize -> IO ()
+
+
+foreign import ccall unsafe "hs_columnar_join_bytes8"
+  c_join_bytes8 :: Ptr Word8 -> Ptr Word8 -> CSize -> IO ()
+
+
+foreign import ccall safe "hs_columnar_join_bytes8"
+  c_join_bytes8_safe :: Ptr Word8 -> Ptr Word8 -> CSize -> IO ()
+
+
+foreign import ccall unsafe "hs_columnar_split_bytes4_array"
+  c_split_bytes4_array :: ByteArray# -> CSize -> Ptr Word8 -> CSize -> IO ()
+
+
+foreign import ccall unsafe "hs_columnar_split_bytes8_array"
+  c_split_bytes8_array :: ByteArray# -> CSize -> Ptr Word8 -> CSize -> IO ()
+
+
+foreign import ccall unsafe "hs_columnar_join_bytes4"
+  c_join_bytes4_array :: Ptr Word8 -> MutableByteArray# RealWorld -> CSize -> IO ()
+
+
+foreign import ccall unsafe "hs_columnar_join_bytes8"
+  c_join_bytes8_array :: Ptr Word8 -> MutableByteArray# RealWorld -> CSize -> IO ()
 
 
 {- | Largest input, in bytes, a kernel reads through an @unsafe@ call.
@@ -408,6 +515,219 @@ unsafeCallBytes = 65536
 small :: Int -> Bool
 small bytes = bytes <= unsafeCallBytes
 {-# INLINE small #-}
+
+
+{- | Split @n@ four-byte values into four byte lanes. Arguments are source,
+destination and value count. Both disjoint buffers cover @4*n@ bytes;
+@n >= 0@ and @4*n@ must fit in 'Int'. Bytes within a value retain their
+order, so callers handle host endianness. No pointer alignment is required.
+-}
+splitByteStreams4 :: Ptr Word8 -> Ptr Word8 -> Int -> IO ()
+splitByteStreams4 src dst n =
+  (if small (n * 4) then c_split_bytes4 else c_split_bytes4_safe) src dst (fromIntegral n)
+{-# INLINE splitByteStreams4 #-}
+
+
+-- | Like 'splitByteStreams4', for eight-byte values and @8*n@ buffer bytes.
+splitByteStreams8 :: Ptr Word8 -> Ptr Word8 -> Int -> IO ()
+splitByteStreams8 src dst n =
+  (if small (n * 8) then c_split_bytes8 else c_split_bytes8_safe) src dst (fromIntegral n)
+{-# INLINE splitByteStreams8 #-}
+
+
+-- | Inverse of 'splitByteStreams4', with the same bounds and ownership contract.
+joinByteStreams4 :: Ptr Word8 -> Ptr Word8 -> Int -> IO ()
+joinByteStreams4 src dst n =
+  (if small (n * 4) then c_join_bytes4 else c_join_bytes4_safe) src dst (fromIntegral n)
+{-# INLINE joinByteStreams4 #-}
+
+
+-- | Inverse of 'splitByteStreams8', with the same bounds and ownership contract.
+joinByteStreams8 :: Ptr Word8 -> Ptr Word8 -> Int -> IO ()
+joinByteStreams8 src dst n =
+  (if small (n * 8) then c_join_bytes8 else c_join_bytes8_safe) src dst (fromIntegral n)
+{-# INLINE joinByteStreams8 #-}
+
+
+{- | Bounded split from an immutable array, which need not be pinned.
+Arguments are source array, source byte offset, disjoint destination and
+value count. The source range and 64 KiB unsafe-call limit are checked;
+the caller supplies @4*n@ writable destination bytes. The unsafe FFI call
+prevents the GC moving the source while C reads it.
+-}
+splitByteStreams4Array :: ByteArray -> Int -> Ptr Word8 -> Int -> IO ()
+splitByteStreams4Array array@(ByteArray bytes) offset dst n
+  | n < 0 || n > unsafeCallBytes `quot` 4 || offset < 0 || offset > sizeofByteArray array - n * 4 =
+      error "Columnar.SIMD: invalid bounded four-byte split"
+  | otherwise = c_split_bytes4_array bytes (fromIntegral offset) dst (fromIntegral n)
+{-# INLINE splitByteStreams4Array #-}
+
+
+-- | Like 'splitByteStreams4Array', with @8*n@ source and destination bytes.
+splitByteStreams8Array :: ByteArray -> Int -> Ptr Word8 -> Int -> IO ()
+splitByteStreams8Array array@(ByteArray bytes) offset dst n
+  | n < 0 || n > unsafeCallBytes `quot` 8 || offset < 0 || offset > sizeofByteArray array - n * 8 =
+      error "Columnar.SIMD: invalid bounded eight-byte split"
+  | otherwise = c_split_bytes8_array bytes (fromIntegral offset) dst (fromIntegral n)
+{-# INLINE splitByteStreams8Array #-}
+
+
+{- | Bounded join into a mutable array, starting at byte zero. The array
+need not be pinned; its size and the 64 KiB unsafe-call limit are checked.
+The caller supplies @4*n@ readable source bytes, disjoint from the array,
+and must not resize the array during the call.
+-}
+joinByteStreams4Array :: Ptr Word8 -> MutableByteArray RealWorld -> Int -> IO ()
+joinByteStreams4Array src array@(MutableByteArray bytes) n
+  | n < 0 || n > unsafeCallBytes `quot` 4 =
+      error "Columnar.SIMD: invalid bounded four-byte join"
+  | otherwise = do
+      size <- getSizeofMutableByteArray array
+      if n > size `quot` 4
+        then error "Columnar.SIMD: invalid bounded four-byte join"
+        else c_join_bytes4_array src bytes (fromIntegral n)
+{-# INLINE joinByteStreams4Array #-}
+
+
+-- | Like 'joinByteStreams4Array', with @8*n@ source and destination bytes.
+joinByteStreams8Array :: Ptr Word8 -> MutableByteArray RealWorld -> Int -> IO ()
+joinByteStreams8Array src array@(MutableByteArray bytes) n
+  | n < 0 || n > unsafeCallBytes `quot` 8 =
+      error "Columnar.SIMD: invalid bounded eight-byte join"
+  | otherwise = do
+      size <- getSizeofMutableByteArray array
+      if n > size `quot` 8
+        then error "Columnar.SIMD: invalid bounded eight-byte join"
+        else c_join_bytes8_array src bytes (fromIntegral n)
+{-# INLINE joinByteStreams8Array #-}
+
+
+{- | A packed unsigned delta is added to the frame with 32-bit wrapping,
+reinterpreted as signed, converted to 'Float', then multiplied by the factor
+and scale in two separate, correctly rounded operations.
+-}
+data PackedFloat32 = PackedFloat32
+  { packedFloat32Width :: {-# UNPACK #-} !Int
+  , packedFloat32Frame :: {-# UNPACK #-} !Word32
+  , packedFloat32Factor :: {-# UNPACK #-} !Float
+  , packedFloat32Scale :: {-# UNPACK #-} !Float
+  }
+
+
+-- | The 64-bit integer and 'Double' counterpart of 'PackedFloat32'.
+data PackedFloat64 = PackedFloat64
+  { packedFloat64Width :: {-# UNPACK #-} !Int
+  , packedFloat64Frame :: {-# UNPACK #-} !Word64
+  , packedFloat64Factor :: {-# UNPACK #-} !Double
+  , packedFloat64Scale :: {-# UNPACK #-} !Double
+  }
+
+
+foreign import ccall unsafe "hs_columnar_unpack_for_f32"
+  c_unpack_for_f32 :: Ptr Word8 -> CSize -> MutableByteArray# RealWorld -> CSize -> CSize -> CSize -> CUInt -> Word32 -> CFloat -> CFloat -> IO ()
+
+
+foreign import ccall unsafe "hs_columnar_unpack_for_f64"
+  c_unpack_for_f64 :: Ptr Word8 -> CSize -> MutableByteArray# RealWorld -> CSize -> CSize -> CSize -> CUInt -> Word64 -> CDouble -> CDouble -> IO ()
+
+
+foreign import ccall unsafe "hs_columnar_scatter_le_f32"
+  c_scatter_le_f32 :: Ptr Word8 -> Ptr Word8 -> MutableByteArray# RealWorld -> CSize -> CSize -> IO ()
+
+
+foreign import ccall unsafe "hs_columnar_scatter_le_f64"
+  c_scatter_le_f64 :: Ptr Word8 -> Ptr Word8 -> MutableByteArray# RealWorld -> CSize -> CSize -> IO ()
+
+
+{- | Unpack @count@ LSB-first values starting at packed row @first@ into
+the mutable array at the given byte offset. Arguments are frame, source
+pointer, readable source byte length, destination array, destination byte
+offset, first packed row and count. Source and destination must be disjoint;
+the caller owns the readable source range. No alignment is required.
+
+The source bit range, current destination size, and 64 KiB output limit are
+checked. The destination may be movable: the bounded unsafe FFI call prevents
+GC during C's writes. The caller must not resize it concurrently.
+-}
+unpackFloat32Array :: PackedFloat32 -> Ptr Word8 -> Int -> MutableByteArray RealWorld -> Int -> Int -> Int -> IO ()
+unpackFloat32Array (PackedFloat32 width frame factor scale) src len array@(MutableByteArray bytes) offset first count
+  | not (packedFloatBounds 4 width len first count) = error "Columnar.SIMD: invalid packed Float range"
+  | otherwise = do
+      checkFloatDestination 4 array offset count
+      c_unpack_for_f32 src (fromIntegral len) bytes (fromIntegral offset) (fromIntegral first) (fromIntegral count) (fromIntegral width) frame (CFloat factor) (CFloat scale)
+{-# INLINE unpackFloat32Array #-}
+
+
+-- | Like 'unpackFloat32Array', with 64-bit wrapping and native 'Double' output.
+unpackFloat64Array :: PackedFloat64 -> Ptr Word8 -> Int -> MutableByteArray RealWorld -> Int -> Int -> Int -> IO ()
+unpackFloat64Array (PackedFloat64 width frame factor scale) src len array@(MutableByteArray bytes) offset first count
+  | not (packedFloatBounds 8 width len first count) = error "Columnar.SIMD: invalid packed Double range"
+  | otherwise = do
+      checkFloatDestination 8 array offset count
+      c_unpack_for_f64 src (fromIntegral len) bytes (fromIntegral offset) (fromIntegral first) (fromIntegral count) (fromIntegral width) frame (CDouble factor) (CDouble scale)
+{-# INLINE unpackFloat64Array #-}
+
+
+packedFloatBounds :: Int -> Int -> Int -> Int -> Int -> Bool
+packedFloatBounds physical width len first count
+  | width < 0 || width > physical * 8 || len < 0 || first < 0 || count < 0 = False
+  | count > unsafeCallBytes `quot` physical || first > maxBound - count = False
+  -- An exact double-width product checks both unsigned overflow and the
+  -- signed Int limit. A division-based bound makes GHC float a boxed quotient
+  -- out of callers' loops, allocating once per packed vector.
+  | otherwise = case width of
+      I# width# -> case first + count of
+        I# end# -> case (maxBound :: Int) of
+          I# limit# -> case timesWord2# (int2Word# width#) (int2Word# end#) of
+            (# high#, bits# #) ->
+              if isTrue# (neWord# high# 0##) || isTrue# (gtWord# bits# (int2Word# limit#))
+                then False
+                else
+                  let !whole = I# (word2Int# (uncheckedShiftRL# bits# 3#))
+                      !extra = if isTrue# (eqWord# (and# bits# 7##) 0##) then 0 else 1
+                  in whole + extra <= len
+{-# INLINE packedFloatBounds #-}
+
+
+checkFloatDestination :: Int -> MutableByteArray RealWorld -> Int -> Int -> IO ()
+checkFloatDestination physical array offset rows
+  | offset < 0 || rows < 0 = error "Columnar.SIMD: invalid floating destination"
+  | otherwise = do
+      size <- getSizeofMutableByteArray array
+      if offset > size || rows > (size - offset) `quot` physical
+        then error "Columnar.SIMD: floating destination too small"
+        else pure ()
+{-# INLINE checkFloatDestination #-}
+
+
+{- | Scatter little-endian IEEE bits without floating-point arithmetic.
+Arguments are uint16 little-endian positions, little-endian value bytes,
+destination array, destination byte offset, destination row limit and count.
+The caller supplies disjoint readable sources of @2*count@ and @4*count@
+bytes, and must have validated every position as less than the row limit.
+Positions may repeat or be unordered; later entries overwrite earlier ones.
+
+The current destination extent and combined 64 KiB source limit are checked.
+The movable destination must not be resized concurrently. The call preserves
+NaN payloads and signed zero, and requires no pointer alignment.
+-}
+scatterFloat32Array :: Ptr Word8 -> Ptr Word8 -> MutableByteArray RealWorld -> Int -> Int -> Int -> IO ()
+scatterFloat32Array positions values array@(MutableByteArray bytes) offset rows count
+  | count < 0 || count > unsafeCallBytes `quot` 6 || (rows == 0 && count > 0) = error "Columnar.SIMD: invalid Float scatter count"
+  | otherwise = do
+      checkFloatDestination 4 array offset rows
+      c_scatter_le_f32 positions values bytes (fromIntegral offset) (fromIntegral count)
+{-# INLINE scatterFloat32Array #-}
+
+
+-- | Like 'scatterFloat32Array', with eight-byte IEEE values and @10*count@ source bytes.
+scatterFloat64Array :: Ptr Word8 -> Ptr Word8 -> MutableByteArray RealWorld -> Int -> Int -> Int -> IO ()
+scatterFloat64Array positions values array@(MutableByteArray bytes) offset rows count
+  | count < 0 || count > unsafeCallBytes `quot` 10 || (rows == 0 && count > 0) = error "Columnar.SIMD: invalid Double scatter count"
+  | otherwise = do
+      checkFloatDestination 8 array offset rows
+      c_scatter_le_f64 positions values bytes (fromIntegral offset) (fromIntegral count)
+{-# INLINE scatterFloat64Array #-}
 
 
 -- | Count set bits in a byte range (entire bytes).
@@ -737,8 +1057,9 @@ takeOffsetsI64 dstOffs srcOffs idx n =
 {-# INLINE takeOffsetsI64 #-}
 
 
--- | Take pass 2: dst bytes, src offsets, src bytes, indices, count. Always a
--- safe call: the bytes copied are not bounded by the row count.
+{- | Take pass 2: dst bytes, src offsets, src bytes, indices, count. Always a
+safe call: the bytes copied are not bounded by the row count.
+-}
 takeBytesI32 :: Ptr Word8 -> Ptr Int32 -> Ptr Word8 -> Ptr Int -> Int -> IO ()
 takeBytesI32 dst srcOffs src idx n = c_take_bytes_i32_safe dst srcOffs src idx (fromIntegral n)
 {-# INLINE takeBytesI32 #-}

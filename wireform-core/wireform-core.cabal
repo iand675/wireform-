@@ -1,6 +1,6 @@
 cabal-version: 3.0
 name: wireform-core
-version: 0.2.0.1
+version: 0.3.0.0
 synopsis: Shared FFI primitives for wireform format packages
 description:
   Cross-format SWAR / SIMD-accelerated primitives used by every
@@ -121,9 +121,9 @@ library
   build-depends:
     base >= 4.20 && < 5,
     bytestring >= 0.11 && < 0.13,
-    containers,
-    ghc-prim,
-    template-haskell,
+    containers >= 0.6 && < 0.9,
+    ghc-prim >= 0.12 && < 0.14,
+    template-haskell >= 2.22 && < 2.25,
     text >= 2.0 && < 2.2,
     vector >= 0.13 && < 0.14
 

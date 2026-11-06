@@ -7,7 +7,7 @@ description:
   Parquet, ORC, and Iceberg packages: a pull-based iterator surface
   ('Columnar.Stream'), a pushdown predicate vocabulary
   ('Columnar.Predicate'), an mmap-aware file loader ('Columnar.IO'),
-  an LZ4 codec wrapper ('Columnar.LZ4'), and SIMD-accelerated
+  LZ4 and raw LZO1X codecs ('Columnar.LZ4', 'Columnar.LZO'), and SIMD-accelerated
   bit-unpacking / popcount kernels ('Columnar.SIMD').
 homepage: https://github.com/iand675/wireform-
 bug-reports: https://github.com/iand675/wireform-/issues
@@ -20,12 +20,18 @@ category: Data, Codec, Serialization
 build-type: Simple
 tested-with: GHC == 9.10.3, GHC == 9.12.4, GHC == 9.14.1
 extra-source-files:
+  README.md
   cbits/*.c
   include/**/*.h
 
 source-repository head
   type:     git
   location: https://github.com/iand675/wireform-
+
+flag lzo-reference-bench
+  description: Include the independent system liblzo2 in the LZO benchmark only
+  manual: True
+  default: False
 
 common defaults
   default-language: GHC2021
@@ -52,10 +58,15 @@ library
   exposed-modules:
     Columnar.IO
     Columnar.LZ4
+    Columnar.LZO
     Columnar.Predicate
     Columnar.SIMD
     Columnar.Stream
-  c-sources: cbits/columnar_simd.c
+  c-sources:
+    cbits/columnar_simd.c
+    cbits/byte_stream_split.c
+    cbits/packed_float.c
+    cbits/lzo.c
   -- simde headers are vendored under include/simde/ so the package
   -- is self-contained at sdist time. The same headers also live in
   -- wireform-core, but cabal-check (correctly) rejects a relative
@@ -88,9 +99,12 @@ test-suite wireform-columnar-test
   type: exitcode-stdio-1.0
   hs-source-dirs: test
   main-is: Main.hs
+  other-modules: LZORegression
+  ghc-options: -threaded -rtsopts
   build-depends:
     base >= 4.20 && < 5,
     wireform-columnar-core,
+    primitive >= 0.7 && < 0.10,
     bytestring >= 0.11 && < 0.13,
     text >= 2.0 && < 2.2,
     vector >= 0.13 && < 0.14,
@@ -98,3 +112,20 @@ test-suite wireform-columnar-test
     sydtest,
     sydtest-hedgehog,
     temporary >= 1.3 && < 1.4
+
+benchmark columnar-lzo-throughput
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: bench
+  main-is: LZOThroughput.hs
+  ghc-options: -rtsopts
+  build-depends:
+    base >= 4.20 && < 5,
+    wireform-columnar-core,
+    bytestring >= 0.11 && < 0.13,
+    deepseq >= 1.4 && < 1.6,
+    criterion >= 1.6 && < 1.7
+  if flag(lzo-reference-bench)
+    cpp-options: -DLZO_REFERENCE
+    c-sources: bench/lzo_reference.c
+    extra-libraries: lzo2

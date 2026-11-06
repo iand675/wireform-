@@ -30,7 +30,7 @@ import qualified Parquet.Predicate as Pred
 let !p = 'PAnd' ('PCol' "ts" ('PGtEq' ('PVInt64' 1700000000)))
                ('PCol' "ts" ('PLt'   ('PVInt64' 1700100000)))
 skipRowGroup :: 'P.RowGroup' -> Bool
-skipRowGroup rg = 'evalRowGroup' columnNames p rg == 'PSkip'
+skipRowGroup rg = 'evalRowGroup' fileMetadata p rg == 'PSkip'
 @
 
 The evaluator never produces a /false negative/ skip
@@ -55,6 +55,8 @@ module Parquet.Predicate (
   -- * Evaluation results
   Decision (..),
   combineDecisions,
+  StatisticsContext (..),
+  statisticsContext,
 
   -- * Statistics-based skipping
   evalRowGroup,
@@ -68,8 +70,12 @@ module Parquet.Predicate (
 
   -- * Conversions
   decodePValueLE,
+  decodePValueForSchema,
+  minimumStatistic,
+  maximumStatistic,
 ) where
 
+import Arrow.Column qualified as AC
 import Columnar.Predicate (
   Decision (..),
   PColPredicate (..),
@@ -77,20 +83,20 @@ import Columnar.Predicate (
   Predicate (..),
   combineDecisions,
   evalRange,
-  pvEq,
-  pvLess,
-  pvLessEq,
  )
 import Data.Bits (shiftL, (.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Int (Int32, Int64)
+import Data.Ratio (denominator, numerator)
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Vector qualified as V
 import Data.Word (Word32, Word64)
 import GHC.Float (castDoubleToWord64, castFloatToWord32, castWord32ToFloat, castWord64ToDouble)
 import Parquet.BloomFilter qualified as Bloom
+import Parquet.Decimal (decodeDecimalInteger)
 import Parquet.Types qualified as P
 
 
@@ -98,24 +104,74 @@ import Parquet.Types qualified as P
 -- Statistics-based skipping
 -- ============================================================
 
+{- | Logical type plus the file's declared ordering. Missing orders cannot
+give meaning to modern bounds; well-defined legacy numeric bounds remain
+usable independently of this optional declaration.
+-}
+data StatisticsContext = StatisticsContext
+  { statisticsField :: !P.SchemaElement
+  , statisticsOrder :: !(Maybe P.ColumnOrder)
+  }
+  deriving (Show, Eq)
+
+
+statisticsContext :: P.FileMetadata -> Int -> Maybe StatisticsContext
+statisticsContext metadata index = do
+  field <- V.filter (maybe False (const True) . P.seType) (P.fmSchema metadata) V.!? index
+  Just (StatisticsContext field (P.fmColumnOrders metadata >>= (V.!? index)))
+
+
+modernOrderSupported :: StatisticsContext -> Bool
+modernOrderSupported context =
+  P.hasDefinedStatisticsOrder field && case statisticsOrder context of
+    Just P.TypeDefinedOrder -> P.seType field /= Just P.PTInt96
+    Just P.IEEE754TotalOrder ->
+      P.seType field `elem` [Just P.PTFloat, Just P.PTDouble]
+        || P.seLogicalType field == Just P.LTFloat16
+    Just P.Int96TimestampOrder -> P.seType field == Just P.PTInt96
+    _ -> False
+  where
+    field = statisticsField context
+
+
 {- | Decide whether an entire row group can be skipped.
 
 Walks the predicate tree, looking up each leaf's column by
-name in the column-name vector (parallel to the row group's
-'rgColumns' vector — typically the leaf names from
-'fmSchema'). Missing columns / missing stats degrade
+column path in the file schema. The schema retains logical annotations
+so decimal and unsigned bounds use their numeric ordering. Missing columns / missing stats degrade
 gracefully to 'PMaybeKeep'.
 -}
 evalRowGroup
-  :: V.Vector Text
-  {- ^ Column names parallel to @rgColumns@. Use
-  @'Parquet.Footer.leafColumnNames'@ or build from
-  'P.fmSchema'.
-  -}
+  :: P.FileMetadata
+  -- ^ File schema including logical annotations; nested columns use dotted paths.
   -> Predicate
   -> P.RowGroup
   -> Decision
-evalRowGroup colNames p rg = evalPredicate (lookupChunkStats colNames rg) p
+evalRowGroup metadata p rg = evalPredicate lookupStats p
+  where
+    leaves = V.filter (maybe False (const True) . P.seType) (P.fmSchema metadata)
+    lookupStats name = do
+      let matches =
+            V.findIndices
+              ( \column -> case P.ccMetadata column of
+                  Just columnMetadata ->
+                    P.cmPathInSchema columnMetadata == V.singleton name
+                      || name == T.intercalate "." (V.toList (P.cmPathInSchema columnMetadata))
+                  _ -> False
+              )
+              (P.rgColumns rg)
+      index <-
+        if V.length leaves == V.length (P.rgColumns rg) && V.length matches == 1
+          then Just (V.head matches)
+          else Nothing
+      context <- statisticsContext metadata index
+      let field = statisticsField context
+      column <- P.rgColumns rg V.!? index
+      columnMetadata <- P.ccMetadata column
+      statistics <- P.cmStatistics columnMetadata
+      if P.seType field == Just (P.cmType columnMetadata)
+        then Just (context, statistics)
+        else Nothing
 
 
 {- | Decide whether one column chunk can be skipped, given the
@@ -123,18 +179,20 @@ predicate fragment that applies to its column. Useful when
 the caller has already projected the predicate per column.
 -}
 evalColumnChunk
-  :: P.ColumnChunk
+  :: StatisticsContext
+  -> P.ColumnChunk
   -> PColPredicate
   -> Decision
-evalColumnChunk cc cp = case P.ccMetadata cc of
+evalColumnChunk context cc cp = case P.ccMetadata cc of
   Nothing -> PMaybeKeep
   Just md -> case P.cmStatistics md of
     Nothing -> PMaybeKeep
-    Just stats -> evalLeaf (P.cmType md) stats cp
+    Just stats | P.seType (statisticsField context) == Just (P.cmType md) -> evalLeaf context stats cp
+    _ -> PMaybeKeep
 
 
 evalPredicate
-  :: (Text -> Maybe (P.ParquetType, P.Statistics))
+  :: (Text -> Maybe (StatisticsContext, P.Statistics))
   -> Predicate
   -> Decision
 evalPredicate _ PTrue = PMaybeKeep
@@ -159,30 +217,6 @@ evalPredicate look (PNot inner) = case evalPredicate look inner of
     _ -> PMaybeKeep
 
 
-{- | Look up the @(type, statistics)@ pair for one column-chunk
-slot of a row group. Index by the caller-supplied name
-vector so one row group's columns stay aligned with the file
-footer's leaf order.
--}
-lookupChunkStats
-  :: V.Vector Text
-  -> P.RowGroup
-  -> Text
-  -> Maybe (P.ParquetType, P.Statistics)
-lookupChunkStats colNames rg name = do
-  i <- V.findIndex (== name) colNames
-  cc <- safeIndex i (P.rgColumns rg)
-  md <- P.ccMetadata cc
-  st <- P.cmStatistics md
-  Just (P.cmType md, st)
-
-
-safeIndex :: Int -> V.Vector a -> Maybe a
-safeIndex i v
-  | i >= 0 && i < V.length v = Just (V.unsafeIndex v i)
-  | otherwise = Nothing
-
-
 -- ============================================================
 -- Leaf predicates
 -- ============================================================
@@ -191,7 +225,7 @@ safeIndex i v
 chunk's 'Statistics'. The 'ParquetType' tells us how to
 decode the bytes inside @statMinValue@ / @statMaxValue@.
 -}
-evalLeaf :: P.ParquetType -> P.Statistics -> PColPredicate -> Decision
+evalLeaf :: StatisticsContext -> P.Statistics -> PColPredicate -> Decision
 evalLeaf _ stats PIsNull
   -- IS NULL is skippable iff null_count is known to be zero.
   | P.statNullCount stats == Just 0 = PSkip
@@ -202,35 +236,40 @@ evalLeaf _ stats PIsNotNull
   | otherwise = case P.statNullCount stats of
       Just _ -> PMaybeKeep -- conservative
       Nothing -> PMaybeKeep
-evalLeaf ty stats cp =
-  case (statMinPV ty stats, statMaxPV ty stats) of
+evalLeaf field stats cp =
+  case (minimumStatistic field stats, maximumStatistic field stats) of
     (Just mn, Just mx) -> evalRange mn mx cp
     _ -> PMaybeKeep
+
+
+minimumStatistic :: StatisticsContext -> P.Statistics -> Maybe PValue
+minimumStatistic field stats = statisticValue field (P.statMinValue stats) (P.statMin stats)
+
+
+maximumStatistic :: StatisticsContext -> P.Statistics -> Maybe PValue
+maximumStatistic field stats = statisticValue field (P.statMaxValue stats) (P.statMax stats)
+
+
+statisticValue :: StatisticsContext -> Maybe ByteString -> Maybe ByteString -> Maybe PValue
+statisticValue context current legacy =
+  ( case current of
+      Just value | modernOrderSupported context -> Just value
+      _ | legacyOrderMatches -> legacy
+      _ -> Nothing
+  )
+    >>= decodePValueForSchema field
+  where
+    field = statisticsField context
+    legacyOrderMatches =
+      P.seType field `elem` (Just <$> [P.PTBoolean, P.PTInt32, P.PTInt64, P.PTFloat, P.PTDouble]) && case P.seLogicalType field of
+        Just (P.LTInteger _ False) -> False
+        Just P.LTDecimal {} -> P.seType field `elem` [Just P.PTInt32, Just P.PTInt64]
+        _ -> P.seConvertedType field `notElem` (Just <$> [P.CTUInt8, P.CTUInt16, P.CTUInt32, P.CTUInt64, P.CTDecimal])
 
 
 -- ============================================================
 -- Min / max decoding
 -- ============================================================
-
-{- | Pick the modern @min_value@ if present (preferred), else
-the legacy @min@ slot (older writers).
--}
-statMinPV :: P.ParquetType -> P.Statistics -> Maybe PValue
-statMinPV ty s =
-  preferring (P.statMinValue s) (P.statMin s)
-    >>= decodePValueLE ty
-
-
-statMaxPV :: P.ParquetType -> P.Statistics -> Maybe PValue
-statMaxPV ty s =
-  preferring (P.statMaxValue s) (P.statMax s)
-    >>= decodePValueLE ty
-
-
-preferring :: Maybe a -> Maybe a -> Maybe a
-preferring (Just x) _ = Just x
-preferring Nothing m = m
-
 
 {- | Decode a min/max byte payload according to its
 'P.ParquetType'. Mirrors what the writer's
@@ -240,20 +279,23 @@ decodePValueLE :: P.ParquetType -> ByteString -> Maybe PValue
 decodePValueLE ty bs = case ty of
   P.PTBoolean ->
     case BS.uncons bs of
-      Just (b, _) -> Just (PVBool (b /= 0))
+      Just (b, rest) | BS.null rest && b <= 1 -> Just (PVBool (b /= 0))
+      Just _ -> Nothing
       Nothing -> Nothing
   P.PTInt32
-    | BS.length bs >= 4 ->
+    | BS.length bs == 4 ->
         Just (PVInt32 (fromIntegral (readLE32 bs 0)))
   P.PTInt64
-    | BS.length bs >= 8 ->
+    | BS.length bs == 8 ->
         Just (PVInt64 (fromIntegral (readLE64 bs 0)))
   P.PTFloat
-    | BS.length bs >= 4 ->
-        Just (PVFloat (castWord32ToFloat (readLE32 bs 0)))
+    | BS.length bs == 4 ->
+        let value = castWord32ToFloat (readLE32 bs 0)
+        in if isNaN value then Nothing else Just (PVFloat value)
   P.PTDouble
-    | BS.length bs >= 8 ->
-        Just (PVDouble (castWord64ToDouble (readLE64 bs 0)))
+    | BS.length bs == 8 ->
+        let value = castWord64ToDouble (readLE64 bs 0)
+        in if isNaN value then Nothing else Just (PVDouble value)
   P.PTByteArray ->
     -- Stats store the bytes without the PLAIN length prefix
     -- (per spec). Treat them as opaque binary; consumers can
@@ -262,6 +304,48 @@ decodePValueLE ty bs = case ty of
   P.PTFixedLenByteArray ->
     Just (PVBinary bs)
   _ -> Nothing
+
+
+{- | Decode statistics using the logical annotation as well as its carrier.
+Exact decimal scalars cover the Arrow decimal256 precision range (76 digits).
+-}
+decodePValueForSchema :: P.SchemaElement -> ByteString -> Maybe PValue
+decodePValueForSchema field bytes
+  | not (P.hasDefinedStatisticsOrder field) = Nothing
+  | otherwise = case P.seLogicalType field of
+      Just P.LTFloat16
+        | BS.length bytes == 2 ->
+            let bits = fromIntegral (BS.index bytes 0) .|. (fromIntegral (BS.index bytes 1) `shiftL` 8)
+                value = AC.float16ToDouble (AC.Float16 bits)
+            in if isNaN value then Nothing else Just (PVDouble value)
+      Just P.LTFloat16 -> Nothing
+      Just P.LTTimestamp {} | P.seType field /= Just P.PTInt64 -> Nothing
+      Just (P.LTDecimal precision scale)
+        | precision > 0 && precision <= 76 && scale >= 0 && scale <= precision -> do
+            value <- case P.seType field of
+              Just P.PTInt32 | BS.length bytes == 4 -> Just (fromIntegral (fromIntegral (readLE32 bytes 0) :: Int32))
+              Just P.PTInt64 | BS.length bytes == 8 -> Just (fromIntegral (fromIntegral (readLE64 bytes 0) :: Int64))
+              Just P.PTByteArray -> decodeDecimalInteger bytes
+              Just P.PTFixedLenByteArray -> decodeDecimalInteger bytes
+              _ -> Nothing
+            Just (PVDecimal (fromInteger value / fromInteger (10 ^ scale)))
+        | otherwise -> Nothing
+      _
+        | unsigned -> case P.seType field of
+            Just P.PTInt32 | BS.length bytes == 4 -> Just (PVUnsigned (fromIntegral (readLE32 bytes 0)))
+            Just P.PTInt64 | BS.length bytes == 8 -> Just (PVUnsigned (readLE64 bytes 0))
+            _ -> Nothing
+        | text -> either (const Nothing) (Just . PVText) (TE.decodeUtf8' bytes)
+        | otherwise -> P.seType field >>= (`decodePValueLE` bytes)
+  where
+    unsigned = case P.seLogicalType field of
+      Just (P.LTInteger _ signed) -> not signed
+      _ -> P.seConvertedType field `elem` (Just <$> [P.CTUInt8, P.CTUInt16, P.CTUInt32, P.CTUInt64])
+    text =
+      P.seType field == Just P.PTByteArray
+        && ( P.seLogicalType field `elem` [Just P.LTString, Just P.LTEnum, Just P.LTJson]
+               || P.seConvertedType field `elem` [Just P.CTUtf8, Just P.CTEnum, Just P.CTJson]
+           )
 
 
 readLE32 :: ByteString -> Int -> Word32
@@ -296,27 +380,33 @@ only nulls) are skipped for /any/ value-style predicate
 ('PEq', 'PLt', …); 'PIsNull' keeps them.
 -}
 evalPagesByColumnIndex
-  :: P.ParquetType
+  :: StatisticsContext
   -> P.ColumnIndex
   -> PColPredicate
   -> V.Vector Decision
-evalPagesByColumnIndex ty ci cp =
+evalPagesByColumnIndex context ci cp =
   let !nulls = P.ciNullPages ci
       !mins = P.ciMinValues ci
       !maxs = P.ciMaxValues ci
       !n = V.length nulls
-  in V.generate n $ \i ->
-       let !isNull = V.unsafeIndex nulls i
-       in if isNull
-            then case cp of
-              PIsNull -> PMaybeKeep
-              PIsNotNull -> PSkip
-              _ -> PSkip
-            else case ( decodePValueLE ty (V.unsafeIndex mins i)
-                      , decodePValueLE ty (V.unsafeIndex maxs i)
-                      ) of
-              (Just mn, Just mx) -> evalRange mn mx cp
-              _ -> PMaybeKeep
+  in if V.length mins /= n || V.length maxs /= n
+       then V.replicate n PMaybeKeep
+       else V.generate n $ \i ->
+         let !isNull = V.unsafeIndex nulls i
+         in if isNull
+              then case cp of
+                PIsNull -> PMaybeKeep
+                PIsNotNull -> PSkip
+                _ -> PSkip
+              else case ( decodeBound (V.unsafeIndex mins i)
+                        , decodeBound (V.unsafeIndex maxs i)
+                        ) of
+                (Just mn, Just mx) -> evalRange mn mx cp
+                _ -> PMaybeKeep
+  where
+    decodeBound bytes
+      | modernOrderSupported context = decodePValueForSchema (statisticsField context) bytes
+      | otherwise = Nothing
 
 
 -- ============================================================
@@ -333,17 +423,17 @@ always degrade to 'PMaybeKeep' here (range / nullity have
 to use min/max stats instead).
 -}
 evalBloomChunk
-  :: P.ParquetType
+  :: P.SchemaElement
   -> Bloom.Sbbf
   -> PColPredicate
   -> Decision
-evalBloomChunk ty sbbf = \case
-  PEq v -> case bloomCheckVal ty sbbf v of
+evalBloomChunk field sbbf = \case
+  PEq v -> case bloomCheckVal field sbbf v of
     True -> PMaybeKeep
     False -> PSkip
   PIn vs ->
     -- Skip iff every candidate is rejected by the filter.
-    if all (not . bloomCheckVal ty sbbf) vs
+    if all (not . bloomCheckVal field sbbf) vs
       then PSkip
       else PMaybeKeep
   _ -> PMaybeKeep
@@ -353,24 +443,57 @@ evalBloomChunk ty sbbf = \case
 its PLAIN-form byte payload (matching what the writer
 inserts) and probes the filter.
 -}
-bloomCheckVal :: P.ParquetType -> Bloom.Sbbf -> PValue -> Bool
-bloomCheckVal _ sbbf v =
-  let !payload = encodePlain v
-  in Bloom.sbbfCheck payload sbbf
+bloomCheckVal :: P.SchemaElement -> Bloom.Sbbf -> PValue -> Bool
+bloomCheckVal field sbbf value = case value of
+  PVFloat f | f == 0 -> check (PVFloat 0.0) || check (PVFloat (-0.0))
+  PVDouble d | d == 0 -> check (PVDouble 0.0) || check (PVDouble (-0.0))
+  _ -> check value
+  where
+    -- Unknown representations cannot prove absence. Variable-width decimal
+    -- bytes may have redundant sign extension, so one hash is insufficient.
+    check v = maybe True (\bytes -> Bloom.sbbfCheck bytes sbbf) (encodePlain field v)
 
 
-{- | Encode a value as its PLAIN payload — matches what
-'Parquet.Write' inserts into the bloom filter at write time.
--}
-encodePlain :: PValue -> ByteString
-encodePlain = \case
-  PVInt32 n -> word32LE (fromIntegral n)
-  PVInt64 n -> word64LE (fromIntegral n)
-  PVFloat f -> word32LE (castFloatToWord32 f)
-  PVDouble d -> word64LE (castDoubleToWord64 d)
-  PVBool b -> BS.singleton (if b then 1 else 0)
-  PVText t -> TE.encodeUtf8 t
-  PVBinary b -> b
+encodePlain :: P.SchemaElement -> PValue -> Maybe ByteString
+encodePlain field value
+  | not (P.hasCompatiblePhysicalType field) = Nothing
+  | Just P.LTDecimal {} <- P.seLogicalType field
+  , notDecimal value =
+      Nothing
+  | otherwise = case (P.seType field, value) of
+      (Just P.PTInt32, PVInt32 n) -> Just (word32LE (fromIntegral n))
+      (Just P.PTInt64, PVInt64 n) -> Just (word64LE (fromIntegral n))
+      (Just P.PTInt32, PVUnsigned n) | unsigned && n <= fromIntegral (maxBound :: Word32) -> Just (word32LE (fromIntegral n))
+      (Just P.PTInt64, PVUnsigned n) | unsigned -> Just (word64LE n)
+      (Just P.PTFloat, PVFloat f) -> Just (word32LE (castFloatToWord32 f))
+      (Just P.PTDouble, PVDouble d) -> Just (word64LE (castDoubleToWord64 d))
+      (Just P.PTBoolean, PVBool b) -> Just (BS.singleton (if b then 1 else 0))
+      (Just P.PTByteArray, PVText t) -> Just (TE.encodeUtf8 t)
+      (Just P.PTByteArray, PVBinary bytes) -> Just bytes
+      (Just P.PTFixedLenByteArray, PVBinary bytes) -> Just bytes
+      (_, PVDecimal decimal) -> case P.seLogicalType field of
+        Just (P.LTDecimal _ scale)
+          | scale >= 0 && scale <= 76 ->
+              let scaled = decimal * fromInteger (10 ^ scale)
+                  integer = numerator scaled
+              in if denominator scaled /= 1
+                   then Nothing
+                   else case P.seType field of
+                     Just P.PTInt32
+                       | integer >= fromIntegral (minBound :: Int32) && integer <= fromIntegral (maxBound :: Int32) ->
+                           Just (word32LE (fromIntegral integer))
+                     Just P.PTInt64
+                       | integer >= fromIntegral (minBound :: Int64) && integer <= fromIntegral (maxBound :: Int64) ->
+                           Just (word64LE (fromIntegral integer))
+                     _ -> Nothing
+        _ -> Nothing
+      _ -> Nothing
+  where
+    notDecimal PVDecimal {} = False
+    notDecimal _ = True
+    unsigned = case P.seLogicalType field of
+      Just (P.LTInteger _ signed) -> not signed
+      _ -> P.seConvertedType field `elem` (Just <$> [P.CTUInt8, P.CTUInt16, P.CTUInt32, P.CTUInt64])
 
 
 word32LE :: Word32 -> ByteString
