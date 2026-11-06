@@ -322,6 +322,14 @@ def build_cases() -> None:
         [5],
     )
     scalar(
+        "decimal32_9_2", pa.decimal32(9, 2),
+        [D("-9999999.99"), D("1.23"), None, D("0.00"), D("9999999.99")], [D("0.01")],
+    )
+    scalar(
+        "decimal64_18_2", pa.decimal64(18, 2),
+        [D("-9999999999999999.99"), D("1.23"), None, D("0.00"), D("9999999999999999.99")], [D("0.01")],
+    )
+    scalar(
         "decimal128_18_2",
         pa.decimal128(18, 2),
         [D("0.00"), D("1.23"), None, D("-1.23"), D("9999999999999999.99")],
@@ -711,6 +719,70 @@ def compare(case: Case, schema: pa.Schema, batches: list[pa.RecordBatch]) -> str
     return None
 
 
+def _swap_words(buffer, width):
+    """Independent fixture adapter: Arrow body words, metadata stays LE."""
+    if buffer is None or width == 1:
+        return buffer
+    data = bytes(buffer)
+    if len(data) % width:
+        raise ValueError(f"partial {width}-byte numeric word")
+    return pa.py_buffer(b"".join(data[i:i + width][::-1] for i in range(0, len(data), width)))
+
+
+def _native_from_big(array):
+    """Normalize an IPC array read with ensure_native_endian=False.
+
+    Arrow C++ 26 cannot swap views or REE itself. This independent Python
+    implementation converts their raw buffers (and nested values), then the
+    normal C++ full validator and semantic comparator check the result.
+    No expected values or wireform code participate in the conversion.
+    The selected fixtures contain views/REE, plain scalars, strings, lists,
+    structs and dictionaries. Unsupported adapter types fail explicitly.
+    """
+    typ = array.type
+    if pa.types.is_dictionary(typ):
+        return pa.DictionaryArray.from_arrays(_native_from_big(array.indices), _native_from_big(array.dictionary), ordered=typ.ordered)
+    if pa.types.is_run_end_encoded(typ):
+        return pa.RunEndEncodedArray.from_arrays(_native_from_big(array.run_ends), _native_from_big(array.values), type=typ)
+    buffers = array.buffers()[:typ.num_buffers]
+    children = []
+    if pa.types.is_string_view(typ) or pa.types.is_binary_view(typ):
+        buffers = array.buffers()
+        data = bytearray(buffers[1])
+        for off in range(0, len(data), 16):
+            length = int.from_bytes(data[off:off + 4], "big", signed=True)
+            data[off:off + 4] = data[off:off + 4][::-1]
+            if length > 12:
+                data[off + 8:off + 12] = data[off + 8:off + 12][::-1]
+                data[off + 12:off + 16] = data[off + 12:off + 16][::-1]
+        buffers[1] = pa.py_buffer(data)
+    elif pa.types.is_string(typ) or pa.types.is_binary(typ) or pa.types.is_large_string(typ) or pa.types.is_large_binary(typ):
+        buffers[1] = _swap_words(buffers[1], 8 if pa.types.is_large_string(typ) or pa.types.is_large_binary(typ) else 4)
+    elif pa.types.is_struct(typ):
+        children = [_native_from_big(array.field(i)) for i in range(typ.num_fields)]
+    elif pa.types.is_list(typ) or pa.types.is_large_list(typ):
+        buffers[1] = _swap_words(buffers[1], 8 if pa.types.is_large_list(typ) else 4)
+        children = [_native_from_big(array.values)]
+    elif pa.types.is_fixed_size_list(typ):
+        children = [_native_from_big(array.values)]
+    elif pa.types.is_boolean(typ) or pa.types.is_null(typ) or pa.types.is_fixed_size_binary(typ):
+        pass
+    elif pa.types.is_integer(typ) or pa.types.is_floating(typ) or pa.types.is_decimal(typ) or (pa.types.is_temporal(typ) and not pa.types.is_interval(typ)):
+        buffers[1] = _swap_words(buffers[1], typ.bit_width // 8)
+    else:
+        raise NotImplementedError(f"fixture endian adapter for {typ}")
+    return pa.Array.from_buffers(typ, len(array), buffers, null_count=array.null_count, offset=array.offset, children=children)
+
+
+def _read_ipc(path, options=None):
+    source = pa.OSFile(str(path), "rb")
+    if path.suffix == ".arrows":
+        reader = ipc.open_stream(source, options=options)
+        return reader.schema, list(reader)
+    reader = ipc.open_file(source, options=options)
+    return reader.schema, [reader.get_batch(i) for i in range(reader.num_record_batches)]
+
+
 def check(directory: Path) -> int:
     for path in sorted(directory.iterdir()):
         parts = path.name.split(".")
@@ -721,14 +793,18 @@ def check(directory: Path) -> int:
             print(f"FAIL {path.name}: no pyarrow-side case named {parts[0]}")
             continue
         try:
-            if parts[2] == "arrows":
-                reader = ipc.open_stream(pa.OSFile(str(path), "rb"))
-                schema = reader.schema
-                batches = list(reader)
-            else:
-                reader = ipc.open_file(pa.OSFile(str(path), "rb"))
-                schema = reader.schema
-                batches = [reader.get_batch(i) for i in range(reader.num_record_batches)]
+            try:
+                schema, batches = _read_ipc(path)
+            except pa.ArrowNotImplementedError as e:
+                # These are explicit reference capability errors, not corrupt
+                # input or value mismatches. All other failures remain failures.
+                known = ("Swapping endianness of string_view", "Swapping endianness of binary_view", "swapping endianness of run-end encoded array")
+                if str(e) not in known:
+                    raise
+                schema, raw_batches = _read_ipc(path, ipc.IpcReadOptions(ensure_native_endian=False))
+                schema = pa.schema(list(schema), metadata=schema.metadata)
+                batches = [pa.record_batch([_native_from_big(b.column(i)) for i in range(b.num_columns)], schema=schema) for b in raw_batches]
+                print(f"ADAPTER {path.name}: PyArrow native limitation: {e}; independent raw-buffer byte swap + full C++ validation")
             err = compare(case, schema, batches)
         except Exception as e:  # noqa: BLE001
             err = f"pyarrow failed to read: {type(e).__name__}: {e}"

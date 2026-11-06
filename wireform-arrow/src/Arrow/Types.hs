@@ -36,6 +36,9 @@ module Arrow.Types (
   defaultField,
   defaultLeafField,
 
+  -- * Decimal schema parameters
+  validateDecimalType,
+
   -- * Schema fingerprint
   schemaFingerprint,
   schemaEquivalent,
@@ -98,6 +101,10 @@ data ArrowType
   | ABinary
   | AUtf8
   | ABool
+  | -- | Arrow format 1.5 signed 32-bit decimal (precision, scale).
+    ADecimal32 !Int !Int
+  | -- | Arrow format 1.5 signed 64-bit decimal (precision, scale).
+    ADecimal64 !Int !Int
   | {- | 128-bit 'Decimal' (precision, scale). Kept as @ADecimal@
     for source compatibility with the original schema; the
     256-bit variant is 'ADecimal256'.
@@ -136,6 +143,26 @@ data ArrowType
   | ALargeListView
   deriving stock (Show, Eq, Generic)
   deriving anyclass (NFData)
+
+
+{- | Check decimal precision and the signed 32-bit scale carried by
+Schema.fbs. General Arrow scales may be negative or exceed precision.
+Other types are unaffected; this does not validate an entire schema.
+-}
+validateDecimalType :: ArrowType -> Either String ()
+validateDecimalType ty = case ty of
+  ADecimal32 precision scale -> decimal 9 precision scale
+  ADecimal64 precision scale -> decimal 18 precision scale
+  ADecimal precision scale -> decimal 38 precision scale
+  ADecimal256 precision scale -> decimal 76 precision scale
+  _ -> Right ()
+  where
+    decimal maximumPrecision precision scale
+      | precision < 1 || precision > maximumPrecision =
+          Left ("Arrow.Types: decimal precision must be between 1 and " ++ show maximumPrecision)
+      | scale < fromIntegral (minBound :: Int32) || scale > fromIntegral (maxBound :: Int32) =
+          Left "Arrow.Types: decimal scale exceeds signed 32-bit schema field"
+      | otherwise = Right ()
 
 
 data Field = Field
@@ -182,13 +209,14 @@ data DictionaryEncoding = DictionaryEncoding
 
 
 {- | Arrow schema feature flags (Schema.fbs's @Feature@ enum).
-Currently the spec only defines 'FeatureUnused' (0) and
-'FeatureDictionaryReplacement' (1) — the latter signals that
-the file may contain delta-replacement dictionary batches.
+'FeatureDictionaryReplacement' (1) advertises multiple full dictionaries
+with the same id; 'FeatureCompressedBody' (2) advertises IPC body
+compression. 'FeatureUnused' (0) is the FlatBuffers placeholder.
 -}
 data Feature
   = FeatureUnused
   | FeatureDictionaryReplacement
+  | FeatureCompressedBody
   deriving stock (Show, Eq, Enum, Bounded, Generic)
   deriving anyclass (NFData)
 
@@ -197,15 +225,16 @@ data Schema = Schema
   { arrowFields :: !(Vector Field)
   , arrowEndianness :: !Endianness
   , arrowMetadata :: !(Vector (Text, Text))
-  {- ^ Arrow schema-level @custom_metadata@ (Schema.fbs field
-  4 of @table Schema@). Most files set zero or one
+  {- ^ Arrow schema-level @custom_metadata@ (Schema.fbs slot
+  2 of @table Schema@). Most files set zero or one
   (@pandas@-style) annotation. Empty by default.
   -}
   , arrowFeatures :: !(Vector Feature)
-  {- ^ Arrow schema-level @features@ (Schema.fbs field 5).
-  Empty by default; readers tolerate either way. Producers
-  emitting delta-replacement dictionary batches should
-  include 'FeatureDictionaryReplacement'.
+  {- ^ Arrow schema-level @features@ (Schema.fbs slot 3).
+  Empty by default. Flags survive IPC stream and file round-trips.
+  Producers emitting replacement dictionaries or compressed bodies can
+  advertise them with 'FeatureDictionaryReplacement' or
+  'FeatureCompressedBody'. Unknown feature values are rejected on read.
   -}
   }
   deriving stock (Show, Eq, Generic)

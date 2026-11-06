@@ -33,11 +33,21 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import duckdb
 import polars as pl
+from parquet_statistics_interop import read_value, TCompactProtocol, TMemoryBuffer, TType
 
 ROOT = Path(__file__).resolve().parent.parent
 
 # --- Each entry: (filename, expected pa.Table)
 import datetime as _dt
+
+def temporal_expected(nullable: bool) -> pa.Table:
+    def values(items):
+        return [item if not nullable or i != 1 else None for i, item in enumerate(items)]
+    return pa.table({
+        "date": pa.array(values([-1, 0, 1]), pa.date32()),
+        "time": pa.array(values([0, 1000, 86399000]), pa.time32("ms")),
+        "stamp": pa.array(values([-1000, 0, 1700000000000]), pa.timestamp("ms")),
+    })
 
 def expected_files() -> list[tuple[str, pa.Table]]:
     return [
@@ -118,6 +128,10 @@ def expected_files() -> list[tuple[str, pa.Table]]:
         , pa.table({"x": pa.array([1.5, 2.5, None, 4.5], pa.float32())}) )
       , ( "optional_bool.parquet"
         , pa.table({"x": pa.array([True, None, False, True, None], pa.bool_())}) )
+      , ("arrow_temporal_required_v1.parquet", temporal_expected(False))
+      , ("arrow_temporal_required_v2.parquet", temporal_expected(False))
+      , ("arrow_temporal_optional_v1.parquet", temporal_expected(True))
+      , ("arrow_temporal_optional_v2.parquet", temporal_expected(True))
     ]
 
 def _normalise_value(v):
@@ -160,7 +174,8 @@ def read_pyarrow(path: Path) -> pa.Table:
 
 def read_duckdb(path: Path) -> pa.Table:
     con = duckdb.connect()
-    rbr = con.execute(f"SELECT * FROM read_parquet('{path}')").arrow()
+    result = con.execute(f"SELECT * FROM read_parquet('{path}')")
+    rbr = result.to_arrow_table() if hasattr(result, "to_arrow_table") else result.arrow()
     if isinstance(rbr, pa.Table):
         return rbr
     # duckdb 1.5+ returns a RecordBatchReader from .arrow() in
@@ -179,9 +194,10 @@ def main() -> int:
 
     out = Path(tempfile.mkdtemp(prefix="wireform-parquet-probe-"))
     print(f"== writing wireform-parquet probe outputs to {out}")
+    probe = os.environ.get("WIREFORM_PARQUET_FORWARD_PROBE")
+    command = [probe] if probe else ["cabal", "run", "wireform-parquet:wireform-parquet-interop-probe", "--"]
     subprocess.run(
-        ["cabal", "run", "wireform-parquet:wireform-parquet-interop-probe",
-         "--", str(out)],
+        [*command, str(out)],
         cwd=ROOT.parent, check=True
     )
 
@@ -192,6 +208,18 @@ def main() -> int:
         if not path.exists():
             failures.append((fname, "probe didn't write"))
             continue
+
+        # These probes write one data page per leaf/group. Check V2's literal
+        # num_rows field independently, especially when repeated events differ.
+        raw = path.read_bytes()
+        metadata = pq.ParquetFile(path).metadata
+        for group_number in range(metadata.num_row_groups):
+            group = metadata.row_group(group_number)
+            for column_number in range(group.num_columns):
+                offset = group.column(column_number).data_page_offset
+                header = read_value(TCompactProtocol(TMemoryBuffer(raw[offset:])), TType.STRUCT)
+                if header[1] == 3:
+                    assert header[8][3] == group.num_rows, (fname, 'V2 rows vs repeated events', header[8], group.num_rows)
 
         for engine, reader in [("pyarrow", read_pyarrow),
                                ("duckdb",  read_duckdb),

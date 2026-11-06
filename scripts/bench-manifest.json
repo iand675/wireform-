@@ -467,6 +467,35 @@
           ]
         }
       ]
+    },
+    {
+      "target": "wireform-parquet:bench:parquet-encryption-throughput",
+      "raw": "parquet-encryption-throughput",
+      "benchmarkOptions": [
+        "--time-limit",
+        "10",
+        "--resamples",
+        "5000",
+        "--regress",
+        "allocated:iters",
+        "--regress",
+        "cpuTime:iters",
+        "+RTS",
+        "-T",
+        "-RTS"
+      ],
+      "summaries": []
+    },    {
+      "target": "parquet-rs-encryption-throughput",
+      "kind": "cargo",
+      "cargoManifest": "interop/parquet-encryption-reference/Cargo.toml",
+      "cargoBench": "encryption",
+      "raw": "parquet-rs-encryption-throughput",
+      "summaries": [],
+      "environment": {
+        "WIREFORM_ENCRYPTION_BENCH_SECONDS": "10",
+        "WIREFORM_ENCRYPTION_BENCH_SAMPLES": "100"
+      }
     }
   ]
 }

@@ -61,6 +61,8 @@ module Arrow.Column (
   pattern ColIntervalYearMonth,
   pattern ColIntervalDayTime,
   pattern ColIntervalMonthDayNano,
+  pattern ColDecimal32,
+  pattern ColDecimal64,
   pattern ColDecimal128,
   pattern ColDecimal256,
   pattern ColBool,
@@ -362,6 +364,14 @@ pattern ColIntervalMonthDayNano v xs <- I.ColPrim PIntervalMonthDayNano v xs
 
 
 -- | Precision, scale, validity, values.
+pattern ColDecimal32 :: Int -> Int -> Maybe Validity -> VS.Vector Int32 -> ColumnArray
+pattern ColDecimal32 p s v xs <- I.ColPrim (PDecimal32 p s) v xs
+
+
+pattern ColDecimal64 :: Int -> Int -> Maybe Validity -> VS.Vector Int64 -> ColumnArray
+pattern ColDecimal64 p s v xs <- I.ColPrim (PDecimal64 p s) v xs
+
+
 pattern ColDecimal128 :: Int -> Int -> Maybe Validity -> VS.Vector Decimal128 -> ColumnArray
 pattern ColDecimal128 p s v xs <- I.ColPrim (PDecimal128 p s) v xs
 
@@ -504,6 +514,8 @@ pattern ColRunEndEncoded off len re vals <- I.ColRunEndEncoded off len re vals
   , ColIntervalYearMonth
   , ColIntervalDayTime
   , ColIntervalMonthDayNano
+  , ColDecimal32
+  , ColDecimal64
   , ColDecimal128
   , ColDecimal256
   , ColBool
@@ -821,6 +833,7 @@ anyBytesAt c i
       I.ColFixedSizeBinary w _ _ d -> Just $! BSU.unsafeTake w (BSU.unsafeDrop (i * w) d)
       _ -> Nothing
 
+{-# INLINE anyBytesAt #-}
 
 -- | Row @i@ of a utf8, large utf8 or utf8 view column, copied into a 'Text'.
 anyTextAt :: ColumnArray -> Int -> Maybe Text
@@ -834,6 +847,7 @@ anyTextAt c i = case c of
       Just bs -> Just $! utf8ToText bs
       Nothing -> Nothing
 
+{-# INLINE anyTextAt #-}
 
 -- | Shared closures for boxed bool rows, so materializing bools allocates nothing per row.
 justTrue, justFalse :: Maybe Bool
@@ -903,6 +917,7 @@ dictKeyAt c i = case c of
   I.ColDictionary _ ix _ | i >= 0 && i < columnLength ix && unsafeIsValidAt (validity ix) i -> Just (keyAt ix i)
   _ -> Nothing
 
+{-# INLINE dictKeyAt #-}
 
 -- | Key @i@ of an integer column (validity ignored); 0 for a non-integer column.
 keyAt :: ColumnArray -> Int -> Int
@@ -1247,8 +1262,29 @@ fromMaybeLargeTexts :: V.Vector (Maybe Text) -> ColumnArray
 fromMaybeLargeTexts = varFromMaybes I.ColLargeUtf8 TF.lengthWord8 TF.unsafeCopyToPtr
 
 
+-- | Construct a binary column from non-null rows, copying their bytes.
 fromByteStrings :: V.Vector ByteString -> ColumnArray
-fromByteStrings = fromMaybeByteStrings . V.map Just
+fromByteStrings vals = unsafeDupablePerformIO $ do
+  -- Check the sum before narrowing to Arrow's signed 32-bit offsets.
+  let !n = V.length vals
+      !total = V.foldl' addLength 0 vals
+      addLength !acc bytes
+        | BS.length bytes > fromIntegral (maxBound :: Int32) - acc =
+            errorWithoutStackTrace "Arrow.Column: var-length data exceeds the 32-bit offset range (use the large variant)"
+        | otherwise = acc + BS.length bytes
+  offsets <- VSM.unsafeNew (n + 1)
+  fp <- mallocAligned total
+  unsafeWithForeignPtr fp $ \dst -> do
+    let fill !i !pos
+          | i == n = VSM.unsafeWrite offsets n (fromIntegral pos)
+          | otherwise = do
+              VSM.unsafeWrite offsets i (fromIntegral pos)
+              let bytes = V.unsafeIndex vals i
+              copyBS bytes (dst `plusPtr` pos)
+              fill (i + 1) (pos + BS.length bytes)
+    fill 0 0
+  offs <- VS.unsafeFreeze offsets
+  pure (I.ColBinary Nothing offs (BSI.BS fp total))
 
 
 fromMaybeByteStrings :: V.Vector (Maybe ByteString) -> ColumnArray
@@ -1271,20 +1307,31 @@ varFromMaybes
   -> (x -> Ptr Word8 -> IO ())
   -> V.Vector (Maybe x)
   -> ColumnArray
-varFromMaybes mk len copy vals
-  | toInteger total > toInteger (maxBound :: o) =
-      errorWithoutStackTrace "Arrow.Column: var-length data exceeds the 32-bit offset range (use the large variant)"
-  | otherwise = mk (validityGenerate n (isJustAt vals)) offs dat
-  where
-    !n = V.length vals
-    rowLen i = maybe 0 len (V.unsafeIndex vals i)
-    offs :: VS.Vector o
-    offs = VS.scanl' (\acc i -> acc + fromIntegral (rowLen i)) 0 (VS.enumFromN 0 n :: VS.Vector Int)
-    !total = fromIntegral (VS.last offs) :: Int
-    dat = createAligned total $ \p ->
-      forM_ [0 .. n - 1] $ \i -> case V.unsafeIndex vals i of
-        Just x -> copy x (p `plusPtr` fromIntegral (VS.unsafeIndex offs i))
-        Nothing -> pure ()
+varFromMaybes mk len copy vals = unsafeDupablePerformIO $ do
+  let !n = V.length vals
+      !limit = fromInteger (min (toInteger (maxBound :: o)) (toInteger (maxBound :: Int))) :: Int
+      addLength !acc Nothing = acc
+      addLength !acc (Just value)
+        | len value > limit - acc =
+            errorWithoutStackTrace "Arrow.Column: var-length data exceeds the offset range (use the large variant for 32-bit columns)"
+        | otherwise = acc + len value
+      !total = V.foldl' addLength 0 vals
+  offsets <- VSM.unsafeNew (n + 1)
+  fp <- mallocAligned total
+  unsafeWithForeignPtr fp $ \dst -> do
+    let fill !i !pos
+          | i == n = VSM.unsafeWrite offsets n (fromIntegral pos)
+          | otherwise = do
+              VSM.unsafeWrite offsets i (fromIntegral pos)
+              case V.unsafeIndex vals i of
+                Nothing -> fill (i + 1) pos
+                Just value -> do
+                  copy value (dst `plusPtr` pos)
+                  fill (i + 1) (pos + len value)
+    fill 0 0
+  offs <- VS.unsafeFreeze offsets
+  pure (mk (validityGenerate n (isJustAt vals)) offs (BSI.BS fp total))
+{-# INLINE varFromMaybes #-}
 
 
 -- | Fixed-size binary rows; every present row must have the given width.
@@ -2317,6 +2364,8 @@ keyOrder col = case col of
     PTime64 -> ordered v xs
     PTimestamp -> ordered v xs
     PDuration -> ordered v xs
+    PDecimal32 _ _ -> ordered v xs
+    PDecimal64 _ _ -> ordered v xs
     PDecimal128 _ _ -> ordered v xs
     PDecimal256 _ _ -> ordered v xs
     PFloat16 -> by v (\i j -> compareFloating (float16ToDouble (VS.unsafeIndex xs i)) (float16ToDouble (VS.unsafeIndex xs j)))
@@ -2549,6 +2598,8 @@ instance Show ColumnArray where
       showString (columnTag c) . params . showChar ' ' . showRows c
     where
       params = case c of
+        I.ColPrim (PDecimal32 p s) _ _ -> showChar ' ' . shows p . showChar ' ' . shows s
+        I.ColPrim (PDecimal64 p s) _ _ -> showChar ' ' . shows p . showChar ' ' . shows s
         I.ColPrim (PDecimal128 p s) _ _ -> showChar ' ' . shows p . showChar ' ' . shows s
         I.ColPrim (PDecimal256 p s) _ _ -> showChar ' ' . shows p . showChar ' ' . shows s
         I.ColFixedSizeBinary w _ _ _ -> showChar ' ' . shows w

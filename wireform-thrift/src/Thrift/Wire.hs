@@ -343,7 +343,9 @@ putVarintSlow = go
 
 
 getVarint :: ByteString -> Int -> Maybe (Word64, Int)
-getVarint !bs !off = go off 0 0
+getVarint !bs !off
+  | off < 0 = Nothing
+  | otherwise = go off 0 0
   where
     go !i !acc !shift
       | i >= BS.length bs = Nothing
@@ -351,9 +353,12 @@ getVarint !bs !off = go off 0 0
       | otherwise =
           let !b = fromIntegral (BSU.unsafeIndex bs i) :: Word64
               !acc' = acc .|. ((b .&. 0x7F) `shiftL` shift)
-          in if b < 0x80
-               then Just (acc', i + 1)
-               else go (i + 1) acc' (shift + 7)
+          in if shift == 63 && b > 1
+               then Nothing
+               else
+                 if b < 0x80
+                   then Just (acc', i + 1)
+                   else go (i + 1) acc' (shift + 7)
 {-# INLINE getVarint #-}
 
 
@@ -609,7 +614,7 @@ tCompEncodeI64 !v = putVarint (zigZagEncode64 v)
 in the field header. This standalone version uses a single byte.
 -}
 tCompEncodeBool :: Bool -> Builder
-tCompEncodeBool !b = B.word8 (if b then 1 else 0)
+tCompEncodeBool !b = B.word8 (if b then 1 else 2)
 {-# INLINE tCompEncodeBool #-}
 
 
@@ -743,8 +748,14 @@ tCompDecodeI64 !bs !off = case getVarint bs off of
 -- | Decode a bool (standalone, not from field header).
 tCompDecodeBool :: ByteString -> Int -> Maybe (Bool, Int)
 tCompDecodeBool !bs !off
-  | off >= BS.length bs = Nothing
-  | otherwise = Just (BSU.unsafeIndex bs off /= 0, off + 1)
+  | off < 0 || off >= BS.length bs = Nothing
+  | otherwise = case BSU.unsafeIndex bs off of
+      1 -> Just (True, off + 1)
+      2 -> Just (False, off + 1)
+      -- Read older wireform files whose element booleans used binary's 0.
+      -- New compact writers always emit the standard false marker, 2.
+      0 -> Just (False, off + 1)
+      _ -> Nothing
 {-# INLINE tCompDecodeBool #-}
 
 
@@ -760,10 +771,11 @@ tCompDecodeDouble !bs !off = case getLE64 bs off of
 tCompDecodeString :: ByteString -> Int -> Maybe (ByteString, Int)
 tCompDecodeString !bs !off = do
   (!lenW, !off1) <- getVarint bs off
-  let !len = fromIntegral lenW :: Int
-  if len < 0 || off1 + len > BS.length bs
+  if lenW > fromIntegral (maxBound :: Int32) || lenW > fromIntegral (BS.length bs - off1)
     then Nothing
-    else Just (BS.take len (BS.drop off1 bs), off1 + len)
+    else
+      let !len = fromIntegral lenW :: Int
+      in Just (BS.take len (BS.drop off1 bs), off1 + len)
 {-# INLINE tCompDecodeString #-}
 
 
@@ -783,7 +795,7 @@ Takes the previous field ID for delta decoding.
 -}
 tCompDecodeFieldBegin :: ByteString -> Int -> Int16 -> Maybe (ThriftType, Int16, Int, Bool)
 tCompDecodeFieldBegin !bs !off !lastFid
-  | off >= BS.length bs = Nothing
+  | off < 0 || off >= BS.length bs = Nothing
   | otherwise =
       let !hdr = BSU.unsafeIndex bs off
       in if hdr == 0x00
@@ -810,7 +822,7 @@ Returns (elemType, size, newOffset).
 -}
 tCompDecodeListBegin :: ByteString -> Int -> Maybe (ThriftType, Int32, Int)
 tCompDecodeListBegin !bs !off
-  | off >= BS.length bs = Nothing
+  | off < 0 || off >= BS.length bs = Nothing
   | otherwise =
       let !hdr = BSU.unsafeIndex bs off
           !szHi = hdr `shiftR` 4
@@ -822,7 +834,9 @@ tCompDecodeListBegin !bs !off
                then Just (tt, fromIntegral szHi, off + 1)
                else case getVarint bs (off + 1) of
                  Nothing -> Nothing
-                 Just (!sz, !off') -> Just (tt, fromIntegral sz, off')
+                 Just (!sz, !off')
+                   | sz > fromIntegral (maxBound :: Int32) -> Nothing
+                   | otherwise -> Just (tt, fromIntegral sz, off')
 {-# INLINE tCompDecodeListBegin #-}
 
 
@@ -839,6 +853,7 @@ For empty maps: a single 0x00 byte (size=0).
 tCompDecodeMapBegin :: ByteString -> Int -> Maybe (ThriftType, ThriftType, Int32, Int)
 tCompDecodeMapBegin !bs !off = do
   (!szW, !off1) <- getVarint bs off
+  if szW > fromIntegral (maxBound :: Int32) then Nothing else Just ()
   let !sz = fromIntegral szW :: Int32
   if sz == 0
     then Just (TT_STOP, TT_STOP, 0, off1)

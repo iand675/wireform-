@@ -1,6 +1,24 @@
 # Changelog for wireform-core
 
 
+## 0.3.0.0 -- unreleased
+
+* Add `Wireform.Hash.xxh64IO` for callers that thread hashes through an IO
+  loop without allocating a separate pure thunk per value.
+
+* Breaking change: the exported `RingSinkState` record gains `rsSpill`.
+  Custom ring sinks must initialise it with `NoSpill`. Requests larger
+  than the ring now use reusable spill storage instead of failing.
+* Export `RingSpill`, `SpillBuf` and `FixedBufferOverflow`. Exact-size
+  builders reject writes that exceed the remaining buffer.
+* Correct direct varint encoding for values at or above `2^21` and
+  remove a per-copy continuation allocation from `dBytes`.
+* Preserve full-width lengths and offsets at C FFI boundaries and include
+  the accumulated buffer-boundary, base64, hashing, parser, ring and
+  transport fixes required by the new format packages.
+* Support GHC 9.10 and newer.
+
+
 ## 0.2.0.1 -- 2026-07-16
 
 * Make `Wireform.Transport.Send` ring-capacity tests portable across

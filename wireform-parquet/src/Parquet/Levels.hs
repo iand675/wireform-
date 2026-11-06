@@ -13,6 +13,7 @@ module Parquet.Levels (
   levelBitWidth,
   maxLevelsForColumnPath,
   parseDataPageV1Levels,
+  parseDataPageV1LevelsWithEncoding,
   materializePlainInt32Optional,
   materializePlainInt64Optional,
   materializePlainFloatOptional,
@@ -28,11 +29,10 @@ module Parquet.Levels (
   NestedValue (..),
 ) where
 
-import Data.Bits (shiftL, shiftR, (.&.), (.|.))
+import Data.Bits (countLeadingZeros, finiteBitSize, shiftL, shiftR, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Int (Int32, Int64)
-import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Vector qualified as V
 import Data.Vector.Primitive qualified as VP
@@ -48,11 +48,7 @@ import Parquet.Types (Repetition (..), SchemaElement (..))
 levelBitWidth :: Int -> Int
 levelBitWidth maxLevel
   | maxLevel <= 0 = 0
-  | otherwise = go 1 0
-  where
-    go !bound !w
-      | bound > maxLevel = w
-      | otherwise = go (bound * 2) (w + 1)
+  | otherwise = finiteBitSize maxLevel - countLeadingZeros maxLevel
 
 
 readLE32 :: ByteString -> Int -> Word32
@@ -125,6 +121,60 @@ parseDataPageV1Levels maxRep maxDef numValues raw = do
   (def, off2) <- decodeLengthPrefixedHybrid bwDef numValues raw off1
   let !rest = BS.drop off2 raw
   pure (rep, def, rest)
+
+
+{- | Legacy BIT_PACKED levels use MSB-first bits with neither a length
+prefix nor hybrid run headers. Modern RLE levels retain their prefix.
+-}
+parseDataPageV1LevelsWithEncoding
+  :: Int32
+  -> Int32
+  -> Int
+  -> Int
+  -> Int
+  -> ByteString
+  -> Either String (VP.Vector Int32, VP.Vector Int32, ByteString)
+parseDataPageV1LevelsWithEncoding _ _ maxRep maxDef numValues _
+  | maxRep < 0
+      || maxDef < 0
+      || maxRep > maxDef
+      || numValues < 0
+      || toInteger numValues > toInteger (maxBound :: Int32)
+      || toInteger maxDef > toInteger (maxBound :: Int32) =
+      Left "Parquet.Levels: invalid level limits or value count"
+parseDataPageV1LevelsWithEncoding repEncoding defEncoding maxRep maxDef numValues raw = do
+  (rep, next) <- levels repEncoding maxRep 0
+  (def, end) <- levels defEncoding maxDef next
+  Right (rep, def, BS.drop end raw)
+  where
+    levels encoding maximum off
+      | maximum == 0 = Right (VP.replicate numValues 0, off)
+      | encoding == 3 = decodeLengthPrefixedHybrid (levelBitWidth maximum) numValues raw off
+      | encoding == 4 =
+          let width = levelBitWidth maximum
+              bytes = (toInteger numValues * toInteger width + 7) `quot` 8
+          in if bytes > toInteger (BS.length raw - off)
+               then Left "Parquet.Levels: truncated BIT_PACKED levels"
+               else
+                 Right
+                   ( VP.generate
+                       numValues
+                       ( \i ->
+                           let (group, lane) = i `quotRem` 8
+                           in readValue width (off + group * width) (lane * width)
+                       )
+                   , off + fromInteger bytes
+                   )
+      | otherwise = Left "Parquet.Levels: unsupported level encoding"
+    readValue width off start = go 0 0
+      where
+        go !bit !acc
+          | bit == width = acc
+          | otherwise =
+              let position = start + bit
+                  byte = BS.index raw (off + position `quot` 8)
+                  value = fromIntegral ((byte `shiftR` (7 - position `rem` 8)) .&. 1)
+              in go (bit + 1) ((acc `shiftL` 1) .|. value)
 
 
 {- | Map @PLAIN@ packed @INT32@ values using Parquet definition levels: rows with
@@ -445,25 +495,27 @@ maxLevelsForColumnPath
 maxLevelsForColumnPath sch path
   | V.null sch = Left "Parquet.Levels: empty schema"
   | V.null path = Left "Parquet.Levels: empty path"
+  | seType (V.head sch) /= Nothing = Left "Parquet.Levels: schema root must be a group"
   | otherwise = descend 0 (V.toList path) (0, 0)
   where
     descend :: Int -> [Text] -> (Int, Int) -> Either String (Int, Int)
-    descend _ [] _ = Left "Parquet.Levels: empty path segment"
-    descend parent (p : ps) acc = do
-      c <- findChild sch parent p
-      let el = V.unsafeIndex sch c
-          acc' = stepLevels (fromMaybe Required (seRepetition el)) acc
-      case seType el of
-        Just _
-          | not (null ps) ->
-              Left "Parquet.Levels: path continues past primitive column"
-          | otherwise -> Right acc'
-        Nothing -> case seNumChildren el of
-          Nothing -> Left "Parquet.Levels: group without num_children"
-          Just _
-            | null ps ->
-                Left "Parquet.Levels: path ends at group, not leaf"
-            | otherwise -> descend c ps acc'
+    descend parent remaining acc = case remaining of
+      [] -> Left "Parquet.Levels: empty path segment"
+      p : ps -> do
+        child <- findChild sch parent p
+        let element = V.unsafeIndex sch child
+        repetition <- maybe (Left "Parquet.Levels: non-root schema node is missing repetition_type") Right (seRepetition element)
+        let next = stepLevels repetition acc
+        case (seType element, seNumChildren element) of
+          (Just _, Nothing)
+            | null ps -> Right next
+            | otherwise -> Left "Parquet.Levels: path continues past primitive column"
+          (Just _, Just _) -> Left "Parquet.Levels: primitive schema node has num_children"
+          (Nothing, Nothing) -> Left "Parquet.Levels: group without num_children"
+          (Nothing, Just count)
+            | count < 0 -> Left "Parquet.Levels: negative schema child count"
+            | null ps -> Left "Parquet.Levels: path ends at group, not leaf"
+            | otherwise -> descend child ps next
 
     stepLevels :: Repetition -> (Int, Int) -> (Int, Int)
     stepLevels Required (!maxRep, !maxDef) = (maxRep, maxDef)
@@ -471,40 +523,46 @@ maxLevelsForColumnPath sch path
     stepLevels Repeated (!maxRep, !maxDef) = (maxRep + 1, maxDef + 1)
 
 
--- | Size of the preorder subtree rooted at @i@ (including @i@).
+-- Scan a skipped subtree iteratively. Pending nodes can never exceed the
+-- remaining schema entries, so malformed counts fail without recursion or
+-- imposing an arbitrary depth limit on this low-level path-lookup API.
 subtreeSize :: V.Vector SchemaElement -> Int -> Either String Int
-subtreeSize sch i
-  | i < 0 || i >= V.length sch =
-      Left "Parquet.Levels: schema index out of range"
-  | otherwise =
-      case seNumChildren (V.unsafeIndex sch i) of
-        Nothing -> Right 1
-        Just k0 ->
-          let k = fromIntegral k0 :: Int
-              go !idx !remaining !total
-                | remaining == 0 = Right (1 + total)
-                | otherwise = do
-                    sz <- subtreeSize sch idx
-                    go (idx + sz) (remaining - 1) (total + sz)
-          in go (i + 1) k 0
+subtreeSize sch start = go start 1
+  where
+    go !index !pending
+      | pending == 0 = Right (index - start)
+      | index < 0 || index >= V.length sch = Left "Parquet.Levels: schema index out of range"
+      | otherwise = do
+          let element = V.unsafeIndex sch index
+          case seRepetition element of
+            Nothing -> Left "Parquet.Levels: non-root schema node is missing repetition_type"
+            Just _ -> Right ()
+          case (seType element, seNumChildren element) of
+            (Just _, Nothing) -> go (index + 1) (pending - 1)
+            (Just _, Just _) -> Left "Parquet.Levels: primitive schema node has num_children"
+            (Nothing, Nothing) -> Left "Parquet.Levels: group without num_children"
+            (Nothing, Just count)
+              | count < 0 || fromIntegral count > V.length sch - index - pending -> Left "Parquet.Levels: invalid schema child count"
+              | otherwise -> go (index + 1) (pending - 1 + fromIntegral count)
 
 
--- | Index of the direct child of @parent@ named @name@.
+-- Index of a direct child. Root repetition is deliberately ignored: common
+-- writers set it to REQUIRED even though the schema root has no parent.
 findChild :: V.Vector SchemaElement -> Int -> Text -> Either String Int
 findChild sch parent name = do
-  k0 <- case seNumChildren (V.unsafeIndex sch parent) of
+  count <- case seNumChildren (V.unsafeIndex sch parent) of
     Nothing -> Left "Parquet.Levels: parent is not a group"
-    Just k -> Right (fromIntegral k :: Int)
-  let go !idx !remaining
-        | remaining == 0 =
-            Left "Parquet.Levels: column path not found in schema"
-        | idx >= V.length sch =
-            Left "Parquet.Levels: schema truncated while searching children"
-        | seName (V.unsafeIndex sch idx) == name = Right idx
+    Just n
+      | n < 0 || fromIntegral n > V.length sch - parent - 1 -> Left "Parquet.Levels: invalid schema child count"
+      | otherwise -> Right (fromIntegral n :: Int)
+  let go !index !remaining
+        | remaining == 0 = Left "Parquet.Levels: column path not found in schema"
+        | index >= V.length sch = Left "Parquet.Levels: schema truncated while searching children"
+        | seName (V.unsafeIndex sch index) == name = Right index
         | otherwise = do
-            sz <- subtreeSize sch idx
-            go (idx + sz) (remaining - 1)
-  go (parent + 1) k0
+            size <- subtreeSize sch index
+            go (index + size) (remaining - 1)
+  go (parent + 1) count
 
 
 {- | Materialize a repeated @INT32@ column using repetition and definition levels.

@@ -6,20 +6,21 @@ Many analytical queries reduce to one of:
 
   * @count(*)@ — number of rows in the whole file.
   * @count(col)@ — number of non-null rows in a column.
-  * @sum/min/max(col)@ — folded value over a column.
+  * @min/max(col)@ — exact extrema of a column's defined values.
 
-All four can be answered from the file footer's row-group
-metadata + per-column 'Statistics' /without/ decoding any
-column data. This module exposes the helpers.
+Counts and exact extrema can be answered from validated footer metadata
+when the necessary statistics are available. Compact bounds are useful
+for pruning, but cannot establish an exact aggregate. Floating-point
+extrema require a known zero NaN count; scan when another NaN policy is
+needed. Repeated leaves cannot supply a non-null /row/ count.
 
-The functions here trust the writer's statistics (writers
-can lie, but every modern producer populates these
-correctly). Callers that don't trust the writer should fall
-through to a full scan.
+These functions trust the supplied statistics after checking their shape;
+callers needing to verify a writer's claims must scan the data.
 -}
 module Parquet.Aggregate (
   -- * count(*)
   fileRowCount,
+  fileRowCountChecked,
   rowGroupRowCount,
 
   -- * count(col)
@@ -46,17 +47,37 @@ module Parquet.Aggregate (
 -- works with ORC files.
 
 import Columnar.Predicate qualified as Pred
+import Control.Monad (guard)
 import Data.Int (Int64)
 import Data.Vector qualified as V
+import Parquet.Levels qualified as Levels
 import Parquet.Predicate qualified as PPred
 import Parquet.Types qualified as P
 
 
-{- | Total row count across every row group in a file. @O(rg)@
-— pure stats arithmetic, no column data decoded.
+{- | Sum of the row-group counts, retaining compatibility with older files
+whose file-wide total is stale. Negative or overflowing group counts raise
+an error; 'fileRowCountChecked' safely checks both the groups and file total.
 -}
 fileRowCount :: P.FileMetadata -> Int64
-fileRowCount fm = V.sum (V.map P.rgNumRows (P.fmRowGroups fm))
+fileRowCount = maybe (error "Parquet.Aggregate: negative or overflowing row counts") id . rowGroupSum
+
+
+-- | Reject negative, overflowing or inconsistent file/row-group counts.
+fileRowCountChecked :: P.FileMetadata -> Maybe Int64
+fileRowCountChecked fm = do
+  total <- rowGroupSum fm
+  guard (total == P.fmNumRows fm)
+  Just total
+
+
+rowGroupSum :: P.FileMetadata -> Maybe Int64
+rowGroupSum fm = V.foldM addRows 0 (P.fmRowGroups fm)
+  where
+    addRows total group = do
+      let rows = P.rgNumRows group
+      guard (rows >= 0 && rows <= maxBound - total)
+      Just (total + rows)
 
 
 -- | Row count of one row group.
@@ -64,24 +85,36 @@ rowGroupRowCount :: P.RowGroup -> Int64
 rowGroupRowCount = P.rgNumRows
 
 
-{- | @count(col)@ — the number of /non-null/ rows in the named
-column across the whole file. Returns 'Nothing' if any
-contributing row group lacks a populated 'Statistics.statNullCount'
-(in which case the value can't be safely computed without
-decoding the column).
+{- | @count(col)@ — non-null rows for a non-repeated leaf, including
+nullable ancestors. Returns 'Nothing' for repeated paths, missing counts,
+or inconsistent metadata. Definition events equal rows only for paths
+without repeated ancestors.
 -}
 columnNonNullCount :: P.FileMetadata -> Int -> Maybe Int64
-columnNonNullCount fm colIdx =
-  V.foldl' step (Just 0) (P.fmRowGroups fm)
+columnNonNullCount fm colIdx = do
+  _ <- fileRowCountChecked fm
+  context <- PPred.statisticsContext fm colIdx
+  V.foldM (step context) 0 (P.fmRowGroups fm)
   where
-    step Nothing _ = Nothing
-    step (Just acc) rg = case P.rgColumns rg V.!? colIdx of
-      Nothing -> Nothing
-      Just cc -> case P.ccMetadata cc >>= P.cmStatistics of
-        Just s
-          | Just nulls <- P.statNullCount s ->
-              Just (acc + (P.rgNumRows rg - nulls))
-        _ -> Nothing
+    step context acc group = do
+      column <- P.rgColumns group V.!? colIdx
+      metadata <- P.ccMetadata column
+      guard (P.seType (PPred.statisticsField context) == Just (P.cmType metadata))
+      (maxRep, maxDef) <-
+        either
+          (const Nothing)
+          Just
+          (Levels.maxLevelsForColumnPath (P.fmSchema fm) (P.cmPathInSchema metadata))
+      guard (maxRep == 0 && P.cmNumValues metadata == P.rgNumRows group)
+      if P.rgNumRows group == 0
+        then Just acc
+        else do
+          statistics <- P.cmStatistics metadata
+          nulls <- P.statNullCount statistics
+          guard (nulls >= 0 && nulls <= P.rgNumRows group && (maxDef /= 0 || nulls == 0))
+          let present = P.rgNumRows group - nulls
+          guard (acc <= maxBound - present)
+          Just (acc + present)
 
 
 {- | Minimum value of a column across the whole file. Reads
@@ -109,39 +142,60 @@ supplied stat extractor on every row group; if any returns
 about a min / max otherwise).
 -}
 aggCmp
-  :: (P.ParquetType -> P.Statistics -> Maybe Pred.PValue)
+  :: (PPred.StatisticsContext -> P.Statistics -> Maybe Pred.PValue)
   -> (Pred.PValue -> Pred.PValue -> Pred.PValue)
   -> P.FileMetadata
   -> Int
   -> Maybe Pred.PValue
-aggCmp takeStat combine fm colIdx =
-  V.foldl' step (Just Nothing) (P.fmRowGroups fm) >>= id
+aggCmp takeStat combine fm colIdx = do
+  _ <- fileRowCountChecked fm
+  context <- PPred.statisticsContext fm colIdx
+  V.foldM (step context) Nothing (P.fmRowGroups fm) >>= id
   where
-    -- Outer Maybe: did any row group fail to produce a stat?
-    -- Inner Maybe: have we accumulated a value yet?
-    step Nothing _ = Nothing
-    step (Just inner) rg = case P.rgColumns rg V.!? colIdx of
-      Nothing -> Nothing
-      Just cc -> case P.ccMetadata cc of
-        Nothing -> Nothing
-        Just md -> case P.cmStatistics md >>= takeStat (P.cmType md) of
-          Nothing -> Nothing -- this row group has no stat -> poison
-          Just v -> case inner of
-            Nothing -> Just (Just v)
-            Just acc -> Just (Just (combine acc v))
+    step context acc group = do
+      column <- P.rgColumns group V.!? colIdx
+      metadata <- P.ccMetadata column
+      guard (P.seType (PPred.statisticsField context) == Just (P.cmType metadata))
+      (maxRep, _) <-
+        either
+          (const Nothing)
+          Just
+          (Levels.maxLevelsForColumnPath (P.fmSchema fm) (P.cmPathInSchema metadata))
+      guard
+        ( if maxRep == 0
+            then P.cmNumValues metadata == P.rgNumRows group
+            else P.cmNumValues metadata >= P.rgNumRows group
+        )
+      if P.rgNumRows group == 0
+        then do
+          guard (P.cmNumValues metadata == 0)
+          Just acc
+        else do
+          statistics <- P.cmStatistics metadata
+          guard (maybe True (\n -> n >= 0 && n <= P.cmNumValues metadata) (P.statNullCount statistics))
+          if P.statNullCount statistics == Just (P.cmNumValues metadata)
+            then Just acc
+            else do
+              guard (nanFree (PPred.statisticsField context) statistics)
+              value <- takeStat context statistics
+              Just (Just (maybe value (`combine` value) acc))
+
+    nanFree field statistics
+      | P.seType field `elem` [Just P.PTFloat, Just P.PTDouble]
+          || P.seLogicalType field == Just P.LTFloat16 =
+          P.statNanCount statistics == Just 0
+      | otherwise = True
 
 
-takeMinStat :: P.ParquetType -> P.Statistics -> Maybe Pred.PValue
-takeMinStat ty s =
-  let !raw = case P.statMinValue s of
-        Just b -> Just b
-        Nothing -> P.statMin s
-  in raw >>= PPred.decodePValueLE ty
+takeMinStat :: PPred.StatisticsContext -> P.Statistics -> Maybe Pred.PValue
+takeMinStat context statistics =
+  PPred.minimumStatistic
+    context
+    (if P.statMinValueExact statistics == Just True then statistics else statistics {P.statMinValue = Nothing})
 
 
-takeMaxStat :: P.ParquetType -> P.Statistics -> Maybe Pred.PValue
-takeMaxStat ty s =
-  let !raw = case P.statMaxValue s of
-        Just b -> Just b
-        Nothing -> P.statMax s
-  in raw >>= PPred.decodePValueLE ty
+takeMaxStat :: PPred.StatisticsContext -> P.Statistics -> Maybe Pred.PValue
+takeMaxStat context statistics =
+  PPred.maximumStatistic
+    context
+    (if P.statMaxValueExact statistics == Just True then statistics else statistics {P.statMaxValue = Nothing})

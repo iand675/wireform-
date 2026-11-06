@@ -172,7 +172,7 @@ library
     Proto.Internal.Maybe
   build-depends:
     base >= 4.20 && < 5,
-    wireform-core == 0.2.*,
+    wireform-core >= 0.2 && < 0.4,
     wireform-derive == 0.2.*,
     bytestring >= 0.11 && < 0.13,
     containers >= 0.6 && < 0.9,

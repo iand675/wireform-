@@ -134,7 +134,10 @@ dVarint !p !off !n
 -- | Write raw bytes at offset (no length prefix). Returns new offset.
 dBytes :: Ptr Word8 -> Int -> ByteString -> IO Int
 dBytes !p !off (BSI.BS fp len) = do
-  withForeignPtr fp $ \src ->
+  -- This continuation only performs a bounded copy: it cannot loop or
+  -- throw a Haskell exception. The touch-based lifetime wrapper therefore
+  -- suffices and avoids a keepAlive# continuation allocation per string.
+  BSI.unsafeWithForeignPtr fp $ \src ->
     copyBytes (p `plusPtr` off) src len
   pure $! off + len
 {-# INLINE dBytes #-}

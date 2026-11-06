@@ -50,7 +50,6 @@ import Arrow.Column.Internal (
   SomePrimType (..),
   integralPrim,
   primTypeFor,
-  primWidth,
   withPrim,
  )
 import Arrow.Column.Internal qualified as I
@@ -76,10 +75,9 @@ import Data.Int (Int32, Int64, Int8)
 import Data.Text (Text)
 import Data.Vector qualified as V
 import Data.Vector.Storable qualified as VS
-import Data.Word (Word8)
 import Foreign.Marshal.Utils (copyBytes, fillBytes)
-import Foreign.Ptr (Ptr, castPtr, plusPtr)
-import Foreign.Storable (Storable (..), peekByteOff, pokeByteOff)
+import Foreign.Ptr (castPtr, plusPtr)
+import Foreign.Storable (Storable (..))
 import GHC.Generics (Generic)
 import System.IO.Unsafe (unsafeDupablePerformIO)
 import Wireform.FFI (validateArrowBuffers)
@@ -523,7 +521,7 @@ storableAt ctx what swapPat n i = do
       let !exact = BSU.unsafeTake need bs
       in Right $!
            if ctxSwap ctx && not (null swapPat)
-             then I.unsafeBytesToStorable (swapCopy swapPat w n exact)
+             then I.unsafeBytesToStorable (I.swapCopy swapPat w n exact)
              else I.bytesToStorable exact
 {-# INLINE storableAt #-}
 
@@ -540,40 +538,6 @@ offsetsAt ctx what rows i = do
 {-# INLINE offsetsAt #-}
 
 
--- | Byte-swap groups within each element (big-endian bodies).
-swapPattern :: PrimType a -> [Int]
-swapPattern = \case
-  PInt8 -> []
-  PUInt8 -> []
-  PIntervalDayTime -> [4, 4]
-  PIntervalMonthDayNano -> [4, 4, 8]
-  t -> [primWidth t]
-
-
-{- | Copy @n@ elements of @w@ bytes, reversing the byte order of each
-group of the pattern within every element (big-endian input only).
--}
-swapCopy :: [Int] -> Int -> Int -> ByteString -> ByteString
-swapCopy pat w n src = I.createAligned (n * w) $ \dst -> I.withBytesPtr src $ \s ->
-  let elemLoop !e
-        | e >= n = pure ()
-        | otherwise = groups (e * w) pat >> elemLoop (e + 1)
-      groups !_ [] = pure ()
-      groups !base (g : gs) = swapGroup (s `plusPtr` base) (dst `plusPtr` base) g >> groups (base + g) gs
-  in elemLoop 0
-
-
-swapGroup :: Ptr Word8 -> Ptr Word8 -> Int -> IO ()
-swapGroup s d g = go 0
-  where
-    go !k
-      | k >= g = pure ()
-      | otherwise = do
-          b <- peekByteOff s (g - 1 - k) :: IO Word8
-          pokeByteOff d k b
-          go (k + 1)
-
-
 -- ============================================================
 -- Leaf arrays
 -- ============================================================
@@ -582,7 +546,7 @@ swapGroup s d g = go 0
 prim :: Ctx -> PrimType a -> FieldNode -> Int -> Int -> Either String ColumnArray
 prim ctx t fn len bi = withPrim t $ do
   v <- validityAt ctx (I.primTypeName t) len fn bi
-  xs <- storableAt ctx (I.primTypeName t) (swapPattern t) len (bi + 1)
+  xs <- storableAt ctx (I.primTypeName t) (I.swapPattern t) len (bi + 1)
   Right (I.ColPrim t v xs)
 
 
@@ -643,7 +607,8 @@ views ctx utf8 fn len cur = do
     then Left ("Arrow.Read.Columns: " ++ what ++ " buffer too small")
     else Right ()
   dataBufs <- V.generateM nVar (\k -> bufferAt ctx (bi + 2 + k))
-  let !viewBytes = BSU.unsafeTake (len * 16) vs
+  let !rawViews = BSU.unsafeTake (len * 16) vs
+      !viewBytes = if ctxSwap ctx then I.swapViewCopy True rawViews else rawViews
   I.validateViews what utf8 len v viewBytes dataBufs
   let !col = if utf8 then I.ColUtf8View v viewBytes dataBufs else I.ColBinaryView v viewBytes dataBufs
       Cur n b x u = cur

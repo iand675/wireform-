@@ -1,4 +1,5 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE PatternSynonyms #-}
 
@@ -15,16 +16,27 @@ module Parquet.Page (
   DictionaryPageHeader (..),
   DataPageHeaderV2 (..),
   readPageHeaderAt,
+  readPageHeaderCheckedAt,
+  PageDetails (..),
+  readPageDetailsAt,
+  readPageDetailsCheckedAt,
   pageTypeTag,
   pageTypeIsDataPageV1,
   pageTypeIsDataPageV2,
   pageTypeIsDictionary,
+  verifyPageChecksum,
 ) where
 
 import Data.ByteString (ByteString)
-import Data.Int (Int16, Int32)
+import Data.ByteString qualified as BS
+import Data.ByteString.Unsafe qualified as BSU
+import Data.Int (Int16, Int32, Int64)
 import Data.Vector qualified as V
+import Data.Word (Word32, Word8)
+import Foreign.C.Types (CUInt (..), CULong (..))
+import Foreign.Ptr (Ptr, castPtr)
 import Parquet.Thrift.Schema
+import System.IO.Unsafe (unsafeDupablePerformIO)
 import Thrift.Decode (decodeCompactFrom)
 import Thrift.Value qualified as TV
 
@@ -109,9 +121,127 @@ data DataPageHeaderV2 = DataPageHeaderV2
 
 readPageHeaderAt :: ByteString -> Int -> Either String (PageHeader, Int)
 readPageHeaderAt bs off = do
-  (v, endOff) <- decodeCompactFrom bs off
-  ph <- pageHeaderFromThrift v
-  pure (ph, endOff)
+  details <- readPageDetailsAt bs off
+  Right (pdHeader details, pdBodyOffset details)
+
+
+data PageDetails = PageDetails
+  { pdHeader :: !PageHeader
+  , pdBodyOffset :: {-# UNPACK #-} !Int
+  , pdDefinitionEncoding :: {-# UNPACK #-} !Int32
+  , pdRepetitionEncoding :: {-# UNPACK #-} !Int32
+  , pdChecksum :: !(Maybe Word32)
+  }
+
+
+readPageDetailsAt :: ByteString -> Int -> Either String PageDetails
+readPageDetailsAt bs off
+  | off < 0 || off >= BS.length bs = Left "Parquet.Page: header offset out of bounds"
+  | otherwise = do
+      (v, endOff) <- decodeCompactFrom bs off
+      ph <- pageHeaderFromThrift v
+      validatePageHeader ph
+      checksum <- case v of
+        TV.Struct fs ->
+          V.foldM
+            ( \seen field -> case field of
+                PageHeader_Crc n -> case seen of
+                  Nothing -> Right (Just (fromIntegral n))
+                  Just _ -> Left "Parquet.Page: duplicate CRC field"
+                (4, _) -> Left "Parquet.Page: CRC must be an i32"
+                _ -> Right seen
+            )
+            Nothing
+            fs
+        _ -> Right Nothing
+      let fields = case v of TV.Struct fs -> V.toList fs; _ -> []
+          inner = maybe [] V.toList $ findField fields $ \case
+            PageHeader_DataPageHeader fs -> Just fs
+            _ -> Nothing
+          definition = maybe 3 id $ findField inner $ \case
+            DataPageHeader_DefinitionLevelEncoding n -> Just n
+            _ -> Nothing
+          repetition = maybe 3 id $ findField inner $ \case
+            DataPageHeader_RepetitionLevelEncoding n -> Just n
+            _ -> Nothing
+      pure (PageDetails ph endOff definition repetition checksum)
+
+
+{- | Read a complete page header and check the serialized (compressed) body.
+Header-only callers, including encryption framing, use 'readPageHeaderAt'.
+Every data reader uses this checked variant before decoding or decompressing.
+-}
+readPageHeaderCheckedAt :: ByteString -> Int -> Either String (PageHeader, Int)
+readPageHeaderCheckedAt bs off = do
+  details <- readPageDetailsCheckedAt bs off
+  Right (pdHeader details, pdBodyOffset details)
+
+
+readPageDetailsCheckedAt :: ByteString -> Int -> Either String PageDetails
+readPageDetailsCheckedAt bs off = do
+  details <- readPageDetailsAt bs off
+  let body = pdBodyOffset details
+  case phCompressedPageSize (pdHeader details) of
+    Just size
+      | fromIntegral size <= BS.length bs - body -> case pdChecksum details of
+          Nothing -> Right details
+          Just expected
+            | pageCrc32 (BS.take (fromIntegral size) (BS.drop body bs)) == expected -> Right details
+            | otherwise -> Left "Parquet.Page: CRC32 checksum mismatch"
+    _ -> Left "Parquet.Page: truncated page body"
+
+
+-- zlib's uInt length is safe here: the validated page size is a nonnegative
+-- signed 32-bit integer, bounded below uInt's maximum on supported platforms.
+-- The foreign call is deterministic and only reads the immutable bytes.
+-- Only validated Parquet page bodies reach this worker, so their signed
+-- 32-bit size fits zlib's unsigned-int byte count without narrowing overflow.
+pageCrc32 :: ByteString -> Word32
+pageCrc32 bytes = unsafeDupablePerformIO $
+  BSU.unsafeUseAsCStringLen bytes $ \(ptr, len) ->
+    fromIntegral <$> c_crc32 0 (castPtr ptr) (fromIntegral len)
+{-# NOINLINE pageCrc32 #-}
+
+
+-- | Check the CRC of an on-disk page body, including encryption framing.
+-- Enforce Parquet's signed 32-bit page-size bound before calling zlib.
+verifyPageChecksum :: Word32 -> ByteString -> Either String ()
+verifyPageChecksum expected bytes
+  | BS.length bytes > fromIntegral (maxBound :: Int32) = Left "Parquet.Page: page body exceeds signed 32-bit size"
+  | pageCrc32 bytes == expected = Right ()
+  | otherwise = Left "Parquet.Page: CRC32 checksum mismatch"
+
+
+foreign import ccall unsafe "crc32"
+  c_crc32 :: CULong -> Ptr Word8 -> CUInt -> IO CULong
+
+
+validatePageHeader :: PageHeader -> Either String ()
+validatePageHeader header = do
+  uncompressed <- size "uncompressed_page_size" (phUncompressedPageSize header)
+  compressed <- size "compressed_page_size" (phCompressedPageSize header)
+  case phType header of
+    PtDataPage page
+      | dphNumValues page < 0 -> Left "Parquet.Page: negative data-page value count"
+    PtDictionaryPage page
+      | dictNumValues page < 0 -> Left "Parquet.Page: negative dictionary value count"
+    PtDataPageV2 page
+      | dph2NumValues page < 0
+          || dph2NumNulls page < 0
+          || dph2NumRows page < 0
+          || dph2DefLevelsLen page < 0
+          || dph2RepLevelsLen page < 0 ->
+          Left "Parquet.Page: negative V2 count or level length"
+      | dph2NumNulls page > dph2NumValues page || dph2NumRows page > dph2NumValues page ->
+          Left "Parquet.Page: inconsistent V2 row/null/value counts"
+      | let levels = fromIntegral (dph2DefLevelsLen page) + fromIntegral (dph2RepLevelsLen page) :: Int64
+      , levels > fromIntegral uncompressed || levels > fromIntegral compressed ->
+          Left "Parquet.Page: V2 level lengths exceed page sizes"
+    _ -> Right ()
+  where
+    size name = \case
+      Just n | n >= 0 -> Right n
+      _ -> Left ("Parquet.Page: missing or negative " ++ name)
 
 
 pageHeaderFromThrift :: TV.Value -> Either String PageHeader

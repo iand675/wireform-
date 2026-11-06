@@ -13,6 +13,7 @@ before a broken later section is reported).
 module Test.Arrow.Sections (tests) where
 
 import Arrow.Column (ColumnArray, PrimType (..), primColumn)
+import Arrow.Column qualified as C
 import Arrow.FlatBufferIPC (ArrowBlock (..), FileIndex (..), readFileIndex)
 import Arrow.Stream (
   ReadOptions,
@@ -29,13 +30,18 @@ import Arrow.Stream (
   streamBatchesHandle,
  )
 import Arrow.Types (ArrowType (..), Schema, defaultLeafField, defaultSchema)
+import Arrow.Types qualified as A
 import Columnar.Stream (IterIO, IterIOStep (..), iterIOStep, iterIOToList)
 import Control.Exception (bracket)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.ByteString.Builder qualified as BB
+import Data.ByteString.Lazy qualified as BL
+import Data.Int (Int64)
 import Data.List (isPrefixOf)
 import Data.Vector qualified as V
 import Data.Vector.Storable qualified as VS
+import FlatBuffers.Reader qualified as FB
 import Hedgehog
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO (Handle, SeekMode (..), hClose, hSeek, openBinaryTempFile)
@@ -51,7 +57,82 @@ tests =
       , ("handle iteration decodes one file section at a time", prop_fileBatchesHandle)
       , ("handle iteration decodes one stream frame at a time (dictionaries included)", prop_streamBatchesHandle)
       , ("a corrupt section fails only when its turn comes", prop_corruptSectionFailsLate)
+      , ("Rust 64-byte aligned files use their footer index", prop_rustAlignedFile)
+      , ("Rust empty 64-byte aligned files keep their schema", prop_rustEmptyFile)
+      , ("footer blocks cannot address footer bytes", prop_blockCannotPointIntoFooter)
+      , ("negative message body lengths fail every file reader", prop_negativeMessageBody)
       ]
+
+
+prop_rustAlignedFile :: Property
+prop_rustAlignedFile = withTests 1 $ property $ do
+  bytes <- evalIO (BS.readFile "test/golden/rs_file_alignment64.arrow")
+  -- The old eager reader mistook this alignment padding for stream EOS.
+  BS.take 4 (BS.drop 8 bytes) === BS.replicate 4 0
+  let expected = [V.singleton (C.fromMaybes PInt32 (V.fromList [Just 1, Nothing, Just (-7), Just maxBound]))]
+  (schema, batches) <- evalEither (decodeArrowFile defaultReadOptions bytes)
+  V.map A.fieldName (A.arrowFields schema) === V.singleton "value"
+  V.map A.fieldType (A.arrowFields schema) === V.singleton (AInt 32 True)
+  batches === expected
+  reader <- evalEither (openFileReader defaultReadOptions bytes)
+  fileReaderSchema reader === schema
+  streamed <- evalEither (fileReaderToList reader)
+  streamed === expected
+
+
+prop_rustEmptyFile :: Property
+prop_rustEmptyFile = withTests 1 $ property $ do
+  bytes <- evalIO (BS.readFile "test/golden/rs_file_empty_alignment64.arrow")
+  (schema, batches) <- evalEither (decodeArrowFile defaultReadOptions bytes)
+  V.map A.fieldName (A.arrowFields schema) === V.singleton "value"
+  V.map A.fieldType (A.arrowFields schema) === V.singleton (AInt 32 True)
+  batches === []
+  reader <- evalEither (openFileReader defaultReadOptions bytes)
+  fileReaderSchema reader === schema
+  streamed <- evalEither (fileReaderToList reader)
+  streamed === []
+
+
+prop_blockCannotPointIntoFooter :: Property
+prop_blockCannotPointIntoFooter = withTests 1 $ property $ do
+  bytes <- evalIO (BS.readFile "test/golden/rs_file_alignment64.arrow")
+  footerLength <- evalEither (FB.peekI32 bytes (BS.length bytes - 10))
+  let footerStart = BS.length bytes - 10 - fromIntegral footerLength
+      footer = BS.take (fromIntegral footerLength) (BS.drop footerStart bytes)
+  root <- evalEither (FB.peekU32 footer 0)
+  slots <- evalEither (FB.resolveTable footer (fromIntegral root))
+  slot <- evalMaybe (slots 3)
+  vector <- evalEither (FB.followUOffset footer slot)
+  (_, positions) <- evalEither (FB.readVectorOfStructs footer vector 24)
+  position <- evalMaybe (positions V.!? 0)
+  let patchPosition = footerStart + position
+      -- A tiny block fits within the whole file but lies in its footer.
+      encoded = BL.toStrict (BB.toLazyByteString (BB.int64LE (fromIntegral footerStart :: Int64) <> BB.int32LE 8 <> BB.int32LE 0 <> BB.int64LE 0))
+      corrupted = BS.take patchPosition bytes <> encoded <> BS.drop (patchPosition + 24) bytes
+  case readFileIndex corrupted of
+    Left _ -> success
+    Right _ -> failure
+
+
+prop_negativeMessageBody :: Property
+prop_negativeMessageBody = withTests 1 $ property $ do
+  bytes <- evalIO (BS.readFile "test/golden/rs_file_alignment64.arrow")
+  index <- evalEither (readFileIndex bytes)
+  descriptor <- evalMaybe (fiRecordBatches index V.!? 0)
+  let metadataStart = fromIntegral (abOffset descriptor) + 8
+      metadata = BS.take (fromIntegral (abMetaLen descriptor) - 8) (BS.drop metadataStart bytes)
+  root <- evalEither (FB.peekU32 metadata 0)
+  slots <- evalEither (FB.resolveTable metadata (fromIntegral root))
+  bodyLengthSlot <- evalMaybe (slots 3)
+  let position = metadataStart + bodyLengthSlot
+      encoded = BL.toStrict (BB.toLazyByteString (BB.int64LE (-1)))
+      corrupted = BS.take position bytes <> encoded <> BS.drop (position + 8) bytes
+      rejected result = case result of Left _ -> True; Right _ -> False
+  assert (rejected (decodeArrowFile defaultReadOptions corrupted))
+  reader <- evalEither (openFileReader defaultReadOptions corrupted)
+  assert (rejected (fileReaderToList reader))
+  handled <- evalIO (withTempFile corrupted (drainFile defaultReadOptions))
+  assert (rejected handled)
 
 
 -- * Fixtures
@@ -61,7 +142,8 @@ tests =
 smallBatches :: (Schema, [V.Vector ColumnArray])
 smallBatches =
   ( defaultSchema (V.fromList [defaultLeafField "a" False (AInt 32 True)])
-  , [ V.singleton (primColumn PInt32 (VS.fromList [1, 2, 3]))
+  ,
+    [ V.singleton (primColumn PInt32 (VS.fromList [1, 2, 3]))
     , V.singleton (primColumn PInt32 (VS.fromList [4]))
     , V.singleton (primColumn PInt32 (VS.fromList [5, 6, 7, 8]))
     ]

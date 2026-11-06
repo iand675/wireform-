@@ -40,6 +40,7 @@ import Data.ByteString (ByteString)
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import Data.Text.Encoding qualified as TE
+import Data.Word (Word64)
 
 
 -- | A typed scalar that can appear in a predicate.
@@ -51,6 +52,8 @@ data PValue
   | PVBool !Bool
   | PVText !Text
   | PVBinary !ByteString
+  | PVUnsigned !Word64
+  | PVDecimal !Rational
   deriving (Show, Eq)
 
 
@@ -115,19 +118,21 @@ decoding statistics into 'PValue's and calling this; the
 range comparison itself is shared.
 -}
 evalRange :: PValue -> PValue -> PColPredicate -> Decision
-evalRange mn mx = \case
-  PEq v -> if pvLess v mn || pvLess mx v then PSkip else PMaybeKeep
-  PNeq _ -> PMaybeKeep
-  PLt v -> if pvLessEq v mn then PSkip else PMaybeKeep
-  PLtEq v -> if pvLess v mn then PSkip else PMaybeKeep
-  PGt v -> if pvLessEq mx v then PSkip else PMaybeKeep
-  PGtEq v -> if pvLess mx v then PSkip else PMaybeKeep
-  PIn vs ->
-    if all (\v -> pvLess v mn || pvLess mx v) vs
-      then PSkip
-      else PMaybeKeep
-  PIsNull -> PMaybeKeep
-  PIsNotNull -> PMaybeKeep
+evalRange mn mx predicate
+  | pvLess mx mn = PMaybeKeep
+  | otherwise = case predicate of
+      PEq v -> if pvLess v mn || pvLess mx v then PSkip else PMaybeKeep
+      PNeq _ -> PMaybeKeep
+      PLt v -> if pvLessEq v mn then PSkip else PMaybeKeep
+      PLtEq v -> if pvLess v mn then PSkip else PMaybeKeep
+      PGt v -> if pvLessEq mx v then PSkip else PMaybeKeep
+      PGtEq v -> if pvLess mx v then PSkip else PMaybeKeep
+      PIn vs ->
+        if all (\v -> pvLess v mn || pvLess mx v) vs
+          then PSkip
+          else PMaybeKeep
+      PIsNull -> PMaybeKeep
+      PIsNotNull -> PMaybeKeep
 
 
 {- | Strict 'PValue' ordering. Cross-type comparisons return
@@ -142,6 +147,8 @@ pvLess (PVDouble a) (PVDouble b) = a < b
 pvLess (PVBool a) (PVBool b) = not a && b
 pvLess (PVText a) (PVText b) = TE.encodeUtf8 a < TE.encodeUtf8 b
 pvLess (PVBinary a) (PVBinary b) = a < b
+pvLess (PVUnsigned a) (PVUnsigned b) = a < b
+pvLess (PVDecimal a) (PVDecimal b) = a < b
 pvLess _ _ = False
 
 
@@ -150,4 +157,4 @@ pvLessEq a b = pvLess a b || pvEq a b
 
 
 pvEq :: PValue -> PValue -> Bool
-pvEq a b = not (pvLess a b) && not (pvLess b a)
+pvEq = (==)

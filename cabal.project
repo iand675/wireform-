@@ -80,7 +80,7 @@ package flatparse
 -- ships text-2.1+, so this only stops the solver reinstalling an
 -- older text.
 constraints: text >= 2.1
-           , crypton >= 1.0 && < 1.2
+           , crypton >= 2.2.6 && < 2.3
 
 package wireform-arrow
   flags: +zstd +lz4

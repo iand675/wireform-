@@ -29,14 +29,17 @@ module Parquet.DeltaEncode (
   encodeDeltaByteArray,
 ) where
 
-import Data.Bits (shiftL, shiftR, (.&.), (.|.))
+import Data.Bits (countLeadingZeros, shiftL, shiftR, unsafeShiftL, unsafeShiftR, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.ByteString.Builder.Prim qualified as Prim
+import Data.ByteString.Builder.Prim.Internal qualified as PrimInternal
 import Data.ByteString.Lazy qualified as BL
 import Data.Int (Int32, Int64)
 import Data.Vector qualified as V
 import Data.Vector.Primitive qualified as VP
-import Data.Word (Word32, Word64, Word8)
+import Data.Word (Word32, Word64)
+import Foreign.Ptr (plusPtr)
 import Wireform.Builder qualified as B
 
 
@@ -45,12 +48,18 @@ defaultBlockSize = 128
 defaultNumMiniblocks = 4
 
 
-{- | DELTA_BINARY_PACKED for INT32. Promotes to Int64 internally and
-delegates to the shared raw encoder.
+{- | DELTA_BINARY_PACKED for INT32. Differences wrap at the physical
+32-bit width before promotion; widening the inputs first can produce
+33-bit miniblocks and min deltas that an INT32 reader cannot consume.
 -}
 encodeDeltaBinaryPackedInt32 :: VP.Vector Int32 -> ByteString
-encodeDeltaBinaryPackedInt32 vs =
-  encodeDeltaBinaryPackedRaw (VP.map fromIntegral vs)
+encodeDeltaBinaryPackedInt32 vs
+  | VP.null vs = encodeDeltaStream 0 0 (const 0)
+  | otherwise =
+      encodeDeltaStream
+        (VP.length vs)
+        (fromIntegral (VP.unsafeIndex vs 0))
+        (\i -> fromIntegral (VP.unsafeIndex vs (i + 1) - VP.unsafeIndex vs i))
 
 
 -- | DELTA_BINARY_PACKED for INT64.
@@ -60,123 +69,126 @@ encodeDeltaBinaryPackedInt64 = encodeDeltaBinaryPackedRaw
 
 -- | Lower-level raw encoder.
 encodeDeltaBinaryPackedRaw :: VP.Vector Int64 -> ByteString
-encodeDeltaBinaryPackedRaw vs =
-  let !n = VP.length vs
-      !blockSize = defaultBlockSize
-      !numMiniblocks = defaultNumMiniblocks
-      !miniblockSize = blockSize `quot` numMiniblocks
-      !header =
-        encodeULeb (fromIntegral blockSize)
-          <> encodeULeb (fromIntegral numMiniblocks)
+encodeDeltaBinaryPackedRaw vs
+  | VP.null vs = encodeDeltaStream 0 0 (const 0)
+  | otherwise = encodeDeltaStream (VP.length vs) (VP.unsafeIndex vs 0) (\i -> VP.unsafeIndex vs (i + 1) - VP.unsafeIndex vs i)
+
+
+-- Keep the physical-width subtraction in the typed caller. Inlining this
+-- pipeline removes the accessor closure from the block's scanning/packing
+-- loops and avoids materialising an input-sized vector of Int64 deltas.
+encodeDeltaStream :: Int -> Int64 -> (Int -> Int64) -> ByteString
+encodeDeltaStream n firstVal deltaAt =
+  let !header =
+        encodeULeb (fromIntegral defaultBlockSize)
+          <> encodeULeb (fromIntegral defaultNumMiniblocks)
           <> encodeULeb (fromIntegral n)
-  in if n == 0
-       then BL.toStrict (B.toLazyByteString (header <> encodeZigzagLeb 0))
-       else
-         let !firstVal = VP.unsafeIndex vs 0
-             !deltas = VP.zipWith (-) (VP.tail vs) (VP.init vs)
-             !blocks = encodeBlocks blockSize numMiniblocks miniblockSize deltas
-             !payload =
-               header
-                 <> encodeZigzagLeb firstVal
-                 <> blocks
-         in BL.toStrict (B.toLazyByteString payload)
+      !blocks = encodeBlocks (max 0 (n - 1)) deltaAt
+  in BL.toStrict (B.toLazyByteString (header <> encodeZigzagLeb firstVal <> blocks))
+{-# INLINE encodeDeltaStream #-}
 
 
-encodeBlocks :: Int -> Int -> Int -> VP.Vector Int64 -> B.Builder
-encodeBlocks blockSize numMiniblocks miniblockSize deltas =
-  let !n = VP.length deltas
-      go !off
-        | off >= n = mempty
-        | otherwise =
-            let !chunkLen = min blockSize (n - off)
-                !chunk = VP.slice off chunkLen deltas
-            in encodeOneBlock numMiniblocks miniblockSize chunk
-                 <> go (off + blockSize)
-  in go 0
-
-
-encodeOneBlock :: Int -> Int -> VP.Vector Int64 -> B.Builder
-encodeOneBlock numMiniblocks miniblockSize chunk =
-  let !minDelta = VP.foldl' min (VP.head chunk) chunk
-      -- Per-miniblock bit widths.
-      !mini = splitIntoMiniblocks numMiniblocks miniblockSize chunk
-      !bitWidths = map (miniblockBitWidth minDelta) mini
-  in encodeZigzagLeb minDelta
-       <> mconcat (map (B.word8 . fromIntegral) bitWidths)
-       <> mconcat (zipWith (encodeMiniblockPayload minDelta miniblockSize) bitWidths mini)
-
-
--- Split a block (possibly less than blockSize values) into miniblocks,
--- padding the last one with the value 'minDelta' so the bit-width loop
--- doesn't go out of range.
-splitIntoMiniblocks :: Int -> Int -> VP.Vector Int64 -> [VP.Vector Int64]
-splitIntoMiniblocks numMiniblocks miniblockSize chunk =
-  go 0 numMiniblocks
+encodeBlocks :: Int -> (Int -> Int64) -> B.Builder
+encodeBlocks n deltaAt = go 0
   where
-    n = VP.length chunk
-    go !off 0 = if off < n then [VP.drop off chunk] else []
-    go !off remaining
-      | off >= n =
-          replicate remaining VP.empty
+    go !off
+      | off >= n = mempty
       | otherwise =
-          let !take' = min miniblockSize (n - off)
-          in VP.slice off take' chunk : go (off + miniblockSize) (remaining - 1)
+          encodeOneBlock off (min defaultBlockSize (n - off)) deltaAt
+            <> go (off + defaultBlockSize)
+{-# INLINE encodeBlocks #-}
 
 
--- Bit width needed to hold every (delta - minDelta) in the miniblock.
-miniblockBitWidth :: Int64 -> VP.Vector Int64 -> Int
-miniblockBitWidth minDelta vs
-  | VP.null vs = 0
-  | otherwise =
-      let !mx = VP.foldl' (\a x -> max a (x - minDelta)) 0 vs
-      in bitWidthW64 (fromIntegral mx :: Word64)
+encodeOneBlock :: Int -> Int -> (Int -> Int64) -> B.Builder
+encodeOneBlock off count deltaAt =
+  let !miniblockSize = defaultBlockSize `quot` defaultNumMiniblocks
+      minimumFrom !i !smallest
+        | i == count = smallest
+        | otherwise = minimumFrom (i + 1) (min smallest (deltaAt (off + i)))
+      !minDelta = minimumFrom 1 (deltaAt off)
+      payload !start !width =
+        encodeMiniblockPayload
+          minDelta
+          miniblockSize
+          width
+          (max 0 (min miniblockSize (count - start)))
+          (\i -> deltaAt (off + start + i))
+      widthAt !start =
+        let !end = min count (start + miniblockSize)
+            maximumFrom !i !largest
+              | i >= end = bitWidthW64 largest
+              | otherwise = maximumFrom (i + 1) (max largest (fromIntegral (deltaAt (off + i) - minDelta)))
+        in maximumFrom start 0
+      !width0 = widthAt 0
+      !width1 = widthAt miniblockSize
+      !width2 = widthAt (2 * miniblockSize)
+      !width3 = widthAt (3 * miniblockSize)
+  in encodeZigzagLeb minDelta
+       <> B.word8 (fromIntegral width0)
+       <> B.word8 (fromIntegral width1)
+       <> B.word8 (fromIntegral width2)
+       <> B.word8 (fromIntegral width3)
+       <> payload 0 width0
+       <> payload miniblockSize width1
+       <> payload (2 * miniblockSize) width2
+       <> payload (3 * miniblockSize) width3
+{-# INLINE encodeOneBlock #-}
 
 
 bitWidthW64 :: Word64 -> Int
-bitWidthW64 = go 0
-  where
-    go !w 0 = w
-    go !w n = go (w + 1) (n `shiftR` 1)
+bitWidthW64 value = 64 - countLeadingZeros value
 
 
 -- Serialise the miniblock's packed bits. Always emits
 -- @ceil(miniblockSize * bw / 8)@ bytes (i.e. uses the *spec* miniblock
 -- size, not the actual chunk length). Trailing values past the end of
--- @vs@ are zero-padded.
-encodeMiniblockPayload :: Int64 -> Int -> Int -> VP.Vector Int64 -> B.Builder
-encodeMiniblockPayload _minDelta _miniblockSize 0 _ = mempty
-encodeMiniblockPayload minDelta miniblockSize bw vs =
+-- the actual miniblock length are zero-padded.
+encodeMiniblockPayload :: Int64 -> Int -> Int -> Int -> (Int -> Int64) -> B.Builder
+encodeMiniblockPayload _minDelta _miniblockSize 0 _ _ = mempty
+encodeMiniblockPayload minDelta miniblockSize bw n deltaAt =
   let !totalBits = miniblockSize * bw
       !totalBytes = (totalBits + 7) `shiftR` 3
-  in mconcat
-       [ B.word8 (byteAt byteIdx)
-       | byteIdx <- [0 .. totalBytes - 1]
-       ]
+  in B.primFixed (PrimInternal.fixedPrim totalBytes fill) ()
   where
-    n = VP.length vs
-
-    byteAt :: Int -> Word8
-    byteAt byteIdx =
-      let !startBit = byteIdx * 8
-          go !bit !acc
-            | bit >= 8 = acc
-            | otherwise =
-                let !globalBit = startBit + bit
-                    !valIdx = globalBit `quot` bw
-                    !innerBit = globalBit `rem` bw
-                in if valIdx >= n
-                     then go (bit + 1) acc
-                     else
-                       let !v =
-                             fromIntegral
-                               (VP.unsafeIndex vs valIdx - minDelta)
-                               :: Word64
-                           !flag =
-                             if (v `shiftR` innerBit) .&. 1 == 1
-                               then acc .|. (1 `shiftL` bit)
-                               else acc
-                       in go (bit + 1) flag
-      in fromIntegral (go 0 (0 :: Int))
+    valueAt :: Int -> Word64
+    valueAt i = if i < n then fromIntegral (deltaAt i - minDelta) else 0
+    {-# INLINE valueAt #-}
+    -- FixedPrim reserves the whole miniblock once. Its standard LE stores
+    -- support unaligned builder cursors and write exactly four/eight bytes.
+    fill () output
+      | bw == 64 = words64 0
+      | bw == 32 = words32 0
+      | otherwise = packed 0 0 0 0
+      where
+        words64 !i
+          | i == miniblockSize = pure ()
+          | otherwise = PrimInternal.runF Prim.word64LE (valueAt i) (output `plusPtr` (i * 8)) *> words64 (i + 1)
+        words32 !i
+          | i == miniblockSize = pure ()
+          | otherwise = PrimInternal.runF Prim.word32LE (fromIntegral (valueAt i)) (output `plusPtr` (i * 4)) *> words32 (i + 1)
+        packed !i !offset !used !acc
+          | i == miniblockSize = tailBytes offset used acc
+          | otherwise =
+              let !value = valueAt i
+                  !merged = acc .|. (value `unsafeShiftL` used)
+                  !bits = used + bw
+              in if bits < 64
+                   then packed (i + 1) offset bits merged
+                   else do
+                     PrimInternal.runF Prim.word64LE merged (output `plusPtr` offset)
+                     -- used stays in [0,63]. A positive carry implies
+                     -- used > 0, so the remaining shift is also in [1,63].
+                     let !carry = if bits == 64 then 0 else value `unsafeShiftR` (64 - used)
+                     packed (i + 1) (offset + 8) (bits - 64) carry
+        tailBytes !offset !used !acc
+          | used == 0 = pure ()
+          | used == 32 = PrimInternal.runF Prim.word32LE (fromIntegral acc) (output `plusPtr` offset)
+          | otherwise = bytes 0
+          where
+            bytes !i
+              | i == (used + 7) `quot` 8 = pure ()
+              | otherwise = PrimInternal.runF Prim.word8 (fromIntegral (acc `unsafeShiftR` (i * 8))) (output `plusPtr` (offset + i)) *> bytes (i + 1)
+{-# INLINE encodeMiniblockPayload #-}
 
 
 -- ============================================================
