@@ -94,11 +94,13 @@ stringLiteral = lexeme $ do
 integerLiteral :: Parser Int64
 integerLiteral = lexeme $ do
   sign <- optional (char '-')
-  n <- try (string "0x" *> L.hexadecimal) <|> L.decimal
+  n <- (try (string "0x" *> L.hexadecimal) <|> L.decimal) :: Parser Integer
   let val = case sign of
         Just _ -> negate n
         Nothing -> n
-  pure val
+  if val < toInteger (minBound :: Int64) || val > toInteger (maxBound :: Int64)
+    then fail "enum integer exceeds the schema AST Int64 range"
+    else pure (fromInteger val)
 
 
 --------------------------------------------------------------------------------

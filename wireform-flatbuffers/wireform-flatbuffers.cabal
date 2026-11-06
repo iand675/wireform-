@@ -8,6 +8,8 @@ author: Ian Duncan
 maintainer: ian@iankduncan.com
 copyright: 2026 Ian Duncan
 build-type: Simple
+data-files: test/fixtures/codec.fbs test/fixtures/codec.json test/fixtures/codec.bin
+extra-source-files: test/fixtures/README.md
 
 common defaults
   ghc-options:
@@ -34,6 +36,7 @@ library
   exposed-modules:
     FlatBuffers
     FlatBuffers.Builder
+    FlatBuffers.Codec
     FlatBuffers.CodeGen
     FlatBuffers.Decode
     FlatBuffers.Derive
@@ -45,6 +48,7 @@ library
     FlatBuffers.View
     FlatBuffers.Schema
     FlatBuffers.Value
+  other-modules: FlatBuffers.Internal.Schema
   build-depends:
     base >= 4.20 && < 5,
     wireform-core,
@@ -82,12 +86,15 @@ test-suite wireform-flatbuffers-derive-test
   hs-source-dirs: test
   main-is: Main.hs
   other-modules:
+    Test.FlatBuffers.Codec
+    Paths_wireform_flatbuffers
     Test.FlatBuffers.Builder
     Test.FlatBuffers.Builder.Reference
     Test.FlatBuffers.Derive
     Test.FlatBuffers.Derive.Types
     Test.FlatBuffers.Derive.Instances
     Test.FlatBuffers.View
+  autogen-modules: Paths_wireform_flatbuffers
   default-extensions:
     ScopedTypeVariables
     TemplateHaskell

@@ -18,6 +18,7 @@ import Data.ByteString.Internal qualified as BSI
 import Data.Text qualified as T
 import FlatBuffers.Derive (toFlatBuffers)
 import FlatBuffers.Encode qualified as FBE
+import FlatBuffers.Parser (parseFlatBuffers)
 import FlatBuffers.View qualified as FV
 import Foreign.ForeignPtr.Unsafe qualified
 import Foreign.Ptr qualified
@@ -45,7 +46,7 @@ functional =
     sequence_
       [ it "Position with all fields set" $ do
           let p = Position "origin" 3 7 (Just "home") "ignored"
-              bs = FBE.encode (toFlatBuffers p)
+              bs = encodePosition p
           case FV.decodeRoot bs of
             Right p' -> do
               posName p' `shouldBe` posName p
@@ -57,26 +58,12 @@ functional =
             Left e -> expectationFailure ("decodeRoot failed: " <> e)
       , it "Position with Nothing note" $ do
           let p = Position "no-note" 1 2 Nothing "ignored"
-              bs = FBE.encode (toFlatBuffers p)
+              bs = encodePosition p
           case FV.decodeRoot bs of
             Right p' -> do
               posNote p' `shouldBe` Nothing
               posLabel p' `shouldBe` defaultLabel
             Left e -> expectationFailure e
-      , it "Tag (newtype)" $ do
-          let t = Tag 42
-              bs = FBE.encode (toFlatBuffers t)
-          -- Newtypes pass through to their inner field's instance.
-          -- Tag's inner field is Int32, which is a scalar — but
-          -- 'decodeRoot' assumes a Table, so for now we exercise the
-          -- newtype on its own buffer via the value-shaped decoder.
-          -- The View deriver still emits the instance for nested use.
-          (BS.length bs > 0) `shouldBe` True
-      , it "Color enum tag override survives round-trip via View" $ do
-          -- An enum decoded via View through a one-slot wrapper
-          -- table would need a wrapping type; here we just confirm
-          -- the deriver compiled (which is the new surface).
-          True `shouldBe` True
       ]
 
 
@@ -96,7 +83,7 @@ zeroCopy =
           -- decoder allocated a copy.
           let needleText = "ZERO_COPY_SLICE_PROBE_0123456789" :: T.Text
               p = Position needleText 1 2 Nothing "ignored"
-              bs = FBE.encode (toFlatBuffers p)
+              bs = encodePosition p
           case findStringSlice bs needleText of
             Nothing -> expectationFailure "string slice not found in buffer"
             Just slice ->
@@ -106,7 +93,7 @@ zeroCopy =
           -- bottoms out in 'readByteVectorSlice'. Confirm the
           -- returned bytes really do lie inside the input.
           let p = Position "PAYLOAD-1234567890" 0 0 Nothing "ignored"
-              bs = FBE.encode (toFlatBuffers p)
+              bs = encodePosition p
           case FV.rootTable bs of
             Left e -> expectationFailure e
             Right t -> case FV.viewSlot t 0 :: Either String ByteString of
@@ -116,7 +103,7 @@ zeroCopy =
                 (sharesForeignPtr bs slice) `shouldBe` True
       , it "string slot accessed twice yields equal Text" $ do
           let p = Position "shared" 0 0 Nothing "ignored"
-              bs = FBE.encode (toFlatBuffers p)
+              bs = encodePosition p
           case (FV.decodeRoot bs, FV.decodeRoot bs) of
             (Right p1, Right p2) -> posName p1 `shouldBe` posName p2
             _ -> expectationFailure "decodeRoot failed"
@@ -161,3 +148,9 @@ sharesForeignPtr (BSI.BS fp1 len1) (BSI.BS fp2 len2) =
 
 plusPtrInt :: Foreign.Ptr.Ptr a -> Int -> Foreign.Ptr.Ptr a
 plusPtrInt = Foreign.Ptr.plusPtr
+
+
+encodePosition :: Position -> ByteString
+encodePosition position = either error id $ do
+  schema <- parseFlatBuffers "table Position { name:string; x:int; y:int; note:string; label:string(deprecated); } root_type Position;"
+  FBE.encode schema (toFlatBuffers position)

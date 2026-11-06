@@ -33,6 +33,15 @@ This package is part of the [wireform](https://github.com/iand675/wireform-)
 monorepo and shares its allocation primitives, annotation deriver, and
 testing discipline with every other format.
 
+`XML.FastDOM` retains internal text entity declarations and expands nested
+general, predefined and numeric references when materializing text/attributes.
+Numeric references are processed at declaration time; general references and
+attribute whitespace follow their inclusion context. Its source spans remain unchanged. Expansion is bounded to 32 levels, 4,096
+declarations and 1,048,576 expanded characters per context/table and document.
+External resources are never fetched. External/parameter entities and markup
+in replacement text are rejected explicitly; this is a text-entity subset,
+not a validating DTD processor. CDATA and comments remain literal.
+
 ## Install
 
 ```cabal

@@ -77,6 +77,7 @@ test-suite wireform-xml-derive-test
   hs-source-dirs: test
   main-is: Main.hs
   other-modules:
+    Test.XML.FastEntities
     Test.XML.Derive
     Test.XML.Derive.Types
     Test.XML.Derive.Instances
@@ -86,6 +87,8 @@ test-suite wireform-xml-derive-test
   build-depends:
     base,
     wireform-xml,
+    bytestring,
+    vector,
     wireform-derive,
     text,
     vector,

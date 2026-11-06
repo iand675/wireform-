@@ -9,6 +9,7 @@ author: Ian Duncan
 maintainer: ian@iankduncan.com
 copyright: 2026 Ian Duncan
 build-type: Simple
+data-files: data/entities.json
 
 common defaults
   default-language: GHC2021
@@ -33,6 +34,8 @@ library
   ghc-options:
   hs-source-dirs: src
   other-modules:
+    HTML.Entities
+    HTML.Entities.Generated
     HTML.DOM.Index
     HTML.DOM.Zipper
     HTML.DOM.Selector
@@ -79,15 +82,21 @@ test-suite wireform-html-derive-test
   hs-source-dirs: test
   main-is: Main.hs
   other-modules:
+    Test.HTML.Entities
+    Paths_wireform_html
     Test.HTML.Derive
     Test.HTML.Derive.Types
     Test.HTML.Derive.Instances
+  autogen-modules: Paths_wireform_html
   default-extensions:
     ScopedTypeVariables
     TemplateHaskell
   build-depends:
     base,
     wireform-html,
+    aeson,
+    bytestring,
+    containers,
     wireform-derive,
     text,
     primitive,

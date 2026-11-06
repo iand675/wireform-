@@ -312,6 +312,7 @@ showCtor = \case
   FB.VVector _ -> "VVector"
   FB.VTable _ -> "VTable"
   FB.VStruct _ -> "VStruct"
+  FB.VUnion _ _ -> "VUnion"
 
 
 -- ---------------------------------------------------------------------------

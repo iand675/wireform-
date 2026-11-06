@@ -62,6 +62,7 @@ module FlatBuffers.Builder (
   newBuilder,
   newBuilderWithCapacity,
   finish,
+  finishWithIdentifier,
   currentUOff,
 
   -- * Low-level prepend primitives
@@ -101,8 +102,9 @@ module FlatBuffers.Builder (
   alignUp,
 ) where
 
-import Data.Bits (complement, (.&.))
+import Data.Bits (complement, shiftL, (.&.), (.|.))
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
 import Data.ByteString.Internal qualified as BSI
 import Data.Int (Int16, Int32, Int64)
 import Data.Text qualified as T
@@ -406,14 +408,27 @@ forward position is aligned too. The result is a slice of the
 builder's buffer (no copy).
 -}
 finish :: Builder -> Int -> IO ByteString
-finish b@(Builder st _) (I# rootUOff) = IO $ \s0 ->
+finish b root = finishHeader b root 4 0
+
+-- | Finish with a four-byte file identifier immediately after the root offset.
+finishWithIdentifier :: Builder -> Int -> ByteString -> IO ByteString
+finishWithIdentifier b root identifier
+  | BS.length identifier /= 4 = error "FlatBuffers.Builder: identifier must have four bytes"
+  | otherwise = finishHeader b root 8 (fromIntegral (BS.index identifier 0)
+      .|. (fromIntegral (BS.index identifier 1) `shiftL` 8)
+      .|. (fromIntegral (BS.index identifier 2) `shiftL` 16)
+      .|. (fromIntegral (BS.index identifier 3) `shiftL` 24))
+
+finishHeader :: Builder -> Int -> Int -> Word32 -> IO ByteString
+finishHeader b@(Builder st _) (I# rootUOff) (I# headerSize) identifier = IO $ \s0 ->
   case readIntArray# st SlotMinAlign s0 of
     (# s1, minA #) ->
-      case prepForObject# b 4# (if isTrue# (minA ># 4#) then minA else 4#) s1 of
-        s2 -> case claim b 4# s2 of
+      case prepForObject# b headerSize (if isTrue# (minA ># 4#) then minA else 4#) s1 of
+        s2 -> case claim b headerSize s2 of
           (# s3, buf, i #) -> case readIntArray# st SlotCap s3 of
             (# s4, cap #) -> case putI32# buf i ((cap -# i) -# rootUOff) s4 of
-              s5 -> (# s5, BSI.BS (ForeignPtr (mutableByteArrayContents# buf `plusAddr#` i) (PlainPtr buf)) (I# (cap -# i)) #)
+              s5 -> let s6 = if isTrue# (headerSize ==# 8#) then putWord# buf (i +# 4#) 4# (fromIntegral identifier) s5 else s5
+                    in (# s6, BSI.BS (ForeignPtr (mutableByteArrayContents# buf `plusAddr#` i) (PlainPtr buf)) (I# (cap -# i)) #)
 
 
 {- | Current UOffset of the bytes about to be written (= bytes written
@@ -431,7 +446,7 @@ currentUOff b = IO $ \s0 -> case uoff# b s0 of (# s1, u #) -> (# s1, I# u #)
 -- ============================================================
 
 {- | A single field slot within a table, described by its on-disk size
-(1, 2, 4, 8, or a struct's size, which is also its alignment; 4 for
+(1, 2, 4, 8, or a struct's size; 4 for
 VOffset fields) and how to write it.
 
 Offsets ('voff') and fixed-width scalars ('scalarU8' ... 'scalarI64')
@@ -441,6 +456,7 @@ are plain data that 'writeTable' stores directly. Only 'scalar',
 -}
 data Field'
   = FieldFn {-# UNPACK #-} !Int !(Builder -> Int -> IO ())
+  | FieldInline {-# UNPACK #-} !Int {-# UNPACK #-} !Int !(Builder -> Int -> IO ())
   | FieldWord {-# UNPACK #-} !Int {-# UNPACK #-} !Word64
   -- ^ size (1, 2, 4 or 8) and value; written little-endian
   | FieldOff {-# UNPACK #-} !Int
@@ -464,17 +480,24 @@ pattern Field' {fsAlign, fsWrite} <- (fieldView -> (fsAlign, fsWrite))
 fieldView :: Field' -> (Int, Builder -> Int -> IO ())
 fieldView = \case
   FieldFn a w -> (a, w)
+  FieldInline size _ w -> (size, w)
   FieldWord a x -> (a, \b _ -> prependWord b a x)
   FieldOff t -> (4, \b _ -> prependVOff b t)
 
 
--- | On-disk size (and alignment) of a field.
+-- | On-disk size of a field, including any struct tail padding.
 fieldSize# :: Field' -> Int#
 fieldSize# = \case
   FieldFn (I# a) _ -> a
+  FieldInline (I# size) _ _ -> size
   FieldWord (I# a) _ -> a
   FieldOff _ -> 4#
 {-# INLINE fieldSize# #-}
+
+fieldAlign# :: Field' -> Int#
+fieldAlign# (FieldInline _ (I# alignment) _) = alignment
+fieldAlign# field = fieldSize# field
+{-# INLINE fieldAlign# #-}
 
 
 {- | A scalar field written by an arbitrary writer of exactly @align@
@@ -538,13 +561,10 @@ table's inline data area. @writer@ must prepend exactly @size@ bytes
 of struct data (in reverse field-declaration order, since the builder
 is back-to-front).
 
-'writeTable' treats the size as the alignment too, so structs are
-over-aligned to @size@. That wastes some padding when @size > align@
-(a 16-byte struct on 8-byte alignment is placed 16-aligned), which
-readers accept.
+The size includes tail padding and may differ from the natural alignment.
 -}
 struct :: Int -> Int -> (Builder -> IO ()) -> Field'
-struct size _align writer = FieldFn size (\b _ -> writer b)
+struct size alignment writer = FieldInline size alignment (\b _ -> writer b)
 {-# INLINE struct #-}
 
 
@@ -612,11 +632,10 @@ prepend lands at the slot's offset.
 writeTable :: Builder -> [Maybe Field'] -> IO Int
 writeTable b@(Builder st arrs) slots = IO $ \s0 ->
   case readSmallArray# arrs ArrScratch s0 of
-    (# s1, scr0 #) -> case scanSlots scr0 0# 4# 0# 4# 0# 0# slots s1 of
+    (# s1, scr0 #) -> case scanSlots scr0 0# 4# 4# 4# 0# 0# slots s1 of
       (# s2, scr, rawEnd, maxAlign, nT, writers #) ->
         let !tableSize = alignUp# rawEnd maxAlign
-            -- An all-absent table still has its soffset_t (its recorded
-            -- size is 0, as it always was here).
+            -- An all-absent table still records its four-byte soffset_t.
             !region = if isTrue# (tableSize ># 4#) then tableSize else 4#
             !vtSize = 4# +# 2# *# nT
             -- Keep a regrown scratch array for the next table.
@@ -670,12 +689,13 @@ scanSlots scr idx pos rawEnd maxA nT writers xs s0 = case xs of
     | otherwise -> case m of
         Nothing -> scanSlots scr (idx +# 1#) pos rawEnd maxA nT writers rest (writeIntArray# scr (2# *# idx) 0# s0)
         Just f -> case f of
-          FieldWord (I# a) (W64# x) -> present rest a KindWord (word2Int# (word64ToWord# x)) writers
-          FieldOff (I# target) -> present rest 4# KindOff target writers
-          FieldFn (I# a) _ -> present rest a KindFn 0# 1#
+          FieldWord (I# a) (W64# x) -> present rest a a KindWord (word2Int# (word64ToWord# x)) writers
+          FieldOff (I# target) -> present rest 4# 4# KindOff target writers
+          FieldFn (I# a) _ -> present rest a a KindFn 0# 1#
+          FieldInline (I# size) (I# alignment) _ -> present rest size alignment KindFn 0# 1#
   where
-    present rest a kind payload writers' =
-      let !off = alignUp# pos a
+    present rest a alignment kind payload writers' =
+      let !off = alignUp# pos alignment
           !end = off +# a
       in case writeIntArray# scr (2# *# idx) (off `orI#` (a `uncheckedIShiftL#` 32#) `orI#` (kind `uncheckedIShiftL#` 56#)) s0 of
           s1 ->
@@ -684,7 +704,7 @@ scanSlots scr idx pos rawEnd maxA nT writers xs s0 = case xs of
               (idx +# 1#)
               end
               (if isTrue# (end ># rawEnd) then end else rawEnd)
-              (if isTrue# (a ># maxA) then a else maxA)
+              (if isTrue# (alignment ># maxA) then alignment else maxA)
               (idx +# 1#)
               writers'
               rest
@@ -745,11 +765,14 @@ runWriters b@(Builder st _) t nT idx pos xs s0
       Nothing : rest -> runWriters b t nT (idx +# 1#) pos rest s0
       Just f : rest ->
         let !a = fieldSize# f
-            !off = alignUp# pos a
+            !off = alignUp# pos (fieldAlign# f)
             next s = runWriters b t nT (idx +# 1#) (off +# a) rest s
             {-# INLINE next #-}
         in case f of
             FieldFn _ w -> case writeIntArray# st SlotHead (t +# off +# a) s0 of
+              s1 -> case w b 0 of
+                IO g -> case g s1 of (# s2, _ #) -> next s2
+            FieldInline _ _ w -> case writeIntArray# st SlotHead (t +# off +# a) s0 of
               s1 -> case w b 0 of
                 IO g -> case g s1 of (# s2, _ #) -> next s2
             _ -> next s0
@@ -913,7 +936,9 @@ writeVectorOfStructs b@(Builder st _) (I# elemSize) (I# elemAlign) writers = IO 
   let !(I# n) = length writers
       !align = if isTrue# (elemAlign ># 4#) then elemAlign else 4#
       !total = 4# +# elemSize *# n
-  in case prepForObject# b total align s0 of
+  -- Align the payload, including narrow element counts that are not multiples
+  -- of four. The four-byte length then remains naturally aligned too.
+  in case prepForObject# b (elemSize *# n) align s0 of
       s1 -> case claim b total s1 of
         (# s2, mba, i #) -> case putI32# mba i n s2 of
           s3 -> case go (i +# 4# +# elemSize) writers s3 of

@@ -32,6 +32,12 @@ This package is part of the [wireform](https://github.com/iand675/wireform-)
 monorepo and shares its allocation primitives, annotation deriver, and
 testing discipline with every other format.
 
+Named references use the complete WHATWG table (2,231 semicolon and legacy
+forms), including multi-codepoint replacements and attribute-context rules.
+The pinned source is `data/entities.json`; regenerate offline with
+`python3 scripts/regen-html-entities.py` from the repository root, or pass
+`--refresh` to fetch the official table before regenerating.
+
 ## Install
 
 ```cabal

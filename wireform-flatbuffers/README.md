@@ -42,7 +42,7 @@ compile time but measurably improves runtime performance.
 ## Hello world
 
 Working directly with `FlatBuffers.Value`, building a small table and
-round-tripping it:
+round-tripping it with its schema:
 
 ```haskell
 import qualified Data.ByteString as BS
@@ -50,9 +50,12 @@ import qualified Data.Vector     as V
 import qualified FlatBuffers.Value  as FB
 import qualified FlatBuffers.Encode as FBE
 import qualified FlatBuffers.Decode as FBD
+import FlatBuffers.Parser (parseFlatBuffers)
 
 main :: IO ()
 main = do
+  schema <- either fail pure $ parseFlatBuffers
+    "table Example { name:string; count:int; price:double; enabled:bool; note:string; } root_type Example;"
   let table = FB.VTable $ V.fromList
         [ Just (FB.VString "wireform")
         , Just (FB.VInt32 42)
@@ -60,8 +63,8 @@ main = do
         , Just (FB.VBool True)
         , Nothing                       -- absent slot
         ]
-      bytes = FBE.encode table
-  case FBD.decode bytes of
+  bytes <- either fail pure (FBE.encode schema table)
+  case FBD.decode schema bytes of
     Right val -> print val
     Left  err -> putStrLn err
 ```
@@ -74,9 +77,10 @@ lives in [`examples/FlatBuffersExample.hs`](../examples/FlatBuffersExample.hs).
 | Module                  | Role                                                      |
 |-------------------------|-----------------------------------------------------------|
 | `FlatBuffers.Value`     | Dynamic untyped `Value` ADT (`VBool`, `VInt8` ... `VInt64`, `VFloat`, `VDouble`, `VString`, `VTable`, `VStruct`, `VVector`, `VUnion`) |
+| `FlatBuffers.Codec`     | Compile a schema once for `encodeWith` / `decodeWith`     |
 | `FlatBuffers.Builder`   | Low-level vtable / offset / inline-data builder           |
-| `FlatBuffers.Encode`    | High-level encoder: `encode :: Value -> ByteString`       |
-| `FlatBuffers.Decode`    | High-level decoder: `decode :: ByteString -> Either String Value` |
+| `FlatBuffers.Encode`    | High-level encoder: `encode :: FlatBuffersSchema -> Value -> Either String ByteString`       |
+| `FlatBuffers.Decode`    | High-level decoder: `decode :: FlatBuffersSchema -> ByteString -> Either String Value` |
 | `FlatBuffers.Reader`    | Low-level cursor / pointer-walking decoder                |
 | `FlatBuffers.View`      | Typeclass-driven zero-copy cursor reader (`View`, `Table`, `Struct`, `FBVector`, `decodeRoot`) |
 | `FlatBuffers.Derive`    | `deriveFlatBuffers` Template Haskell entry point          |
@@ -93,9 +97,27 @@ Two layers, both exposed.
 The high-level path materialises a `Value` and round-trips through it:
 
 ```haskell
-FlatBuffers.Encode.encode :: Value      -> ByteString
-FlatBuffers.Decode.decode :: ByteString -> Either String Value
+FlatBuffers.Encode.encode :: FlatBuffersSchema -> Value -> Either String ByteString
+FlatBuffers.Decode.decode :: FlatBuffersSchema -> ByteString -> Either String Value
 ```
+
+FlatBuffers buffers carry no type tags. Both dynamic operations require a
+schema; table and struct values use declaration order, even with explicit
+field IDs. `compileSchema` prepares reusable layouts for `encodeWith` and
+`decodeWith`. Missing scalars decode to their schema defaults; optional scalar
+`null` stays `Nothing`. Present values are emitted, including scalar defaults.
+`VUnion 1 value` selects the first declared union member; `Nothing` means NONE.
+The decoder validates bounds, alignment, UTF-8, terminators, required fields,
+and union tags before materializing values (64 levels / one million values).
+
+The dynamic codec supports scalar enums, table unions, nested tables, strings,
+vectors and padded/nested structs. Resolve includes before compiling a schema.
+Nested vectors, union vectors and 64-bit offsets are rejected explicitly; the
+current schema AST also limits explicit enum constants to signed 64-bit values.
+It is not a replacement for the official schema validator.
+
+The independent fixture and reverse verifier are documented in
+[`test/fixtures/README.md`](test/fixtures/README.md).
 
 The zero-copy path uses `FlatBuffers.View`. You declare a `View`
 instance that reads only the fields you actually want:
@@ -197,15 +219,15 @@ cabal bench wireform-flatbuffers:wireform-flatbuffers-bench
 <!-- BEGIN_AUTOGEN bench:flatbuffers-encode-decode -->
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench-results/charts/flatbuffers-encode-decode-dark.svg">
-  <img src="bench-results/charts/flatbuffers-encode-decode-light.svg" alt="wireform-flatbuffers encode + decode (zero-copy decode)">
+  <img src="bench-results/charts/flatbuffers-encode-decode-light.svg" alt="wireform-flatbuffers schema-directed dynamic encode + decode">
 </picture>
 
-| Operation          |   encode |  decode | ratio |
-| :----------------- | -------: | ------: | ----: |
-| Person table       |   827 ns |  142 ns | 0.17x |
-| Person[100] vector | 95352 ns | 75.7 ns | 0.00x |
+| Operation          |   encode |   decode | ratio |
+| :----------------- | -------: | -------: | ----: |
+| Person table       |  1222 ns |   185 ns | 0.15x |
+| Person[100] vector | 99387 ns | 17627 ns | 0.18x |
 
-<sub>Last run 2026-06-27 11:35:54 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5. Decode is a zero-copy cursor by design: only the outer envelope is resolved at decode time. Per-field reads happen lazily..</sub>
+<sub>Last run 2026-11-06 10:08:02 UTC. GHC 9.10.3, Apple Silicon, criterion 1.6.5. Full Value materialization; compiled schemas reused.</sub>
 <!-- END_AUTOGEN bench:flatbuffers-encode-decode -->
 
 For cross-language comparisons:

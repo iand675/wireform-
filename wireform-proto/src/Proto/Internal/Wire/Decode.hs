@@ -119,7 +119,7 @@ instance NFData DecodeError where
   rnf (CustomError s) = rnf s
 
 
--- | Legacy result type, kept for compatibility with runDecoder'.
+-- | Boxed decode result, including the next byte offset for offset-threading callers.
 data DecodeResult a
   = DecodeOK !a {-# UNPACK #-} !Int
   | DecodeFail !DecodeError
@@ -171,7 +171,7 @@ runDecoder (Decoder f) bs =
 {-# INLINE runDecoder #-}
 
 
--- | Run a decoder returning the legacy DecodeResult (for internal use).
+-- | Run a decoder at a caller-supplied offset, retaining the next offset in 'DecodeResult'.
 runDecoder' :: Decoder a -> ByteString -> Int -> DecodeResult a
 runDecoder' (Decoder f) bs (I# off) =
   case f bs off of

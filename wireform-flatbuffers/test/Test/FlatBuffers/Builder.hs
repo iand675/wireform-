@@ -65,16 +65,16 @@ data Val
   | VI16 Int16
   | VI32 Int32
   | VI64 Int64
-  | VStruct Int64 Int64
-  -- ^ inline 16-byte struct field
+  | -- | inline 16-byte struct field
+    VStruct Int64 Int64
   | VStr Text
   | VTab [Maybe Val]
   | VVecI32 [Int32]
   | VVecI64 [Int64]
   | VVecStr [Text]
   | VVecTab [[Maybe Val]]
-  | VVecStruct [(Int64, Int32)]
-  -- ^ vector of 16-byte structs: i64, i32, 4 bytes of padding
+  | -- | vector of 16-byte structs: i64, i32, 4 bytes of padding
+    VVecStruct [(Int64, Int32)]
   deriving stock (Show)
 
 
@@ -96,8 +96,8 @@ genVal depth =
     , (1, VVecStr <$> Gen.list (Range.linear 0 6) genText)
     , (1, VVecStruct <$> Gen.list (Range.linear 0 6) ((,) <$> Gen.enumBounded <*> Gen.enumBounded))
     ]
-      <> [ (2, VTab <$> genTable (depth - 1)) | depth > 0 ]
-      <> [ (1, VVecTab <$> Gen.list (Range.linear 0 4) (genTable (depth - 1))) | depth > 0 ]
+      <> [(2, VTab <$> genTable (depth - 1)) | depth > 0]
+      <> [(1, VVecTab <$> Gen.list (Range.linear 0 4) (genTable (depth - 1))) | depth > 0]
 
 
 genText :: Gen Text
@@ -108,8 +108,9 @@ genText = Gen.text (Range.linear 0 40) Gen.unicode
 -- Building through either implementation
 -- ---------------------------------------------------------------------------
 
--- | The builder operations a tree needs, so one walker drives both
--- implementations.
+{- | The builder operations a tree needs, so one walker drives both
+implementations.
+-}
 data Ops b f = Ops
   { opNew :: IO b
   , opFinish :: b -> Int -> IO ByteString
@@ -158,8 +159,9 @@ refOps =
 data Style
   = -- | the 'B.Field'' pattern: a closure 'B.writeTable' must call
     Opaque
-  | -- | @'B.scalar' n (\\b -> prependX b v)@, as "Arrow.FlatBufferIPC"
-    -- writes it; the builder's rewrite rules turn it into data
+  | {- | @'B.scalar' n (\\b -> prependX b v)@, as "Arrow.FlatBufferIPC"
+    writes it; the builder's rewrite rules turn it into data
+    -}
     Scalar
   | -- | 'B.scalarU8' ... 'B.scalarI64'
     Data
@@ -367,9 +369,10 @@ checkVal bs p = \case
       es
 
 
--- | Every inline scalar sits at a multiple of its size; strings and
--- offset vectors at a multiple of 4; i64 and struct vectors have
--- 8-aligned elements.
+{- | Every inline scalar sits at a multiple of its size; strings and
+offset vectors at a multiple of 4; i64 and struct vectors have
+8-aligned elements.
+-}
 checkAlignment :: ByteString -> R.Pos -> [Maybe Val] -> PropertyT IO ()
 checkAlignment bs pos slots = do
   (pos `mod` 4) === 0
@@ -390,10 +393,7 @@ checkAlignment bs pos slots = do
           (target `mod` 4) === 0
           ps <- evalEither (R.readVectorOfOffsets bs target)
           zipWithM_ (checkAlignment bs) (V.toList ps) tss
-        -- Only the length prefix's 4-byte alignment is checked: like
-        -- the original builder, 'B.writeVectorOfStructs' aligns the
-        -- whole object (prefix first) to the struct alignment.
-        VVecStruct _ -> out p 4 0
+        VVecStruct _ -> out p 8 4
         _ -> pure ()
     _ -> pure ()
   where
@@ -406,12 +406,13 @@ checkAlignment bs pos slots = do
       VI16 _ -> 2
       VI32 _ -> 4
       VI64 _ -> 8
-      VStruct _ _ -> 16
+      VStruct _ _ -> 8
       _ -> 4
 
 
--- | Number of distinct vtables used by the root, the table in its slot
--- 0, and the tables in the vectors of its other slots.
+{- | Number of distinct vtables used by the root, the table in its slot
+0, and the tables in the vectors of its other slots.
+-}
 countVTables :: ByteString -> Int
 countVTables bs = either error length $ do
   rootPos <- R.followUOffset bs 0
@@ -425,4 +426,3 @@ countVTables bs = either error length $ do
       soff <- R.peekI32 bs pos
       let vt = pos - fromIntegral soff
       Right (if vt `elem` seen then seen else vt : seen)
-
