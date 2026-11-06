@@ -372,6 +372,7 @@ test-suite hermes-tests
       Test.Hermes.Expect
       Test.Hermes.Forwarded
       Test.Hermes.Framing
+      Test.Hermes.HeaderMap
       Test.Hermes.IPAddress
       Test.Hermes.Link
       Test.Hermes.Mailbox
