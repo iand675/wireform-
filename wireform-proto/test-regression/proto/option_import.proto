@@ -1,0 +1,47 @@
+edition = "2024";
+package wireform.option_fixture;
+
+import option "option_policy.proto";
+
+option (file_tag) = "runtime";
+
+message WithOptionImport {
+  option (enabled) = true;
+  option (build_only) = true;
+  option (runtime_policy).label = "kept";
+  option (runtime_policy).annotation = "source only";
+  option (values) = 5;
+  option (values) = 6;
+  option (aggregate_policy) = { numbers: [-1, 2] annotation: "also source only" label: "aggregate" };
+  option (nested_policy).(detail) = "x";
+  option (implicit_defaults) = {
+    number: 0 flag: false label: "" explicit_zero: -0
+    indexed { key: "z" } indexed { value: 4 }
+    signed_zero: -0 empty {} messages {} choices {}
+    choice: DEFAULT_CHOICE_UNSPECIFIED repeat_zero: 0 explicit_arm: 0 positive_zero: 0.0
+    fractional_negative_zero: -0.0
+  };
+  option (edition_defaults) = { explicit_zero: 0 implicit_zero: 0 };
+  option (scalar_float_zero) = -0;
+  option (scalar_int_zero) = -0;
+  option (dotted_defaults).float_value = -0;
+
+  string payload = 1 [(field_tag) = -7];
+  oneof variant {
+    option (oneof_tag) = true;
+    bool flag = 2;
+  }
+  extensions 100 to 199 [(range_tag) = true];
+}
+
+enum OptionMode {
+  option (enum_tag) = 8;
+  OPTION_MODE_UNSPECIFIED = 0 [(enum_value_tag) = "\377"];
+}
+
+service OptionService {
+  option (service_tag) = POLICY_LEVEL_ON;
+  rpc Inspect(WithOptionImport) returns (WithOptionImport) {
+    option (method_tag) = "method";
+  }
+}

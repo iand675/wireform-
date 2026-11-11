@@ -1,0 +1,13 @@
+syntax = "proto3";
+import "google/protobuf/timestamp.proto";
+
+message JsonNumbers {
+ double value = 1;
+ float small = 2;
+ optional double optional_value = 3;
+ oneof choice { double selected = 4; string label = 5; }
+}
+
+message JsonTimestamp {
+ google.protobuf.Timestamp stamp = 1;
+}

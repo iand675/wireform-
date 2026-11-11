@@ -39,17 +39,27 @@ module Test.Conformance.Handler (
 
 import Control.Exception (SomeException, evaluate, try)
 import Data.Aeson qualified as Aeson
+import Data.Aeson.Decoding qualified as JSON
+import Data.Aeson.Decoding.Text (textToTokens)
+import Data.Aeson.Decoding.Tokens (TkArray (..), TkRecord (..), Tokens (..))
+import Data.Aeson.Types qualified as Aeson
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
-import Data.Proxy (Proxy (..))
+import Data.Set qualified as Set
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.Text.Lazy qualified as TL
 import Data.Text.Lazy.Encoding qualified as TLE
 import Proto.Decode qualified as PD
 import Proto.Encode qualified as PE
+import Proto.Extension qualified as Ext
+import Proto.Internal.JSON qualified as PJ
 import Proto.Internal.JSON.Extension qualified as PJExt
-import Proto.TH.Metadata qualified as PTM
+import Proto.Schema (ProtoMessage)
 import Proto.TextFormat qualified as PTF
+import Test.Conformance.EditionUnstable qualified as Unstable
+import Test.Conformance.MigrationProto2 qualified as Migration2
+import Test.Conformance.MigrationProto3 qualified as Migration3
 import Test.Conformance.Schema
 
 
@@ -64,7 +74,15 @@ handleRequest req
   | mt == "protobuf_test_messages.proto3.TestAllTypesProto3" =
       handleTestAllTypesProto3 req
   | mt == "protobuf_test_messages.proto2.TestAllTypesProto2" =
-      handleTestAllTypesProto2 req
+      handleTestWithExtensions hasUnknownFields2 req
+  | mt == "protobuf_test_messages.editions.TestAllTypesEdition2023" =
+      handleTestWithExtensions hasUnknownEditionFields req
+  | mt == "protobuf_test_messages.editions.proto2.TestAllTypesProto2" =
+      handleTestWithExtensions (hasUnregisteredFields Migration2.migrationProto2Registry mt . Migration2.testAllTypesProto2UnknownFields) req
+  | mt == "protobuf_test_messages.editions.proto3.TestAllTypesProto3" =
+      handleTestWithExtensions (not . null . Migration3.testAllTypesProto3UnknownFields) req
+  | mt == "protobuf_test_messages.edition_unstable.TestAllTypesEditionUnstable" =
+      handleTestWithExtensions (hasUnregisteredFields Unstable.unstableExtensionRegistry mt . Unstable.testAllTypesEditionUnstableUnknownFields) req
   | otherwise = pure (skipped ("Unknown message type: " <> mt))
   where
     mt = conformanceRequestMessageType req
@@ -85,49 +103,54 @@ failureSetResponse =
 
 
 handleTestAllTypesProto3 :: ConformanceRequest -> IO ConformanceResponse
-handleTestAllTypesProto3 req = do
-  -- Per-request lenient enum mode: the conformance suite's
-  -- 'JSON_IGNORE_UNKNOWN_PARSING_TEST' category expects unknown
-  -- enum string values to be silently dropped.
-  PTM.setLenientUnknownEnum (isIgnoreUnknownCategory req)
+handleTestAllTypesProto3 req =
   case payloadInputFormat req of
     PayloadProtobuf bs -> case PD.decodeMessage bs of
       Left e -> pure (parseErr (T.pack (show e)))
-      Right tm -> serializeTAT outFmt tm
-    PayloadJson js -> do
-      -- Lenient mode: pre-strip unknown enum strings out of
-      -- the JSON before handing it to the FromJSON parser.
-      -- This is a pragmatic shortcut around the fact that the
-      -- spec's "ignore unknown enum value" semantics need a
-      -- per-call signal that's hard to thread through Aeson's
-      -- pure 'Parser' machinery — and the conformance suite
-      -- uses a fixed sentinel string ("UNKNOWN_ENUM_VALUE"),
-      -- so a syntactic rewrite is sufficient.
-      let js' =
-            if isIgnoreUnknownCategory req
-              then stripUnknownEnumStrings js
-              else js
-      case Aeson.eitherDecodeStrictText js' of
-        Left e -> pure (parseErr (T.pack e))
-        Right tm -> serializeTAT outFmt tm
-    PayloadText _ -> pure (skipped "TEXT_FORMAT input not supported")
+      Right tm -> serializeTAT req tm
+    PayloadJson js -> case decodeConformanceJSON req js of
+      Left e -> pure (parseErr (T.pack e))
+      Right tm -> serializeTAT req tm
+    PayloadText input -> case conformanceTextSchema >>= (\schema -> PTF.textToTyped schema input) of
+      Left err -> pure (parseErr (T.pack err))
+      Right tm -> serializeTAT req tm
     PayloadJspb _ -> pure (skipped "JSPB input not supported")
     PayloadNone -> pure (skipped "no payload set")
+
+
+-- Inspect raw keys before Aeson constructs a KeyMap. This runner uses the
+-- conformance suite's duplicate-rejection policy.
+decodeConformanceJSON :: (ProtoMessage a, Aeson.FromJSON a) => ConformanceRequest -> T.Text -> Either String a
+decodeConformanceJSON req input = do
+  PJ.checkJSONNumberExponents (TE.encodeUtf8 input)
+  let tokens = textToTokens input
+  remaining <- checkValue tokens
+  if T.all (\c -> c == ' ' || c == '\t' || c == '\r' || c == '\n') remaining
+    then do
+      (value, _) <- JSON.toEitherValue tokens
+      let parser = if isIgnoreUnknownCategory req then PJ.parseJSONIgnoringUnknownEnumNames else Aeson.parseJSON
+      Aeson.parseEither parser value
+    else Left "Trailing data after JSON value"
   where
-    outFmt = conformanceRequestRequestedOutputFormat req
+    checkValue :: Tokens k String -> Either String k
+    checkValue (TkLit _ next) = Right next
+    checkValue (TkText _ next) = Right next
+    checkValue (TkNumber _ next) = Right next
+    checkValue (TkArrayOpen items) = checkArray items
+    checkValue (TkRecordOpen fields) = checkRecord Set.empty fields
+    checkValue (TkErr err) = Left err
 
+    checkArray :: TkArray k String -> Either String k
+    checkArray (TkItem value) = checkValue value >>= checkArray
+    checkArray (TkArrayEnd next) = Right next
+    checkArray (TkArrayErr err) = Left err
 
-{- | Walk the JSON looking for the literal string
-@\"UNKNOWN_ENUM_VALUE\"@ (the conformance suite's sentinel
-for "an unknown enum value") and replace it with @null@. The
-standard FromJSON path then treats the field as absent / the
-array element as a @null@ (which we filter out at the parser
-level for repeated/map enum fields). Cheap textual hack — the
-sentinel is unique enough not to collide with real data.
--}
-stripUnknownEnumStrings :: T.Text -> T.Text
-stripUnknownEnumStrings =
-  T.replace (T.pack "\"UNKNOWN_ENUM_VALUE\"") (T.pack "null")
+    checkRecord :: Set.Set Aeson.Key -> TkRecord k String -> Either String k
+    checkRecord seen (TkPair key value)
+      | Set.member key seen = Left ("Duplicate JSON field: " <> show key)
+      | otherwise = checkValue value >>= checkRecord (Set.insert key seen)
+    checkRecord _ (TkRecordEnd next) = Right next
+    checkRecord _ (TkRecordErr err) = Left err
 
 
 {- | Encode a parsed TestAllTypesProto3 in the requested output
@@ -137,8 +160,8 @@ done under 'try' so the WKT range-check 'error' calls
 (Timestamp\/Duration ProtoInputTooLarge\/Small) surface as
 @serialize_error@ rather than killing the process.
 -}
-serializeTAT :: WireFormat -> TestAllTypesProto3 -> IO ConformanceResponse
-serializeTAT fmt tm = case fmt of
+serializeTAT :: ConformanceRequest -> TestAllTypesProto3 -> IO ConformanceResponse
+serializeTAT req tm = case conformanceRequestRequestedOutputFormat req of
   WireFormat'Protobuf ->
     pure
       defaultConformanceResponse
@@ -166,17 +189,20 @@ serializeTAT fmt tm = case fmt of
                       Just
                         (ConformanceResponse'Result'JsonPayload t)
                   }
-  WireFormat'TextFormat -> trySerialize "TEXT_FORMAT" $ do
-    !pbtxt <- evaluate (PTF.typedToTextPretty (Proxy :: Proxy TestAllTypesProto3) tm)
-    pure
-      defaultConformanceResponse
-        { conformanceResponseResult =
-            Just
-              (ConformanceResponse'Result'TextPayload pbtxt)
-        }
+  WireFormat'TextFormat -> serializeText req tm
   WireFormat'Jspb -> pure (skipped "JSPB output not supported")
   WireFormat'Unspecified -> pure (serializeError "UNSPECIFIED requested_output_format")
   WireFormat''Unrecognized _ -> pure (serializeError "Unknown WireFormat enum value")
+
+
+serializeText :: (ProtoMessage a, PE.MessageEncode a) => ConformanceRequest -> a -> IO ConformanceResponse
+serializeText req message = trySerialize "TEXT_FORMAT" $
+  case conformanceTextSchema >>= (\schema -> PTF.typedToTextWithSchema schema (conformanceRequestPrintUnknownFields req) message) of
+    Left err -> pure (serializeError (T.pack err))
+    Right !text ->
+      pure defaultConformanceResponse
+        { conformanceResponseResult = Just (ConformanceResponse'Result'TextPayload text)
+        }
 
 
 {- | Wrap an IO action that builds a 'ConformanceResponse' so
@@ -209,33 +235,28 @@ hasUnknownFields :: TestAllTypesProto3 -> Bool
 hasUnknownFields = not . null . testAllTypesProto3UnknownFields
 
 
-{- | Proto2 sibling of 'handleTestAllTypesProto3'. Same wire
-and JSON shapes, just rooted at 'TestAllTypesProto2'.
--}
-handleTestAllTypesProto2 :: ConformanceRequest -> IO ConformanceResponse
-handleTestAllTypesProto2 req = do
-  PTM.setLenientUnknownEnum (isIgnoreUnknownCategory req)
+handleTestWithExtensions
+  :: (ProtoMessage a, PD.MessageDecode a, PE.MessageEncode a, Aeson.FromJSON a, Aeson.ToJSON a)
+  => (a -> Bool) -> ConformanceRequest -> IO ConformanceResponse
+handleTestWithExtensions hasUnknown req =
   case payloadInputFormat req of
     PayloadProtobuf bs -> case PD.decodeMessage bs of
       Left e -> pure (parseErr (T.pack (show e)))
-      Right tm -> serializeTAT2 outFmt tm
-    PayloadJson js -> do
-      let js' =
-            if isIgnoreUnknownCategory req
-              then stripUnknownEnumStrings js
-              else js
-      case Aeson.eitherDecodeStrictText js' of
-        Left e -> pure (parseErr (T.pack e))
-        Right tm -> serializeTAT2 outFmt tm
-    PayloadText _ -> pure (skipped "TEXT_FORMAT input not supported")
+      Right tm -> serializeWithExtensions hasUnknown req tm
+    PayloadJson js -> case decodeConformanceJSON req js of
+      Left e -> pure (parseErr (T.pack e))
+      Right tm -> serializeWithExtensions hasUnknown req tm
+    PayloadText input -> case conformanceTextSchema >>= (\schema -> PTF.textToTyped schema input) of
+      Right tm -> serializeWithExtensions hasUnknown req tm
+      Left err -> pure (parseErr (T.pack err))
     PayloadJspb _ -> pure (skipped "JSPB input not supported")
     PayloadNone -> pure (skipped "no payload set")
-  where
-    outFmt = conformanceRequestRequestedOutputFormat req
 
 
-serializeTAT2 :: WireFormat -> TestAllTypesProto2 -> IO ConformanceResponse
-serializeTAT2 fmt tm = case fmt of
+serializeWithExtensions
+  :: (ProtoMessage a, PE.MessageEncode a, Aeson.ToJSON a)
+  => (a -> Bool) -> ConformanceRequest -> a -> IO ConformanceResponse
+serializeWithExtensions hasUnknown req tm = case conformanceRequestRequestedOutputFormat req of
   WireFormat'Protobuf ->
     pure
       defaultConformanceResponse
@@ -244,11 +265,11 @@ serializeTAT2 fmt tm = case fmt of
               (ConformanceResponse'Result'ProtobufPayload (PE.encodeMessage tm))
         }
   WireFormat'Json
-    | hasUnknownFields2 tm ->
+    | hasUnknown tm ->
         pure
           ( skipped
               "JSON output skipped: payload contains fields outside the spliced \
-              \proto2 schema; their JSON shape isn't recoverable from the \
+              \schema; their JSON shape isn't recoverable from the \
               \unknown-fields slot."
           )
     | otherwise ->
@@ -263,35 +284,31 @@ serializeTAT2 fmt tm = case fmt of
                       Just
                         (ConformanceResponse'Result'JsonPayload t)
                   }
-  WireFormat'TextFormat -> trySerialize "TEXT_FORMAT" $ do
-    !pbtxt <- evaluate (PTF.typedToTextPretty (Proxy :: Proxy TestAllTypesProto2) tm)
-    pure
-      defaultConformanceResponse
-        { conformanceResponseResult =
-            Just
-              (ConformanceResponse'Result'TextPayload pbtxt)
-        }
+  WireFormat'TextFormat -> serializeText req tm
   WireFormat'Jspb -> pure (skipped "JSPB output not supported")
   WireFormat'Unspecified -> pure (serializeError "UNSPECIFIED requested_output_format")
   WireFormat''Unrecognized _ -> pure (serializeError "Unknown WireFormat enum value")
 
 
 hasUnknownFields2 :: TestAllTypesProto2 -> Bool
-hasUnknownFields2 m =
-  not (all knownExtension (testAllTypesProto2UnknownFields m))
+hasUnknownFields2 =
+  hasUnregisteredFields registerExt_protobuf_test_messages_proto2_extension_int32
+    "protobuf_test_messages.proto2.TestAllTypesProto2" . testAllTypesProto2UnknownFields
+
+
+hasUnknownEditionFields :: TestAllTypesEdition2023 -> Bool
+hasUnknownEditionFields =
+  hasUnregisteredFields editionExtensionRegistry "protobuf_test_messages.editions.TestAllTypesEdition2023"
+    . testAllTypesEdition2023UnknownFields
+
+
+hasUnregisteredFields :: PJExt.ExtensionRegistry -> T.Text -> [PD.UnknownField] -> Bool
+hasUnregisteredFields registry parent = not . all knownExtension
   where
     knownExtension uf =
-      case PJExt.lookupExtensionByNumber
-        registerExt_protobuf_test_messages_proto2_extension_int32
-        (T.pack "protobuf_test_messages.proto2.TestAllTypesProto2")
-        (extUfNumber uf) of
+      case PJExt.lookupExtensionByNumber registry parent (Ext.unknownFieldNumber uf) of
         Just _ -> True
         Nothing -> False
-    extUfNumber uf = case uf of
-      PD.UnknownVarint n _ -> n
-      PD.UnknownFixed64 n _ -> n
-      PD.UnknownLenDelim n _ -> n
-      PD.UnknownFixed32 n _ -> n
 
 
 -- ---------------------------------------------------------------------------

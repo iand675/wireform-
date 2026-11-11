@@ -29,14 +29,14 @@ module Proto.Google.Protobuf.Timestamp.Util (
   compareTimestamp,
 ) where
 
-import Data.Int (Int32, Int64)
+import Data.Int (Int64)
 import Data.Time.Clock (UTCTime)
 import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime, posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
 import Proto.Google.Protobuf.Duration (Duration (..), defaultDuration)
 import Proto.Google.Protobuf.Timestamp (Timestamp (..), defaultTimestamp)
 
 
-nanosPerSecond :: Int64
+nanosPerSecond :: Integer
 nanosPerSecond = 1000000000
 
 
@@ -55,13 +55,28 @@ timestampToUTCTime = posixSecondsToUTCTime . timestampToPOSIXTime
 Fractional seconds are preserved at nanosecond granularity.
 -}
 timestampFromPOSIXTime :: POSIXTime -> Timestamp
-timestampFromPOSIXTime pt =
-  let totalNanos = round (pt * fromIntegral nanosPerSecond) :: Int64
-      (s, n) = totalNanos `quotRem` nanosPerSecond
+timestampFromPOSIXTime pt = timestampFromTotalNanos (round (pt * fromIntegral nanosPerSecond))
+
+
+-- Timestamp carries a nonnegative fractional part, including before 1970.
+timestampFromTotalNanos :: Integer -> Timestamp
+timestampFromTotalNanos total =
+  let (seconds, nanos) = total `divMod` nanosPerSecond
   in defaultTimestamp
-       { timestampSeconds = s
-       , timestampNanos = fromIntegral n
+       { timestampSeconds = checkedSeconds seconds
+       , timestampNanos = fromIntegral nanos
        }
+
+
+timestampTotalNanos :: Timestamp -> Integer
+timestampTotalNanos ts = toInteger (timestampSeconds ts) * nanosPerSecond + toInteger (timestampNanos ts)
+
+
+checkedSeconds :: Integer -> Int64
+checkedSeconds seconds
+  | seconds < toInteger (minBound :: Int64) || seconds > toInteger (maxBound :: Int64) =
+      error "Protobuf time: seconds do not fit in Int64"
+  | otherwise = fromInteger seconds
 
 
 -- | Convert a 'Timestamp' to a 'POSIXTime'.
@@ -80,26 +95,16 @@ getCurrentTimestamp = timestampFromPOSIXTime <$> getPOSIXTime
 -- | Add a 'Duration' to a 'Timestamp', producing a new 'Timestamp'.
 addDuration :: Timestamp -> Duration -> Timestamp
 addDuration ts dur =
-  let totalNanos =
-        (fromIntegral (timestampSeconds ts) * nanosPerSecond + fromIntegral (timestampNanos ts))
-          + (fromIntegral (durationSeconds dur) * nanosPerSecond + fromIntegral (durationNanos dur))
-      (s, n) = totalNanos `quotRem` nanosPerSecond
-  in defaultTimestamp
-       { timestampSeconds = s
-       , timestampNanos = fromIntegral n
-       }
+  timestampFromTotalNanos (timestampTotalNanos ts + toInteger (durationSeconds dur) * nanosPerSecond + toInteger (durationNanos dur))
 
 
 -- | Compute the 'Duration' between two 'Timestamp' values (@a - b@).
 subtractTimestamps :: Timestamp -> Timestamp -> Duration
 subtractTimestamps a b =
-  let aNanos = fromIntegral (timestampSeconds a) * nanosPerSecond + fromIntegral (timestampNanos a)
-      bNanos = fromIntegral (timestampSeconds b) * nanosPerSecond + fromIntegral (timestampNanos b)
-      diff = aNanos - bNanos
-      (s, n) = diff `quotRem` nanosPerSecond
+  let (seconds, nanos) = (timestampTotalNanos a - timestampTotalNanos b) `quotRem` nanosPerSecond
   in defaultDuration
-       { durationSeconds = s
-       , durationNanos = fromIntegral n
+       { durationSeconds = checkedSeconds seconds
+       , durationNanos = fromIntegral nanos
        }
 
 

@@ -1,0 +1,24 @@
+syntax = "proto3";
+package example.api;
+
+import "google/protobuf/empty.proto";
+
+message RpcEnvelope {
+  message Request {
+    string input = 1;
+  }
+}
+
+service Proxy {
+  rpc Pipe(stream RpcEnvelope.Request) returns (stream .google.protobuf.Empty);
+  rpc Fetch(.example.api.RpcEnvelope.Request) returns (google.protobuf.Empty);
+}
+
+message MirrorServer {}
+message FetchMethod {}
+
+service Mirror {
+  rpc Pipe(RpcEnvelope.Request) returns (RpcEnvelope.Request);
+}
+
+service Idle {}

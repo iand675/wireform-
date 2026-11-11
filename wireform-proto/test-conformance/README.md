@@ -86,6 +86,14 @@ CONFORMANCE_TEST_RUNNER=/path/to/conformance_test_runner \
   cabal test wireform-proto:protobuf-conformance-test
 ```
 
+To exercise the Editions and migration schemas with the upstream v34.1 runner:
+
+```bash
+cabal build wireform-proto:exe:wireform-conformance-runner
+"$CONFORMANCE_TEST_RUNNER" --maximum_edition 2024 \
+  "$(cabal list-bin wireform-proto:exe:wireform-conformance-runner)"
+```
+
 To use a different failure list:
 
 ```bash
@@ -101,17 +109,5 @@ line to `failure_list_proto3.txt` with a one-line `# comment`
 explaining why. Glob patterns are supported per the upstream
 runner's parser.
 
-## Coverage caveats
-
-- **WKTs**: the spliced `TestAllTypesProto3` deliberately omits the
-  Well-Known-Types arms (Timestamp, Duration, Wrappers, Struct,
-  Any, FieldMask, Empty, Value). `loadProto` doesn't currently
-  follow proto `import` statements, so cross-file refs to those
-  types would fail to splice. Wire-format round-trips of test
-  cases that exercise WKT fields still pass — the bytes survive
-  through the message's unknown-fields slot — but the JSON
-  conformance branch returns Skipped for them, and the failure
-  list pre-marks those tests as expected failures.
-- **JSPB**: never supported; the failure list pre-marks every
-  JSPB test.
-- **TEXT_FORMAT**: not implemented; pre-marked.
+The runner handles binary protobuf, ProtoJSON, and TextFormat for the
+vendored schemas, including the well-known types. It skips JSPB requests.

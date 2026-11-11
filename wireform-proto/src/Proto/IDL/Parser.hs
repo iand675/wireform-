@@ -18,11 +18,14 @@ import Data.IntMap.Strict qualified as IntMap
 import Data.IntSet (IntSet)
 import Data.IntSet qualified as IntSet
 import Data.Maybe (catMaybes, fromMaybe, mapMaybe)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
+import Data.Text.Read qualified as TR
 import Data.Void (Void)
 import Proto.IDL.AST
-import Proto.IDL.AST.Span (Span, SrcSpan (..), mkSpan)
+import Proto.IDL.AST.Span (Span (..), SrcSpan (..), mkSpan)
 import Proto.IDL.Parser.Error (renderParseError, renderParseErrors)
 import Proto.IDL.Parser.Lexer
 import Text.Megaparsec hiding (option)
@@ -63,12 +66,13 @@ parseProto :: CommentMap -> Parser (ProtoFile' Parsed)
 parseProto cm = do
   sc
   syn <- option Proto3 syntaxOrEdition
-  stmts <- manyStmts (topLevelStmt cm)
+  stmts <- manyStmts (topLevelStmt cm syn)
   eof
   let pkg = firstJust (\case TLStmtPackage p -> Just p; _ -> Nothing) stmts
   let imps = concatMap (\case TLStmtImport i -> [i]; _ -> []) stmts
   let opts = concatMap (\case TLStmtOption o -> [o]; _ -> []) stmts
   let topDefs = concatMap (\case TLStmtTopLevel t -> [t]; TLStmtTopLevels ts -> ts; _ -> []) stmts
+  validateOptionImports imps
   pure
     ProtoFile
       { protoSyntax = syn
@@ -78,6 +82,23 @@ parseProto cm = do
       , protoTopLevels = topDefs
       , protoSource = Nothing
       }
+
+
+validateOptionImports :: [ImportDef' Parsed] -> Parser ()
+validateOptionImports imports
+  | any optionOnly imports = go Set.empty False imports
+  | otherwise = pure ()
+  where
+    optionOnly imp = importModifier imp == Just ImportOption
+    go _ _ [] = pure ()
+    go seen afterOption (imp : rest)
+      | afterOption && not (optionOnly imp) = atImport imp "ordinary imports must precede option imports"
+      | Set.member (importPath imp) seen = atImport imp "import was listed twice"
+      | otherwise = go (Set.insert (importPath imp) seen) (afterOption || optionOnly imp) rest
+    atImport :: ImportDef' Parsed -> String -> Parser ()
+    atImport imp message = do
+      mapM_ (setOffset . spanStart) (unSpan (importExt imp))
+      fail message
 
 
 firstJust :: (a -> Maybe b) -> [a] -> Maybe b
@@ -139,14 +160,14 @@ editionDecl = do
   pure (Editions (Edition ed))
 
 
-topLevelStmt :: CommentMap -> Parser TLStmt
-topLevelStmt cm = do
+topLevelStmt :: CommentMap -> Syntax -> Parser TLStmt
+topLevelStmt cm syn = do
   start <- getOffset
   doc <- getDoc cm
   kw <- lookAhead (identifier <?> "top-level declaration (message, enum, service, import, package, or option)")
   case kw of
     "package" -> TLStmtPackage <$> packageDecl
-    "import" -> TLStmtImport <$> importDecl start
+    "import" -> TLStmtImport <$> importDecl syn start
     "option" -> TLStmtOption <$> optionDecl start
     "message" -> TLStmtTopLevel . TLMessage <$> messageDef cm doc start
     "enum" -> TLStmtTopLevel . TLEnum <$> enumDef cm doc start
@@ -201,14 +222,21 @@ packageDecl = do
   pure pkg
 
 
-importDecl :: Int -> Parser (ImportDef' Parsed)
-importDecl start = do
+importDecl :: Syntax -> Int -> Parser (ImportDef' Parsed)
+importDecl syn start = do
   reserved "import"
   modifier <-
     optional $
       choice
         [ ImportPublic <$ reserved "public"
         , ImportWeak <$ reserved "weak"
+        , do
+            reserved "option"
+            case syn of
+              Editions (Edition edition)
+                | Right (year, "") <- TR.decimal edition
+                , year >= (2024 :: Integer) -> pure ImportOption
+              _ -> fail "option import requires edition 2024 or later"
         ]
   path <- stringLiteral
   semi
@@ -226,11 +254,15 @@ optionDecl start = do
 
 
 optionAssignment :: Parser (OptionDef' Parsed)
-optionAssignment = do
+optionAssignment = optionAssignmentWith (const constant)
+
+
+optionAssignmentWith :: (OptionName -> Parser Constant) -> Parser (OptionDef' Parsed)
+optionAssignmentWith valueParser = do
   start <- getOffset
   name <- optionName
   equals
-  val <- constant
+  val <- valueParser name
   end <- getOffset
   pure OptionDef {optExt = mkSpan start end, optName = name, optValue = val}
 
@@ -256,13 +288,23 @@ constant :: Parser Constant
 constant =
   choice
     [ CBool <$> try boolLiteral
-    , CString <$> try stringLiteral
+    , quotedConstant
     , try (CFloat <$> floatLiteral)
-    , CInt <$> try intLiteral
+    , try integerConstant
     , CAggregate <$> aggregateLiteral
     , CIdent <$> fullIdent
     ]
     <?> "constant value (string, number, boolean, identifier, or aggregate)"
+  where
+    quotedConstant = do
+      bytes <- bytesLiteral
+      pure (either (const (CBytes bytes)) CString (TE.decodeUtf8' bytes))
+    integerConstant = do
+      (spelling, number) <- intLiteralWithSpelling
+      let digits = T.dropWhile (== '-') spelling
+          signedZero = number == 0 && T.isPrefixOf "-" spelling
+          nonDecimal = T.isPrefixOf "0" digits && T.compareLength digits 1 == GT
+      pure (if signedZero || nonDecimal then CSpelledInt spelling number else CInt number)
 
 
 aggregateLiteral :: Parser [(Text, Constant)]
@@ -316,7 +358,7 @@ messageElement :: CommentMap -> Parser [MessageElement' Parsed]
 messageElement cm = do
   start <- getOffset
   doc <- getDoc cm
-  kw <- lookAhead (identifier <?> "message element (field, group, enum, message, oneof, map, option, reserved, or extensions)")
+  kw <- lookAhead ((identifier <|> symbol ".") <?> "message element (field, group, enum, message, oneof, map, option, reserved, or extensions)")
   case kw of
     "reserved" -> one (MEReserved <$> reservedDecl)
     "extensions" -> one (uncurry MEExtensions <$> extensionsDecl)
@@ -361,7 +403,7 @@ fieldRest doc lbl start = do
   name <- identifier <?> "field name"
   equals
   num <- FieldNumber . fromIntegral <$> (intLiteral <?> "field number")
-  opts <- fieldOptionList
+  opts <- fieldOptionsWith (optionAssignmentWith (fieldOptionValue ft))
   semi
   end <- getOffset
   pure
@@ -376,13 +418,29 @@ fieldRest doc lbl start = do
       }
 
 
+fieldOptionValue :: FieldType -> OptionName -> Parser Constant
+fieldOptionValue (FTScalar SBytes) (OptionName [SimpleOption "default"]) = CBytes <$> bytesLiteral
+fieldOptionValue (FTScalar SString) (OptionName [SimpleOption "default"]) = CString <$> stringLiteral
+fieldOptionValue (FTScalar SFloat) (OptionName [SimpleOption "default"]) = floatingDefault
+fieldOptionValue (FTScalar SDouble) (OptionName [SimpleOption "default"]) = floatingDefault
+fieldOptionValue _ _ = constant
+
+
+floatingDefault :: Parser Constant
+floatingDefault = do
+  (source, value) <- match constant
+  case value of
+    CInt 0 | T.isPrefixOf "-" source -> pure (CFloat (-0.0))
+    _ -> pure value
+
+
 {- | Parse either a regular field or a proto2 @group@.
 
 A group (@[label] group Name = N [opts] { body }@) is deprecated syntax that
 is semantically a nested message plus a field of that message type. We desugar
 it the way @protoc@ does: emit the nested message named @Name@ and a field
-named after the lower-cased group name. (The group wire-type — tags 3/4 — is
-not emitted by the code generator; the field encodes as a normal submessage.)
+named after the lower-cased group name. The field retains the group marker
+so the generators can emit matching start and end tags.
 -}
 fieldOrGroupDef :: CommentMap -> Maybe Text -> Int -> Parser [MessageElement' Parsed]
 fieldOrGroupDef cm doc start = do
@@ -414,7 +472,7 @@ groupParts cm doc lbl start = do
           , msgElements = elems
           }
       fld =
-        FieldDef
+        GroupFieldDef
           { fieldExt = sp
           , fieldDoc = doc
           , fieldLabel = lbl
@@ -542,7 +600,11 @@ oneofDef cm doc start = do
 
 
 fieldOptionList :: Parser [OptionDef' Parsed]
-fieldOptionList = fromMaybe [] <$> optional (brackets (optionAssignment `sepBy1` comma))
+fieldOptionList = fieldOptionsWith optionAssignment
+
+
+fieldOptionsWith :: Parser (OptionDef' Parsed) -> Parser [OptionDef' Parsed]
+fieldOptionsWith assignment = fromMaybe [] <$> optional (brackets (assignment `sepBy1` comma))
 
 
 reservedDecl :: Parser ReservedDef

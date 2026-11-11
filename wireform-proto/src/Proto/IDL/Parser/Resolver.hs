@@ -14,6 +14,9 @@ module Proto.IDL.Parser.Resolver (
   resolveProtoImports,
   ResolvedProto (..),
   ResolveError (..),
+  resolvedImportFiles,
+  resolvedTypeDependencies,
+  importClosure,
 
   -- * Bundled well-known types
   bundledIncludeDir,
@@ -23,6 +26,9 @@ module Proto.IDL.Parser.Resolver (
 import Control.Monad (foldM)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (mapMaybe)
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -63,6 +69,39 @@ data ResolvedProto = ResolvedProto
   , rpImports :: !(Map Text ResolvedProto)
   }
   deriving stock (Show)
+
+
+-- | Index resolved dependency schemas by their protobuf import names.
+resolvedImportFiles :: ResolvedProto -> Map Text ProtoFile
+resolvedImportFiles = collect Map.empty . Map.toList . rpImports
+  where
+    collect seen [] = seen
+    collect seen ((name, dependency) : rest)
+      | Map.member name seen = collect seen rest
+      | otherwise =
+          collect (Map.insert name (rpFile dependency) seen) (Map.toList (rpImports dependency) <> rest)
+
+
+-- | The root and the files reachable through ordinary type imports.
+resolvedTypeDependencies :: ResolvedProto -> [ResolvedProto]
+resolvedTypeDependencies proto =
+  proto : concatMap resolvedTypeDependencies (mapMaybe dependency (protoImports (rpFile proto)))
+  where
+    dependency imp
+      | importModifier imp == Just ImportOption = Nothing
+      | otherwise = Map.lookup (importPath imp) (rpImports proto)
+
+
+-- | Follow selected import edges from a set of named schemas.
+importClosure :: Map Text ProtoFile -> (ImportDef -> Bool) -> [Text] -> Set Text
+importClosure files follow = go Set.empty
+  where
+    go seen [] = seen
+    go seen (name : rest)
+      | Set.member name seen = go seen rest
+      | otherwise =
+          let imports = maybe [] protoImports (Map.lookup name files)
+          in go (Set.insert name seen) (map importPath (filter follow imports) <> rest)
 
 
 -- | Errors that can occur during proto file resolution.

@@ -41,9 +41,11 @@ module Proto.Internal.Wire.Decode (
   -- * Tags
   getTag,
   getTagOr,
+  getTagVarint,
 
   -- * Skipping unknown fields
   skipField,
+  getGroupBody,
 
   -- * Running a decoder
   runDecoder,
@@ -68,6 +70,7 @@ module Proto.Internal.Wire.Decode (
   -- * Monadic CPS tag dispatch (zero Tag allocation, for generated code)
   withTagM,
   skipWireType,
+  skipTaggedWireType,
 
   -- * Non-throwing UTF-8 validation
   validateUtf8,
@@ -82,13 +85,13 @@ import Data.ByteString.Unsafe qualified as BSU
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import Data.Text.Encoding qualified as TE
-import Data.Word (Word32, Word64)
+import Data.Word (Word32, Word64, Word8)
 import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
 import Foreign.Storable (peek)
 import GHC.Exts (Int (I#), Int#, isTrue#, (+#), (>=#))
 import GHC.Float (castWord32ToFloat, castWord64ToDouble)
-import Proto.Internal.Wire (Tag (..), WireType (..), decodeTag)
+import Proto.Internal.Wire (Tag (..), WireType (..), decodeTag, fieldTag, validTagWord)
 import System.IO.Unsafe (unsafeDupablePerformIO)
 import Wireform.FFI (validateUtf8SWAR)
 
@@ -194,7 +197,18 @@ field number ~500k and values up to 2^28, hitting the slow path
 only for genuinely large values.
 -}
 getVarint :: Decoder Word64
-getVarint = Decoder $ \bs off ->
+getVarint = getVarintWithLimit 63 1
+{-# INLINE getVarint #-}
+
+
+-- | Read at most five bytes for a tag. Callers also validate the tag's value.
+getTagVarint :: Decoder Word64
+getTagVarint = getVarintWithLimit 28 0x7F
+{-# INLINE getTagVarint #-}
+
+
+getVarintWithLimit :: Int -> Word8 -> Decoder Word64
+getVarintWithLimit finalShift finalByte = Decoder $ \bs off ->
   let len = bsLen bs
   in if isTrue# (off >=# len)
        then (# | UnexpectedEnd #)
@@ -241,24 +255,26 @@ getVarint = Decoder $ \bs off ->
                                                               , off +# 4#
                                                             #) |
                                                           #)
-                                                        else getVarintSlow bs off
-{-# INLINE getVarint #-}
+                                                        else getVarintSlow finalShift finalByte bs off
+{-# INLINE getVarintWithLimit #-}
 
 
-getVarintSlow :: ByteString -> Int# -> (# (# Word64, Int# #) | DecodeError #)
-getVarintSlow bs = go 0 0
+getVarintSlow :: Int -> Word8 -> ByteString -> Int# -> (# (# Word64, Int# #) | DecodeError #)
+getVarintSlow finalShift finalByte bs = go 0 0
   where
     len = bsLen bs
     go :: Word64 -> Int -> Int# -> (# (# Word64, Int# #) | DecodeError #)
     go !acc !shift !pos
-      | shift > 63 = (# | InvalidVarint #)
       | isTrue# (pos >=# len) = (# | UnexpectedEnd #)
       | otherwise =
           let !b = BSU.unsafeIndex bs (I# pos)
               !val = acc .|. ((fromIntegral b .&. 0x7F) `shiftL` shift)
-          in if b < 0x80
-               then (# (# val, pos +# 1# #) | #)
-               else go val (shift + 7) (pos +# 1#)
+          in if shift == finalShift && b > finalByte
+               then (# | InvalidVarint #)
+               else
+                 if b < 0x80
+                   then (# (# val, pos +# 1# #) | #)
+                   else go val (shift + 7) (pos +# 1#)
 {-# INLINE getVarintSlow #-}
 
 
@@ -350,19 +366,37 @@ getDouble = castWord64ToDouble <$> getFixed64
 -- | Decode a length-delimited field. Zero-copy ByteString slice.
 getLengthDelimited :: Decoder ByteString
 getLengthDelimited = Decoder $ \bs off ->
+  case lengthDelimitedBounds# bs off of
+    (# (# start, len #) | #) ->
+      (# (# BSU.unsafeTake (I# len) (BSU.unsafeDrop (I# start) bs), start +# len #) | #)
+    (# | e #) -> (# | e #)
+{-# INLINE getLengthDelimited #-}
+
+
+-- Check the length against the remaining bytes before adding it to the
+-- offset. A valid Int length can still overflow when added to the offset.
+lengthDelimitedBounds# :: ByteString -> Int# -> (# (# Int#, Int# #) | DecodeError #)
+lengthDelimitedBounds# bs off =
   case runDecoder# getVarint bs off of
     (# (# lenW, off' #) | #) ->
       let !len = fromIntegral lenW :: Int
-      in if len < 0
+      in if lenW > fromIntegral (maxBound :: Int)
            then (# | NegativeLength #)
            else
-             if I# off' + len > BS.length bs
+             if len > BS.length bs - I# off'
                then (# | UnexpectedEnd #)
                else
-                 let !i = I# off'
-                 in (# (# BSU.unsafeTake len (BSU.unsafeDrop i bs), case i + len of I# r -> r #) | #)
+                 case len of I# len# -> (# (# off', len# #) | #)
     (# | e #) -> (# | e #)
-{-# INLINE getLengthDelimited #-}
+{-# INLINE lengthDelimitedBounds# #-}
+
+
+skipLengthDelimited :: Decoder ()
+skipLengthDelimited = Decoder $ \bs off ->
+  case lengthDelimitedBounds# bs off of
+    (# (# start, len #) | #) -> (# (# (), start +# len #) | #)
+    (# | e #) -> (# | e #)
+{-# INLINE skipLengthDelimited #-}
 
 
 -- | Decode a length-delimited bytes field (alias for 'getLengthDelimited').
@@ -391,7 +425,7 @@ getText = Decoder $ \bs off ->
 -- | Decode a field tag (field number + wire type). Fails on invalid tags.
 getTag :: Decoder Tag
 getTag = Decoder $ \bs off ->
-  case runDecoder# getVarint bs off of
+  case runDecoder# getTagVarint bs off of
     (# (# w, off' #) | #) ->
       case decodeTag w of
         Just tag -> (# (# tag, off' #) | #)
@@ -416,15 +450,8 @@ skipField :: WireType -> Decoder ()
 skipField = \case
   WireVarint -> skipVarint
   Wire64Bit -> skip 8
-  WireLengthDelimited -> Decoder $ \bs off ->
-    case runDecoder# getVarint bs off of
-      (# (# lenW, off' #) | #) ->
-        let !len = fromIntegral lenW :: Int
-        in if I# off' + len > BS.length bs
-             then (# | UnexpectedEnd #)
-             else (# (# (), case I# off' + len of I# r -> r #) | #)
-      (# | e #) -> (# | e #)
-  WireStartGroup -> skipGroup
+  WireLengthDelimited -> skipLengthDelimited
+  WireStartGroup -> skipGroup 0
   WireEndGroup -> pure ()
   Wire32Bit -> skip 4
 
@@ -438,24 +465,44 @@ skip (I# n) = Decoder $ \bs off ->
 
 
 skipVarint :: Decoder ()
-skipVarint = Decoder $ \bs off0 ->
-  let len = bsLen bs
-      go !pos
-        | isTrue# (pos >=# len) = (# | UnexpectedEnd #)
-        | BSU.unsafeIndex bs (I# pos) < 0x80 = (# (# (), pos +# 1# #) | #)
-        | otherwise = go (pos +# 1#)
-  in go off0
+skipVarint = () <$ getVarint
 {-# INLINE skipVarint #-}
 
 
-skipGroup :: Decoder ()
-skipGroup = Decoder $ \bs off ->
-  case runDecoder# getTagOrU bs off of
-    (# (# mt, off' #) | #) -> case mt of
-      UNothing -> (# | UnexpectedEnd #)
-      UJust (Tag _ WireEndGroup) -> (# (# (), off' #) | #)
-      UJust (Tag _ wt) -> runDecoder# (skipField wt >> skipGroup) bs off'
+skipGroup :: Int -> Decoder ()
+skipGroup fn = Decoder $ \bs off ->
+  case scanGroup fn bs off of
+    (# (# _, end #) | #) -> (# (# (), end #) | #)
     (# | e #) -> (# | e #)
+
+
+-- | Read a legacy group's body, consuming the matching end tag.
+getGroupBody :: Int -> Decoder ByteString
+getGroupBody fn = Decoder $ \bs start ->
+  case scanGroup fn bs start of
+    (# (# bodyEnd, end #) | #) ->
+      (# (# BSU.unsafeTake (I# bodyEnd - I# start) (BSU.unsafeDrop (I# start) bs), end #) | #)
+    (# | e #) -> (# | e #)
+
+
+-- The explicit stack keeps nested groups independent of the call stack.
+-- Field zero is used only by the legacy type-only skipper, where the
+-- outer start tag's field number is unavailable.
+scanGroup :: Int -> ByteString -> Int# -> (# (# Int#, Int# #) | DecodeError #)
+scanGroup fn bs = go fn []
+  where
+    go !expected parents off = case runDecoder# getTag bs off of
+      (# | e #) -> (# | e #)
+      (# (# Tag n wt, next #) | #) -> case wt of
+        WireStartGroup -> go n (expected : parents) next
+        WireEndGroup
+          | expected /= 0 && n /= expected -> (# | InvalidTag (fieldTag n WireEndGroup) #)
+          | otherwise -> case parents of
+              [] -> (# (# off, next #) | #)
+              parent : rest -> go parent rest next
+        _ -> case runDecoder# (skipField wt) bs next of
+          (# (# (), end #) | #) -> go expected parents end
+          (# | e #) -> (# | e #)
 
 
 -- | Unboxed optional for zero-allocation tag-or-EOF in the decode loop.
@@ -519,22 +566,23 @@ withTag
 withTag bs off kEOF kTag kErr =
   if isTrue# (off >=# bsLen bs)
     then kEOF off
-    else case runDecoder# getVarint bs off of
+    else case runDecoder# getTagVarint bs off of
       (# (# w, off' #) | #) ->
         case decodeTagParts w of
-          (# fn, wt #) -> kTag fn wt off'
+          (# (# fn, wt #) | #) -> kTag fn wt off'
+          (# | err #) -> kErr err
       (# | e #) -> kErr e
 {-# INLINE withTag #-}
 
 
 -- | Decode tag into unboxed field number and wire type.
-decodeTagParts :: Word64 -> (# Int#, Int# #)
-decodeTagParts w =
-  let fn = fromIntegral (w `shiftR` 3) :: Int
-      wt = fromIntegral (w .&. 0x07) :: Int
-  in case fn of
-       I# fn# -> case wt of
-         I# wt# -> (# fn#, wt# #)
+decodeTagParts :: Word64 -> (# (# Int#, Int# #) | DecodeError #)
+decodeTagParts w
+  | validTagWord w =
+      case fromIntegral (w `shiftR` 3) of
+        I# fn# -> case fromIntegral (w .&. 0x07) of
+          I# wt# -> (# (# fn#, wt# #) | #)
+  | otherwise = (# | InvalidTag w #)
 {-# INLINE decodeTagParts #-}
 
 
@@ -557,10 +605,11 @@ withTagM
 withTagM (Decoder kEOF) kTag = Decoder $ \bs off ->
   if isTrue# (off >=# bsLen bs)
     then kEOF bs off
-    else case runDecoder# getVarint bs off of
+    else case runDecoder# getTagVarint bs off of
       (# (# w, off' #) | #) ->
         case decodeTagParts w of
-          (# fn#, wt# #) -> runDecoder# (kTag (I# fn#) (I# wt#)) bs off'
+          (# (# fn#, wt# #) | #) -> runDecoder# (kTag (I# fn#) (I# wt#)) bs off'
+          (# | err #) -> (# | err #)
       (# | e #) -> (# | e #)
 {-# INLINE withTagM #-}
 
@@ -570,17 +619,17 @@ skipWireType :: Int -> Decoder ()
 skipWireType wt = case wt of
   0 -> skipVarint
   1 -> skip 8
-  2 -> Decoder $ \bs off ->
-    case runDecoder# getVarint bs off of
-      (# (# lenW, off' #) | #) ->
-        let !len = fromIntegral lenW :: Int
-        in if I# off' + len > BS.length bs
-             then (# | UnexpectedEnd #)
-             else (# (# (), case I# off' + len of I# r -> r #) | #)
-      (# | e #) -> (# | e #)
+  2 -> skipLengthDelimited
   5 -> skip 4
   _ -> Decoder $ \_ _ -> (# | InvalidWireType wt #)
 {-# INLINE skipWireType #-}
+
+
+-- | Skip a raw wire type, checking the field number on a group end tag.
+skipTaggedWireType :: Int -> Int -> Decoder ()
+skipTaggedWireType fn 3 = skipGroup fn
+skipTaggedWireType _ wt = skipWireType wt
+{-# INLINE skipTaggedWireType #-}
 
 
 {- | Validate UTF-8 without exceptions.

@@ -1,6 +1,6 @@
 cabal-version: 3.0
 name: wireform-proto
-version: 0.2.0.0
+version: 0.3.0.0
 synopsis: Protocol Buffers (proto2/proto3) with IDL parser, code generation, JSON mapping
 description:
   A high-performance Protocol Buffers implementation for Haskell.
@@ -41,6 +41,13 @@ tested-with: GHC == 9.10.3, GHC == 9.12.4, GHC == 9.14.1
 extra-doc-files:
   CHANGELOG.md
   README.md
+extra-source-files:
+  test/data/*.proto
+  test-conformance/protos/*.proto
+  test-conformance/failure_list_proto3.txt
+  test-regression/proto/*.proto
+  test-regression/proto/google/protobuf/*.proto
+  test-regression/Generate.hs
 data-dir: data
 data-files: proto/google/protobuf/*.proto
 
@@ -159,6 +166,8 @@ library
     Proto.Google.Protobuf.Wrappers.Util
 
   other-modules:
+    Proto.Internal.FieldPresence
+    Proto.Internal.JSON.Number
     -- Internal codegen sub-modules (used only by Proto.CodeGen)
     Proto.CodeGen.Decode
     Proto.CodeGen.Encode
@@ -186,7 +195,6 @@ library
     deepseq >= 1.4 && < 1.6,
     template-haskell >= 2.18 && < 2.25,
     prettyprinter >= 1.7 && < 1.8,
-    base16-bytestring >= 1.0 && < 1.1,
     base64-bytestring >= 1.2 && < 1.3,
     aeson >= 2.1 && < 2.4,
     scientific >= 0.3 && < 0.4,
@@ -238,6 +246,7 @@ test-suite wireform-proto-test
     hashable,
     unordered-containers,
     text,
+    temporary,
     time,
     vector,
     hedgehog             >= 1.0  && < 1.8,
@@ -300,10 +309,13 @@ executable wireform-conformance-runner
   other-modules:
     Test.Conformance.Schema
     Test.Conformance.Handler
+    Test.Conformance.MigrationProto2
+    Test.Conformance.MigrationProto3
+    Test.Conformance.EditionUnstable
   build-depends:
     base >= 4.20 && < 5,
     wireform-proto,
-    aeson,
+    aeson >= 2.2.1,
     bytestring,
     containers,
     deepseq,
@@ -324,6 +336,9 @@ test-suite protobuf-conformance-test
   other-modules:
     Test.Conformance.Schema
     Test.Conformance.Handler
+    Test.Conformance.MigrationProto2
+    Test.Conformance.MigrationProto3
+    Test.Conformance.EditionUnstable
   build-depends:
     base >= 4.20 && < 5,
     wireform-proto,
@@ -423,3 +438,48 @@ benchmark compare-bench
     , proto-lens-runtime >= 0.7  && < 0.8
     , lens-family        >= 2.1  && < 2.2
   hs-source-dirs: bench/compare, bench/compare/gen
+
+-- Real generated-record regressions for Editions presence and ProtoJSON numbers.
+test-suite wireform-proto-regression-test
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test-regression
+  main-is: Main.hs
+  other-modules:
+    THFixtures
+    Generated.Edition2023
+    Generated.Edition2024
+    Generated.Integermaps'Path'696e74656765724d617073
+    Generated.JsonTemporal
+    Generated.JsonCollections
+    Generated.PackingLegacy
+    Generated.Groups
+    Generated.EditionDelimited
+    Generated.ExtensionUtf8
+    Generated.Rpc
+    Generated.ImportScope
+    Generated.ImportStatus
+    Generated.MyFile
+    Generated.MyFile'Path'6d795f5f66696c65
+    Generated.Google.Protobuf.AuditMode
+    Generated.GoogleImport
+    Generated.OptionImport
+    Proto.Gen.ImportStatus
+    THGoogleImports
+    THImportScope
+    THImportScopeExplicit
+    THOptionImports
+  build-depends:
+    base,
+    wireform-proto,
+    wireform-core,
+    aeson,
+    bytestring,
+    containers,
+    deepseq,
+    hashable,
+    reflection,
+    template-haskell,
+    text,
+    vector,
+    sydtest

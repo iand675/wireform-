@@ -1,0 +1,37 @@
+syntax = "proto2";
+
+message GroupEnvelope {
+  optional group Entry = 1 {
+    optional int32 first = 1 [default = 7];
+    optional int32 second = 2;
+    optional group Nested = 3 {
+      optional bool present = 1 [default = false];
+    }
+  }
+  repeated group Items = 16 {
+    optional string text = 1 [default = ""];
+  }
+  extensions 100 to 199;
+}
+
+extend GroupEnvelope {
+  optional group Note = 100 {
+    optional int32 first = 1;
+    optional int32 second = 2;
+  }
+  repeated group Extra = 101 {
+    optional int32 count = 1;
+  }
+}
+
+message OneofDefaults {
+  enum State {
+    FIRST = 0;
+    SECOND = 1;
+  }
+  oneof selection {
+    State state = 1 [default = SECOND];
+    bytes raw = 2 [default = ""];
+    sint32 count = 3 [default = -15];
+  }
+}

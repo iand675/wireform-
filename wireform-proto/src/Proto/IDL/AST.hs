@@ -1,5 +1,7 @@
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE ViewPatterns #-}
 
 {- | Proto file abstract syntax tree.
 
@@ -47,6 +49,7 @@ module Proto.IDL.AST (
   MessageElement,
   FieldDef' (..),
   FieldDef,
+  isLegacyGroupField,
   FieldLabel (..),
   FieldType (..),
   ScalarType (..),
@@ -78,7 +81,7 @@ module Proto.IDL.AST (
   OptionDef,
   OptionName (..),
   OptionNamePart (..),
-  Constant (..),
+  Constant (CIdent, CInt, CSpelledInt, CFloat, CString, CBytes, CBool, CAggregate),
 
   -- * Comments
   Comment (..),
@@ -112,6 +115,7 @@ module Proto.IDL.AST (
 ) where
 
 import Control.DeepSeq (NFData)
+import Data.ByteString (ByteString)
 import Data.Text (Text)
 import GHC.Generics (Generic)
 import Proto.IDL.AST.Span
@@ -260,6 +264,8 @@ data ImportModifier
     ImportPublic
   | -- | @import weak@ — the import is optional.
     ImportWeak
+  | -- | @import option@ — makes custom options available without importing types.
+    ImportOption
   deriving stock (Show, Eq, Generic)
   deriving anyclass (NFData)
 
@@ -383,6 +389,15 @@ data FieldDef' p = FieldDef
   , fieldOptions :: ![OptionDef' p]
   -- ^ Inline field options (e.g. @[packed = true]@).
   }
+  | GroupFieldDef
+      { fieldExt :: !(XNode p)
+      , fieldDoc :: !(Maybe Text)
+      , fieldLabel :: !(Maybe FieldLabel)
+      , fieldType :: !FieldType
+      , fieldName :: !Text
+      , fieldNumber :: !FieldNumber
+      , fieldOptions :: ![OptionDef' p]
+      }
   deriving stock (Generic)
 
 
@@ -393,6 +408,12 @@ deriving stock instance Eq (XNode p) => Eq (FieldDef' p)
 
 
 instance NFData (XNode p) => NFData (FieldDef' p)
+
+
+-- | A proto2 group names a hoisted message but has delimited wire encoding.
+isLegacyGroupField :: FieldDef' p -> Bool
+isLegacyGroupField GroupFieldDef {} = True
+isLegacyGroupField FieldDef {} = False
 
 
 -- | A protobuf field number (1-536870911).
@@ -736,18 +757,36 @@ data OptionNamePart
 data Constant
   = -- | An identifier constant (e.g. an enum value name).
     CIdent !Text
-  | -- | An integer constant.
-    CInt !Integer
+  | CInteger !Integer
+  | -- | An integer whose spelling matters in TextFormat, such as @-0@ or @0xff@.
+    CSpelledInt !Text !Integer
   | -- | A floating-point constant.
     CFloat !Double
   | -- | A string constant.
     CString !Text
+  | -- | A bytes default or a quoted option containing non-UTF-8 bytes.
+    CBytes !ByteString
   | -- | A boolean constant.
     CBool !Bool
   | -- | An aggregate (braced key-value) constant.
     CAggregate ![(Text, Constant)]
   deriving stock (Show, Eq, Generic)
   deriving anyclass (NFData)
+
+
+-- | An integer constant, regardless of its original spelling.
+pattern CInt :: Integer -> Constant
+pattern CInt value <- (integerValue -> Just value)
+  where CInt value = CInteger value
+
+
+{-# COMPLETE CIdent, CInt, CFloat, CString, CBytes, CBool, CAggregate #-}
+
+
+integerValue :: Constant -> Maybe Integer
+integerValue (CInteger value) = Just value
+integerValue (CSpelledInt _ value) = Just value
+integerValue _ = Nothing
 
 
 -- -----------------------------------------------------------------------
@@ -943,15 +982,10 @@ stripMsgElem = \case
 -- | Strip span annotations from a field definition.
 stripField :: FieldDef' p -> FieldDef
 stripField f =
-  FieldDef
-    { fieldExt = ()
-    , fieldDoc = fieldDoc f
-    , fieldLabel = fieldLabel f
-    , fieldType = fieldType f
-    , fieldName = fieldName f
-    , fieldNumber = fieldNumber f
-    , fieldOptions = fmap stripOption (fieldOptions f)
-    }
+  constructor () (fieldDoc f) (fieldLabel f) (fieldType f) (fieldName f)
+    (fieldNumber f) (fmap stripOption (fieldOptions f))
+  where
+    constructor = if isLegacyGroupField f then GroupFieldDef else FieldDef
 
 
 -- | Strip span annotations from an enum definition.

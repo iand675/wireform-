@@ -37,7 +37,7 @@ module Proto.Google.Protobuf.Duration.Util (
   compareDuration,
 ) where
 
-import Data.Int (Int32, Int64)
+import Data.Int (Int64)
 import Data.Time.Clock (NominalDiffTime)
 import Proto.Google.Protobuf.Duration (Duration (..), defaultDuration)
 
@@ -52,12 +52,28 @@ Fractional seconds are preserved at nanosecond granularity.
 -}
 durationFromNominalDiffTime :: NominalDiffTime -> Duration
 durationFromNominalDiffTime ndt =
-  let totalNanos = round (ndt * fromIntegral nanosPerSecond) :: Int64
-      (s, n) = totalNanos `quotRem` nanosPerSecond
+  durationFromTotalNanos (round (ndt * fromIntegral nanosPerSecond))
+
+
+durationFromTotalNanos :: Integer -> Duration
+durationFromTotalNanos total =
+  let (seconds, nanos) = total `quotRem` toInteger nanosPerSecond
   in defaultDuration
-       { durationSeconds = s
-       , durationNanos = fromIntegral n
+       { durationSeconds = checkedInt64 seconds
+       , durationNanos = fromIntegral nanos
        }
+
+
+durationTotalNanos :: Duration -> Integer
+durationTotalNanos dur =
+  toInteger (durationSeconds dur) * toInteger nanosPerSecond + toInteger (durationNanos dur)
+
+
+checkedInt64 :: Integer -> Int64
+checkedInt64 n
+  | n < toInteger (minBound :: Int64) || n > toInteger (maxBound :: Int64) =
+      error "Protobuf Duration: result does not fit in Int64"
+  | otherwise = fromInteger n
 
 
 -- | Convert a 'Duration' to a 'NominalDiffTime'.
@@ -108,42 +124,30 @@ durationToSeconds :: Duration -> Int64
 durationToSeconds = durationSeconds
 
 
--- | Convert to total milliseconds (truncating sub-millisecond part).
+-- | Convert to total milliseconds, truncating toward zero. Throws on Int64 overflow.
 durationToMillis :: Duration -> Int64
-durationToMillis dur =
-  durationSeconds dur * 1000 + fromIntegral (durationNanos dur) `quot` 1000000
+durationToMillis dur = checkedInt64 (durationTotalNanos dur `quot` 1000000)
 
 
--- | Convert to total microseconds (truncating sub-microsecond part).
+-- | Convert to total microseconds, truncating toward zero. Throws on Int64 overflow.
 durationToMicros :: Duration -> Int64
-durationToMicros dur =
-  durationSeconds dur * 1000000 + fromIntegral (durationNanos dur) `quot` 1000
+durationToMicros dur = checkedInt64 (durationTotalNanos dur `quot` 1000)
 
 
--- | Convert to total nanoseconds.
+-- | Convert to total nanoseconds. Throws when the result cannot fit in Int64.
 durationToNanos :: Duration -> Int64
-durationToNanos dur =
-  durationSeconds dur * nanosPerSecond + fromIntegral (durationNanos dur)
+durationToNanos = checkedInt64 . durationTotalNanos
 
 
 -- | Add two 'Duration' values.
 addDurations :: Duration -> Duration -> Duration
-addDurations a b =
-  let totalNanos = durationToNanos a + durationToNanos b
-      (s, n) = totalNanos `quotRem` nanosPerSecond
-  in defaultDuration
-       { durationSeconds = s
-       , durationNanos = fromIntegral n
-       }
+addDurations a b = durationFromTotalNanos (durationTotalNanos a + durationTotalNanos b)
 
 
 -- | Negate a 'Duration'.
 negateDuration :: Duration -> Duration
 negateDuration dur =
-  defaultDuration
-    { durationSeconds = negate (durationSeconds dur)
-    , durationNanos = negate (durationNanos dur)
-    }
+  durationFromTotalNanos (negate (durationTotalNanos dur))
 
 
 -- | Absolute value of a 'Duration'.
@@ -155,19 +159,13 @@ absDuration dur
 
 
 {- | Normalize a Duration so that seconds and nanos have the same sign
-and nanos is in @(-999999999, 999999999)@.
+and nanos is in @[-999999999, 999999999]@.
 
 The proto spec requires that for valid Durations, nanos have the same
 sign as seconds (or be zero) and @|nanos| < 10^9@.
 -}
 normalizeDuration :: Duration -> Duration
-normalizeDuration dur =
-  let totalNanos = durationToNanos dur
-      (s, n) = totalNanos `quotRem` nanosPerSecond
-  in defaultDuration
-       { durationSeconds = s
-       , durationNanos = fromIntegral n
-       }
+normalizeDuration = durationFromTotalNanos . durationTotalNanos
 
 
 {- | A 'Duration' is valid when:
@@ -178,7 +176,8 @@ normalizeDuration dur =
 -}
 isValidDuration :: Duration -> Bool
 isValidDuration dur =
-  abs (durationSeconds dur) <= 315576000000
+  durationSeconds dur >= -315576000000
+    && durationSeconds dur <= 315576000000
     && abs (fromIntegral (durationNanos dur) :: Int64) <= 999999999
     && signsAgree (durationSeconds dur) (fromIntegral (durationNanos dur))
   where
@@ -189,7 +188,7 @@ isValidDuration dur =
 
 -- | Compare two 'Duration' values by total nanoseconds.
 compareDuration :: Duration -> Duration -> Ordering
-compareDuration a b = compare (durationToNanos a) (durationToNanos b)
+compareDuration a b = compare (durationTotalNanos a) (durationTotalNanos b)
 
 
 instance Ord Duration where

@@ -68,12 +68,14 @@ decodeMessageStream lbs
   | BL.null lbs = []
   | otherwise = case getVarintLazy lbs of
       Left e -> [Left e]
-      Right (len, rest) ->
-        let msgLen = fromIntegral len :: Int64
-            (msgBytes, remaining) = BL.splitAt msgLen rest
-        in if BL.length msgBytes < msgLen
-             then [Left UnexpectedEnd]
-             else decodeMessage (BL.toStrict msgBytes) : decodeMessageStream remaining
+      Right (len, rest)
+        | len > fromIntegral (maxBound :: Int) -> [Left NegativeLength]
+        | otherwise ->
+            let msgLen = fromIntegral len :: Int64
+                (msgBytes, remaining) = BL.splitAt msgLen rest
+            in if BL.length msgBytes < msgLen
+                 then [Left UnexpectedEnd]
+                 else decodeMessage (BL.toStrict msgBytes) : decodeMessageStream remaining
 
 
 -- ---------------------------------------------------------------------------
@@ -162,13 +164,15 @@ goVarint !acc !shift !buf
       let !b = BS.index buf 0
           !rest = BS.drop 1 buf
           !val = acc .|. ((fromIntegral b .&. 0x7F) `shiftL` shift)
-      in if b < 0x80
-           then
-             let !msgLen = fromIntegral val :: Int
-             in if msgLen < 0
-                  then IFail NegativeLength rest
-                  else goBody msgLen 0 [] rest
-           else goVarint val (shift + 7) rest
+      in if shift == 63 && b > 1
+           then IFail InvalidVarint rest
+           else
+             if b < 0x80
+               then
+                 if val > fromIntegral (maxBound :: Int)
+                   then IFail NegativeLength rest
+                   else goBody (fromIntegral val) 0 [] rest
+               else goVarint val (shift + 7) rest
 
 
 -- ---------------------------------------------------------------------------
@@ -221,6 +225,7 @@ getVarintLazy = go 0 0
       | shift > 63 = Left InvalidVarint
       | otherwise = case BL.uncons bs of
           Nothing -> Left UnexpectedEnd
+          Just (b, _) | shift == 63 && b > 1 -> Left InvalidVarint
           Just (b, rest) ->
             let val = acc .|. ((fromIntegral b .&. 0x7F) `shiftL` shift)
             in if b < 0x80
@@ -279,13 +284,15 @@ dsVarint !acc !shift !buf
       let !b = BS.index buf 0
           !rest = BS.drop 1 buf
           !val = acc .|. ((fromIntegral b .&. 0x7F) `shiftL` shift)
-      in if b < 0x80
-           then
-             let !msgLen = fromIntegral val :: Int
-             in if msgLen < 0
-                  then Fail "negative message length"
-                  else dsBody msgLen 0 [] rest
-           else dsVarint val (shift + 7) rest
+      in if shift == 63 && b > 1
+           then Fail "varint overflow"
+           else
+             if b < 0x80
+               then
+                 if val > fromIntegral (maxBound :: Int)
+                   then Fail "negative message length"
+                   else dsBody (fromIntegral val) 0 [] rest
+               else dsVarint val (shift + 7) rest
 
 
 dsBody :: MessageDecode a => Int -> Int -> [ByteString] -> ByteString -> DecodeStep a

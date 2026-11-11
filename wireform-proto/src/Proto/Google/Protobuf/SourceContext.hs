@@ -1,9 +1,12 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE StrictData #-}
+{-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-unused-imports -Wno-unused-matches -Wno-unused-top-binds #-}
 
 {- | Auto-generated protobuf types from package @google.protobuf@.
@@ -57,7 +60,8 @@ import Proto.Internal.Encode.Archetype (
   archVarint,
   archVarintSize,
  )
-import Proto.Internal.JSON (bytesFieldToJSON, bytesMapFieldToJSON, jsonObject, parseBytesFieldMaybe, parseBytesMapFieldMaybe, parseFieldMaybe, protoBytesToJSON, (.=:))
+import Proto.Internal.JSON (bytesFieldToJSON, bytesMapFieldToJSON, jsonObject, parseBytesFieldMaybe, parseBytesMapFieldMaybe, parseFieldMaybe, protoBytesFromJSON, protoBytesToJSON, (.=:))
+import Proto.Internal.JSON qualified as PJ
 import Proto.Internal.JSON.Extension qualified as PJExt
 import Proto.Internal.Wire (Tag (..), WireType (..))
 import Proto.Internal.Wire.Encode (
@@ -92,7 +96,7 @@ import Proto.Internal.Wire.Encode (
  )
 import Proto.Registry (IsMessage)
 import Proto.Registry qualified
-import Proto.Schema (FieldDescriptor (..), FieldLabel' (..), FieldTypeDescriptor (..), ProtoMessage (..), ScalarFieldType (..), SomeFieldDescriptor (..))
+import Proto.Schema (FieldDescriptor (..), FieldLabel' (..), FieldTypeDescriptor (..), ProtoEnum (..), ProtoMessage (..), ScalarFieldType (..), SomeFieldDescriptor (..))
 import Wireform.Builder qualified as B
 
 
@@ -139,7 +143,7 @@ instance MessageDecode SourceContext where
         withTagM
           (pure (SourceContext {sourceContextFileName = acc_0, sourceContextUnknownFields = reverse acc_unknown_}))
           ( \fn wt -> case fn of
-              1 -> do
+              1 | wt == 2 -> do
                 v <- decodeFieldString
                 loop v acc_unknown_
               _ -> do
@@ -176,13 +180,15 @@ instance IsMessage SourceContext
 instance Aeson.ToJSON SourceContext where
   toJSON msg =
     jsonObject
-      [ "fileName" .=: msg.sourceContextFileName
-      ]
+      ( concat
+          [ if T.null msg.sourceContextFileName then [] else ["fileName" .=: msg.sourceContextFileName]
+          ]
+      )
 
 
 instance Aeson.FromJSON SourceContext where
   parseJSON = Aeson.withObject "SourceContext" $ \obj -> do
-    fld_sourceContextFileName <- parseFieldMaybe obj "fileName"
+    fld_sourceContextFileName <- PJ.parseFieldWithAlias parseFieldMaybe obj "fileName" "file_name"
     pure
       defaultSourceContext
         { sourceContextFileName = maybe (sourceContextFileName defaultSourceContext) id fld_sourceContextFileName

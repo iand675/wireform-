@@ -23,8 +23,6 @@ upstream runner and pipes requests through this binary.
 module Main (main) where
 
 import Control.Exception (SomeException, catch, evaluate)
-import Data.Aeson qualified as Aeson
-import Data.Aeson.Types qualified as AesonT
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import Data.ByteString qualified as BS
 import Data.Proxy (Proxy (..))
@@ -32,8 +30,7 @@ import Data.Text qualified as T
 import Data.Word (Word32)
 import Proto.Decode qualified as PD
 import Proto.Encode qualified as PE
-import Proto.Internal.JSON.WellKnown qualified as WK
-import Proto.Registry (AnyCodec (..), TypeRegistry, registerCodec)
+import Proto.Registry (TypeRegistry, emptyRegistry, registerGlobalAnyCodecs, registerMessage)
 import System.IO (
   BufferMode (..),
   Handle,
@@ -47,42 +44,39 @@ import System.IO (
   stdout,
  )
 import Test.Conformance.Handler (handleRequest)
+import Test.Conformance.EditionUnstable qualified as Unstable
+import Test.Conformance.MigrationProto2 qualified as Migration2
+import Test.Conformance.MigrationProto3 qualified as Migration3
 import Test.Conformance.Schema (
   ConformanceResponse,
   ConformanceResponse'Result (..),
   TestAllTypesProto2,
   TestAllTypesProto3,
+  TestAllTypesEdition2023,
   conformanceResponseResult,
   defaultConformanceResponse,
-  registerExt_protobuf_test_messages_proto2_extension_int32,
  )
 
 
-{- | The type registry used by the conformance runner: standard
-WKT codecs plus the conformance suite's reference messages.
--}
+-- | Application codecs for Any payloads in the conformance suite.
 conformanceRegistry :: TypeRegistry
 conformanceRegistry =
-  registerCodec
-    "protobuf_test_messages.proto3.TestAllTypesProto3"
-    testAllTypesProto3AnyCodec
-    . registerCodec
-      "protobuf_test_messages.proto2.TestAllTypesProto2"
-      testAllTypesProto2AnyCodec
-    $ WK.standardWktRegistry
+  registerMessage (Proxy @TestAllTypesProto3)
+    . registerMessage (Proxy @TestAllTypesProto2)
+    . registerMessage (Proxy @TestAllTypesEdition2023)
+    . registerMessage (Proxy @Migration2.TestAllTypesProto2)
+    . registerMessage (Proxy @Migration3.TestAllTypesProto3)
+    . registerMessage (Proxy @Unstable.TestAllTypesEditionUnstable)
+    $ emptyRegistry
 
 
 main :: IO ()
 main = do
+  registerGlobalAnyCodecs conformanceRegistry
   hSetBinaryMode stdin True
   hSetBinaryMode stdout True
   hSetBuffering stdout NoBuffering
   hSetBuffering stderr LineBuffering
-  -- Proto2 extension JSON codecs: the loadProto splice generates
-  -- an ExtensionRegistry value per extend block; pass it via
-  -- Data.Reflection.give so the Generated ToJSON/FromJSON instances
-  -- can pick it up.
-  let _reg = registerExt_protobuf_test_messages_proto2_extension_int32
   loop
   where
     loop = do
@@ -128,40 +122,6 @@ runtimeErr :: T.Text -> ConformanceResponse
 runtimeErr t =
   defaultConformanceResponse
     { conformanceResponseResult = Just (ConformanceResponse'Result'RuntimeError t)
-    }
-
-
-{- | The non-WKT codec for the conformance suite's reference
-message. The Any envelope inlines the message's JSON object
-alongside @\@type@ rather than wrapping under @"value"@.
--}
-testAllTypesProto3AnyCodec :: AnyCodec
-testAllTypesProto3AnyCodec =
-  AnyCodec
-    { acToJSON = \bs ->
-        case PD.decodeMessage bs :: Either PD.DecodeError TestAllTypesProto3 of
-          Left e -> Left ("Any embedded TestAllTypesProto3: " <> show e)
-          Right m -> Right (Aeson.toJSON m)
-    , acFromJSON = \v ->
-        case AesonT.parseEither (Aeson.parseJSON @TestAllTypesProto3) v of
-          Left e -> Left e
-          Right m -> Right (PE.encodeMessage m)
-    , acIsWkt = False
-    }
-
-
-testAllTypesProto2AnyCodec :: AnyCodec
-testAllTypesProto2AnyCodec =
-  AnyCodec
-    { acToJSON = \bs ->
-        case PD.decodeMessage bs :: Either PD.DecodeError TestAllTypesProto2 of
-          Left e -> Left ("Any embedded TestAllTypesProto2: " <> show e)
-          Right m -> Right (Aeson.toJSON m)
-    , acFromJSON = \v ->
-        case AesonT.parseEither (Aeson.parseJSON @TestAllTypesProto2) v of
-          Left e -> Left e
-          Right m -> Right (PE.encodeMessage m)
-    , acIsWkt = False
     }
 
 

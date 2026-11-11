@@ -44,6 +44,7 @@ module Proto.Extension (
   -- * Repeated extensions
   RepeatedExtension (..),
   getRepeatedExtension,
+  getRepeatedExtensionChecked,
   setRepeatedExtension,
   appendRepeatedExtension,
   clearRepeatedExtension,
@@ -60,13 +61,18 @@ module Proto.Extension (
   unknownFieldNumber,
 ) where
 
+import Data.Aeson (FromJSON, ToJSON)
 import Data.Bits (shiftL, shiftR, xor, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
+import Data.Either (isRight)
 import Data.Int (Int32, Int64)
+import Data.List (find)
+import Data.Maybe (isJust, mapMaybe, maybeToList)
 import Data.Text (Text)
 import Data.Text.Encoding qualified as TE
+import Data.Vector.Unboxed qualified as VU
 import Data.Word (Word32, Word64)
 import GHC.Float (
   castDoubleToWord64,
@@ -74,7 +80,9 @@ import GHC.Float (
   castWord32ToFloat,
   castWord64ToDouble,
  )
-import Proto.Decode (UnknownField (..))
+import Proto.Decode (DecodeError (..), UnknownField (..), decodeAllVarints, runDecoder, skipTaggedWireType, withTagM)
+import Proto.Internal.Wire (WireType (..))
+import Proto.Schema (ProtoEnum (..))
 
 
 -- ============================================================
@@ -116,12 +124,15 @@ data ExtensionType a where
   ExtFloat :: ExtensionType Float
   ExtDouble :: ExtensionType Double
   ExtBool :: ExtensionType Bool
+  ExtEnum :: (ProtoEnum a, FromJSON a, ToJSON a) => ExtensionType a
   ExtString :: ExtensionType Text
   ExtBytes :: ExtensionType ByteString
   ExtMessage :: ExtensionType ByteString
     {- ^ Sub-message stored as its raw length-delimited payload;
     callers use 'Proto.Decode.decodeMessage' to re-project.
     -}
+  ExtGroup :: ExtensionType ByteString
+    -- ^ Delimited message stored as the raw body between its group tags.
 
 
 deriving stock instance Show (ExtensionType a)
@@ -143,28 +154,34 @@ class HasExtensions msg where
 
 -- | 'True' when the message carries a value for this extension.
 hasExtension :: HasExtensions msg => Extension msg a -> msg -> Bool
-hasExtension ext msg =
-  any
-    (\uf -> unknownFieldNumber uf == extNumber ext)
-    (messageUnknownFields msg)
+hasExtension ext = any (matchesExtensionRecord ext) . messageUnknownFields
 
 
-{- | Retrieve an extension value. Returns 'Nothing' when the field
-is absent or the stored bytes don't fit the declared payload
-type (corruption or aliasing — real deployments treat the
-missing case as "use the extension's proto default", which
-callers can layer on top).
+{- | Retrieve an extension value. Incompatible wire types stay unknown.
+The last compatible scalar wins. Singular message payloads are concatenated
+in wire order so decoding the result merges them.
 -}
 getExtension :: HasExtensions msg => Extension msg a -> msg -> Maybe a
-getExtension ext msg = do
-  uf <- lookupField (extNumber ext) (messageUnknownFields msg)
-  decodeExtensionValue (extType ext) uf
+getExtension ext msg = case extType ext of
+  ExtMessage -> mergeMessagePayloads ExtMessage
+  ExtGroup -> mergeMessagePayloads ExtGroup
+  ty -> find (matchesExtensionRecord ext) (reverse fields) >>= decodeExtensionValue ty
+  where
+    fields = messageUnknownFields msg
+    mergeMessagePayloads :: ExtensionType ByteString -> Maybe ByteString
+    mergeMessagePayloads ty = case mapMaybe (decodeExtensionValue ty) (filter (matchesExtensionRecord ext) fields) of
+      [] -> Nothing
+      [payload] -> Just payload
+      payloads
+        -- Keep a truncated occurrence from consuming bytes from the next one.
+        | all (isRight . runDecoder skipMessage) payloads -> Just (BS.concat payloads)
+        | otherwise -> Nothing
+    skipMessage = withTagM (pure ()) (\fn wt -> skipTaggedWireType fn wt >> skipMessage)
 
 
 {- | Attach (or overwrite) an extension value. The underlying
-unknown-fields list has any prior entries for the same field
-number removed before the new one is appended, matching
-protobuf's "last one wins" semantics for singular fields.
+unknown-fields list retains any prior records with an incompatible
+wire type.
 -}
 setExtension
   :: HasExtensions msg => Extension msg a -> a -> msg -> msg
@@ -172,7 +189,7 @@ setExtension ext value msg =
   let !fresh = encodeExtensionValue (extNumber ext) (extType ext) value
       !rest =
         filter
-          (\uf -> unknownFieldNumber uf /= extNumber ext)
+          (not . matchesExtensionRecord ext)
           (messageUnknownFields msg)
   in setMessageUnknownFields (rest ++ [fresh]) msg
 
@@ -185,7 +202,7 @@ clearExtension
 clearExtension ext msg =
   setMessageUnknownFields
     ( filter
-        (\uf -> unknownFieldNumber uf /= extNumber ext)
+        (not . matchesExtensionRecord ext)
         (messageUnknownFields msg)
     )
     msg
@@ -202,17 +219,44 @@ unknownFieldNumber = \case
   UnknownFixed64 n _ -> n
   UnknownLenDelim n _ -> n
   UnknownFixed32 n _ -> n
+  UnknownGroup n _ -> n
 
 
--- The proto spec says later occurrences of a singular field
--- override earlier ones, so we walk from the tail.
-lookupField :: Int -> [UnknownField] -> Maybe UnknownField
-lookupField fn = go . reverse
-  where
-    go [] = Nothing
-    go (uf : rest)
-      | unknownFieldNumber uf == fn = Just uf
-      | otherwise = go rest
+unknownFieldWireType :: UnknownField -> WireType
+unknownFieldWireType = \case
+  UnknownVarint {} -> WireVarint
+  UnknownFixed64 {} -> Wire64Bit
+  UnknownLenDelim {} -> WireLengthDelimited
+  UnknownFixed32 {} -> Wire32Bit
+  UnknownGroup {} -> WireStartGroup
+
+
+extensionWireType :: ExtensionType a -> WireType
+extensionWireType = \case
+  ExtFixed32 -> Wire32Bit
+  ExtSFixed32 -> Wire32Bit
+  ExtFloat -> Wire32Bit
+  ExtFixed64 -> Wire64Bit
+  ExtSFixed64 -> Wire64Bit
+  ExtDouble -> Wire64Bit
+  ExtString -> WireLengthDelimited
+  ExtBytes -> WireLengthDelimited
+  ExtMessage -> WireLengthDelimited
+  ExtGroup -> WireStartGroup
+  _ -> WireVarint
+
+
+matchesExtensionRecord :: Extension msg a -> UnknownField -> Bool
+matchesExtensionRecord ext uf =
+  unknownFieldNumber uf == extNumber ext
+    && unknownFieldWireType uf == extensionWireType (extType ext)
+    && case extType ext of
+      ExtEnum -> isJust (decodeExtensionValue (extType ext) uf)
+      _ -> True
+
+
+enumExtensionValue :: ProtoEnum a => Word64 -> Maybe a
+enumExtensionValue = fromProtoEnumValue . fromIntegral . (fromIntegral :: Word64 -> Int32)
 
 
 -- | Decode a typed value from an 'UnknownField' using the given 'ExtensionType'.
@@ -225,6 +269,7 @@ decodeExtensionValue ty uf = case (ty, uf) of
   (ExtSInt32, UnknownVarint _ v) -> Just (zigzagDecode32 v)
   (ExtSInt64, UnknownVarint _ v) -> Just (zigzagDecode64 v)
   (ExtBool, UnknownVarint _ v) -> Just (v /= 0)
+  (ExtEnum, UnknownVarint _ v) -> enumExtensionValue v
   (ExtFixed32, UnknownFixed32 _ v) -> Just v
   (ExtSFixed32, UnknownFixed32 _ v) -> Just (fromIntegral v)
   (ExtFloat, UnknownFixed32 _ v) -> Just (castWord32ToFloat v)
@@ -236,6 +281,7 @@ decodeExtensionValue ty uf = case (ty, uf) of
     Left _ -> Nothing
   (ExtBytes, UnknownLenDelim _ b) -> Just b
   (ExtMessage, UnknownLenDelim _ b) -> Just b
+  (ExtGroup, UnknownGroup _ b) -> Just b
   _ -> Nothing
 
 
@@ -249,6 +295,7 @@ encodeExtensionValue fn ty value = case ty of
   ExtSInt32 -> UnknownVarint fn (zigzagEncode32 value)
   ExtSInt64 -> UnknownVarint fn (zigzagEncode64 value)
   ExtBool -> UnknownVarint fn (if value then 1 else 0)
+  ExtEnum -> UnknownVarint fn (fromIntegral (toProtoEnumValue value))
   ExtFixed32 -> UnknownFixed32 fn value
   ExtSFixed32 -> UnknownFixed32 fn (fromIntegral value)
   ExtFloat -> UnknownFixed32 fn (castFloatToWord32 value)
@@ -258,6 +305,7 @@ encodeExtensionValue fn ty value = case ty of
   ExtString -> UnknownLenDelim fn (TE.encodeUtf8 value)
   ExtBytes -> UnknownLenDelim fn value
   ExtMessage -> UnknownLenDelim fn value
+  ExtGroup -> UnknownGroup fn value
 
 
 -- ============================================================
@@ -286,43 +334,72 @@ data RepeatedExtension msg a = RepeatedExtension
 deriving stock instance Show (ExtensionType a) => Show (RepeatedExtension msg a)
 
 
+matchesRepeatedExtensionRecord :: RepeatedExtension msg a -> UnknownField -> Bool
+matchesRepeatedExtensionRecord ext uf =
+  let actual = unknownFieldWireType uf
+      expected = extensionWireType (reType ext)
+  in unknownFieldNumber uf == reNumber ext
+       && (actual == expected || (actual == WireLengthDelimited && isPackable (reType ext)))
+
+
+-- Closed enums can have unrecognized values in a packed record alongside
+-- recognized ones. Keep those values as individual unknown varints.
+withoutRepeatedExtension :: forall msg a. RepeatedExtension msg a -> [UnknownField] -> [UnknownField]
+withoutRepeatedExtension ext = case reType ext of
+  ExtEnum -> concatMap stripEnum
+  _ -> filter (not . matchesRepeatedExtensionRecord ext)
+  where
+    stripEnum :: ProtoEnum a => UnknownField -> [UnknownField]
+    stripEnum uf
+      | unknownFieldNumber uf /= reNumber ext = [uf]
+      | otherwise = case uf of
+          UnknownVarint _ v | known v -> []
+          UnknownLenDelim fn payload -> case decodeAllVarints payload of
+            Left _ -> [uf]
+            Right values -> map (UnknownVarint fn) (filter (not . known) (VU.toList values))
+          _ -> [uf]
+      where
+        known v = isJust (enumExtensionValue v :: Maybe a)
+
+
 {- | Read every value associated with a repeated extension, in
 wire order (which matches the order the user wrote them). Both
 packed and unpacked encodings are accepted regardless of
 'reIsPacked'; protobuf parsers must honour either form on read.
+Malformed records contribute no values and remain available as unknown
+fields. Use 'getRepeatedExtensionChecked' to surface the decode error.
 -}
 getRepeatedExtension
   :: HasExtensions msg => RepeatedExtension msg a -> msg -> [a]
-getRepeatedExtension ext msg =
-  concatMap
-    decodeOne
-    [ uf
-    | uf <- messageUnknownFields msg
-    , unknownFieldNumber uf == reNumber ext
-    ]
-  where
-    decodeOne uf = case (reType ext, uf) of
-      -- Packed scalars can show up as a single UnknownLenDelim.
-      (ty, UnknownLenDelim _ payload)
-        | not (isLenDelimNative ty) -> decodePacked ty payload
-      -- Otherwise, decode as a single unpacked entry.
-      (ty, _) ->
-        case decodeExtensionValue ty uf of
-          Just v -> [v]
-          Nothing -> []
+getRepeatedExtension ext =
+  concatMap (either (const []) id . decodeRepeatedRecord (reType ext))
+    . filter (matchesRepeatedExtensionRecord ext)
+    . messageUnknownFields
+
+
+-- | Read a repeated extension, failing if any matching record is malformed.
+getRepeatedExtensionChecked
+  :: HasExtensions msg => RepeatedExtension msg a -> msg -> Either DecodeError [a]
+getRepeatedExtensionChecked ext =
+  fmap concat
+    . traverse (decodeRepeatedRecord (reType ext))
+    . filter (matchesRepeatedExtensionRecord ext)
+    . messageUnknownFields
+
+
+decodeRepeatedRecord :: ExtensionType a -> UnknownField -> Either DecodeError [a]
+decodeRepeatedRecord ty (UnknownLenDelim _ payload) = decodeRepeatedPayload ty payload
+decodeRepeatedRecord ty uf = Right (maybeToList (decodeExtensionValue ty uf))
 
 
 {- | Replace every occurrence of the extension with the given list,
-in order. Uses packed or unpacked encoding per 'reIsPacked' (the
-former requires fixed-width scalar types).
+in order. Uses packed or unpacked encoding per 'reIsPacked' for
+packable scalar types.
 -}
 setRepeatedExtension
   :: HasExtensions msg => RepeatedExtension msg a -> [a] -> msg -> msg
 setRepeatedExtension ext values msg =
-  let !rest =
-        filter
-          (\uf -> unknownFieldNumber uf /= reNumber ext)
-          (messageUnknownFields msg)
+  let !rest = withoutRepeatedExtension ext (messageUnknownFields msg)
       !fresh =
         if reIsPacked ext && isPackable (reType ext)
           then [packRepeated (reNumber ext) (reType ext) values]
@@ -342,27 +419,13 @@ appendRepeatedExtension ext value msg =
        msg
 
 
--- | Drop every entry for this repeated extension.
+-- | Drop the packed and unpacked records for this repeated extension.
 clearRepeatedExtension
   :: HasExtensions msg => RepeatedExtension msg a -> msg -> msg
 clearRepeatedExtension ext msg =
   setMessageUnknownFields
-    ( filter
-        (\uf -> unknownFieldNumber uf /= reNumber ext)
-        (messageUnknownFields msg)
-    )
+    (withoutRepeatedExtension ext (messageUnknownFields msg))
     msg
-
-
-{- | Whether the given type's wire form is itself
-length-delimited. Only @string@, @bytes@, and @message@ are.
--}
-isLenDelimNative :: ExtensionType a -> Bool
-isLenDelimNative = \case
-  ExtString -> True
-  ExtBytes -> True
-  ExtMessage -> True
-  _ -> False
 
 
 {- | Whether a packed encoding is permitted for this type. Per the
@@ -370,34 +433,39 @@ protobuf spec only fixed-width scalars and varint integers are
 packable.
 -}
 isPackable :: ExtensionType a -> Bool
-isPackable ty = not (isLenDelimNative ty)
+isPackable ty = case extensionWireType ty of
+  WireLengthDelimited -> False
+  WireStartGroup -> False
+  _ -> True
 
 
-{- | Decode the body of a packed-format @UnknownLenDelim@ entry
-into a list of values.
--}
-decodePacked :: ExtensionType a -> ByteString -> [a]
-decodePacked ty bs = case ty of
-  ExtInt32 -> map fromIntegral (varintList bs)
-  ExtInt64 -> map fromIntegral (varintList bs)
-  ExtUInt32 -> map fromIntegral (varintList bs)
-  ExtUInt64 -> varintList bs
-  ExtSInt32 -> map zigzagDecode32 (varintList bs)
-  ExtSInt64 -> map zigzagDecode64 (varintList bs)
-  ExtBool -> map (/= 0) (varintList bs)
+-- A length-delimited record is either a packed scalar sequence or one
+-- string, byte string or message.
+decodeRepeatedPayload :: ExtensionType a -> ByteString -> Either DecodeError [a]
+decodeRepeatedPayload ty bs = case ty of
+  ExtInt32 -> varints fromIntegral
+  ExtInt64 -> varints fromIntegral
+  ExtUInt32 -> varints fromIntegral
+  ExtUInt64 -> VU.toList <$> decodeAllVarints bs
+  ExtSInt32 -> varints zigzagDecode32
+  ExtSInt64 -> varints zigzagDecode64
+  ExtBool -> varints (/= 0)
+  ExtEnum -> mapMaybe enumExtensionValue . VU.toList <$> decodeAllVarints bs
   ExtFixed32 -> chunked 4 readU32 bs
-  ExtSFixed32 -> map fromIntegral (chunked 4 readU32 bs)
-  ExtFloat -> map castWord32ToFloat (chunked 4 readU32 bs)
+  ExtSFixed32 -> chunked 4 (fromIntegral . readU32) bs
+  ExtFloat -> chunked 4 (castWord32ToFloat . readU32) bs
   ExtFixed64 -> chunked 8 readU64 bs
-  ExtSFixed64 -> map fromIntegral (chunked 8 readU64 bs)
-  ExtDouble -> map castWord64ToDouble (chunked 8 readU64 bs)
-  -- LEN-delimited types can't be packed; treat the whole payload
-  -- as one unpacked element.
+  ExtSFixed64 -> chunked 8 (fromIntegral . readU64) bs
+  ExtDouble -> chunked 8 (castWord64ToDouble . readU64) bs
   ExtString -> case TE.decodeUtf8' bs of
-    Right t -> [t]
-    Left _ -> []
-  ExtBytes -> [bs]
-  ExtMessage -> [bs]
+    Right t -> Right [t]
+    Left _ -> Left InvalidUtf8
+  ExtBytes -> Right [bs]
+  ExtMessage -> Right [bs]
+  ExtGroup -> Left (CustomError "Groups cannot be packed")
+  where
+    varints :: (Word64 -> b) -> Either DecodeError [b]
+    varints convert = map convert . VU.toList <$> decodeAllVarints bs
 
 
 -- | Pack a list of values into a single 'UnknownLenDelim' entry.
@@ -419,6 +487,7 @@ packedPayload ty values =
       ExtSInt32 -> encodeVarint (zigzagEncode32 v)
       ExtSInt64 -> encodeVarint (zigzagEncode64 v)
       ExtBool -> encodeVarint (if v then 1 else 0)
+      ExtEnum -> encodeVarint (fromIntegral (toProtoEnumValue v))
       ExtFixed32 -> writeU32 v
       ExtSFixed32 -> writeU32 (fromIntegral v)
       ExtFloat -> writeU32 (castFloatToWord32 v)
@@ -426,29 +495,6 @@ packedPayload ty values =
       ExtSFixed64 -> writeU64 (fromIntegral v)
       ExtDouble -> writeU64 (castDoubleToWord64 v)
       _ -> BS.empty -- shouldn't be reachable: isPackable guards
-
-
-varintList :: ByteString -> [Word64]
-varintList = go
-  where
-    go bs
-      | BS.null bs = []
-      | otherwise = case readVarint bs of
-          Nothing -> []
-          Just (v, rest) -> v : go rest
-
-
-readVarint :: ByteString -> Maybe (Word64, ByteString)
-readVarint = step 0 0
-  where
-    step !acc !shift bs
-      | BS.null bs = Nothing
-      | otherwise =
-          let b = BS.head bs
-              acc' = acc + (fromIntegral (b .&. 0x7F) `shiftL` shift)
-          in if b < 0x80
-               then Just (acc', BS.tail bs)
-               else step acc' (shift + 7) (BS.tail bs)
 
 
 encodeVarint :: Word64 -> ByteString
@@ -512,13 +558,15 @@ readU64 bs =
        .|. (b7 `shiftL` 56)
 
 
-chunked :: Int -> (ByteString -> a) -> ByteString -> [a]
-chunked n decode = go
+chunked :: Int -> (ByteString -> a) -> ByteString -> Either DecodeError [a]
+chunked n decode bs
+  | BS.length bs `rem` n == 0 = Right (go bs)
+  | otherwise = Left UnexpectedEnd
   where
-    go bs
-      | BS.length bs < n = []
+    go bytes
+      | BS.null bytes = []
       | otherwise =
-          decode (BS.take n bs) : go (BS.drop n bs)
+          decode (BS.take n bytes) : go (BS.drop n bytes)
 
 
 -- Zig-zag encodings per the protobuf spec.

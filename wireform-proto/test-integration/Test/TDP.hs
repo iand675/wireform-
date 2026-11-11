@@ -1,5 +1,6 @@
 module Test.TDP (dynamicSchemaTests) where
 
+import Control.Exception (IOException, evaluate, try)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
@@ -37,6 +38,7 @@ import Proto.Internal.Wire.Decode (
 import Proto.Internal.Wire.Decode qualified as WD
 import Proto.Internal.Wire.Encode
 import Proto.Schema
+import System.IO.Error (ioeGetErrorString)
 import Test.Syd
 import Test.Syd.Hedgehog ()
 import Wireform.Builder qualified as B
@@ -136,6 +138,37 @@ coreTests =
             Right msg ->
               Map.lookup 1 (dynFields msg) `shouldBe` Just (DynVarint 20)
             Left e -> expectationFailure (show e)
+      , it "the empty-table fallback preserves every occurrence in order" $ do
+          let wire = BS.pack [8, 10, 8, 20]
+          fmap (dynamicField 1) (decodeDynamicWithSchema emptyTable wire)
+            `shouldBe` Right (Just (DynRepeated [DynVarint 10, DynVarint 20]))
+      , it "uses the supplied child table with raw or schemaless field thunks" $ do
+          let child = makeSimpleTable 1 WireVarint (thunkVarintPub (DynBool . (/= 0)))
+              withChild (ParseTable fields lut tags misses) =
+                ParseTable (V.map (\fp -> fp {fpSubmsg = Just child}) fields) lut tags misses
+              raw = withChild (makeSimpleTable 1 WireLengthDelimited thunkLenDelimPub)
+              schemaless bs off = do
+                (value, end) <- thunkLenDelimPub bs off
+                case value of
+                  DynBytes body -> either (fail . show) (\msg -> pure (DynMessage msg, end)) (decodeDynamic body)
+                  _ -> fail "expected length-delimited payload"
+              wrapped = withChild (makeSimpleTable 1 WireLengthDelimited schemaless)
+              wire = BS.pack [10, 2, 8, 0, 10, 2, 8, 2]
+              expected = Just (DynMessage (setDynamicField 1 (DynBool True) emptyDynamic))
+          fmap (dynamicField 1) (decodeDynamicWithSchema raw wire) `shouldBe` Right expected
+          fmap (dynamicField 1) (decodeDynamicWithSchema wrapped wire) `shouldBe` Right expected
+      , it "looks up a low tag whose parser index is too large for the byte table" $ do
+          let entry number = (number, WireVarint, thunkVarintPub DynVarint)
+              table = makeMultiTable (map entry ([16 .. 270] <> [1]))
+              wire = BS.pack [8, 42]
+          fmap (dynamicField 1) (decodeDynamicWithSchema table wire)
+            `shouldBe` Right (Just (DynVarint 42))
+      , it "exceptions from custom field thunks reach the caller" $ do
+          let table = makeSimpleTable 1 WireVarint (\_ _ -> ioError (userError "custom field thunk"))
+          result <- try @IOException (evaluate (decodeDynamicWithSchema table (BS.pack [8, 10])))
+          case result of
+            Left e -> ioeGetErrorString e `shouldBe` "custom field thunk"
+            Right value -> expectationFailure ("Expected custom thunk exception, got " <> show value)
       , it "fixed32 field" $ do
           let bs = buildToBS $ putTag 1 Wire32Bit <> putFixed32 0xDEADBEEF
               table = makeSimpleTable 1 Wire32Bit (thunkFixed32Pub DynFixed32)

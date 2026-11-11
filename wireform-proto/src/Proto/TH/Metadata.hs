@@ -25,7 +25,7 @@ module Proto.TH.Metadata (
   -- * Per-message instances (consumed by 'Proto.TH.messageToDecls'')
   mkProtoMessageInstance,
   mkAesonInstancesForMessage,
-  setLenientUnknownEnum,
+  mkAnyAesonInstances,
   mkHashableInstanceForMessage,
 
   -- * Per-oneof instances (consumed for each oneof carrier sum)
@@ -76,32 +76,29 @@ import Data.ByteString.Short qualified as SBS
 import Data.Either (fromRight)
 import Data.Foldable qualified as F
 import Data.Hashable (Hashable, hashWithSalt)
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Int (Int32, Int64)
 import Data.Map.Strict qualified as Map
-import Data.Maybe qualified
 import Data.Reflection (Given, given)
-import Data.Scientific qualified as Sci
 import Data.Sequence (Seq)
 import Data.Sequence qualified as Seq
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Vector qualified as V
+import Data.Vector.Generic qualified as VG
 import Data.Word (Word32, Word64)
-import GHC.IO.Unsafe (unsafePerformIO)
 import Language.Haskell.TH
 import Proto.Decode qualified as PD
 import Proto.Google.Protobuf.Any qualified
 import Proto.Google.Protobuf.Duration qualified
 import Proto.Google.Protobuf.Empty qualified
 import Proto.Google.Protobuf.FieldMask qualified
-import Proto.Google.Protobuf.Struct (NullValue (NullValue'NullValue))
 import Proto.Google.Protobuf.Struct qualified as PGS
 import Proto.Google.Protobuf.Timestamp qualified
 import Proto.Google.Protobuf.Wrappers qualified
 import Proto.Internal.JSON qualified as PJ
 import Proto.Internal.JSON qualified as PJI
 import Proto.Internal.JSON.Extension qualified as PJExt
+import Proto.Internal.JSON.Number qualified as Number
 import Proto.Internal.JSON.WellKnown qualified as WK
 import Proto.Schema qualified as PS
 
@@ -206,8 +203,8 @@ data JsonShape
     stringify (proto3 spec).
     -}
     JSMapScalar !JsonScalar !JsonScalar
-  | -- | Map with submessage values.
-    JSMapMessage !JsonScalar
+  | -- | Map whose values use their JSON instances directly.
+    JSMapJSON !JsonScalar
   | -- | Map with enum values.
     JSMapEnum !JsonScalar
   | {- | Oneof carrier — emit at most
@@ -287,7 +284,9 @@ data OneofVariantJson = OneofVariantJson
   { ovjConstructor :: !Name
   -- ^ Sum-type constructor name.
   , ovjJsonKey :: !Text
-  -- ^ Variant's camelCase JSON key.
+  -- ^ Variant's canonical JSON key.
+  , ovjProtoKey :: !Text
+  -- ^ Original field name, also accepted on input.
   , ovjShape :: !OneofValueShape
   -- ^ How to encode the variant's payload.
   }
@@ -296,15 +295,8 @@ data OneofVariantJson = OneofVariantJson
 -- | Payload shape for one oneof variant.
 data OneofValueShape
   = OVScalar !JsonScalar
-  | OVMessage -- payload is a submessage; emit via 'Aeson.toJSON'
-  | OVEnum -- payload is an enum; emit via 'Aeson.toJSON'
-  | {- | Oneof variant whose payload is the
-    @google.protobuf.NullValue@ WKT. JSON
-    @null@ is the variant's /value/ (mapped to
-    the singleton enum constant), not the
-    "variant unset" marker.
-    -}
-    OVNullValue
+  | -- | A named type and whether JSON null selects this variant.
+    OVNamed !Bool
   deriving stock (Eq, Show)
 
 
@@ -385,9 +377,16 @@ mkProtoMessageInstance
   -- ^ Proto package (may be empty).
   -> Name
   -- ^ The @default<Tyname>@ value the splice already emitted.
+  -> Maybe Name
+  -- ^ The serialized descriptor shared by the messages in this file.
   -> [MetaField]
+  -> Maybe Exp
+  -> Maybe Exp
+  -> Maybe Exp
+  -> Maybe Exp
+  -> Maybe Exp
   -> Q [Dec]
-mkProtoMessageInstance tyName fqName pkg defName fields = do
+mkProtoMessageInstance tyName fqName pkg defName descriptorName fields oneofMetadata enumMetadata childMetadata mapMetadata jsonNormalize = do
   descrEntries <- traverse (oneFieldDescriptor tyName) fields
   let descrMap = AppE (VarE 'Map.fromList) (ListE descrEntries)
       protoNameDec =
@@ -406,20 +405,33 @@ mkProtoMessageInstance tyName fqName pkg defName fields = do
         FunD
           'PS.protoFieldDescriptors
           [Clause [WildP] (NormalB descrMap) []]
+      fileDescriptorDec =
+        foldMap (\name -> [FunD 'PS.protoFileDescriptorBytes [Clause [WildP] (NormalB (VarE name)) []]]) descriptorName
+      protoJSONDec =
+        foldMap (\normalize -> [FunD 'PS.protoJSONIgnoreUnknownEnumNames [Clause [WildP] (NormalB normalize) []]]) jsonNormalize
+      protoOneofDec =
+        foldMap (\metadata -> [FunD 'PS.protoOneofDescriptors [Clause [WildP] (NormalB metadata) []]]) oneofMetadata
+      protoEnumDec =
+        foldMap (\metadata -> [FunD 'PS.protoClosedEnumFields [Clause [WildP] (NormalB metadata) []]]) enumMetadata
+      protoChildDec =
+        foldMap (\metadata -> [FunD 'PS.protoSubmessageSchemas [Clause [WildP] (NormalB metadata) []]]) childMetadata
+      protoMapDec =
+        foldMap (\metadata -> [FunD 'PS.protoMapValueDecoders [Clause [WildP] (NormalB metadata) []]]) mapMetadata
   pure
     [ InstanceD
         Nothing
         []
         (AppT (ConT ''PS.ProtoMessage) (ConT tyName))
-        [protoNameDec, protoPkgDec, protoDefDec, protoDescrDec]
+        ([protoNameDec, protoPkgDec, protoDefDec, protoDescrDec] <> fileDescriptorDec <> protoOneofDec <> protoEnumDec <> protoChildDec <> protoMapDec <> protoJSONDec)
     ]
 
 
--- | Read a record field expression: record-dot @msg.field@ when the
--- record uses the unprefixed layout ('NoFieldSelectors' + shared field
--- names), else the bare selector application @field msg@. The label for
--- the record-dot form is the selector's base name — the field name in
--- either layout.
+{- | Read a record field expression: record-dot @msg.field@ when the
+record uses the unprefixed layout ('NoFieldSelectors' + shared field
+names), else the bare selector application @field msg@. The label for
+the record-dot form is the selector's base name — the field name in
+either layout.
+-}
 dotRead :: Bool -> Name -> Name -> Exp
 dotRead recDot sel msgVar
   | recDot = GetFieldE (VarE msgVar) (nameBase sel)
@@ -487,7 +499,9 @@ through the dedicated helpers in "Proto.Internal.JSON" so base64 and
 64-bit-integer-as-string encoding happen automatically.
 -}
 mkAesonInstancesForMessage
-  :: Name
+  :: Cxt
+  -- ^ Registry context for this message and its embedded messages.
+  -> Name
   -- ^ Type name.
   -> Text
   {- ^ Fully-qualified proto name (drives the
@@ -504,14 +518,37 @@ mkAesonInstancesForMessage
   -- ^ Read fields with record-dot (unprefixed layout).
   -> [MetaField]
   -> Q [Dec]
-mkAesonInstancesForMessage tyName fqName ufSel defName recDot fields = do
-  toJSONDec <- mkToJSONForMessage tyName fqName ufSel recDot fields
-  fromJSONDec <- mkFromJSONForMessage tyName fqName ufSel defName recDot fields
+mkAesonInstancesForMessage ctx tyName fqName ufSel defName recDot fields = do
+  toJSONDec <- mkToJSONForMessage ctx tyName fqName ufSel recDot fields
+  fromJSONDec <- mkFromJSONForMessage ctx tyName fqName ufSel defName recDot fields
   pure [toJSONDec, fromJSONDec]
 
 
-mkToJSONForMessage :: Name -> Text -> Maybe Name -> Bool -> [MetaField] -> Q Dec
-mkToJSONForMessage tyName fqName mUfSel recDot fields = do
+-- | Canonical JSON for a splice of google.protobuf.Any itself.
+mkAnyAesonInstances :: Name -> Q [Dec]
+mkAnyAesonInstances tyName = do
+  url <- newName "url"
+  bytes <- newName "bytes"
+  json <- newName "json"
+  let anyPattern = ConP tyName [] [VarP url, VarP bytes, WildP]
+      body = [|WK.anyPartsToJSON WK.anyJsonRegistry $(varE url) $(varE bytes)|]
+      parse = [|
+        case WK.anyPartsFromJSON WK.anyJsonRegistry $(varE json) of
+          Left err -> fail err
+          Right (parsedUrl, parsedBytes) -> pure ($(conE tyName) parsedUrl parsedBytes [])
+        |]
+  toJSONBody <- body
+  parseBody <- parse
+  pure
+    [ InstanceD Nothing [] (AppT (ConT ''Aeson.ToJSON) (ConT tyName))
+        [FunD 'Aeson.toJSON [Clause [anyPattern] (NormalB toJSONBody) []]]
+    , InstanceD Nothing [] (AppT (ConT ''Aeson.FromJSON) (ConT tyName))
+        [FunD 'Aeson.parseJSON [Clause [VarP json] (NormalB parseBody) []]]
+    ]
+
+
+mkToJSONForMessage :: Cxt -> Name -> Text -> Maybe Name -> Bool -> [MetaField] -> Q Dec
+mkToJSONForMessage ctx tyName fqName mUfSel recDot fields = do
   msgVar <- newName "msg"
   -- Each field contributes a @[(Text, Aeson.Value)]@ — a singleton
   -- when we want to emit the field, an empty list when we want to
@@ -537,9 +574,6 @@ mkToJSONForMessage tyName fqName mUfSel recDot fields = do
               (VarE '(<>))
               (Just extensionEntries)
           )
-      ctx = case mUfSel of
-        Nothing -> []
-        Just _ -> [AppT (ConT ''Given) (ConT ''PJExt.ExtensionRegistry)]
   pure $
     InstanceD
       Nothing
@@ -704,58 +738,16 @@ jsonShapeEntry _msgVar mf fieldExpr jsonKey one = case mfJsonShape mf of
         Just $(varP vName) ->
           $(pure (one (AppE (VarE 'Aeson.toJSON) (VarE vName))))
       |]
-  JSRepeatedScalar sc -> case mfKind mf of
-    MFKList ->
-      [|
-        if null $(pure fieldExpr)
-          then []
-          else
-            $( pure
-                 ( one
-                     ( AppE
-                         ( AppE
-                             (VarE 'scalarListToJSON)
-                             (scalarTagE sc)
-                         )
-                         fieldExpr
-                     )
-                 )
-             )
-        |]
-    MFKSeq ->
-      [|
-        if Seq.null $(pure fieldExpr)
-          then []
-          else
-            $( pure
-                 ( one
-                     ( AppE
-                         ( AppE
-                             (VarE 'scalarSeqToJSON)
-                             (scalarTagE sc)
-                         )
-                         fieldExpr
-                     )
-                 )
-             )
-        |]
-    _ ->
-      [|
-        if V.null $(pure fieldExpr)
-          then []
-          else
-            $( pure
-                 ( one
-                     ( AppE
-                         ( AppE
-                             (VarE 'scalarVectorToJSON)
-                             (scalarTagE sc)
-                         )
-                         fieldExpr
-                     )
-                 )
-             )
-        |]
+  JSRepeatedScalar sc ->
+    let encode = pure (scalarToJSONExp sc)
+        field = pure fieldExpr
+        entry empty value = do
+          valueExp <- value
+          [|if $empty then [] else $(pure (one valueExp))|]
+    in case mfKind mf of
+         MFKList -> entry [|null $field|] [|Aeson.toJSON (map $encode $field)|]
+         MFKSeq -> entry [|Seq.null $field|] [|Aeson.toJSON (map $encode (F.toList $field))|]
+         _ -> entry [|VG.null $field|] [|PJ.repeatedVectorToJSON $encode $field|]
   JSRepeatedMessage -> case mfKind mf of
     MFKList ->
       [|
@@ -794,58 +786,10 @@ jsonShapeEntry _msgVar mf fieldExpr jsonKey one = case mfJsonShape mf of
           then []
           else [($(pure jsonKey), Aeson.toJSON $(pure fieldExpr))]
         |]
-  JSMapScalar kSc vSc ->
-    [|
-      if Map.null $(pure fieldExpr)
-        then []
-        else
-          $( pure
-               ( one
-                   ( AppE
-                       ( AppE
-                           ( AppE
-                               (VarE 'scalarMapToJSON)
-                               (scalarTagE kSc)
-                           )
-                           (scalarTagE vSc)
-                       )
-                       fieldExpr
-                   )
-               )
-           )
-      |]
-  JSMapMessage kSc ->
-    [|
-      if Map.null $(pure fieldExpr)
-        then []
-        else
-          [
-            ( $(pure jsonKey)
-            , Aeson.toJSON
-                ( Map.fromList
-                    [ (scalarMapKeyToText $(pure (scalarTagE kSc)) k, Aeson.toJSON v)
-                    | (k, v) <- Map.toList $(pure fieldExpr)
-                    ]
-                )
-            )
-          ]
-      |]
-  JSMapEnum kSc ->
-    [|
-      if Map.null $(pure fieldExpr)
-        then []
-        else
-          [
-            ( $(pure jsonKey)
-            , Aeson.toJSON
-                ( Map.fromList
-                    [ (scalarMapKeyToText $(pure (scalarTagE kSc)) k, Aeson.toJSON v)
-                    | (k, v) <- Map.toList $(pure fieldExpr)
-                    ]
-                )
-            )
-          ]
-      |]
+  JSMapScalar _ vSc ->
+    mapEntry (AppE (VarE 'PJ.mapValuesToJSON) (scalarToJSONExp vSc))
+  JSMapJSON _ -> mapEntry (VarE 'Aeson.toJSON)
+  JSMapEnum _ -> mapEntry (VarE 'Aeson.toJSON)
   JSOneof variants -> do
     mVar <- newName "mv"
     arms <- traverse oneofVariantArm variants
@@ -892,6 +836,10 @@ jsonShapeEntry _msgVar mf fieldExpr jsonKey one = case mfJsonShape mf of
             )
           ]
       |]
+
+  where
+    mapEntry encode =
+      [|if Map.null $(pure fieldExpr) then [] else $(pure (one (AppE encode fieldExpr)))|]
 
 
 -- | Splice for one WKT value: returns an @Aeson.Value@.
@@ -964,13 +912,8 @@ oneofVariantArm OneofVariantJson {ovjConstructor = con, ovjJsonKey = key, ovjSha
     OVScalar sc -> do
       let valE = scalarToJsonE sc (VarE vName)
       [|[($(pure (textLit key)), $(pure valE))]|]
-    OVMessage ->
+    OVNamed _ ->
       [|[($(pure (textLit key)), Aeson.toJSON $(varE vName))]|]
-    OVEnum ->
-      [|[($(pure (textLit key)), Aeson.toJSON $(varE vName))]|]
-    -- Proto3 spec: NullValue serialises to JSON null.
-    OVNullValue ->
-      [|[($(pure (textLit key)), Aeson.Null)]|]
   pure (Match (ConP con [] [VarP vName]) (NormalB body) [])
 
 
@@ -999,50 +942,25 @@ string-form helpers in "Proto.Internal.JSON", floats through the
 NaN/Infinity-aware helpers, bytes through base64.
 -}
 scalarToJsonE :: JsonScalar -> Exp -> Exp
-scalarToJsonE sc e = case sc of
-  JSBool -> AppE (VarE 'Aeson.toJSON) e
-  JSInt32 -> AppE (VarE 'Aeson.toJSON) e
-  JSUInt32 -> AppE (VarE 'Aeson.toJSON) e
-  JSSInt32 -> AppE (VarE 'Aeson.toJSON) e
-  JSFixed32 -> AppE (VarE 'Aeson.toJSON) e
-  JSSFixed32 -> AppE (VarE 'Aeson.toJSON) e
-  JSInt64 -> AppE (VarE 'PJ.protoInt64ToJSON) e
-  JSUInt64 -> AppE (VarE 'PJ.protoWord64ToJSON) e
-  JSSInt64 -> AppE (VarE 'PJ.protoInt64ToJSON) e
-  JSFixed64 -> AppE (VarE 'PJ.protoWord64ToJSON) e
-  JSSFixed64 -> AppE (VarE 'PJ.protoInt64ToJSON) e
-  JSFloat -> AppE (VarE 'PJ.protoFloatToJSON) e
-  JSDouble -> AppE (VarE 'PJ.protoDoubleToJSON) e
-  JSString -> AppE (VarE 'Aeson.toJSON) e
-  JSBytes -> AppE (VarE 'PJ.protoBytesToJSON) e
+scalarToJsonE sc = AppE (scalarToJSONExp sc)
 
 
-{- | Splice the 'JsonScalar' constructor as a value-level tag the
-runtime helpers ('scalarVectorToJSON' / 'scalarMapToJSON') can
-pattern-match on.
--}
-scalarTagE :: JsonScalar -> Exp
-scalarTagE = \case
-  JSBool -> ConE 'JSBool
-  JSInt32 -> ConE 'JSInt32
-  JSUInt32 -> ConE 'JSUInt32
-  JSSInt32 -> ConE 'JSSInt32
-  JSFixed32 -> ConE 'JSFixed32
-  JSSFixed32 -> ConE 'JSSFixed32
-  JSInt64 -> ConE 'JSInt64
-  JSUInt64 -> ConE 'JSUInt64
-  JSSInt64 -> ConE 'JSSInt64
-  JSFixed64 -> ConE 'JSFixed64
-  JSSFixed64 -> ConE 'JSSFixed64
-  JSFloat -> ConE 'JSFloat
-  JSDouble -> ConE 'JSDouble
-  JSString -> ConE 'JSString
-  JSBytes -> ConE 'JSBytes
+scalarToJSONExp :: JsonScalar -> Exp
+scalarToJSONExp sc = VarE $ case sc of
+  JSInt64 -> 'PJ.protoInt64ToJSON
+  JSSInt64 -> 'PJ.protoInt64ToJSON
+  JSSFixed64 -> 'PJ.protoInt64ToJSON
+  JSUInt64 -> 'PJ.protoWord64ToJSON
+  JSFixed64 -> 'PJ.protoWord64ToJSON
+  JSFloat -> 'PJ.protoFloatToJSON
+  JSDouble -> 'PJ.protoDoubleToJSON
+  JSBytes -> 'PJ.protoBytesToJSON
+  _ -> 'Aeson.toJSON
 
 
 mkFromJSONForMessage
-  :: Name -> Text -> Maybe Name -> Name -> Bool -> [MetaField] -> Q Dec
-mkFromJSONForMessage tyName fqName mUfSel defName recDot fields = do
+  :: Cxt -> Name -> Text -> Maybe Name -> Name -> Bool -> [MetaField] -> Q Dec
+mkFromJSONForMessage ctx tyName fqName mUfSel defName recDot fields = do
   objVar <- newName "obj"
   fldNames <- mapM (\mf -> (,) mf <$> newName ("fld_" ++ nameBase (mfSelector mf))) fields
   binds <- traverse (uncurry (parseBindStmt objVar)) fldNames
@@ -1067,7 +985,7 @@ mkFromJSONForMessage tyName fqName mUfSel defName recDot fields = do
       pure $
         InstanceD
           Nothing
-          []
+          ctx
           (AppT (ConT ''Aeson.FromJSON) (ConT tyName))
           [FunD 'Aeson.parseJSON [Clause [] (NormalB body) []]]
     Just ufN -> do
@@ -1133,7 +1051,7 @@ mkFromJSONForMessage tyName fqName mUfSel defName recDot fields = do
       pure $
         InstanceD
           Nothing
-          [AppT (ConT ''Given) (ConT ''PJExt.ExtensionRegistry)]
+          ctx
           (AppT (ConT ''Aeson.FromJSON) (ConT tyName))
           [FunD 'Aeson.parseJSON [Clause [] (NormalB body) []]]
 
@@ -1150,22 +1068,7 @@ entirely.
 -}
 extDrain
   :: Given PJExt.ExtensionRegistry => Text -> Aeson.Object -> Either String [PD.UnknownField]
-extDrain parentFqn obj
-  | not (PJExt.parentHasExtensions reg parentFqn) = Right []
-  | otherwise =
-      let go acc (k, v) = case PJExt.parseExtensionEntry reg parentFqn k v of
-            Nothing -> Right acc
-            Just (Right uf) -> Right (uf : acc)
-            Just (Left e) -> Left e
-      in case foldlEither go [] (AesonKM.toList obj) of
-           Right xs -> Right (reverse xs)
-           Left e -> Left e
-  where
-    reg = given :: PJExt.ExtensionRegistry
-    foldlEither _ z [] = Right z
-    foldlEither f z (x : xs) = case f z x of
-      Right z' -> foldlEither f z' xs
-      Left e -> Left e
+extDrain = PJExt.parseExtensionsFromJson given
 {-# INLINE extDrain #-}
 
 
@@ -1180,74 +1083,20 @@ parseBindStmt objVar mf fldVar = case mfJsonShape mf of
   JSOneof variants -> do
     e <- buildOneofParseExp objVar variants
     pure (BindS (VarP fldVar) e)
-  _ ->
-    pure
-      ( if mfJsonName mf == mfProtoName mf
-          then parseBindStmtSingleKey objVar mf fldVar (mfJsonName mf)
-          else parseBindStmtTwoKeys objVar mf fldVar (mfJsonName mf) (mfProtoName mf)
-      )
+  _ -> do
+    let parse = pure (parseFnFor mf)
+        jsonKey = pure (textLit (mfJsonName mf))
+        protoKey = pure (textLit (mfProtoName mf))
+    e <-
+      if mfJsonName mf == mfProtoName mf
+        then [|$parse $(varE objVar) $jsonKey|]
+        else [|PJ.parseFieldWithAlias $parse $(varE objVar) $jsonKey $protoKey|]
+    pure (BindS (VarP fldVar) e)
 
 
-{- | Parse @Maybe a@ from @obj@, trying both the camelCase JSON
-key and the snake_case proto-original name. Per proto3 spec
-the JSON reader SHOULD accept both forms.
--}
-parseBindStmtTwoKeys :: Name -> MetaField -> Name -> Text -> Text -> Stmt
-parseBindStmtTwoKeys objVar mf fldVar jsonKey snakeKey =
-  let parseFn = parseFnFor mf
-      callJson = AppE (AppE parseFn (VarE objVar)) (textLit jsonKey)
-      callSnake = AppE (AppE parseFn (VarE objVar)) (textLit snakeKey)
-      -- Try @parseFnFor mf obj <jsonKey>@; if that yielded
-      -- 'Nothing' (= JSON object had no such key) AND the
-      -- snake-case form differs, also try @parseFnFor mf obj
-      -- <snakeKey>@. This matches the proto3 spec's "accept both
-      -- forms on input" rule. We prefer the camelCase form when
-      -- both keys are present (proto3 canonical form).
-      e =
-        InfixE
-          (Just callJson)
-          (VarE '(>>=))
-          ( Just
-              ( LamE
-                  [VarP fldVar]
-                  ( CaseE
-                      (VarE fldVar)
-                      [ Match
-                          (ConP 'Just [] [WildP])
-                          (NormalB (AppE (VarE 'pure) (VarE fldVar)))
-                          []
-                      , Match
-                          (ConP 'Nothing [] [])
-                          (NormalB callSnake)
-                          []
-                      ]
-                  )
-              )
-          )
-  in BindS (VarP fldVar) e
-
-
-{- | The single-key parsing path used when the JSON key matches
-the proto-side name (no snake_case fallback needed).
--}
-parseBindStmtSingleKey :: Name -> MetaField -> Name -> Text -> Stmt
-parseBindStmtSingleKey objVar mf fldVar key =
-  BindS
-    (VarP fldVar)
-    (AppE (AppE (parseFnFor mf) (VarE objVar)) (textLit key))
-
-
-{- | Pick the right parser helper for a 'MetaField'. Factored out
-of 'parseBindStmt' so both the single- and two-key paths can
-share the same dispatch table.
--}
+-- | Pick the field parser independently of its accepted spellings.
 parseFnFor :: MetaField -> Exp
-parseFnFor = oldParseFnFor
-
-
--- | Renamed inline of the original 'parseBindStmt' helper logic.
-oldParseFnFor :: MetaField -> Exp
-oldParseFnFor mf =
+parseFnFor mf =
   case mfJsonKind mf of
     JKBytes -> case (mfKind mf, mfBytesShape mf) of
       (MFKMaybe, SBStrict) -> VarE 'parseBytesMaybeFieldMaybe
@@ -1317,43 +1166,36 @@ oldParseFnFor mf =
       JSMaybe JSFloat -> VarE 'parseFloatMaybeFieldMaybe
       JSMaybe JSBool -> VarE 'parseBoolMaybeFieldMaybe
       JSMaybe JSString -> VarE 'parseStringMaybeFieldMaybe
-      -- map<K, message V>: parse via a custom Map walker so
-      -- the nested message FromJSON instance is exercised
-      -- explicitly. Aeson's generic Map FromJSON instance
-      -- has a habit of falling back to an empty result when
-      -- the inner parse fails partially; the explicit walker
-      -- propagates failures cleanly.
-      JSMapMessage _ -> VarE 'parseStringMessageMapMaybe
-      -- Singular / repeated / map enum fields: route through
-      -- the lenient-mode-aware helpers so the conformance
-      -- suite's JSON_IGNORE_UNKNOWN_PARSING_TEST category
-      -- silently drops unknown enum strings.
-      JSEnum -> VarE 'parseEnumFieldMaybe
-      -- 'Maybe Enum' carrier (proto2 optional enum, proto3
-      -- explicit-optional enum). 'parseEnumFieldMaybeMaybe'
-      -- distinguishes "key absent" from "key present, value
-      -- null" so the round-trip preserves presence.
       JSEnumMaybe -> VarE 'parseEnumFieldMaybeMaybe
-      JSRepeatedEnum -> VarE 'parseEnumVectorMaybe
-      JSMapEnum _ -> VarE 'parseStringEnumMapMaybe
+      JSRepeatedScalar sc -> repeated (scalarFromJSONExp sc)
+      JSRepeatedEnum -> repeated (VarE 'Aeson.parseJSON)
+      JSMapScalar _ vSc -> AppE (VarE 'PJ.parseMapFieldMaybeWith) (scalarFromJSONExp vSc)
+      JSMapEnum _ -> AppE (VarE 'PJ.parseMapFieldMaybeWith) (VarE 'Aeson.parseJSON)
       _ -> VarE 'PJ.parseFieldMaybe
+
+  where
+    repeated parse = AppE (AppE (VarE 'PJ.parseRepeatedFieldMaybeWith) parse) collect
+    collect = case mfKind mf of
+      MFKList -> VarE 'V.toList
+      MFKSeq -> InfixE (Just (VarE 'Seq.fromList)) (VarE '(.)) (Just (VarE 'V.toList))
+      _ -> VarE 'id
 
 
 -- | Parse @Maybe Int64@ from a JSON string-or-number key.
 parseInt64FieldMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe Int64)
-parseInt64FieldMaybe = parseScalarFieldMaybe PJI.protoInt64FromJSON
+parseInt64FieldMaybe = PJI.parseFieldMaybeWith PJI.protoInt64FromJSON
 
 
 parseWord64FieldMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe Word64)
-parseWord64FieldMaybe = parseScalarFieldMaybe PJI.protoWord64FromJSON
+parseWord64FieldMaybe = PJI.parseFieldMaybeWith PJI.protoWord64FromJSON
 
 
 parseDoubleFieldMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe Double)
-parseDoubleFieldMaybe = parseScalarFieldMaybe (protoFloatFromJSONLenient @Double)
+parseDoubleFieldMaybe = PJI.parseFieldMaybeWith (protoFloatFromJSONLenient @Double)
 
 
 parseFloatFieldMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe Float)
-parseFloatFieldMaybe = parseScalarFieldMaybe (protoFloatFromJSONLenient @Float)
+parseFloatFieldMaybe = PJI.parseFieldMaybeWith (protoFloatFromJSONLenient @Float)
 
 
 {- | Lenient float\/double parser specialised by 'RealFloat'
@@ -1368,196 +1210,27 @@ assert on. (NaN\/Infinity sentinels still flow through.)
 -}
 protoFloatFromJSONLenient
   :: forall a. (RealFloat a) => Aeson.Value -> AesonT.Parser a
-protoFloatFromJSONLenient v = case v of
-  Aeson.Number n -> finite n
-  Aeson.String "NaN" -> pure (0 / 0)
-  Aeson.String "Infinity" -> pure (1 / 0)
-  Aeson.String "-Infinity" -> pure (negate (1 / 0))
-  Aeson.String s -> sciFromText32 s >>= finite
-  _ -> fail "Expected JSON Number or numeric String"
-  where
-    finite :: Sci.Scientific -> AesonT.Parser a
-    finite n =
-      let d = Sci.toRealFloat n :: a
-      in if isInfinite d
-           then fail ("float/double overflow: " <> show n)
-           else pure d
+protoFloatFromJSONLenient = Number.floating
 
 
-{- | Parse @Maybe (Map Text v)@ where @v@ is a generated
-submessage. The inner @parseJSON@ is the message's own
-FromJSON instance; we walk the JSON object explicitly so a
-single failing entry surfaces as a parse error rather than
-being silently dropped.
----------------------------------------------------------------------------
-Lenient unknown-enum mode
----------------------------------------------------------------------------
--}
-
-{- | When set to 'True', the generated enum @parseJSON@ parsers
-swallow unknown string values rather than failing. This
-mirrors the proto3 conformance suite's
-@JSON_IGNORE_UNKNOWN_PARSING_TEST@ category, which
-intentionally feeds JSON containing enum strings outside the
-declared set and expects them to be silently dropped.
--}
-{-# NOINLINE lenientUnknownEnumRef #-}
-lenientUnknownEnumRef :: IORef Bool
-lenientUnknownEnumRef = unsafePerformIO (newIORef False)
-
-
--- | Set the global lenient-mode flag for unknown enum values in JSON parsing.
-setLenientUnknownEnum :: Bool -> IO ()
-setLenientUnknownEnum = writeIORef lenientUnknownEnumRef
-
-
-{- | Read the current lenient-mode flag. The 'IORef' itself is
-the cache-busting argument: passing it explicitly defeats
-GHC's CSE / common-subexpression-elimination, which would
-otherwise memoise @unsafePerformIO (readIORef _)@ to the
-first observed value.
--}
-isLenientUnknownEnum :: IORef Bool -> Bool
-isLenientUnknownEnum ref = unsafePerformIO (readIORef ref)
-{-# NOINLINE isLenientUnknownEnum #-}
-
-
-{- | Parse a singular optional enum field that defaults to its
-zero value when the JSON either omits the field or carries
-an unknown enum string AND the runtime is in lenient mode.
--}
+-- Preserve the distinction between an omitted field and an explicit null.
 parseEnumFieldMaybeMaybe
-  :: forall a
-   . (Aeson.FromJSON a)
+  :: Aeson.FromJSON a
   => Aeson.Object
   -> Text
   -> AesonT.Parser (Maybe (Maybe a))
-parseEnumFieldMaybeMaybe obj key =
-  case AesonKM.lookup (AesonKey.fromText key) obj of
-    Nothing -> pure Nothing
-    Just Aeson.Null -> pure (Just Nothing)
-    Just v ->
-      AesonT.parserCatchError
-        (Just . Just <$> Aeson.parseJSON v)
-        ( \_ msg ->
-            if isUnknownEnumFail msg && isLenientUnknownEnum lenientUnknownEnumRef
-              then pure Nothing
-              else fail msg
-        )
-
-
-parseEnumFieldMaybe
-  :: forall a
-   . (Aeson.FromJSON a)
-  => Aeson.Object
-  -> Text
-  -> AesonT.Parser (Maybe a)
-parseEnumFieldMaybe obj key =
-  case AesonKM.lookup (AesonKey.fromText key) obj of
-    Nothing -> pure Nothing
-    Just Aeson.Null -> pure Nothing
-    Just v ->
-      AesonT.parserCatchError
-        (Just <$> Aeson.parseJSON v)
-        ( \_ msg ->
-            if isUnknownEnumFail msg && isLenientUnknownEnum lenientUnknownEnumRef
-              then pure Nothing
-              else fail msg
-        )
-
-
-{- | Parse a repeated enum field. Unknown-enum elements are
-dropped from the result vector when lenient mode is on, kept
-(as parse errors) otherwise.
--}
-parseEnumVectorMaybe
-  :: forall a
-   . (Aeson.FromJSON a)
-  => Aeson.Object
-  -> Text
-  -> AesonT.Parser (Maybe (V.Vector a))
-parseEnumVectorMaybe obj key =
-  case AesonKM.lookup (AesonKey.fromText key) obj of
-    Nothing -> pure Nothing
-    Just Aeson.Null -> pure Nothing
-    Just (Aeson.Array vs) -> do
-      xs <- traverse parseOne (V.toList vs)
-      pure (Just (V.fromList (Data.Maybe.catMaybes xs)))
-    Just _ -> fail ("Expected JSON Array for enum field " <> show key)
-  where
-    -- 'null' as an array element means "unknown enum value
-    -- in lenient JSON mode" (the conformance handler rewrites
-    -- the sentinel @"UNKNOWN_ENUM_VALUE"@ string to @null@
-    -- when the test_category is 'JSON_IGNORE_UNKNOWN_PARSING_TEST').
-    parseOne Aeson.Null = pure Nothing
-    parseOne v =
-      AesonT.parserCatchError
-        (Just <$> Aeson.parseJSON v)
-        ( \_ msg ->
-            if isUnknownEnumFail msg && isLenientUnknownEnum lenientUnknownEnumRef
-              then pure Nothing
-              else fail msg
-        )
-
-
-{- | Parse a @map<string, Enum>@ field. Unknown-enum entries are
-dropped when lenient mode is on; treated as parse errors
-otherwise.
--}
-parseStringEnumMapMaybe
-  :: forall a
-   . (Aeson.FromJSON a)
-  => Aeson.Object
-  -> Text
-  -> AesonT.Parser (Maybe (Map.Map Text a))
-parseStringEnumMapMaybe obj key =
-  case AesonKM.lookup (AesonKey.fromText key) obj of
-    Nothing -> pure Nothing
-    Just Aeson.Null -> pure Nothing
-    Just (Aeson.Object inner) -> do
-      pairs <- traverse parseEntry (AesonKM.toList inner)
-      pure (Just (Map.fromList [(k, v) | (k, Just v) <- pairs]))
-    Just _ -> fail ("Expected JSON Object for map field " <> show key)
-  where
-    parseEntry (k, Aeson.Null) = pure (AesonKey.toText k, Nothing)
-    parseEntry (k, v) = do
-      mv <-
-        AesonT.parserCatchError
-          (Just <$> Aeson.parseJSON v)
-          ( \_ msg ->
-              if isUnknownEnumFail msg && isLenientUnknownEnum lenientUnknownEnumRef
-                then pure Nothing
-                else fail msg
-          )
-      pure (AesonKey.toText k, mv)
-
-
-parseStringMessageMapMaybe
-  :: Aeson.FromJSON v
-  => Aeson.Object
-  -> Text
-  -> AesonT.Parser (Maybe (Map.Map Text v))
-parseStringMessageMapMaybe obj key =
-  case AesonKM.lookup (AesonKey.fromText key) obj of
-    Nothing -> pure Nothing
-    Just Aeson.Null -> pure Nothing
-    Just (Aeson.Object inner) -> do
-      pairs <- traverse parseEntry (AesonKM.toList inner)
-      pure (Just (Map.fromList pairs))
-    Just _ ->
-      fail ("Expected JSON Object for map field " <> show key)
-  where
-    parseEntry (k, v) = do
-      v' <- Aeson.parseJSON v
-      pure (AesonKey.toText k, v')
+parseEnumFieldMaybeMaybe obj key = case AesonKM.lookup (AesonKey.fromText key) obj of
+  Nothing -> pure Nothing
+  Just Aeson.Null -> pure (Just Nothing)
+  Just value -> Just . Just <$> Aeson.parseJSON value
 
 
 parseInt32FieldMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe Int32)
-parseInt32FieldMaybe = parseScalarFieldMaybe protoInt32FromJSON
+parseInt32FieldMaybe = PJI.parseFieldMaybeWith PJI.protoInt32FromJSON
 
 
 parseWord32FieldMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe Word32)
-parseWord32FieldMaybe = parseScalarFieldMaybe protoWord32FromJSON
+parseWord32FieldMaybe = PJI.parseFieldMaybeWith PJI.protoWord32FromJSON
 
 
 -- ---------------------------------------------------------------------------
@@ -1583,11 +1256,11 @@ parseScalarMaybeMaybe parser obj key =
 
 
 parseInt32MaybeFieldMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe Int32))
-parseInt32MaybeFieldMaybe = parseScalarMaybeMaybe protoInt32FromJSON
+parseInt32MaybeFieldMaybe = parseScalarMaybeMaybe PJI.protoInt32FromJSON
 
 
 parseWord32MaybeFieldMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe Word32))
-parseWord32MaybeFieldMaybe = parseScalarMaybeMaybe protoWord32FromJSON
+parseWord32MaybeFieldMaybe = parseScalarMaybeMaybe PJI.protoWord32FromJSON
 
 
 parseInt64MaybeFieldMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe Int64))
@@ -1617,66 +1290,6 @@ parseStringMaybeFieldMaybe = parseScalarMaybeMaybe Aeson.parseJSON
 parseBytesMaybeFieldMaybe
   :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe BS.ByteString))
 parseBytesMaybeFieldMaybe = parseScalarMaybeMaybe PJ.protoBytesFromJSON
-
-
--- Proto3 canonical-JSON spec rejects: out-of-range, fractional
--- (e.g. @1.5@), and unparsable strings for {int32, uint32}.
--- The conformance suite covers all three categories.
-protoInt32FromJSON :: Aeson.Value -> AesonT.Parser Int32
-protoInt32FromJSON v = case v of
-  Aeson.Number n -> bounded32 "int32" n
-  Aeson.String s -> sciFromText32 s >>= bounded32 "int32"
-  _ -> fail "Expected JSON Number or String for Int32"
-
-
-protoWord32FromJSON :: Aeson.Value -> AesonT.Parser Word32
-protoWord32FromJSON v = case v of
-  Aeson.Number n -> bounded32 "uint32" n
-  Aeson.String s -> sciFromText32 s >>= bounded32 "uint32"
-  _ -> fail "Expected JSON Number or String for UInt32"
-
-
-{- | Parse 'Scientific' from a JSON-quoted numeric string. We
-can't reuse 'PJ.sciFromText' without adding a Proto.Internal.JSON
-dependency edge, so duplicate the trivial implementation.
--}
-sciFromText32 :: Text -> AesonT.Parser Sci.Scientific
-sciFromText32 t
-  | hasLeadingWs t = fail ("Invalid numeric string (leading whitespace): " <> show t)
-  | otherwise = case reads (T.unpack t) :: [(Sci.Scientific, String)] of
-      [(s, "")] -> pure s
-      _ -> fail ("Invalid numeric string: " <> show t)
-  where
-    hasLeadingWs s = case T.uncons s of
-      Just (c, _) -> c == ' ' || c == '\t' || c == '\n' || c == '\r'
-      Nothing -> True
-
-
-{- | Bounded-integer narrowing for 32-bit fields. Mirrors
-'Proto.Internal.JSON.boundedFromSci' but lives here so the TH-spliced
-decoders don't have to drag in 'Proto.Internal.JSON' transitively.
--}
-bounded32 :: forall i. (Integral i, Bounded i) => String -> Sci.Scientific -> AesonT.Parser i
-bounded32 ty s = case Sci.toBoundedInteger s of
-  Just n -> pure n
-  Nothing -> fail (ty <> " value out of range or non-integer: " <> show s)
-
-
-{- | Generic helper: parse @Maybe a@ via a per-scalar @Aeson.Value
--> Parser a@ helper. Returns 'Nothing' for missing or null.
--}
-parseScalarFieldMaybe
-  :: (Aeson.Value -> AesonT.Parser a)
-  -> Aeson.Object
-  -> Text
-  -> AesonT.Parser (Maybe a)
-parseScalarFieldMaybe parser obj key = do
-  mv <- PJI.parseFieldMaybe obj key
-  case mv of
-    Nothing -> pure Nothing
-    Just Aeson.Null -> pure Nothing
-    Just v -> Just <$> parser v
-{-# INLINE parseScalarFieldMaybe #-}
 
 
 -- ---------------------------------------------------------------------------
@@ -1768,12 +1381,7 @@ WKT). 'parseWktMaybe' is too eager about returning
 @Just Nothing@ for @null@; supply a tailored parser instead.
 -}
 parseValueMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe PGS.Value))
-parseValueMaybe obj key =
-  case AesonKM.lookup (AesonKey.fromText key) obj of
-    Nothing -> pure Nothing
-    Just v -> case WK.valueFromJSON v of
-      Right a -> pure (Just (Just a))
-      Left e -> fail e
+parseValueMaybe obj key = fmap (fmap Just) (PJ.parsePresentFieldMaybe obj key)
 
 
 parseListValueMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe PGS.ListValue))
@@ -1808,7 +1416,7 @@ parseEmptyMaybe = parseWktMaybe WK.emptyFromJSON
 
 
 parseNullValueMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe PGS.NullValue))
-parseNullValueMaybe = parseWktMaybe WK.nullValueFromJSON
+parseNullValueMaybe obj key = fmap (fmap Just) (PJ.parsePresentFieldMaybe obj key)
 
 
 parseBoolWrapperMaybe :: Aeson.Object -> Text -> AesonT.Parser (Maybe (Maybe Proto.Google.Protobuf.Wrappers.BoolValue))
@@ -2008,7 +1616,7 @@ fromJSONAssign defName mf fldVar = case mfKind mf of
 
 {- | Synthesise a 'Hashable' instance for a generated record.
 Mirrors the per-shape combinator the pure-text codegen uses
-('V.foldl' for vectors, 'Map.foldlWithKey'' for maps, plain
+('VG.foldl' for vectors, 'Map.foldlWithKey'' for maps, plain
 'hashWithSalt' for everything else).
 -}
 mkHashableInstanceForMessage :: Name -> [MetaField] -> Q Dec
@@ -2037,7 +1645,7 @@ hashStep msgVar acc mf =
   let fieldExpr = readFieldE mf msgVar
   in case mfKind mf of
        MFKVector ->
-         AppE (AppE (AppE (VarE 'V.foldl') (VarE 'hashWithSalt)) acc) fieldExpr
+         AppE (AppE (AppE (VarE 'VG.foldl') (VarE 'hashWithSalt)) acc) fieldExpr
        MFKList ->
          AppE (AppE (AppE (VarE 'foldl) (VarE 'hashWithSalt)) acc) fieldExpr
        MFKSeq ->
@@ -2251,10 +1859,7 @@ scalarValueToJSON _ _ =
   Aeson.Null
 
 
-{- | A repeated scalar field as a JSON array. The splice
-pre-passes the 'JsonScalar' tag so the runtime knows which
-per-element encoder to call.
--}
+-- | Legacy runtime helper retained for previously generated splices.
 scalarVectorToJSON
   :: forall a
    . (Aeson.ToJSON a)
@@ -2264,37 +1869,7 @@ scalarVectorToJSON
 scalarVectorToJSON sc xs = Aeson.toJSON (V.toList (V.map (encodeOneScalar sc) xs))
 
 
-{- | List-backed counterpart of 'scalarVectorToJSON', dispatched
-when the field's 'fieldRepeated' override is 'ListRep'.
--}
-scalarListToJSON
-  :: forall a
-   . (Aeson.ToJSON a)
-  => JsonScalar
-  -> [a]
-  -> Aeson.Value
-scalarListToJSON sc xs = Aeson.toJSON (fmap (encodeOneScalar sc) xs)
-
-
-{- | Seq-backed counterpart of 'scalarVectorToJSON', dispatched
-when the field's 'fieldRepeated' override is 'SeqRep'.
--}
-scalarSeqToJSON
-  :: forall a
-   . (Aeson.ToJSON a)
-  => JsonScalar
-  -> Seq a
-  -> Aeson.Value
-scalarSeqToJSON sc xs = Aeson.toJSON (fmap (encodeOneScalar sc) (F.toList xs))
-
-
-{- | Per-element encoder shared by 'scalarVectorToJSON',
-'scalarListToJSON', 'scalarSeqToJSON'. 'JSBytes' is handled by
-the dedicated @*BytesVectorToJSON@ / @*BytesListToJSON@ /
-@*BytesSeqToJSON@ helpers, so a 'JSBytes' tag reaching this
-function means the splice picked the wrong helper -- emit
-@null@ rather than silently base64-encoding via the wrong path.
--}
+-- | Legacy scalar encoder. Bytes use their dedicated helpers.
 encodeOneScalar :: Aeson.ToJSON a => JsonScalar -> a -> Aeson.Value
 encodeOneScalar JSBytes _ = Aeson.Null
 encodeOneScalar _ x = Aeson.toJSON x
@@ -2488,12 +2063,14 @@ mkProtoEnumInstance
   for every declared value (aliases
   included).
   -}
+  -> Bool
+  -- ^ Whether the enum is closed on the wire.
   -> Name
   {- ^ Synthetic @<EnumName>'Unknown !Int32@
   constructor for open-enum semantics.
   -}
   -> Q Dec
-mkProtoEnumInstance tyName fqName values unknownCon = do
+mkProtoEnumInstance tyName fqName values closed unknownCon = do
   nVar <- newName "n"
   let
     -- protoEnumName _ = "..."
@@ -2515,21 +2092,14 @@ mkProtoEnumInstance tyName fqName values unknownCon = do
     -- constructor, plus the Unknown wrapper which simply
     -- yields its carried int.
     toClauses =
-      [ Clause
-          [ConP con [] []]
-          (NormalB (intLit num))
-          []
-      | (con, _, num) <- values
-      ]
+      map (\(con, _, num) -> Clause [ConP con [] []] (NormalB (intLit num)) []) primaries
         <> [ Clause
                [ConP unknownCon [] [VarP nVar]]
                (NormalB (AppE (VarE 'fromIntegral) (VarE nVar)))
                []
            ]
     toDec = FunD 'PS.toProtoEnumValue toClauses
-    -- fromProtoEnumValue: one Just clause per primary number,
-    -- then a catch-all that produces 'Just (Unknown n)' so
-    -- callers can preserve the wire value across encode\/decode.
+    -- Open enums expose unknown wire values through the synthetic constructor.
     primaries = primaryByNumber values
     fromClauses =
       fmap
@@ -2540,29 +2110,22 @@ mkProtoEnumInstance tyName fqName values unknownCon = do
               []
         )
         primaries
-        <> [ Clause
-               [VarP nVar]
-               ( NormalB
-                   ( AppE
-                       (ConE 'Just)
-                       ( AppE
-                           (ConE unknownCon)
-                           ( SigE
-                               (AppE (VarE 'fromIntegral) (VarE nVar))
-                               (ConT ''Int32)
-                           )
-                       )
-                   )
-               )
-               []
+        <> [ if closed
+               then Clause [WildP] (NormalB (ConE 'Nothing)) []
+               else
+                 Clause
+                   [VarP nVar]
+                   (NormalB (AppE (ConE 'Just) (AppE (ConE unknownCon) (AppE (VarE 'fromIntegral) (VarE nVar)))))
+                   []
            ]
     fromDec = FunD 'PS.fromProtoEnumValue fromClauses
+    closedDec = FunD 'PS.protoEnumIsOpen [Clause [WildP] (NormalB (ConE 'False)) []]
   pure $
     InstanceD
       Nothing
       []
       (AppT (ConT ''PS.ProtoEnum) (ConT tyName))
-      [nameDec, valuesDec, toDec, fromDec]
+      ([nameDec, valuesDec, toDec, fromDec] <> if closed then [closedDec] else [])
 
 
 -- | Drop later occurrences of any wire number; preserves first.
@@ -2583,6 +2146,8 @@ read, but the canonical write form is the name).
 mkEnumAesonInstances :: Name -> [(Name, Text, Int)] -> Name -> Q [Dec]
 mkEnumAesonInstances tyName values unknownCon = do
   nVar <- newName "n"
+  numberValue <- newName "numberValue"
+  parseNumber <- [|PJ.protoEnumNumberFromJSON $(varE numberValue)|]
   let primaries = primaryByNumber values
       toClauses =
         [ Clause
@@ -2615,44 +2180,13 @@ mkEnumAesonInstances tyName values unknownCon = do
             []
         | (con, pname, _) <- values
         ]
-      -- 'toEnum' is the open-enum-aware constructor: known
-      -- numbers route to the matching constructor, unknown
-      -- numbers wrap in the Unknown variant.
+      -- The schema decides whether unrecognized numbers are accepted.
       numberMatch =
         Match
-          (ConP 'Aeson.Number [] [VarP nVar])
-          ( NormalB
-              ( AppE
-                  (VarE 'pure)
-                  ( AppE
-                      (VarE 'toEnum)
-                      (AppE (VarE 'round) (VarE nVar))
-                  )
-              )
-          )
+          (VarP numberValue)
+          (NormalB parseNumber)
           []
-      -- Tag the failure with a sentinel prefix so wrapping
-      -- parsers (e.g. lenient mode for repeated/map enum fields,
-      -- the JSON_IGNORE_UNKNOWN_PARSING_TEST conformance
-      -- category) can detect it without false-positiving on
-      -- unrelated Aeson parse errors.
-      failMatch =
-        Match
-          WildP
-          ( NormalB
-              ( AppE
-                  (VarE 'fail)
-                  ( LitE
-                      ( StringL
-                          ( unknownEnumFailPrefix
-                              <> nameBase tyName
-                          )
-                      )
-                  )
-              )
-          )
-          []
-      caseExp = LamCaseE (stringClauses <> [numberMatch, failMatch])
+      caseExp = LamCaseE (stringClauses <> [numberMatch])
 
   pure
     [ InstanceD
@@ -2695,49 +2229,19 @@ mkEnumHashableInstance tyName = do
 -- Oneof JSON input
 -- ---------------------------------------------------------------------------
 
-{- | Build an 'Exp' that parses a oneof carrier (@Maybe SumType@)
-from an 'Aeson.Object' by scanning for any of the variant
-JSON keys. Implements the proto3 spec rules:
-
-  * No variant key present: @Nothing@.
-  * Exactly one variant key present, value is JSON @null@:
-    @Nothing@ (treats null as variant-cleared).
-  * Exactly one variant key present, value parses: @Just v@.
-  * Multiple non-null variant keys present: parser fails
-    ('OneofFieldDuplicate' conformance test).
--}
+-- | Splice the shared flattened-oneof parser into the parent message.
 buildOneofParseExp :: Name -> [OneofVariantJson] -> Q Exp
 buildOneofParseExp objVar variants = do
-  pairs <- traverse mkPair variants
-  let pairsList = ListE pairs
-  [|parseOneofVariants $(varE objVar) $(pure pairsList)|]
+  choices <- traverse mkChoice variants
+  [|PJ.parseOneofVariants $(varE objVar) $(pure (ListE choices))|]
   where
-    mkPair OneofVariantJson {ovjConstructor = con, ovjJsonKey = key, ovjShape = sh} = do
+    mkChoice OneofVariantJson {ovjConstructor = con, ovjJsonKey = key, ovjProtoKey = protoKey, ovjShape = sh} = do
       vName <- newName "v"
-      parser <- case sh of
-        OVScalar sc -> pure (oneofScalarParserE sc (ConE con) (VarE vName))
-        OVMessage ->
-          [|$(pure (ConE con)) <$> Aeson.parseJSON $(varE vName)|]
-        OVEnum ->
-          [|$(pure (ConE con)) <$> Aeson.parseJSON $(varE vName)|]
-        OVNullValue ->
-          -- NullValue accepts JSON @null@ /or/ the @"NULL_VALUE"@
-          -- string sentinel; both decode to the singleton enum
-          -- value via the standard 'parseJSON' instance, except
-          -- that we also cover the bare-null shape ourselves.
-          [|
-            $(pure (ConE con))
-              <$> ( case $(varE vName) of
-                      Aeson.Null -> pure NullValue'NullValue
-                      other -> Aeson.parseJSON other
-                  )
-            |]
-      let nullSem = case sh of
-            OVNullValue -> ConE 'OneofVariantNullIsValue
-            _ -> ConE 'OneofVariantNullIsUnset
-          lam = LamE [VarP vName] parser
-          tuple3 = TupE [Just (textLit key), Just nullSem, Just lam]
-      pure tuple3
+      let (selectsNull, parse) = case sh of
+            OVScalar sc -> (False, pure (oneofScalarParserE sc (ConE con) (VarE vName)))
+            OVNamed acceptsNull -> (acceptsNull, [|$(conE con) <$> Aeson.parseJSON $(varE vName)|])
+      parser <- parse
+      [|PJ.OneofVariant $(pure (textLit key)) $(pure (textLit protoKey)) $(conE (if selectsNull then 'True else 'False)) $(pure (LamE [VarP vName] parser))|]
 
 
 {- | Splice for one scalar oneof variant: applies the right
@@ -2750,17 +2254,15 @@ oneofScalarParserE sc conE valE =
   in InfixE (Just conE) (VarE '(<$>)) (Just (AppE p valE))
 
 
-{- | Per-scalar @Aeson.Value -> Parser a@ helper. Mirrors the
-writer-side 'scalarValueToJSON' / 'scalarTagE' tables.
--}
+-- | Splice the parser that pairs with 'scalarToJSONExp'.
 scalarFromJSONExp :: JsonScalar -> Exp
 scalarFromJSONExp = \case
   JSBool -> VarE 'Aeson.parseJSON
-  JSInt32 -> VarE 'protoInt32FromJSON
-  JSSInt32 -> VarE 'protoInt32FromJSON
-  JSSFixed32 -> VarE 'protoInt32FromJSON
-  JSUInt32 -> VarE 'protoWord32FromJSON
-  JSFixed32 -> VarE 'protoWord32FromJSON
+  JSInt32 -> VarE 'PJI.protoInt32FromJSON
+  JSSInt32 -> VarE 'PJI.protoInt32FromJSON
+  JSSFixed32 -> VarE 'PJI.protoInt32FromJSON
+  JSUInt32 -> VarE 'PJI.protoWord32FromJSON
+  JSFixed32 -> VarE 'PJI.protoWord32FromJSON
   JSInt64 -> VarE 'PJI.protoInt64FromJSON
   JSSInt64 -> VarE 'PJI.protoInt64FromJSON
   JSSFixed64 -> VarE 'PJI.protoInt64FromJSON
@@ -2778,59 +2280,6 @@ oneofFloatFromJSON = protoFloatFromJSONLenient
 
 oneofDoubleFromJSON :: Aeson.Value -> AesonT.Parser Double
 oneofDoubleFromJSON = protoFloatFromJSONLenient
-
-
-{- | Sentinel error-message prefix used by the generated enum
-'parseJSON' when it can't recognise a string value. Wrapping
-parsers (singular / repeated / map enum fields, lenient
-conformance mode) detect it via 'isUnknownEnumFail' and
-decide whether to filter the element or propagate the error.
--}
-unknownEnumFailPrefix :: String
-unknownEnumFailPrefix = "wireform-unknown-enum-value:"
-
-
-isUnknownEnumFail :: String -> Bool
-isUnknownEnumFail = (unknownEnumFailPrefix `isPrefixOf`)
-  where
-    isPrefixOf p s = take (length p) s == p
-
-
-{- | Per-variant interpretation of JSON @null@ for oneofs. For
-most variants, @null@ means "this variant is unset" (proto3
-spec). For a 'google.protobuf.NullValue' variant, @null@
-is the variant's value.
--}
-data OneofVariantNullSemantics
-  = OneofVariantNullIsUnset
-  | OneofVariantNullIsValue
-
-
-{- | Runtime helper backing 'buildOneofParseExp'. Lives outside
-the splice so the 'parseFnFor' table doesn't have to.
--}
-parseOneofVariants
-  :: Aeson.Object
-  -> [(Text, OneofVariantNullSemantics, Aeson.Value -> AesonT.Parser a)]
-  -> AesonT.Parser (Maybe a)
-parseOneofVariants obj variants =
-  let present =
-        [ (k, v, p)
-        | (k, sem, p) <- variants
-        , Just v <- [AesonKM.lookup (AesonKey.fromText k) obj]
-        , keep sem v
-        ]
-      keep OneofVariantNullIsUnset Aeson.Null = False
-      keep _ _ = True
-  in case present of
-       [] -> pure Nothing
-       [(_, v, p)] -> Just <$> p v
-       _ ->
-         fail
-           ( "Multiple oneof variants set: "
-               <> show (fmap (\(k, _, _) -> k) present)
-           )
-{-# INLINE parseOneofVariants #-}
 
 
 -- ---------------------------------------------------------------------------

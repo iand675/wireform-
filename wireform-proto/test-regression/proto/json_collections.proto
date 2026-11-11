@@ -1,0 +1,233 @@
+syntax = "proto3";
+
+import "google/protobuf/any.proto";
+import "google/protobuf/field_mask.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/wrappers.proto";
+
+message JsonCollections {
+  repeated bytes blobs = 1;
+}
+
+message JsonScalars {
+  int64 signed_value = 1;
+  uint64 unsigned_value = 2;
+  sint32 small = 3;
+  optional fixed32 optional_small = 4;
+  float fraction = 5;
+  double ratio = 6;
+}
+
+enum ChoiceColor {
+  option allow_alias = true;
+  CHOICE_COLOR_UNSPECIFIED = 0;
+  CHOICE_COLOR_RED = 7;
+  CHOICE_COLOR_CRIMSON = 7;
+  CHOICE_COLOR_RETIRED = -3;
+}
+
+message ChoicePayload {
+  int32 count = 1;
+}
+
+message JsonAny {
+  google.protobuf.Any payload = 1;
+  repeated google.protobuf.Any items = 2;
+  map<string, google.protobuf.Any> entries = 3;
+  oneof selection {
+    google.protobuf.Any selected = 4;
+  }
+}
+
+message JsonWrappers {
+  google.protobuf.BoolValue flag = 1;
+  google.protobuf.Int32Value int32_value = 2;
+  google.protobuf.Int64Value int64_value = 3;
+  google.protobuf.UInt32Value uint32_value = 4;
+  google.protobuf.UInt64Value uint64_value = 5;
+  google.protobuf.FloatValue float_value = 6;
+  google.protobuf.DoubleValue double_value = 7;
+  google.protobuf.StringValue text = 8;
+  google.protobuf.BytesValue blob = 9;
+  google.protobuf.FieldMask mask = 10;
+  repeated google.protobuf.BytesValue blobs = 11;
+  map<string, google.protobuf.Int64Value> counts = 12;
+  oneof selection {
+    google.protobuf.FieldMask selected_mask = 13;
+    google.protobuf.UInt32Value selected_uint32 = 14;
+  }
+}
+
+message JsonContainers {
+  repeated int32 ints = 1;
+  repeated ChoicePayload messages = 2;
+  repeated ChoiceColor colors = 3;
+  map<string, int32> values = 4;
+  map<string, bytes> blobs = 5;
+}
+
+message JsonEnumMode {
+  string label = 1;
+  optional ChoiceColor primary_color = 2;
+  repeated ChoiceColor colors = 3;
+  repeated ChoiceColor more_colors = 4;
+  map<string, ChoiceColor> by_name = 5;
+  JsonEnumMode child = 6;
+  repeated JsonEnumMode children = 7;
+  map<string, JsonEnumMode> named_children = 8;
+  oneof selection {
+    ChoiceColor selected_color = 9;
+    JsonEnumMode selected_child = 10;
+  }
+  bool flag = 11;
+  bytes blob = 12;
+  ChoiceColor implicit_color = 13;
+  optional bool explicit_flag = 14;
+  optional bytes explicit_blob = 15;
+  optional string explicit_label = 16;
+}
+
+message JsonChoices {
+  oneof choice {
+    int64 signed_value = 1 [json_name = "signed"];
+    bytes byte_payload = 2;
+    float fraction = 3;
+    ChoiceColor color = 4;
+    ChoicePayload child = 5;
+    google.protobuf.NullValue nil = 6;
+  }
+  oneof secondary {
+    string label = 7;
+  }
+}
+
+message UserNullChoice {
+  enum NullValue {
+    LOCAL_NULL_VALUE_UNSPECIFIED = 0;
+    LOCAL_NULL_VALUE_ACTIVE = 1;
+  }
+  oneof choice {
+    NullValue nil = 1;
+    int32 number = 2;
+  }
+}
+
+message JsonNulls {
+  optional google.protobuf.NullValue sentinel = 1;
+  .google.protobuf.Value dynamic = 2;
+  repeated google.protobuf.NullValue sentinels = 3;
+  repeated google.protobuf.Value dynamics = 4;
+  map<string, google.protobuf.NullValue> sentinel_map = 5;
+  map<int32, google.protobuf.Value> dynamic_map = 6;
+  oneof choice {
+    google.protobuf.NullValue selected_sentinel = 7;
+    .google.protobuf.Value selected_dynamic = 8;
+  }
+  google.protobuf.NullValue implicit_sentinel = 9;
+  google.protobuf.Struct structured = 10;
+  google.protobuf.ListValue listed = 11;
+  optional int32 plain = 12;
+}
+
+message JsonAliases {
+  optional int64 original_id = 1 [json_name = "id"];
+  repeated bytes byte_chunks = 2;
+  map<string, int32> tags_by_name = 3 [json_name = "tags"];
+  optional ChoiceColor open_color = 4;
+  google.protobuf.Value raw_value = 5;
+  optional bytes scalar_bytes = 6;
+  map<string, bytes> blobs_by_name = 7 [json_name = "blobs"];
+}
+
+message JsonTypedMaps {
+  map<int32, ChoiceColor> enums_by_id = 1;
+  map<bool, ChoiceColor> enums_by_flag = 2;
+  map<int32, bytes> bytes_by_id = 3;
+  map<bool, bytes> bytes_by_flag = 4;
+  map<int64, uint64> unsigned_by_id = 5;
+  map<uint64, int64> signed_by_id = 6;
+  map<bool, double> ratio_by_flag = 7;
+}
+
+message SelectorCollision {
+  int32 chosen = 1;
+  int32 _chosen = 2 [json_name = "alternate"];
+  map<string, int32> foo_bar = 3;
+  int32 foo_BAR = 4 [json_name = "otherFoo"];
+  oneof _selection {
+    int32 picked = 5;
+  }
+  int32 selection = 6;
+  bytes unknown_fields = 7;
+}
+
+message OneofCollision {
+  enum Change {
+    NAME = 0;
+  }
+
+  oneof change {
+    int32 name = 1;
+    int32 _name = 2 [json_name = "alternate"];
+  }
+
+  oneof _change {
+    string note = 3;
+  }
+}
+
+message JsonRepeatedNumbers {
+  repeated uint64 limits = 1;
+  repeated double ratios = 2;
+  repeated sint64 offsets = 3;
+  repeated float fractions = 4;
+  repeated fixed32 sample_counts = 5;
+  repeated bool flags = 6;
+}
+
+message WideTags {
+  int32 scalar = 16;
+  optional string title = 17;
+  repeated string names = 2048;
+  repeated bytes chunks = 2049;
+  ChoiceColor color = 18;
+  ChoicePayload child = 19;
+  repeated ChoicePayload children = 20;
+  repeated ChoiceColor colors = 21 [packed = false];
+  repeated int32 packed_codes = 22;
+  map<string, int32> entries = 23;
+  oneof selection {
+    fixed64 token = 24;
+    ChoicePayload selected_child = 25;
+    ChoiceColor selected_color = 26;
+    bytes selected_bytes = 27;
+  }
+  string largest_tag = 536870911;
+}
+
+message Packing3 {
+  repeated ChoiceColor packed_colors = 16;
+  repeated sfixed32 signed32 = 17;
+  repeated sfixed64 signed64 = 18;
+  repeated sint32 expanded_sint = 19 [packed = false];
+  repeated ChoiceColor expanded_colors = 20 [packed = false];
+}
+
+message MergePart {
+  int32 first = 1;
+  int32 second = 2;
+  repeated int32 values = 3;
+  optional int32 explicit_value = 4;
+}
+
+message MergeCases {
+  MergePart child = 1;
+  oneof selection {
+    MergePart branch = 2;
+    int32 reset = 3;
+    JsonChoices selected_child = 7;
+  }
+  map<string, MergePart> items = 4;
+  JsonChoices choice_child = 5;
+  repeated MergePart children = 6;
+}

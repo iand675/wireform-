@@ -8,7 +8,7 @@
 
 This module centralises the @loadProto@ calls so the rest of
 the harness can import the generated types without fighting
-TH stage restrictions. Two schemas are spliced in:
+TH stage restrictions.
 
   * @conformance.proto@ — the wire protocol the upstream
     @conformance_test_runner@ uses to drive any test program.
@@ -26,9 +26,9 @@ TH stage restrictions. Two schemas are spliced in:
     wire-format round-trip still survives those fields via
     unknown-field preservation.
 
-The two splices are kept on separate top-level pragmas so a
-compile error in one doesn't blow up the entire module — the
-error message points straight at the offending @.proto@ file.
+  * @test_messages_proto2.proto@ and @test_messages_edition2023.proto@
+    provide the proto2 and Editions test messages, including groups and
+    tag-delimited extensions.
 -}
 module Test.Conformance.Schema where
 
@@ -41,6 +41,7 @@ module Test.Conformance.Schema where
 -- the generated record fields use.
 import Control.DeepSeq (NFData)
 import Data.ByteString (ByteString)
+import Data.Bifunctor (first)
 import Data.Hashable (Hashable)
 import Data.Int (Int32, Int64)
 import Data.Map.Strict qualified as Map
@@ -50,6 +51,8 @@ import Data.Text (Text)
 import Data.Vector qualified as V
 import Data.Word (Word32, Word64)
 import GHC.Generics (Generic)
+import Language.Haskell.TH (listE, litE, runIO, stringL, tupE)
+import Language.Haskell.TH.Syntax (addDependentFile)
 import Proto.Extension qualified as Ext
 -- The WKT splice paths in the test_messages_proto3.proto file
 -- reference @Proto.Google.Protobuf.X@ types; those modules must
@@ -79,8 +82,12 @@ import Proto.Google.Protobuf.Wrappers (
   UInt32Value,
   UInt64Value,
  )
-import Proto.Internal.JSON.Extension (ExtensionRegistry, emptyExtensionRegistry)
+import Proto.Internal.JSON.Extension (ExtensionRegistry)
+import Proto.IDL.Parser (parseProtoFile)
+import Proto.TextFormat (TextFormatSchema, buildTextFormatSchema)
 import Proto.TH (loadProto)
+import Test.Conformance.EditionUnstable (unstableExtensionRegistry)
+import Test.Conformance.MigrationProto2 (migrationProto2Registry)
 
 
 -- Reference the imported types to keep GHC from stripping them
@@ -109,13 +116,6 @@ _keepWkts
 _keepWkts _ = ()
 
 
--- The conformance protos have no proto2 extensions, but the TH-generated
--- JSON instances carry a Given ExtensionRegistry constraint. Satisfy it
--- with an empty registry.
-instance Given ExtensionRegistry where
-  given = emptyExtensionRegistry
-
-
 -- The wire protocol the upstream conformance_test_runner uses.
 $(loadProto "test-conformance/protos/conformance.proto")
 
@@ -124,12 +124,49 @@ $(loadProto "test-conformance/protos/conformance.proto")
 $(loadProto "test-conformance/protos/test_messages_proto3.proto")
 
 
--- The TestAllTypesProto2 message schema (also a pruned subset —
--- group syntax, message_set_wire_format, and required-fields-
--- only TestAllRequiredTypesProto2 are dropped because loadProto
--- doesn't support them yet; tests targeting those features
--- stay 'skipped' downstream).
+-- The same source schema drives TextFormat field validation and wire codegen.
+conformanceTextSchema :: Either String TextFormatSchema
+conformanceTextSchema = buildTextFormatSchema =<< traverse parse
+  $(let embed file = do
+          addDependentFile file
+          source <- runIO (readFile file)
+          tupE [litE (stringL file), litE (stringL source)]
+        files = [ "test-conformance/protos/test_messages_proto3.proto"
+                , "test-conformance/protos/test_messages_proto2.proto"
+                , "test-conformance/protos/test_messages_edition2023.proto"
+                , "test-conformance/protos/test_messages_proto2_editions.proto"
+                , "test-conformance/protos/test_messages_proto3_editions.proto"
+                , "test-conformance/protos/test_messages_edition_unstable.proto"
+                ] <> fmap (\name -> "data/proto/google/protobuf/" <> name <> ".proto")
+              ["any", "duration", "empty", "field_mask", "struct", "timestamp", "wrappers"]
+    in listE (fmap embed files))
+  where
+    parse (file, source) = first show (parseProtoFile file source)
+
+
+-- The vendored TestAllTypesProto2 schema includes legacy groups and extensions.
 $(loadProto "test-conformance/protos/test_messages_proto2.proto")
+
+
+$(loadProto "test-conformance/protos/test_messages_edition2023.proto")
+
+
+editionExtensionRegistry :: ExtensionRegistry
+editionExtensionRegistry =
+  registerExt_protobuf_test_messages_editions_extension_int32
+    <> registerExt_protobuf_test_messages_editions_extension_string
+    <> registerExt_protobuf_test_messages_editions_extension_bytes
+    <> registerExt_protobuf_test_messages_editions_groupliketype
+    <> registerExt_protobuf_test_messages_editions_delimited_ext
+
+
+-- Use the same generated extension codec for ProtoJSON input and output.
+instance Given ExtensionRegistry where
+  given =
+    registerExt_protobuf_test_messages_proto2_extension_int32
+      <> editionExtensionRegistry
+      <> migrationProto2Registry
+      <> unstableExtensionRegistry
 
 
 -- Force the generated types into the export list so a downstream

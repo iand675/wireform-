@@ -1,5 +1,6 @@
 module Test.WellKnownUtil (wellKnownUtilTests) where
 
+import Control.Exception (ErrorCall, evaluate)
 import Data.Aeson qualified as Aeson
 import Data.Int (Int32, Int64)
 import Data.Map.Strict qualified as Map
@@ -68,6 +69,14 @@ timestampUtilTests =
           let ts = timestampFromPOSIXTime 1708000000.5
           timestampSeconds ts `shouldBe` 1708000000
           timestampNanos ts `shouldBe` 500000000
+      , it "normalizes pre-epoch fractions and preserves the latest Timestamp" $ do
+          let before = defaultTimestamp {timestampSeconds = -1, timestampNanos = 500000000}
+              latest = defaultTimestamp {timestampSeconds = 253402300799, timestampNanos = 999999999}
+              earliest = defaultTimestamp {timestampSeconds = -62135596800}
+          timestampFromPOSIXTime (-0.5) `shouldBe` before
+          timestampFromPOSIXTime (timestampToPOSIXTime latest) `shouldBe` latest
+          addDuration defaultTimestamp (defaultDuration {durationNanos = -500000000}) `shouldBe` before
+          addDuration earliest (subtractTimestamps latest earliest) `shouldBe` latest
       , it "addDuration" $ do
           let ts = defaultTimestamp {timestampSeconds = 100, timestampNanos = 500000000}
               dur = defaultDuration {durationSeconds = 1, durationNanos = 700000000}
@@ -124,6 +133,14 @@ durationUtilTests =
           let dur = durationFromSeconds 42
           durationSeconds dur `shouldBe` 42
           durationNanos dur `shouldBe` 0
+      , it "preserves the maximum Duration through conversion and arithmetic" $ do
+          let limit = defaultDuration {durationSeconds = 315576000000, durationNanos = 999999999}
+          durationFromNominalDiffTime (durationToNominalDiffTime limit) `shouldBe` limit
+          normalizeDuration limit `shouldBe` limit
+          addDurations limit defaultDuration `shouldBe` limit
+          compare limit (durationFromSeconds 2000000000) `shouldBe` GT
+          isValidDuration (durationFromSeconds minBound) `shouldBe` False
+          evaluate (durationToNanos limit) `shouldThrow` (\(_ :: ErrorCall) -> True)
       , it "durationFromMillis" $ do
           let dur = durationFromMillis 1500
           durationSeconds dur `shouldBe` 1

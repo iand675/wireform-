@@ -1,0 +1,10 @@
+syntax = "proto3";
+package wireform.audit;
+
+import "google/protobuf/audit_mode.proto";
+import "google/protobuf/source_context.proto";
+
+message AuditEnvelope {
+  .google.protobuf.AuditMode mode = 1;
+  .google.protobuf.SourceContext context = 2;
+}

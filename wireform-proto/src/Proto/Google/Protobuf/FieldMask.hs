@@ -1,9 +1,12 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE StrictData #-}
+{-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-unused-imports -Wno-unused-matches -Wno-unused-top-binds #-}
 
 {- | Auto-generated protobuf types from package @google.protobuf@.
@@ -57,7 +60,8 @@ import Proto.Internal.Encode.Archetype (
   archVarint,
   archVarintSize,
  )
-import Proto.Internal.JSON (bytesFieldToJSON, bytesMapFieldToJSON, jsonObject, parseBytesFieldMaybe, parseBytesMapFieldMaybe, parseFieldMaybe, protoBytesToJSON, (.=:))
+import Proto.Internal.JSON (bytesFieldToJSON, bytesMapFieldToJSON, jsonObject, parseBytesFieldMaybe, parseBytesMapFieldMaybe, parseFieldMaybe, protoBytesFromJSON, protoBytesToJSON, (.=:))
+import Proto.Internal.JSON qualified as PJ
 import Proto.Internal.JSON.Extension qualified as PJExt
 import Proto.Internal.Wire (Tag (..), WireType (..))
 import Proto.Internal.Wire.Encode (
@@ -92,7 +96,7 @@ import Proto.Internal.Wire.Encode (
  )
 import Proto.Registry (IsMessage)
 import Proto.Registry qualified
-import Proto.Schema (FieldDescriptor (..), FieldLabel' (..), FieldTypeDescriptor (..), ProtoMessage (..), ScalarFieldType (..), SomeFieldDescriptor (..))
+import Proto.Schema (FieldDescriptor (..), FieldLabel' (..), FieldTypeDescriptor (..), ProtoEnum (..), ProtoMessage (..), ScalarFieldType (..), SomeFieldDescriptor (..))
 import Wireform.Builder qualified as B
 
 
@@ -127,7 +131,7 @@ instance MessageEncode FieldMask where
 
 instance MessageSize FieldMask where
   messageSize msg =
-    (V.foldl' (\acc v -> acc + fieldTextSize 1 v) 0 msg.fieldMaskPaths)
+    (V.foldl' (\acc v -> acc + archStringSize v) 0 msg.fieldMaskPaths)
       + unknownFieldsSize msg.fieldMaskUnknownFields
 
 
@@ -139,7 +143,7 @@ instance MessageDecode FieldMask where
         withTagM
           (pure (FieldMask {fieldMaskPaths = acc_0, fieldMaskUnknownFields = reverse acc_unknown_}))
           ( \fn wt -> case fn of
-              1 -> do
+              1 | wt == 2 -> do
                 v <- decodeFieldString
                 loop (acc_0 <> V.singleton v) acc_unknown_
               _ -> do
@@ -174,20 +178,11 @@ instance IsMessage FieldMask
 
 
 instance Aeson.ToJSON FieldMask where
-  toJSON msg =
-    jsonObject
-      [ "paths" .=: msg.fieldMaskPaths
-      ]
+  toJSON (FieldMask value _) = PJ.fieldMaskPathsToJSON value
 
 
 instance Aeson.FromJSON FieldMask where
-  parseJSON = Aeson.withObject "FieldMask" $ \obj -> do
-    fld_fieldMaskPaths <- parseFieldMaybe obj "paths"
-    pure
-      defaultFieldMask
-        { fieldMaskPaths = maybe (fieldMaskPaths defaultFieldMask) id fld_fieldMaskPaths
-        , fieldMaskUnknownFields = []
-        }
+  parseJSON json = flip FieldMask [] <$> PJ.fieldMaskPathsFromJSON json
 
 
 instance Hashable FieldMask where

@@ -57,7 +57,7 @@ import Proto.Internal.Encode.Archetype (
   archVarint,
   archVarintSize,
  )
-import Proto.Internal.JSON (bytesFieldToJSON, bytesMapFieldToJSON, jsonObject, parseBytesFieldMaybe, parseBytesMapFieldMaybe, parseFieldMaybe, protoBytesToJSON, (.=:))
+import Proto.Internal.JSON (bytesFieldToJSON, bytesMapFieldToJSON, formatDurationSeconds, jsonObject, parseBytesFieldMaybe, parseBytesMapFieldMaybe, parseDurationSeconds, parseFieldMaybe, protoBytesToJSON, (.=:))
 import Proto.Internal.JSON.Extension qualified as PJExt
 import Proto.Internal.Wire (Tag (..), WireType (..))
 import Proto.Internal.Wire.Encode (
@@ -143,10 +143,10 @@ instance MessageDecode Duration where
         withTagM
           (pure (Duration {durationSeconds = acc_0, durationNanos = acc_1, durationUnknownFields = reverse acc_unknown_}))
           ( \fn wt -> case fn of
-              1 -> do
+              1 | wt == 0 -> do
                 v <- (fromIntegral <$> decodeFieldVarint)
                 loop v acc_1 acc_unknown_
-              2 -> do
+              2 | wt == 0 -> do
                 v <- (fromIntegral <$> decodeFieldVarint)
                 loop acc_0 v acc_unknown_
               _ -> do
@@ -193,19 +193,12 @@ instance IsMessage Duration
 
 
 instance Aeson.ToJSON Duration where
-  toJSON msg =
-    let s = msg.durationSeconds
-        n = msg.durationNanos
-        nanoStr = if n == 0 then T.pack "" else T.pack "." <> dropTrailingZeros (pad9 (abs (fromIntegral n)))
-        dropTrailingZeros t = case T.stripSuffix (T.pack "0") t of Just t' -> dropTrailingZeros t'; Nothing -> t
-        pad9 x = let sx = T.pack (show x) in T.replicate (9 - T.length sx) (T.pack "0") <> sx
-        sign = if s < 0 || n < 0 then T.pack "-" else T.pack ""
-    in Aeson.String (sign <> T.pack (show (abs s)) <> nanoStr <> T.pack "s")
+  toJSON (Duration seconds nanos _) = Aeson.String (formatDurationSeconds seconds nanos)
 
 
 instance Aeson.FromJSON Duration where
-  parseJSON (Aeson.String _) = pure defaultDuration
-  parseJSON _ = fail "Expected duration string like \"3.5s\""
+  parseJSON (Aeson.String t) = either fail pure (parseDurationSeconds (\s n -> Duration s n []) t)
+  parseJSON _ = fail "Expected duration string"
 
 
 instance Hashable Duration where

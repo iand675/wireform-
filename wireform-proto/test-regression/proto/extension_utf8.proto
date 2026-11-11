@@ -1,0 +1,29 @@
+edition = "2024";
+package verify.extensions;
+
+option features.utf8_validation = NONE;
+
+message Utf8Extensions {
+  extensions 100 to 109;
+}
+
+extend Utf8Extensions {
+  string unchecked = 100;
+  string checked = 101 [features.utf8_validation = VERIFY];
+  repeated string repeated_checked = 102 [features = {utf8_validation: VERIFY}];
+  bytes opaque = 103;
+}
+
+message Utf8Scope {
+  message Utf8Extensions {
+    extensions 100 to 109;
+  }
+
+  extend Utf8Extensions {
+    string lexical_checked = 104 [features.utf8_validation = VERIFY];
+  }
+
+  extend .verify.extensions.Utf8Extensions {
+    string qualified_checked = 105 [features.utf8_validation = VERIFY];
+  }
+}

@@ -31,11 +31,13 @@ module Proto.Internal.JSON.Extension (
   ExtensionRegistry,
   emptyExtensionRegistry,
   registerExtensionJson,
+  registerTypedExtensionJson,
   lookupExtensionByFqn,
   lookupExtensionByNumber,
   parentHasExtensions,
   extensionEntriesForJson,
   parseExtensionEntry,
+  parseExtensionsFromJson,
 
   -- * Per-extension codec primitives (used by the
 
@@ -44,26 +46,28 @@ module Proto.Internal.JSON.Extension (
   encodeExtValueViaConstructor,
 ) where
 
+import Control.Monad (foldM)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as AesonKey
+import Data.Aeson.KeyMap qualified as AesonKM
 import Data.Aeson.Types qualified as AesonT
 import Data.ByteString qualified as BS
-import Data.Int (Int32, Int64)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
-import Data.Scientific qualified as Sci
+import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Word (Word32, Word64)
 import Proto.Decode (UnknownField (..))
 import Proto.Extension (
+  Extension (..),
   ExtensionType (..),
   decodeExtensionValue,
   encodeExtensionValue,
   unknownFieldNumber,
  )
 import Proto.Internal.JSON qualified as PJ
+import Proto.Schema (ProtoEnum (..))
 
 
 {- | Describes how to bridge a single proto2 extension between
@@ -81,11 +85,17 @@ data ExtJsonCodec = ExtJsonCodec
   }
 
 
+data RegisteredExtension = RegisteredExtension
+  { registeredCodec :: !ExtJsonCodec
+  , omitNull :: !Bool
+  }
+
+
 {- | One per parent message: maps both extension FQN (for parse)
 and field number (for output) to the codec.
 -}
 data ExtRegistryEntry = ExtRegistryEntry
-  { byFqn :: !(Map Text ExtJsonCodec)
+  { byFqn :: !(Map Text RegisteredExtension)
   , byNum :: !(Map Int ExtJsonCodec)
   }
 
@@ -129,21 +139,42 @@ registerExtensionJson
   -- ^ Parent message FQN.
   -> ExtJsonCodec
   -> ExtensionRegistry
-registerExtensionJson parentFqn codec =
+registerExtensionJson = registerExtensionWithNull False
+
+
+registerExtensionWithNull :: Bool -> Text -> ExtJsonCodec -> ExtensionRegistry
+registerExtensionWithNull omit parentFqn codec =
   let entry =
         ExtRegistryEntry
-          { byFqn = Map.singleton (ejcExtensionFqn codec) codec
+          { byFqn = Map.singleton (ejcExtensionFqn codec) (RegisteredExtension codec omit)
           , byNum = Map.singleton (ejcFieldNumber codec) codec
           }
   in ExtensionRegistry (Map.singleton parentFqn entry)
 
 
+-- | Build the JSON registry entry for a generated singular extension.
+registerTypedExtensionJson :: forall msg a. Text -> Text -> Extension msg a -> ExtensionRegistry
+registerTypedExtensionJson parentFqn fqn ext =
+  registerExtensionWithNull omit parentFqn $
+    ExtJsonCodec
+      { ejcExtensionFqn = fqn
+      , ejcFieldNumber = extNumber ext
+      , ejcParseValue = parseExtValueViaConstructor (extType ext) (extNumber ext)
+      , ejcEncodeValue = encodeExtValueViaConstructor (extType ext)
+      }
+  where
+    omit = case extType ext of
+      ExtEnum -> not (isNullValue (Proxy :: Proxy a))
+      _ -> True
+
+
 -- | Look up an extension codec by its fully-qualified proto name under a parent message.
 lookupExtensionByFqn :: ExtensionRegistry -> Text -> Text -> Maybe ExtJsonCodec
-lookupExtensionByFqn reg parentFqn fqn =
-  case Map.lookup parentFqn (erEntries reg) of
-    Nothing -> Nothing
-    Just e -> Map.lookup fqn (byFqn e)
+lookupExtensionByFqn reg parentFqn fqn = registeredCodec <$> lookupRegistered reg parentFqn fqn
+
+
+lookupRegistered :: ExtensionRegistry -> Text -> Text -> Maybe RegisteredExtension
+lookupRegistered reg parentFqn fqn = Map.lookup parentFqn (erEntries reg) >>= Map.lookup fqn . byFqn
 
 
 -- | Look up an extension codec by field number under a parent message.
@@ -201,8 +232,8 @@ the FQN in the parent's registry and parse @value@ through
 the matched codec. Returns 'Just (Right uf)' on success,
 'Just (Left e)' when the bracket key is recognised but parsing
 fails (so the FromJSON instance can propagate the error), and
-'Nothing' when the key isn't bracket-quoted (so the caller
-treats it as an ordinary field).
+'Nothing' when the key does not select a registered extension or
+a typed extension treats null as unset.
 -}
 parseExtensionEntry
   :: ExtensionRegistry
@@ -215,12 +246,26 @@ parseExtensionEntry reg parentFqn key val =
   let t = AesonKey.toText key
   in case T.uncons t of
        Just ('[', rest) -> case T.unsnoc rest of
-         Just (fqn, ']') -> case lookupExtensionByFqn reg parentFqn fqn of
-           Just codec -> Just (ejcParseValue codec val)
-           Nothing -> Nothing -- unrecognised extension; ignore
+         Just (fqn, ']') -> do
+           registered <- lookupRegistered reg parentFqn fqn
+           case val of
+             Aeson.Null | omitNull registered -> Nothing
+             _ -> Just (ejcParseValue (registeredCodec registered) val)
          _ -> Nothing
        _ -> Nothing
 {-# INLINE parseExtensionEntry #-}
+
+
+-- | Extract the registered extension entries of a message JSON object.
+parseExtensionsFromJson :: ExtensionRegistry -> Text -> Aeson.Object -> Either String [UnknownField]
+parseExtensionsFromJson reg parentFqn obj
+  | not (parentHasExtensions reg parentFqn) = Right []
+  | otherwise = reverse <$> foldM step [] (AesonKM.toList obj)
+  where
+    step acc (key, value) = case parseExtensionEntry reg parentFqn key value of
+      Nothing -> Right acc
+      Just result -> (: acc) <$> result
+{-# INLINE parseExtensionsFromJson #-}
 
 
 -- ---------------------------------------------------------------------------
@@ -242,16 +287,26 @@ parseExtValueViaConstructor
   -> Either String UnknownField
 parseExtValueViaConstructor ty fn v = case ty of
   ExtBool -> encodeExtensionValue fn ty <$> parseBool v
-  ExtInt32 -> encodeExtensionValue fn ty <$> (parseBoundedInt v :: Either String Int32)
-  ExtInt64 -> encodeExtensionValue fn ty <$> (parseBoundedInt v :: Either String Int64)
-  ExtUInt32 -> encodeExtensionValue fn ty <$> (parseBoundedInt v :: Either String Word32)
-  ExtUInt64 -> encodeExtensionValue fn ty <$> (parseBoundedInt v :: Either String Word64)
-  ExtSInt32 -> encodeExtensionValue fn ty <$> (parseBoundedInt v :: Either String Int32)
-  ExtSInt64 -> encodeExtensionValue fn ty <$> (parseBoundedInt v :: Either String Int64)
-  ExtFixed32 -> encodeExtensionValue fn ty <$> (parseBoundedInt v :: Either String Word32)
-  ExtFixed64 -> encodeExtensionValue fn ty <$> (parseBoundedInt v :: Either String Word64)
-  ExtSFixed32 -> encodeExtensionValue fn ty <$> (parseBoundedInt v :: Either String Int32)
-  ExtSFixed64 -> encodeExtensionValue fn ty <$> (parseBoundedInt v :: Either String Int64)
+  ExtEnum -> do
+    value <- case v of
+      Aeson.Null
+        | isNullValue (Proxy :: Proxy a) ->
+            maybe (Left "NullValue enum has no zero member") Right (fromProtoEnumValue 0)
+      _ -> AesonT.parseEither Aeson.parseJSON v
+    let uf = encodeExtensionValue fn ty value
+    case decodeExtensionValue ty uf of
+      Just _ -> Right uf
+      Nothing -> Left "Unrecognized value for a closed enum extension"
+  ExtInt32 -> parseInteger PJ.protoInt32FromJSON
+  ExtInt64 -> parseInteger PJ.protoInt64FromJSON
+  ExtUInt32 -> parseInteger PJ.protoWord32FromJSON
+  ExtUInt64 -> parseInteger PJ.protoWord64FromJSON
+  ExtSInt32 -> parseInteger PJ.protoInt32FromJSON
+  ExtSInt64 -> parseInteger PJ.protoInt64FromJSON
+  ExtFixed32 -> parseInteger PJ.protoWord32FromJSON
+  ExtFixed64 -> parseInteger PJ.protoWord64FromJSON
+  ExtSFixed32 -> parseInteger PJ.protoInt32FromJSON
+  ExtSFixed64 -> parseInteger PJ.protoInt64FromJSON
   ExtFloat -> encodeExtensionValue fn ty <$> parseFloating v
   ExtDouble -> encodeExtensionValue fn ty <$> parseFloatingD v
   ExtString -> encodeExtensionValue fn ty <$> parseStringT v
@@ -261,28 +316,14 @@ parseExtValueViaConstructor ty fn v = case ty of
     -- conformance suite's bracket-syntax tests; if a user
     -- needs them they can register a custom codec.
     Left "JSON serialisation of message-typed extensions is not yet supported"
+  ExtGroup -> Left "JSON serialisation of group-typed extensions is not yet supported"
+  where
+    parseInteger parser = encodeExtensionValue fn ty <$> AesonT.parseEither parser v
 
 
 parseBool :: Aeson.Value -> Either String Bool
 parseBool (Aeson.Bool b) = Right b
 parseBool _ = Left "Expected JSON Bool"
-
-
-parseBoundedInt
-  :: forall a
-   . (Integral a, Bounded a)
-  => Aeson.Value
-  -> Either String a
-parseBoundedInt v = case v of
-  Aeson.Number n -> coerce n
-  Aeson.String s -> case reads (T.unpack s) :: [(Sci.Scientific, String)] of
-    [(sci, "")] -> coerce sci
-    _ -> Left ("Invalid integer string: " <> show s)
-  _ -> Left "Expected JSON Number or String for integer extension"
-  where
-    coerce sci = case Sci.toBoundedInteger sci of
-      Just n -> Right n
-      Nothing -> Left "Extension integer value out of range or non-integer"
 
 
 parseFloating :: Aeson.Value -> Either String Float
@@ -319,8 +360,11 @@ encodeExtValueViaConstructor ty uf = case decodeExtensionValue ty uf of
   Nothing -> Left "extension JSON encode: wire-type/extension-type mismatch"
   Just a -> Right (encodeOne ty a)
   where
-    encodeOne :: ExtensionType b -> b -> Aeson.Value
+    encodeOne :: forall b. ExtensionType b -> b -> Aeson.Value
     encodeOne ExtBool b = Aeson.Bool b
+    encodeOne ExtEnum e
+      | isNullValue (Proxy :: Proxy b) = Aeson.Null
+      | otherwise = Aeson.toJSON e
     encodeOne ExtInt32 n = Aeson.Number (fromIntegral n)
     encodeOne ExtInt64 n = PJ.protoInt64ToJSON n
     encodeOne ExtUInt32 n = Aeson.Number (fromIntegral n)
@@ -336,3 +380,8 @@ encodeExtValueViaConstructor ty uf = case decodeExtensionValue ty uf of
     encodeOne ExtString s = Aeson.String s
     encodeOne ExtBytes b = PJ.protoBytesToJSON b
     encodeOne ExtMessage b = PJ.protoBytesToJSON b
+    encodeOne ExtGroup b = PJ.protoBytesToJSON b
+
+
+isNullValue :: ProtoEnum a => Proxy a -> Bool
+isNullValue proxy = protoEnumName proxy == "google.protobuf.NullValue"

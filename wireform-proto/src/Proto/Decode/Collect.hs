@@ -10,8 +10,8 @@ once — each with a field path — instead of surfacing only the first.
 
 'decodeCollecting' returns the list of 'DecodeIssue's plus the strictly
 decoded value when (and only when) the message is clean. It is built on the
-message's 'Proto.Schema.ProtoMessage' field descriptors and a self-contained
-wire scanner, so it never touches the hot-path decoder.
+message's 'Proto.Schema.ProtoMessage' field descriptors and shares checked
+wire readers with the fail-fast decoder.
 
 What it reports:
 
@@ -31,21 +31,25 @@ module Proto.Decode.Collect (
 ) where
 
 import Control.DeepSeq (NFData)
-import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Map.Strict qualified as Map
 import Data.Proxy (Proxy (..))
+import Data.Set qualified as Set
 import Data.Text (Text)
-import Data.Text qualified as T
-import Data.Text.Encoding qualified as TE
-import Data.Word (Word32, Word64)
+import Data.Text.Lazy qualified as TL
+import Data.Text.Lazy.Builder qualified as TB
+import Data.Text.Lazy.Builder.Int qualified as TB
 import GHC.Generics (Generic)
 import Proto.Decode (DecodeError (..), MessageDecode, decodeMessage)
+import Proto.Internal.Wire (Tag (..), WireType (..), wireTypeToWord)
+import Proto.Internal.Wire.Decode (DecodeResult (..), getLengthDelimited, getTag, runDecoder', skipTaggedWireType, validateUtf8)
 import Proto.Schema (
   FieldDescriptor (..),
   FieldLabel' (..),
   FieldTypeDescriptor (..),
+  OneofDescriptor (..),
+  OneofFieldDescriptor (..),
   ProtoMessage (..),
   ScalarFieldType (..),
   SomeFieldDescriptor (..),
@@ -80,110 +84,78 @@ decodeCollecting bytes =
 -- | Collect issues for a message type's wire bytes using its field schema.
 collectIssues :: ProtoMessage a => Proxy a -> ByteString -> [DecodeIssue]
 collectIssues proxy bytes =
-  let fds = protoFieldDescriptors proxy
-      (entries, mErr) = scan bytes
-      fieldIssues = checkEntries fds entries
+  let (entries, mErr) = scan bytes
+      fieldIssues = checkEntries (diagnosticFields proxy) entries
       tailIssue = maybe [] (\e -> [DecodeIssue [] e]) mErr
   in fieldIssues ++ tailIssue
 
 
--- Assign per-field occurrence indices, then check each entry against its
--- descriptor.
-checkEntries :: Map.Map Int (SomeFieldDescriptor a) -> [(Int, WV)] -> [DecodeIssue]
-checkEntries fds = go Map.empty
+data DiagnosticField = DiagnosticField !Text !FieldLabel' !FieldTypeDescriptor
+
+
+diagnosticFields :: ProtoMessage a => Proxy a -> Map.Map Int DiagnosticField
+diagnosticFields proxy =
+  Map.union oneofFields (Map.mapMaybe ordinaryField (protoFieldDescriptors proxy))
+  where
+    groups = protoOneofDescriptors proxy
+    carriers = Set.fromList (map odName groups)
+    oneofFields = Map.fromList (concatMap (map member . odFields) groups)
+    member arm = (ofdNumber arm, DiagnosticField (ofdName arm) LabelOptional (ofdType arm))
+    ordinaryField (SomeField fd)
+      | Set.member (fdName fd) carriers = Nothing
+      | otherwise = Just (DiagnosticField (fdName fd) (fdLabel fd) (fdTypeDesc fd))
+
+
+-- Only accepted length-delimited records contribute to an occurrence index.
+checkEntries :: Map.Map Int DiagnosticField -> [(Int, WV)] -> [DecodeIssue]
+checkEntries fields = go Map.empty
   where
     go _ [] = []
-    go counts ((fn, wv) : rest) =
-      let idx = Map.findWithDefault 0 fn counts
-          counts' = Map.insert fn (idx + 1) counts
-      in checkOne fds fn idx wv ++ go counts' rest
+    go !counts ((fn, WLen body) : rest)
+      | Just (DiagnosticField name label fieldType) <- Map.lookup fn fields
+      , Just check <- payloadCheck fieldType =
+          let idx = Map.findWithDefault (0 :: Int) fn counts
+              repeated = label == LabelRepeated
+              counts' = if repeated then Map.insert fn (idx + 1) counts else counts
+              path = if repeated
+                then name <> TL.toStrict (TB.toLazyText ("[" <> TB.decimal idx <> "]"))
+                else name
+          in case check body of
+               Nothing -> go counts' rest
+               Just err -> DecodeIssue [path] err : go counts' rest
+    go counts (_ : rest) = go counts rest
 
 
-checkOne :: Map.Map Int (SomeFieldDescriptor a) -> Int -> Int -> WV -> [DecodeIssue]
-checkOne fds fn idx wv = case Map.lookup fn fds of
-  Nothing -> [] -- unknown field: allowed, preserved elsewhere
-  Just (SomeField fd) ->
-    let seg =
-          if fdLabel fd == LabelRepeated
-            then fdName fd <> "[" <> T.pack (show idx) <> "]"
-            else fdName fd
-        issue e = [DecodeIssue [seg] e]
-    in case fdTypeDesc fd of
-         ScalarType StringField -> case wv of
-           WLen bs -> case TE.decodeUtf8' bs of
-             Left _ -> issue InvalidUtf8
-             Right _ -> []
-           _ -> []
-         MessageType _ -> subMessageIssues issue wv
-         MapType _ _ -> subMessageIssues issue wv
-         _ -> []
-
-
-subMessageIssues :: (DecodeError -> [DecodeIssue]) -> WV -> [DecodeIssue]
-subMessageIssues issue wv = case wv of
-  WLen bs -> case snd (scan bs) of
-    Just e -> issue (SubMessageError e)
-    Nothing -> []
-  _ -> []
+payloadCheck :: FieldTypeDescriptor -> Maybe (ByteString -> Maybe DecodeError)
+payloadCheck (ScalarType StringField) = Just $ \body ->
+  if validateUtf8 body then Nothing else Just InvalidUtf8
+payloadCheck (MessageType _) = Just (fmap SubMessageError . snd . scan)
+payloadCheck (MapType _ _) = Just (fmap SubMessageError . snd . scan)
+payloadCheck _ = Nothing
 
 
 ----------------------------------------------------------------------
--- Self-contained wire scanner
+-- Wire scanner
 ----------------------------------------------------------------------
 
-data WV = WVarint !Word64 | WI64 !Word64 | WI32 !Word32 | WLen !ByteString
+data WV = WOther | WLen !ByteString
 
 
 {- | Scan a message into @(fieldNumber, value)@ pairs, preserving repeats.
 Returns any trailing structural error encountered.
 -}
 scan :: ByteString -> ([(Int, WV)], Maybe DecodeError)
-scan = go id
+scan bytes = go id 0
   where
-    go acc bs
-      | BS.null bs = (acc [], Nothing)
-      | otherwise = case readVarint bs of
-          Nothing -> (acc [], Just InvalidVarint)
-          Just (tag, r) ->
-            let fn = fromIntegral (tag `shiftR` 3)
-                wt = tag .&. 7
-            in case wt of
-                 0 -> case readVarint r of
-                   Just (v, r2) -> go (acc . ((fn, WVarint v) :)) r2
-                   Nothing -> (acc [], Just InvalidVarint)
-                 1 ->
-                   if BS.length r >= 8
-                     then go (acc . ((fn, WI64 (le64 (BS.take 8 r))) :)) (BS.drop 8 r)
-                     else (acc [], Just UnexpectedEnd)
-                 5 ->
-                   if BS.length r >= 4
-                     then go (acc . ((fn, WI32 (le32 (BS.take 4 r))) :)) (BS.drop 4 r)
-                     else (acc [], Just UnexpectedEnd)
-                 2 -> case readVarint r of
-                   Just (len, r2) ->
-                     let n = fromIntegral len
-                     in if n >= 0 && BS.length r2 >= n
-                          then go (acc . ((fn, WLen (BS.take n r2)) :)) (BS.drop n r2)
-                          else (acc [], Just UnexpectedEnd)
-                   Nothing -> (acc [], Just InvalidVarint)
-                 _ -> (acc [], Just (InvalidWireType (fromIntegral wt)))
-
-
-readVarint :: ByteString -> Maybe (Word64, ByteString)
-readVarint = goV 0 0
-  where
-    goV !shift !acc bs = case BS.uncons bs of
-      Nothing -> Nothing
-      Just (b, rest) ->
-        let acc' = acc .|. (fromIntegral (b .&. 0x7F) `shiftL` shift)
-        in if b .&. 0x80 /= 0
-             then if shift >= 63 then Nothing else goV (shift + 7) acc' rest
-             else Just (acc', rest)
-
-
-le64 :: ByteString -> Word64
-le64 = BS.foldr (\b a -> a `shiftL` 8 .|. fromIntegral b) 0
-
-
-le32 :: ByteString -> Word32
-le32 = BS.foldr (\b a -> a `shiftL` 8 .|. fromIntegral b) 0
+    len = BS.length bytes
+    go acc !off
+      | off == len = (acc [], Nothing)
+      | otherwise = case runDecoder' getTag bytes off of
+          DecodeFail e -> (acc [], Just e)
+          DecodeOK (Tag fn wt) start ->
+            let value = case wt of
+                  WireLengthDelimited -> WLen <$> getLengthDelimited
+                  _ -> WOther <$ skipTaggedWireType fn (fromIntegral (wireTypeToWord wt))
+            in case runDecoder' value bytes start of
+                 DecodeOK entry end -> go (acc . ((fn, entry) :)) end
+                 DecodeFail e -> (acc [], Just e)

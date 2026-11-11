@@ -57,28 +57,30 @@ module Proto.Setup (
 ) where
 
 import Control.Exception (IOException, catch)
-import Control.Monad (forM, forM_, unless, when)
+import Control.Monad (forM, forM_, unless)
+import Data.List (sort)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Proto.CodeGen (
   GenerateOpts (..),
-  TypeRegistry,
+  buildTypeRegistry,
   defaultGenerateOpts,
-  generateModuleText,
+  generateModuleTextWithImports,
   moduleNameForProto,
+  restrictOptionImportTypes,
  )
 import Proto.CodeGen.Hooks (CodeGenHooks, defaultCodeGenHooks)
-import Proto.IDL.AST (ProtoFile, ProtoFile' (..))
-import Proto.IDL.Parser (parseProtoFile, renderParseError)
+import Proto.IDL.Parser.Resolver (ResolveError (..), ResolvedProto (..), resolveProtoImports, resolvedImportFiles, resolvedTypeDependencies)
 import System.Directory (
   createDirectoryIfMissing,
   doesDirectoryExist,
   doesFileExist,
-  getModificationTime,
   listDirectory,
+  makeAbsolute,
  )
-import System.FilePath (takeDirectory, takeExtension, (<.>), (</>))
+import System.FilePath (isRelative, makeRelative, normalise, takeDirectory, takeExtension, takeFileName, (<.>), (</>))
 
 
 {- | Configuration for automatic protobuf code generation.
@@ -125,7 +127,7 @@ defaultProtoGenConfig =
 
 
 {- | Pre-build hook: generate Haskell from all .proto files in pgcProtoDir.
-Only regenerates when source is newer than output.
+Rewrites modules whose generated content differs from the existing output.
 -}
 protoGenPreBuildHook :: ProtoGenConfig -> IO ()
 protoGenPreBuildHook = generateProtos
@@ -139,36 +141,92 @@ generateProtos cfg = do
   if not exists
     then putStrLn $ "[wireform] Proto directory not found: " <> protoDir
     else do
-      protos <- findProtoFiles protoDir
+      protos <- sort <$> findProtoFiles protoDir
       unless (null protos) $
         putStrLn $
           "[wireform] Found " <> show (length protos) <> " .proto file(s) in " <> protoDir
-      forM_ protos $ \relPath ->
-        generateProtoFile cfg (protoDir </> relPath)
+      resolved <- traverse (resolveForGeneration cfg . (protoDir </>)) protos
+      generateResolvedProtos cfg resolved
 
 
 -- | Generate Haskell for one .proto file. Skips if output is up-to-date.
 generateProtoFile :: ProtoGenConfig -> FilePath -> IO ()
 generateProtoFile cfg protoPath = do
-  contents <- TIO.readFile protoPath
-  case parseProtoFile protoPath contents of
-    Left err ->
-      putStrLn $ "[wireform] " <> renderParseError err
-    Right pf -> do
-      let opts =
-            defaultGenerateOpts
-              { genModulePrefix = pgcModulePrefix cfg
-              , genLazySubmessages = pgcLazySub cfg
-              , genHooks = pgcHooks cfg
-              }
-          emptyReg = Map.empty :: TypeRegistry
-          code = generateModuleText opts emptyReg protoPath pf
-          outPath = pgcOutputDir cfg </> moduleToPath opts protoPath pf <.> "hs"
-      needsRegen <- checkStale protoPath outPath
-      when needsRegen $ do
-        createDirectoryIfMissing True (takeDirectory outPath)
-        TIO.writeFile outPath code
-        putStrLn $ "[wireform] Generated " <> outPath
+  resolved <- resolveForGeneration cfg protoPath
+  generateResolvedProtos cfg [resolved]
+
+
+resolveForGeneration :: ProtoGenConfig -> FilePath -> IO ResolvedProto
+resolveForGeneration cfg path = do
+  result <- resolveProtoImports (pgcProtoDir cfg : pgcIncludeDirs cfg) path
+  either (fail . ("[wireform] " <>) . describeError) pure result
+  where
+    describeError (ParseError _ message) = message
+    describeError (FileNotFound _ dependency directories) =
+      path <> ": cannot find import " <> T.unpack dependency <> " in " <> show directories
+    describeError (CircularImport chain) =
+      "circular import: " <> T.unpack (T.intercalate " -> " chain)
+
+
+generateResolvedProtos :: ProtoGenConfig -> [ResolvedProto] -> IO ()
+generateResolvedProtos cfg resolved = do
+  roots <- traverse (\dir -> (dir,) <$> makeAbsolute dir) (pgcProtoDir cfg : pgcIncludeDirs cfg)
+  files <- Map.fromList <$> traverse identify (concatMap resolvedTypeDependencies resolved)
+  let opts =
+        defaultGenerateOpts
+          { genModulePrefix = pgcModulePrefix cfg
+          , genLazySubmessages = pgcLazySub cfg
+          , genHooks = pgcHooks cfg
+          }
+      modulePath = sourceModulePath roots . rpPath
+      output proto =
+        pgcOutputDir cfg </> moduleToPath (moduleNameForProto opts (modulePath proto) (rpFile proto)) <.> "hs"
+      outputs = Map.fromListWith (<>) (map (outputEntry output) (Map.elems files))
+  forM_ (Map.elems outputs) $ \sources -> case sources of
+    (first, dest) : (second, other) : _
+      | dest == other ->
+          fail ("[wireform] " <> first <> " and " <> second <> " both generate " <> dest)
+      | otherwise ->
+          fail ("[wireform] " <> first <> " and " <> second
+            <> " generate paths differing only by case: " <> dest <> ", " <> other)
+    _ -> pure ()
+  prepared <- traverse (\proto -> do
+    let importFiles = resolvedImportFiles proto
+        pairs = map (\dependency -> (modulePath dependency, dependency)) (resolvedTypeDependencies proto)
+    registry <- either (fail . T.unpack) pure $
+      restrictOptionImportTypes importFiles (rpFile proto) (buildTypeRegistry opts pairs)
+    code <- either (fail . T.unpack) pure $
+      generateModuleTextWithImports opts registry (modulePath proto) importFiles (rpFile proto)
+    pure (output proto, code)) resolved
+  forM_ prepared $ \(outPath, code) -> do
+    exists <- doesFileExist outPath
+    unchanged <- if exists then (== code) <$> TIO.readFile outPath else pure False
+    unless unchanged $ do
+      createDirectoryIfMissing True (takeDirectory outPath)
+      TIO.writeFile outPath code
+      putStrLn $ "[wireform] Generated " <> outPath
+  where
+    outputEntry output proto =
+      let dest = output proto
+      in (T.toCaseFold (T.pack dest), [(rpPath proto, dest)])
+    identify proto = do
+      absolute <- makeAbsolute (rpPath proto)
+      pure (absolute, proto)
+
+
+-- Preserve the module names previously generated from relative paths. For an
+-- absolute path, remove the source or include root before naming its module.
+sourceModulePath :: [(FilePath, FilePath)] -> FilePath -> FilePath
+sourceModulePath roots path
+  | isRelative path = normalise path
+  | otherwise = fromMaybe (takeFileName path) (listToMaybe (mapMaybe relativeToRoot roots))
+  where
+    relativeToRoot (configured, absolute)
+      | isRelative relative =
+          Just (if isRelative configured then normalise (configured </> relative) else relative)
+      | otherwise = Nothing
+      where
+        relative = makeRelative absolute path
 
 
 findProtoFiles :: FilePath -> IO [FilePath]
@@ -186,18 +244,5 @@ findProtoFiles root = go ""
           else pure [rel | takeExtension entry == ".proto"]
 
 
-checkStale :: FilePath -> FilePath -> IO Bool
-checkStale src out = do
-  outExists <- doesFileExist out
-  if not outExists
-    then pure True
-    else do
-      srcT <- getModificationTime src
-      outT <- getModificationTime out
-      pure (srcT > outT)
-
-
-moduleToPath :: GenerateOpts -> FilePath -> ProtoFile -> FilePath
-moduleToPath opts fp pf =
-  let modName = T.unpack (moduleNameForProto opts fp pf)
-  in fmap (\c -> if c == '.' then '/' else c) modName
+moduleToPath :: T.Text -> FilePath
+moduleToPath = map (\c -> if c == '.' then '/' else c) . T.unpack

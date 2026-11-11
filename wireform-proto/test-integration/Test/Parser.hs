@@ -1,10 +1,12 @@
 module Test.Parser (parserTests) where
 
+import Data.ByteString qualified as BS
 import Data.Either (isLeft, isRight)
 import Data.List (isInfixOf)
 import Data.Text (Text)
 import Proto.IDL.AST
 import Proto.IDL.Parser
+import Proto.IDL.Print (printConstant)
 import Test.Syd
 
 
@@ -580,6 +582,17 @@ parserTests =
                 fileOptValue "\"caf\\u00e9\"" `shouldBe` Just (CString "caf\233")
             , it "full unicode escape (\\U0001F600)" $
                 fileOptValue "\"\\U0001F600\"" `shouldBe` Just (CString "\128512")
+            , it "decodes escaped octets after concatenating adjacent literals" $
+                fileOptValue "\"\\303\" /* split */ '\\xA9'" `shouldBe` Just (CString "é")
+            , it "joins UTF-16 surrogate pairs in Unicode escapes" $
+                fileOptValue "\"\\uD83D\\uDE00\"" `shouldBe` Just (CString "\128512")
+            , it "keeps non-UTF-8 octets available for bytes options" $
+                fileOptValue "\"\\777\\uD83D\"" `shouldBe` Just (CBytes (BS.pack [255, 237, 160, 189]))
+            , it "rejects non-UTF-8 string defaults without substituting characters" $
+                parseProtoFile "<test>" "syntax = \"proto2\"; message X { optional string x = 1 [default = '\\377']; }"
+                  `shouldSatisfy` isLeft
+            , it "prints an escaped NUL in a string literal" $
+                fileOptValue (printConstant (CString "\NUL7")) `shouldBe` Just (CString "\NUL7")
             , it "nested extension option name (a).(b).c" $ do
                 let input =
                       unlines'

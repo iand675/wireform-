@@ -1,0 +1,72 @@
+edition = "2023";
+option features.message_encoding = DELIMITED;
+
+enum WireMode {
+  WIRE_MODE_UNSPECIFIED = 0;
+  WIRE_MODE_ACTIVE = 1;
+}
+
+message WireChild {
+  int32 first = 1;
+  int32 second = 2;
+}
+
+message GroupLike {
+  int32 other = 2;
+}
+
+message EditionEnvelope {
+  message GroupLike {
+    int32 value = 1;
+  }
+
+  GroupLike grouplike = 1;
+  WireChild regular_name = 2;
+  WireChild prefixed = 3 [features.message_encoding = LENGTH_PREFIXED];
+  repeated WireChild items = 4;
+  map<string, WireChild> children = 5;
+  WireMode mode = 6;
+
+  oneof choice {
+    WireChild chosen = 7;
+    int32 number = 8;
+  }
+  RegistryWrapper wrapper = 9;
+
+  extensions 100 to 108;
+}
+
+extend EditionEnvelope {
+  WireChild extra = 100;
+  repeated WireChild extras = 101;
+  WireChild prefixed_extra = 102 [features.message_encoding = LENGTH_PREFIXED];
+  WireChild grouplike = 103;
+  string verified_text = 107;
+  string unchecked_text = 108 [features.utf8_validation = NONE];
+}
+
+message ExtScope {
+  extend EditionEnvelope {
+    int32 extra = 104;
+    int32 sub_alias = 105;
+  }
+}
+
+message ExtScope_sub {
+  extend EditionEnvelope {
+    int32 alias = 106;
+  }
+}
+
+message RegistryWrapper {
+  message Entry {
+    EditionEnvelope corecursive = 1;
+  }
+
+  Entry singular = 1;
+  repeated Entry entries = 2;
+  map<string, Entry> entries_by_key = 3;
+  oneof selected {
+    Entry entry = 4;
+  }
+}

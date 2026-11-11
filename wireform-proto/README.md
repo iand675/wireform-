@@ -405,6 +405,24 @@ materialising a `ByteString`.
 
 ## Also included
 
+### Editions field presence
+
+Standalone generation and `loadProto` retain explicit presence for Editions
+singular scalar and enum fields using `Maybe`. An explicitly encoded zero
+round-trips as `Just 0`; an absent field remains `Nothing`. File and field
+`features.field_presence` settings support `EXPLICIT` and `IMPLICIT`, using
+both dotted and aggregate syntax. A singular field can use
+`LEGACY_REQUIRED` to retain proto2 required-field behavior.
+This is a source-level change from 0.2 for generated Editions records.
+
+Both generators use `Maybe` for proto2 `required` and Editions
+`LEGACY_REQUIRED` fields. After regeneration, assign required values as
+`Just value`. Decoding can retain an
+incomplete message, including fragments of a singular embedded message that
+will merge later. Only present fields are emitted by the binary and JSON
+encoders. TextFormat parsing checks required fields. Binary and JSON
+codecs leave required-field validation to the caller.
+
 ### Proto3 canonical JSON
 
 Generated types get `ToJSON` / `FromJSON` instances that follow the

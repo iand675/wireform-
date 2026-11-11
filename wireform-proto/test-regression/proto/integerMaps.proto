@@ -1,0 +1,23 @@
+syntax = "proto3";
+message IntegerMaps {
+  map<string, int32> int32_values = 1;
+  map<string, int64> int64_values = 2;
+  map<string, uint32> uint32_values = 3;
+  map<string, uint64> uint64_values = 4;
+  map<string, sint32> sint32_values = 5;
+  map<string, sint64> sint64_values = 6;
+  map<string, sfixed32> sfixed32_values = 7;
+  map<string, sfixed64> sfixed64_values = 8;
+  map<int32, int32> integer_keys = 9;
+  map<string, fixed32> fixed32_values = 10;
+  map<string, fixed64> fixed64_values = 11;
+  map<sint32, string> zigzag_keys = 12;
+}
+
+message MapPayload {
+  int32 count = 1;
+}
+
+message MessageMap {
+  map<string, MapPayload> entries = 1;
+}

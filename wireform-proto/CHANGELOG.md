@@ -1,6 +1,28 @@
 # Changelog for wireform-proto
 
 
+## 0.3.0.0 -- 2026-11-06
+
+* Breaking generated-code change: Editions singular scalar and enum fields
+  use `Maybe` for explicit presence, including the default in Edition 2023
+  and later. Both standalone codegen and `loadProto` preserve explicitly
+  encoded default values. File/field `EXPLICIT` and `IMPLICIT` overrides,
+  including aggregate option syntax, are resolved consistently. Unsupported
+  `LEGACY_REQUIRED` presence now produces a generation error.
+* Accept quoted ProtoJSON numbers with `e`/`E` and signed exponents in
+  generated scalar/optional/oneof float and double decoders and the runtime
+  numeric helpers. Share the numeric grammar with the integer helpers;
+  retain full input consumption, canonical special-value spellings and
+  target-type overflow checks.
+* Fix standalone integer-map encoders by applying composed value encoders
+  as complete functions. Encode and size `sint32`/`sint64` map values with
+  ZigZag, matching their decoders and the TH path.
+* Stream large string fields across bounded ring chunks without a
+  contiguous reservation larger than the ring; retain the direct-copy
+  fast path and avoid intermediate pinned bytestrings.
+* Add runtime regressions using real standalone-generated and TH-generated
+  messages, with a reproducible fixture generator and drift check.
+
 ## 0.2.0.0 -- 2026-07-16
 
 Breaking release from 0.1.0.0.

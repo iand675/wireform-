@@ -1,9 +1,12 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE StrictData #-}
+{-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-unused-imports -Wno-unused-matches -Wno-unused-top-binds #-}
 
 {- | Auto-generated protobuf types from package @google.protobuf@.
@@ -57,8 +60,10 @@ import Proto.Internal.Encode.Archetype (
   archVarint,
   archVarintSize,
  )
-import Proto.Internal.JSON (bytesFieldToJSON, bytesMapFieldToJSON, jsonObject, parseBytesFieldMaybe, parseBytesMapFieldMaybe, parseFieldMaybe, protoBytesToJSON, (.=:))
+import Proto.Internal.JSON (bytesFieldToJSON, bytesMapFieldToJSON, jsonObject, parseBytesFieldMaybe, parseBytesMapFieldMaybe, parseFieldMaybe, protoBytesFromJSON, protoBytesToJSON, (.=:))
+import Proto.Internal.JSON qualified as PJ
 import Proto.Internal.JSON.Extension qualified as PJExt
+import Proto.Internal.JSON.WellKnown qualified as WK
 import Proto.Internal.Wire (Tag (..), WireType (..))
 import Proto.Internal.Wire.Encode (
   fieldBoolSize,
@@ -92,7 +97,7 @@ import Proto.Internal.Wire.Encode (
  )
 import Proto.Registry (IsMessage)
 import Proto.Registry qualified
-import Proto.Schema (FieldDescriptor (..), FieldLabel' (..), FieldTypeDescriptor (..), ProtoMessage (..), ScalarFieldType (..), SomeFieldDescriptor (..))
+import Proto.Schema (FieldDescriptor (..), FieldLabel' (..), FieldTypeDescriptor (..), ProtoEnum (..), ProtoMessage (..), ScalarFieldType (..), SomeFieldDescriptor (..))
 import Wireform.Builder qualified as B
 
 
@@ -143,10 +148,10 @@ instance MessageDecode Any where
         withTagM
           (pure (Any {anyTypeUrl = acc_0, anyValue = acc_1, anyUnknownFields = reverse acc_unknown_}))
           ( \fn wt -> case fn of
-              1 -> do
+              1 | wt == 2 -> do
                 v <- decodeFieldString
                 loop v acc_1 acc_unknown_
-              2 -> do
+              2 | wt == 2 -> do
                 v <- decodeFieldBytes
                 loop acc_0 v acc_unknown_
               _ -> do
@@ -187,29 +192,20 @@ instance ProtoMessage Any where
               }
         )
       ]
+  protoJSONIgnoreUnknownEnumNames _ = WK.normalizeAnyEnumJSON WK.anyJsonRegistry
 
 
 instance IsMessage Any
 
 
 instance Aeson.ToJSON Any where
-  toJSON msg =
-    jsonObject
-      [ "typeUrl" .=: msg.anyTypeUrl
-      , bytesFieldToJSON "value" msg.anyValue
-      ]
+  toJSON (Any url bytes _) = WK.anyPartsToJSON WK.anyJsonRegistry url bytes
 
 
 instance Aeson.FromJSON Any where
-  parseJSON = Aeson.withObject "Any" $ \obj -> do
-    fld_anyTypeUrl <- parseFieldMaybe obj "typeUrl"
-    fld_anyValue <- parseBytesFieldMaybe obj "value"
-    pure
-      defaultAny
-        { anyTypeUrl = maybe (anyTypeUrl defaultAny) id fld_anyTypeUrl
-        , anyValue = maybe (anyValue defaultAny) id fld_anyValue
-        , anyUnknownFields = []
-        }
+  parseJSON j = case WK.anyPartsFromJSON WK.anyJsonRegistry j of
+    Left err -> fail err
+    Right (url, bytes) -> pure (Any url bytes [])
 
 
 instance Hashable Any where

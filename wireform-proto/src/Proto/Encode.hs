@@ -76,7 +76,13 @@ module Proto.Encode (
   encodeFieldString,
   encodeFieldBytes,
   encodeFieldMessage,
+  encodeFieldGroup,
+  fieldGroupSize,
   encodeFieldEnum,
+
+  -- * Implicit floating-point presence
+  isDefaultFloat,
+  isDefaultDouble,
 
   -- * Packed repeated field encoding
   encodePackedWord64,
@@ -86,6 +92,10 @@ module Proto.Encode (
   encodePackedBool,
   encodePackedFixed32,
   encodePackedFixed64,
+  encodePackedSFixed32,
+  encodePackedSFixed64,
+  encodePackedEnum,
+  packedEnumSize,
   encodePackedFloat,
   encodePackedDouble,
   encodePackedSVarint32,
@@ -130,6 +140,7 @@ import Data.Word (Word32, Word64)
 import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (castPtr)
 import Foreign.Storable (Storable, sizeOf)
+import GHC.Float (castDoubleToWord64, castFloatToWord32)
 import Proto.Internal.SizedBuilder (SizedBuilder, sized, toByteStringFromBuilder, withSubMessage)
 import Proto.Internal.Wire (WireType (..))
 import Proto.Internal.Wire.Encode
@@ -197,6 +208,18 @@ hPutMessageLen h = WB.hPutBuilderLen h . buildMessage
 -- | Convert a builder to strict ByteString.
 messageToByteString :: B.Builder -> ByteString
 messageToByteString = B.toStrictByteString
+
+
+-- | Only positive zero is the implicit protobuf default.
+isDefaultFloat :: Float -> Bool
+isDefaultFloat value = castFloatToWord32 value == 0
+{-# INLINE isDefaultFloat #-}
+
+
+-- | Only positive zero is the implicit protobuf default.
+isDefaultDouble :: Double -> Bool
+isDefaultDouble value = castDoubleToWord64 value == 0
+{-# INLINE isDefaultDouble #-}
 
 
 -- | Encode a varint field (int32, int64, uint32, uint64).
@@ -280,6 +303,18 @@ encodeFieldMessage fn msg =
 {-# INLINE encodeFieldMessage #-}
 
 
+-- | Encode a delimited message with matching start and end tags.
+encodeFieldGroup :: MessageEncode a => Int -> a -> B.Builder
+encodeFieldGroup fn message =
+  putTag fn WireStartGroup <> buildMessage message <> putTag fn WireEndGroup
+{-# INLINE encodeFieldGroup #-}
+
+
+fieldGroupSize :: MessageSize a => Int -> a -> Int
+fieldGroupSize fn message = 2 * tagSize fn + messageSize message
+{-# INLINE fieldGroupSize #-}
+
+
 {- | Encode a submessage field using pre-computed size (no materialization).
 Two-pass: first compute size, then write tag + length + payload.
 This avoids allocating a temporary ByteString for the submessage.
@@ -296,6 +331,30 @@ encodeFieldEnum :: Enum a => Int -> a -> B.Builder
 encodeFieldEnum fn val =
   putTag fn WireVarint <> putVarint (fromIntegral (fromEnum val))
 {-# INLINE encodeFieldEnum #-}
+
+
+-- | Exact encoded size of a packed enum field, including its tag.
+packedEnumSize :: Enum a => Int -> V.Vector a -> Int
+packedEnumSize fn values
+  | V.null values = 0
+  | otherwise = fieldMessageSize fn (packedEnumPayloadSize values)
+{-# INLINE packedEnumSize #-}
+
+
+-- | Encode a packed repeated enum using its declared signed wire numbers.
+encodePackedEnum :: Enum a => Int -> V.Vector a -> B.Builder
+encodePackedEnum fn values
+  | V.null values = mempty
+  | otherwise =
+      putTag fn WireLengthDelimited
+        <> putVarint (fromIntegral (packedEnumPayloadSize values))
+        <> V.foldl' (\acc value -> acc <> putVarint (fromIntegral (fromEnum value))) mempty values
+{-# INLINE encodePackedEnum #-}
+
+
+packedEnumPayloadSize :: Enum a => V.Vector a -> Int
+packedEnumPayloadSize = V.foldl' (\acc value -> acc + varintSize (fromIntegral (fromEnum value))) 0
+{-# INLINE packedEnumPayloadSize #-}
 
 
 -- | Encode a packed repeated uint64 field. No conversion needed.
@@ -374,26 +433,36 @@ On LE platforms: the vector's backing store is already the wire bytes.
 We bulk-copy via a single B.byteString instead of N individual putFixed32.
 -}
 encodePackedFixed32 :: Int -> VU.Vector Word32 -> B.Builder
-encodePackedFixed32 fn vals
-  | VU.null vals = mempty
-  | otherwise =
-      let sz = VU.length vals * 4
-      in putTag fn WireLengthDelimited
-           <> putVarint (fromIntegral sz)
-           <> vectorToBuilder vals 4
+encodePackedFixed32 = encodePackedFixedWidth 4
 {-# INLINE encodePackedFixed32 #-}
 
 
 -- | Encode a packed repeated fixed64 field.
 encodePackedFixed64 :: Int -> VU.Vector Word64 -> B.Builder
-encodePackedFixed64 fn vals
+encodePackedFixed64 = encodePackedFixedWidth 8
+{-# INLINE encodePackedFixed64 #-}
+
+
+-- | Encode packed sfixed32 values in their native two's-complement form.
+encodePackedSFixed32 :: Int -> VU.Vector Int32 -> B.Builder
+encodePackedSFixed32 = encodePackedFixedWidth 4
+{-# INLINE encodePackedSFixed32 #-}
+
+
+-- | Encode packed sfixed64 values in their native two's-complement form.
+encodePackedSFixed64 :: Int -> VU.Vector Int64 -> B.Builder
+encodePackedSFixed64 = encodePackedFixedWidth 8
+{-# INLINE encodePackedSFixed64 #-}
+
+
+encodePackedFixedWidth :: (VU.Unbox a, Storable a) => Int -> Int -> VU.Vector a -> B.Builder
+encodePackedFixedWidth elemSize fn vals
   | VU.null vals = mempty
   | otherwise =
-      let sz = VU.length vals * 8
-      in putTag fn WireLengthDelimited
-           <> putVarint (fromIntegral sz)
-           <> vectorToBuilder vals 8
-{-# INLINE encodePackedFixed64 #-}
+      putTag fn WireLengthDelimited
+        <> putVarint (fromIntegral (VU.length vals * elemSize))
+        <> vectorToBuilder vals elemSize
+{-# INLINE encodePackedFixedWidth #-}
 
 
 -- | Encode a packed repeated float field.
