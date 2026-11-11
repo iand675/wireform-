@@ -1,0 +1,26 @@
+-- Validate the initial Parquet release without shadowing published dependencies.
+-- wireform-derive is deliberately absent: resolve the published 0.2.0.0.
+-- Proto is not part of Parquet's dependency graph.
+--
+-- cabal build --project-file=cabal.project.parquet-release all
+-- Install pyarrow for the bidirectional Arrow interoperability suite, then:
+-- WIREFORM_ARROW_REQUIRE_PYARROW=1 cabal test --project-file=cabal.project.parquet-release all --test-show-details=direct
+-- cabal sdist --project-file=cabal.project.parquet-release all --output-directory=dist-parquet-release
+packages:
+  wireform-core
+  wireform-columnar-core
+  wireform-flatbuffers
+  wireform-arrow
+  wireform-thrift
+  wireform-parquet
+
+optimization: 2
+tests: True
+constraints: wireform-derive == 0.2.0.0
+
+package wireform-arrow
+  flags: +zstd +lz4
+
+package wireform-derive
+  tests: False
+  benchmarks: False

@@ -1,6 +1,6 @@
 ---
 title: wireform-parquet
-description: "Apache Parquet reader and writer with full encoding support, compression, bloom filters, page indexes, column encryption, predicate pushdown, and an Arrow bridge."
+description: "Apache Parquet reader and writer with compression, bloom filters, page indexes, column encryption, predicate pushdown, and an Arrow bridge."
 sidebar:
   order: 40
 ---
@@ -19,6 +19,7 @@ compression codecs that real-world writers emit.
 - **Compression codecs** behind Cabal flags: Snappy, Zstd, LZ4, Gzip, and
   Brotli
 - **Bloom filters** and **page indexes** for sub-row-group predicate pruning
+- **Page integrity**: optional CRC32 checksums verified before decompression
 - **Modular column encryption** (AES-GCM) per the Parquet Modular Encryption
   spec
 - **Predicate pushdown** over footer statistics, page indexes, and bloom filters
@@ -80,6 +81,51 @@ writeParquet schema rowGroups =
 When you need projection or filter pushdown without loading every column,
 use the predicate and aggregate modules together with the Arrow bridge or
 the cross-format `Wireform.Columnar` facade.
+
+Statistics-only min/max requires exact bounds; compact bounds still support
+filtering. Non-null row counts support nullable ancestors but return
+`Nothing` for repeated paths or insufficient metadata. `fileRowCountChecked`
+also verifies the file total against its row groups without overflow.
+
+The schema-aware Arrow writers convert millisecond dates to INT32 days and
+second-resolution times/timestamps to milliseconds. Invalid dates/times,
+timestamp overflow, and durations without a Parquet logical type return an
+error. The inferred read schema uses the normalized units. Fixed-width
+binary, Decimal128/256, and FLOAT16 values are supported by the reader;
+legacy INT96 values must fit a signed 64-bit nanosecond timestamp.
+
+For nested Arrow data, use `arrowFieldToNestedSchema field` together with
+`columnArrayToNestedRows field column`, then `encodeParquetNested`. The
+field controls integer annotations and temporal units, including within
+structs, lists, and maps. Hidden values beneath null parents or outside
+referenced child ranges are ignored; visible required nulls and null map
+keys are rejected. Both Arrow list widths use standard Parquet LIST storage.
+Nested booleans use bit-packed PLAIN values.
+
+Nested writers check row/event counts and the complete V2 page payload
+against signed 32-bit limits.
+The size checks run while shredding, and all leaf level streams are planned
+before value buffers are materialized. For pre-shredded optional lists,
+`buildOptionalListFileEither` also validates level ranges, row boundaries,
+paths, and PLAIN payload sizes. The older `buildOptionalListFile` raises
+an error for invalid input.
+`Parquet.Footer.writeFooterEither` and `writeRawFooterEither` expose footer
+length/trailer errors without an exception. Typed metadata is measured before
+UTF-8 conversion or output allocation. Encrypted footers include crypto
+metadata, the nonce and authentication tag in the same checked budget.
+
+`parquetRowGroupToArrow` projects and reorders nested struct children by
+name, widens signed `Int32` to `Int64` and `Float` to `Double`, and builds
+64-bit offsets for requested `LargeList` fields. List/map wrapper names
+are positional. Omitted physical leaves are not decoded, and required
+targets reject visible nulls before reconstruction.
+
+`parquetFileArrowSchemaChecked` reconstructs struct, list and map fields,
+including legacy list layouts. `parquetRowGroupToArrow` preserves null and
+empty containers, null elements and duplicate leaf names under different
+parents. It rejects inconsistent ancestor levels and malformed schema
+trees. Legacy timestamp annotations infer UTC; JSON columns use Arrow's
+canonical `arrow.json` metadata, which the writers also preserve.
 
 ## Performance
 

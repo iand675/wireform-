@@ -18,9 +18,9 @@ main :: IO ()
 main = do
   let schema =
         V.fromList
-          [ P.SchemaElement "schema" Nothing Nothing (Just 2) Nothing Nothing Nothing
-          , P.SchemaElement "id" (Just P.Required) (Just P.PTInt64) Nothing Nothing Nothing Nothing
-          , P.SchemaElement "name" (Just P.Optional) (Just P.PTByteArray) Nothing Nothing Nothing Nothing
+          [ P.SchemaElement "schema" Nothing Nothing (Just 2) Nothing Nothing Nothing Nothing
+          , P.SchemaElement "id" (Just P.Required) (Just P.PTInt64) Nothing Nothing Nothing Nothing Nothing
+          , P.SchemaElement "name" (Just P.Optional) (Just P.PTByteArray) Nothing Nothing Nothing Nothing Nothing
           ]
 
   let metadata =
@@ -30,6 +30,7 @@ main = do
           , P.fmNumRows = 1000
           , P.fmRowGroups = V.empty
           , P.fmCreatedBy = Just "wireform"
+          , P.fmKeyValueMetadata = Nothing
           , P.fmColumnOrders = Nothing
           }
 

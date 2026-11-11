@@ -34,6 +34,12 @@ This package is part of the [wireform](https://github.com/iand675/wireform-)
 monorepo and shares its allocation primitives, annotation deriver, and
 testing discipline with every other format.
 
+IPC file readers use the footer's schema and block positions, including files
+whose first message is aligned to 64 bytes. Dictionary and record blocks must
+remain inside the data region; offsets into the footer are rejected. Independent
+Rust fixtures exercise both nonempty and empty files through the eager and
+section readers.
+
 ## Install
 
 ```cabal

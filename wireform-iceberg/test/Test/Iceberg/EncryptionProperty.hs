@@ -24,7 +24,7 @@ tests =
   describe "Parquet.Encryption properties" $
     sequence_
       [ it
-          "GCM encrypt/decrypt round-trip with derived nonce"
+          "GCM encrypt/decrypt round-trip with random nonce"
           propGcmRoundTrip
       , it
           "GCM rejects flipped tag bits"
@@ -42,7 +42,7 @@ tests =
           "framed module: writeFramed -> readFramed -> decrypt"
           propFramedRoundTrip
       , it
-          "AAD suffix is exactly 15 bytes for any input"
+          "data-page AAD suffix preserves the file ID and appends seven bytes"
           propAadSuffixLength
       ]
 
@@ -77,7 +77,8 @@ propGcmRoundTrip = property $ do
   key <- forAll genKey
   aad <- forAll genAad
   plain <- forAll genPlaintext
-  case Enc.encryptGcmModulePure key aad plain of
+  encrypted <- evalIO (Enc.encryptModule key aad plain)
+  case encrypted of
     Left e -> footnote ("encrypt failed: " ++ e) >> failure
     Right ct -> case Enc.decryptGcmModule key aad ct of
       Left e -> footnote ("decrypt failed: " ++ e) >> failure
@@ -89,8 +90,9 @@ propGcmTamperTag = property $ do
   key <- forAll genKey
   aad <- forAll genAad
   plain <- forAll genPlaintext
-  case Enc.encryptGcmModulePure key aad plain of
-    Left _ -> success
+  encrypted <- evalIO (Enc.encryptModule key aad plain)
+  case encrypted of
+    Left e -> footnote ("encrypt failed: " ++ e) >> failure
     Right ct -> do
       let !n = BS.length ct
       idx <- forAll (Gen.int (Range.linear (n - 16) (n - 1)))
@@ -107,8 +109,9 @@ propGcmTamperCiphertext = property $ do
   key <- forAll genKey
   aad <- forAll genAad
   plain <- forAll (Gen.bytes (Range.linear 1 200)) -- non-empty so there's CT to flip
-  case Enc.encryptGcmModulePure key aad plain of
-    Left _ -> success
+  encrypted <- evalIO (Enc.encryptModule key aad plain)
+  case encrypted of
+    Left e -> footnote ("encrypt failed: " ++ e) >> failure
     Right ct -> do
       let !n = BS.length ct
       -- flip a byte inside the ciphertext, between nonce(12) and tag(16).
@@ -125,8 +128,9 @@ propGcmAadMismatch = property $ do
   aad1 <- forAll genAad
   aad2 <- forAll (Gen.filter (/= aad1) genAad)
   plain <- forAll genPlaintext
-  case Enc.encryptGcmModulePure key aad1 plain of
-    Left _ -> success
+  encrypted <- evalIO (Enc.encryptModule key aad1 plain)
+  case encrypted of
+    Left e -> footnote ("encrypt failed: " ++ e) >> failure
     Right ct -> case Enc.decryptGcmModule key aad2 ct of
       Left _ -> success
       Right _ -> footnote "decrypt accepted wrong AAD" >> failure
@@ -136,7 +140,8 @@ propCtrRoundTrip :: Property
 propCtrRoundTrip = property $ do
   key <- forAll genKey
   plain <- forAll genPlaintext
-  case Enc.encryptCtrModulePure key plain of
+  encrypted <- evalIO (Enc.encryptModuleCtr key plain)
+  case encrypted of
     Left e -> footnote ("encrypt failed: " ++ e) >> failure
     Right ct -> case Enc.decryptCtrModule key ct of
       Left e -> footnote ("decrypt failed: " ++ e) >> failure
@@ -148,7 +153,8 @@ propFramedRoundTrip = property $ do
   key <- forAll genKey
   aad <- forAll genAad
   plain <- forAll genPlaintext
-  case Enc.encryptGcmModuleFramed key aad plain of
+  encrypted <- evalIO (Enc.encryptGcmModuleFramed key aad plain)
+  case encrypted of
     Left e -> footnote ("framed encrypt failed: " ++ e) >> failure
     Right framed ->
       case Enc.readFramedModule framed 0 of
@@ -167,8 +173,9 @@ propAadSuffixLength = property $ do
   col <- forAll (Gen.int16 Range.linearBounded)
   pg <- forAll (Gen.int16 Range.linearBounded)
   let !suffix = Enc.buildAadSuffix fileId Enc.ModuleDataPage rg col pg
-  -- 8 (file_id padded) + 1 (module type) + 2*3 (ordinals) = 15.
-  BS.length suffix === 15
+  -- The file identifier is implementation-defined; data pages append
+  -- one module byte and three little-endian 16-bit ordinals.
+  BS.length suffix === BS.length fileId + 7
 
 
 -- ============================================================

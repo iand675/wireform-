@@ -67,9 +67,9 @@ main = do
   --    filtering downstream.
   let parquetSchema =
         V.fromList
-          [ P.SchemaElement "schema" Nothing Nothing (Just 2) Nothing Nothing Nothing
-          , P.SchemaElement "id" (Just P.Required) (Just P.PTInt64) Nothing Nothing Nothing Nothing
-          , P.SchemaElement "name" (Just P.Required) (Just P.PTByteArray) Nothing Nothing Nothing Nothing
+          [ P.SchemaElement "schema" Nothing Nothing (Just 2) Nothing Nothing Nothing Nothing
+          , P.SchemaElement "id" (Just P.Required) (Just P.PTInt64) Nothing Nothing Nothing Nothing Nothing
+          , P.SchemaElement "name" (Just P.Required) (Just P.PTByteArray) Nothing Nothing Nothing Nothing Nothing
           ]
       idVals = VP.fromList [(0 :: Int64) .. 9]
       nameVals =

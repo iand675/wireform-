@@ -47,9 +47,9 @@ import Data.Vector.Primitive qualified as VP
 import DataFrame.IO.Parquet qualified as D
 import DataFrame.Operations.Core qualified as D
 import DataFrame.Operators ((|>))
-import DataFrame.Typed.Expr ((.*.), (.==.), (.>.))
 import DataFrame.Typed.Access qualified as TDF
 import DataFrame.Typed.Aggregate qualified as TDF
+import DataFrame.Typed.Expr ((.*.), (.==.), (.>.))
 import DataFrame.Typed.Expr qualified as TDF
 import DataFrame.Typed.Freeze qualified as TDF
 import DataFrame.Typed.Operations qualified as TDF
@@ -209,7 +209,8 @@ encodeOrders rows =
   let schema =
         V.fromList
           [ P.SchemaElement
-              { P.seName = "schema"
+              { P.seTypeLength = Nothing
+              , P.seName = "schema"
               , P.seRepetition = Nothing
               , P.seType = Nothing
               , P.seNumChildren = Just 3
@@ -225,6 +226,7 @@ encodeOrders rows =
               Nothing
               Nothing
               Nothing
+              Nothing
           , P.SchemaElement
               "region"
               (Just P.Required)
@@ -233,10 +235,12 @@ encodeOrders rows =
               (Just P.CTUtf8)
               Nothing
               Nothing
+              Nothing
           , P.SchemaElement
               "amount"
               (Just P.Required)
               (Just P.PTDouble)
+              Nothing
               Nothing
               Nothing
               Nothing

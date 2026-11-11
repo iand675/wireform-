@@ -49,6 +49,7 @@ mkParquetFm =
               }
           )
     , P.fmCreatedBy = Just "wireform-parquet test"
+    , P.fmKeyValueMetadata = Nothing
     , P.fmColumnOrders = Nothing
     }
   where
@@ -71,7 +72,10 @@ mkParquetFm =
                   , P.cmStatistics =
                       Just
                         ( P.Statistics
-                            { P.statMin = Nothing
+                            { P.statMinValueExact = Nothing
+                            , P.statMaxValueExact = Nothing
+                            , P.statNanCount = Nothing
+                            , P.statMin = Nothing
                             , P.statMax = Nothing
                             , P.statNullCount = Just 1
                             , P.statDistinctCount = Nothing
@@ -107,7 +111,10 @@ mkParquetFm =
                   , P.cmStatistics =
                       Just
                         ( P.Statistics
-                            { P.statMin = Nothing
+                            { P.statMinValueExact = Nothing
+                            , P.statMaxValueExact = Nothing
+                            , P.statNanCount = Nothing
+                            , P.statMin = Nothing
                             , P.statMax = Nothing
                             , P.statNullCount = Just 0
                             , P.statDistinctCount = Nothing
