@@ -42,6 +42,7 @@ module Arrow.FlatBufferIPC.Read
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Int (Int64)
+import Data.Word (Word8)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as V
@@ -78,6 +79,23 @@ when' :: Bool -> Either String () -> Either String ()
 when' True  e = e
 when' False _ = Right ()
 
+data MetadataVersion = MetadataV4 | MetadataV5
+
+-- | Both Message and Footer put the signed 16-bit version in slot 0.
+-- An absent FlatBuffers enum field has its default value, V1 (0).
+readMetadataVersion :: ByteString -> (Int -> Maybe Pos) -> Either String MetadataVersion
+readMetadataVersion bytes slot = do
+  version <- maybe (Right 0) (peekI16 bytes) (slot 0)
+  case version of
+    3 -> Right MetadataV4
+    4 -> Right MetadataV5
+    _ -> Left ("Arrow.FlatBufferIPC: unsupported metadata version " ++ show version)
+
+readMessageTable :: ByteString -> Either String (Int -> Maybe Pos)
+readMessageTable meta = do
+  msgPos <- fromIntegral <$> peekU32 meta 0
+  resolveTable meta msgPos
+
 -- | Slice @len@ bytes at @off@ out of @bs@, where both come off the
 -- wire: negative or out-of-range values are a 'Left', never a
 -- silently clamped slice.
@@ -105,8 +123,8 @@ sliceWire what off len bs
 decodeTensorMessage
   :: ByteString -> Either String (Tensor, Int64)
 decodeTensorMessage meta = do
-  msgPos <- fromIntegral <$> peekU32 meta 0
-  mSlot  <- resolveTable meta msgPos
+  mSlot <- readMessageTable meta
+  _ <- readMetadataVersion meta mSlot
   ht <- case mSlot 1 of
     Nothing -> Right (0 :: Int)
     Just b  -> fromIntegral <$> peekU8 meta b
@@ -151,8 +169,8 @@ decodeSparseTensorFrame
 decodeSparseTensorFrame bs = do
   (mlen, meta, rest1) <- readFrameHeader bs
   when' (mlen <= 0) $ Left "decodeSparseTensorFrame: unexpected EOS"
-  msgPos <- fromIntegral <$> peekU32 meta 0
-  mSlot  <- resolveTable meta msgPos
+  mSlot <- readMessageTable meta
+  _ <- readMetadataVersion meta mSlot
   ht <- case mSlot 1 of
     Nothing -> Right (0 :: Int)
     Just b  -> fromIntegral <$> peekU8 meta b
@@ -625,8 +643,8 @@ structVector bs slotPos = do
     else Right $! bytesToStorable (BS.take (n * 16) (BS.drop (vecPos + 4) bs))
 
 -- | Decode a @RecordBatch@ table.
-readRecordBatchTable :: ByteString -> Pos -> Either String RecordBatchDef
-readRecordBatchTable bs rbPos = do
+readRecordBatchTable :: MetadataVersion -> ByteString -> Pos -> Either String RecordBatchDef
+readRecordBatchTable version bs rbPos = do
   s <- resolveTable bs rbPos
   len <- case s 0 of
     Nothing -> Right 0
@@ -654,25 +672,23 @@ readRecordBatchTable bs rbPos = do
         0 -> Right (Just LZ4Frame)
         1 -> Right (Just BodyZstd)
         n -> Left $ "Arrow.FlatBufferIPC: unknown BodyCompression codec " ++ show n
-  Right RecordBatchDef
-    { rbLength  = len
-    , rbNodes   = nodes
-    , rbBuffers = bufs
-    , rbVariadicBufferCounts = variadic
-    , rbBodyCompression = bodyComp
-    }
+  Right $ case version of
+    MetadataV4 -> RecordBatchDefV4 len nodes bufs variadic bodyComp
+    MetadataV5 -> RecordBatchDef len nodes bufs variadic bodyComp
 
 -- | Decode a Schema-typed @Message@ flatbuffer (just the metadata
 -- bytes; the caller has already stripped the encapsulated framing).
 decodeSchemaMessage :: ByteString -> Either String Schema
 decodeSchemaMessage meta = do
-  msgPos <- fromIntegral <$> peekU32 meta 0
-  s <- resolveTable meta msgPos
-  ht <- case s 1 of
-    Nothing -> Left "Arrow.FlatBufferIPC: Message header_type missing"
-    Just b  -> peekU8 meta b
+  s <- readMessageTable meta
+  _ <- readMetadataVersion meta s
+  ht <- readHeaderType meta s
   when' (ht /= 1) $
     Left ("Arrow.FlatBufferIPC: expected Schema header (1), got " ++ show ht)
+  readSchemaPayload meta s
+
+readSchemaPayload :: ByteString -> (Int -> Maybe Pos) -> Either String Schema
+readSchemaPayload meta s =
   case s 2 of
     Nothing -> Left "Arrow.FlatBufferIPC: Message header (Schema) missing"
     Just b  -> do
@@ -683,21 +699,21 @@ decodeSchemaMessage meta = do
 -- @(RecordBatchDef, bodyLength)@.
 decodeRecordBatchMessage :: ByteString -> Either String (RecordBatchDef, Int64)
 decodeRecordBatchMessage meta = do
-  msgPos <- fromIntegral <$> peekU32 meta 0
-  s <- resolveTable meta msgPos
-  ht <- case s 1 of
-    Nothing -> Left "Arrow.FlatBufferIPC: Message header_type missing"
-    Just b  -> peekU8 meta b
+  s <- readMessageTable meta
+  version <- readMetadataVersion meta s
+  ht <- readHeaderType meta s
   when' (ht /= 3) $
     Left ("Arrow.FlatBufferIPC: expected RecordBatch header (3), got " ++ show ht)
+  readRecordBatchPayload meta version s
+
+readRecordBatchPayload :: ByteString -> MetadataVersion -> (Int -> Maybe Pos) -> Either String (RecordBatchDef, Int64)
+readRecordBatchPayload meta version s = do
   rb <- case s 2 of
     Nothing -> Left "Arrow.FlatBufferIPC: Message header (RecordBatch) missing"
     Just b  -> do
       rbPos <- followUOffset meta b
-      readRecordBatchTable meta rbPos
-  bodyLen <- case s 3 of
-    Nothing -> Right 0
-    Just b  -> peekI64 meta b
+      readRecordBatchTable version meta rbPos
+  bodyLen <- readBodyLength meta s
   Right (rb, bodyLen)
 
 -- | Decode a DictionaryBatch-typed @Message@ flatbuffer to
@@ -705,13 +721,15 @@ decodeRecordBatchMessage meta = do
 decodeDictionaryBatchMessage
   :: ByteString -> Either String (Int64, Bool, RecordBatchDef, Int64)
 decodeDictionaryBatchMessage meta = do
-  msgPos <- fromIntegral <$> peekU32 meta 0
-  s <- resolveTable meta msgPos
-  ht <- case s 1 of
-    Nothing -> Left "Arrow.FlatBufferIPC: Message header_type missing"
-    Just b  -> peekU8 meta b
+  s <- readMessageTable meta
+  version <- readMetadataVersion meta s
+  ht <- readHeaderType meta s
   when' (ht /= 2) $
     Left ("Arrow.FlatBufferIPC: expected DictionaryBatch header (2), got " ++ show ht)
+  readDictionaryBatchPayload meta version s
+
+readDictionaryBatchPayload :: ByteString -> MetadataVersion -> (Int -> Maybe Pos) -> Either String (Int64, Bool, RecordBatchDef, Int64)
+readDictionaryBatchPayload meta version s = do
   dbTblPos <- case s 2 of
     Nothing -> Left "Arrow.FlatBufferIPC: Message header (DictionaryBatch) missing"
     Just b  -> followUOffset meta b
@@ -723,16 +741,21 @@ decodeDictionaryBatchMessage meta = do
     Nothing -> Left "Arrow.FlatBufferIPC: DictionaryBatch.data missing"
     Just b  -> do
       rbPos <- followUOffset meta b
-      readRecordBatchTable meta rbPos
+      readRecordBatchTable version meta rbPos
   isDelta <- case ds 2 of
     Nothing -> Right False
     Just b  -> do
       v <- peekU8 meta b
       Right (v /= 0)
-  bodyLen <- case s 3 of
-    Nothing -> Right 0
-    Just b  -> peekI64 meta b
+  bodyLen <- readBodyLength meta s
   Right (did, isDelta, rb, bodyLen)
+
+readHeaderType :: ByteString -> (Int -> Maybe Pos) -> Either String Word8
+readHeaderType meta s =
+  maybe (Left "Arrow.FlatBufferIPC: Message header_type missing") (peekU8 meta) (s 1)
+
+readBodyLength :: ByteString -> (Int -> Maybe Pos) -> Either String Int64
+readBodyLength meta s = maybe (Right 0) (peekI64 meta) (s 3)
 
 -- | Parse an Arrow IPC stream produced by any spec-compliant
 -- writer (pyarrow / arrow-cpp / arrow-rs) into wireform's
@@ -786,15 +809,17 @@ readArrowStreamFBInterleaved bs0 = do
           if mlen == 0
             then Right (reverse acc)
             else do
-              ht <- peekHeaderType meta
+              s <- readMessageTable meta
+              version <- readMetadataVersion meta s
+              ht <- readHeaderType meta s
               case ht of
                 3 -> do
-                  (rb, bodyLen) <- decodeRecordBatchMessage meta
+                  (rb, bodyLen) <- readRecordBatchPayload meta version s
                   (body, rest2) <- takeFrameBody "record batch body" bodyLen rest1
                   goFrames rest2 (SFBatch rb body : acc)
                 2 -> do
                   (did, isDelta, rb, bodyLen) <-
-                    decodeDictionaryBatchMessage meta
+                    readDictionaryBatchPayload meta version s
                   (body, rest2) <- takeFrameBody "dictionary batch body" bodyLen rest1
                   let !db = DictBatch { dbId = did, dbIsDelta = isDelta
                                       , dbData = rb, dbBody = body }
@@ -817,15 +842,6 @@ readArrowStreamFBWithDicts bs0 = do
       (dicts, batches) = foldr split ([], []) frames
   Right (schema, dicts, batches)
 
--- | Look up the @header_type@ ubyte from a Message flatbuffer.
-peekHeaderType :: ByteString -> Either String Int
-peekHeaderType meta = do
-  msgPos <- fromIntegral <$> peekU32 meta 0
-  s <- resolveTable meta msgPos
-  case s 1 of
-    Nothing -> Right 0
-    Just b  -> fromIntegral <$> peekU8 meta b
-
 -- | Parse one encapsulated frame (with or without the continuation
 -- marker) into its 'Message' and the @bodyLength@ it declares. The
 -- end-of-stream marker and unsupported header types are 'Left'.
@@ -836,11 +852,13 @@ decodeMessageFrame bs = do
     Left "Arrow.FlatBufferIPC: end-of-stream marker, not a message"
   when' (BS.length meta < mlen) $
     Left "Arrow.FlatBufferIPC: truncated message metadata"
-  ht <- peekHeaderType meta
+  s <- readMessageTable meta
+  version <- readMetadataVersion meta s
+  ht <- readHeaderType meta s
   case ht of
-    1 -> (\s -> (SchemaMessage s, 0)) <$> decodeSchemaMessage meta
-    2 -> (\(did, isDelta, rb, n) -> (DictionaryBatch did isDelta rb, n)) <$> decodeDictionaryBatchMessage meta
-    3 -> (\(rb, n) -> (RecordBatch rb, n)) <$> decodeRecordBatchMessage meta
+    1 -> (\sch -> (SchemaMessage sch, 0)) <$> readSchemaPayload meta s
+    2 -> (\(did, isDelta, rb, n) -> (DictionaryBatch did isDelta rb, n)) <$> readDictionaryBatchPayload meta version s
+    3 -> (\(rb, n) -> (RecordBatch rb, n)) <$> readRecordBatchPayload meta version s
     _ -> Left ("Arrow.FlatBufferIPC: unsupported message header_type " ++ show ht)
 
 -- | Parse an Arrow IPC /file/ (per @format/File.fbs@) using its footer
@@ -936,6 +954,7 @@ parseFileIndex fileSize footer = do
   let dataEnd = fileSize - 10 - fromIntegral (BS.length footer)
   rootPos <- fromIntegral <$> peekU32 footer 0
   s <- resolveTable footer rootPos
+  _ <- readMetadataVersion footer s
   schField <- case s 1 of
     Nothing -> Left "Arrow.FlatBufferIPC: footer has no schema"
     Just b -> Right b

@@ -409,7 +409,9 @@ batchMessage encapsulated mDict rb bodyLen = BSI.unsafeCreate total $ \p0 -> do
   w32 0 16
   w16 4 12 >> w16 6 24 >> w16 8 4 >> w16 10 6 >> w16 12 8 >> w16 14 16
   w32 16 12
-  pokeByteOff p 20 metadataVersionV5
+  pokeByteOff p 20 $ case rb of
+    RecordBatchDefV4 {} -> 3 :: Int16
+    RecordBatchDef {} -> metadataVersionV5
   case mDict of
     Nothing -> do
       w8 22 3

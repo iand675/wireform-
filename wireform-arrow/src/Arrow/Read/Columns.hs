@@ -208,7 +208,18 @@ decodeRecordBatch :: ReadOptions -> Schema -> RecordBatchDef -> ByteString -> Ei
 decodeRecordBatch opts schema rb body = do
   checkBatchBudgets opts rb
   src <- bodySource opts rb body
-  let !ctx = Ctx (arrowEndianness schema == Big) rb src opts
+  let !legacyUnionValidity = case rb of
+        RecordBatchDefV4 {} -> True
+        RecordBatchDef {} -> False
+      !ctx =
+        Ctx
+          (arrowEndianness schema == Big)
+          legacyUnionValidity
+          (rbNodes rb)
+          (rbBuffers rb)
+          (rbVariadicBufferCounts rb)
+          src
+          opts
   Outs cols _ <- fieldsN ctx (arrowFields schema) (Cur 0 0 0 0)
   case V.findIndex (\c -> fromIntegral (columnLength c) /= rbLength rb) cols of
     Nothing -> Right cols
@@ -300,7 +311,10 @@ bodySource opts rb body = case rbBodyCompression rb of
 data Ctx = Ctx
   { ctxSwap :: !Bool
   -- ^ Big-endian body: multi-byte values are byte-swapped into fresh buffers.
-  , ctxRb :: !RecordBatchDef
+  , ctxLegacyUnionValidity :: !Bool
+  , ctxNodes :: !(VS.Vector FieldNode)
+  , ctxBuffers :: !(VS.Vector Buffer)
+  , ctxVariadicBufferCounts :: !(V.Vector Int64)
   , ctxSrc :: !Source
   , ctxOpts :: !ReadOptions
   }
@@ -337,11 +351,11 @@ maxArrayLength = 1 `shiftL` 40
 
 -- | Field node @i@ with its length checked to lie in @[0, 'maxArrayLength']@.
 nodeAt :: Ctx -> Int -> Either String FieldNode
-nodeAt ctx i = case rbNodes (ctxRb ctx) VS.!? i of
+nodeAt ctx i = case ctxNodes ctx VS.!? i of
   Nothing ->
     Left
       ( "Arrow.Read.Columns: record batch has "
-          ++ show (VS.length (rbNodes (ctxRb ctx)))
+          ++ show (VS.length (ctxNodes ctx))
           ++ " field nodes, schema needs node #"
           ++ show i
       )
@@ -370,7 +384,7 @@ bufferAt ctx i
              then Left "Arrow.Read.Columns: buffer outside the body"
              else Right $! BSU.unsafeTake (fromIntegral l) (BSU.unsafeDrop (fromIntegral o) body)
   where
-    !bufs = rbBuffers (ctxRb ctx)
+    !bufs = ctxBuffers ctx
 {-# INLINE bufferAt #-}
 
 
@@ -433,7 +447,7 @@ fieldAt ctx f fn len cur = case fieldDictionary f of
     ALargeListView -> listView @Int64 ctx "large list view" I.ColLargeListView f fn len cur
     AFixedSizeList size -> fixedSizeList ctx size f fn len cur
     AMap _ -> mapCol ctx f fn len cur
-    AUnion mode ids -> union ctx mode ids f len cur
+    AUnion mode ids -> union ctx mode ids f fn len cur
     ARunEndEncoded -> runEndEncoded ctx f len cur
     ty -> case primTypeFor ty of
       Just (SomePrimType t) -> do
@@ -592,13 +606,12 @@ column's variadic data buffers (their count is the next
 -}
 views :: Ctx -> Bool -> FieldNode -> Int -> Cur -> Either String Out
 views ctx utf8 fn len cur = do
-  let !rb = ctxRb ctx
-      !bi = curBuf cur
+  let !bi = curBuf cur
       !what = if utf8 then "utf8 view" else "binary view"
-  nVar <- case rbVariadicBufferCounts rb V.!? curVar cur of
+  nVar <- case ctxVariadicBufferCounts ctx V.!? curVar cur of
     Nothing -> Left "Arrow.Read.Columns: view column has no variadicBufferCounts entry"
     Just c
-      | c < 0 || c > fromIntegral (VS.length (rbBuffers rb)) ->
+      | c < 0 || c > fromIntegral (VS.length (ctxBuffers ctx)) ->
           Left ("Arrow.Read.Columns: invalid variadic buffer count " ++ show c)
       | otherwise -> Right (fromIntegral c :: Int)
   v <- validityAt ctx what len fn bi
@@ -744,13 +757,21 @@ mapCol ctx f fn len cur = do
     _ -> Left "Arrow.Read.Columns: map entries must be a struct of exactly (key, value) without nulls"
 
 
-{- | Unions carry no validity. Wire type ids become child positions
+{- | V4 unions have a validity slot before the type ids. Like Arrow C++,
+we accept the slot for a union with no top-level nulls, and reject
+top-level nulls because our union representation uses child validity.
+V5 unions have no validity slot. Wire type ids become child positions
 through the declared @typeIds@ (aliased as is when they are
 positional, the common case; otherwise one table-lookup pass).
 -}
-union :: Ctx -> UnionMode -> V.Vector Int32 -> Field -> Int -> Cur -> Either String Out
-union ctx mode declared f len cur = do
-  let !bi = curBuf cur
+union :: Ctx -> UnionMode -> V.Vector Int32 -> Field -> FieldNode -> Int -> Cur -> Either String Out
+union ctx mode declared f fn len cur = do
+  validitySlots <- case ctxLegacyUnionValidity ctx of
+    False -> Right 0
+    True
+      | fnNullCount fn /= 0 -> Left "Arrow.Read.Columns: V4 union has top-level nulls"
+      | otherwise -> 1 <$ bufferAt ctx (curBuf cur)
+  let !bi = curBuf cur + validitySlots
       !k = V.length (fieldChildren f)
       !what = "union"
   table <- unionChildTable k declared
@@ -761,12 +782,12 @@ union ctx mode declared f len cur = do
   case mode of
     Dense -> do
       offs <- storableAt @Int32 ctx "dense union offsets" [4] len (bi + 1)
-      Outs children cur' <- fieldsN ctx (fieldChildren f) (adv 1 2 cur)
+      Outs children cur' <- fieldsN ctx (fieldChildren f) (adv 1 (validitySlots + 2) cur)
       let !lens = VS.generate k (\j -> fromIntegral (columnLength (V.unsafeIndex children j))) :: VS.Vector Int64
       I.validateDenseUnion what types offs lens
       Right (Out (I.ColDenseUnion types offs children) cur')
     Sparse -> do
-      Outs children cur' <- fieldsN ctx (fieldChildren f) (adv 1 1 cur)
+      Outs children cur' <- fieldsN ctx (fieldChildren f) (adv 1 (validitySlots + 1) cur)
       checkChildLengths "sparse union" len children
       I.validateSparseUnionTypes what types k
       Right (Out (I.ColSparseUnion types children) cur')

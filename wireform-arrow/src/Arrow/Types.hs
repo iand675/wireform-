@@ -282,6 +282,9 @@ instance Storable Buffer where
   {-# INLINE poke #-}
 
 
+-- | A batch definition with buffers in its original wire layout.
+-- Both constructors have the same fields. New batches use 'RecordBatchDef'
+-- (V5), and a V4 message retains its layout in 'RecordBatchDefV4'.
 data RecordBatchDef = RecordBatchDef
   { rbLength :: !Int64
   , rbNodes :: !(VS.Vector FieldNode)
@@ -304,6 +307,13 @@ data RecordBatchDef = RecordBatchDef
   decompressed. 'Nothing' = uncompressed buffers (the wire
   default).
   -}
+  }
+  | RecordBatchDefV4
+  { rbLength :: !Int64
+  , rbNodes :: !(VS.Vector FieldNode)
+  , rbBuffers :: !(VS.Vector Buffer)
+  , rbVariadicBufferCounts :: !(Vector Int64)
+  , rbBodyCompression :: !(Maybe BodyCompressionCodec)
   }
   deriving stock (Show, Eq, Generic)
   deriving anyclass (NFData)
