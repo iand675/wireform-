@@ -68,6 +68,7 @@ jobs:
             liblz4-dev \
             libzstd-dev \
             libbrotli-dev \
+            libre2-dev pkg-config \
             librdkafka-dev \
             protobuf-compiler
 
@@ -175,6 +176,7 @@ jobs:
             liblz4-dev \
             libzstd-dev \
             libbrotli-dev \
+            libre2-dev pkg-config \
             librdkafka-dev
 
       - name: Build all benchmarks
@@ -213,7 +215,7 @@ jobs:
             libsnappy-dev \
             liblz4-dev \
             libzstd-dev \
-            libbrotli-dev
+            libbrotli-dev libre2-dev pkg-config
 
       - name: Build code generator
         run: |

@@ -10,9 +10,8 @@ definition: numeric operators check for overflow, division / modulus by
 zero are errors, ordering and equality treat the numeric types as a single
 number line, and @NaN@ is unordered and never equal.
 
-Named (Joda / IANA) timezones are not yet supported by the date/time
-accessors; @UTC@ and fixed @±HH:MM@ offsets are. Passing an unsupported
-timezone name yields an error rather than an incorrect result.
+Timestamp accessors support named IANA timezones, @UTC@, and fixed
+@±HH:MM@ offsets.
 -}
 module CEL.Stdlib (
   arith,
@@ -23,15 +22,26 @@ module CEL.Stdlib (
   indexValue,
   selectField,
   callFunction,
+  callGlobalFunction,
+  callMemberFunction,
   sizeOf,
+  mkTimestampNanos,
+  mkDurationNanos,
+  protobufJsonValue,
+  protobufJsonList,
+  protobufJsonStruct,
 ) where
 
 import CEL.Error
+import CEL.Internal.Number (parseDecimalDouble)
 import CEL.Syntax (ArithOp (..), RelOp (..))
 import CEL.Value
+import Data.Bits ((.&.), countTrailingZeros, shiftR)
 import Data.ByteString qualified as BS
-import Data.Char (intToDigit, isDigit)
+import Data.ByteString.Unsafe qualified as BSU
+import Data.Char (isAsciiLower, isDigit, toUpper)
 import Data.Int (Int64)
+import Data.Map.Lazy qualified as Map
 import Data.Ratio ((%))
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -43,15 +53,18 @@ import Data.Text.Read qualified as TR
 import Data.Time.Calendar (dayOfWeek, toGregorian)
 import Data.Time.Calendar.OrdinalDate (toOrdinalDate)
 import Data.Time.Clock (UTCTime (..), diffTimeToPicoseconds)
-import Data.Time.Clock.POSIX (posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
+import Data.Time.Clock.POSIX (POSIXTime, posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
 import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
-import Data.Time.LocalTime (timeZoneMinutes)
-import Data.Time.Zones (timeZoneForUTCTime)
+import Data.Time.Zones (diffForPOSIX)
 import Data.Time.Zones.All (fromTZName, tzByLabel)
 import Data.Vector qualified as V
 import Data.Word (Word64)
+import Foreign.C.Types (CChar, CInt (..), CSize (..))
+import Foreign.Ptr (Ptr)
+import GHC.Float (castDoubleToWord64)
 import Numeric (floatToDigits)
-import Text.Regex.TDFA (Regex, makeRegexM, matchTest)
+import System.IO.Unsafe (unsafePerformIO)
+import Wireform.Base64 (encodeBase64)
 
 
 ----------------------------------------------------------------------
@@ -176,12 +189,11 @@ mkTimestampNanos total =
 
 
 mkDurationNanos :: Integer -> Either CelError Value
-mkDurationNanos total
-  | total < toInteger (minBound :: Int64) || total > toInteger (maxBound :: Int64) =
-      Left (overflow "duration")
-  | otherwise =
-      let (s, n) = total `quotRem` 1000000000
-      in Right (VDuration (Duration (fromInteger s) (fromInteger n)))
+mkDurationNanos total =
+  let (s, n) = total `quotRem` 1000000000
+  in if abs s > 315576000000
+       then Left (overflow "duration")
+       else Right (VDuration (Duration (fromInteger s) (fromInteger n)))
 
 
 addTsDur :: Timestamp -> Duration -> Either CelError Value
@@ -245,24 +257,30 @@ inOp _ _ = Left (noOverload "@in")
 
 -- | Indexing: @list[int]@ and @map[key]@.
 indexValue :: Value -> Value -> Either CelError Value
-indexValue (VList v) i = case asListIndex i of
-  Just k
-    | k < 0 || k >= V.length v -> Left (CelError ErrNoSuchKey "index out of bounds")
-    | otherwise -> Right (v V.! k)
-  Nothing -> Left (noOverload "_[_]")
+indexValue (VList v) i = asListIndex (V.length v) i >>= unpackValue . V.unsafeIndex v
 indexValue (VMap m) k = case celMapLookup k m of
-  Just val -> Right val
+  Just val -> unpackValue val
   Nothing -> Left (noSuchKey (renderKey k))
 indexValue _ _ = Left (noOverload "_[_]")
 
 
-asListIndex :: Value -> Maybe Int
-asListIndex (VInt n) = Just (fromIntegral n)
-asListIndex (VUInt n) = Just (fromIntegral n)
-asListIndex (VDouble d)
-  | not (isNaN d || isInfinite d) && fromIntegral (truncate d :: Integer) == d =
-      Just (truncate d)
-asListIndex _ = Nothing
+-- Check bounds before narrowing to the machine Int used by Vector.
+asListIndex :: Int -> Value -> Either CelError Int
+asListIndex len = \case
+  VInt n
+    | n >= 0 && n < fromIntegral len -> Right (fromIntegral n)
+    | otherwise -> outOfBounds
+  VUInt n
+    | n < fromIntegral len -> Right (fromIntegral n)
+    | otherwise -> outOfBounds
+  VDouble d
+    | not (isNaN d || isInfinite d)
+    , let n = truncate d :: Integer
+    , fromInteger n == d ->
+        if n >= 0 && n < toInteger len then Right (fromInteger n) else outOfBounds
+  _ -> Left (noOverload "_[_]")
+  where
+    outOfBounds = Left (CelError ErrNoSuchKey "index out of bounds")
 
 
 renderKey :: Value -> Text
@@ -274,14 +292,14 @@ renderKey = \case
   v -> T.pack (show v)
 
 
-{- | Field selection @e.f@. Only maps support selection in this
-implementation (there is no protobuf message support yet); selecting a
-missing map key is a no-such-key error.
--}
+-- | Field selection @e.f@. An unset protobuf field yields its default.
 selectField :: Value -> Text -> Either CelError Value
 selectField (VMap m) f = case celMapLookup (VString f) m of
-  Just v -> Right v
+  Just v -> unpackValue v
   Nothing -> Left (noSuchKey f)
+selectField (VMessage (CelMessage _ fields)) f = case Map.lookup f fields of
+  Just field -> selectCelField field >>= unpackValue
+  Nothing -> Left (noSuchField f)
 selectField _ f = Left (noSuchField f)
 
 
@@ -303,12 +321,18 @@ sizeOf = \case
 -- Standard functions
 ----------------------------------------------------------------------
 
-{- | Dispatch a standard function or conversion by name and evaluated
-arguments. The receiver of a method-style call is passed as the first
-argument.
+{- | Dispatch a built-in whose arguments have already been flattened.
+Expression evaluation uses the form-specific dispatchers below.
 -}
 callFunction :: Text -> [Value] -> Either CelError Value
-callFunction name args = case (name, args) of
+callFunction name args = case callGlobalFunction name args of
+  Left e | errKind e == ErrNoOverload -> callMemberFunction name args
+  result -> result
+
+
+-- | Dispatch a global call without a receiver.
+callGlobalFunction :: Text -> [Value] -> Either CelError Value
+callGlobalFunction name args = case (name, args) of
   ("size", [v]) -> sizeOf v
   ("type", [v]) -> Right (VType (typeOf v))
   ("dyn", [v]) -> Right v
@@ -349,6 +373,15 @@ callFunction name args = case (name, args) of
   ("timestamp", [VTimestamp t]) -> Right (VTimestamp t)
   ("timestamp", [VString s]) -> parseTimestampText s
   ("timestamp", [VInt i]) -> mkTimestampNanos (toInteger i * 1000000000)
+  ("matches", [VString s, VString p]) -> matchesRegex s p
+  _ -> Left (noOverload name)
+
+
+-- | Dispatch a member call with the receiver as its first argument.
+callMemberFunction :: Text -> [Value] -> Either CelError Value
+callMemberFunction name args = case (name, args) of
+  ("size", _) -> callGlobalFunction name args
+  ("matches", _) -> callGlobalFunction name args
   -- String functions
   ("contains", [VString s, VString needle]) -> Right (VBool (needle `T.isInfixOf` s))
   ("startsWith", [VString s, VString p]) -> Right (VBool (p `T.isPrefixOf` s))
@@ -356,7 +389,6 @@ callFunction name args = case (name, args) of
   ("contains", [VBytes s, VBytes needle]) -> Right (VBool (needle `BS.isInfixOf` s))
   ("startsWith", [VBytes s, VBytes p]) -> Right (VBool (p `BS.isPrefixOf` s))
   ("endsWith", [VBytes s, VBytes p]) -> Right (VBool (p `BS.isSuffixOf` s))
-  ("matches", [VString s, VString p]) -> matchesRegex s p
   -- Timestamp accessors
   ("getFullYear", _) -> tsAccessor args (\(y, _, _, _, _, _, _, _) -> y)
   ("getMonth", _) -> tsAccessor args (\(_, mo, _, _, _, _, _, _) -> mo - 1)
@@ -372,8 +404,11 @@ callFunction name args = case (name, args) of
   ("getHours", _) -> tsAccessor args (\(_, _, _, h, _, _, _, _) -> h)
   ("getMinutes", _) -> tsAccessor args (\(_, _, _, _, mi, _, _, _) -> mi)
   ("getSeconds", _) -> tsAccessor args (\(_, _, _, _, _, se, _, _) -> se)
-  ("getMilliseconds", [VTimestamp t]) -> Right (VInt (fromIntegral (tsNanos t `div` 1000000)))
+  ("getMilliseconds", [VTimestamp t]) -> Right (timestampMillis t)
+  ("getMilliseconds", [VTimestamp t, VString tz]) -> timestampMillis t <$ resolveOffset tz t
   _ -> Left (noOverload name)
+  where
+    timestampMillis t = VInt (fromIntegral (tsNanos t `div` 1000000))
 
 
 ----------------------------------------------------------------------
@@ -390,70 +425,54 @@ parseBoolText s
 parseDoubleText :: Text -> Either CelError Value
 parseDoubleText s0 =
   let s = T.strip s0
-  in case s of
-       "Infinity" -> Right (VDouble (1 / 0))
-       "+Infinity" -> Right (VDouble (1 / 0))
-       "-Infinity" -> Right (VDouble (-1 / 0))
-       "NaN" -> Right (VDouble (0 / 0))
-       _ -> case parseDecimalRational s of
-         Just r -> Right (VDouble (fromRational r))
-         Nothing -> Left (conversion ("cannot convert string to double: " <> s0))
-
-
--- Parse a decimal string @[sign] digits [. digits] [(e|E) [sign] digits]@ into
--- an exact 'Rational', so the subsequent 'fromRational' is correctly rounded.
-parseDecimalRational :: Text -> Maybe Rational
-parseDecimalRational t0 =
-  let (sign, t1) = case T.uncons t0 of
-        Just ('-', r) -> (-1, r)
-        Just ('+', r) -> (1, r)
-        _ -> (1, t0)
-      (intPart, t2) = T.span isDigit t1
-      (fracPart, t3) = case T.uncons t2 of
-        Just ('.', r) -> T.span isDigit r
-        _ -> (T.empty, t2)
-      (expVal, t4) = parseExp t3
-  in if not (T.null intPart && T.null fracPart) && T.null t4
-       then
-         let digits = intPart <> fracPart
-             mantissa = readIntegerText digits
-             scale = toInteger (T.length fracPart)
-             value = (mantissa % 1) * (10 ^^ (expVal - scale))
-         in Just (sign * value)
-       else Nothing
-  where
-    parseExp t = case T.uncons t of
-      Just (e, r)
-        | e == 'e' || e == 'E' ->
-            let (s', r') = case T.uncons r of
-                  Just ('-', rr) -> (-1, rr)
-                  Just ('+', rr) -> (1, rr)
-                  _ -> (1, r)
-                (ds, r'') = T.span isDigit r'
-            in if T.null ds then (0, t) else (s' * fromIntegral (readIntegerText ds), r'')
-      _ -> (0, t)
-
-
-readIntegerText :: Text -> Integer
-readIntegerText t = T.foldl' (\acc c -> acc * 10 + toInteger (fromEnum c - fromEnum '0')) 0 t
+      invalid = Left (conversion ("cannot convert string to double: " <> s0))
+  in case parseDecimalDouble s of
+       Just d | isInfinite d -> Left (conversion ("double out of range: " <> s0))
+       Just d -> Right (VDouble d)
+       Nothing
+         | T.compareLength s 9 == GT -> invalid
+         | otherwise -> case T.toLower s of
+             "inf" -> Right (VDouble (1 / 0))
+             "+inf" -> Right (VDouble (1 / 0))
+             "infinity" -> Right (VDouble (1 / 0))
+             "+infinity" -> Right (VDouble (1 / 0))
+             "-inf" -> Right (VDouble (-1 / 0))
+             "-infinity" -> Right (VDouble (-1 / 0))
+             "nan" -> Right (VDouble (0 / 0))
+             _ -> invalid
 
 
 parseIntText :: Text -> Either CelError Value
-parseIntText s0 =
-  let s = T.strip s0
-  in case TR.signed TR.decimal s of
-       Right (n, rest) | T.null rest -> mkInt n
-       _ -> Left (conversion ("cannot convert string to int: " <> s0))
+parseIntText input = do
+  let text = T.strip input
+      (negative, digits) = case T.uncons text of
+        Just ('-', rest) -> (True, rest)
+        Just ('+', rest) -> (False, rest)
+        _ -> (False, text)
+      invalid = conversion ("cannot convert string to int: " <> input)
+  n <- decimalMagnitude invalid (overflow "integer") digits
+  mkInt (if negative then negate n else n)
 
 
 parseUintText :: Text -> Either CelError Value
-parseUintText s0 =
-  let s = T.strip s0
-  in if T.isPrefixOf "-" s
-       then Left (conversion ("cannot convert string to uint: " <> s0))
-       else case TR.decimal s of
-         Right (n, rest) | T.null rest -> mkUInt n
-         _ -> Left (conversion ("cannot convert string to uint: " <> s0))
+parseUintText input =
+  let invalid = conversion ("cannot convert string to uint: " <> input)
+  in decimalMagnitude invalid (overflow "unsigned integer") (T.strip input) >>= mkUInt
+
+
+-- Check the input before accumulating. Any 64-bit integer has at most
+-- twenty significant decimal digits, regardless of the number of zeros.
+decimalMagnitude :: CelError -> CelError -> Text -> Either CelError Integer
+decimalMagnitude invalid tooLarge digits
+  | T.null digits = Left invalid
+  | T.null significant = Right 0
+  | T.compareLength significant 20 == GT =
+      Left (if T.all isDigit significant then tooLarge else invalid)
+  | otherwise = case TR.decimal significant of
+      Right (n, rest) | T.null rest -> Right n
+      _ -> Left invalid
+  where
+    significant = T.dropWhile (== '0') digits
 
 
 doubleToInt :: Double -> Either CelError Value
@@ -481,11 +500,20 @@ bytesToString b = case TE.decodeUtf8' b of
 
 
 matchesRegex :: Text -> Text -> Either CelError Value
-matchesRegex s p
-  | T.null p = Right (VBool True) -- the empty pattern matches at any position
-  | otherwise = case makeRegexM (T.unpack p) :: Maybe Regex of
-      Nothing -> Left (invalidArg ("invalid regular expression: " <> p))
-      Just re -> Right (VBool (matchTest re (T.unpack s)))
+matchesRegex subject patternText = unsafePerformIO $
+  BSU.unsafeUseAsCStringLen (TE.encodeUtf8 subject) $ \(subjectPtr, subjectLen) ->
+    BSU.unsafeUseAsCStringLen (TE.encodeUtf8 patternText) $ \(patternPtr, patternLen) -> do
+      result <- re2Match subjectPtr (fromIntegral subjectLen) patternPtr (fromIntegral patternLen)
+      pure $ case result of
+        0 -> Right (VBool False)
+        1 -> Right (VBool True)
+        -1 -> Left (invalidArg ("invalid regular expression: " <> patternText))
+        _ -> Left (invalidArg "regular expression evaluation failed")
+{-# NOINLINE matchesRegex #-}
+
+
+foreign import ccall safe "wireform_cel_re2_match"
+  re2Match :: Ptr CChar -> CSize -> Ptr CChar -> CSize -> IO CInt
 
 
 ----------------------------------------------------------------------
@@ -496,9 +524,78 @@ intToText :: Integral a => a -> Text
 intToText = TL.toStrict . TB.toLazyText . TBI.decimal
 
 
+-- Conversion through google.protobuf.Value preserves doubles as numbers,
+-- including IEEE special values. JSON serialization is a separate step.
+protobufJsonValue :: Value -> Either CelError Value
+protobufJsonValue value = case value of
+  VNull -> Right value
+  VBool _ -> Right value
+  VString _ -> Right value
+  VDouble _ -> Right value
+  VInt n -> Right (jsonInteger n)
+  VUInt n -> Right (jsonInteger n)
+  VBytes bytes -> Right (VString (base64Text bytes))
+  VDuration d -> Right (VString (formatDuration (durationNanos d)))
+  VTimestamp t -> Right (VString (formatTimestamp t))
+  VList _ -> protobufJsonList value
+  VMap _ -> protobufJsonStruct value
+  VMessage (CelMessage "google.protobuf.Empty" _) -> Right (VMap (celMapFromList []))
+  VMessage (CelMessage "google.protobuf.FieldMask" fields) ->
+    case Map.lookup "paths" fields of
+      Nothing -> Right (VString "")
+      Just field -> do
+        paths <- selectCelField field
+        case paths of
+          VList values -> VString . T.intercalate "," <$> traverse renderPath (V.toList values)
+          _ -> Left (noOverload "FieldMask.paths")
+  VMessage _ -> Left (noOverload "google.protobuf.Value")
+  VAny {} -> unpackValue value >>= protobufJsonValue
+  VType _ -> Left (noOverload "google.protobuf.Value")
+  where
+    jsonInteger :: Integral a => a -> Value
+    jsonInteger n
+      | integer >= -9007199254740991 && integer <= 9007199254740991 = VDouble (fromIntegral n)
+      | otherwise = VString (intToText n)
+      where
+        integer = toInteger n
+
+    renderPath (VString path)
+      | T.all (\c -> isAsciiLower c || ('0' <= c && c <= '9') || c == '.' || c == '_') path =
+          case T.splitOn "_" path of
+            first : rest -> (first <>) . T.concat <$> traverse capitalize rest
+            [] -> Right ""
+      | otherwise = Left (conversion "irreversible FieldMask path")
+    renderPath _ = Left (noOverload "FieldMask.paths")
+    capitalize part = case T.uncons part of
+      Just (c, rest) | isAsciiLower c -> Right (T.cons (toUpper c) rest)
+      _ -> Left (conversion "irreversible FieldMask path")
+
+    -- Keep each call below the C encoder's length limit. Full chunks
+    -- contain complete triplets, so padding occurs only in the last one.
+    base64Text = T.concat . encodeChunks
+    encodeChunks bytes
+      | BS.null bytes = []
+      | otherwise =
+          let (chunk, rest) = BS.splitAt (3 * 1024 * 1024) bytes
+          in TE.decodeUtf8 (encodeBase64 chunk) : encodeChunks rest
+
+
+protobufJsonList :: Value -> Either CelError Value
+protobufJsonList (VList values) = VList <$> V.mapM protobufJsonValue values
+protobufJsonList _ = Left (noOverload "google.protobuf.ListValue")
+
+
+protobufJsonStruct :: Value -> Either CelError Value
+protobufJsonStruct (VMap values) = VMap <$> traverseCelMapValues convertEntry values
+  where
+    convertEntry (VString _) value = protobufJsonValue value
+    convertEntry _ _ = Left (noOverload "google.protobuf.Struct requires string keys")
+protobufJsonStruct _ = Left (noOverload "google.protobuf.Struct")
+
+
 {- | Format a double the way reference CEL (Go's @strconv.FormatFloat(_, 'g',
 -1, 64)@) does: shortest round-tripping decimal, switching to scientific
-notation when the decimal exponent is @< -4@ or @>= 21@.
+notation when the decimal exponent is @< -4@ or @>= 6@.
 -}
 doubleToText :: Double -> Text
 doubleToText d
@@ -507,21 +604,83 @@ doubleToText d
   | d == 0 = if isNegativeZero d then "-0" else "0"
   | otherwise =
       let sign = if d < 0 then "-" else ""
-          (ds, n) = floatToDigits 10 (abs d)
-          digits = map intToDigit ds
-          expo = n - 1 -- power of ten of the leading digit
-      in T.pack (sign ++ if expo < -4 || expo >= 21 then sci digits expo else fixed digits n)
+          (openDigits, point) = floatToDigits 10 (abs d)
+          scale = point - length openDigits
+          coefficient = foldl' (\n digit -> n * 10 + fromIntegral digit) 0 openDigits
+          decimal = shortestDecimal (abs d) coefficient scale
+          raw = intToText (decimalCoefficient decimal)
+          digits = T.dropWhileEnd (== '0') raw
+          n = decimalScale decimal + T.length raw
+          expo = n - 1
+      in sign <> if expo < -4 || expo >= 6 then sci digits expo else fixed digits n
   where
-    sci [] _ = "0"
-    sci (d1 : rest) expo =
-      let mant = d1 : (if null rest then "" else '.' : rest)
-      in mant ++ "e" ++ expSign expo ++ pad2 (abs expo)
-    expSign e = if e < 0 then "-" else "+"
-    pad2 e = let s = show e in if length s < 2 then replicate (2 - length s) '0' ++ s else s
+    sci digits expo =
+      let (first, rest) = T.splitAt 1 digits
+          mantissa = if T.null rest then first else first <> "." <> rest
+          expSign = if expo < 0 then "-" else "+"
+      in mantissa <> "e" <> expSign <> T.justifyRight 2 '0' (intToText (abs expo))
     fixed digits n
-      | n <= 0 = "0." ++ replicate (negate n) '0' ++ digits
-      | n >= length digits = digits ++ replicate (n - length digits) '0'
-      | otherwise = let (a, b) = splitAt n digits in a ++ "." ++ b
+      | n <= 0 = "0." <> T.replicate (negate n) "0" <> digits
+      | n >= T.length digits = digits <> T.replicate (n - T.length digits) "0"
+      | otherwise = let (a, b) = T.splitAt n digits in a <> "." <> b
+
+
+data Decimal = Decimal
+  { decimalCoefficient :: {-# UNPACK #-} !Word64
+  , decimalScale :: {-# UNPACK #-} !Int
+  }
+
+
+-- GHC supplies the shortest decimal strictly inside the binary rounding
+-- interval. An even significand can also round-trip from either endpoint.
+-- Only the two neighboring points on the next coarser decimal grid can
+-- produce a shorter representation. Within the same grid, ties go to even.
+shortestDecimal :: Double -> Word64 -> Int -> Decimal
+shortestDecimal d coefficient scale
+  | even significand && lower /= 0 && onBoundary lower = Decimal lower coarser
+  | even significand && coefficient >= 10 && onBoundary (lower + 1) =
+      Decimal (lower + 1) coarser
+  | coefficient > 1 && odd coefficient
+  , sameDecimal significand (binaryScale + 1) (2 * coefficient - 1) scale
+  , not closerLower || lowerTieRoundsBack =
+      Decimal (coefficient - 1) scale
+  | otherwise = Decimal coefficient scale
+  where
+    bits = castDoubleToWord64 d
+    encodedExponent = fromIntegral (bits `shiftR` 52) :: Int
+    leadingBit = 0x10000000000000
+    fraction = bits .&. (leadingBit - 1)
+    significand = if encodedExponent == 0 then fraction else leadingBit + fraction
+    binaryScale = max 1 encodedExponent - 1075
+    -- A normal power of two above the smallest normal has half the
+    -- spacing on the lower side.
+    closerLower = fraction == 0 && encodedExponent > 1
+    lower = coefficient `quot` 10
+    coarser = scale + 1
+    onBoundary candidate =
+      let lowerMantissa = (if closerLower then 4 else 2) * significand - 1
+          lowerScale = binaryScale - if closerLower then 2 else 1
+      in sameDecimal lowerMantissa lowerScale candidate coarser
+           || sameDecimal (2 * significand + 1) (binaryScale - 1) candidate coarser
+    -- At an asymmetric interval, the equally near lower decimal can fall
+    -- outside the interval even though the upper decimal round-trips.
+    lowerTieRoundsBack =
+      fromRational ((toInteger (coefficient - 1) % 1) * 10 ^^ scale) == d
+
+
+-- Compare m * 2^b to c * 10^e exactly. Removing factors of two rules out
+-- most candidates before any arbitrary-precision arithmetic is needed.
+sameDecimal :: Word64 -> Int -> Word64 -> Int -> Bool
+sameDecimal m b c e
+  | b + binaryTwos /= e + decimalTwos = False
+  | e == 0 = binaryOdd == decimalOdd
+  | e > 0 = toInteger binaryOdd == toInteger decimalOdd * 5 ^ e
+  | otherwise = toInteger binaryOdd * 5 ^ negate e == toInteger decimalOdd
+  where
+    binaryTwos = countTrailingZeros m
+    decimalTwos = countTrailingZeros c
+    binaryOdd = m `shiftR` binaryTwos
+    decimalOdd = c `shiftR` decimalTwos
 
 
 ----------------------------------------------------------------------
@@ -554,9 +713,8 @@ trimTrailingZeros = T.dropWhileEnd (== '0')
 @"0"@.
 -}
 parseDurationText :: Text -> Either CelError Value
-parseDurationText input0 =
-  let input = T.strip input0
-      (neg, rest) = case T.uncons input of
+parseDurationText input =
+  let (neg, rest) = case T.uncons input of
         Just ('-', r) -> (True, r)
         Just ('+', r) -> (False, r)
         _ -> (False, input)
@@ -564,7 +722,7 @@ parseDurationText input0 =
        then Right (VDuration (Duration 0 0))
        else
          if T.null rest
-           then Left (conversion ("invalid duration string: " <> input0))
+           then Left (conversion ("invalid duration string: " <> input))
            else do
              nanos <- parseUnits rest 0
              let signed = if neg then negate nanos else nanos
@@ -576,15 +734,16 @@ parseUnits :: Text -> Integer -> Either CelError Integer
 parseUnits t acc
   | T.null t = Right acc
   | otherwise =
-      let (numText, t1) = T.span (\c -> isDigit c || c == '.') t
-          (unitText, t2) = T.span (\c -> c >= 'a' && c <= 'z') t1
+      let isNumberChar c = isDigit c || c == '.'
+          (numText, t1) = T.span isNumberChar t
+          (unitText, t2) = T.break isNumberChar t1
       in if T.null numText
            then dErr
            else case unitNanos unitText of
              Nothing -> dErr
              Just per -> case parseNumberRational numText of
                Nothing -> dErr
-               Just q -> parseUnits t2 (acc + roundRational (q * fromInteger per))
+               Just q -> parseUnits t2 (acc + truncate (q * fromInteger per))
   where
     dErr = Left (conversion "invalid duration string")
 
@@ -596,18 +755,22 @@ unitNanos u = case u of
   "s" -> Just 1000000000
   "ms" -> Just 1000000
   "us" -> Just 1000
+  "µs" -> Just 1000
+  "μs" -> Just 1000
   "ns" -> Just 1
   _ -> Nothing
 
 
 parseNumberRational :: Text -> Maybe Rational
-parseNumberRational t = case TR.rational t of
-  Right (q, rest) | T.null rest -> Just q
-  _ -> Nothing
-
-
-roundRational :: Rational -> Integer
-roundRational = round
+parseNumberRational t
+  | t == "." = Nothing
+  | T.isPrefixOf "." t = readNumber ("0" <> t)
+  | Just whole <- T.stripSuffix "." t = readNumber whole
+  | otherwise = readNumber t
+  where
+    readNumber input = case TR.rational input of
+      Right (q, rest) | T.null rest -> Just q
+      _ -> Nothing
 
 
 ----------------------------------------------------------------------
@@ -626,35 +789,41 @@ formatTimestamp (Timestamp secs nanos) =
 
 
 parseTimestampText :: Text -> Either CelError Value
-parseTimestampText s =
-  let str = T.unpack s
-      tryFmt fmt = parseTimeM True defaultTimeLocale fmt str :: Maybe UTCTime
-      parsed = firstJust (map tryFmt timestampFormats)
-  in case parsed of
-       Nothing -> Left (conversion ("cannot parse timestamp: " <> s))
-       Just utct ->
-         let posix = utcTimeToPOSIXSeconds utct
-             r = toRational posix
-             secs = floor r :: Integer
-             nanos = round ((r - fromInteger secs) * 1000000000) :: Integer
-             (secs', nanos') = if nanos >= 1000000000 then (secs + 1, nanos - 1000000000) else (secs, nanos)
-         in if secs' < tsSecMin || secs' > tsSecMax
-              then Left (overflow "timestamp")
-              else Right (VTimestamp (Timestamp (fromInteger secs') (fromInteger nanos')))
+parseTimestampText input =
+  case parseTimestampUTC input of
+    Nothing -> Left (conversion ("cannot parse timestamp: " <> input))
+    Just posix -> mkTimestampNanos (round (posix * 1000000000))
 
 
-timestampFormats :: [String]
-timestampFormats =
-  [ "%Y-%m-%dT%H:%M:%S%Q%Ez"
-  , "%Y-%m-%dT%H:%M:%S%QZ"
-  , "%Y-%m-%dT%H:%M:%S%Qz"
-  ]
+parseTimestampUTC :: Text -> Maybe POSIXTime
+parseTimestampUTC input = do
+  let (base, suffix) = T.splitAt 19 (T.toUpper input)
+      (fraction, zone) = case T.stripPrefix "." suffix of
+        Just rest ->
+          let (digits, z) = T.span isDigit rest
+          in ("." <> T.take 9 digits, z)
+        Nothing -> ("", suffix)
+  offset <- case T.uncons zone of
+    Just ('Z', "") -> Just 0
+    Just (sign, _) | sign == '+' || sign == '-' -> fixedOffset zone
+    _ -> Nothing
+  if validTimestampBase base && fraction /= "."
+    then do
+      local <- parseTimeM False defaultTimeLocale "%Y-%m-%dT%H:%M:%S%QZ" (T.unpack (base <> fraction <> "Z"))
+      pure (utcTimeToPOSIXSeconds local - fromIntegral offset)
+    else Nothing
 
 
-firstJust :: [Maybe a] -> Maybe a
-firstJust [] = Nothing
-firstJust (Just x : _) = Just x
-firstJust (Nothing : rest) = firstJust rest
+validTimestampBase :: Text -> Bool
+validTimestampBase base =
+  T.length base == 19
+    && T.index base 4 == '-'
+    && T.index base 7 == '-'
+    && T.index base 10 == 'T'
+    && T.index base 13 == ':'
+    && T.index base 16 == ':'
+    && T.length (T.filter isDigit base) == 14
+    && T.index base 17 <= '5'
 
 
 -- (year, month, day, hour, minute, second, dayOfYear0, dayOfWeek0)
@@ -696,10 +865,7 @@ resolveOffset tz ts
   | tz == "" || tz == "UTC" = Right 0
   | Just off <- fixedOffset tz = Right off
   | otherwise = case fromTZName (TE.encodeUtf8 tz) of
-      Just label ->
-        let zone = tzByLabel label
-            utct = posixSecondsToUTCTime (fromIntegral (tsSeconds ts))
-        in Right (timeZoneMinutes (timeZoneForUTCTime zone utct) * 60)
+      Just label -> Right (diffForPOSIX (tzByLabel label) (tsSeconds ts))
       Nothing -> Left (invalidArg ("unsupported timezone: " <> tz))
 
 
@@ -711,10 +877,14 @@ fixedOffset t0 =
         _ -> (False, t0)
   in case T.splitOn ":" t of
        [hh, mm]
-         | Right (h, hr) <- TR.decimal hh
+         | T.length hh == 2
+         , T.length mm == 2
+         , Right (h, hr) <- TR.decimal hh
          , T.null hr
+         , h < 24
          , Right (m, mr) <- TR.decimal mm
-         , T.null mr ->
+         , T.null mr
+         , m < 60 ->
              let off = h * 3600 + m * 60
              in Just (if neg then negate off else off)
        _ -> Nothing

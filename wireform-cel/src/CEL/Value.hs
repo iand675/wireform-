@@ -1,3 +1,7 @@
+{-# LANGUAGE DeriveLift #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
+
 {- | Runtime value model for the Common Expression Language (CEL).
 
 This module defines 'Value', the dynamically-typed value that a CEL
@@ -20,7 +24,24 @@ The semantics implemented here follow
     @google.protobuf.Timestamp@ / @google.protobuf.Duration@.
 -}
 module CEL.Value (
-  Value (..),
+  Value
+    ( VNull
+    , VBool
+    , VInt
+    , VUInt
+    , VDouble
+    , VString
+    , VBytes
+    , VList
+    , VMap
+    , VMessage
+    , VAny
+    , VAnyPayload
+    , VType
+    , VTimestamp
+    , VDuration
+    ),
+  AnyPayload (..),
   CelType (..),
   Timestamp (..),
   Duration (..),
@@ -28,8 +49,18 @@ module CEL.Value (
   celMap,
   celMapFromList,
   celMapEntries,
+  traverseCelMapValues,
   celMapLookup,
   celMapSize,
+  CelMessage (CelMessage),
+  celMessageWithUnknownFields,
+  celMessageUnknownFields,
+  equalUnknownFields,
+  CelField (..),
+  celFieldPresent,
+  celFieldStoredValue,
+  selectCelField,
+  unpackValue,
   typeOf,
   typeName,
   typeNameText,
@@ -44,15 +75,21 @@ module CEL.Value (
   timestampNanos,
 ) where
 
+import CEL.Error (CelError)
+import CEL.Internal.UnknownFields (equalUnknownFields)
 import Control.DeepSeq (NFData (..))
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
 import Data.Int (Int32, Int64)
+import Data.List (partition)
+import Data.Map.Lazy qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Vector (Vector)
 import Data.Vector qualified as V
 import Data.Word (Word64)
 import GHC.Generics (Generic)
+import Language.Haskell.TH.Syntax (Lift)
 
 
 {- | A @google.protobuf.Duration@: a signed span of seconds plus nanoseconds.
@@ -109,9 +146,7 @@ instance Ord Timestamp where
 
 
 {- | The runtime type of a CEL value, as returned by the @type()@ function.
-'TyMessage' carries the fully-qualified name of an opaque/abstract type
-(currently only used for the @type@ values of the well-known abstract
-types).
+'TyMessage' carries the fully-qualified name of a protobuf or abstract type.
 -}
 data CelType
   = TyNull
@@ -127,7 +162,7 @@ data CelType
   | TyTimestamp
   | TyDuration
   | TyMessage !Text
-  deriving stock (Eq, Show, Generic)
+  deriving stock (Eq, Show, Generic, Lift)
 
 
 instance NFData CelType
@@ -175,6 +210,9 @@ data Value
   | VBytes !ByteString
   | VList !(Vector Value)
   | VMap !CelMap
+  | VMessage !CelMessage
+  -- | The type URL and bytes are available for equality when decoding fails.
+  | VAnyPayload !Text !ByteString ~(Either CelError AnyPayload)
   | VType !CelType
   | VTimestamp !Timestamp
   | VDuration !Duration
@@ -184,14 +222,114 @@ data Value
 instance NFData Value
 
 
+-- | The decoded protobuf value used for equality and its CEL projection.
+data AnyPayload = AnyPayload
+  { anyProtobufValue :: ~Value
+  , anyCelValue :: ~(Either CelError Value)
+  }
+  deriving stock (Show, Generic)
+
+
+instance NFData AnyPayload
+
+
+-- | An Any supplied as a CEL value. A wire decoder can use 'VAnyPayload' to
+-- retain the full protobuf message when projection removes fields.
+pattern VAny :: Text -> ByteString -> Either CelError Value -> Value
+pattern VAny url bytes adapted <- VAnyPayload url bytes ((>>= anyCelValue) -> adapted)
+  where VAny url bytes adapted = VAnyPayload url bytes (fmap (\value -> AnyPayload value (Right value)) adapted)
+
+
+{-# COMPLETE VNull, VBool, VInt, VUInt, VDouble, VString, VBytes, VList, VMap, VMessage, VAny, VType, VTimestamp, VDuration #-}
+
+
+-- | Read the CEL value represented by an Any, leaving collection members
+-- deferred until they are used.
+unpackValue :: Value -> Either CelError Value
+unpackValue (VAnyPayload _ _ decoded) = decoded >>= anyCelValue >>= unpackValue
+unpackValue value = Right value
+
+
+-- | A protobuf message as seen by CEL. The value of an absent field is its
+-- selection default, which can itself be a lazily constructed message.
+data CelMessage = Message !Text !(Map.Map Text CelField) !ByteString
+  deriving stock (Generic)
+
+
+-- | A message's type and declared fields. Constructing one this way starts
+-- with no unknown fields.
+pattern CelMessage :: Text -> Map.Map Text CelField -> CelMessage
+pattern CelMessage name fields <- Message name fields _
+  where CelMessage name fields = Message name fields BS.empty
+
+
+{-# COMPLETE CelMessage #-}
+
+
+-- | Construct a message with the original wire bytes of its unknown fields.
+celMessageWithUnknownFields :: Text -> Map.Map Text CelField -> ByteString -> CelMessage
+celMessageWithUnknownFields = Message
+
+
+celMessageUnknownFields :: CelMessage -> ByteString
+celMessageUnknownFields (Message _ _ unknown) = unknown
+
+
+data CelField
+  = CelField !Bool ~Value
+  -- | The stored value participates in protobuf message equality. Reading
+  -- the field performs CEL adaptation, which can fail for an unresolved Any.
+  | CelFieldWithSelection !Bool ~Value ~(Either CelError Value)
+  deriving stock (Show, Generic)
+
+
+celFieldPresent :: CelField -> Bool
+celFieldPresent (CelField present _) = present
+celFieldPresent (CelFieldWithSelection present _ _) = present
+
+
+celFieldStoredValue :: CelField -> Value
+celFieldStoredValue (CelField _ value) = value
+celFieldStoredValue (CelFieldWithSelection _ value _) = value
+
+
+selectCelField :: CelField -> Either CelError Value
+selectCelField (CelField _ value) = Right value
+selectCelField (CelFieldWithSelection _ _ selected) = selected
+
+
+instance Show CelMessage where
+  showsPrec p (Message name fields unknown) =
+    showParen (p > 10) (showString "CelMessage " . showsPrec 11 name . showChar ' ' . showsPrec 11 (presentFields fields) . showUnknown)
+    where
+      showUnknown
+        | BS.null unknown = id
+        | otherwise = showString " unknown=" . shows unknown
+
+
+instance NFData CelMessage where
+  rnf (Message name fields unknown) = rnf name `seq` rnf (presentFields fields) `seq` rnf unknown
+
+
+presentFields :: Map.Map Text CelField -> Map.Map Text Value
+presentFields = Map.mapMaybe (\field -> if celFieldPresent field then Just (celFieldStoredValue field) else Nothing)
+
+
 {- | An insertion-ordered association of CEL keys to CEL values with unique
-keys (uniqueness determined by 'valueEq', so @1@ and @1u@ are the same key).
+keys, using the same equivalence as 'celMapLookup'. For example, @1@ and @1u@
+are the same key.
 -}
 newtype CelMap = CelMap {celMapEntries :: [(Value, Value)]}
   deriving stock (Show, Generic)
 
 
 instance NFData CelMap
+
+
+-- | Transform each value with its key, preserving the keys and their order.
+traverseCelMapValues :: Applicative f => (Value -> Value -> f Value) -> CelMap -> f CelMap
+traverseCelMapValues f (CelMap entries) =
+  CelMap <$> traverse (\(key, value) -> (key,) <$> f key value) entries
 
 
 -- | Number of entries in a map.
@@ -207,26 +345,87 @@ celMap = go []
   where
     go acc [] = Right (CelMap (reverse acc))
     go acc ((k, v) : rest)
-      | any (\(k', _) -> valueEq k k') acc =
+      | any (\(k', _) -> mapKeyEq k k') acc =
           Left ("duplicate key in map: " <> T.pack (show k))
       | otherwise = go ((k, v) : acc) rest
 
 
-{- | Build a map from entries, keeping the last value for duplicate keys.
-Used where the caller has already validated uniqueness.
+{- | Build a map from entries, keeping the last value for duplicate keys
+in the position and key representation of their first occurrence.
 -}
 celMapFromList :: [(Value, Value)] -> CelMap
-celMapFromList = CelMap
+celMapFromList entries
+  | ascendingIndices entries = CelMap entries
+  | otherwise = CelMap $ case traverse indexEntry entries of
+      Just indexed -> inInsertionOrder (Map.fromList indexed) indexed
+      Nothing -> deduplicateOtherKeys entries
+  where
+    indexEntry entry@(k, _) = (,entry) <$> indexKey k
+
+    inInsertionOrder _ [] = []
+    inInsertionOrder values ((indexedKey, (k, _)) : rest) =
+      case Map.lookup indexedKey values of
+        Just (_, v) -> (k, v) : inInsertionOrder (Map.delete indexedKey values) rest
+        Nothing -> inInsertionOrder values rest
+
+    -- Host callers can supply keys outside the CEL language's key types.
+    deduplicateOtherKeys [] = []
+    deduplicateOtherKeys ((k, v) : rest) =
+      let (duplicates, others) = partition (mapKeyEq k . fst) rest
+          final = foldl' (\_ entry -> entry) (k, v) duplicates
+      in (k, snd final) : deduplicateOtherKeys others
 
 
--- | Look up a key in a map using CEL key equality (numeric cross-type aware).
+-- List transformMap produces an increasing subsequence of the input indices.
+ascendingIndices :: [(Value, Value)] -> Bool
+ascendingIndices [] = True
+ascendingIndices ((VInt i, _) : rest) = go i rest
+  where
+    go _ [] = True
+    go prev ((VInt next, _) : xs) = prev < next && go next xs
+    go _ _ = False
+ascendingIndices _ = False
+
+
+data MapKey = IntegerKey !Integer | BoolKey !Bool | StringKey !Text
+  deriving stock (Eq, Ord)
+
+
+indexKey :: Value -> Maybe MapKey
+indexKey = \case
+  VInt i -> Just (IntegerKey (toInteger i))
+  VUInt u -> Just (IntegerKey (toInteger u))
+  VBool b -> Just (BoolKey b)
+  VString s -> Just (StringKey s)
+  _ -> Nothing
+
+
+-- | Look up a key, allowing only lossless numeric conversions between key
+-- types.
 celMapLookup :: Value -> CelMap -> Maybe Value
 celMapLookup k (CelMap es) = go es
   where
     go [] = Nothing
     go ((k', v) : rest)
-      | valueEq k k' = Just v
+      | mapKeyEq k k' = Just v
       | otherwise = go rest
+
+
+mapKeyEq :: Value -> Value -> Bool
+mapKeyEq a b = case (a, b) of
+  (VDouble d, VInt i) -> exactDoubleKey d (toInteger i)
+  (VInt i, VDouble d) -> exactDoubleKey d (toInteger i)
+  (VDouble d, VUInt u) -> exactDoubleKey d (toInteger u)
+  (VUInt u, VDouble d) -> exactDoubleKey d (toInteger u)
+  _ -> valueEq a b
+
+
+exactDoubleKey :: Double -> Integer -> Bool
+exactDoubleKey d expected
+  | isNaN d || isInfinite d = False
+  | otherwise =
+      let whole = truncate d :: Integer
+      in whole == expected && fromInteger whole == d
 
 
 -- | The runtime 'CelType' of a value.
@@ -241,6 +440,8 @@ typeOf = \case
   VBytes _ -> TyBytes
   VList _ -> TyList
   VMap _ -> TyMap
+  VMessage (CelMessage name _) -> TyMessage name
+  value@(VAny _ _ _) -> either (const (TyMessage "google.protobuf.Any")) typeOf (unpackValue value)
   VType _ -> TyType
   VTimestamp _ -> TyTimestamp
   VDuration _ -> TyDuration
@@ -256,6 +457,7 @@ isNumeric = \case
   VInt _ -> True
   VUInt _ -> True
   VDouble _ -> True
+  value@(VAny _ _ _) -> either (const False) isNumeric (unpackValue value)
   _ -> False
 
 
@@ -326,6 +528,8 @@ cmpUintDouble x y
 compare unequal rather than erroring. @NaN@ is unequal to everything.
 -}
 valueEq :: Value -> Value -> Bool
+valueEq a@(VAny _ _ _) b = either (const False) (\value -> valueEq value b) (unpackValue a)
+valueEq a b@(VAny _ _ _) = either (const False) (valueEq a) (unpackValue b)
 valueEq a b
   | Just x <- toNum a, Just y <- toNum b = cmpNum x y == Just EQ
 valueEq a b = case (a, b) of
@@ -339,16 +543,119 @@ valueEq a b = case (a, b) of
   (VList x, VList y) ->
     V.length x == V.length y && V.and (V.zipWith valueEq x y)
   (VMap x, VMap y) -> mapEq x y
+  (VMessage (Message name x unknown), VMessage (Message name' y unknown')) ->
+    let px = presentFields x
+        py = presentFields y
+    in name == name' && equalUnknownFields unknown unknown'
+         && Map.size px == Map.size py && Map.isSubmapOfBy protobufValueEq px py
   _ -> False
 
 
 mapEq :: CelMap -> CelMap -> Bool
-mapEq (CelMap xs) my@(CelMap ys) =
+mapEq = mapEqWith valueEq
+
+
+mapEqWith :: (Value -> Value -> Bool) -> CelMap -> CelMap -> Bool
+mapEqWith equal (CelMap xs) my@(CelMap ys) =
   length xs == length ys && all entryMatches xs
   where
     entryMatches (k, v) = case celMapLookup k my of
-      Just v' -> valueEq v v'
+      Just v' -> equal v v'
       Nothing -> False
+
+
+-- Protobuf fields have homogeneous types even when their CEL projections
+-- support heterogeneous equality. Any adds its packed type to the comparison.
+protobufValueEq :: Value -> Value -> Bool
+protobufValueEq (VAnyPayload leftUrl leftBytes left) (VAnyPayload rightUrl rightBytes right) =
+  case (left, right) of
+    (Right x, Right y) ->
+      let name = anyType leftUrl
+      in name == anyType rightUrl && equalAnyPayload name (anyProtobufValue x) (anyProtobufValue y)
+    _ -> leftUrl == rightUrl && leftBytes == rightBytes
+protobufValueEq (VAnyPayload url _ decoded) y = case decoded of
+  Right x -> anyType url == packedType y && equalAnyPayload (anyType url) (anyProtobufValue x) y
+  Left _ -> False
+protobufValueEq x (VAnyPayload url _ decoded) = case decoded of
+  Right y -> packedType x == anyType url && equalAnyPayload (anyType url) x (anyProtobufValue y)
+  Left _ -> False
+protobufValueEq (VList x) (VList y) =
+  V.length x == V.length y && V.and (V.zipWith protobufValueEq x y)
+protobufValueEq (VMap x) (VMap y) = mapEqWith protobufValueEq x y
+protobufValueEq x y = typeOf x == typeOf y && valueEq x y
+
+
+equalAnyPayload :: Text -> Value -> Value -> Bool
+equalAnyPayload name x y = case (x, y) of
+  (VMessage _, VMessage _) -> protobufValueEq x y
+  (VMessage _, _) -> maybe False (protobufValueEq x) (projectedMessage name y)
+  (_, VMessage _) -> maybe False (\value -> protobufValueEq value y) (projectedMessage name x)
+  _ -> protobufValueEq x y
+
+
+-- Compare a wire message to the canonical protobuf form of a CEL value
+-- assigned to an Any field.
+projectedMessage :: Text -> Value -> Maybe Value
+projectedMessage name value = case (name, value) of
+  ("google.protobuf.BoolValue", VBool b) -> wrapper (not b)
+  ("google.protobuf.BytesValue", VBytes b) -> wrapper (BS.null b)
+  ("google.protobuf.StringValue", VString t) -> wrapper (T.null t)
+  ("google.protobuf.Int32Value", VInt n) -> wrapper (n == 0)
+  ("google.protobuf.Int64Value", VInt n) -> wrapper (n == 0)
+  ("google.protobuf.UInt32Value", VUInt n) -> wrapper (n == 0)
+  ("google.protobuf.UInt64Value", VUInt n) -> wrapper (n == 0)
+  ("google.protobuf.FloatValue", VDouble n) -> wrapper (n == 0 && not (isNegativeZero n))
+  ("google.protobuf.DoubleValue", VDouble n) -> wrapper (n == 0 && not (isNegativeZero n))
+  ("google.protobuf.Timestamp", VTimestamp (Timestamp seconds nanos)) -> temporal seconds nanos
+  ("google.protobuf.Duration", VDuration (Duration seconds nanos)) -> temporal seconds nanos
+  ("google.protobuf.ListValue", VList values) -> do
+    items <- traverse jsonValueMessage values
+    oneField "values" (V.null items) (VList items)
+  ("google.protobuf.Struct", VMap values) -> do
+    items <- traverseCelMapValues (\_ -> jsonValueMessage) values
+    oneField "fields" (celMapSize items == 0) (VMap items)
+  ("google.protobuf.Value", _) -> jsonValueMessage value
+  _ -> Nothing
+  where
+    wrapper isDefault = oneField "value" isDefault value
+    oneField field isDefault fieldValue =
+      Just (VMessage (CelMessage name (Map.singleton field (CelField (not isDefault) fieldValue))))
+    temporal seconds nanos = Just $ VMessage $ CelMessage name $ Map.fromList
+      [ ("seconds", CelField (seconds /= 0) (VInt seconds))
+      , ("nanos", CelField (nanos /= 0) (VInt (fromIntegral nanos)))
+      ]
+
+
+jsonValueMessage :: Value -> Maybe Value
+jsonValueMessage value = case value of
+  VNull -> field "null_value" (VInt 0)
+  VBool _ -> field "bool_value" value
+  VString _ -> field "string_value" value
+  VDouble _ -> field "number_value" value
+  VList _ -> projectedMessage "google.protobuf.ListValue" value >>= field "list_value"
+  VMap _ -> projectedMessage "google.protobuf.Struct" value >>= field "struct_value"
+  _ -> Nothing
+  where
+    field name v = Just (VMessage (CelMessage "google.protobuf.Value" (Map.singleton name (CelField True v))))
+
+
+anyType :: Text -> Text
+anyType = snd . T.breakOnEnd "/"
+
+
+-- CEL values assigned to Any are packed as the corresponding protobuf type.
+packedType :: Value -> Text
+packedType value = case typeOf value of
+  TyNull -> "google.protobuf.Value"
+  TyBool -> "google.protobuf.BoolValue"
+  TyInt -> "google.protobuf.Int64Value"
+  TyUInt -> "google.protobuf.UInt64Value"
+  TyDouble -> "google.protobuf.DoubleValue"
+  TyString -> "google.protobuf.StringValue"
+  TyBytes -> "google.protobuf.BytesValue"
+  TyList -> "google.protobuf.ListValue"
+  TyMap -> "google.protobuf.Struct"
+  ty -> typeNameText ty
 
 
 {- | Compare two values for ordering. 'Nothing' is returned when the values

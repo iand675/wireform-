@@ -25,16 +25,22 @@ main = do
 
 == Scope
 
-The core language and standard library are implemented in full, operating
-on the dynamic 'Value' model. Protocol-buffer message values are not yet
-modelled (the well-known abstract types @google.protobuf.Timestamp@ and
-@google.protobuf.Duration@ /are/ supported via 'VTimestamp' / 'VDuration'),
-and the date/time accessors support @UTC@ and fixed @±HH:MM@ offsets rather
-than named IANA/Joda timezones.
+The evaluator operates on the dynamic 'Value' model. Protobuf scalar
+wrapper literals evaluate to CEL primitives. @google.protobuf.Value@,
+@google.protobuf.Struct@ and @google.protobuf.ListValue@ literals unpack
+to CEL values, maps and lists. @google.protobuf.Timestamp@ and
+@google.protobuf.Duration@ evaluate to 'VTimestamp' and 'VDuration'.
+@google.protobuf.Empty@ and @google.protobuf.FieldMask@ remain messages
+and support conversion to the corresponding protobuf JSON values.
+Other protobuf message types can be registered with 'addMessageType'.
+Applications can install an @Any@ decoder with 'addAnyResolver'.
+When a decoded protobuf collection contains deferred 'VAny' values,
+'unpackValue' reads one element without forcing the others.
 -}
 module CEL (
   -- * Values
   Value (..),
+  AnyPayload (..),
   CelType (..),
   Timestamp (..),
   Duration (..),
@@ -43,17 +49,26 @@ module CEL (
   celMapFromList,
   celMapEntries,
   celMapLookup,
+  CelMessage (..),
+  celMessageWithUnknownFields,
+  celMessageUnknownFields,
+  CelField (..),
+  unpackValue,
   typeOf,
   typeNameText,
 
   -- * Environment
   Env,
   Overload,
+  MessageConstructor,
+  AnyResolver,
   emptyEnv,
   bind,
   bindAll,
   withContainer,
   addFunction,
+  addMessageType,
+  addAnyResolver,
 
   -- * Errors
   CelError (..),

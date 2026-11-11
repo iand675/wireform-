@@ -22,7 +22,7 @@ jobs:
             build-essential libgmp-dev libffi-dev libffi8 \
             libncurses-dev libtinfo6 zlib1g-dev libssl-dev \
             libbrotli-dev libzstd-dev liblz4-dev libsnappy-dev \
-            libxml2-dev pkg-config
+            libxml2-dev libre2-dev pkg-config
 
       - name: Set up Haskell toolchain
         uses: haskell-actions/setup@v2

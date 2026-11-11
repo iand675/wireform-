@@ -214,6 +214,8 @@
               if name == "wireform-kafka-protocol"
               then self.callCabal2nixWithOptions name kafkaProtocolSrc
                      "--subpath wireform-kafka-protocol" {}
+              else if name == "wireform-cel"
+              then self.callCabal2nix name src { inherit (pkgs) re2; }
               else self.callCabal2nix name src {};
             mkPkg = name: src:
               applyFlags name
@@ -374,7 +376,7 @@
               hp.haskell-language-server
             ] ++ sharedTools ++ cdnTools;
 
-            buildInputs = systemDeps;
+            buildInputs = systemDeps ++ [ pkgs.re2 ];
 
             shellHook = ''
               echo "wireform dev shell — $(ghc --version)"
