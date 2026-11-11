@@ -13,6 +13,7 @@ build-type:         Simple
 extra-doc-files:    CHANGELOG.md
 data-dir:           data
 extra-source-files: data/route_guide_db.json
+                    test-minimal/service_codegen.proto
                     data/grpc-demo.pem
                     data/grpc-demo.key
                     data/interop.pem
@@ -264,8 +265,10 @@ test-suite wireform-grpc-test-minimal
   type:            exitcode-stdio-1.0
   hs-source-dirs:  test-minimal
   main-is:         Main.hs
+  other-modules:   ServiceCodegen
   build-depends:
     , wireform-grpc
+    , grpc-spec
     , wireform-proto
     , bytestring >= 0.10.12 && < 0.13
     , wireform-core >= 0.2 && < 0.4

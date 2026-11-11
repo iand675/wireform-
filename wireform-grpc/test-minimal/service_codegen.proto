@@ -1,0 +1,25 @@
+syntax = "proto3";
+package example.rpc_demo;
+
+message First {
+  message Request {
+    string text = 1;
+  }
+}
+
+message Second {
+  message Request {
+    int32 number = 1;
+  }
+}
+
+service Alpha {
+  rpc Ping(First.Request) returns (Second.Request);
+  rpc ping(Second.Request) returns (First.Request);
+}
+
+service Beta {
+  rpc Ping(.example.rpc_demo.Second.Request) returns (First.Request);
+}
+
+service Idle {}

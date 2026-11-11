@@ -93,19 +93,25 @@ module Network.GRPC.Protobuf.TH (
   , defaultServiceGenOpts
   ) where
 
-import Data.Char (toUpper)
+import Data.Char (isUpper, toUpper)
+import Data.List (mapAccumL)
 import Data.Maybe (fromMaybe)
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
+import Data.Traversable (mapAccumM)
 
 import Language.Haskell.TH
 import Language.Haskell.TH.Syntax (addDependentFile)
 
-import Proto.CodeGen (hsTypeName, lowerFirst)
+import Proto.CodeGen (hsTypeName, lowerFirst, scopedTypeName)
 import Proto.IDL.AST
+import Proto.IDL.Descriptor (descriptorTypeDefinitions, resolveDescriptorName)
 import Proto.IDL.Parser (parseProtoFile, renderParseError)
+import Proto.Internal.CodeGen.Combinators (chooseGeneratedName)
 
 import Network.GRPC.Common.Protobuf (Proto (..), Protobuf, getProto)
 import Network.GRPC.Spec (
@@ -169,7 +175,14 @@ loadProtoServicesWith opts path = do
     Right pf -> do
       let pkg = fromMaybe T.empty (protoPackage pf)
           services = collectServices (protoTopLevels pf)
-      concat <$> mapM (serviceToDecls opts pf pkg) services
+      (reserved, named) <- mapAccumM nameService Set.empty services
+      (_, declarations) <- mapAccumM (serviceToDecls opts (rpcTypeResolver pf pkg) pkg) reserved named
+      pure (concat declarations)
+  where
+    nameService used svc = do
+      let protoName = svcName svc
+      (occupied, name) <- allocateTypeName used (pascalName protoName) protoName
+      pure (occupied, (svc, name))
 
 
 collectServices :: [TopLevel] -> [ServiceDef]
@@ -183,30 +196,37 @@ collectServices = foldr step []
 -- Per-service generation
 -- ---------------------------------------------------------------------------
 
-serviceToDecls :: ServiceGenOpts -> ProtoFile -> Text -> ServiceDef -> Q [Dec]
-serviceToDecls opts pf pkg svc = do
-  let servHsName = mkName (T.unpack (pascalName (svcName svc)))
-      fqServiceName = qualify pkg (svcName svc)
+serviceToDecls
+  :: ServiceGenOpts -> (Text -> (Text, Text)) -> Text
+  -> Set Text -> (ServiceDef, Name) -> Q (Set Text, [Dec])
+serviceToDecls opts resolveType pkg used (svc, servHsName) = do
+  let fqServiceName = qualify pkg (svcName svc)
+      (_, methods) = mapAccumL nameMethod Set.empty (svcRpcs svc)
   servData <- dataD (pure []) servHsName [] Nothing [] []
-  rpcDecls <-
-    concat
-      <$> traverse (rpcToDecls pf pkg servHsName fqServiceName) (svcRpcs svc)
+  (occupied, rpcDecls) <- mapAccumM (rpcToDecls resolveType servHsName fqServiceName) used methods
   metaDecls <-
     if sgoGenerateMetadata opts
       then serviceMetadataDecls servHsName
       else pure []
-  methodsDecl <- serviceMethodsDecl servHsName (svcRpcs svc)
-  pure (servData : rpcDecls <> metaDecls <> [methodsDecl])
+  methodsDecl <- serviceMethodsDecl servHsName (map snd methods)
+  pure (occupied, servData : concat rpcDecls <> metaDecls <> [methodsDecl])
+  where
+    nameMethod symbols rpc =
+      let protoName = rpcName rpc
+          symbol = chooseGeneratedName symbols (methodSymbol protoName) protoName
+      in (Set.insert symbol symbols, (rpc, symbol))
 
 
 -- | All declarations for a single RPC method.
-rpcToDecls :: ProtoFile -> Text -> Name -> Text -> RpcDef -> Q [Dec]
-rpcToDecls pf pkg servHsName fqServiceName rpc = do
-  let methHsName = mkName (T.unpack (pascalName (rpcName rpc)))
-      methSym = methodSymbol (rpcName rpc)
-      inHs = resolveHsType pf (rpcInput rpc)
-      outHs = resolveHsType pf (rpcOutput rpc)
-      inFq = fqMessageName pkg (rpcInput rpc)
+rpcToDecls
+  :: (Text -> (Text, Text)) -> Name -> Text
+  -> Set Text -> (RpcDef, Text) -> Q (Set Text, [Dec])
+rpcToDecls resolveType servHsName fqServiceName used (rpc, methSym) = do
+  let protoName = rpcName rpc
+      suffix = T.pack (nameBase servHsName) <> "'" <> protoName
+  (occupied, methHsName) <- allocateTypeName used (pascalName protoName) suffix
+  let (inHs, inFq) = resolveType (rpcInput rpc)
+      (outHs, _) = resolveType (rpcOutput rpc)
       streamCon = streamingCon (rpcInputStr rpc) (rpcOutputStr rpc)
       protobufHead =
         appT (appT (conT ''Protobuf) (conT servHsName)) (strLitT methSym)
@@ -242,7 +262,7 @@ rpcToDecls pf pkg servHsName fqServiceName rpc = do
           )
       ]
 
-  pure
+  pure (occupied,
     [ synDec
     , inputInst
     , outputInst
@@ -251,7 +271,7 @@ rpcToDecls pf pkg servHsName fqServiceName rpc = do
     , serverInst
     , supportsInst
     , hasStreamingInst
-    ]
+    ])
 
 
 mkIsRpcInstance :: Name -> Text -> Text -> Text -> Q Dec
@@ -300,16 +320,14 @@ serviceMetadataDecls servHsName =
 
 
 -- | @type instance ServiceMethods Svc = '[ ...method symbols... ]@.
-serviceMethodsDecl :: Name -> [RpcDef] -> Q Dec
-serviceMethodsDecl servHsName rpcs =
+serviceMethodsDecl :: Name -> [Text] -> Q Dec
+serviceMethodsDecl servHsName symbols =
   tySynInstD
     ( tySynEqn
         Nothing
         (appT (conT ''ServiceMethods) (conT servHsName))
-        (promotedSymbolList syms)
+        (promotedSymbolList symbols)
     )
-  where
-    syms = fmap (methodSymbol . rpcName) rpcs
 
 
 -- ---------------------------------------------------------------------------
@@ -350,7 +368,11 @@ streamingCon inS outS = case (inS, outS) of
 'Proto.CodeGen.snakeToPascal' (which lower-cases each segment's tail) this is
 safe for the already-PascalCase service and method names gRPC uses. -}
 pascalName :: Text -> Text
-pascalName t = T.concat (fmap upperFirst (T.splitOn (T.singleton '_') t))
+pascalName t =
+  let name = T.concat (fmap upperFirst (T.splitOn (T.singleton '_') t))
+  in case T.uncons name of
+       Just (first, _) | isUpper first -> name
+       _ -> "Rpc" <> t
   where
     upperFirst x = case T.uncons x of
       Just (c, rest) -> T.cons (toUpper c) rest
@@ -361,6 +383,17 @@ pascalName t = T.concat (fmap upperFirst (T.splitOn (T.singleton '_') t))
 -- lower-cased leading character (@GetFeature@ / @get_feature@ -> @getFeature@).
 methodSymbol :: Text -> Text
 methodSymbol = lowerFirst . pascalName
+
+
+-- | Reserve local names and respect types already in scope at the splice.
+allocateTypeName :: Set Text -> Text -> Text -> Q (Set Text, Name)
+allocateTypeName used base suffix = do
+  let candidate = chooseGeneratedName used base suffix
+      occupied = Set.insert candidate used
+  existing <- lookupTypeName (T.unpack candidate)
+  case existing of
+    Just _ -> allocateTypeName occupied base suffix
+    Nothing -> pure (occupied, mkName (T.unpack candidate))
 
 
 -- ---------------------------------------------------------------------------
@@ -374,74 +407,19 @@ qualify pkg name
   | otherwise = pkg <> T.singleton '.' <> name
 
 
-{- | Fully-qualified proto message name for the @rpcMessageType@ slot.
-A reference that is already package-qualified (contains a @.@, after any
-leading dot) is used verbatim; an unqualified leaf is prefixed with the
-enclosing file's package.
--}
-fqMessageName :: Text -> Text -> Text
-fqMessageName pkg t =
-  let t' = T.dropWhile (== '.') t
-  in if T.isInfixOf (T.singleton '.') t'
-      then t'
-      else qualify pkg t'
-
-
-{- | Resolve a proto type reference to the Haskell type name
-@loadProto@ would have generated for it. Nested types are scope-prefixed
-with @'@ to match @wireform-proto@'s naming; anything not found among
-this file's declarations falls back to the bare leaf name (correct for
-top-level types defined in imported files).
--}
-resolveHsType :: ProtoFile -> Text -> Text
-resolveHsType pf t =
-  let lf = leafName t
-  in case findTypeScope (protoTopLevels pf) lf of
-      Just parents -> scopedHsName parents lf
-      Nothing -> hsTypeName lf
-
-
-scopedHsName :: [Text] -> Text -> Text
-scopedHsName parents nm = case parents of
-  [] -> hsTypeName nm
-  _ -> T.intercalate (T.singleton '\'') (fmap hsTypeName (parents <> [nm]))
-
-
--- | Last @.@-separated segment, ignoring any leading dot.
-leafName :: Text -> Text
-leafName t = case T.splitOn (T.singleton '.') (T.dropWhile (== '.') t) of
-  [] -> t
-  parts -> last parts
-
-
-{- | Find the parent-message chain of a (leaf) type name within a file's
-declarations, searching top-level and nested messages\/enums. 'Nothing'
-when the name is not declared in this file.
--}
-findTypeScope :: [TopLevel] -> Text -> Maybe [Text]
-findTypeScope tls needle = firstJust (fmap (topLevel []) tls)
+-- | Resolve the Haskell type and the fully qualified protobuf message name.
+rpcTypeResolver :: ProtoFile -> Text -> Text -> (Text, Text)
+rpcTypeResolver pf pkg = resolve
   where
-    topLevel parents (TLMessage m) = searchMessage parents m
-    topLevel parents (TLEnum e)
-      | enumName e == needle = Just parents
-      | otherwise = Nothing
-    topLevel _ _ = Nothing
-
-    searchMessage parents m
-      | msgName m == needle = Just parents
-      | otherwise =
-          let parents' = parents <> [msgName m]
-          in firstJust (fmap (element parents') (msgElements m))
-
-    element parents (MEMessage inner) = searchMessage parents inner
-    element parents (MEEnum e)
-      | enumName e == needle = Just parents
-      | otherwise = Nothing
-    element _ _ = Nothing
-
-
-firstJust :: [Maybe a] -> Maybe a
-firstJust = foldr step Nothing
-  where
-    step (Just x) _ = Just x
-    step Nothing acc = acc
+    definitions = descriptorTypeDefinitions pf
+    resolve name = case resolveDescriptorName definitions pkg name of
+      Just (qualified, 11) ->
+        let local = fromMaybe qualified (T.stripPrefix (pkg <> ".") qualified)
+        in (scopedTypeName (T.splitOn "." local), qualified)
+      _ ->
+        let absolute = T.dropWhile (== '.') name
+            leaf = T.takeWhileEnd (/= '.') absolute
+            qualified
+              | T.isPrefixOf "." name || T.isInfixOf "." absolute = absolute
+              | otherwise = qualify pkg absolute
+        in (hsTypeName leaf, qualified)

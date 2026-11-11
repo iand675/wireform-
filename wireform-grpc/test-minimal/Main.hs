@@ -5,6 +5,7 @@ import Data.ByteString.Char8 qualified as BS.Char8
 import Network.GRPC.Common.Framing (grpcFrame, grpcFrameMany, grpcUnframe, grpcUnframeMany)
 import Network.GRPC.Server.Otel (grpcTracer)
 import OpenTelemetry.Trace.Core (getGlobalTracerProvider)
+import ServiceCodegen (testServiceCodegen)
 
 main :: IO ()
 main = do
@@ -13,6 +14,7 @@ main = do
   testGrpcFramingEmpty
   testGrpcFramingMany
   testGrpcFramingLarge
+  testServiceCodegen
   putStrLn "All wireform-grpc tests passed"
 
 testTracer :: IO ()

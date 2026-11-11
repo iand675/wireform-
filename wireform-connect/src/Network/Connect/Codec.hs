@@ -4,7 +4,7 @@
 -- A Connect 'Network.Connect.Protocol.Codec' dispatches to either the binary
 -- Protobuf path (grpc-spec's @rpcSerialize*@ \/ @rpcDeserialize*@, which go
 -- through @wireform-proto@'s wire codec) or the proto3-JSON path
--- (vanilla aeson 'ToJSON' \/ 'FromJSON' on the generated message type; the
+-- (aeson 'ToJSON' \/ 'FromJSON' on the generated message type; the
 -- 'Proto' newtype bridge lives in @grpc-spec@).
 module Network.Connect.Codec (
   encodeInputBody,
@@ -24,6 +24,7 @@ import Network.GRPC.Spec
   , SupportsClientRpc (..)
   , SupportsServerRpc (..)
   )
+import Proto.Internal.JSON (decodeProtoJSON)
 
 -- Binary serialization helpers return lazy ByteStrings; we convert to/from
 -- strict at the boundary.
@@ -48,7 +49,7 @@ decodeInputBody
   -> Either String (Input rpc)
 decodeInputBody codec p bs = case codec of
   CodecProto -> rpcDeserializeInput p (BL.fromStrict bs)
-  CodecJSON -> Aeson.eitherDecodeStrict' bs
+  CodecJSON -> decodeProtoJSON bs
 
 -- | Encode a response output message to a strict body.
 encodeOutputBody
@@ -70,4 +71,4 @@ decodeOutputBody
   -> Either String (Output rpc)
 decodeOutputBody codec p bs = case codec of
   CodecProto -> rpcDeserializeOutput p (BL.fromStrict bs)
-  CodecJSON -> Aeson.eitherDecodeStrict' bs
+  CodecJSON -> decodeProtoJSON bs
