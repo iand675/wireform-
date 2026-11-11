@@ -196,6 +196,20 @@ edgeCases =
           case decode BS.empty of
             Left _ -> pure ()
             Right _ -> expectationFailure "expected error on empty input"
+      , it "Rejects document lengths below the five-byte minimum" $
+          mapM_
+            (\size -> do
+                -- A leading byte makes the old length-zero underread reproducible.
+                let bytes = BS.drop 1 (BS.pack [0, size, 0, 0, 0, 0])
+                decode bytes `shouldBe` Left "BSON.Decode: invalid document length"
+            )
+            [0 .. 4]
+      , it "Rejects negative document lengths" $
+          decode (BS.pack [0xff, 0xff, 0xff, 0xff, 0])
+            `shouldBe` Left "BSON.Decode: invalid document length"
+      , it "Rejects zero-length embedded documents" $
+          decode (BS.pack [12, 0, 0, 0, 0x03, 0x78, 0, 0, 0, 0, 0, 0])
+            `shouldBe` Left "BSON.Decode: invalid document length"
       ]
 
 

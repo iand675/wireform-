@@ -12,6 +12,7 @@ module BSON.Decode (
 ) where
 
 import BSON.Value qualified as B
+import Control.Monad (when)
 import Control.Monad.ST (ST, runST)
 import Data.Bits (shiftL, (.|.))
 import Data.ByteString (ByteString)
@@ -102,9 +103,12 @@ readBSONString bs off = do
 decodeDocument :: ByteString -> Int -> Either String (B.Value, Int)
 decodeDocument bs off = do
   ensure bs off 4
-  let !docSz = fromIntegral (readLE32 bs off) :: Int
-      !docEnd = off + docSz
+  let !declaredSize = fromIntegral (readLE32 bs off) :: Int32
+  -- The length includes the four-byte prefix and the final NUL.
+  when (declaredSize < 5) (Left "BSON.Decode: invalid document length")
+  let !docSz = fromIntegral declaredSize
   ensure bs off docSz
+  let !docEnd = off + docSz
   if rdByte bs (docEnd - 1) /= 0x00
     then Left "BSON.Decode: document missing terminator"
     else do
