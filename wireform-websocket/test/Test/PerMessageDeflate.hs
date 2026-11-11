@@ -44,6 +44,14 @@ tests =
             , it "rejects window_bits out of range" $ do
                 let r = parseOffers ["permessage-deflate; server_max_window_bits=16"]
                 r `shouldBe` []
+            , it "declines offers with duplicate parameters" $
+                mapM_ (\offer -> parseOffers [offer] `shouldBe` []) duplicateParams
+            , it "still accepts a separate valid offer after a duplicate" $
+                parseOffers
+                  [ "permessage-deflate; server_max_window_bits=10; server_max_window_bits=15"
+                  , "permessage-deflate; server_max_window_bits=12"
+                  ]
+                  `shouldBe` parseOffers ["permessage-deflate; server_max_window_bits=12"]
             ]
       , describe "selectOffer" $
           sequence_
@@ -80,6 +88,8 @@ tests =
                         , pmdClientNoContextTakeover = True
                         }
                 parseResponseParams (responseHeader p) `shouldBe` Just p
+            , it "rejects responses with duplicate parameters" $
+                mapM_ (\reply -> parseResponseParams reply `shouldBe` Nothing) duplicateParams
             ]
       , describe "compress / decompress round-trip" $
           sequence_
@@ -109,6 +119,15 @@ tests =
                   "smaller window bits force more frequent dictionary reset"
             ]
       ]
+
+
+duplicateParams :: [BS.ByteString]
+duplicateParams =
+  [ "permessage-deflate; server_no_context_takeover; Server_No_Context_Takeover"
+  , "permessage-deflate; client_no_context_takeover; client_no_context_takeover"
+  , "permessage-deflate; server_max_window_bits=15; server_max_window_bits=10"
+  , "permessage-deflate; client_max_window_bits=15; client_max_window_bits=15"
+  ]
 
 
 -- Test that one Server-side compress + Client-side decompress
