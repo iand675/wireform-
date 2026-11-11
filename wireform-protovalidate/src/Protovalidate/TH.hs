@@ -4,13 +4,11 @@
 {- | Generate a protobuf message validator __at compile time__, with every
 rule's CEL compiled to Haskell.
 
-Where "Protovalidate.Eval" interprets each constraint's CEL on every call,
 'compileMessageValidator' reads a @.proto@'s @buf.validate@ rules at compile
-time and emits a @'Value' -> ['Violation']@ function in which each rule (the
-standard ones, inlined to a self-contained CEL expression over @this@, and
-any custom @(buf.validate.field).cel@) is turned into Haskell via
-"CEL.TH".'CEL.TH.compileCelFn'. There is no runtime parsing, no AST walk,
-and no per-node dispatch — GHC optimizes the predicates like ordinary code.
+time and emits a @'Value' -> ['Violation']@ function. It uses the same rule
+selection, bindings, and traversal as "Protovalidate.Eval" and compiles
+each constraint's parsed CEL AST into Haskell. Evaluation requires no
+runtime parsing or AST traversal.
 
 @
 {\-# LANGUAGE TemplateHaskell #-\}
@@ -22,9 +20,6 @@ validateUser :: Value -> [Violation]
 validateUser = $(compileMessageValidator userProto \"User\")
 @
 
-The current generator validates the message's own fields (standard +
-custom + message-level CEL); nested-message and repeated-element recursion
-is not yet emitted.
 -}
 module Protovalidate.TH (
   compileMessageValidator,
@@ -34,17 +29,19 @@ module Protovalidate.TH (
 ) where
 
 import CEL.Environment (bind)
-import CEL.Error (errMsg)
+import CEL.Error (CelError (..))
 import CEL.Eval (Compiled)
-import CEL.TH (compileCelFn)
-import CEL.Value (Duration (..), Timestamp (..), Value (..), celMapLookup)
-import Data.ByteString qualified as BS
+import CEL.TH (compileCelExprFn)
+import CEL.Value (AnyPayload (..), CelField (..), CelMessage (..), Duration (..), Timestamp (..), Value (..), celMapEntries, celMapFromList, celMapLookup, celMessageUnknownFields, celMessageWithUnknownFields)
+import Data.Map.Lazy qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Vector qualified as V
+import GHC.Float (castDoubleToWord64, castWord64ToDouble)
 import Language.Haskell.TH (Exp, Q, listE)
 import Language.Haskell.TH.Syntax (lift)
 import Protovalidate.Constraint (Constraint (..))
+import Protovalidate.Eval
 import Protovalidate.Library (libraryEnv)
 import Protovalidate.Rules
 import Protovalidate.Schema (parseProtoRules)
@@ -74,49 +71,105 @@ compileMessageValidator protoSrc name = case parseProtoRules protoSrc of
 
 -- | Emit a compiled validator for an already-known 'MessageRules'.
 messageValidatorE :: MessageRules -> Q Exp
-messageValidatorE mr = do
-  fieldExps <- mapM emitField (mrFields mr)
-  msgExps <- mapM emitConstraint (map fromCustom (mrCustom mr))
-  [|runCompiledValidator $(listE (map pure fieldExps)) $(listE (map pure msgExps))|]
+messageValidatorE rules =
+  [|runValidationPlan libraryEnv $(emitMessage (prepareValidation id rules))|]
+
+
+emitMessage :: MessagePlan Constraint -> Q Exp
+emitMessage plan =
+  [|
+    MessagePlan
+      $(listE (map emitNamedField (mpFields plan)))
+      $(listE (map emitConstraint (mpConstraints plan)))
+      $(listE (map emitOneof (mpMessageOneofs plan)))
+      $(lift (mpMessageName plan))
+      $(emitOptional emitSchema (mpProtoSchema plan))
+    |]
   where
-    emitField (fname, fr) = do
-      conExps <- mapM emitConstraint (fieldConstraints fr)
-      [|($(lift fname), $(listE (map pure conExps)))|]
+    emitNamedField (name, field) = [|($(lift name), $(emitField field))|]
+    emitOneof (MessageOneof fields required) = [|MessageOneof $(lift fields) $(lift required)|]
 
 
--- Emit one (id, message, compiledProgram) triple.
-emitConstraint :: (Text, Text, Text) -> Q Exp
-emitConstraint (cid, msg, src) =
-  [|($(lift cid), $(lift msg), $(compileCelFn (T.unpack src)))|]
-
-
-fromCustom :: Constraint -> (Text, Text, Text)
-fromCustom c = (constraintId c, constraintMessage c, constraintSource c)
-
-
--- The (id, message, self-contained CEL) triples for a field: applicable
--- standard rules (inlined over @this@) plus custom CEL constraints.
-fieldConstraints :: FieldRules -> [(Text, Text, Text)]
-fieldConstraints fr =
-  standard ++ map fromCustom (frCustom fr)
+emitSchema :: (Text, ProtoSchema) -> Q Exp
+emitSchema (name, schema) = [|($(lift name), $(emitMap (emitMap emitShape) schema))|]
   where
-    standard = case frKind fr of
-      Nothing -> []
-      Just kind ->
-        [ (cid, msg, src)
-        | (rf, value) <- frRules fr
-        , active value
-        , Just src <- [inlineRuleCel rf value]
-        , let (cid, msg) = standardMeta kind rf
-        ]
-    active v = case v of VBool False -> False; _ -> True
+    emitShape = \case
+      ExplicitDefault value -> [|ExplicitDefault $(emitValue value)|]
+      ImplicitDefault value -> [|ImplicitDefault $(emitValue value)|]
+      MessageShape ty -> [|MessageShape $(lift ty)|]
+      ListShape item -> [|ListShape $(emitShape item)|]
+      MapShape item -> [|MapShape $(emitShape item)|]
 
 
-standardMeta :: RuleKind -> Text -> (Text, Text)
-standardMeta kind rf =
-  case lookup rf [(r, (constraintId c, constraintMessage c)) | (r, c) <- standardConstraints kind] of
-    Just m -> m
-    Nothing -> (rf, "constraint failed")
+emitMap :: (a -> Q Exp) -> Map.Map Text a -> Q Exp
+emitMap emit values = [|Map.fromDistinctAscList $(listE (map entry (Map.toAscList values)))|]
+  where
+    entry (key, value) = [|($(lift key), $(emit value))|]
+
+
+emitField :: FieldPlan Constraint -> Q Exp
+emitField field =
+  [|
+    FieldPlan
+      { fpRequired = $(lift (fpRequired field))
+      , fpImplicitDefault = $(emitOptional emitValue (fpImplicitDefault field))
+      , fpIgnoreEmpty = $(lift (fpIgnoreEmpty field))
+      , fpRules = $(emitValue (fpRules field))
+      , fpConstraints = $(listE (map emitConstraint (fpConstraints field)))
+      , fpPredefined = $(listE (map emitPredefined (fpPredefined field)))
+      , fpItems = $(emitOptional emitField (fpItems field))
+      , fpMapKeys = $(emitOptional emitField (fpMapKeys field))
+      , fpMapValues = $(emitOptional emitField (fpMapValues field))
+      , fpMessage = $(emitOptional emitMessage (fpMessage field))
+      , fpMessageReference = $(lift (fpMessageReference field))
+      }
+    |]
+  where
+    emitPredefined (constraint, value) = [|($(emitConstraint constraint), $(emitValue value))|]
+
+
+emitOptional :: (a -> Q Exp) -> Maybe a -> Q Exp
+emitOptional _ Nothing = [|Nothing|]
+emitOptional emit (Just value) = [|Just $(emit value)|]
+
+
+emitConstraint :: Constraint -> Q Exp
+emitConstraint constraint =
+  [|
+    ConstraintProgram
+      $(lift (constraintId constraint))
+      $(lift (constraintMessage constraint))
+      $(compileCelExprFn (constraintExpr constraint))
+    |]
+
+
+emitValue :: Value -> Q Exp
+emitValue = \case
+  VNull -> [|VNull|]
+  VBool v -> [|VBool $(lift v)|]
+  VInt v -> [|VInt $(lift v)|]
+  VUInt v -> [|VUInt $(lift v)|]
+  VDouble v -> [|VDouble (castWord64ToDouble $(lift (castDoubleToWord64 v)))|]
+  VString v -> [|VString $(lift v)|]
+  VBytes v -> [|VBytes $(lift v)|]
+  VList values -> [|VList (V.fromList $(listE (map emitValue (V.toList values))))|]
+  VMap values -> [|VMap (celMapFromList $(listE (map emitEntry (celMapEntries values))))|]
+  VMessage message@(CelMessage name fields) ->
+    [|VMessage (celMessageWithUnknownFields $(lift name) $(emitMap emitCelField fields) $(lift (celMessageUnknownFields message)))|]
+  VAnyPayload url bytes decoded -> [|VAnyPayload $(lift url) $(lift bytes) $(emitResult emitPayload decoded)|]
+  VType v -> [|VType $(lift v)|]
+  VTimestamp (Timestamp s n) -> [|VTimestamp (Timestamp $(lift s) $(lift n))|]
+  VDuration (Duration s n) -> [|VDuration (Duration $(lift s) $(lift n))|]
+  where
+    emitEntry (key, value) = [|($(emitValue key), $(emitValue value))|]
+    emitCelField (CelField present value) = [|CelField $(lift present) $(emitValue value)|]
+    emitCelField (CelFieldWithSelection present value selected) =
+      [|CelFieldWithSelection $(lift present) $(emitValue value) $(emitResult emitValue selected)|]
+    emitPayload (AnyPayload value selected) =
+      [|AnyPayload $(emitValue value) $(emitResult emitValue selected)|]
+    emitResult :: (a -> Q Exp) -> Either CelError a -> Q Exp
+    emitResult _ (Left (CelError kind message)) = [|Left (CelError $(lift kind) $(lift message))|]
+    emitResult emit (Right value) = [|Right $(emit value)|]
 
 
 ----------------------------------------------------------------------
@@ -132,13 +185,22 @@ runCompiledValidator
   -> [CompiledConstraint]
   -> Value
   -> [Violation]
-runCompiledValidator fields msgCons msg =
+runCompiledValidator fields =
+  runCompiledValidatorWithIgnore (map (\(name, cons) -> (name, False, cons)) fields)
+
+
+runCompiledValidatorWithIgnore
+  :: [(Text, Bool, [CompiledConstraint])]
+  -> [CompiledConstraint]
+  -> Value
+  -> [Violation]
+runCompiledValidatorWithIgnore fields msgCons msg =
   concatMap fieldChecks fields ++ runCons "" msg msgCons
   where
-    fieldChecks (fname, cons) = case msg of
+    fieldChecks (fname, ignoreEmpty, cons) = case msg of
       VMap m -> case celMapLookup (VString fname) m of
-        Just v -> runCons fname v cons
-        Nothing -> []
+        Just v | not (ignoreEmpty && isZeroValue v) -> runCons fname v cons
+        _ -> []
       _ -> []
 
     runCons path this = concatMap (one path this)
@@ -151,104 +213,3 @@ runCompiledValidator fields msgCons msg =
            Right (VString s) -> [Violation path cid s]
            Right _ -> [Violation path cid "constraint must evaluate to bool or string"]
            Left e -> [Violation path cid ("evaluation error: " <> errMsg e)]
-
-
-----------------------------------------------------------------------
--- Inlining standard rules to self-contained CEL (over @this@)
-----------------------------------------------------------------------
-
-{- | A self-contained CEL expression (referencing only @this@) for a standard
-rule, with the rule value inlined as a literal. 'Nothing' for rules with no
-direct CEL form.
--}
-inlineRuleCel :: Text -> Value -> Maybe Text
-inlineRuleCel rf value = case rf of
-  "const" -> Just ("this == " <> celLit value)
-  "lt" -> Just ("this < " <> celLit value)
-  "lte" -> Just ("this <= " <> celLit value)
-  "gt" -> Just ("this > " <> celLit value)
-  "gte" -> Just ("this >= " <> celLit value)
-  "in" -> Just ("this in " <> celLit value)
-  "not_in" -> Just ("!(this in " <> celLit value <> ")")
-  "len" -> Just ("uint(size(this)) == " <> celLit value)
-  "min_len" -> Just ("uint(size(this)) >= " <> celLit value)
-  "max_len" -> Just ("uint(size(this)) <= " <> celLit value)
-  "min_bytes" -> Just ("uint(size(bytes(this))) >= " <> celLit value)
-  "max_bytes" -> Just ("uint(size(bytes(this))) <= " <> celLit value)
-  "len_bytes" -> Just ("uint(size(bytes(this))) == " <> celLit value)
-  "min_items" -> Just ("uint(size(this)) >= " <> celLit value)
-  "max_items" -> Just ("uint(size(this)) <= " <> celLit value)
-  "min_pairs" -> Just ("uint(size(this)) >= " <> celLit value)
-  "max_pairs" -> Just ("uint(size(this)) <= " <> celLit value)
-  "pattern" -> Just ("this.matches(" <> celLit value <> ")")
-  "prefix" -> Just ("this.startsWith(" <> celLit value <> ")")
-  "suffix" -> Just ("this.endsWith(" <> celLit value <> ")")
-  "contains" -> Just ("this.contains(" <> celLit value <> ")")
-  "not_contains" -> Just ("!this.contains(" <> celLit value <> ")")
-  "email" -> Just "this.isEmail()"
-  "hostname" -> Just "this.isHostname()"
-  "ip" -> Just "this.isIp()"
-  "ipv4" -> Just "this.isIp(4)"
-  "ipv6" -> Just "this.isIp(6)"
-  "ip_prefix" -> Just "this.isIpPrefix()"
-  "ipv4_prefix" -> Just "this.isIpPrefix(4, true)"
-  "ipv6_prefix" -> Just "this.isIpPrefix(6, true)"
-  "ip_with_prefixlen" -> Just "this.isIpPrefix()"
-  "ipv4_with_prefixlen" -> Just "this.isIpPrefix(4)"
-  "ipv6_with_prefixlen" -> Just "this.isIpPrefix(6)"
-  "uri" -> Just "this.isUri()"
-  "uri_ref" -> Just "this.isUriRef()"
-  "address" -> Just "this.isIp() || this.isHostname()"
-  "host_and_port" -> Just "this.isHostAndPort(true)"
-  "uuid" -> Just "this.matches('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')"
-  "tuuid" -> Just "this.matches('^[0-9a-fA-F]{32}$')"
-  "unique" -> Just "unique(this)"
-  "finite" -> Just "!isInf(this) && !isNan(this)"
-  _ -> Nothing
-
-
-celLit :: Value -> Text
-celLit = \case
-  VBool b -> if b then "true" else "false"
-  VInt n -> tshow n
-  VUInt n -> tshow n <> "u"
-  VDouble d -> tshow d
-  VString s -> celString s
-  VBytes b -> celBytes b
-  VList xs -> "[" <> T.intercalate ", " (map celLit (V.toList xs)) <> "]"
-  VTimestamp (Timestamp s _) -> "timestamp(" <> tshow s <> ")"
-  VDuration d -> celDuration d
-  VNull -> "null"
-  _ -> "null"
-  where
-    tshow :: Show a => a -> Text
-    tshow = T.pack . show
-
-
--- A CEL @duration("…s")@ literal. Seconds plus a 9-digit fractional part for
--- any nanoseconds (trailing zeros trimmed).
-celDuration :: Duration -> Text
-celDuration (Duration s n)
-  | n == 0 = "duration(\"" <> tshow s <> "s\")"
-  | otherwise = "duration(\"" <> sign <> tshow (abs s) <> "." <> frac <> "s\")"
-  where
-    tshow :: Show a => a -> Text
-    tshow = T.pack . show
-    sign = if s < 0 || n < 0 then "-" else ""
-    frac =
-      let padded = T.justifyRight 9 '0' (tshow (abs (fromIntegral n :: Integer)))
-      in case T.dropWhileEnd (== '0') padded of
-           "" -> "0"
-           t -> t
-
-
-celString :: Text -> Text
-celString s = "'" <> T.replace "'" "\\'" (T.replace "\\" "\\\\" s) <> "'"
-
-
--- A CEL bytes literal: every octet as a @\\xHH@ escape inside @b'…'@.
-celBytes :: BS.ByteString -> Text
-celBytes b = "b'" <> T.concat (map hexEsc (BS.unpack b)) <> "'"
-  where
-    hexEsc w = "\\x" <> T.pack [hexDigit (w `div` 16), hexDigit (w `mod` 16)]
-    hexDigit n = "0123456789abcdef" !! fromIntegral n

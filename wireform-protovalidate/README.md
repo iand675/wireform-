@@ -151,10 +151,10 @@ mapping directly.
 ## Compile-time validators
 
 `Protovalidate.TH.compileMessageValidator` reads a `.proto`'s `buf.validate`
-rules at compile time and emits a `Value -> [Violation]` in which every
-predicate — the standard rules (inlined to self-contained CEL) and any custom
-`(buf.validate.field).cel` — is compiled to Haskell via `CEL.TH`. No runtime
-parsing, no AST walk:
+rules at compile time and emits a `Value -> [Violation]`. It uses the same
+rule selection, environment bindings, and traversal as runtime validation.
+Standard and custom predicates compile from their CEL ASTs to Haskell via
+`CEL.TH`, with rule values embedded at their original precision.
 
 ```haskell
 {-# LANGUAGE TemplateHaskell #-}
@@ -166,8 +166,8 @@ validateUser :: Value -> [Violation]
 validateUser = $(compileMessageValidator userProto "User")
 ```
 
-(Current generator covers the message's own fields + message-level CEL;
-nested-message/repeated recursion isn't emitted yet.)
+`messageValidatorE` also accepts a parsed `MessageRules` directly, including
+predefined rules and nested, repeated, and map rules.
 
 ## Validating typed messages (no dynamic round trip)
 
@@ -189,6 +189,8 @@ check = validateValue userValidator
 
 `Protovalidate.Proto.dynamicMessageToCel` remains available for when you only
 have a schemaless `wireform-proto` `DynamicMessage`.
+Generic record conversion omits `Nothing` fields. A present value such as
+`Just VNull` still counts as present.
 
 ## Refinement types
 
@@ -289,18 +291,33 @@ errors). `within` compares `this - now` and `now - this` against the configured
 - `timestamp`/`duration` `const`/`lt`/`lte`/`gt`/`gte` (and `timestamp.within`)
   bounds are decoded from their `{seconds:.., nanos:..}` message literals;
 - `map.keys`/`map.values` sub-rules and oneof `required`.
+- Field rules use protobuf presence. Omitted implicit fields are validated
+  at their defaults, and `required` rejects implicit defaults and empty
+  collections. An explicitly present optional or oneof field can satisfy
+  `required` with its default value.
+- Source and descriptor validators expose a schema-backed protobuf message
+  to CEL. Selecting an unset field returns its protobuf default, including
+  declared proto2 defaults. The `has()` macro still tests presence.
+  Nested message shapes come from the supplied file.
 
 Remaining caveats:
 
-- the now-relative timestamp rules still need a clock, so use `validateAt`;
-- compile-time validators (`Protovalidate.TH`) inline the standard rules
-  (including the `timestamp`/`duration` literal bounds, rendered as
-  `timestamp(..)`/`duration("..s")`) and all custom constraints (so
-  `defined_only`/`well_known_regex` ride along), but the now-relative,
-  map-key/value, and predefined rules run through the interpreted engine;
-- the compiled-`FileDescriptorProto` path (`Protovalidate.Descriptor`) extracts
-  the standard #1159 rules; the `.proto` AST is the source of truth for the
-  advanced extraction above.
+- time-relative timestamp rules need a `now` binding. Use `validateAt` to
+  supply it.
+- The compiled-`FileDescriptorProto` path (`Protovalidate.Descriptor`) decodes
+  supported scalar rules from option extension #1159, including packed
+  membership lists and timestamp and duration bounds. It also decodes
+  collection subrules and required protobuf oneofs. Both source and
+  descriptor validation follow same-file message references, including
+  recursive references through collections.
+- Both loaders accept `cel_expression` shorthand on messages, fields, and
+  collection members. The expression serves as the rule ID.
+- Both loaders enforce `(buf.validate.message).oneof` groups using protobuf
+  presence, including for repeated and map fields. Group members skip unset
+  values by default and can override that behavior with `ignore`.
+- Both loaders support `enum.defined_only` and strict or loose HTTP header
+  regexes on scalar fields and collection members. Enum rules require the
+  enum definition in the input file.
 
 ## Building and testing
 

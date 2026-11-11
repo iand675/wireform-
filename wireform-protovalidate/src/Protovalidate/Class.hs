@@ -53,8 +53,9 @@ import Data.Text qualified as T
 import Data.Vector (Vector)
 import Data.Vector qualified as V
 import Data.Word (Word16, Word32, Word64, Word8)
+import GHC.Float (float2Double)
 import GHC.Generics
-import Protovalidate.Eval (validateIn)
+import Protovalidate.Eval (ConstraintProgram, MessagePlan, compileValidationPlan, runValidationPlan)
 import Protovalidate.Library (libraryEnv)
 import Protovalidate.Rules (MessageRules)
 import Protovalidate.Violation (Violation)
@@ -64,22 +65,22 @@ import Protovalidate.Violation (Violation)
 expressions are already compiled, and the base environment (with the
 protovalidate library) is captured once.
 -}
-data Validator = Validator !Env !MessageRules
+data Validator = Validator !Env !(MessagePlan ConstraintProgram)
 
 
 -- | Compile a validator using the standard protovalidate CEL environment.
 compileValidator :: MessageRules -> Validator
-compileValidator = Validator libraryEnv
+compileValidator = compileValidatorIn libraryEnv
 
 
 -- | Compile a validator with a caller-supplied base environment.
 compileValidatorIn :: Env -> MessageRules -> Validator
-compileValidatorIn = Validator
+compileValidatorIn env rules = Validator env (compileValidationPlan rules)
 
 
 -- | Run a compiled validator against a message already in CEL form.
 runValidator :: Validator -> Value -> [Violation]
-runValidator (Validator env rules) v = validateIn env v rules
+runValidator (Validator env plan) = runValidationPlan env plan
 
 
 -- | Validate a typed value by converting it directly to CEL via 'ToCel'.
@@ -99,6 +100,10 @@ class ToCel a where
   toCel :: a -> Value
   default toCel :: (Generic a, GToCelRecord (Rep a)) => a -> Value
   toCel = genericToCel
+
+  -- | Field presence when converting a generic record.
+  toCelField :: a -> Maybe Value
+  toCelField = Just . toCel
 
 
 instance ToCel Value where toCel = id
@@ -137,7 +142,7 @@ instance ToCel Word32 where toCel = VUInt . fromIntegral
 instance ToCel Word64 where toCel = VUInt
 
 
-instance ToCel Float where toCel = VDouble . realToFrac
+instance ToCel Float where toCel = VDouble . float2Double
 
 
 instance ToCel Double where toCel = VDouble
@@ -152,6 +157,7 @@ instance ToCel ByteString where toCel = VBytes
 instance ToCel a => ToCel (Maybe a) where
   toCel Nothing = VNull
   toCel (Just a) = toCel a
+  toCelField = fmap toCel
 
 
 instance ToCel a => ToCel [a] where
@@ -193,4 +199,4 @@ instance GToCelRecord U1 where
 
 
 instance (Selector s, ToCel a) => GToCelRecord (S1 s (K1 i a)) where
-  gToCelRecord m@(M1 (K1 a)) = [(T.pack (selName m), toCel a)]
+  gToCelRecord m@(M1 (K1 a)) = maybe [] (\v -> [(T.pack (selName m), v)]) (toCelField a)
