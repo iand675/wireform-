@@ -938,6 +938,7 @@ main = do
 
   -- Arrow ↔ Parquet bridge round-trip.
   arrowParquetBridge
+  finiteVectorListFallback
   arrowParquetInputValidation
   arrowParquetIntegerTypes
   arrowParquetProjectionTypes
@@ -3196,6 +3197,45 @@ pyarrowAssert label snippet = do
       | otherwise -> failTest ("pyarrow: unexpected output: " ++ out)
     _ -> failTest ("pyarrow rejected our nested file:\nstdout=" ++ out
                     ++ "\nstderr=" ++ err)
+
+finiteVectorListFallback :: IO ()
+finiteVectorListFallback = do
+  let fieldSchema = Nested.NSOptional (Nested.NSList (Nested.NSPrimitive Nested.LtInt32))
+      vector x y = Nested.NRList (V.fromList (map (Nested.NRLeaf . Nested.LvInt32) [x, y]))
+      rows = V.fromList [vector 1 2, Nested.NRNull, vector 3 4]
+  listFile <- either failTest pure (Nested.buildNestedFile (V.singleton ("embedding", fieldSchema)) (V.singleton rows))
+  footer <- either failTest pure (Footer.readFooter listFile)
+  trailer <- either failTest pure (Footer.readFooterTrailer listFile)
+  let prefix = BS.take (BS.length listFile - BS.length (Footer.ftBytes trailer) - 8) listFile
+      annotation n = TS.SchemaElement_LogicalType (V.singleton (20, TV.Struct (V.singleton (1, TV.I32 n))))
+      stripList = V.filter (\case
+        TS.SchemaElement_LogicalType _ -> False
+        TS.SchemaElement_ConvertedType _ -> False
+        _ -> True)
+      replaceAnnotation newFields = \case
+        TS.FileMetadata_Schema schema ->
+          TS.FileMetadata_Schema (schema V.// [(1, case schema V.! 1 of
+            TV.Struct fields -> TV.Struct (stripList fields V.++ V.fromList newFields)
+            other -> other)])
+        entry -> entry
+      withAnnotation newFields = case Footer.fileMetadataToThrift footer of
+        TV.Struct fields ->
+          prefix <> Footer.writeRawFooter parquetMagic (Thrift.encodeCompact (TV.Struct (V.map (replaceAnnotation newFields) fields)))
+        _ -> error "expected footer struct"
+  mapM_ (\converted -> do
+    file <- either failTest pure (loadParquetFile (withAnnotation (annotation 2 : converted)))
+    arrowSchema <- either failTest pure (PArrow.parquetFileArrowSchemaChecked file)
+    let field = V.head (AT.arrowFields arrowSchema)
+    expect "FINITE_VECTOR falls back to a nullable LIST"
+      (AT.fieldType field == AT.AList && AT.fieldNullable field)
+    columns <- either (failTest . show) pure (PArrow.parquetRowGroupToArrow arrowSchema file 0)
+    decoded <- either failTest pure (PArrow.columnArrayToNestedRows field (V.head columns))
+    expect "FINITE_VECTOR fallback preserves vector elements and null parents" (decoded == rows))
+    [[], [TS.SchemaElement_ConvertedType 3]]
+  malformed <- either failTest pure (Footer.readFooter (withAnnotation [annotation 0]))
+  expect "malformed FINITE_VECTOR does not become LIST"
+    (seLogicalType (fmSchema malformed V.! 1) == Just LTUnsupported)
+
 
 validateListStructAgainstPyarrow :: IO ()
 validateListStructAgainstPyarrow = do

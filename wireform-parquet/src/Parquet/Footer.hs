@@ -362,6 +362,11 @@ decodeKnownLogicalType fs = case V.toList fs of
                 <*> optionalLogicalField 2 (fmap intToInterpolationAlgorithm . asI32) sb
             )
     (19, TV.Struct _) -> Just LTFile
+    -- FINITE_VECTOR uses the three-level LIST representation. Read it as
+    -- LIST until the logical type and its element constraints are supported.
+    (20, TV.Struct sb)
+      | Just (Just count) <- optionalLogicalField 1 asI32 sb
+      , count > 0 -> Just LTList
     _ -> Nothing
   _ -> Nothing
   where
