@@ -28,7 +28,8 @@
         # tested. Keep in sync with `allGhcVersions` in nix/ci/packages.nix.
         ghcMatrix = {
           ghc910 = "ghc910";
-          ghc912 = "ghc912";
+          # The series alias currently selects 9.12.3; CI declares 9.12.4.
+          ghc912 = "ghc9124";
           ghc914 = "ghc914";
         };
 
