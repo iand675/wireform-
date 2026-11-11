@@ -12,7 +12,8 @@ parallel runs poison each other's numbers):
 
 A manifest entry is a cabal benchmark (the default, `"kind": "cabal"`) or a
 criterion.rs benchmark (`"kind": "cargo"`, with `cargoManifest` and
-`cargoBench`), which supplies external baseline series such as arrow-rs.
+`cargoBench`, and optional `cargoFeatures`), which supplies external
+baseline series such as arrow-rs.
 A cargo bench writes criterion.rs output under `<rawDir>/<raw>-criterion`
 (via CRITERION_HOME), which is collected into the same `--json` shape the
 Haskell criterion emits, at `<rawDir>/<raw>.json`. A summary entry may list
@@ -45,6 +46,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -194,32 +196,54 @@ def main() -> int:
         raw_path = os.path.join(raw_dir, b["raw"] + ".json")
         print(f"==> {target}")
 
+        bench_env = {**os.environ,
+                     **{key: value.replace("{root}", ROOT)
+                        for key, value in b.get("environment", {}).items()}}
+        if not args.distill_only:
+            prepared = True
+            for command in b.get("prepare", []):
+                invocation = (cabal(command[1:], project_file=args.project_file, use_nix=not args.no_nix)
+                              if command[0] == "cabal" else command)
+                if run(invocation, cwd=ROOT, env=bench_env) != 0:
+                    failures.append(f"prepare {target}")
+                    prepared = False
+                    break
+            if not prepared:
+                continue
+
         if kind == "cabal":
             if not args.distill_only:
                 if not args.no_build:
-                    if run(cabal(["build", target], project_file=args.project_file, use_nix=not args.no_nix), cwd=ROOT) != 0:
+                    if run(cabal(["build", target], project_file=args.project_file, use_nix=not args.no_nix), cwd=ROOT, env=bench_env) != 0:
                         failures.append(f"build {target}")
                         continue
-                # criterion writes relative to the package cwd, so pass an abs path.
+                # Preserve names/paths with spaces as single arguments.
+                # Criterion writes relative to the package cwd, so use an abs path.
+                options = [f"--benchmark-option={arg}"
+                           for arg in ["--json", raw_path, *b.get("benchmarkOptions", []), *shlex.split(args.benchmark_options)]]
                 rc = run(
-                    cabal(["bench", target, f"--benchmark-options=--json {raw_path} {args.benchmark_options}"], project_file=args.project_file, use_nix=not args.no_nix),
+                    cabal(["bench", target, *options], project_file=args.project_file, use_nix=not args.no_nix),
                     cwd=ROOT,
+                    env=bench_env,
                 )
                 if rc != 0:
                     failures.append(f"run {target}")
                     continue
         elif kind == "cargo":
             cargo = ["cargo", "bench", "--manifest-path", os.path.join(ROOT, b["cargoManifest"]), "--bench", b["cargoBench"]]
+            if b.get("cargoFeatures"):
+                cargo += ["--features", ",".join(b["cargoFeatures"])]
             home = os.path.join(raw_dir, b["raw"] + "-criterion")
             if not args.distill_only:
+                bench_env["CRITERION_HOME"] = home
                 if not args.no_build:
-                    if run([*cargo, "--no-run"], cwd=ROOT) != 0:
+                    if run([*cargo, "--no-run"], cwd=ROOT, env=bench_env) != 0:
                         failures.append(f"build {target}")
                         continue
                 # A fresh CRITERION_HOME so a dropped bench can't leave a
                 # stale result behind.
                 shutil.rmtree(home, ignore_errors=True)
-                rc = run([*cargo, "--", "--noplot"], cwd=ROOT, env={**os.environ, "CRITERION_HOME": home})
+                rc = run([*cargo, "--", "--noplot"], cwd=ROOT, env=bench_env)
                 if rc != 0:
                     failures.append(f"run {target}")
                     continue

@@ -253,6 +253,10 @@ name = "arrow-schema"
 version = "58.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "18aa020f6bc8e5201dcd2d4b7f98c68f8a410ef37128263243e6ff2a47a67d4f"
+dependencies = [
+ "serde_core",
+ "serde_json",
+]
 
 [[package]]
 name = "arrow-select"
@@ -629,8 +633,19 @@ checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
 dependencies = [
  "cfg-if",
  "libc",
- "r-efi",
+ "r-efi 5.3.0",
  "wasip2",
+]
+
+[[package]]
+name = "getrandom"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "r-efi 6.0.0",
 ]
 
 [[package]]
@@ -911,6 +926,9 @@ dependencies = [
  "num-bigint",
  "num-integer",
  "num-traits",
+ "parquet-variant",
+ "parquet-variant-compute",
+ "parquet-variant-json",
  "paste",
  "seq-macro",
  "simdutf8",
@@ -918,6 +936,53 @@ dependencies = [
  "thrift",
  "twox-hash",
  "zstd",
+]
+
+[[package]]
+name = "parquet-variant"
+version = "58.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "262fd51760f388670dbab2283efaadd0f4ed87ad584e60bd0db7fb79d527f045"
+dependencies = [
+ "arrow",
+ "arrow-schema",
+ "chrono",
+ "half",
+ "indexmap",
+ "num-traits",
+ "simdutf8",
+ "uuid",
+]
+
+[[package]]
+name = "parquet-variant-compute"
+version = "58.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c94fc2c2c077a00b3d5232f965037cee3455c432567a78d66db101daa035689"
+dependencies = [
+ "arrow",
+ "arrow-schema",
+ "chrono",
+ "half",
+ "indexmap",
+ "parquet-variant",
+ "parquet-variant-json",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "parquet-variant-json"
+version = "58.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ed1077da4aeb4e4141aa2f9858ac354975595eb30f907762894587941e8f2f7"
+dependencies = [
+ "arrow-schema",
+ "base64",
+ "chrono",
+ "parquet-variant",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -961,6 +1026,12 @@ name = "r-efi"
 version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
+
+[[package]]
+name = "r-efi"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rayon"
@@ -1180,6 +1251,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
+name = "uuid"
+version = "1.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
+dependencies = [
+ "getrandom 0.4.3",
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1338,6 +1420,7 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "arrow-ipc",
+ "bytes",
  "criterion",
  "parquet",
 ]

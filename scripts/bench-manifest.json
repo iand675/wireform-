@@ -496,6 +496,271 @@
         "WIREFORM_ENCRYPTION_BENCH_SECONDS": "10",
         "WIREFORM_ENCRYPTION_BENCH_SAMPLES": "100"
       }
+    },
+    {
+      "target": "wireform-columnar-core:bench:columnar-lzo-throughput",
+      "raw": "columnar-lzo-throughput",
+      "benchmarkOptions": [
+        "--time-limit",
+        "2",
+        "--resamples",
+        "2000",
+        "--regress",
+        "allocated:iters",
+        "--regress",
+        "cpuTime:iters",
+        "+RTS",
+        "-T",
+        "-RTS"
+      ],
+      "summaries": []
+    },
+    {
+      "target": "wireform-parquet:bench:parquet-selection-throughput",
+      "raw": "parquet-selection-throughput",
+      "benchmarkOptions": [
+        "--regress",
+        "allocated:iters",
+        "+RTS",
+        "-T",
+        "-RTS"
+      ],
+      "prepare": [
+        [
+          "python3",
+          "wireform-parquet/scripts/parquet_selection_fixtures.py",
+          "wireform-parquet/dist-stats/bench-fixtures/parquet-selection",
+          "--extended"
+        ]
+      ],
+      "environment": {
+        "WIREFORM_PARQUET_SELECTION_FIXTURES": "{root}/wireform-parquet/dist-stats/bench-fixtures/parquet-selection"
+      },
+      "summaries": []
+    },
+    {
+      "target": "parquet-rs-selection-throughput",
+      "kind": "cargo",
+      "cargoManifest": "interop/arrow-rs/Cargo.toml",
+      "cargoBench": "parquet_selection",
+      "raw": "parquet-rs-selection-throughput",
+      "prepare": [
+        [
+          "python3",
+          "wireform-parquet/scripts/parquet_selection_fixtures.py",
+          "wireform-parquet/dist-stats/bench-fixtures/parquet-selection",
+          "--extended"
+        ]
+      ],
+      "environment": {
+        "WIREFORM_PARQUET_SELECTION_FIXTURES": "{root}/wireform-parquet/dist-stats/bench-fixtures/parquet-selection"
+      },
+      "summaries": []
+    },
+    {
+      "target": "wireform-parquet:bench:parquet-delta-throughput",
+      "raw": "parquet-delta-throughput",
+      "benchmarkOptions": [
+        "--regress",
+        "allocated:iters",
+        "+RTS",
+        "-T",
+        "-RTS"
+      ],
+      "summaries": []
+    },
+    {
+      "target": "parquet-rs-delta-throughput",
+      "kind": "cargo",
+      "cargoManifest": "interop/arrow-rs/Cargo.toml",
+      "cargoBench": "parquet_delta",
+      "cargoFeatures": [
+        "delta-encoding-bench"
+      ],
+      "raw": "parquet-rs-delta-throughput",
+      "summaries": []
+    },
+    {
+      "target": "wireform-parquet:bench:parquet-dictionary-throughput",
+      "raw": "parquet-dictionary-throughput",
+      "benchmarkOptions": [
+        "--regress",
+        "allocated:iters",
+        "+RTS",
+        "-T",
+        "-RTS"
+      ],
+      "summaries": []
+    },
+    {
+      "target": "parquet-rs-dictionary-throughput",
+      "kind": "cargo",
+      "cargoManifest": "interop/arrow-rs/Cargo.toml",
+      "cargoBench": "parquet_dictionary",
+      "cargoFeatures": [
+        "delta-encoding-bench"
+      ],
+      "raw": "parquet-rs-dictionary-throughput",
+      "summaries": []
+    },
+    {
+      "target": "wireform-parquet:bench:parquet-rle-throughput",
+      "raw": "parquet-rle-throughput",
+      "benchmarkOptions": [
+        "--time-limit",
+        "1",
+        "--resamples",
+        "1000",
+        "--regress",
+        "allocated:iters",
+        "--regress",
+        "cpuTime:iters",
+        "+RTS",
+        "-T",
+        "-RTS"
+      ],
+      "summaries": []
+    },
+    {
+      "target": "parquet-rs-rle-throughput",
+      "kind": "cargo",
+      "cargoManifest": "interop/arrow-rs/Cargo.toml",
+      "cargoBench": "parquet_rle",
+      "cargoFeatures": [
+        "delta-encoding-bench"
+      ],
+      "raw": "parquet-rs-rle-throughput",
+      "summaries": []
+    },
+    {
+      "target": "wireform-parquet:bench:parquet-alp-throughput",
+      "raw": "parquet-alp-throughput",
+      "benchmarkOptions": [
+        "--time-limit",
+        "2",
+        "--resamples",
+        "2000",
+        "--regress",
+        "allocated:iters",
+        "--regress",
+        "cpuTime:iters",
+        "+RTS",
+        "-T",
+        "-RTS"
+      ],
+      "environment": {
+        "WIREFORM_PARQUET_ALP_FIXTURES": "{root}/wireform-parquet/dist-stats/bench-fixtures/alp"
+      },
+      "summaries": []
+    },
+    {
+      "target": "parquet-alp-reference",
+      "kind": "cargo",
+      "cargoManifest": "interop/parquet-alp/Cargo.toml",
+      "cargoBench": "alp",
+      "raw": "parquet-alp-reference",
+      "environment": {
+        "WIREFORM_PARQUET_ALP_FIXTURES": "{root}/wireform-parquet/dist-stats/bench-fixtures/alp"
+      },
+      "summaries": []
+    },
+    {
+      "target": "parquet60-rs-byte-stream-split-throughput",
+      "kind": "cargo",
+      "cargoManifest": "interop/parquet-alp/Cargo.toml",
+      "cargoBench": "parquet_byte_stream_split",
+      "raw": "parquet60-rs-byte-stream-split-throughput",
+      "summaries": []
+    },
+    {
+      "target": "parquet60-rs-dictionary-throughput",
+      "kind": "cargo",
+      "cargoManifest": "interop/parquet-alp/Cargo.toml",
+      "cargoBench": "parquet_dictionary",
+      "raw": "parquet60-rs-dictionary-throughput",
+      "summaries": []
+    },
+    {
+      "target": "parquet60-rs-throughput",
+      "kind": "cargo",
+      "cargoManifest": "interop/parquet-alp/Cargo.toml",
+      "cargoBench": "parquet_file",
+      "cargoFeatures": [
+        "file-bench"
+      ],
+      "raw": "parquet60-rs-throughput",
+      "environment": {
+        "WIREFORM_PARQUET_BENCH_FIXTURES": "{root}/wireform-parquet/dist-stats/bench-fixtures/parquet"
+      },
+      "prepare": [
+        [
+          "cabal",
+          "bench",
+          "wireform-parquet:bench:parquet-throughput",
+          "--benchmark-options=--write-fixtures dist-stats/bench-fixtures/parquet"
+        ]
+      ],
+      "summaries": []
+    },
+    {
+      "target": "wireform-parquet:bench:parquet-byte-stream-split-throughput",
+      "raw": "parquet-byte-stream-split-throughput",
+      "benchmarkOptions": [
+        "--time-limit",
+        "1",
+        "--resamples",
+        "1000",
+        "--regress",
+        "allocated:iters",
+        "--regress",
+        "cpuTime:iters",
+        "+RTS",
+        "-T",
+        "-RTS"
+      ],
+      "summaries": []
+    },
+    {
+      "target": "parquet-rs-byte-stream-split-throughput",
+      "kind": "cargo",
+      "cargoManifest": "interop/arrow-rs/Cargo.toml",
+      "cargoBench": "parquet_byte_stream_split",
+      "cargoFeatures": [
+        "delta-encoding-bench"
+      ],
+      "raw": "parquet-rs-byte-stream-split-throughput",
+      "summaries": []
+    },
+    {
+      "target": "wireform-parquet:bench:parquet-throughput",
+      "raw": "parquet-throughput",
+      "benchmarkOptions": [
+        "--regress",
+        "allocated:iters",
+        "+RTS",
+        "-T",
+        "-RTS"
+      ],
+      "summaries": []
+    },
+    {
+      "target": "parquet-rs-throughput",
+      "kind": "cargo",
+      "cargoManifest": "interop/arrow-rs/Cargo.toml",
+      "cargoBench": "parquet_file",
+      "raw": "parquet-rs-throughput",
+      "prepare": [
+        [
+          "cabal",
+          "bench",
+          "wireform-parquet:bench:parquet-throughput",
+          "--benchmark-options=--write-fixtures dist-stats/bench-fixtures/parquet"
+        ]
+      ],
+      "environment": {
+        "WIREFORM_PARQUET_BENCH_FIXTURES": "{root}/wireform-parquet/dist-stats/bench-fixtures/parquet"
+      },
+      "summaries": []
     }
   ]
 }
