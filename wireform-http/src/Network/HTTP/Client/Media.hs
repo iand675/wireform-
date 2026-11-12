@@ -81,19 +81,21 @@ mediaTypeBytes = renderMediaType
 
 {- | Parse a @Content-Type@ value using hermes's
 'Hermes.mediaRangeParser', then project into the wireform
-'MediaType' shape. Trailing whitespace is tolerated.
+'MediaType' shape. Leading and trailing HTTP whitespace is tolerated.
 -}
 parseMediaType :: ByteString -> Either String MediaType
 parseMediaType bs0 =
-  let bs = BS.dropWhileEnd (== 0x20) (BS.dropWhile (== 0x20) bs0)
+  let bs = BS.dropWhile isOWS bs0
   in case runParser Hermes.mediaRangeParser bs of
        OK r leftover
-         | BS.all (\b -> b == 0x20 || b == 0x09) leftover ->
+         | BS.all isOWS leftover ->
              Right (fromHermesRange r)
          | otherwise ->
              Left ("trailing input after Content-Type: " <> show leftover)
        Fail -> Left ("malformed Content-Type: " <> show bs0)
        Err e -> Left e
+  where
+    isOWS b = b == 0x20 || b == 0x09
 
 
 {- | Convert a hermes 'MediaRange' to our 'MediaType'. Hermes uses

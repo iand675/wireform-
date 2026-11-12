@@ -12,6 +12,7 @@ import Data.Aeson qualified as Aeson
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
+import Data.IORef (atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Maybe (mapMaybe)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
@@ -19,8 +20,9 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Network.Connect.Client
 import Network.Connect.Compression (ContentCoding (..))
+import Network.Connect.Envelope (EndStreamResponse (..), EnvelopeFlags (..), buildFrameLazy, decodeEndStream, newFrameReader, readFrame)
 import Network.Connect.Error (ConnectError (..), ConnectException (..), decodeConnectError, throwConnect)
-import Network.Connect.Protocol (Codec (..))
+import Network.Connect.Protocol (Codec (..), hConnectTimeoutMs)
 import Network.Connect.Server
 import Network.GRPC.Spec
   ( CustomMetadata (..)
@@ -29,15 +31,16 @@ import Network.GRPC.Spec
   , Proto (..)
   )
 import Network.HTTP.Connection (sendOn)
-import Network.HTTP.Message (Request (..), Response (..))
+import Network.HTTP.Message (Request (..), Response (..), Scheme (..))
 import Network.HTTP.Server (ServerConfig (..), defaultServerConfig, runServerOnListener)
 import Network.HTTP.Types.Body (Body (..))
-import Network.HTTP.Types.Header (hContentType)
-import Network.HTTP.Types.Method (mPost)
-import Network.HTTP.Types.Status (status501)
+import Network.HTTP.Types.Header (Headers, hContentType)
+import Network.HTTP.Types.Method (mGet, mPost)
+import Network.HTTP.Types.Status (status200, status400, status415, status501, status504)
 import Network.HTTP.Types.Version (pattern HTTP1_1)
 import Network.HTTP.VersionRange (VersionRange, http1Only, http2Only)
 import Network.Socket qualified as NS
+import System.Timeout (timeout)
 import Test.Syd
 
 import Connect.TestProto
@@ -129,14 +132,17 @@ serverCfg :: ConnectServerConfig
 serverCfg = defaultConnectServerConfig{cscSupportedCompression = [Identity, Gzip, Br, Zstd]}
 
 withLoopback :: VersionRange -> ConnectClientConfig -> (ConnectClient -> IO a) -> IO a
-withLoopback range ccfg action =
+withLoopback = withLoopbackHandlers elizaHandlers
+
+withLoopbackHandlers :: [MethodHandler] -> VersionRange -> ConnectClientConfig -> (ConnectClient -> IO a) -> IO a
+withLoopbackHandlers handlers range ccfg action =
   withServerSocket $ \sock port -> do
     let scfg =
           defaultServerConfig
             { serverHost = "127.0.0.1"
             , serverPort = show port
             , serverVersionRange = range
-            , serverHandler = connectApplication serverCfg elizaHandlers
+            , serverHandler = connectApplication serverCfg handlers
             }
     readyVar <- newEmptyMVar
     tid <- forkIO (putMVar readyVar () >> runServerOnListener scfg sock)
@@ -228,6 +234,10 @@ tests =
     it "error path surfaces ConnectException" errorT
     it "error path returns HTTP 501 on the wire" rawErrorStatusT
     it "leading metadata reaches the handler" metadataT
+    it "accepts supported Content-Type parameters on unary and streaming requests" mediaTypeT
+    it "rejects malformed media types and incompatible JSON charsets" invalidMediaTypeT
+    it "rejects invalid and zero deadlines before running unary or streaming handlers" timeoutHeaderT
+    it "ends a blocked stream when its positive deadline expires" streamingDeadlineT
 
 unaryEchoT :: VersionRange -> Codec -> IO ()
 unaryEchoT range codec = do
@@ -336,3 +346,108 @@ metadataT = do
   out <- withLoopback http1Only cfg $ \cl ->
     nonStreaming cl (Proxy @Say) (mkSay "hi")
   saidSentence out `shouldBe` "echo:hi!"
+
+mediaTypeT :: IO ()
+mediaTypeT = withLoopback http1Only (clientCfg CodecJSON) $ \cl -> do
+  let call = sendRaw cl
+  unary <- call (testRequest False "application/json; charset=\"UTF-8\"; version=1" [])
+  responseStatus unary `shouldBe` status200
+  unaryBody <- drainBody (responseBody unary)
+  fmap saidSentence (Aeson.eitherDecodeStrict unaryBody) `shouldBe` Right "echo:hi"
+  streaming <- call (testRequest True "application/connect+json; charset=utf-8" [])
+  responseStatus streaming `shouldBe` status200
+  body <- drainBody (responseBody streaming)
+  BS.take 1 body `shouldBe` "\0"
+
+invalidMediaTypeT :: IO ()
+invalidMediaTypeT = withLoopback http1Only (clientCfg CodecJSON) $ \cl -> do
+  let call = sendRaw cl
+  forM_ ["application", "application/json; charset=latin1"] $ \ct -> do
+    response <- call (testRequest False ct [])
+    responseStatus response `shouldBe` status415
+  response <- call (testRequest True "application/connect+json; charset=utf-16" [])
+  responseStatus response `shouldBe` status415
+
+timeoutHeaderT :: IO ()
+timeoutHeaderT = do
+  called <- newIORef False
+  let handlers =
+        connectHandlers $
+          service @ElizaService
+            ( method @Say (\input -> liftIO (writeIORef called True) >> sayH input)
+                :& method @Aggregate (\recv -> liftIO (writeIORef called True) >> aggregateH recv)
+                :& method @Converse converseH
+                :& method @Introduce introduceH
+                :& Done
+            )
+  withLoopbackHandlers handlers http1Only (clientCfg CodecJSON) $ \cl -> do
+    forM_ [("0", status504, GrpcDeadlineExceeded), ("-1", status400, GrpcInvalidArgument), ("0x1", status400, GrpcInvalidArgument), ("10000000000", status400, GrpcInvalidArgument)] $
+      \(value, status, code) -> do
+        let headers = [(hConnectTimeoutMs, value)]
+            post = testRequest False "application/json" headers
+            get =
+              post
+                { requestMethod = mGet
+                , requestTarget = requestTarget post <> "?connect=v1&encoding=json&message=%7B%7D"
+                , requestBody = BodyEmpty
+                }
+        forM_ [post, get] $ \request -> do
+          unary <- sendRaw cl request
+          responseStatus unary `shouldBe` status
+          unaryBody <- drainBody (responseBody unary)
+          fmap ceCode (Aeson.eitherDecodeStrict unaryBody >>= decodeConnectError) `shouldBe` Right code
+        streaming <- sendRaw cl (testRequest True "application/connect+json" headers)
+        expectStreamError code streaming
+  readIORef called >>= (`shouldBe` False)
+
+streamingDeadlineT :: IO ()
+streamingDeadlineT = do
+  blocker <- newEmptyMVar
+  let handlers =
+        connectHandlers $
+          service @ElizaService
+            ( method @Say sayH
+                :& method @Aggregate (\_ -> liftIO (takeMVar blocker))
+                :& method @Converse converseH
+                :& method @Introduce introduceH
+                :& Done
+            )
+      request = testRequest True "application/connect+json" [(hConnectTimeoutMs, "10")]
+  result <- timeout 5000000 $
+    withLoopbackHandlers handlers http1Only (clientCfg CodecJSON) $ \cl ->
+      sendRaw cl request >>= expectStreamError GrpcDeadlineExceeded
+  result `shouldBe` Just ()
+
+expectStreamError :: GrpcError -> Response -> IO ()
+expectStreamError code response = do
+  responseStatus response `shouldBe` status200
+  frame <- newIORef . Just =<< drainBody (responseBody response)
+  reader <- newFrameReader (atomicModifyIORef' frame (\current -> (Nothing, current)))
+  readFrame reader >>= \case
+    Just (flags, payload) -> do
+      flags `shouldBe` EnvelopeFlags False True
+      fmap (fmap ceCode . esError) (decodeEndStream payload) `shouldBe` Right (Just code)
+    Nothing -> expectationFailure "expected an end-stream error frame"
+  readFrame reader >>= (`shouldBe` Nothing)
+
+sendRaw :: ConnectClient -> Request -> IO Response
+sendRaw cl req =
+  sendOn (clConn cl) req{requestAuthority = Just (clAuthority cl), requestScheme = clScheme cl}
+
+testRequest :: Bool -> ByteString -> Headers -> Request
+testRequest streaming ct headers =
+  Request
+    { requestMethod = mPost
+    , requestTarget = "/connectrpc.eliza.v1.ElizaService/" <> if streaming then "Aggregate" else "Say"
+    , requestAuthority = Nothing
+    , requestScheme = SchemeHttp
+    , requestHeaders = (hContentType, ct) : headers
+    , requestBody = BodyBytes body
+    , requestVersion = HTTP1_1
+    , requestTrailers = pure []
+    }
+  where
+    json = "{\"sentence\":\"hi\"}"
+    body
+      | streaming = BL.toStrict (buildFrameLazy (EnvelopeFlags False False) json)
+      | otherwise = json

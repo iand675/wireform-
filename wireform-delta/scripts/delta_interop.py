@@ -12,10 +12,8 @@ Coverage:
     * an OVERWRITE commit (which removes the original add and
       writes a new one)
     * a partitioned table (separate from the unpartitioned case)
-    * a checkpointed table — exercises the wireform
-      ``_last_checkpoint`` discovery and the
-      ``*.checkpoint.parquet`` enumeration even though the
-      checkpoint Parquet body itself is not yet decoded.
+    * a checkpointed table and a synthetic Parquet checkpoint with
+      deletion-vector tombstones and signed transaction identifiers.
 
 Usage:
     python3 wireform-delta/scripts/delta_interop.py
@@ -30,6 +28,7 @@ import tempfile
 from pathlib import Path
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 from deltalake import DeltaTable, write_deltalake
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -401,6 +400,56 @@ def case_time_travel_and_history(failures: Failures, root: Path) -> None:
               f"v2 has {len(v2['active_files'])} active files")
 
 
+def case_checkpoint_replay(failures: Failures, root: Path) -> None:
+    log = root / "_delta_log"
+    log.mkdir(parents=True)
+    dv_type = pa.struct([
+        ("storageType", pa.string()), ("pathOrInlineDv", pa.string()),
+        ("offset", pa.int32()), ("sizeInBytes", pa.int32()),
+        ("cardinality", pa.int64()),
+    ])
+    file_path = "p.parquet"
+    old_dv = {"storageType": "p", "pathOrInlineDv": "file:///vectors",
+              "offset": 1, "sizeInBytes": 32, "cardinality": 1}
+    checkpoint = pa.table({
+        "add": pa.array([
+            {"path": file_path, "size": 1, "modificationTime": 0,
+             "dataChange": True, "deletionVector": {**old_dv, "offset": 2}},
+            None, None, None,
+        ], type=pa.struct([
+            ("path", pa.string()), ("size", pa.int64()),
+            ("modificationTime", pa.int64()), ("dataChange", pa.bool_()),
+            ("deletionVector", dv_type),
+        ])),
+        "remove": pa.array([
+            None, {"path": file_path, "dataChange": True, "deletionVector": old_dv},
+            None, None,
+        ], type=pa.struct([
+            ("path", pa.string()), ("dataChange", pa.bool_()),
+            ("deletionVector", dv_type),
+        ])),
+        "txn": pa.array([
+            None, None, {"appId": "kept", "version": -1},
+            {"appId": "updated", "version": 7, "lastUpdated": 42},
+        ], type=pa.struct([
+            ("appId", pa.string()), ("version", pa.int64()),
+            ("lastUpdated", pa.int64()),
+        ])),
+    })
+    pq.write_table(checkpoint, log / "00000000000000000000.checkpoint.parquet",
+                   compression="NONE")
+    (log / "00000000000000000001.json").write_text(
+        json.dumps({"txn": {"appId": "updated", "version": 3}}) + "\n"
+    )
+    summary = run_probe(root)
+    expect_eq(failures, "checkpoint-replay", "checkpoint active files",
+              summary["checkpoint_active_files"], [file_path])
+    expect_eq(failures, "checkpoint-replay", "active files after replay",
+              summary["active_relative_paths"], [file_path])
+    expect_eq(failures, "checkpoint-replay", "signed transaction versions after replay",
+              summary["txn_app_versions"], {"kept": -1, "updated": 3})
+
+
 def main() -> int:
     failures = Failures()
     out = Path(tempfile.mkdtemp(prefix="wireform-delta-probe-"))
@@ -408,6 +457,7 @@ def main() -> int:
     case_unpartitioned(failures, out / "table_unpart")
     case_partitioned (failures, out / "table_part")
     case_checkpointed(failures, out / "table_ckpt")
+    case_checkpoint_replay(failures, out / "table_ckpt_replay")
     case_partitioned_checkpoint(failures, out / "table_part_ckpt")
     case_time_travel_and_history(failures, out / "table_tt")
 

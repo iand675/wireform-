@@ -30,6 +30,8 @@ main =
         , it "parseLogLine: txn" txnLineTest
         , it "parseLogLine: cdc" cdcLineTest
         , it "snapshot fold collapses add+remove" snapshotFoldTest
+        , it "replays deletion-vector replacements in either action order" deletionVectorReplayTest
+        , it "uses the last signed transaction version for each app" transactionReplayTest
         , it "snapshot reflects metadata + protocol" snapshotProtoMetaTest
         , it "schemaString decodes nested types" schemaTest
         , it "_last_checkpoint parser" lastCheckpointTest
@@ -158,11 +160,40 @@ snapshotFoldTest = do
               , D.removeExtendedFileMetadata = Nothing
               , D.removeSize = Nothing
               , D.removePartitionValues = Map.empty
+              , D.removeDeletionVector = Nothing
               }
         ]
       snap = D.snapshotFromActions actions
   Map.keys (D.tsFiles snap) `shouldBe` ["data/b.parquet"]
   map D.addPath (D.activeFiles actions) `shouldBe` ["data/b.parquet"]
+
+
+deletionVectorReplayTest :: IO ()
+deletionVectorReplayTest = do
+  let noVector = "{\"add\":{\"path\":\"p.parquet\",\"size\":1,\"modificationTime\":0,\"dataChange\":true}}"
+      removeNoVector = "{\"remove\":{\"path\":\"p.parquet\",\"dataChange\":true}}"
+      action prefix offset =
+        prefix <> "{\"storageType\":\"p\",\"pathOrInlineDv\":\"file:///vectors\",\"offset\":"
+          <> offset <> ",\"sizeInBytes\":32,\"cardinality\":1}}}"
+      addVector = action "{\"add\":{\"path\":\"p.parquet\",\"size\":1,\"modificationTime\":0,\"dataChange\":true,\"deletionVector\":"
+      removeVector = action "{\"remove\":{\"path\":\"p.parquet\",\"dataChange\":true,\"deletionVector\":"
+      replay = D.tsFiles . D.snapshotFromActions . D.parseLogFile . BL.intercalate "\n"
+      expected = replay [addVector "2"]
+  Map.keys expected `shouldBe` ["p.parquet"]
+  replay [noVector, addVector "2", removeNoVector] `shouldBe` expected
+  replay [noVector, removeNoVector, addVector "2"] `shouldBe` expected
+  replay [addVector "1", addVector "2", removeVector "1"] `shouldBe` expected
+  replay [addVector "1", removeVector "1", addVector "2"] `shouldBe` expected
+  replay [addVector "2", removeVector "2"] `shouldBe` Map.empty
+
+
+transactionReplayTest :: IO ()
+transactionReplayTest = do
+  let record app version = "{\"txn\":{\"appId\":\"" <> app <> "\",\"version\":" <> version <> "}}"
+      replay = D.tsAppIds . D.snapshotFromActions . D.parseLogFile . BL.intercalate "\n"
+      events = [record "a" "7", record "b" "4", record "a" "3"]
+  replay events `shouldBe` Map.fromList [("a", 3), ("b", 4)]
+  replay (events ++ [record "a" "-1"]) `shouldBe` Map.fromList [("a", -1), ("b", 4)]
 
 
 snapshotProtoMetaTest :: IO ()

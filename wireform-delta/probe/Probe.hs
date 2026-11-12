@@ -18,6 +18,7 @@ import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Lazy qualified as BL
+import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Vector qualified as V
@@ -166,8 +167,8 @@ numW64 :: Word64 -> Aeson.Value
 numW64 = Aeson.Number . fromIntegral
 
 
-txnEntry :: (Text, Word64) -> (Key.Key, Aeson.Value)
-txnEntry (k, v) = (Key.fromText k, numW64 v)
+txnEntry :: (Text, Int64) -> (Key.Key, Aeson.Value)
+txnEntry (k, v) = (Key.fromText k, Aeson.Number (fromIntegral v))
 
 
 pad20 :: Word64 -> String

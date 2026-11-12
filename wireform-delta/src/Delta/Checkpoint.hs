@@ -13,11 +13,9 @@ action structs on that row are null. By reading these
 columns, consumers can reconstruct a 'Delta.Log.TableSnapshot'
 without walking the @NNNN.json@ commit files from version 0.
 
-This module decodes the four action columns most readers
-need: @add@, @remove@, @metaData@, and @protocol@. The
-spec also defines @txn@, @domainMetadata@, and @sidecar@
-columns; these are surfaced as 'ActionOther' so callers can
-see they exist without losing them.
+This module decodes @add@, @remove@, @metaData@, @protocol@,
+and @txn@. Domain metadata and sidecar rows are surfaced as
+'ActionOther'.
 
 /Implementation notes:/
 
@@ -38,10 +36,6 @@ see they exist without losing them.
     @metaData.id@ / @protocol.minReaderVersion@ leaves: if
     the row's value is 'Just _' the corresponding struct is
     present, so we attribute the row to that variant.
-  * Map-typed and list-typed leaves (partitionValues, tags,
-    partitionColumns, readerFeatures, writerFeatures) are
-    /not/ decoded yet. See the docstring on the per-action
-    decoder for what's surfaced and what's left blank.
 -}
 module Delta.Checkpoint (
   -- * Decode
@@ -73,6 +67,7 @@ import Delta.Log (
   ProtocolAction (..),
   RemoveAction (..),
   TableSnapshot,
+  TxnAction (..),
   snapshotFromActions,
  )
 import Parquet.Levels qualified as PL
@@ -86,7 +81,7 @@ import Parquet.Types qualified as P
 
 {- | Decode every action row in a Delta checkpoint Parquet
 payload into a flat list of 'DeltaAction's. Rows whose
-variant we don't recognise (@txn@, @domainMetadata@,
+variant we don't recognise (@domainMetadata@,
 @sidecar@) are surfaced as 'ActionOther' rather than
 dropped, so callers can see they exist.
 -}
@@ -168,14 +163,7 @@ rowGroupActions pf rg = do
   addTagsK_ <- readByteArrayRep pf rg ["add", "tags", "key_value", "key"]
   -- tags is map<string, string> (required value).
   addTagsV_ <- readByteArrayRep pf rg ["add", "tags", "key_value", "value"]
-  -- Deletion-vector struct on add (V2 deletion-vectors feature).
-  -- All leaves are optional inside the optional struct, so each
-  -- comes back as a flat 'V.Vector (Maybe a)'.
-  addDvSt_ <- readByteArrayOpt pf rg ["add", "deletionVector", "storageType"]
-  addDvPath_ <- readByteArrayOpt pf rg ["add", "deletionVector", "pathOrInlineDv"]
-  addDvOff_ <- readInt32Opt pf rg ["add", "deletionVector", "offset"]
-  addDvSz_ <- readInt32Opt pf rg ["add", "deletionVector", "sizeInBytes"]
-  addDvCard_ <- readInt64Opt pf rg ["add", "deletionVector", "cardinality"]
+  addDv <- readDeletionVectorCols pf rg "add"
   -- 'remove' columns
   remPath_ <- readByteArrayOpt pf rg ["remove", "path"]
   remDelTs_ <- readInt64Opt pf rg ["remove", "deletionTimestamp"]
@@ -192,6 +180,7 @@ rowGroupActions pf rg = do
       rg
       ["remove", "partitionValues", "key_value", "value"]
   remExt_ <- readBoolOpt pf rg ["remove", "extendedFileMetadata"]
+  remDv <- readDeletionVectorCols pf rg "remove"
   -- 'metaData' columns
   metaId_ <- readByteArrayOpt pf rg ["metaData", "id"]
   metaName_ <- readByteArrayOpt pf rg ["metaData", "name"]
@@ -237,8 +226,9 @@ rowGroupActions pf rg = do
       pf
       rg
       ["protocol", "writerFeatures", "list", "element"]
-  -- 'txn' presence (just the appId leaf; we don't decode the body)
   txnApp_ <- readByteArrayOpt pf rg ["txn", "appId"]
+  txnVersion_ <- readInt64Opt pf rg ["txn", "version"]
+  txnLastUpdated_ <- readInt64Opt pf rg ["txn", "lastUpdated"]
   -- 'domainMetadata' / 'sidecar' presence
   domDom_ <- readByteArrayOpt pf rg ["domainMetadata", "domain"]
   sideP_ <- readByteArrayOpt pf rg ["sidecar", "path"]
@@ -256,11 +246,7 @@ rowGroupActions pf rg = do
           , addPartV_ = addPartV_
           , addTagsK_ = addTagsK_
           , addTagsV_ = addTagsV_
-          , addDvSt_ = addDvSt_
-          , addDvPath_ = addDvPath_
-          , addDvOff_ = addDvOff_
-          , addDvSz_ = addDvSz_
-          , addDvCard_ = addDvCard_
+          , addDv_ = addDv
           }
         RemCols
           { remPath_ = remPath_
@@ -270,6 +256,7 @@ rowGroupActions pf rg = do
           , remPartK_ = remPartK_
           , remPartV_ = remPartV_
           , remExt_ = remExt_
+          , remDv_ = remDv
           }
         MetaCols
           { metaId_ = metaId_
@@ -290,7 +277,13 @@ rowGroupActions pf rg = do
           , protRdrFt_ = protRdrFt_
           , protWrtFt_ = protWrtFt_
           }
-        OtherCols {txnApp_ = txnApp_, domDom_ = domDom_, sideP_ = sideP_}
+        OtherCols
+          { txnApp_ = txnApp_
+          , txnVersion_ = txnVersion_
+          , txnLastUpdated_ = txnLastUpdated_
+          , domDom_ = domDom_
+          , sideP_ = sideP_
+          }
     | i <- [0 .. n - 1]
     ]
 
@@ -310,11 +303,7 @@ data AddCols = AddCols
   , addPartV_ :: !(V.Vector (V.Vector (Maybe ByteString)))
   , addTagsK_ :: !(V.Vector (V.Vector (Maybe ByteString)))
   , addTagsV_ :: !(V.Vector (V.Vector (Maybe ByteString)))
-  , addDvSt_ :: !(V.Vector (Maybe ByteString))
-  , addDvPath_ :: !(V.Vector (Maybe ByteString))
-  , addDvOff_ :: !(V.Vector (Maybe Int32))
-  , addDvSz_ :: !(V.Vector (Maybe Int32))
-  , addDvCard_ :: !(V.Vector (Maybe Int64))
+  , addDv_ :: !DeletionVectorCols
   }
 
 
@@ -326,6 +315,7 @@ data RemCols = RemCols
   , remPartK_ :: !(V.Vector (V.Vector (Maybe ByteString)))
   , remPartV_ :: !(V.Vector (V.Vector (Maybe ByteString)))
   , remExt_ :: !(V.Vector (Maybe Bool))
+  , remDv_ :: !DeletionVectorCols
   }
 
 
@@ -354,6 +344,8 @@ data ProtCols = ProtCols
 
 data OtherCols = OtherCols
   { txnApp_ :: !(V.Vector (Maybe ByteString))
+  , txnVersion_ :: !(V.Vector (Maybe Int64))
+  , txnLastUpdated_ :: !(V.Vector (Maybe Int64))
   , domDom_ :: !(V.Vector (Maybe ByteString))
   , sideP_ :: !(V.Vector (Maybe ByteString))
   }
@@ -382,13 +374,7 @@ rowAction i ac rc mc pc oc
           , addStats = fmap decodeText (atIdx (addStats_ ac) i)
           , addPartitionValues = decodeOptStringMap (addPartK_ ac) (addPartV_ ac) i
           , addTags = decodeStringMap (addTagsK_ ac) (addTagsV_ ac) i
-          , addDeletionVector =
-              decodeDeletionVector
-                (atIdx (addDvSt_ ac) i)
-                (atIdx (addDvPath_ ac) i)
-                (atIdx (addDvOff_ ac) i)
-                (atIdx (addDvSz_ ac) i)
-                (atIdx (addDvCard_ ac) i)
+          , addDeletionVector = decodeDeletionVector (addDv_ ac) i
           }
   | Just path <- atIdx (remPath_ rc) i =
       ActionRemove
@@ -399,6 +385,7 @@ rowAction i ac rc mc pc oc
           , removeExtendedFileMetadata = atIdx (remExt_ rc) i
           , removeSize = fmap fromIntegral (atIdx (remSize_ rc) i)
           , removePartitionValues = decodeOptStringMap (remPartK_ rc) (remPartV_ rc) i
+          , removeDeletionVector = decodeDeletionVector (remDv_ rc) i
           }
   | Just metaIdBs <- atIdx (metaId_ mc) i =
       ActionMetaData
@@ -426,7 +413,10 @@ rowAction i ac rc mc pc oc
           , pReaderFeatures = decodeStringList (protRdrFt_ pc) i
           , pWriterFeatures = decodeStringList (protWrtFt_ pc) i
           }
-  | Just _ <- atIdx (txnApp_ oc) i = ActionOther "txn"
+  | Just appId <- atIdx (txnApp_ oc) i =
+      case atIdx (txnVersion_ oc) i of
+        Just version -> ActionTxn (TxnAction (decodeText appId) version (atIdx (txnLastUpdated_ oc) i))
+        Nothing -> ActionOther "txn"
   | Just _ <- atIdx (domDom_ oc) i = ActionOther "domainMetadata"
   | Just _ <- atIdx (sideP_ oc) i = ActionOther "sidecar"
   | otherwise = ActionOther "<empty-row>"
@@ -487,42 +477,51 @@ decodeStringList col i =
   in [decodeText t | Just t <- V.toList row]
 
 
-{- | Reassemble the typed @add.deletionVector@ struct into a
-JSON object — the typed 'AddAction' carries it as
-@Maybe Aeson.Value@ so it can round-trip through the same
-aeson encode the JSON commit reader produces. We emit
-'Nothing' if every leaf of the struct is null on this row
-(i.e. the table doesn't use deletion vectors / this file
-isn't covered by one).
--}
-decodeDeletionVector
-  :: Maybe ByteString -- storageType
-  -> Maybe ByteString -- pathOrInlineDv
-  -> Maybe Int32 -- offset
-  -> Maybe Int32 -- sizeInBytes
-  -> Maybe Int64 -- cardinality
-  -> Maybe Aeson.Value
-decodeDeletionVector st pth off sz card
-  | allNothing = Nothing
-  | otherwise =
-      Just $
-        Aeson.Object $
-          KM.fromList $
-            catMaybes
-              [ kv "storageType" . Aeson.String . decodeText <$> st
-              , kv "pathOrInlineDv" . Aeson.String . decodeText <$> pth
-              , kv "offset" . Aeson.Number . fromIntegral <$> off
-              , kv "sizeInBytes" . Aeson.Number . fromIntegral <$> sz
-              , kv "cardinality" . Aeson.Number . fromIntegral <$> card
-              ]
+data DeletionVectorCols = DeletionVectorCols
+  { dvStorageType :: !(V.Vector (Maybe ByteString))
+  , dvPathOrInline :: !(V.Vector (Maybe ByteString))
+  , dvOffset :: !(V.Vector (Maybe Int32))
+  , dvSize :: !(V.Vector (Maybe Int32))
+  , dvCardinality :: !(V.Vector (Maybe Int64))
+  }
+
+
+readDeletionVectorCols :: PR.ParquetFile -> P.RowGroup -> Text -> Either String DeletionVectorCols
+readDeletionVectorCols pf rg action =
+  DeletionVectorCols
+    <$> readByteArrayOpt pf rg (path "storageType")
+    <*> readByteArrayOpt pf rg (path "pathOrInlineDv")
+    <*> readInt32Opt pf rg (path "offset")
+    <*> readInt32Opt pf rg (path "sizeInBytes")
+    <*> readInt64Opt pf rg (path "cardinality")
   where
-    kv k v = (Aeson.fromString k, v)
-    allNothing =
-      st == Nothing
-        && pth == Nothing
-        && off == Nothing
-        && sz == Nothing
-        && card == Nothing
+    path leaf = [action, "deletionVector", leaf]
+
+
+-- Reassemble the same descriptor object as the JSON log reader.
+decodeDeletionVector :: DeletionVectorCols -> Int -> Maybe Aeson.Value
+decodeDeletionVector cols i
+  | Nothing <- storageType
+  , Nothing <- pathOrInline
+  , Nothing <- offset
+  , Nothing <- size
+  , Nothing <- cardinality =
+      Nothing
+  | otherwise =
+      Just . Aeson.Object . KM.fromList . catMaybes $
+        [ field "storageType" (Aeson.String . decodeText) storageType
+        , field "pathOrInlineDv" (Aeson.String . decodeText) pathOrInline
+        , field "offset" (Aeson.Number . fromIntegral) offset
+        , field "sizeInBytes" (Aeson.Number . fromIntegral) size
+        , field "cardinality" (Aeson.Number . fromIntegral) cardinality
+        ]
+  where
+    storageType = atIdx (dvStorageType cols) i
+    pathOrInline = atIdx (dvPathOrInline cols) i
+    offset = atIdx (dvOffset cols) i
+    size = atIdx (dvSize cols) i
+    cardinality = atIdx (dvCardinality cols) i
+    field key wrap value = (,) (Aeson.fromString key) . wrap <$> value
 
 
 atIdx :: V.Vector (Maybe a) -> Int -> Maybe a

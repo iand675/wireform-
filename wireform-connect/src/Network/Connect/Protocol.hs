@@ -3,8 +3,7 @@
 -- | Connect protocol wire vocabulary: codecs, the content-type matrix,
 -- reserved header names, and unary-GET query parameters.
 --
--- This module is pure values; the only logic is the content-type
--- parse/render matrix.
+-- Includes parsing for Connect media types and request timeouts.
 module Network.Connect.Protocol (
   -- * Codecs
   Codec (..),
@@ -22,6 +21,7 @@ module Network.Connect.Protocol (
   -- * Header names
   hConnectProtocolVersion,
   hConnectTimeoutMs,
+  parseTimeoutMillis,
   hConnectContentEncoding,
   hConnectAcceptEncoding,
 
@@ -38,10 +38,12 @@ module Network.Connect.Protocol (
   connectGetVersion,
 ) where
 
+import Control.Monad (guard)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
-import Data.CaseInsensitive (CI)
 import Data.CaseInsensitive qualified as CI
+import Data.Word (Word64)
+import Network.HTTP.Client.Media (MediaType (..), parseMediaType)
 import Network.HTTP.Types.Header (HeaderName)
 
 -- | A Connect wire codec: 'CodecProto' (binary Protobuf) or 'CodecJSON'
@@ -72,32 +74,26 @@ unaryContentType c = "application/" <> codecName c
 streamContentType :: Codec -> ByteString
 streamContentType c = "application/connect+" <> codecName c
 
--- | Parse a Connect content-type into (streaming-kind, codec).
---
--- Recognizes the four exact wire strings:
---
--- @application\/proto@, @application\/json@ (unary) and
--- @application\/connect+proto@, @application\/connect+json@ (streaming).
--- The @application\/@ prefix is matched case-insensitively (HTTP header
--- values are case-insensitive for media types); the codec suffix must
--- match exactly. Returns 'Nothing' for anything else (the call site
--- responds 415 Unsupported Media Type).
+-- | Parse a Connect content type. JSON accepts only UTF-8 when a charset
+-- is supplied. Protobuf and other media-type parameters are independent
+-- of the charset parameter.
 parseContentType :: ByteString -> Maybe (IsStreaming, Codec)
-parseContentType bs = do
-  let (media, rest) = BS.break (== 0x2F) bs -- split on first '/'
-  if CI.mk media /= "application"
-    then Nothing
-    else case rest of
-      -- Drop the leading '/'.
-      r | BS.head r == 0x2F -> classify (BS.drop 1 r)
-      _ -> Nothing
+parseContentType "application/proto" = Just (Unary, CodecProto)
+parseContentType "application/json" = Just (Unary, CodecJSON)
+parseContentType "application/connect+proto" = Just (Streaming, CodecProto)
+parseContentType "application/connect+json" = Just (Streaming, CodecJSON)
+parseContentType bytes = do
+  media <- either (const Nothing) Just (parseMediaType bytes)
+  guard (mtType media == "application")
+  let subtype = mtSubType media
+      (streaming, codecBytes) = case BS.stripPrefix "connect+" subtype of
+        Just suffix -> (Streaming, suffix)
+        Nothing -> (Unary, subtype)
+  codec <- codecFromName codecBytes
+  guard (codec /= CodecJSON || all validCharset (mtParameters media))
+  pure (streaming, codec)
   where
-    classify r
-      | Just c <- codecFromName r = Just (Unary, c)
-      | "connect+" `BS.isPrefixOf` r =
-          codecFromName (BS.drop (BS.length "connect+") r)
-            >>= \c -> Just (Streaming, c)
-      | otherwise = Nothing
+    validCharset (name, value) = name /= "charset" || CI.mk value == "utf-8"
 
 ------------------------------------------------------------------------
 -- Header names
@@ -110,6 +106,17 @@ hConnectProtocolVersion = CI.mk "connect-protocol-version"
 -- | @connect-timeout-ms@
 hConnectTimeoutMs :: HeaderName
 hConnectTimeoutMs = CI.mk "connect-timeout-ms"
+
+-- | Parse one to ten ASCII digits, including zero. Keep the conversion to
+-- microseconds within the host 'Int' range used by @System.Timeout.timeout@.
+parseTimeoutMillis :: ByteString -> Maybe Int
+parseTimeoutMillis bytes
+  | BS.null bytes || BS.length bytes > 10 || not (BS.all isDigit bytes) = Nothing
+  | otherwise = Just (fromIntegral (min millis maxMillis))
+  where
+    isDigit b = b >= 48 && b <= 57
+    millis = BS.foldl' (\n b -> n * 10 + fromIntegral (b - 48)) 0 bytes :: Word64
+    maxMillis = fromIntegral (maxBound `quot` 1000 :: Int)
 
 -- | @connect-content-encoding@ (streaming compression)
 hConnectContentEncoding :: HeaderName

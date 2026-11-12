@@ -37,6 +37,7 @@ module Delta.IO (
 import Control.Exception (SomeException, try)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
+import Data.Int (Int64)
 import Data.List (sort, sortBy)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
@@ -173,16 +174,9 @@ The checkpoint short-circuit turns table-open from O(N) in
 commit count to O(N − checkpoint_version), which is the
 whole point of the checkpoint format.
 
-The path-aware checkpoint reader covers the core action
-types ('add', 'remove', 'metaData', 'protocol') needed to
-materialise an active file set; @txn@ / @domainMetadata@ /
-@sidecar@ rows are surfaced as 'ActionOther'. A few
-secondary fields (partition-values map, partition-columns
-list, configuration map, reader/writer features list) are
-not yet decoded from the checkpoint and remain default
-('Map.empty' / @[]@); subsequent JSON commits will refresh
-them, and the active-file-set check that's the most
-common consumer is unaffected.
+The path-aware checkpoint reader reconstructs file actions, metadata,
+protocol, and transaction identifiers. Domain metadata and sidecar rows
+are surfaced as 'ActionOther'.
 -}
 openDeltaTable :: FilePath -> IO (Either String DeltaTable)
 openDeltaTable tableRoot = do
@@ -418,7 +412,7 @@ data HistoryEntry = HistoryEntry
   , heIsBlindAppend :: !(Maybe Bool)
   , heIsolationLevel :: !(Maybe Text)
   , heAppId :: !(Maybe Text)
-  , heAppVersion :: !(Maybe Word64)
+  , heAppVersion :: !(Maybe Int64)
   }
   deriving (Show, Eq)
 

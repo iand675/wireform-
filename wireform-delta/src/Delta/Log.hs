@@ -104,6 +104,7 @@ import Data.Aeson.KeyMap qualified as AKM
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 import Data.HashMap.Strict qualified as HM
+import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Scientific (toBoundedInteger)
@@ -167,6 +168,7 @@ data RemoveAction = RemoveAction
   , removeExtendedFileMetadata :: !(Maybe Bool)
   , removeSize :: !(Maybe Word64)
   , removePartitionValues :: !(Map.Map Text (Maybe Text))
+  , removeDeletionVector :: !(Maybe Value)
   }
   deriving (Show, Eq)
 
@@ -228,8 +230,8 @@ streaming jobs.
 -}
 data TxnAction = TxnAction
   { txnAppId :: !Text
-  , txnVersion :: !Word64
-  , txnLastUpdated :: !(Maybe Word64)
+  , txnVersion :: !Int64
+  , txnLastUpdated :: !(Maybe Int64)
   }
   deriving (Show, Eq)
 
@@ -274,6 +276,7 @@ instance FromJSON RemoveAction where
       <*> o .:? "extendedFileMetadata"
       <*> o .:? "size"
       <*> (fromMaybe Map.empty <$> o .:? "partitionValues")
+      <*> o .:? "deletionVector"
 
 
 instance FromJSON MetaDataAction where
@@ -612,15 +615,15 @@ parseDecimal t = do
 
 {- | Active state of the table at a particular log version.
 Combines protocol, metadata, the live file set, and the
-highest version of each idempotent app id.
+last recorded transaction version for each app id.
 -}
 data TableSnapshot = TableSnapshot
   { tsProtocol :: !(Maybe ProtocolAction)
   , tsMetaData :: !(Maybe MetaDataAction)
   , tsFiles :: !(Map.Map Text AddAction)
   -- ^ Live data files keyed by 'addPath'.
-  , tsAppIds :: !(Map.Map Text Word64)
-  -- ^ Highest committed version per @txn.appId@.
+  , tsAppIds :: !(Map.Map Text Int64)
+  -- ^ Last version recorded per @txn.appId@, in commit order.
   , tsLastCommit :: !(Maybe CommitInfoAction)
   -- ^ Most recently observed @commitInfo@.
   }
@@ -644,13 +647,33 @@ so a long replay doesn't build a thunk chain.
 applyAction :: TableSnapshot -> DeltaAction -> TableSnapshot
 applyAction !s = \case
   ActionAdd a -> s {tsFiles = Map.insert (addPath a) a (tsFiles s)}
-  ActionRemove r -> s {tsFiles = Map.delete (removePath r) (tsFiles s)}
+  ActionRemove r -> s {tsFiles = Map.update (removeMatching r) (removePath r) (tsFiles s)}
   ActionMetaData md -> s {tsMetaData = Just md}
   ActionProtocol p -> s {tsProtocol = Just p}
   ActionCommitInfo c -> s {tsLastCommit = Just c}
-  ActionTxn t -> s {tsAppIds = Map.insertWith max (txnAppId t) (txnVersion t) (tsAppIds s)}
+  ActionTxn t -> s {tsAppIds = Map.insert (txnAppId t) (txnVersion t) (tsAppIds s)}
   ActionCdc _ -> s -- @cdc@ does not affect the live file set
   ActionOther _ -> s
+  where
+    -- A tombstone for an earlier deletion vector can appear after the
+    -- replacement add, either in a commit or in a checkpoint.
+    removeMatching r a
+      | sameDeletionVector (removeDeletionVector r) (addDeletionVector a) = Nothing
+      | otherwise = Just a
+
+
+-- Only these descriptor fields identify a deletion vector. Size and
+-- cardinality describe its contents, and are irrelevant to reconciliation.
+sameDeletionVector :: Maybe Value -> Maybe Value -> Bool
+sameDeletionVector Nothing Nothing = True
+sameDeletionVector (Just (Object left)) (Just (Object right)) =
+  matches "storageType" && matches "pathOrInlineDv" && offset left == offset right
+  where
+    matches key = case AKM.lookup key left of
+      Just v@(String _) -> AKM.lookup key right == Just v
+      _ -> False
+    offset = fromMaybe Null . AKM.lookup "offset"
+sameDeletionVector _ _ = False
 
 
 {- | Replay a chronologically-ordered list of actions into a

@@ -5,6 +5,7 @@ module Network.HTTP.ContentNegotiation where
 
 import Control.Monad.Combinators (sepBy)
 import Data.Functor (($>))
+import Data.Maybe (catMaybes)
 import qualified Data.Text.Short as ST
 import qualified Network.HTTP.Headers.Mason as M
 import Network.HTTP.Headers.Parsing.Util
@@ -43,7 +44,7 @@ mediaTypeParser = do
 mediaRangeParser :: ParserT st e MediaRange
 mediaRangeParser = do
   mt <- mediaTypeParser
-  mp <- many (ows *> $(char ';') *> ows *> mediaParam)
+  mp <- catMaybes <$> many (ows *> $(char ';') *> ows *> optional mediaParam)
   pure $ MediaRange mt mp
   where
     mediaParam = (,) <$> rfc9110Token <*> ($(char '=') *> (rfc9110Token <|> quotedString))
