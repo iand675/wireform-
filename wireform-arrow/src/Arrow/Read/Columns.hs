@@ -82,15 +82,12 @@ import GHC.Generics (Generic)
 import System.IO.Unsafe (unsafeDupablePerformIO)
 import Wireform.FFI (validateArrowBuffers)
 
-
 #ifdef HAVE_ZSTD
 import qualified Codec.Compression.Zstd as Zstd
 #endif
 
 #ifdef HAVE_LZ4
-import qualified Codec.Lz4 as Lz4
-import qualified Control.Exception as Exc
-import qualified Data.ByteString.Lazy as BL
+import Columnar.LZ4 qualified as Lz4
 #endif
 
 
@@ -1012,8 +1009,7 @@ leInt64 bs = go 7 0
 
 
 {- | Decompress a payload that must expand to exactly @rawLen@ bytes
-('decompressBufferEnvelope' has already bounded @rawLen@). Neither
-backend may allocate more than @rawLen + 1@ output bytes.
+('decompressBufferEnvelope' has already bounded @rawLen@).
 -}
 decompressBuffer :: BodyCompressionCodec -> Int -> ByteString -> Either String ByteString
 #if defined(HAVE_ZSTD) || defined(HAVE_LZ4)
@@ -1042,16 +1038,7 @@ decompressBuffer codec _ _ = case codec of
   BodyZstd -> Left "Arrow.Read.Columns: ZSTD body compression requires building wireform-arrow with -fzstd"
 #endif
 #ifdef HAVE_LZ4
-  LZ4Frame ->
-    -- lz4-hs's decompress is lazy and throws on malformed input; take at
-    -- most one byte past the expected size (so an overlong frame is
-    -- detected without being fully inflated) and catch the exception to
-    -- keep the Either-shaped contract.
-    case unsafeDupablePerformIO $
-      Exc.try @Exc.SomeException
-        (Exc.evaluate (BL.toStrict (BL.take (fromIntegral rawLen + 1) (Lz4.decompress (BL.fromStrict comp))))) of
-      Right out -> Right out
-      Left e -> Left ("Arrow.Read.Columns: LZ4_FRAME decompress: " ++ show e)
+  LZ4Frame -> Lz4.decompressFrame rawLen comp
 #else
   LZ4Frame -> Left "Arrow.Read.Columns: LZ4 body compression requires building wireform-arrow with -flz4"
 #endif

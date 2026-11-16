@@ -1,10 +1,9 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
 
-{- | Direct FFI bindings to @liblz4@ for the raw LZ4 block
-format. No framing, no size headers — exactly the byte
-layout that Apache Parquet's @LZ4_RAW@ codec (codec id 7)
-and Apache ORC's @LZ4@ stream codec specify.
+{- | Direct FFI bindings to @liblz4@. The raw block codec serves Apache
+Parquet's @LZ4_RAW@ and Apache ORC's @LZ4@. The frame decoder handles
+the single-frame format used by Arrow IPC's @LZ4_FRAME@ buffers.
 
 The Haskell @lz4@ package on Hackage wraps its compress /
 decompress in its own 8-byte size header (matching the C
@@ -46,6 +45,9 @@ module Columnar.LZ4 (
   decompress,
   compress,
 
+  -- * Frame decoder
+  decompressFrame,
+
   -- * Errors
   LZ4Error (..),
   prettyLZ4Error,
@@ -55,14 +57,17 @@ module Columnar.LZ4 (
   lz4MaxInputSize,
 ) where
 
-import Control.Exception (mask_)
+import Control.Exception (bracket, mask_)
+import Control.Monad (void)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Internal qualified as BSI
 import Data.ByteString.Unsafe qualified as BSU
-import Foreign.C.Types (CChar, CInt (..))
+import Foreign.C.Types (CChar, CInt (..), CSize (..), CUInt (..))
 import Foreign.ForeignPtr (mallocForeignPtrBytes, withForeignPtr)
-import Foreign.Ptr (Ptr, castPtr)
+import Foreign.Marshal.Alloc (alloca)
+import Foreign.Ptr (Ptr, castPtr, nullPtr, plusPtr)
+import Foreign.Storable (peek, poke)
 import System.IO.Unsafe (unsafePerformIO)
 
 
@@ -92,6 +97,32 @@ foreign import ccall unsafe "LZ4_decompress_safe"
     -> IO CInt -- decompressedSize, or negative on failure
 
 
+data LZ4FrameContext
+
+
+foreign import ccall unsafe "LZ4F_getVersion"
+  c_LZ4F_getVersion :: IO CUInt
+
+foreign import ccall unsafe "LZ4F_createDecompressionContext"
+  c_LZ4F_createDecompressionContext :: Ptr (Ptr LZ4FrameContext) -> CUInt -> IO CSize
+
+foreign import ccall unsafe "LZ4F_freeDecompressionContext"
+  c_LZ4F_freeDecompressionContext :: Ptr LZ4FrameContext -> IO CSize
+
+foreign import ccall unsafe "LZ4F_isError"
+  c_LZ4F_isError :: CSize -> CUInt
+
+foreign import ccall safe "LZ4F_decompress"
+  c_LZ4F_decompress
+    :: Ptr LZ4FrameContext
+    -> Ptr a -- destination
+    -> Ptr CSize -- destination capacity / bytes written
+    -> Ptr CChar -- source
+    -> Ptr CSize -- available source bytes / bytes consumed
+    -> Ptr () -- default options when null
+    -> IO CSize -- zero at the end of the frame, otherwise a hint or error code
+
+
 {- | @LZ4_MAX_INPUT_SIZE@ from @lz4.h@ (0x7E000000, 2113929216 bytes).
 
 The raw block API is @int@-based by definition, so it cannot be widened
@@ -107,6 +138,49 @@ lz4MaxInputSize = 0x7E000000
 -- | Largest size the int-based block API accepts for a decode parameter.
 cIntMax :: Int
 cIntMax = fromIntegral (maxBound :: CInt)
+
+
+{- | Decode exactly one complete frame into a buffer of the expected size.
+The caller must bound that size before decoding. liblz4 checks the
+frame footer even if all expected output bytes have already arrived.
+-}
+decompressFrame :: Int -> ByteString -> Either String ByteString
+decompressFrame !expected !input
+  | expected < 0 = Left "LZ4 frame: negative output length"
+  | not (BS.pack [4, 34, 77, 24] `BS.isPrefixOf` input) = Left "LZ4 frame: invalid magic number"
+  | otherwise = unsafePerformIO $
+      bracket openContext (mapM_ (void . c_LZ4F_freeDecompressionContext)) $ \case
+        Nothing -> pure (Left "LZ4 frame: could not initialise decompression context")
+        Just ctx -> do
+          fp <- mallocForeignPtrBytes (max 1 expected)
+          finished <- withForeignPtr fp $ \dst ->
+            BSU.unsafeUseAsCStringLen input $ \(src, inputLen) ->
+              alloca $ \srcSize -> alloca $ \dstSize -> do
+                let go !consumed !produced = do
+                      poke srcSize (fromIntegral (inputLen - consumed))
+                      poke dstSize (fromIntegral (expected - produced))
+                      status <- c_LZ4F_decompress ctx (dst `plusPtr` produced) dstSize (src `plusPtr` consumed) srcSize nullPtr
+                      if c_LZ4F_isError status /= 0
+                        then pure (Left "LZ4 frame: invalid compressed data")
+                        else do
+                          readBytes <- fromIntegral <$> peek srcSize
+                          writtenBytes <- fromIntegral <$> peek dstSize
+                          let consumed' = consumed + readBytes
+                              produced' = produced + writtenBytes
+                          if status == 0
+                            then pure $ if consumed' == inputLen && produced' == expected
+                              then Right ()
+                              else Left "LZ4 frame: source or output length does not match the envelope"
+                            else if readBytes == 0 && writtenBytes == 0
+                              then pure (Left "LZ4 frame: frame is incomplete or exceeds the expected output length")
+                              else go consumed' produced'
+                go 0 0
+          pure (BSI.fromForeignPtr fp 0 expected <$ finished)
+  where
+    openContext = alloca $ \ptr -> do
+      version <- c_LZ4F_getVersion
+      status <- c_LZ4F_createDecompressionContext ptr version
+      if c_LZ4F_isError status /= 0 then pure Nothing else Just <$> peek ptr
 
 
 -- ============================================================

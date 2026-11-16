@@ -436,7 +436,7 @@ def build_cases() -> None:
     list_view(True)
 
     # Unions. Children are nullable; the union itself has no validity.
-    def union(name: str, dense: bool, codes: list[int], nullable_field: bool):
+    def union(name: str, dense: bool, codes: list[int], nullable_field: bool, *, selections=None):
         names = ["i", "s"]
         if dense:
             def mk(types, offsets, ints, strs):
@@ -471,13 +471,18 @@ def build_cases() -> None:
             )
             b2 = mk([codes[1]], [0], ["z"])
         s = schema1("x", b1.type, nullable_field)
-        add(Case(name, s, [batch1(s, b1), batch1(s, b2)]))
+        arrays = [b1, b2] if selections is None else [
+            b1.take(pa.array(rows, pa.int64())) for rows in selections
+        ]
+        add(Case(name, s, [batch1(s, arr) for arr in arrays]))
 
     union("dense_union", True, [0, 1], False)
     union("dense_union_nullable", True, [0, 1], True)
     union("sparse_union", False, [0, 1], False)
     union("sparse_union_nullable", False, [0, 1], True)
     union("dense_union_type_codes", True, [3, 7], True)
+    reordered = [4, 2, 1, 0, 2, 3]
+    union("dense_union_take", True, [3, 7], True, selections=[reordered, reordered * 512, [0, 3, 4], []])
     union("sparse_union_type_codes", False, [5, 2], True)
 
     # Dictionaries.

@@ -26,7 +26,7 @@ import Data.ByteString.Internal qualified as BSI
 import Data.Either (isLeft, isRight)
 import Data.Foldable (foldl')
 import Data.Int (Int32, Int64)
-import Data.List (isInfixOf, sortOn)
+import Data.List (isInfixOf, mapAccumL, sortOn)
 import Data.Maybe (catMaybes, isJust, isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -416,11 +416,15 @@ genRaw ty n = case ty of
     children <- forM tys $ \t -> do
       len <- Gen.int (Range.linear 1 5)
       genColumnOf t len
-    picks <- replicateM n $ do
+    candidates <- replicateM n $ do
       ci <- Gen.int (Range.linear 0 (length tys - 1))
       off <- Gen.int (Range.linear 0 (length (fst (children !! ci)) - 1))
       pure (ci, off)
-    let c =
+    let order previous (ci, off) =
+          let next = maybe off (max off) (lookup ci previous)
+          in ((ci, next) : previous, (ci, next))
+        (_, picks) = mapAccumL order [] candidates
+        c =
           right
             ( mkDenseUnion
                 (VS.fromList (map (fromIntegral . fst) picks))

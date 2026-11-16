@@ -53,7 +53,7 @@ Validators:
 * 'listViewCheckI32', 'listViewCheckI64': for every valid row, offset and
   size are non-negative and @offset + size <= childLen@.
 * 'denseUnionCheck': for every row, the type id names an existing child and
-  the offset is within that child's length.
+  the offset is within that child's length and no smaller than its previous offset.
 * 'viewRefsCheck': Arrow BinaryView / Utf8View (16 bytes per view). Lengths
   are non-negative; out-of-line views reference an existing buffer, lie
   within it and carry a matching 4-byte prefix. With the UTF-8 flag every

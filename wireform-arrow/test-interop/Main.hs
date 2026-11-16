@@ -79,6 +79,7 @@ import Arrow.Column (
   withPrim,
   pattern ColBinary,
   pattern ColBinaryView,
+  takeColumnArray,
   pattern ColBool,
   pattern ColDenseUnion,
   pattern ColDictionary,
@@ -464,22 +465,31 @@ unionCases =
   , sparse "sparse_union" [0, 1] False
   , sparse "sparse_union_nullable" [0, 1] True
   , dense "dense_union_type_codes" [3, 7] True
+  , simple
+      "dense_union_take"
+      (ufield Dense [3, 7] True)
+      (map takeDense [reordered, concat (replicate 512 reordered), [0, 3, 4], []])
   , sparse "sparse_union_type_codes" [5, 2] True
   ]
   where
     kids = [field "i" True (AInt 32 True) [], field "s" True AUtf8 []]
     ufield mode codes nullable = field "x" nullable (AUnion mode (V.fromList codes)) kids
     tids = VS.fromList :: [Int8] -> VS.Vector Int8
+    -- Repeat the selection so the compression variants emit actual frames.
+    reordered = [4, 2, 1, 0, 2, 3]
+    takeDense rows = ok (takeColumnArray (VS.fromList rows) denseValues)
+    denseValues =
+      ok
+        ( mkDenseUnion
+            (tids [0, 1, 0, 0, 1])
+            (VS.fromList [0, 0, 1, 2, 1])
+            (V.fromList [i32m [Just 1, Just 2, Nothing], utf8m [Just "a", Just "b"]])
+        )
     dense n codes nullable =
       simple
         n
         (ufield Dense codes nullable)
-        [ ok
-            ( mkDenseUnion
-                (tids [0, 1, 0, 0, 1])
-                (VS.fromList [0, 0, 1, 2, 1])
-                (V.fromList [i32m [Just 1, Just 2, Nothing], utf8m [Just "a", Just "b"]])
-            )
+        [ denseValues
         , ok (mkDenseUnion (tids [1]) (VS.fromList [0]) (V.fromList [i32m [], utf8m [Just "z"]]))
         ]
     sparse n codes nullable =

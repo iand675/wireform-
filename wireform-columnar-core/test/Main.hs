@@ -27,7 +27,7 @@ import Data.ByteString.Lazy qualified as BL
 import Data.ByteString.Unsafe qualified as BSU
 import Data.Either (isLeft)
 import Data.Int (Int32, Int64)
-import Data.List (findIndex, sort)
+import Data.List (findIndex, sort, sortOn)
 import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Primitive.ByteArray (ByteArray, copyByteArrayToAddr, copyMutableByteArray, copyPtrToMutableByteArray, newByteArray, setByteArray, shrinkMutableByteArray, unsafeFreezeByteArray)
 import Data.Text qualified as T
@@ -968,8 +968,10 @@ denseUnionProp = property $ do
             (t, l) <- Gen.element nonEmpty
             o <- Gen.integral (Range.constant 0 (l - 1))
             pure (t, o)
-  types <- forAll (corrupt (genCorrupt wI8) (map fst rows))
-  offs <- forAll (corrupt (genCorrupt wI32) (map snd rows))
+  ordered <- forAll (Gen.element [True, True, False])
+  let inputs = if ordered then sortOn snd rows else rows
+  types <- forAll (corrupt (genCorrupt wI8) (map fst inputs))
+  offs <- forAll (corrupt (genCorrupt wI32) (map snd inputs))
   alT <- forAll genAlign
   alO <- forAll genAlign
   alL <- forAll genAlign
@@ -978,8 +980,11 @@ denseUnionProp = property $ do
       withBytesAt alT (encW wI8 types) $ \tp ->
         withBytesAt alO (encW wI32 offs) $ \op ->
           withBytesAt alL (encW wI64 lens) $ \lp -> SIMD.denseUnionCheck tp op n lp nch
-  let bad t o = t < 0 || t >= toInteger nch || o < 0 || o >= lens !! fromInteger t
-  let model = firstFail (zipWith bad types offs)
+  let pairs = zip types offs
+      bad i (t, o) =
+        t < 0 || t >= toInteger nch || o < 0 || o >= lens !! fromInteger t
+          || maybe False (> o) (lookup t (reverse (take i pairs)))
+      model = firstFail (zipWith bad [0 ..] pairs)
   coverPaths model
   r === model
 

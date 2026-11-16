@@ -116,6 +116,7 @@ import Control.Exception (SomeException, displayException, evaluate, try)
 import Data.Bits (complementBit, shiftR)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.Either (isLeft)
 import Data.List (foldl')
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Int (Int32, Int64)
@@ -158,7 +159,9 @@ tests = do
       , ("schema nested past the depth limit", prop_deepSchema)
       , ("unbacked rows from a tiny header", prop_unbackedRows)
       , ("buffer descriptor validation bounds", prop_bufferValidator)
+      , ("dense union offsets cannot decrease within a child", prop_denseUnionOffsets)
       , ("compressed buffer length claims", prop_decompressionClaims)
+      , ("LZ4 buffers require one complete frame", prop_lz4FrameCompletion)
       , ("decode budgets bound rows, values, unbacked rows and decompression", prop_readerBudgets)
       , ("map keys and entries cannot contain nulls", prop_mapNulls)
       , ("mutated writer output over zero-copy decode never throws from any accessor", prop_zeroCopyAccessorFuzz)
@@ -1127,11 +1130,16 @@ really holds 64 bytes of @0x07@.
 -}
 compressedClaim :: BodyCompressionCodec -> Int64 -> ByteString
 compressedClaim codec claim =
-  let payload = either (const BS.empty) id (compressBufferEither codec (BS.replicate 64 7))
-      env = le64 claim <> payload
+  compressedBuffer StreamEnc codec claim $
+    either (const BS.empty) id (compressBufferEither codec (BS.replicate 64 7))
+
+
+compressedBuffer :: Encoding -> BodyCompressionCodec -> Int64 -> ByteString -> ByteString
+compressedBuffer enc codec claim payload =
+  let env = le64 claim <> payload
       envLen = fromIntegral (BS.length env)
       rb = RecordBatchDef 8 (VS.singleton (FieldNode 8 0)) (VS.fromList [Buffer 0 0, Buffer 0 envLen]) V.empty (Just codec)
-  in serialize StreamEnc (schemaOf [plain "x" False (AInt 64 True)]) [(SFBatch rb env, Nothing)]
+  in serialize enc (schemaOf [plain "x" False (AInt 64 True)]) [(SFBatch rb env, Nothing)]
 
 
 -- | The body-compression codecs this build was compiled with (cabal
@@ -1153,6 +1161,48 @@ prop_decompressionClaims = withTests 1 . property $ do
   mapM_
     (\codec -> fmap snd (decodeArrowStream defaultReadOptions (compressedClaim codec 64)) === Right [V.singleton (primColumn PInt64 (VS.replicate 8 0x0707070707070707))])
     availableCodecs
+
+
+prop_lz4FrameCompletion :: Property
+prop_lz4FrameCompletion = withTests 1 . property $
+  if not (bodyCompressionAvailable LZ4Frame)
+    then success
+    else do
+      payload <- evalEither (compressBufferEither LZ4Frame (BS.replicate 64 7))
+      emptyFrame <- evalEither (compressBufferEither LZ4Frame BS.empty)
+      BS.drop (BS.length payload - 4) payload === BS.replicate 4 0
+      let truncated = BS.take (BS.length payload - 4) payload
+          expected = [V.singleton (primColumn PInt64 (VS.replicate 8 0x0707070707070707))]
+          check enc decode = do
+            let fixture = compressedBuffer enc LZ4Frame 64
+            fmap snd (decode (fixture payload)) === Right expected
+            assert (isLeft (decode (fixture truncated)))
+            assert (isLeft (decode (fixture (payload <> emptyFrame))))
+      check StreamEnc (decodeArrowStream defaultReadOptions)
+      check FileEnc (decodeArrowFile defaultReadOptions)
+
+
+prop_denseUnionOffsets :: Property
+prop_denseUnionOffsets = withTests 1 . property $ do
+  let field = nested "u" False (AUnion Dense (V.singleton 3)) [plain "x" False (AInt 64 True)]
+      nodes = VS.fromList [FieldNode 2 0, FieldNode 2 0]
+      bufs = VS.fromList [Buffer 0 2, Buffer 8 8, Buffer 0 0, Buffer 16 16]
+      batch = RecordBatchDef 2 nodes bufs V.empty Nothing
+      fixture enc offsets =
+        let body = BS.pack [3, 3] <> BS.replicate 6 0 <> offsets <> le64 12 <> le64 34
+        in serialize enc (schemaOf [field]) [(SFBatch batch body, Nothing)]
+      descending = le64 1 -- two little-endian Int32 offsets [1, 0]
+      repeated = le64 0
+      children = V.singleton (primColumn PInt64 (VS.fromList [12, 34]))
+      constructor offsets = mkDenseUnion (VS.replicate 2 0) offsets children
+      check expected enc decode = do
+        assert (isLeft (decode (fixture enc descending)))
+        fmap snd (decode (fixture enc repeated)) === Right expected
+  assert (isLeft (constructor (VS.fromList [1, 0])))
+  union <- evalEither (constructor (VS.replicate 2 0))
+  let expected = [V.singleton union]
+  check expected StreamEnc (decodeArrowStream defaultReadOptions)
+  check expected FileEnc (decodeArrowFile defaultReadOptions)
 
 
 {- | Two non-null int64 columns of 8 rows whose data buffers are

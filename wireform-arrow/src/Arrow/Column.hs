@@ -241,7 +241,7 @@ import Arrow.Types (ArrowType (..), DictionaryEncoding (..), Field (..), UnionMo
 import Columnar.SIMD qualified as K
 import Control.DeepSeq (NFData (..))
 import Control.Monad (forM_, when)
-import Control.Monad.ST (stToIO)
+import Control.Monad.ST (runST, stToIO)
 import Data.Bits (unsafeShiftR, (.&.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -2066,16 +2066,26 @@ concatRuns re0 parts = case re0 of
 {- | Rows by index (repeats allowed); any index outside the column is
 a 'Left'. Fixed-width buffers and bitmaps go through C gather
 kernels; var-length columns take two passes (offsets, then bytes);
-lists gather their child ranges; dictionaries, dense unions and list
-views gather only their own buffers and share the rest.
+lists gather their child ranges. Dictionaries and list views share
+their children, as do dense unions when the selection is strictly
+increasing.
 -}
 takeColumnArray :: VS.Vector Int -> ColumnArray -> Either String ColumnArray
 takeColumnArray ix col
-  | VS.any (\i -> i < 0 || i >= n) ix =
-      Left ("Arrow.Column.takeColumnArray: index out of range for a column of " ++ show n ++ " rows")
+  | I.ColDenseUnion types offsets children <- col = takeDenseUnion (Just n) ix types offsets children
+  | takeIndicesOutOfRange n ix = takeIndexError n
   | otherwise = takeRows ix col
   where
     !n = columnLength col
+
+
+takeIndicesOutOfRange :: Int -> VS.Vector Int -> Bool
+takeIndicesOutOfRange n = VS.any (\i -> i < 0 || i >= n)
+
+
+takeIndexError :: Int -> Either String ColumnArray
+takeIndexError n =
+  Left ("Arrow.Column.takeColumnArray: index out of range for a column of " ++ show n ++ " rows")
 
 
 -- | 'takeColumnArray' after the range check.
@@ -2101,7 +2111,7 @@ takeRows ix col = case col of
   I.ColMap v o keys vals -> do
     (o', childIx) <- takeOffsetRanges ix o
     I.ColMap (tv v) o' <$> takeRows childIx keys <*> takeRows childIx vals
-  I.ColDenseUnion t o cs -> Right (I.ColDenseUnion (gatherStorable ix t) (gatherStorable ix o) cs)
+  I.ColDenseUnion t o cs -> takeDenseUnion Nothing ix t o cs
   I.ColSparseUnion t cs -> I.ColSparseUnion (gatherStorable ix t) <$> V.mapM (takeRows ix) cs
   I.ColDictionary did keys vals -> (\keys' -> I.ColDictionary did keys' vals) <$> takeRows ix keys
   I.ColRunEndEncoded off _ re vals -> takeRuns ix off re vals
@@ -2112,6 +2122,52 @@ takeRows ix col = case col of
     takeList mk v o c = do
       (o', childIx) <- takeOffsetRanges ix o
       mk (tv v) o' <$> takeRows childIx c
+
+
+-- | Arrow requires offsets to be ordered within each child. A
+-- strictly increasing selection preserves that ordering and shares the
+-- children. Other selections rebuild the offsets and gather each child
+-- in output order. At the public entry point, ordered indices only
+-- need their endpoints checked against the row count.
+takeDenseUnion :: Maybe Int -> VS.Vector Int -> VS.Vector Int8 -> VS.Vector Int32 -> V.Vector ColumnArray -> Either String ColumnArray
+takeDenseUnion rowLimit ix types offsets children
+  | n < 2 || ordered 1 (VS.unsafeHead ix) = case rowLimit of
+      Just limit | n /= 0 && (VS.unsafeHead ix < 0 || VS.unsafeLast ix >= limit) -> takeIndexError limit
+      _ -> Right (I.ColDenseUnion selectedTypes (gatherStorable ix offsets) children)
+  | Just limit <- rowLimit, takeIndicesOutOfRange limit ix = takeIndexError limit
+  | otherwise = runST $ do
+      counts <- VSM.replicate (V.length children) (0 :: Int)
+      newOffsets <- VSM.unsafeNew n
+      VS.iforM_ selectedTypes $ \row typeId -> do
+        let child = fromIntegral typeId
+        count <- VSM.unsafeRead counts child
+        VSM.unsafeWrite newOffsets row (fromIntegral count)
+        VSM.unsafeWrite counts child (count + 1)
+      lengths <- VS.unsafeFreeze counts
+      if VS.any (> maxChildLength) lengths
+        then pure (Left "Arrow.Column.takeColumnArray: dense union child exceeds the offset width")
+        else do
+          rebased <- VS.unsafeFreeze newOffsets
+          let !starts = VS.prescanl' (+) 0 lengths
+          indices <- VSM.unsafeNew n
+          VS.iforM_ selectedTypes $ \row typeId -> do
+            let start = VS.unsafeIndex starts (fromIntegral typeId)
+                offset = fromIntegral (VS.unsafeIndex rebased row)
+                source = VS.unsafeIndex offsets (VS.unsafeIndex ix row)
+            VSM.unsafeWrite indices (start + offset) (fromIntegral source)
+          grouped <- VS.unsafeFreeze indices
+          pure $ I.ColDenseUnion selectedTypes rebased <$> V.imapM (takeChild grouped starts lengths) children
+  where
+    !n = VS.length ix
+    selectedTypes = gatherStorable ix types
+    maxChildLength = fromIntegral (maxBound :: Int32) + 1
+    ordered !row !previous
+      | row == n = True
+      | otherwise =
+          let current = VS.unsafeIndex ix row
+          in previous < current && ordered (row + 1) current
+    takeChild grouped starts lengths child =
+      takeRows (VS.unsafeSlice (VS.unsafeIndex starts child) (VS.unsafeIndex lengths child) grouped)
 
 
 gatherStorable :: forall a. Storable a => VS.Vector Int -> VS.Vector a -> VS.Vector a

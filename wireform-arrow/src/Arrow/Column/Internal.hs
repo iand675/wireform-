@@ -574,12 +574,12 @@ validateListView what v offs sizes childLen
             cListViewCheck po ps (VS.length offs) pv vo (fromIntegral childLen)
 
 
--- | Dense union child indices and offsets against the child lengths.
+-- | Check dense union indices, offset bounds and ordering within each child.
 validateDenseUnion :: String -> VS.Vector Int8 -> VS.Vector Int32 -> VS.Vector Int64 -> Either String ()
 validateDenseUnion what types offs childLens
   | VS.length types /= VS.length offs = Left (what ++ ": type ids and offsets differ in length")
   | otherwise =
-      kernelResult what "union child index or offset out of range" $
+      kernelResult what "union child index or offset out of range, or decreasing offset" $
         unsafeDupablePerformIO $
           VS.unsafeWith types $ \pt -> VS.unsafeWith offs $ \po -> VS.unsafeWith childLens $ \pl ->
             K.denseUnionCheck pt po (VS.length types) pl (VS.length childLens)
