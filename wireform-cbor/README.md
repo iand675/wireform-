@@ -169,27 +169,31 @@ entry point + the `wireform-gen` CLI in the umbrella package
 
 ## JSON bridge
 
-`CBOR.JSON` round-trips between `CBOR.Value` and `Data.Aeson.Value`,
-following the JSON-mapping recommendations in
-[RFC 8949 §6.1](https://www.rfc-editor.org/rfc/rfc8949#section-6.1)
-where there is an obvious one. CBOR types JSON has no shape for
-(byte strings, tagged values, half-precision floats) follow the
-recommended fallbacks: byte strings as base64url, tags as
-`{"tag": N, "value": ...}` envelopes.
+`CBOR.JSON` converts between `CBOR.Value` and `Data.Aeson.Value`.
+It preserves integers in CBOR's basic integer range. It renders byte
+strings as unpadded base64url and handles tags with
+`{"tag": N, "value": ...}` envelopes. An object with exactly those two
+fields and an unsigned integer tag is reserved for envelopes. This
+conversion is lossy. For example, a base64url JSON string is read
+back as text.
 
 ## Streaming
 
 `CBOR.Stream.streamDecode` consumes input in `ByteString` chunks and
 returns a `DecodeStep` that either yields a value, asks for more bytes,
-or fails. Suitable for parsing CBOR off a socket or a file handle
-without loading the whole input first:
+or fails. It resumes from the current parse position and returns the
+unused suffix of the final feed along with the decoded value. An
+empty feed signals end of input:
 
 ```haskell
 import qualified CBOR.Stream as CS
+import qualified CBOR.Value as CV
+import qualified Data.ByteString as BS
+import System.IO (Handle)
 
 go :: Handle -> CS.DecodeStep CV.Value -> IO (Either String CV.Value)
 go h step = case step of
-  CS.NeedMore k -> BS.hGet h 4096 >>= go h . k
+  CS.Partial k  -> BS.hGet h 4096 >>= go h . k
   CS.Done v _   -> pure (Right v)
   CS.Fail err   -> pure (Left err)
 ```
@@ -210,6 +214,11 @@ It covers the typeclass instances, the deriver, generic and
 TH-derived round-trips, and the dynamic `Value` ADT.
 
 ## Benchmarks
+
+Run the streaming comparison with
+`python3 scripts/run-benchmarks.py --only cbor-stream-bench` from the
+repository root. It reports wall time and allocations for whole items
+and for 256-byte and 16-byte feeds, with cborg as a reference.
 
 A criterion harness in [`bench/FormatBench.hs`](../bench/FormatBench.hs)
 (in the umbrella package) compares wireform-cbor's encode and decode

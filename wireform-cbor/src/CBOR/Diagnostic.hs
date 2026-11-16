@@ -21,14 +21,18 @@ module CBOR.Diagnostic (
   fromDiagnostic,
 ) where
 
+import CBOR.Internal (integerValue)
 import CBOR.Value qualified as C
+import Data.Aeson qualified as Aeson
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
-import Data.Char (chr, digitToInt, isDigit, isHexDigit, isSpace, ord, toLower)
+import Data.ByteString.Lazy qualified as BSL
+import Data.Char (chr, digitToInt, isDigit, isHexDigit, isSpace, ord)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.Vector qualified as V
-import Data.Word (Word64, Word8)
+import Data.Word (Word64)
 
 
 ------------------------------------------------------------------------
@@ -50,7 +54,7 @@ renderValue (C.Float16 f) = renderFloat (realToFrac f :: Double)
 renderValue (C.Float32 f) = renderFloat (realToFrac f :: Double)
 renderValue (C.Float64 d) = renderFloat d
 renderValue (C.ByteString b) = "h'" <> bytesToHex b <> "'"
-renderValue (C.TextString t) = "\"" <> escapeText t <> "\""
+renderValue (C.TextString t) = TE.decodeUtf8 (BSL.toStrict (Aeson.encode t))
 renderValue (C.Array vec) = "[" <> renderItems vec <> "]"
 renderValue (C.Map vec) = "{" <> renderPairs vec <> "}"
 renderValue (C.Tag n v) = T.pack (show n) <> "(" <> renderValue v <> ")"
@@ -90,17 +94,6 @@ bytesToHex = T.pack . concatMap byteToHex . BS.unpack
     hexChar n
       | n < 10 = chr (ord '0' + fromIntegral n)
       | otherwise = chr (ord 'a' + fromIntegral n - 10)
-
-
-escapeText :: Text -> Text
-escapeText = T.concatMap escChar
-  where
-    escChar '"' = "\\\""
-    escChar '\\' = "\\\\"
-    escChar '\n' = "\\n"
-    escChar '\r' = "\\r"
-    escChar '\t' = "\\t"
-    escChar c = T.singleton c
 
 
 ------------------------------------------------------------------------
@@ -152,15 +145,15 @@ notIdentCont (c : _) = not (isDigit c || c == '_' || (c >= 'a' && c <= 'z') || (
 
 
 parseTextString :: Parser C.Value
-parseTextString = go []
+parseTextString = go ['"']
   where
-    go acc [] = Left "CBOR.Diagnostic: unterminated string"
-    go acc ('"' : rest) = Right (C.TextString (T.pack (reverse acc)), rest)
-    go acc ('\\' : '"' : rest) = go ('"' : acc) rest
-    go acc ('\\' : '\\' : rest) = go ('\\' : acc) rest
-    go acc ('\\' : 'n' : rest) = go ('\n' : acc) rest
-    go acc ('\\' : 'r' : rest) = go ('\r' : acc) rest
-    go acc ('\\' : 't' : rest) = go ('\t' : acc) rest
+    go _ [] = Left "CBOR.Diagnostic: unterminated string"
+    go acc ('"' : rest) =
+      case Aeson.eitherDecodeStrict' (TE.encodeUtf8 (T.pack (reverse ('"' : acc)))) of
+        Left err -> Left ("CBOR.Diagnostic: invalid text string: " ++ err)
+        Right value -> Right (C.TextString value, rest)
+    -- Leave escape and Unicode validation to the JSON string decoder.
+    go acc ('\\' : c : rest) = go (c : '\\' : acc) rest
     go acc (c : rest) = go (c : acc) rest
 
 
@@ -182,10 +175,15 @@ parseSimple :: Parser C.Value
 parseSimple input = case span isDigit input of
   ([], _) -> Left "CBOR.Diagnostic: expected number after simple("
   (digits, ')' : rest) ->
-    let n = read digits :: Int
-    in if n > 255
-         then Left "CBOR.Diagnostic: simple value out of range (0-255)"
-         else Right (C.Simple (fromIntegral n), rest)
+    case read digits :: Integer of
+      20 -> Right (C.Bool False, rest)
+      21 -> Right (C.Bool True, rest)
+      22 -> Right (C.Null, rest)
+      23 -> Right (C.Undefined, rest)
+      n
+        | n >= 24 && n < 32 -> Left "CBOR.Diagnostic: reserved simple value"
+        | n > 255 -> Left "CBOR.Diagnostic: simple value out of range (0-255)"
+        | otherwise -> Right (C.Simple (fromIntegral n), rest)
   _ -> Left "CBOR.Diagnostic: expected ')' after simple value"
 
 
@@ -229,10 +227,9 @@ parseNegNumber input = case span isDigit input of
       'E' : _ -> parseNegFloat digits rest
       _ ->
         let n = read digits :: Integer
-            encoded = n - 1
-        in if encoded < 0
+        in if n == 0
              then Left "CBOR.Diagnostic: negative integer -0 not valid in CBOR"
-             else Right (C.NInt (fromIntegral encoded), rest)
+             else Right (integerValue (negate n), rest)
 
 
 parseNegFloat :: String -> String -> Either String (C.Value, String)
@@ -249,15 +246,18 @@ parseNumberOrTag input =
   let (digits, rest) = span isDigit input
   in case rest of
        '(' : rest2 -> do
-         let tagNum = read digits :: Word64
-         (val, rest3) <- parseValue rest2
-         case dropWhile isSpace rest3 of
-           ')' : rest4 -> Right (C.Tag tagNum val, rest4)
-           _ -> Left "CBOR.Diagnostic: expected ')' after tag content"
+         let tagNum = read digits :: Integer
+         if tagNum > toInteger (maxBound :: Word64)
+           then Left "CBOR.Diagnostic: tag number out of range"
+           else do
+             (val, rest3) <- parseValue rest2
+             case dropWhile isSpace rest3 of
+               ')' : rest4 -> Right (C.Tag (fromInteger tagNum) val, rest4)
+               _ -> Left "CBOR.Diagnostic: expected ')' after tag content"
        '.' : _ -> parsePosFloat digits rest
        'e' : _ -> parsePosFloat digits rest
        'E' : _ -> parsePosFloat digits rest
-       _ -> Right (C.UInt (read digits), rest)
+       _ -> Right (integerValue (read digits), rest)
 
 
 parsePosFloat :: String -> String -> Either String (C.Value, String)

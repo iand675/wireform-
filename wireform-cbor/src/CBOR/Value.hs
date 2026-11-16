@@ -47,6 +47,7 @@ data Value
   | Array !(Vector Value)
   | Map !(Vector (Value, Value))
   | Tag {-# UNPACK #-} !Word64 !Value
-  | Simple {-# UNPACK #-} !Word8
+  | -- | Custom simple value. Codes 24 through 31 are reserved.
+    Simple {-# UNPACK #-} !Word8
   deriving stock (Show, Eq, Generic)
   deriving anyclass (NFData)

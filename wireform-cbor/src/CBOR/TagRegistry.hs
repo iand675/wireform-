@@ -74,6 +74,7 @@ defaultCBORTagRegistry =
                 , thValidate = \v -> case v of
                     CBOR.Value.UInt _ -> Right v
                     CBOR.Value.NInt _ -> Right v
+                    CBOR.Value.Float16 _ -> Right v
                     CBOR.Value.Float32 _ -> Right v
                     CBOR.Value.Float64 _ -> Right v
                     _ -> Left "tag 1 (epoch) expects a number"

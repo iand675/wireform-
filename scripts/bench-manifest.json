@@ -26,6 +26,12 @@
   "rawDir": "dist-stats/bench-raw",
   "benches": [
     {
+      "target": "wireform-cbor:bench:cbor-stream-bench",
+      "raw": "cbor-stream",
+      "benchmarkOptions": ["--time-limit", "1", "--resamples", "1000", "--regress", "allocated:iters", "+RTS", "-T", "-RTS"],
+      "summaries": []
+    },
+    {
       "target": "wireform-arrow:bench:wireform-arrow-bench",
       "raw": "arrow",
       "summaries": [

@@ -58,7 +58,8 @@ module CBOR.Encoding (
   mapHeader,
 ) where
 
-import Data.Bits (shiftL, shiftR, (.&.), (.|.))
+import CBOR.Internal (floatToHalf, withInteger)
+import Data.Bits ((.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BSL
@@ -126,11 +127,9 @@ negativeInteger !n = Encoding (header 0x20 n)
 {-# INLINE negativeInteger #-}
 
 
--- | Encode any 'Integral' value, picking unsigned/negative as appropriate.
+-- | Encode an integer, using a bignum tag beyond the basic 64-bit range.
 integer :: Integer -> Encoding
-integer n
-  | n >= 0 = unsignedInteger (fromInteger n)
-  | otherwise = negativeInteger (fromInteger (negate n - 1))
+integer n = withInteger n unsignedInteger negativeInteger (\t magnitude -> tag t (bytes magnitude))
 {-# INLINEABLE integer #-}
 
 
@@ -280,32 +279,3 @@ arrayHeader = header 0x80
 -- | Emit just the map header for a map of @n@ pairs.
 mapHeader :: Word64 -> BB.Builder
 mapHeader = header 0xa0
-
-
-{- | Convert IEEE 754 single-precision bits to half-precision bits
-(mirrors 'CBOR.Encode.floatToHalf').
--}
-floatToHalf :: Word32 -> Word16
-floatToHalf !w =
-  let !sign32 = w `shiftR` 31
-      !expo = (w `shiftR` 23) .&. 0xff
-      !mant = w .&. 0x7fffff
-      !signBit = fromIntegral sign32 `shiftL` 15 :: Word16
-  in if expo == 0xff
-       then signBit .|. 0x7c00 .|. (if mant /= 0 then 0x0200 else 0)
-       else
-         if expo > 142
-           then signBit .|. 0x7c00
-           else
-             if expo < 113
-               then
-                 if expo < 103
-                   then signBit
-                   else
-                     let !m = mant .|. 0x800000
-                         !shift = fromIntegral (125 - expo) :: Int
-                     in signBit .|. fromIntegral ((m `shiftR` shift) .&. 0x03ff)
-               else
-                 let !hexp = fromIntegral (expo - 112) :: Word16
-                     !hmant = fromIntegral ((mant `shiftR` 13) .&. 0x03ff) :: Word16
-                 in signBit .|. (hexp `shiftL` 10) .|. hmant

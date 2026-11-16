@@ -1,12 +1,7 @@
 {-# LANGUAGE BangPatterns #-}
 
-{- | Incremental\/streaming decode for CBOR values.
-
-CBOR values are self-delimiting, so the streaming decoder reads
-one complete value at a time. When the input is incomplete, it
-returns 'Partial' requesting more bytes.
-Uses mutable vectors for definite-length arrays/maps and growing
-vectors for indefinite-length containers.
+{- | Incremental CBOR decoding. A suspended decoder retains its parse state and
+any pieces of the current string. Resuming it consumes only the new input.
 -}
 module CBOR.Stream (
   DecodeStep (..),
@@ -14,19 +9,22 @@ module CBOR.Stream (
   feedMore,
 ) where
 
+import CBOR.Internal (halfToFloat)
 import CBOR.Value qualified as C
-import Control.Monad.ST (ST, runST)
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
-import Data.Text.Encoding qualified as TE
+import Data.ByteString.Unsafe qualified as BSU
+import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Vector qualified as V
 import Data.Vector.Mutable qualified as MV
-import Data.Word (Word16, Word32, Word64, Word8)
+import Data.Word (Word64, Word8)
 import GHC.Float (castWord32ToFloat, castWord64ToDouble)
+import Wireform.FFI (decodeTextFast)
 
 
--- | Result of an incremental decode step.
+-- | Result of an incremental decode step. Pass an empty feed to signal EOF.
 data DecodeStep a
   = Done !a !ByteString
   | Partial (ByteString -> DecodeStep a)
@@ -39,9 +37,10 @@ instance Show a => Show (DecodeStep a) where
   show (Fail e) = "Fail " ++ show e
 
 
--- | Begin streaming decode of a single CBOR value.
+-- | Begin streaming one CBOR value. On success the unused suffix of the final
+-- feed is returned unchanged.
 streamDecode :: ByteString -> DecodeStep C.Value
-streamDecode = tryDecode BS.empty
+streamDecode bytes = readItem bytes 0 Root
 
 
 -- | Feed more bytes into a 'Partial' continuation.
@@ -50,358 +49,196 @@ feedMore (Partial k) bs = k bs
 feedMore step _ = step
 
 
-tryDecode :: ByteString -> ByteString -> DecodeStep C.Value
-tryDecode !accum !new =
-  let !buf = if BS.null accum then new else accum <> new
-  in if BS.null buf
-       then Partial $ \more ->
-         if BS.null more
-           then Fail "CBOR.Stream: unexpected end of input"
-           else tryDecode buf more
-       else case decodeOneWithLeftover buf of
-         Right (val, leftover) -> Done val leftover
-         Left _ -> Partial $ \more ->
-           if BS.null more
-             then Fail "CBOR.Stream: incomplete CBOR value"
-             else tryDecode buf more
+-- Frames are immutable, so feeding the same continuation twice can produce
+-- two independent results. A remaining count of -1 means until a break.
+data Frame
+  = Root
+  | ArrayItems {-# UNPACK #-} !Int {-# UNPACK #-} !Int ![C.Value] !Frame
+  | MapKey {-# UNPACK #-} !Int {-# UNPACK #-} !Int ![(C.Value, C.Value)] !Frame
+  | MapValue {-# UNPACK #-} !Int {-# UNPACK #-} !Int !C.Value ![(C.Value, C.Value)] !Frame
+  | TagItem {-# UNPACK #-} !Word64 !Frame
+  | ByteChunks {-# UNPACK #-} !Int ![ByteString] !Frame
+  | TextChunks {-# UNPACK #-} !Int ![Text] !Frame
 
 
-decodeOneWithLeftover :: ByteString -> Either String (C.Value, ByteString)
-decodeOneWithLeftover bs
-  | BS.null bs = Left "empty input"
-  | otherwise = case decodeOne bs 0 of
-      Left e -> Left e
-      Right (val, off) -> Right (val, BS.drop off bs)
+await :: (ByteString -> DecodeStep C.Value) -> DecodeStep C.Value
+await resume = Partial $ \bytes ->
+  if BS.null bytes
+    then Fail "CBOR.Stream: incomplete CBOR value"
+    else resume bytes
+{-# INLINE await #-}
 
 
-rdByte :: ByteString -> Int -> Word8
-rdByte !bs !off = BS.index bs off
-{-# INLINE rdByte #-}
+invalid :: String -> DecodeStep a
+invalid message = Fail ("CBOR.Stream: " ++ message)
 
 
-ensureBytes :: ByteString -> Int -> Int -> Either String ()
-ensureBytes !bs !off !n
-  | off + n > BS.length bs = Left "unexpected end of input"
-  | otherwise = Right ()
-{-# INLINE ensureBytes #-}
+readItem :: ByteString -> Int -> Frame -> DecodeStep C.Value
+readItem !buf !off !frame
+  | off == BS.length buf = await (\more -> readItem more 0 frame)
+  | header == 0xff = closeItem buf next frame
+  | otherwise = case frame of
+      ByteChunks _ _ _
+        | major /= 2 || info == 31 -> invalid "expected a definite byte string chunk"
+      TextChunks _ _ _
+        | major /= 3 || info == 31 -> invalid "expected a definite text string chunk"
+      _ -> decodeHead buf next header frame
+  where
+    header = BSU.unsafeIndex buf off
+    next = off + 1
+    major = header `shiftR` 5
+    info = header .&. 31
 
 
-readArg :: ByteString -> Int -> Word8 -> Either String (Word64, Int)
-readArg !bs !off !info
-  | info <= 23 = Right (fromIntegral info, off)
-  | info == 24 = do
-      ensureBytes bs off 1
-      Right (fromIntegral (rdByte bs off), off + 1)
-  | info == 25 = do
-      ensureBytes bs off 2
-      let !b0 = fromIntegral (rdByte bs off) :: Word64
-          !b1 = fromIntegral (rdByte bs (off + 1)) :: Word64
-      Right ((b0 `shiftL` 8) .|. b1, off + 2)
-  | info == 26 = do
-      ensureBytes bs off 4
-      let !b0 = fromIntegral (rdByte bs off) :: Word64
-          !b1 = fromIntegral (rdByte bs (off + 1)) :: Word64
-          !b2 = fromIntegral (rdByte bs (off + 2)) :: Word64
-          !b3 = fromIntegral (rdByte bs (off + 3)) :: Word64
-      Right ((b0 `shiftL` 24) .|. (b1 `shiftL` 16) .|. (b2 `shiftL` 8) .|. b3, off + 4)
-  | info == 27 = do
-      ensureBytes bs off 8
-      let !b0 = fromIntegral (rdByte bs off) :: Word64
-          !b1 = fromIntegral (rdByte bs (off + 1)) :: Word64
-          !b2 = fromIntegral (rdByte bs (off + 2)) :: Word64
-          !b3 = fromIntegral (rdByte bs (off + 3)) :: Word64
-          !b4 = fromIntegral (rdByte bs (off + 4)) :: Word64
-          !b5 = fromIntegral (rdByte bs (off + 5)) :: Word64
-          !b6 = fromIntegral (rdByte bs (off + 6)) :: Word64
-          !b7 = fromIntegral (rdByte bs (off + 7)) :: Word64
-      Right
-        ( (b0 `shiftL` 56)
-            .|. (b1 `shiftL` 48)
-            .|. (b2 `shiftL` 40)
-            .|. (b3 `shiftL` 32)
-            .|. (b4 `shiftL` 24)
-            .|. (b5 `shiftL` 16)
-            .|. (b6 `shiftL` 8)
-            .|. b7
-        , off + 8
-        )
-  | info == 31 = Left "indefinite length not supported in stream decoder"
-  | otherwise = Left $ "reserved additional info: " ++ show info
+decodeHead :: ByteString -> Int -> Word8 -> Frame -> DecodeStep C.Value
+decodeHead buf off header frame
+  | info < 24 = finishHead buf off header (fromIntegral info) frame
+  | info < 28 = readArgument buf off header (1 `shiftL` fromIntegral (info - 24)) 0 frame
+  | info /= 31 = invalid "reserved additional information"
+  | otherwise = case header `shiftR` 5 of
+      2 -> readItem buf off (ByteChunks 0 [] frame)
+      3 -> readItem buf off (TextChunks 0 [] frame)
+      4 -> readItem buf off (ArrayItems (-1) 0 [] frame)
+      5 -> readItem buf off (MapKey (-1) 0 [] frame)
+      _ -> invalid "indefinite length is invalid in this item"
+  where
+    info = header .&. 31
+{-# INLINE decodeHead #-}
 
 
-decodeOne :: ByteString -> Int -> Either String (C.Value, Int)
-decodeOne !bs !off
-  | off >= BS.length bs = Left "unexpected end of input"
+-- Only the bytes already read into the argument survive a short feed.
+readArgument :: ByteString -> Int -> Word8 -> Int -> Word64 -> Frame -> DecodeStep C.Value
+readArgument !buf !off !header !needed !arg !frame
+  | needed == 0 = finishHead buf off header arg frame
+  | off == BS.length buf = await (\more -> readArgument more 0 header needed arg frame)
   | otherwise =
-      let !ib = rdByte bs off
-          !major = ib `shiftR` 5
-          !info = ib .&. 0x1f
-      in case major of
-           0 -> do (n, off') <- readArg bs (off + 1) info; Right (C.UInt n, off')
-           1 -> do (n, off') <- readArg bs (off + 1) info; Right (C.NInt n, off')
-           2 -> decodeBStr bs (off + 1) info
-           3 -> decodeTStr bs (off + 1) info
-           4 -> decodeArray bs (off + 1) info
-           5 -> decodeMap bs (off + 1) info
-           6 -> decodeTag bs (off + 1) info
-           7 -> decodeSimpleOrFloat bs (off + 1) info
-           _ -> Left $ "invalid major type: " ++ show major
+      let !byte = BSU.unsafeIndex buf off
+      in readArgument buf (off + 1) header (needed - 1) ((arg `shiftL` 8) .|. fromIntegral byte) frame
 
 
-decodeBStr :: ByteString -> Int -> Word8 -> Either String (C.Value, Int)
-decodeBStr bs off info
-  | info == 31 = decodeIndefiniteBStr bs off
-  | otherwise = do
-      (len64, off') <- readArg bs off info
-      let !len = fromIntegral len64
-      ensureBytes bs off' len
-      let !chunk = BS.take len (BS.drop off' bs)
-      Right (C.ByteString chunk, off' + len)
-
-
-decodeTStr :: ByteString -> Int -> Word8 -> Either String (C.Value, Int)
-decodeTStr bs off info
-  | info == 31 = decodeIndefiniteTStr bs off
-  | otherwise = do
-      (len64, off') <- readArg bs off info
-      let !len = fromIntegral len64
-      ensureBytes bs off' len
-      let !raw = BS.take len (BS.drop off' bs)
-      case TE.decodeUtf8' raw of
-        Left _ -> Left "invalid UTF-8 in text string"
-        Right t -> Right (C.TextString t, off' + len)
-
-
-decodeIndefiniteBStr :: ByteString -> Int -> Either String (C.Value, Int)
-decodeIndefiniteBStr bs off0 = go off0 []
+finishHead :: ByteString -> Int -> Word8 -> Word64 -> Frame -> DecodeStep C.Value
+finishHead buf off header arg frame = case header `shiftR` 5 of
+  0 -> acceptValue buf off (C.UInt arg) frame
+  1 -> acceptValue buf off (C.NInt arg) frame
+  2 -> string
+  3 -> string
+  4
+    | arg > maxSize -> invalid "array size exceeds the supported range"
+    | arg == 0 -> acceptValue buf off (C.Array V.empty) frame
+    | otherwise -> readItem buf off (ArrayItems (fromIntegral arg) 0 [] frame)
+  5
+    | arg > maxSize `quot` 2 -> invalid "map size exceeds the supported range"
+    | arg == 0 -> acceptValue buf off (C.Map V.empty) frame
+    | otherwise -> readItem buf off (MapKey (fromIntegral arg) 0 [] frame)
+  6 -> readItem buf off (TagItem arg frame)
+  _ -> case header .&. 31 of
+    20 -> acceptValue buf off (C.Bool False) frame
+    21 -> acceptValue buf off (C.Bool True) frame
+    22 -> acceptValue buf off C.Null frame
+    23 -> acceptValue buf off C.Undefined frame
+    24
+      | arg < 32 -> invalid "invalid two-byte simple value"
+    25 -> acceptValue buf off (C.Float16 (halfToFloat (fromIntegral arg))) frame
+    26 -> acceptValue buf off (C.Float32 (castWord32ToFloat (fromIntegral arg))) frame
+    27 -> acceptValue buf off (C.Float64 (castWord64ToDouble arg)) frame
+    _ -> acceptValue buf off (C.Simple (fromIntegral arg)) frame
   where
-    go !off !acc
-      | off >= BS.length bs = Left "unexpected end of input in indefinite byte string"
-      | rdByte bs off == 0xff = Right (C.ByteString (BS.concat (reverse acc)), off + 1)
-      | otherwise = do
-          let !ib = rdByte bs off
-              !m = ib `shiftR` 5
-              !ai = ib .&. 0x1f
-          if m /= 2
-            then Left "non-byte-string chunk in indefinite byte string"
-            else do
-              (len64, off') <- readArg bs (off + 1) ai
-              let !len = fromIntegral len64
-              ensureBytes bs off' len
-              let !chunk = BS.take len (BS.drop off' bs)
-              go (off' + len) (chunk : acc)
+    maxSize = fromIntegral (maxBound :: Int)
+    string = case frame of
+      ByteChunks size chunks parent ->
+        addChunk size (\total -> payload chunks (ByteChunks total [] parent))
+      TextChunks size chunks parent ->
+        addChunk size (\total -> payload [] (TextChunks total chunks parent))
+      _
+        | arg > maxSize -> invalid "string size exceeds the supported range"
+        | otherwise -> payload [] frame
+
+    addChunk size resume
+      | arg > maxSize - fromIntegral size =
+          invalid "combined string size exceeds the supported range"
+      | otherwise = resume (size + fromIntegral arg)
+
+    payload = readPayload buf off (header `shiftR` 5 == 3) (fromIntegral arg)
 
 
-decodeIndefiniteTStr :: ByteString -> Int -> Either String (C.Value, Int)
-decodeIndefiniteTStr bs off0 = go off0 []
+-- A payload wholly inside a feed is a slice. Spanning payloads collect slices
+-- across feeds and allocate one contiguous result when their last piece arrives.
+readPayload :: ByteString -> Int -> Bool -> Int -> [ByteString] -> Frame -> DecodeStep C.Value
+readPayload !buf !off !isText !needed !pieces !frame
+  | needed <= available =
+      let !lastPiece = BSU.unsafeTake needed (BSU.unsafeDrop off buf)
+          !end = off + needed
+      in case (isText, frame) of
+           (False, ByteChunks size _ parent) ->
+             -- Keep the slices in the outer accumulator. The indefinite
+             -- string will be joined once, even if its chunks span feeds.
+             let !allChunks = if needed == 0 then pieces else lastPiece : pieces
+             in readItem buf end (ByteChunks size allChunks parent)
+           _ ->
+             let !payload = case pieces of
+                   [] -> lastPiece
+                   _ -> BS.concat (reverse (lastPiece : pieces))
+             in if isText
+                  then case decodeTextFast payload of
+                    Left _ -> invalid "invalid UTF-8 in text string"
+                    Right value -> acceptValue buf end (C.TextString value) frame
+                  else acceptValue buf end (C.ByteString payload) frame
+  | available == 0 =
+      await (\more -> readPayload more 0 isText needed pieces frame)
+  | otherwise =
+      let !piece = BSU.unsafeDrop off buf
+          !pieces' = piece : pieces
+          !needed' = needed - available
+      in await (\more -> readPayload more 0 isText needed' pieces' frame)
   where
-    go !off !acc
-      | off >= BS.length bs = Left "unexpected end of input in indefinite text string"
-      | rdByte bs off == 0xff = do
-          let !combined = BS.concat (reverse acc)
-          case TE.decodeUtf8' combined of
-            Left _ -> Left "invalid UTF-8 in indefinite text string"
-            Right t -> Right (C.TextString t, off + 1)
-      | otherwise = do
-          let !ib = rdByte bs off
-              !m = ib `shiftR` 5
-              !ai = ib .&. 0x1f
-          if m /= 3
-            then Left "non-text-string chunk in indefinite text string"
-            else do
-              (len64, off') <- readArg bs (off + 1) ai
-              let !len = fromIntegral len64
-              ensureBytes bs off' len
-              let !chunk = BS.take len (BS.drop off' bs)
-              go (off' + len) (chunk : acc)
+    available = BS.length buf - off
 
 
-decodeArray :: ByteString -> Int -> Word8 -> Either String (C.Value, Int)
-decodeArray bs off info
-  | info == 31 = decodeIndefiniteArray bs off
-  | otherwise = do
-      (len64, off') <- readArg bs off info
-      let !len = fromIntegral len64
-      decodeNItems bs off' len
-{-# INLINE decodeArray #-}
+closeItem :: ByteString -> Int -> Frame -> DecodeStep C.Value
+closeItem buf off = \case
+  ArrayItems (-1) count items parent ->
+    acceptValue buf off (C.Array (fromReversed count items)) parent
+  MapKey (-1) count pairs parent ->
+    acceptValue buf off (C.Map (fromReversed count pairs)) parent
+  ByteChunks _ chunks parent ->
+    acceptValue buf off (C.ByteString (BS.concat (reverse chunks))) parent
+  TextChunks _ chunks parent ->
+    acceptValue buf off (C.TextString (T.concat (reverse chunks))) parent
+  _ -> invalid "break outside an indefinite-length item"
 
 
-decodeNItems :: ByteString -> Int -> Int -> Either String (C.Value, Int)
-decodeNItems _bs !off 0 = Right (C.Array V.empty, off)
-decodeNItems bs !off !n = runST $ do
-  mv <- MV.new n
-  go mv 0 off
+acceptValue :: ByteString -> Int -> C.Value -> Frame -> DecodeStep C.Value
+acceptValue !buf !off !value = \case
+  Root -> Done value (BSU.unsafeDrop off buf)
+  ArrayItems remaining count items parent
+    | remaining == 1 -> acceptValue buf off (C.Array (fromReversed (count + 1) (value : items))) parent
+    | otherwise -> readItem buf off (ArrayItems (nextCount remaining) (count + 1) (value : items) parent)
+  MapKey remaining count pairs parent ->
+    readItem buf off (MapValue remaining count value pairs parent)
+  MapValue remaining count key pairs parent
+    | remaining == 1 -> acceptValue buf off (C.Map (fromReversed (count + 1) ((key, value) : pairs))) parent
+    | otherwise -> readItem buf off (MapKey (nextCount remaining) (count + 1) ((key, value) : pairs) parent)
+  TagItem tag parent -> acceptValue buf off (C.Tag tag value) parent
+  TextChunks size chunks parent -> case value of
+    C.TextString t
+      | T.null t -> readItem buf off (TextChunks size chunks parent)
+      | otherwise -> readItem buf off (TextChunks size (t : chunks) parent)
+    _ -> invalid "expected a text string chunk"
+  ByteChunks {} -> invalid "expected a byte string chunk"
   where
-    go :: MV.MVector s C.Value -> Int -> Int -> ST s (Either String (C.Value, Int))
-    go !mv !i !o
-      | i >= n = do
-          vec <- V.unsafeFreeze mv
-          pure $! Right (C.Array vec, o)
-      | otherwise = case decodeOne bs o of
-          Left e -> pure $! Left e
-          Right (v, o') -> do
-            MV.unsafeWrite mv i v
-            go mv (i + 1) o'
-{-# INLINE decodeNItems #-}
+    nextCount remaining
+      | remaining < 0 = remaining
+      | otherwise = remaining - 1
 
 
-decodeIndefiniteArray :: ByteString -> Int -> Either String (C.Value, Int)
-decodeIndefiniteArray bs off0 = runST $ do
-  mv <- MV.new 8
-  go mv 0 8 off0
-  where
-    go :: MV.MVector s C.Value -> Int -> Int -> Int -> ST s (Either String (C.Value, Int))
-    go !mv !i !cap !off
-      | off >= BS.length bs = pure $! Left "unexpected end of input in indefinite array"
-      | rdByte bs off == 0xff = do
-          vec <- V.unsafeFreeze (MV.take i mv)
-          pure $! Right (C.Array vec, off + 1)
-      | otherwise = case decodeOne bs off of
-          Left e -> pure $! Left e
-          Right (v, off') -> do
-            mv' <-
-              if i >= cap
-                then MV.grow mv cap
-                else pure mv
-            let !cap' = if i >= cap then cap * 2 else cap
-            MV.unsafeWrite mv' i v
-            go mv' (i + 1) cap' off'
-
-
-decodeMap :: ByteString -> Int -> Word8 -> Either String (C.Value, Int)
-decodeMap bs off info
-  | info == 31 = decodeIndefiniteMap bs off
-  | otherwise = do
-      (len64, off') <- readArg bs off info
-      let !len = fromIntegral len64
-      decodeNPairs bs off' len
-{-# INLINE decodeMap #-}
-
-
-decodeNPairs :: ByteString -> Int -> Int -> Either String (C.Value, Int)
-decodeNPairs _bs !off 0 = Right (C.Map V.empty, off)
-decodeNPairs bs !off !n = runST $ do
-  mv <- MV.new n
-  go mv 0 off
-  where
-    go :: MV.MVector s (C.Value, C.Value) -> Int -> Int -> ST s (Either String (C.Value, Int))
-    go !mv !i !o
-      | i >= n = do
-          vec <- V.unsafeFreeze mv
-          pure $! Right (C.Map vec, o)
-      | otherwise = case decodeOne bs o of
-          Left e -> pure $! Left e
-          Right (k, o') -> case decodeOne bs o' of
-            Left e -> pure $! Left e
-            Right (v, o'') -> do
-              MV.unsafeWrite mv i (k, v)
-              go mv (i + 1) o''
-{-# INLINE decodeNPairs #-}
-
-
-decodeIndefiniteMap :: ByteString -> Int -> Either String (C.Value, Int)
-decodeIndefiniteMap bs off0 = runST $ do
-  mv <- MV.new 8
-  go mv 0 8 off0
-  where
-    go :: MV.MVector s (C.Value, C.Value) -> Int -> Int -> Int -> ST s (Either String (C.Value, Int))
-    go !mv !i !cap !off
-      | off >= BS.length bs = pure $! Left "unexpected end of input in indefinite map"
-      | rdByte bs off == 0xff = do
-          vec <- V.unsafeFreeze (MV.take i mv)
-          pure $! Right (C.Map vec, off + 1)
-      | otherwise = case decodeOne bs off of
-          Left e -> pure $! Left e
-          Right (k, off') -> case decodeOne bs off' of
-            Left e -> pure $! Left e
-            Right (v, off'') -> do
-              mv' <-
-                if i >= cap
-                  then MV.grow mv cap
-                  else pure mv
-              let !cap' = if i >= cap then cap * 2 else cap
-              MV.unsafeWrite mv' i (k, v)
-              go mv' (i + 1) cap' off''
-
-
-decodeTag :: ByteString -> Int -> Word8 -> Either String (C.Value, Int)
-decodeTag bs off info = do
-  (tagNum, off') <- readArg bs off info
-  (content, off'') <- decodeOne bs off'
-  Right (C.Tag tagNum content, off'')
-
-
-decodeSimpleOrFloat :: ByteString -> Int -> Word8 -> Either String (C.Value, Int)
-decodeSimpleOrFloat bs off info
-  | info <= 19 = Right (C.Simple info, off)
-  | info == 20 = Right (C.Bool False, off)
-  | info == 21 = Right (C.Bool True, off)
-  | info == 22 = Right (C.Null, off)
-  | info == 23 = Right (C.Undefined, off)
-  | info == 24 = do
-      ensureBytes bs off 1
-      let !sv = rdByte bs off
-      Right (C.Simple sv, off + 1)
-  | info == 25 = do
-      ensureBytes bs off 2
-      let !b0 = rdByte bs off
-          !b1 = rdByte bs (off + 1)
-          !halfBits =
-            (fromIntegral b0 :: Word16) `shiftL` 8
-              .|. fromIntegral b1
-          !f = halfToFloat halfBits
-      Right (C.Float16 f, off + 2)
-  | info == 26 = do
-      ensureBytes bs off 4
-      let !b0 = fromIntegral (rdByte bs off) :: Word32
-          !b1 = fromIntegral (rdByte bs (off + 1)) :: Word32
-          !b2 = fromIntegral (rdByte bs (off + 2)) :: Word32
-          !b3 = fromIntegral (rdByte bs (off + 3)) :: Word32
-          !w = (b0 `shiftL` 24) .|. (b1 `shiftL` 16) .|. (b2 `shiftL` 8) .|. b3
-      Right (C.Float32 (castWord32ToFloat w), off + 4)
-  | info == 27 = do
-      ensureBytes bs off 8
-      let !b0 = fromIntegral (rdByte bs off) :: Word64
-          !b1 = fromIntegral (rdByte bs (off + 1)) :: Word64
-          !b2 = fromIntegral (rdByte bs (off + 2)) :: Word64
-          !b3 = fromIntegral (rdByte bs (off + 3)) :: Word64
-          !b4 = fromIntegral (rdByte bs (off + 4)) :: Word64
-          !b5 = fromIntegral (rdByte bs (off + 5)) :: Word64
-          !b6 = fromIntegral (rdByte bs (off + 6)) :: Word64
-          !b7 = fromIntegral (rdByte bs (off + 7)) :: Word64
-          !w =
-            (b0 `shiftL` 56)
-              .|. (b1 `shiftL` 48)
-              .|. (b2 `shiftL` 40)
-              .|. (b3 `shiftL` 32)
-              .|. (b4 `shiftL` 24)
-              .|. (b5 `shiftL` 16)
-              .|. (b6 `shiftL` 8)
-              .|. b7
-      Right (C.Float64 (castWord64ToDouble w), off + 8)
-  | info == 31 = Left "break at top level is not valid"
-  | otherwise = Left $ "reserved simple value info: " ++ show info
-
-
-halfToFloat :: Word16 -> Float
-halfToFloat !h =
-  let !sign = (fromIntegral h :: Word32) `shiftR` 15
-      !expo = (fromIntegral h :: Word32) `shiftR` 10 .&. 0x1f
-      !mant = fromIntegral h .&. 0x03ff :: Word32
-      !signBit = sign `shiftL` 31
-  in if expo == 0
-       then
-         if mant == 0
-           then castWord32ToFloat signBit
-           else
-             let !f = (fromIntegral mant :: Float) / 1024.0 * (2 ** (-14))
-             in if sign /= 0 then negate f else f
-       else
-         if expo == 0x1f
-           then
-             if mant == 0
-               then castWord32ToFloat (signBit .|. 0x7f800000)
-               else castWord32ToFloat (signBit .|. 0x7fc00000)
-           else
-             castWord32ToFloat
-               (signBit .|. ((expo + 112) `shiftL` 23) .|. (mant `shiftL` 13))
+-- Every element increments the count once. Fill from the end to avoid
+-- allocating a reversed list just to construct the vector.
+fromReversed :: Int -> [a] -> V.Vector a
+fromReversed !count items = V.create $ do
+  vec <- MV.new count
+  let fill !_ [] = pure ()
+      fill !i (x : rest) = do
+        MV.unsafeWrite vec i x
+        fill (i - 1) rest
+  fill (count - 1) items
+  pure vec

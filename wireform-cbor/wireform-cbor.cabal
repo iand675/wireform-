@@ -47,6 +47,7 @@ library
     CBOR.Stream
     CBOR.TagRegistry
     CBOR.Value
+  other-modules: CBOR.Internal
   build-depends:
     base >= 4.20 && < 5,
     wireform-core,
@@ -85,3 +86,17 @@ test-suite wireform-cbor-derive-test
     text,
     vector,
     sydtest
+
+benchmark cbor-stream-bench
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: bench
+  main-is: StreamBench.hs
+  ghc-options: -rtsopts
+  build-depends:
+    base,
+    bytestring,
+    cborg >= 0.2 && < 0.3,
+    criterion >= 1.5 && < 1.7,
+    vector,
+    wireform-cbor

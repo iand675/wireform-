@@ -1,12 +1,10 @@
 {-# LANGUAGE BangPatterns #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
-{- | CBOR / JSON interconversion (RFC 8949 Section 6.1).
-
-Converts between 'CBOR.Value.Value' and 'Data.Aeson.Value' following
-the preferred serialization mapping from RFC 8949 Section 6.1. The
-mapping is lossy: CBOR byte strings are base64url-encoded, tags are
-dropped, and negative integers use JSON numbers.
+{- | Lossy conversion between CBOR and Aeson values. Byte strings use
+unpadded base64url. An object with exactly @tag@ and @value@ fields
+and an unsigned integer tag is reserved for CBOR tags. Non-text map
+keys use a flat array of alternating keys and values.
 -}
 module CBOR.JSON (
   toJSON,
@@ -17,14 +15,10 @@ import CBOR.Value qualified as C
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
-import Data.ByteString qualified as BS
-import Data.ByteString.Base64 qualified as B64
-import Data.Scientific (fromFloatDigits, toBoundedInteger, toRealFloat)
-import Data.Text (Text)
-import Data.Text qualified as T
+import Data.ByteString.Base64.URL qualified as B64
+import Data.Scientific (coefficient, fromFloatDigits, toBoundedInteger, toRealFloat)
 import Data.Text.Encoding qualified as TE
 import Data.Vector qualified as V
-import Data.Word (Word64)
 import Prelude hiding (map)
 
 
@@ -38,7 +32,7 @@ toJSON C.Undefined = Aeson.Null
 toJSON (C.Float16 f) = floatToJSON f
 toJSON (C.Float32 f) = floatToJSON f
 toJSON (C.Float64 d) = doubleToJSON d
-toJSON (C.ByteString bs) = Aeson.String (TE.decodeUtf8Lenient (B64.encode bs))
+toJSON (C.ByteString bs) = Aeson.String (TE.decodeUtf8 (B64.encodeUnpadded bs))
 toJSON (C.TextString t) = Aeson.String t
 toJSON (C.Array vec) = Aeson.Array (V.map toJSON vec)
 toJSON (C.Map vec) = mapToJSON vec
@@ -56,20 +50,21 @@ fromJSON :: Aeson.Value -> C.Value
 fromJSON Aeson.Null = C.Null
 fromJSON (Aeson.Bool b) = C.Bool b
 fromJSON (Aeson.String t) = C.TextString t
-fromJSON (Aeson.Number n) =
-  case toBoundedInteger n :: Maybe Int of
-    Just i
-      | i >= 0 -> C.UInt (fromIntegral i)
-      | otherwise -> C.NInt (fromIntegral (negate (fromIntegral i :: Integer) - 1))
-    Nothing -> C.Float64 (toRealFloat n)
+fromJSON (Aeson.Number n)
+  | coefficient n >= 0
+  , Just magnitude <- toBoundedInteger n = C.UInt magnitude
+  | coefficient n < 0
+  , Just magnitude <- toBoundedInteger (negate n) = C.NInt (magnitude - 1)
+  -- The lowest basic CBOR integer has an absolute value one past Word64.
+  | n == -18446744073709551616 = C.NInt maxBound
+  | otherwise = C.Float64 (toRealFloat n)
 fromJSON (Aeson.Array arr) = C.Array (V.map fromJSON arr)
-fromJSON (Aeson.Object obj) =
-  case (KM.lookup (Key.fromText "tag") obj, KM.lookup (Key.fromText "value") obj) of
-    (Just (Aeson.Number tn), Just val) ->
-      case toBoundedInteger tn :: Maybe Word64 of
-        Just tagN -> C.Tag tagN (fromJSON val)
-        Nothing -> objToMap obj
-    _ -> objToMap obj
+fromJSON (Aeson.Object obj)
+  | KM.size obj == 2
+  , Just (Aeson.Number tn) <- KM.lookup "tag" obj
+  , Just val <- KM.lookup "value" obj
+  , Just tagN <- toBoundedInteger tn = C.Tag tagN (fromJSON val)
+  | otherwise = objToMap obj
 
 
 objToMap :: KM.KeyMap Aeson.Value -> C.Value
