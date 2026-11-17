@@ -166,12 +166,20 @@ readValue bs off tag = case tag of
       (_, _off1) -> Left "BSON.Decode: expected document for array"
   0x05 -> do
     ensure bs off 5
-    let !len = fromIntegral (readLE32 bs off) :: Int
+    let !len = fromIntegral (fromIntegral (readLE32 bs off) :: Int32) :: Int
         !sub = rdByte bs (off + 4)
-        !off1 = off + 4 + 1
-    ensure bs off1 len
-    let !dat = BSU.unsafeTake len (BSU.unsafeDrop off1 bs)
-    Right (B.Binary sub dat, off1 + len)
+        !start = off + 5
+    when (len < 0) (Left "BSON.Decode: invalid binary length")
+    ensure bs start len
+    if sub == 0x02
+      then do
+        when (len < 4 || readLE32 bs start /= fromIntegral (len - 4)) $
+          Left "BSON.Decode: invalid legacy binary length"
+        let !dat = BSU.unsafeTake (len - 4) (BSU.unsafeDrop (start + 4) bs)
+        Right (B.Binary sub dat, start + len)
+      else do
+        let !dat = BSU.unsafeTake len (BSU.unsafeDrop start bs)
+        Right (B.Binary sub dat, start + len)
   0x06 -> Right (B.Undefined, off)
   0x07 -> do
     ensure bs off 12

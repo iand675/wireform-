@@ -270,6 +270,23 @@ newTypeTests =
       , it "Binary subtype 0x00 (generic)" $ do
           let val = B.Document (V.singleton (T.pack "b", B.Binary 0x00 (BS.pack [0xDE, 0xAD])))
           decode (encode val) `shouldBe` Right val
+      , it "legacy binary subtype 0x02 uses a nested length" $ do
+          let check payload = do
+                let len = fromIntegral (BS.length payload)
+                    val = B.Document (V.singleton ("b", B.Binary 0x02 payload))
+                    wire =
+                      BS.pack [17 + len, 0, 0, 0, 5, 0x62, 0, 4 + len, 0, 0, 0, 2, len, 0, 0, 0]
+                        <> payload
+                        <> BS.singleton 0
+                encode val `shouldBe` wire
+                decode wire `shouldBe` Right val
+          check BS.empty
+          check (BS.pack [0xde, 0xad])
+      , it "rejects legacy binary subtype 0x02 with an inconsistent nested length" $ do
+          let wire = BS.pack [19, 0, 0, 0, 5, 0x62, 0, 6, 0, 0, 0, 2, 1, 0, 0, 0, 0xde, 0xad, 0]
+          case decode wire of
+            Left _ -> pure ()
+            Right v -> expectationFailure ("decoded malformed legacy binary: " ++ show v)
       , it "Binary subtype preserved" $ do
           let val = B.Document (V.singleton (T.pack "b", B.Binary 0x05 (BS.pack [1, 2, 3])))
               Right (B.Document fields) = decode (encode val)

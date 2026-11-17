@@ -42,7 +42,7 @@ data Value
   | String !Text
   | Document !(Vector (Text, Value))
   | Array !(Vector Value)
-  | -- | subtype + data
+  | -- | Subtype and payload bytes. Legacy subtype 0x02 excludes the nested length.
     Binary {-# UNPACK #-} !Word8 !ByteString
   | Bool !Bool
   | DateTime {-# UNPACK #-} !Int64
