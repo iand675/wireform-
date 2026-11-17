@@ -3,7 +3,9 @@ module Test.ASN1 (asn1Tests) where
 import ASN1.Decode (decode)
 import ASN1.Encode (encode)
 import ASN1.Value
+import Control.Exception (ErrorCall, evaluate, try)
 import Data.ByteString qualified as BS
+import Data.Either (isLeft)
 import Data.Text qualified as T
 import Data.Vector qualified as V
 import Hedgehog
@@ -85,6 +87,32 @@ unitTests =
       , it "OID 2.5.4.3" $ do
           let val = OID (V.fromList [2, 5, 4, 3])
           decode (encode val) `shouldBe` Right val
+      , it "encodes the combined first two OID arcs as a base-128 subidentifier" $ do
+          let check arcs bytes = do
+                let val = OID (V.fromList arcs)
+                    der = BS.pack bytes
+                encode val `shouldBe` der
+                decode der `shouldBe` Right val
+          check [2, 40, 3] [0x06, 2, 0x78, 3]
+          check [2, 999, 3] [0x06, 3, 0x88, 0x37, 3]
+          check
+            [2, maxBound, maxBound]
+            ([0x06, 20, 0x82] ++ replicate 8 0x80 ++ [0x4f, 0x81] ++ replicate 8 0xff ++ [0x7f])
+      , it "rejects empty, overlong, truncated and out-of-range OID subidentifiers" $ do
+          let bad =
+                [ [0x06, 0]
+                , [0x06, 2, 0x80, 0x2a]
+                , [0x06, 2, 0x2a, 0x80]
+                , [0x06, 1, 0x81]
+                , [0x06, 10, 0x82] ++ replicate 8 0x80 ++ [0x50]
+                , [0x06, 11, 0x2a, 0x82] ++ replicate 8 0x80 ++ [0]
+                ]
+          mapM_ (\bytes -> isLeft (decode (BS.pack bytes)) `shouldBe` True) bad
+      , it "rejects invalid OID arcs on encode" $ do
+          let check arcs = do
+                result <- try (evaluate (BS.length (encode (OID (V.fromList arcs))))) :: IO (Either ErrorCall Int)
+                isLeft result `shouldBe` True
+          mapM_ check [[1], [3, 0], [1, 40]]
       , it "Sequence" $ do
           let val = Sequence (V.fromList [Integer 1, Boolean True, Null])
           decode (encode val) `shouldBe` Right val

@@ -14,7 +14,7 @@ module ASN1.Encode (
 ) where
 
 import ASN1.Value
-import Data.Bits (shiftL, shiftR, testBit, (.&.), (.|.))
+import Data.Bits (Bits, shiftL, shiftR, testBit, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Internal qualified as BSI
@@ -27,6 +27,7 @@ import Foreign.Storable (pokeByteOff)
 import Wireform.Encode.Direct (directEncode)
 
 
+-- | Encode a DER value. Invalid OID arcs raise an error.
 encode :: Value -> ByteString
 encode val = directEncode (asn1Size val) (writeASN1 val)
 {-# INLINE encode #-}
@@ -76,7 +77,7 @@ lengthOfLength n
 tagBytesSize :: Int -> Int
 tagBytesSize tagNum
   | tagNum < 31 = 1
-  | otherwise = 1 + BS.length (encodeBase128 (fromIntegral tagNum))
+  | otherwise = 1 + BS.length (encodeBase128 (fromIntegral tagNum :: Word64))
 {-# INLINE tagBytesSize #-}
 
 
@@ -162,7 +163,7 @@ writeTagBytes p off tagByte tagNum
       pure $! off + 1
   | otherwise = do
       pokeByteOff p off tagByte
-      writeRaw p (off + 1) (encodeBase128 (fromIntegral tagNum))
+      writeRaw p (off + 1) (encodeBase128 (fromIntegral tagNum :: Word64))
 {-# INLINE writeTagBytes #-}
 
 
@@ -218,23 +219,16 @@ integerToTwosComplement n
 
 encodeOID :: V.Vector Word64 -> ByteString
 encodeOID components
-  | V.length components < 2 = BS.empty
-  | otherwise =
-      let !first = V.unsafeIndex components 0
-          !second = V.unsafeIndex components 1
-          !firstByte = fromIntegral (first * 40 + second) :: Word8
-          !rest = V.toList (V.drop 2 components)
-      in BS.singleton firstByte <> mconcat (map encodeOIDComponent rest)
-
-
-encodeOIDComponent :: Word64 -> ByteString
-encodeOIDComponent n
-  | n < 128 = BS.singleton (fromIntegral n)
-  | otherwise = BS.pack (go n [])
+  | V.length components < 2 = error "ASN1.Encode: OID needs at least two arcs"
+  | first > 2 || (first < 2 && second >= 40) = error "ASN1.Encode: invalid first two OID arcs"
+  | otherwise = BS.concat (firstSubidentifier : map encodeBase128 (V.toList (V.drop 2 components)))
   where
-    go 0 acc = acc
-    go v [] = go (v `shiftR` 7) [fromIntegral (v .&. 0x7F)]
-    go v acc = go (v `shiftR` 7) (fromIntegral ((v .&. 0x7F) .|. 0x80) : acc)
+    first = V.unsafeIndex components 0
+    second = V.unsafeIndex components 1
+    firstSubidentifier
+      -- The combined value can exceed Word64 even when both arcs fit.
+      | first == 2 && second > maxBound - 80 = encodeBase128 (80 + toInteger second)
+      | otherwise = encodeBase128 (40 * first + second)
 
 
 encodeTagByte :: TagClass -> Bool -> Int -> Word8
@@ -249,7 +243,7 @@ encodeTagByte tc constructed tagNum =
   in classBits .|. consBit .|. tagBits
 
 
-encodeBase128 :: Word64 -> ByteString
+encodeBase128 :: (Bits a, Integral a) => a -> ByteString
 encodeBase128 n
   | n < 128 = BS.singleton (fromIntegral n)
   | otherwise = BS.pack (go n [])
@@ -257,3 +251,4 @@ encodeBase128 n
     go 0 acc = acc
     go v [] = go (v `shiftR` 7) [fromIntegral (v .&. 0x7F)]
     go v acc = go (v `shiftR` 7) (fromIntegral ((v .&. 0x7F) .|. 0x80) : acc)
+{-# INLINEABLE encodeBase128 #-}

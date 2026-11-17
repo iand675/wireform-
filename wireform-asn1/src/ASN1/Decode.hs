@@ -11,7 +11,7 @@ module ASN1.Decode (
 ) where
 
 import ASN1.Value
-import Data.Bits (shiftL, shiftR, testBit, (.&.), (.|.))
+import Data.Bits (Bits, shiftL, shiftR, testBit, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Unsafe qualified as BSU
@@ -174,35 +174,42 @@ decodeIntegerBytes bs
 
 decodeOID :: ByteString -> Either String [Word64]
 decodeOID bs
-  | BS.null bs = Right []
+  | BS.null bs = Left "ASN1.Decode: empty OID"
+  | first < 40 = rest 0 (fromIntegral first) 1
+  | first < 80 = rest 1 (fromIntegral first - 40) 1
+  | first < 128 = rest 2 (fromIntegral first - 80) 1
   | otherwise = do
-      let !first = fromIntegral (BS.index bs 0) :: Word64
-          !c1 = first `div` 40
-          !c2 = first `mod` 40
-      rest <- decodeOIDComponents bs 1 (BS.length bs)
-      Right (c1 : c2 : rest)
+      (combined, off) <- decodeBase128 (80 + toInteger (maxBound :: Word64)) bs 0
+      rest 2 (fromIntegral (combined - 80)) off
+  where
+    first = rdByte bs 0
+    rest !firstArc !secondArc !off =
+      (firstArc :) . (secondArc :) <$> decodeOIDComponents bs off
 
 
-decodeOIDComponents :: ByteString -> Int -> Int -> Either String [Word64]
-decodeOIDComponents bs off end
-  | off >= end = Right []
+decodeOIDComponents :: ByteString -> Int -> Either String [Word64]
+decodeOIDComponents bs off
+  | off >= BS.length bs = Right []
   | otherwise = do
-      (val, off') <- decodeBase128 bs off
-      rest <- decodeOIDComponents bs off' end
-      Right (val : rest)
+      (val, off') <- decodeBase128 maxBound bs off
+      (val :) <$> decodeOIDComponents bs off'
 
 
-decodeBase128 :: ByteString -> Int -> Either String (Word64, Int)
-decodeBase128 bs off = go off 0
+decodeBase128 :: (Bits a, Integral a) => a -> ByteString -> Int -> Either String (a, Int)
+decodeBase128 limit bs off
+  | rdByte bs off == 0x80 = Left "ASN1.Decode: non-minimal OID subidentifier"
+  | otherwise = go off 0
   where
     go !o !acc
-      | o >= BS.length bs = Left "ASN1.Decode: unterminated base-128 integer"
-      | otherwise =
-          let !b = rdByte bs o
-              !val = acc `shiftL` 7 .|. fromIntegral (b .&. 0x7F)
-          in if testBit b 7
-               then go (o + 1) val
-               else Right (val, o + 1)
+      | o >= BS.length bs = Left "ASN1.Decode: unterminated OID subidentifier"
+      | acc > (limit - digit) `shiftR` 7 = Left "ASN1.Decode: OID arc exceeds Word64"
+      | testBit b 7 = go (o + 1) val
+      | otherwise = Right (val, o + 1)
+      where
+        b = rdByte bs o
+        digit = fromIntegral (b .&. 0x7F)
+        val = (acc `shiftL` 7) .|. digit
+{-# INLINE decodeBase128 #-}
 
 
 rdByte :: ByteString -> Int -> Word8
