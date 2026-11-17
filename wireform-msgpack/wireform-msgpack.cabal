@@ -42,6 +42,7 @@ library
     MsgPack.RPC
     MsgPack.Stream
     MsgPack.Value
+  other-modules: MsgPack.Timestamp
   build-depends:
     base >= 4.20 && < 5,
     wireform-core,
