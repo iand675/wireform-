@@ -1,6 +1,7 @@
 module Test.Avro (avroTests) where
 
-import Avro.Decode (decodeAvro)
+import Avro.Container (readContainer)
+import Avro.Decode (decodeAvro, decodeAvroAt)
 import Avro.Encode (encodeAvro)
 import Avro.Fingerprint (avroFingerprint, avroFingerprintMD5, parsingCanonicalForm)
 import Avro.JSON (avroFromJSON, avroSchemaFromJSON, avroSchemaToJSON, avroToJSON)
@@ -12,6 +13,7 @@ import Avro.Wire (avroEncodeInt, avroEncodeLong)
 import Data.Aeson qualified as Aeson
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
+import Data.Either (isLeft)
 import Data.Int (Int32, Int64)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
@@ -39,6 +41,7 @@ avroTests =
       , nullUnionComplianceTests
       , arrayEncodingComplianceTests
       , mapEncodingComplianceTests
+      , sizedBlockTests
       , deconflictComplianceTests
       , propertyRoundtripComplianceTests
       , avroSpecConformanceVectors
@@ -797,6 +800,43 @@ mapEncodingComplianceTests =
               encoded = encodeAvro ty (AV.Map (V.fromList [("a", AV.Int 1)]))
           encoded `shouldBe` BS.pack [0x02, 0x02, 0x61, 0x02, 0x00]
       ]
+
+
+sizedBlockTests :: Spec
+sizedBlockTests = describe "Negative-count blocks" $ do
+  let intTy = AvroPrimitive AvroInt
+  it "checks array block sizes and resumes at the following value" $ do
+    let ty = AvroArray intTy
+        wire size = BS.pack [1, size, 0x36, 0, 0x0e]
+    decodeAvroAt ty (wire 2) 0 `shouldBe` Right (AV.Array (V.singleton (AV.Int 27)), 4)
+    decodeAvroAt intTy (wire 2) 4 `shouldBe` Right (AV.Int 7, 5)
+    mapM_ (\size -> isLeft (decodeAvroAt ty (wire size) 0) `shouldBe` True) [0, 4, 1, 0x7e]
+  it "checks map block sizes and resumes at the following value" $ do
+    let ty = AvroMap intTy
+        wire size = BS.pack [1, size, 2, 0x61, 0x36, 0, 0x0e]
+    decodeAvroAt ty (wire 6) 0 `shouldBe` Right (AV.Map (V.singleton ("a", AV.Int 27)), 6)
+    decodeAvroAt intTy (wire 6) 6 `shouldBe` Right (AV.Int 7, 7)
+    mapM_ (\size -> isLeft (decodeAvroAt ty (wire size) 0) `shouldBe` True) [2, 8, 1, 0x7e]
+  it "allows zero-byte array blocks and continues across mixed block types" $ do
+    let ty = AvroArray (AvroPrimitive AvroNull)
+        wire = BS.pack [3, 0, 2, 0]
+    decodeAvro ty wire `shouldBe` Right (AV.Array (V.replicate 3 AV.Null))
+  it "rejects the count whose absolute value does not fit a long" $ do
+    let wire = BS.pack (replicate 9 0xff ++ [1, 0, 0])
+    isLeft (decodeAvro (AvroArray intTy) wire) `shouldBe` True
+    isLeft (decodeAvro (AvroMap intTy) wire) `shouldBe` True
+  it "checks sized map blocks in an object container header" $ do
+    let entry = "avro.schema"
+        metadata = B.toStrictByteString (avroEncodeLong 11 <> B.byteString entry <> avroEncodeLong 5 <> B.byteString "\"int\"")
+        file size =
+          "Obj\1"
+            <> B.toStrictByteString (avroEncodeLong (-1) <> avroEncodeLong size)
+            <> metadata
+            <> BS.replicate 17 0
+        size = fromIntegral (BS.length metadata)
+    readContainer (file size) `shouldBe` Right (intTy, V.empty)
+    isLeft (readContainer (file (size - 1))) `shouldBe` True
+    isLeft (readContainer (file (size + 1))) `shouldBe` True
 
 
 deconflictComplianceTests :: Spec

@@ -45,6 +45,7 @@ import Avro.Schema (AvroType)
 import qualified Avro.Value as AV
 import Avro.Wire
   ( AvroDecodeResult(..)
+  , avroDecodeBlockEnd
   , avroDecodeLong
   , avroEncodeBytes
   , avroEncodeLong
@@ -146,32 +147,32 @@ parseHeader bs
           Right (ContainerHeader schema codec sync, off + syncMarkerSize)
 
 decodeAvroMap :: ByteString -> Int -> Either String ([(ByteString, ByteString)], Int)
-decodeAvroMap bs off = decodeMapBlocks bs off []
+decodeAvroMap bs off = decodeMapBlocks off []
   where
-    decodeMapBlocks :: ByteString -> Int -> [(ByteString, ByteString)] -> Either String ([(ByteString, ByteString)], Int)
-    decodeMapBlocks bs' off' acc =
-      case avroDecodeLong bs' off' of
+    decodeMapBlocks next acc =
+      case avroDecodeLong bs next of
+        AvroDecodeOK 0 start -> Right (reverse acc, start)
+        AvroDecodeOK count start
+          | count == minBound -> Left "Avro.Container: invalid metadata block count"
+          | count < 0 -> case avroDecodeBlockEnd bs start of
+              AvroDecodeOK end payload -> decodeMapEntries (BS.take end bs) payload (negate count) end acc
+              AvroDecodeFail e -> Left e
+          | otherwise -> decodeMapEntries bs start count (-1) acc
         AvroDecodeFail e -> Left e
-        AvroDecodeOK cnt off'' ->
-          if cnt == 0
-          then Right (reverse acc, off'')
-          else if cnt < 0
-          then case avroDecodeLong bs' off'' of
-            AvroDecodeFail e -> Left e
-            AvroDecodeOK _blockSz off''' ->
-              decodeMapEntries bs' off''' (fromIntegral (negate cnt)) acc
-          else decodeMapEntries bs' off'' (fromIntegral cnt) acc
 
-    decodeMapEntries :: ByteString -> Int -> Int -> [(ByteString, ByteString)] -> Either String ([(ByteString, ByteString)], Int)
-    decodeMapEntries _bs' off' 0 acc = decodeMapBlocks _bs' off' acc
-    decodeMapEntries bs' off' n acc =
-      case avroDecodeBytes bs' off' of
-        AvroDecodeFail e -> Left e
-        AvroDecodeOK key off'' ->
-          case avroDecodeBytes bs' off'' of
+    decodeMapEntries input next count end acc
+      | count == 0 =
+          if end >= 0 && next /= end
+            then Left "Avro.Container: metadata block size does not match its entries"
+            else decodeMapBlocks next acc
+      | otherwise =
+          case avroDecodeBytes input next of
             AvroDecodeFail e -> Left e
-            AvroDecodeOK val off''' ->
-              decodeMapEntries bs' off''' (n - 1) ((key, val) : acc)
+            AvroDecodeOK key valueStart ->
+              case avroDecodeBytes input valueStart of
+                AvroDecodeFail e -> Left e
+                AvroDecodeOK val entryEnd ->
+                  decodeMapEntries input entryEnd (count - 1) end ((key, val) : acc)
 
 parseBlocks :: AvroType -> T.Text -> ByteString -> ByteString -> Int -> [AV.Value] -> Either String [AV.Value]
 parseBlocks schema codec sync bs off acc

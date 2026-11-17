@@ -26,6 +26,7 @@ import Avro.Schema (AvroField (..), AvroSchema (..), AvroType (..))
 import Avro.Value qualified as AV
 import Avro.Wire (
   AvroDecodeResult (..),
+  avroDecodeBlockEnd,
   avroDecodeBool,
   avroDecodeBytes,
   avroDecodeDouble,
@@ -101,7 +102,7 @@ decodeValue (AvroUnion {avroUnionBranches = branches}) bs off =
              AvroDecodeFail e -> AvroDecodeFail e
     AvroDecodeFail e -> AvroDecodeFail e
 decodeValue (AvroFixed {avroFixedSize = sz}) bs off
-  | off + sz > BS.length bs = AvroDecodeFail "Avro.Decode: fixed: unexpected end of input"
+  | sz < 0 || sz > BS.length bs - off = AvroDecodeFail "Avro.Decode: fixed: unexpected end of input"
   | otherwise = AvroDecodeOK (AV.Fixed (BS.take sz (BS.drop off bs))) (off + sz)
 decodeValue (AvroLogical {avroLogicalBase = base}) bs off =
   decodeValue base bs off
@@ -167,79 +168,78 @@ decodeRecord fields bs off0 =
 
 
 decodeArray :: AvroType -> ByteString -> Int -> AvroDecodeResult AV.Value
-decodeArray itemTy bs off0 = decodeArrayBlocks bs off0 []
+decodeArray itemTy bs off0 = decodeArrayBlocks off0 []
   where
-    decodeArrayBlocks :: ByteString -> Int -> [V.Vector AV.Value] -> AvroDecodeResult AV.Value
-    decodeArrayBlocks bsB off blockAcc =
-      case avroDecodeLong bsB off of
-        AvroDecodeOK cnt64 off' ->
-          let !cnt = cnt64
-          in if cnt == 0
-               then AvroDecodeOK (AV.Array (V.concat (reverse blockAcc))) off'
-               else
-                 if cnt < 0
-                   then case avroDecodeLong bsB off' of
-                     AvroDecodeOK _blockSize off'' ->
-                       decodeArrayBlock bsB off'' (fromIntegral (negate cnt)) blockAcc
-                     AvroDecodeFail e -> AvroDecodeFail e
-                   else decodeArrayBlock bsB off' (fromIntegral cnt) blockAcc
+    decodeArrayBlocks :: Int -> [V.Vector AV.Value] -> AvroDecodeResult AV.Value
+    decodeArrayBlocks off blockAcc =
+      case avroDecodeLong bs off of
+        AvroDecodeOK 0 next -> AvroDecodeOK (AV.Array (V.concat (reverse blockAcc))) next
+        AvroDecodeOK count next
+          | count == minBound -> AvroDecodeFail "Avro.Decode: invalid array block count"
+          | count < 0 -> case avroDecodeBlockEnd bs next of
+              AvroDecodeOK end start ->
+                decodeArrayBlock (BS.take end bs) start (fromIntegral (negate count)) end blockAcc
+              AvroDecodeFail e -> AvroDecodeFail e
+          | otherwise -> decodeArrayBlock bs next (fromIntegral count) (-1) blockAcc
         AvroDecodeFail e -> AvroDecodeFail e
 
-    decodeArrayBlock :: ByteString -> Int -> Int -> [V.Vector AV.Value] -> AvroDecodeResult AV.Value
-    decodeArrayBlock bsI off blockCount blockAcc =
+    -- Positive counts have no declared end.
+    decodeArrayBlock :: ByteString -> Int -> Int -> Int -> [V.Vector AV.Value] -> AvroDecodeResult AV.Value
+    decodeArrayBlock input off blockCount end blockAcc =
       runST $ do
         mv <- MV.new blockCount
-        goBlock mv 0 off
-      where
-        goBlock :: MV.MVector s AV.Value -> Int -> Int -> ST s (AvroDecodeResult AV.Value)
-        goBlock mv !i !o
-          | i >= blockCount = do
-              vec <- V.unsafeFreeze mv
-              pure $! decodeArrayBlocks bsI o (vec : blockAcc)
-          | otherwise =
-              case decodeValue itemTy bsI o of
-                AvroDecodeOK val o' -> do
-                  MV.unsafeWrite mv i val
-                  goBlock mv (i + 1) o'
-                AvroDecodeFail e -> pure $! AvroDecodeFail e
+        let go !i !o
+              | i >= blockCount =
+                  if end >= 0 && o /= end
+                    then pure (AvroDecodeFail "Avro.Decode: array block size does not match its elements")
+                    else do
+                      vec <- V.unsafeFreeze mv
+                      pure $! decodeArrayBlocks o (vec : blockAcc)
+              | otherwise =
+                  case decodeValue itemTy input o of
+                    AvroDecodeOK val o' -> do
+                      MV.unsafeWrite mv i val
+                      go (i + 1) o'
+                    AvroDecodeFail e -> pure $! AvroDecodeFail e
+        go 0 off
 
 
 decodeMap :: AvroType -> ByteString -> Int -> AvroDecodeResult AV.Value
-decodeMap valTy bs off0 = decodeMapBlocks bs off0 []
+decodeMap valTy bs off0 = decodeMapBlocks off0 []
   where
-    decodeMapBlocks :: ByteString -> Int -> [V.Vector (Text, AV.Value)] -> AvroDecodeResult AV.Value
-    decodeMapBlocks bsB off blockAcc =
-      case avroDecodeLong bsB off of
-        AvroDecodeOK cnt64 off' ->
-          let !cnt = cnt64
-          in if cnt == 0
-               then AvroDecodeOK (AV.Map (V.concat (reverse blockAcc))) off'
-               else
-                 if cnt < 0
-                   then case avroDecodeLong bsB off' of
-                     AvroDecodeOK _blockSize off'' ->
-                       decodeMapBlock bsB off'' (fromIntegral (negate cnt)) blockAcc
-                     AvroDecodeFail e -> AvroDecodeFail e
-                   else decodeMapBlock bsB off' (fromIntegral cnt) blockAcc
+    decodeMapBlocks :: Int -> [V.Vector (Text, AV.Value)] -> AvroDecodeResult AV.Value
+    decodeMapBlocks off blockAcc =
+      case avroDecodeLong bs off of
+        AvroDecodeOK 0 next -> AvroDecodeOK (AV.Map (V.concat (reverse blockAcc))) next
+        AvroDecodeOK count next
+          | count == minBound -> AvroDecodeFail "Avro.Decode: invalid map block count"
+          | count < 0 -> case avroDecodeBlockEnd bs next of
+              AvroDecodeOK end start ->
+                decodeMapBlock (BS.take end bs) start (fromIntegral (negate count)) end blockAcc
+              AvroDecodeFail e -> AvroDecodeFail e
+          | otherwise -> decodeMapBlock bs next (fromIntegral count) (-1) blockAcc
         AvroDecodeFail e -> AvroDecodeFail e
 
-    decodeMapBlock :: ByteString -> Int -> Int -> [V.Vector (Text, AV.Value)] -> AvroDecodeResult AV.Value
-    decodeMapBlock bsE off blockCount blockAcc =
-      runST $ do
-        mv <- MV.new blockCount
-        goBlock mv 0 off
-      where
-        goBlock :: MV.MVector s (Text, AV.Value) -> Int -> Int -> ST s (AvroDecodeResult AV.Value)
-        goBlock mv !i !o
-          | i >= blockCount = do
-              vec <- V.unsafeFreeze mv
-              pure $! decodeMapBlocks bsE o (vec : blockAcc)
-          | otherwise =
-              case avroDecodeString bsE o of
-                AvroDecodeOK key o' ->
-                  case decodeValue valTy bsE o' of
-                    AvroDecodeOK val o'' -> do
-                      MV.unsafeWrite mv i (key, val)
-                      goBlock mv (i + 1) o''
-                    AvroDecodeFail e -> pure $! AvroDecodeFail e
-                AvroDecodeFail e -> pure $! AvroDecodeFail e
+    -- Every key has at least a one-byte length prefix, even for a null value.
+    decodeMapBlock :: ByteString -> Int -> Int -> Int -> [V.Vector (Text, AV.Value)] -> AvroDecodeResult AV.Value
+    decodeMapBlock input off blockCount end blockAcc
+      | blockCount > BS.length input - off = AvroDecodeFail "Avro.Decode: map block has too few bytes for its keys"
+      | otherwise = runST $ do
+          mv <- MV.new blockCount
+          let go !i !o
+                | i >= blockCount =
+                    if end >= 0 && o /= end
+                      then pure (AvroDecodeFail "Avro.Decode: map block size does not match its entries")
+                      else do
+                        vec <- V.unsafeFreeze mv
+                        pure $! decodeMapBlocks o (vec : blockAcc)
+                | otherwise =
+                    case avroDecodeString input o of
+                      AvroDecodeOK key o' ->
+                        case decodeValue valTy input o' of
+                          AvroDecodeOK val o'' -> do
+                            MV.unsafeWrite mv i (key, val)
+                            go (i + 1) o''
+                          AvroDecodeFail e -> pure $! AvroDecodeFail e
+                      AvroDecodeFail e -> pure $! AvroDecodeFail e
+          go 0 off
