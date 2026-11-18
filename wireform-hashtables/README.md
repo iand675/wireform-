@@ -124,12 +124,12 @@ counted as the best there. Speedups use the faster of our two modes.
 | insert | rand | 1,000 | 11.7 | 12.3 | 15.4 | 38.0 | 84.3 | 93.9 | 1.32× | 1.32× |
 | insert | rand | 100,000 | 23.9 | 25.1 | 35.6 | 92.2 | 99.1 | 453.9 | 1.49× | 1.49× |
 | insert | rand | 1,000,000 | 58.4 | 33.3 | 68.8 | 150.6 | 227.8 | 1142.2 | 2.06× (batch) | 2.06× (batch) |
-| insert-grow | seq | 1,000 | 27.6 | 13.0 | 26.2 | 112.6 | 207.4 | 85.4 | 0.95× | 0.95× |
-| insert-grow | seq | 100,000 | 25.1 | 14.1 | 20.7 | 90.6 | 404.3 | 293.1 | 0.83× | 0.83× |
-| insert-grow | seq | 1,000,000 | 42.0 | 19.5 | 29.2 | 124.8 | 390.4 | 707.9 | 0.69× | 0.69× |
-| insert-grow | rand | 1,000 | 31.6 | 13.1 | 28.3 | 159.5 | 271.6 | 99.6 | 0.90× | 0.90× |
-| insert-grow | rand | 100,000 | 32.1 | 26.6 | 54.7 | 222.8 | 587.2 | 502.6 | 1.71× | 1.71× |
-| insert-grow | rand | 1,000,000 | 73.7 | 34.8 | 90.5 | 419.1 | 567.7 | 1169.4 | 1.23× | 1.23× |
+| insert-grow | seq | 1,000 | 26.7 | 11.7 | 26.2 | 112.6 | 207.4 | 85.4 | 0.98× | 0.98× |
+| insert-grow | seq | 100,000 | 25.8 | 14.2 | 20.7 | 90.6 | 404.3 | 293.1 | 0.80× | 0.80× |
+| insert-grow | seq | 1,000,000 | 37.6 | 18.3 | 29.2 | 124.8 | 390.4 | 707.9 | 0.78× | 0.78× |
+| insert-grow | rand | 1,000 | 26.5 | 13.7 | 28.3 | 159.5 | 271.6 | 99.6 | 1.06× | 1.06× |
+| insert-grow | rand | 100,000 | 31.7 | 26.1 | 54.7 | 222.8 | 587.2 | 502.6 | 1.72× | 1.72× |
+| insert-grow | rand | 1,000,000 | 66.5 | 36.1 | 90.5 | 419.1 | 567.7 | 1169.4 | 1.36× | 1.36× |
 | lookup-hit | seq | 1,000 | 4.0 | 6.4 | 4.3 | 14.5 | 37.4 | 9.3 | 1.07× | 1.07× |
 | lookup-hit | seq | 100,000 | 6.4 | 8.4 | 5.3 | 19.2 | 48.1 | 70.0 | 0.83× | 0.83× |
 | lookup-hit | seq | 1,000,000 | 7.1 | 12.2 | 4.6 | 14.3 | 44.2 | 206.0 | 0.65× | 0.65× |
@@ -175,6 +175,9 @@ Where it loses, and why:
   256-key blocks contiguous (consecutive home groups) to get most of that
   locality back — 41 → 7 ns per hit at 1M — but a 7-lane group still
   touches about a line per key.
+* **Growing from empty at 1k** is at parity (0.98–1.06×, within noise):
+  tables under 64 groups grow 4× instead of 2×, halving the tiny rehashes
+  (1.10–1.23× over 2× growth in an interleaved A/B).
 * **`toList`**: `hashtables` and `unordered-containers` store boxed `Int`s
   and cons pointers to them; an `Unboxed` column must allocate two `I#`s per
   entry on the way out. `foldM` does not allocate.

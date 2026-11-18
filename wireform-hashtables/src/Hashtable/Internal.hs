@@ -474,6 +474,9 @@ growAndPlace# ref t@(Table mask ctrl _ _) w k v s0 =
             I# full
               | isTrue# (((n +# 1#) *# 2#) <=# full) -> g
               | isTrue# (g >=# (case maxGroups of I# mg -> mg)) -> case tableTooLarge of () -> g
+              -- small tables grow 4x: half as many tiny rehashes, and the
+              -- extra memory is confined to tables of a few hundred entries
+              | isTrue# (g <# 64#) -> g *# 4#
               | otherwise -> g *# 2#
        in case rehash# t g' s1 of
             (# s2, t'@(Table mask' ctrl' keys' vals') #) -> case writeMutVar# ref t' s2 of
