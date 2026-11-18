@@ -92,6 +92,7 @@ module Hashtable.Internal
   , matchEmpty#
   , matchFull#
   , mustContinue#
+  , probeStep#
   , lanePos#
   , slotOf#
     -- * Metadata
@@ -181,21 +182,49 @@ groupsFor n = go start
     | need <= 1 = 1
     | otherwise = 1 `unsafeShiftL` (finiteBitSize need - countLeadingZeros (need - 1))
   go g
+    | g > maxGroups = errorWithoutStackTrace "Hashtable: table too large (more than 2^31 groups)"
     | maxLoadFor g >= n = g
     | otherwise = go (g * 2)
+
+tableTooLarge :: ()
+tableTooLarge = errorWithoutStackTrace "Hashtable: table too large (more than 2^31 groups)"
+{-# NOINLINE tableTooLarge #-}
+
+-- | Probe loops pack the group index into 32 bits (see $probestate), so a
+-- table is capped at 2^31 groups — about 15 billion slots.
+maxGroups :: Int
+maxGroups = 2 ^ (31 :: Int)
 
 ------------------------------------------------------------------------
 -- Hashing
 
-{- | The user's 'hash', finished with a folded multiply (high word xor low
-word of a 64×64→128 product). @hashable@ hashes 'Int' as the identity, so
-without this sequential keys would put every tag in one bucket. Low bits
-pick the home group, the top byte is the tag.
+{- | Finish the user's 'hash' into the word the table uses: low bits pick
+the home group, the top byte is the tag.
+
+@hashable@ hashes 'Int' as the identity, so the word has to be mixed —
+but a full mix throws away the one useful property of dense integer keys,
+that neighbours are looked up together. So the mix is split:
+
+@
+  m = fold (h >> 8)              -- folded 64x64->128 multiply of the high bits
+  w = (h + m) `xor` (h << 56)
+@
+
+Keys in the same 256-aligned block share @m@, so their home groups are
+consecutive (@h + m@) and a dense ID range turns into sequential memory
+traffic the hardware prefetcher can follow. Across blocks, @m@ is a full
+mix, so placement is as random as hashing everything. Two keys of one block
+cannot share a group once the table has 256 groups (their low bits differ);
+below that, keys strided by exactly the group count can share one, at most
+@256 / G@ deep. The tag gets the key's low byte xor'd in, so neighbours in
+a block also get distinct tags (and overflow bits).
 -}
 hashKey# :: Hashable k => k -> Word#
 hashKey# k = case hash k of
-  I# h -> case timesWord2# (int2Word# h) 0x9E3779B97F4A7C15## of
-    (# hi, lo #) -> xor# hi lo
+  I# h' ->
+    let h = int2Word# h'
+     in case timesWord2# (uncheckedShiftRL# h 8#) 0x9E3779B97F4A7C15## of
+          (# hi, lo #) -> xor# (plusWord# h (xor# hi lo)) (uncheckedShiftL# h 56#)
 {-# INLINE hashKey# #-}
 
 {- | Top byte of the mixed hash, remapped into @[2, 255]@. Empty is 0, and
@@ -274,11 +303,23 @@ mustContinue# grp tag = isTrue# (neWord# (and# grp (inline overflowBit# tag)) 0#
 {-# INLINE mustContinue# #-}
 
 {- $probestate
-Probe loops carry the group index and the triangular stride in one word,
-group in the low 32 bits and stride in the high 32 (tables are far below
+Probe loops carry the group index and the step count in one word,
+group in the low 32 bits and steps taken in the high 32 (tables are far below
 2^32 groups): one register instead of two, and the group comes back out
 with a zero-extending 32-bit move.
 -}
+
+{- | Probe step between groups: double hashing with an odd stride from the
+tag, @2·tag + 1@. Odd, so it cycles through every group of a power-of-two
+table. Not triangular @+1, +2, ...@: 'hashKey#' gives neighbouring keys
+neighbouring home groups, and a first step of @+1@ would land an overflow on
+the neighbour's home, cascading at high load and saturating the overflow
+bytes along the run. Neighbours have different tags, so their overflows
+scatter.
+-}
+probeStep# :: Word# -> Int#
+probeStep# tag = word2Int# (or# (uncheckedShiftL# tag 1#) 1##)
+{-# INLINE probeStep# #-}
 
 lowHalf# :: Int# -> Int#
 lowHalf# gs = word2Int# (word32ToWord# (wordToWord32# (int2Word# gs)))
@@ -354,13 +395,12 @@ lookupPos# mask ctrl keys k w s0 = group (word2Int# w `andI#` mask) s0
     | isTrue# (eqWord# m 0##) = case inline loadGroup# ctrl (inline lowHalf# gs) s of
         (# s1, grp #)
           | inline mustContinue# grp (and# pat 0xFF##) ->
-              let stride = uncheckedIShiftRL# gs 32#
-               in if isTrue# (stride ==# mask)
+              let steps = uncheckedIShiftRL# gs 32#
+               in if isTrue# (steps ==# mask)
                     then (# s1, -1# #)
                     else
-                      let stride' = stride +# 1#
-                          g' = (inline lowHalf# gs +# stride') `andI#` mask
-                       in group (g' `orI#` uncheckedIShiftL# stride' 32#) s1
+                      let g' = (inline lowHalf# gs +# inline probeStep# (and# pat 0xFF##)) `andI#` mask
+                       in group (g' `orI#` uncheckedIShiftL# (steps +# 1#) 32#) s1
           | otherwise -> (# s1, -1# #)
     | otherwise =
         let g = inline lowHalf# gs
@@ -376,11 +416,12 @@ overflow bit of every full group walked past. Terminates because a table
 never exceeds 7/8 load.
 -}
 placeWalk# :: Int# -> MutableByteArray# s -> Word# -> State# s -> (# State# s, Int# #)
-placeWalk# mask ctrl w s0 = go (word2Int# w `andI#` mask) 0# s0
+placeWalk# mask ctrl w s0 = go (word2Int# w `andI#` mask) s0
  where
-  ob = inline overflowBit# (inline tagOf# w)
-  obByte = uncheckedShiftRL# ob 56#
-  go g stride s = case inline loadGroup# ctrl g s of
+  tag = inline tagOf# w
+  step = inline probeStep# tag
+  obByte = uncheckedShiftRL# (inline overflowBit# tag) 56#
+  go g s = case inline loadGroup# ctrl g s of
     (# s1, grp #) ->
       let e = inline matchEmpty# grp
        in if isTrue# (neWord# e 0##)
@@ -388,9 +429,8 @@ placeWalk# mask ctrl w s0 = go (word2Int# w `andI#` mask) 0# s0
             else
               let off = CtrlBase +# uncheckedIShiftL# g 3# +# 7#
                   ofl = or# (uncheckedShiftRL# grp 56#) obByte
-                  stride' = stride +# 1#
                in case writeWord8Array# ctrl off (wordToWord8# ofl) s1 of
-                    s2 -> go ((g +# stride') `andI#` mask) stride' s2
+                    s2 -> go ((g +# step) `andI#` mask) s2
 {-# INLINE placeWalk# #-}
 
 -- | Write a full slot. Value first: for 'Strict' storage forcing it may
@@ -431,7 +471,10 @@ growAndPlace# ref t@(Table mask ctrl _ _) w k v s0 =
     (# s1, n #) ->
       let g = mask +# 1#
           g' = case maxLoadFor (I# g) of
-            I# full -> if isTrue# (((n +# 1#) *# 2#) <=# full) then g else g *# 2#
+            I# full
+              | isTrue# (((n +# 1#) *# 2#) <=# full) -> g
+              | isTrue# (g >=# (case maxGroups of I# mg -> mg)) -> case tableTooLarge of () -> g
+              | otherwise -> g *# 2#
        in case rehash# t g' s1 of
             (# s2, t'@(Table mask' ctrl' keys' vals') #) -> case writeMutVar# ref t' s2 of
               s3 -> case placeWalk# mask' ctrl' w s3 of
@@ -520,13 +563,12 @@ frozenLookupSlot# mask ctrl keys k = case inline hashKey# k of
           | isTrue# (eqWord# m 0##) =
               if inline mustContinue# (groupAt gs) (and# pat 0xFF##)
                 then
-                  let stride = uncheckedIShiftRL# gs 32#
-                   in if isTrue# (stride ==# mask)
+                  let steps = uncheckedIShiftRL# gs 32#
+                   in if isTrue# (steps ==# mask)
                         then -1#
                         else
-                          let stride' = stride +# 1#
-                              g' = (inline lowHalf# gs +# stride') `andI#` mask
-                           in group (g' `orI#` uncheckedIShiftL# stride' 32#)
+                          let g' = (inline lowHalf# gs +# inline probeStep# (and# pat 0xFF##)) `andI#` mask
+                           in group (g' `orI#` uncheckedIShiftL# (steps +# 1#) 32#)
                 else -1#
           | otherwise =
               let g = inline lowHalf# gs

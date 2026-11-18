@@ -254,7 +254,7 @@ lookup' ::
 lookup' (Dictionary ref) k = primitive $ \s -> case readMutVar# ref s of
   (# s1, Table mask ctrl kcol vcol #) -> case lookupPos# mask ctrl kcol k (inline hashKey# k) s1 of
     (# s2, p #)
-      | isTrue# (p <# 0#) -> (# s2, keyNotFound #)
+      | isTrue# (p <# 0#) -> keyNotFound `seq` (# s2, keyNotFound #)
       | otherwise -> readM vcol (inline slotOf# p) s2
 {-# INLINE lookup' #-}
 

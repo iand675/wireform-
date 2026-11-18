@@ -92,6 +92,7 @@ invariants d = do
           modifyIORef' seen (Map.insertWith (+) k (1 :: Int))
           let w = W# (hashKey# k)
               want = case w of W# w# -> W# (tagOf# w#)
+              step = fromIntegral (2 * tag + 1) :: Int
           when (want /= tag) $ bad ("tag mismatch for " <> show k)
           let walk h stride steps
                 | h == g = pure ()
@@ -101,8 +102,7 @@ invariants d = do
                     let bit = 1 `unsafeShiftLW` fromIntegral (tag `rem` 8)
                     when (ofl `andW` bit == 0) $
                       bad ("missing overflow bit for " <> show k <> " in group " <> show h)
-                    let stride' = stride + 1
-                    walk ((h + stride') `rem` groups) stride' (steps + 1 :: Int)
+                    walk ((h + step) `rem` groups) stride (steps + 1 :: Int)
           walk (fromIntegral (w `andW` fromIntegral (groups - 1))) 0 0
       counts <- readIORef seen
       let full = sum (Map.elems counts)
@@ -128,6 +128,7 @@ missProbeGroups d k = do
           w = W# (hashKey# k)
           tag = case w of W# w# -> W# (tagOf# w#)
           bit = case tag of W# t# -> W# (uncheckedShiftL# 1## (word2Int# (and# t# 7##)))
+          step = fromIntegral (2 * tag + 1) :: Int
           ofl (I# g) = IO $ \s -> case readWord8Array# ctrl (16# +# uncheckedIShiftL# g 3# +# 7#) s of
             (# s1, b #) -> (# s1, W# (word8ToWord# b) #)
           go h stride n
@@ -136,7 +137,7 @@ missProbeGroups d k = do
                 o <- ofl h
                 if o `andW'` bit == 0
                   then pure n
-                  else let stride' = stride + 1 in go ((h + stride') `rem` groups) stride' (n + 1)
+                  else go ((h + step) `rem` groups) stride (n + 1)
       go (fromIntegral (w `andW'` fromIntegral (groups - 1))) 0 1
  where
   andW' :: Word -> Word -> Word
