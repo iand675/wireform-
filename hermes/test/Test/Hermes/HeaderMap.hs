@@ -3,7 +3,8 @@
 module Test.Hermes.HeaderMap (tests) where
 
 import Data.List.NonEmpty (NonEmpty (..))
-import Network.HTTP.Headers (deleteHeader, headerMapFromList, headerMapToList, insertRawHeader, lookupRawHeader, setRawHeader)
+import Network.HTTP.Headers (deleteHeader, headerMapFromList, headerMapToList, insertRawHeader, lookupHeader, lookupRawHeader, setRawHeader)
+import Network.HTTP.Headers.CacheControl (CacheControl (..), CacheControlDirective (..))
 import Network.HTTP.Headers.HeaderFieldName (hCacheControl)
 import Test.Syd
 
@@ -39,3 +40,12 @@ tests = describe "HeaderMap" $ do
   it "case-variant names collapse into one key" $
     fmap length (lookupRawHeader hCacheControl (headerMapFromList [("cache-control", "a"), ("CACHE-CONTROL", "b")]))
       `shouldBe` Just 2
+
+  -- Typed lookups parse the repeated lines in order, so the directives must come back in wire order.
+  it "typed lookupHeader sees repeated values from headerMapFromList in order" $
+    lookupHeader @CacheControl (headerMapFromList [("cache-control", "no-store"), ("cache-control", "max-age=60")])
+      `shouldBe` Right (Just (CacheControl (NoStore :| [MaxAge 60])))
+
+  it "typed lookupHeader sees repeated raw inserts in order" $
+    lookupHeader @CacheControl (insertRawHeader hCacheControl "max-age=60" (insertRawHeader hCacheControl "no-store" (headerMapFromList [])))
+      `shouldBe` Right (Just (CacheControl (NoStore :| [MaxAge 60])))
