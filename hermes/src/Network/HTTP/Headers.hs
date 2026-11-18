@@ -1,6 +1,5 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableSuperClasses #-}
 
@@ -61,13 +60,17 @@ instance Show HeaderMap where
 
 
 lookupRawHeader :: HeaderFieldName -> HeaderMap -> Maybe (NonEmpty BS.ByteString)
-lookupRawHeader name (HeaderMap m) = fmap NE.reverse $ name `Map.lookup` m
+lookupRawHeader name (HeaderMap m) = fmap inInsertionOrder $ name `Map.lookup` m
+  where
+    -- Most headers have a single value. Return those without reversing.
+    inInsertionOrder vs@(_ NE.:| []) = vs
+    inInsertionOrder vs = NE.reverse vs
 
 
 lookupHeader :: forall a. KnownHeader a => HeaderMap -> Either (ParseFailure a) (Maybe a)
 lookupHeader m = case lookupRawHeader (headerName $ Proxy @a) m of
   Nothing -> Right Nothing
-  Just entries -> case parseFromHeaders defaultHeaderSettings (NE.reverse entries) of
+  Just entries -> case parseFromHeaders defaultHeaderSettings entries of
     Left e -> Left e
     Right a -> Right $ Just a
 
@@ -103,20 +106,15 @@ This is the format used by the @http-types@ and @wai@, so it's useful for
 integrating with those libraries.
 -}
 headerMapFromList :: [(CI BS.ByteString, BS.ByteString)] -> HeaderMap
-headerMapFromList = foldr f (HeaderMap mempty)
+headerMapFromList = HeaderMap . Map.fromListWith (<>) . map toEntry
   where
-    f (name, value) (HeaderMap m) = HeaderMap $ Map.alter g (unsafeUnknownHeaderFromBytestring $ foldedCase name) m
-      where
-        g Nothing = Just $ value NE.:| []
-        g (Just (x NE.:| xs)) = Just $ value NE.:| (x : xs)
+    toEntry (name, value) = (unsafeUnknownHeaderFromBytestring (foldedCase name), value NE.:| [])
 
 
 headerMapToList :: HeaderMap -> [(CI BS.ByteString, BS.ByteString)]
-headerMapToList (HeaderMap m) = concatMap f $ Map.toList m
+headerMapToList (HeaderMap m) = Map.foldrWithKey f [] m
   where
-    f (name, values) =
-      let ciName = toCIByteString name
-      in map (ciName,) $ NE.toList values
+    f name values acc = foldl' (\out v -> (toCIByteString name, v) : out) acc values
 
 
 data HeaderCardinality = ZeroOrOne | One | ZeroOrMore | OneOrMore
