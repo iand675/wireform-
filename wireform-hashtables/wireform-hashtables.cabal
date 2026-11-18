@@ -1,0 +1,91 @@
+cabal-version: 3.0
+name: wireform-hashtables
+version: 0.1.0.0
+synopsis: Fast mutable open-addressing hash tables
+description:
+  Mutable hash tables with the API shape of @vector-hashtables@ on a
+  Boost @unordered_flat_map@-style engine: 64-bit SWAR group words of seven
+  8-bit tags plus an overflow Bloom byte, no tombstones, unlifted storage
+  columns ('Hashtable.Storage.Unboxed' / 'Hashtable.Storage.Strict' /
+  'Hashtable.Storage.Boxed') and a one-hop handle. See "Hashtable".
+homepage: https://github.com/iand675/wireform-
+bug-reports: https://github.com/iand675/wireform-/issues
+license: BSD-3-Clause
+license-file: LICENSE
+author: Ian Duncan
+maintainer: ian@iankduncan.com
+copyright: 2026 Ian Duncan
+category: Data, Data Structures
+build-type: Simple
+tested-with: GHC == 9.10.3, GHC == 9.12.4, GHC == 9.14.1
+extra-doc-files: README.md
+
+source-repository head
+  type:     git
+  location: https://github.com/iand675/wireform-
+
+common defaults
+  default-language: GHC2021
+  ghc-options:
+    -Wall
+    -Wcompat
+    -Widentities
+    -Wincomplete-record-updates
+    -Wincomplete-uni-patterns
+    -Wpartial-fields
+    -Wredundant-constraints
+    -O2
+  default-extensions:
+    BangPatterns
+    LambdaCase
+    DerivingStrategies
+
+library
+  import: defaults
+  hs-source-dirs: src
+  exposed-modules:
+    Hashtable
+    Hashtable.Internal
+    Hashtable.Storage
+  build-depends:
+    base >= 4.20 && < 5,
+    primitive >= 0.9 && < 0.10,
+    hashable >= 1.4 && < 1.6,
+    vector >= 0.13 && < 0.14
+
+test-suite wireform-hashtables-test
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is: Main.hs
+  ghc-options: -threaded -rtsopts "-with-rtsopts=-N"
+  build-depends:
+    base >= 4.20 && < 5,
+    wireform-hashtables,
+    containers >= 0.6 && < 0.9,
+    hashable >= 1.4 && < 1.6,
+    primitive >= 0.9 && < 0.10,
+    vector >= 0.13 && < 0.14,
+    hedgehog >= 1.4 && < 1.8,
+    sydtest,
+    sydtest-hedgehog
+
+benchmark wireform-hashtables-bench
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: bench
+  main-is: Main.hs
+  ghc-options: -rtsopts "-with-rtsopts=-A64m"
+  build-depends:
+    base >= 4.20 && < 5,
+    wireform-hashtables,
+    containers >= 0.6 && < 0.9,
+    criterion >= 1.6 && < 1.7,
+    deepseq >= 1.4 && < 1.6,
+    hashable >= 1.4 && < 1.6,
+    hashtables >= 1.3 && < 1.5,
+    primitive >= 0.9 && < 0.10,
+    text >= 2.1 && < 2.2,
+    unordered-containers >= 0.2.19 && < 0.3,
+    vector >= 0.13 && < 0.14,
+    vector-hashtables >= 0.1.2 && < 0.2
