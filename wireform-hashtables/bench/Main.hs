@@ -115,6 +115,10 @@ insertSuite label capFor n ks =
   bgroup
     (label <> "/" <> kName ks <> "/" <> show n)
     [ bench "wireform-hashtables" $ whnfIO (WHNF <$> buildOurs (capFor n) (kHit ks))
+    , bench "wireform-hashtables-batch" $ whnfIO $ do
+        t <- H.initialize (capFor n) :: IO Ours
+        H.insertBatch t (kHit ks) (kHit ks)
+        pure (WHNF t)
     , bench "vector-hashtables" $ whnfIO (WHNF <$> buildVH (capFor n) (kHit ks))
     , bench "hashtables-basic" $ whnfIO (WHNF <$> buildBasic (capFor n) (kHit ks))
     , bench "hashtables-cuckoo" $ whnfIO (WHNF <$> buildCuckoo (capFor n) (kHit ks))
@@ -141,6 +145,7 @@ lookupSuite label probe n ks =
      in bgroup
           (label <> "/" <> kName ks <> "/" <> show n)
           [ bench "wireform-hashtables" $ whnfIO $ sumKeys qs (H.findWithDefault o 0)
+          , bench "wireform-hashtables-batch" $ whnfIO $ U.sum <$> (H.lookupBatch o 0 qs :: IO (U.Vector Int))
           , bench "vector-hashtables" $ whnfIO $ sumKeys qs (\k -> maybe 0 id <$> VH.lookup v k)
           , bench "hashtables-basic" $ whnfIO $ sumKeys qs (\k -> maybe 0 id <$> HT.lookup b k)
           , bench "hashtables-cuckoo" $ whnfIO $ sumKeys qs (\k -> maybe 0 id <$> HT.lookup c k)
@@ -181,6 +186,10 @@ upsertSuite n ks =
         [ bench "wireform-hashtables" $ whnfIO $ do
             t <- H.new :: IO Ours
             forKeys xs (H.upsert t (maybe 1 (+ 1)))
+            WHNF <$> pure t
+        , bench "wireform-hashtables-batch" $ whnfIO $ do
+            t <- H.new :: IO Ours
+            H.upsertBatch t (maybe 1 (+ 1)) xs
             WHNF <$> pure t
         , bench "vector-hashtables" $ whnfIO $ do
             t <- VH.initialize 0 :: IO VHT

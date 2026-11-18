@@ -51,14 +51,17 @@ module Hashtable
 
     -- * Construction
   , initialize
+  , newSized
   , new
   , clone
   , reserve
+  , clear
 
     -- * Size
   , null
   , size
   , length
+  , capacity
 
     -- * Queries
   , lookup
@@ -73,10 +76,25 @@ module Hashtable
     -- * Updates
   , insert
   , insertWith
+  , insertIfAbsent
   , delete
+  , adjust
+  , adjustM
+  , update
   , upsert
   , alter
   , alterM
+  , mutate
+  , mutateM
+
+    -- * Bulk in-place updates
+  , mapInPlace
+  , filterInPlace
+
+    -- * Batched operations (software-prefetched)
+  , lookupBatch
+  , insertBatch
+  , upsertBatch
 
     -- * Traversal
   , foldM
@@ -97,6 +115,7 @@ module Hashtable
     -- * Lists
   , fromList
   , fromListN
+  , fromListWith
   , toList
 
     -- * Freezing
@@ -121,6 +140,7 @@ import Control.Monad.Primitive (PrimMonad (..), primitive_)
 import Data.Hashable (Hashable)
 import qualified Data.Vector.Generic as G
 import qualified Data.Vector.Generic.Mutable as GM
+import Data.Primitive.PrimArray (newPrimArray, readPrimArray, writePrimArray)
 import GHC.Exts hiding (fromList, fromListN, toList)
 import Hashtable.Internal
 import Hashtable.Storage
@@ -138,6 +158,13 @@ initialize n = primitive $ \s -> case groupsFor n of
     (# s1, t #) -> case newMutVar# t s1 of
       (# s2, ref #) -> (# s2, Dictionary ref #)
 {-# INLINE initialize #-}
+
+-- | Alias for 'initialize' (the @hashtables@ name).
+newSized ::
+  (PrimMonad m, Storage ks k, Storage vs v) =>
+  Int -> m (Dictionary (PrimState m) ks k vs v)
+newSized = initialize
+{-# INLINE newSized #-}
 
 -- | An empty table (room for 6 entries).
 new :: (PrimMonad m, Storage ks k, Storage vs v) => m (Dictionary (PrimState m) ks k vs v)
@@ -168,6 +195,16 @@ reserve (Dictionary ref) (I# want) = primitive_ $ \s -> case readMutVar# ref s o
             (# s3, t' #) -> writeMutVar# ref t' s3
 {-# INLINE reserve #-}
 
+-- | Remove every entry, keeping the current capacity. Boxed columns are
+-- replaced, so nothing they referenced stays reachable.
+clear ::
+  (PrimMonad m, Storage ks k, Storage vs v) =>
+  Dictionary (PrimState m) ks k vs v -> m ()
+clear (Dictionary ref) = primitive_ $ \s -> case readMutVar# ref s of
+  (# s1, Table mask _ _ _ #) -> case newTable# (mask +# 1#) s1 of
+    (# s2, t #) -> writeMutVar# ref t s2
+{-# INLINE clear #-}
+
 ------------------------------------------------------------------------
 -- Size
 
@@ -181,6 +218,16 @@ size (Dictionary ref) = primitive $ \s -> case readMutVar# ref s of
 length :: PrimMonad m => Dictionary (PrimState m) ks k vs v -> m Int
 length = size
 {-# INLINE length #-}
+
+{- | Entries the table can hold before its next rehash (live entries plus
+remaining headroom). At most 7/8 of the slot count; deletions from
+overflowed groups lower it until the next rehash (see "Hashtable.Internal").
+-}
+capacity :: PrimMonad m => Dictionary (PrimState m) ks k vs v -> m Int
+capacity (Dictionary ref) = primitive $ \s -> case readMutVar# ref s of
+  (# s1, Table _ ctrl _ _ #) -> case readMaxLoad# ctrl s1 of
+    (# s2, ml #) -> (# s2, I# ml #)
+{-# INLINE capacity #-}
 
 null :: PrimMonad m => Dictionary (PrimState m) ks k vs v -> m Bool
 null d = (== 0) <$> size d
@@ -303,6 +350,19 @@ insertWith f (Dictionary ref) k v = primitive_ $ \s -> case readMutVar# ref s of
             | otherwise -> insertAbsent# ref t w k v s2
 {-# INLINE insertWith #-}
 
+-- | Insert only if the key is absent. 'True' if it was inserted.
+insertIfAbsent ::
+  (PrimMonad m, Hashable k, Storage ks k, Storage vs v) =>
+  Dictionary (PrimState m) ks k vs v -> k -> v -> m Bool
+insertIfAbsent (Dictionary ref) k v = primitive $ \s -> case readMutVar# ref s of
+  (# s1, t@(Table mask ctrl kcol _) #) ->
+    let w = hashKey# k
+     in case lookupPos# mask ctrl kcol k w s1 of
+          (# s2, r #)
+            | isTrue# (r >=# 0#) -> (# s2, False #)
+            | otherwise -> (# insertAbsent# ref t w k v s2, True #)
+{-# INLINE insertIfAbsent #-}
+
 delete ::
   (PrimMonad m, Hashable k, Storage ks k, Storage vs v) =>
   Dictionary (PrimState m) ks k vs v -> k -> m ()
@@ -312,6 +372,47 @@ delete (Dictionary ref) k = primitive_ $ \s -> case readMutVar# ref s of
       | isTrue# (p <# 0#) -> s2
       | otherwise -> deleteAtPos# t p s2
 {-# INLINE delete #-}
+
+-- | @adjust t f k@ replaces the value at @k@ with @f@ of it; absent keys
+-- are left alone. One probe.
+adjust ::
+  (PrimMonad m, Hashable k, Storage ks k, Storage vs v) =>
+  Dictionary (PrimState m) ks k vs v -> (v -> v) -> k -> m ()
+adjust (Dictionary ref) f k = primitive_ $ \s -> case readMutVar# ref s of
+  (# s1, Table mask ctrl kcol vcol #) -> case lookupPos# mask ctrl kcol k (hashKey# k) s1 of
+    (# s2, p #)
+      | isTrue# (p <# 0#) -> s2
+      | otherwise ->
+          let i = slotOf# p
+           in case readM vcol i s2 of
+                (# s3, old #) -> writeM vcol i (f old) s3
+{-# INLINE adjust #-}
+
+-- | Monadic 'adjust'. Like 'alterM', the key is looked up again after the
+-- callback, which may use the table; if the callback deleted the key, the
+-- new value is inserted.
+adjustM ::
+  (PrimMonad m, Hashable k, Storage ks k, Storage vs v) =>
+  Dictionary (PrimState m) ks k vs v -> (v -> m v) -> k -> m ()
+adjustM d f = alterM d (traverse f)
+{-# INLINE adjustM #-}
+
+-- | @update t f k@: like 'adjust', but 'Nothing' from @f@ deletes. One
+-- probe.
+update ::
+  (PrimMonad m, Hashable k, Storage ks k, Storage vs v) =>
+  Dictionary (PrimState m) ks k vs v -> (v -> Maybe v) -> k -> m ()
+update (Dictionary ref) f k = primitive_ $ \s -> case readMutVar# ref s of
+  (# s1, t@(Table mask ctrl kcol vcol) #) -> case lookupPos# mask ctrl kcol k (hashKey# k) s1 of
+    (# s2, p #)
+      | isTrue# (p <# 0#) -> s2
+      | otherwise ->
+          let i = slotOf# p
+           in case readM vcol i s2 of
+                (# s3, old #) -> case f old of
+                  Nothing -> deleteAtPos# t p s3
+                  Just new' -> writeM vcol i new' s3
+{-# INLINE update #-}
 
 -- | @upsert t f k@ stores @f (lookup k)@ at @k@. One probe.
 upsert ::
@@ -351,6 +452,45 @@ alter (Dictionary ref) f k = primitive_ $ \s -> case readMutVar# ref s of
                 Just new' -> insertAbsent# ref t w k new' s2
 {-# INLINE alter #-}
 
+{- | @mutate t f k@: 'alter' that also returns a result, the shape of
+@hashtables@' @mutate@ (with this module's table-function-key argument
+order). One probe.
+-}
+mutate ::
+  (PrimMonad m, Hashable k, Storage ks k, Storage vs v) =>
+  Dictionary (PrimState m) ks k vs v -> (Maybe v -> (Maybe v, a)) -> k -> m a
+mutate (Dictionary ref) f k = primitive $ \s -> case readMutVar# ref s of
+  (# s1, t@(Table mask ctrl kcol vcol) #) ->
+    let w = hashKey# k
+     in case lookupPos# mask ctrl kcol k w s1 of
+          (# s2, r #)
+            | isTrue# (r >=# 0#) ->
+                let i = slotOf# r
+                 in case readM vcol i s2 of
+                      (# s3, old #) -> case f (Just old) of
+                        (Nothing, a) -> (# deleteAtPos# t r s3, a #)
+                        (Just new', a) -> (# writeM vcol i new' s3, a #)
+            | otherwise -> case f Nothing of
+                (Nothing, a) -> (# s2, a #)
+                (Just new', a) -> (# insertAbsent# ref t w k new' s2, a #)
+{-# INLINE mutate #-}
+
+-- | Monadic 'mutate'; looks the key up again after the callback, like
+-- 'alterM'.
+mutateM ::
+  (PrimMonad m, Hashable k, Storage ks k, Storage vs v) =>
+  Dictionary (PrimState m) ks k vs v -> (Maybe v -> m (Maybe v, a)) -> k -> m a
+mutateM d f k = do
+  old <- lookup d k
+  (r, a) <- f old
+  case r of
+    Just v -> insert d k v
+    Nothing -> case old of
+      Nothing -> pure ()
+      Just _ -> delete d k
+  pure a
+{-# INLINE mutateM #-}
+
 {- | Monadic 'alter'. The callback may itself use the table, so the key is
 looked up again after it returns: two probes, always correct.
 -}
@@ -366,6 +506,199 @@ alterM d f k = do
       Nothing -> pure ()
       Just _ -> delete d k
 {-# INLINE alterM #-}
+
+------------------------------------------------------------------------
+-- Bulk in-place updates
+
+-- | Every position of a full slot, in slot order, at the 'State#' level.
+-- For pure per-entry work: no user code can touch the table meanwhile.
+forFullPositions# ::
+  Table s ks k vs v -> (Int# -> State# s -> State# s) -> State# s -> State# s
+forFullPositions# (Table mask ctrl _ _) f = groups 0#
+ where
+  groups g s
+    | isTrue# (g ># mask) = s
+    | otherwise = case inline loadGroup# ctrl g s of
+        (# s1, grp #) -> laneLoop g (inline matchFull# grp) s1
+  laneLoop g m s
+    | isTrue# (eqWord# m 0##) = groups (g +# 1#) s
+    | otherwise = case f (inline lanePos# g m) s of
+        s1 -> laneLoop g (and# m (minusWord# m 1##)) s1
+{-# INLINE forFullPositions# #-}
+
+-- | Replace every value with @f key value@.
+mapInPlace ::
+  (PrimMonad m, Storage ks k, Storage vs v) =>
+  Dictionary (PrimState m) ks k vs v -> (k -> v -> v) -> m ()
+mapInPlace (Dictionary ref) f = primitive_ $ \s -> case readMutVar# ref s of
+  (# s1, t@(Table _ _ kcol vcol) #) -> forFullPositions# t
+    ( \p s2 ->
+        let i = inline slotOf# p
+         in case readM kcol i s2 of
+              (# s3, k #) -> case readM vcol i s3 of
+                (# s4, v #) -> writeM vcol i (f k v) s4
+    )
+    s1
+{-# INLINE mapInPlace #-}
+
+-- | Delete every entry for which the predicate is 'False'. Never rehashes.
+filterInPlace ::
+  (PrimMonad m, Storage ks k, Storage vs v) =>
+  Dictionary (PrimState m) ks k vs v -> (k -> v -> Bool) -> m ()
+filterInPlace (Dictionary ref) keep = primitive_ $ \s -> case readMutVar# ref s of
+  (# s1, t@(Table _ _ kcol vcol) #) -> forFullPositions# t
+    ( \p s2 ->
+        let i = inline slotOf# p
+         in case readM kcol i s2 of
+              (# s3, k #) -> case readM vcol i s3 of
+                (# s4, v #) -> if keep k v then s4 else deleteAtPos# t p s4
+    )
+    s1
+{-# INLINE filterInPlace #-}
+
+------------------------------------------------------------------------
+-- Batched operations
+
+{- $batch
+Batched operations run the keys through a three-stage software pipeline so
+that, on tables too big for cache, memory latency overlaps across many keys
+instead of being paid one probe at a time:
+
+  * at @i + 2·D@: hash the key into a small ring, prefetch its home group;
+  * at @i + D@: match the (now cached) group word and prefetch the exact key
+    and value lines the probe will touch;
+  * at @i@: the probe itself, against warm lines.
+
+Each key is hashed once. On tables that fit in cache the pipeline is pure
+overhead, so below 'batchThreshold' groups it falls back to the plain loop.
+-}
+
+-- | Pipeline distance @D@ (keys). Two stages in flight keep about @2·D@
+-- lines outstanding, inside a core's line-fill buffers.
+batchDistance :: Int
+batchDistance = 8
+
+-- | Group count from which batches prefetch: 2^15 groups, about 229k
+-- slots (~4 MB of 'Int'/'Int' table, past a core's L2). Below it the
+-- table is cache-resident and the pipeline is pure overhead (measured: 1.5×
+-- slower at 100k entries, 2× faster at 1M and 16M).
+batchThreshold :: Int
+batchThreshold = 32768
+
+-- | Hash ring: a power of two strictly greater than the @2·D@ keys in
+-- flight, or stage A would overwrite a hash before stage C reads it.
+ringMask :: Int
+ringMask = go 1 - 1
+ where
+  go r
+    | r > 2 * batchDistance = r
+    | otherwise = go (r * 2)
+
+{- | Drive @step i w@ over @[0, n)@ (@w@ is key @i@'s hash), prefetching
+@D@ and @2·D@ keys ahead when the table is big. One loop with a
+loop-invariant (perfectly predicted) branch, rather than two loops, so
+@step@ has a single call site and is inlined into it. @key i@ must be
+cheap (an index).
+-}
+batched ::
+  (PrimMonad m, Hashable k, Storage ks k, Storage vs v) =>
+  Bool -> Dictionary (PrimState m) ks k vs v -> Int -> (Int -> k) -> (Int -> Word -> m ()) -> m ()
+batched forInsert d@(Dictionary ref) n key step = do
+  pipelined <- (&& n > 2 * batchDistance) <$> bigTable d
+  ring <- newPrimArray (if pipelined then ringMask + 1 else 0)
+  let dist = batchDistance
+      !(I# rm) = ringMask
+      stageA j = do
+        let !w@(W# w#) = hashW (key j)
+        writePrimArray ring (I# (andI# (case j of I# j# -> j#) rm)) w
+        primitive_ $ \s -> case readMutVar# ref s of
+          (# s1, Table mask ctrl _ _ #) -> prefetchHome# mask ctrl w# s1
+      stageB j = do
+        W# w# <- readPrimArray ring (I# (andI# (case j of I# j# -> j#) rm))
+        primitive_ $ \s -> case readMutVar# ref s of
+          (# s1, t #) -> prefetchSlot# forInsert t w# s1
+      prime j
+        | j >= min n (2 * dist) = pure ()
+        | otherwise = stageA j >> prime (j + 1)
+      go i
+        | i >= n = pure ()
+        | otherwise = do
+            w <-
+              if pipelined
+                then do
+                  if i + 2 * dist < n then stageA (i + 2 * dist) else pure ()
+                  if i + dist < n then stageB (i + dist) else pure ()
+                  readPrimArray ring (I# (andI# (case i of I# i# -> i#) rm))
+                else pure (hashW (key i))
+            step i w
+            go (i + 1)
+  if pipelined then prime 0 else pure ()
+  go 0
+{-# INLINE batched #-}
+
+-- | Hash a key outside the pipeline.
+hashW :: Hashable k => k -> Word
+hashW k = W# (hashKey# k)
+{-# INLINE hashW #-}
+
+bigTable :: PrimMonad m => Dictionary (PrimState m) ks k vs v -> m Bool
+bigTable (Dictionary ref) = primitive $ \s -> case readMutVar# ref s of
+  (# s1, Table mask _ _ _ #) -> (# s1, isTrue# (mask >=# (case batchThreshold of I# b -> b -# 1#)) #)
+{-# INLINE bigTable #-}
+
+-- | Like 'findWithDefault' for every key of a vector, pipelined.
+lookupBatch ::
+  (PrimMonad m, Hashable k, Storage ks k, Storage vs v, G.Vector kv k, G.Vector vv v) =>
+  Dictionary (PrimState m) ks k vs v -> v -> kv k -> m (vv v)
+lookupBatch d@(Dictionary ref) def ks = do
+  let n = G.length ks
+  out <- GM.unsafeNew n
+  batched False d n (G.unsafeIndex ks) $ \i (W# w) -> do
+    let !k = G.unsafeIndex ks i
+    v <- primitive $ \s -> case readMutVar# ref s of
+      (# s1, Table mask ctrl kcol vcol #) -> case lookupPos# mask ctrl kcol k w s1 of
+        (# s2, p #)
+          | isTrue# (p <# 0#) -> (# s2, def #)
+          | otherwise -> readM vcol (slotOf# p) s2
+    GM.unsafeWrite out i v
+  G.unsafeFreeze out
+{-# INLINE lookupBatch #-}
+
+-- | 'insert' every pair of two vectors (up to the shorter), pipelined.
+-- Later duplicates win.
+insertBatch ::
+  (PrimMonad m, Hashable k, Storage ks k, Storage vs v, G.Vector kv k, G.Vector vv v) =>
+  Dictionary (PrimState m) ks k vs v -> kv k -> vv v -> m ()
+insertBatch d@(Dictionary ref) ks vs = do
+  let n = min (G.length ks) (G.length vs)
+  reserve d . (+ n) =<< size d
+  batched True d n (G.unsafeIndex ks) $ \i (W# w) -> do
+    let !k = G.unsafeIndex ks i
+        v = G.unsafeIndex vs i
+    primitive_ $ \s -> case readMutVar# ref s of
+      (# s1, t@(Table mask ctrl kcol vcol) #) -> case lookupPos# mask ctrl kcol k w s1 of
+        (# s2, r #)
+          | isTrue# (r >=# 0#) -> writeM vcol (slotOf# r) v s2
+          | otherwise -> insertAbsent# ref t w k v s2
+{-# INLINE insertBatch #-}
+
+-- | 'upsert' every key of a vector, pipelined: e.g. a histogram is
+-- @upsertBatch t (maybe 1 (+ 1)) keys@.
+upsertBatch ::
+  (PrimMonad m, Hashable k, Storage ks k, Storage vs v, G.Vector kv k) =>
+  Dictionary (PrimState m) ks k vs v -> (Maybe v -> v) -> kv k -> m ()
+upsertBatch d@(Dictionary ref) f ks =
+  batched True d (G.length ks) (G.unsafeIndex ks) $ \i (W# w) -> do
+    let !k = G.unsafeIndex ks i
+    primitive_ $ \s -> case readMutVar# ref s of
+      (# s1, t@(Table mask ctrl kcol vcol) #) -> case lookupPos# mask ctrl kcol k w s1 of
+        (# s2, r #)
+          | isTrue# (r >=# 0#) ->
+              let j = slotOf# r
+               in case readM vcol j s2 of
+                    (# s3, old #) -> writeM vcol j (f (Just old)) s3
+          | otherwise -> insertAbsent# ref t w k (f Nothing) s2
+{-# INLINE upsertBatch #-}
 
 ------------------------------------------------------------------------
 -- Traversal
@@ -474,6 +807,17 @@ fromListN n kvs = do
   foldr (\(k, v) r -> insert d k v >> r) (pure ()) kvs
   pure d
 {-# INLINE fromListN #-}
+
+-- | Duplicate keys are combined with @f new old@ (as
+-- @Data.HashMap.Strict.fromListWith@).
+fromListWith ::
+  (PrimMonad m, Hashable k, Storage ks k, Storage vs v) =>
+  (v -> v -> v) -> [(k, v)] -> m (Dictionary (PrimState m) ks k vs v)
+fromListWith f kvs = do
+  d <- initialize 0
+  foldr (\(k, v) r -> insertWith f d k v >> r) (pure ()) kvs
+  pure d
+{-# INLINE fromListWith #-}
 
 toList ::
   (PrimMonad m, Storage ks k, Storage vs v) =>

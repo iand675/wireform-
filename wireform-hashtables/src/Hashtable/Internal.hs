@@ -110,6 +110,9 @@ module Hashtable.Internal
   , rehash#
   , cloneTable#
   , frozenLookupSlot#
+    -- * Prefetch
+  , prefetchHome#
+  , prefetchSlot#
   ) where
 
 import Control.Monad.Primitive (PrimMonad (..))
@@ -534,3 +537,38 @@ frozenLookupSlot# mask ctrl keys k = case inline hashKey# k of
                       | otherwise -> scan gs (and# m (minusWord# m 1##))
      in group (word2Int# w `andI#` mask)
 {-# INLINE frozenLookupSlot# #-}
+
+------------------------------------------------------------------------
+-- Prefetch
+
+-- | Stage A of a batch pipeline: prefetch the key's home group word.
+prefetchHome# :: Int# -> MutableByteArray# s -> Word# -> State# s -> State# s
+prefetchHome# mask ctrl w =
+  prefetchMutableByteArray3# ctrl (CtrlBase +# uncheckedIShiftL# (word2Int# w `andI#` mask) 3#)
+{-# INLINE prefetchHome# #-}
+
+{- | Stage B: with the home group word (hopefully) in cache, prefetch the
+key and value lines the probe will actually touch: the first tag match,
+or, when @forInsert@, the first empty lane (where an insert will write).
+A lookup that will miss prefetches nothing — a miss only needs @ctrl@, and
+dragging dead key/value lines in would just burn memory bandwidth.
+-}
+prefetchSlot# ::
+  (Storage ks k, Storage vs v) =>
+  Bool -> Table s ks k vs v -> Word# -> State# s -> State# s
+prefetchSlot# forInsert (Table mask ctrl keys vals) w s0 =
+  let g = word2Int# w `andI#` mask
+   in case inline loadGroup# ctrl g s0 of
+        (# s1, grp #) ->
+          let m = inline matchTag# grp (timesWord# (inline tagOf# w) Lanes)
+              m'
+                | isTrue# (neWord# m 0##) = m
+                | forInsert = inline matchEmpty# grp
+                | otherwise = 0##
+           in if isTrue# (eqWord# m' 0##)
+                then s1
+                else
+                  let i = g *# 7# +# word2Int# (uncheckedShiftRL# (ctz# m') 3#)
+                   in case prefetchM keys i s1 of
+                        s2 -> prefetchM vals i s2
+{-# INLINE prefetchSlot# #-}

@@ -8,6 +8,13 @@
 Module      : Hashtable.Storage
 Description : Per-column element storage for "Hashtable".
 
+Boxed columns are prefetched through the byte-array prefetch primop: a
+@MutableArray#@'s payload starts one word further from the object than a
+@MutableByteArray#@'s (@StgMutArrPtrs@ carries @ptrs@ and @size@), so slot
+@i@ is at byte offset @8 + 8i@ in byte-array terms. A prefetch never
+faults, so the coercion is harmless even if a layout ever changed — it
+would only make the hint useless.
+
 A table keeps its keys and its values in two separate flat arrays. How each
 array stores its elements is chosen independently by a /storage tag/, the
 same role the @ks@ / @vs@ vector-type parameters play in
@@ -89,6 +96,10 @@ class Storage r a where
 
   unsafeThawI :: IArr r a -> State# s -> (# State# s, MArr r s a #)
 
+  -- | Hint that slot @i@ will be touched soon (a @prefetcht0@). Never
+  -- faults, whatever the index.
+  prefetchM :: MArr r s a -> Int# -> State# s -> State# s
+
   -- | Index a frozen column. The unboxed 1-tuple lets the caller force the
   -- read without forcing the element (no thunk around the array access).
   indexI :: IArr r a -> Int# -> (# a #)
@@ -105,6 +116,7 @@ instance Storage Boxed a where
   readM (MBoxed a) = readArray# a
   writeM (MBoxed a) = writeArray# a
   clearM (MBoxed a) i = writeArray# a i deadSlot
+  prefetchM (MBoxed a) i = prefetchMutableByteArray3# (unsafeCoerce# a) (8# +# uncheckedIShiftL# i 3#)
   cloneM (MBoxed a) n s = case cloneMutableArray# a 0# n s of (# s1, b #) -> (# s1, MBoxed b #)
   unsafeFreezeM (MBoxed a) s = case unsafeFreezeArray# a s of (# s1, b #) -> (# s1, IBoxed b #)
   unsafeThawI (IBoxed a) s = case unsafeThawArray# a s of (# s1, b #) -> (# s1, MBoxed b #)
@@ -113,6 +125,7 @@ instance Storage Boxed a where
   {-# INLINE readM #-}
   {-# INLINE writeM #-}
   {-# INLINE clearM #-}
+  {-# INLINE prefetchM #-}
   {-# INLINE cloneM #-}
   {-# INLINE unsafeFreezeM #-}
   {-# INLINE unsafeThawI #-}
@@ -125,6 +138,7 @@ instance Storage Strict a where
   readM (MStrict a) = readArray# a
   writeM (MStrict a) i !x = writeArray# a i x
   clearM (MStrict a) i = writeArray# a i deadSlot
+  prefetchM (MStrict a) i = prefetchMutableByteArray3# (unsafeCoerce# a) (8# +# uncheckedIShiftL# i 3#)
   cloneM (MStrict a) n s = case cloneMutableArray# a 0# n s of (# s1, b #) -> (# s1, MStrict b #)
   unsafeFreezeM (MStrict a) s = case unsafeFreezeArray# a s of (# s1, b #) -> (# s1, IStrict b #)
   unsafeThawI (IStrict a) s = case unsafeThawArray# a s of (# s1, b #) -> (# s1, MStrict b #)
@@ -133,6 +147,7 @@ instance Storage Strict a where
   {-# INLINE readM #-}
   {-# INLINE writeM #-}
   {-# INLINE clearM #-}
+  {-# INLINE prefetchM #-}
   {-# INLINE cloneM #-}
   {-# INLINE unsafeFreezeM #-}
   {-# INLINE unsafeThawI #-}
@@ -149,6 +164,7 @@ instance Prim a => Storage Unboxed a where
   readM (MUnboxed a) = readByteArray# a
   writeM (MUnboxed a) = writeByteArray# a
   clearM _ _ s = s
+  prefetchM (MUnboxed a) i = prefetchMutableByteArray3# a (i *# sizeOf# (undefined :: a))
   cloneM (MUnboxed a) n s =
     let bytes = n *# sizeOf# (undefined :: a)
      in case newByteArray# bytes s of
@@ -161,6 +177,7 @@ instance Prim a => Storage Unboxed a where
   {-# INLINE readM #-}
   {-# INLINE writeM #-}
   {-# INLINE clearM #-}
+  {-# INLINE prefetchM #-}
   {-# INLINE cloneM #-}
   {-# INLINE unsafeFreezeM #-}
   {-# INLINE unsafeThawI #-}

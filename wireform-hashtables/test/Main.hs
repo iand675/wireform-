@@ -37,6 +37,18 @@ instance Hashable Collide where
   hashWithSalt _ _ = 0
   hash _ = 0
 
+-- | A boxed key with an ordinary hash.
+newtype Weak' = Weak' Int deriving stock (Eq, Ord, Show)
+
+instance Hashable Weak' where
+  hashWithSalt s (Weak' k) = hashWithSalt s k
+
+shouldReturnM :: (Show a, Eq a) => IO a -> IO a -> IO ()
+shouldReturnM act want = do
+  x <- act
+  y <- want
+  x `shouldBe` y
+
 -- | Only five distinct hashes.
 newtype Weak = Weak Int deriving stock (Eq, Ord, Show)
 
@@ -157,6 +169,10 @@ data Op k
   | Lookup k
   | Reserve Int
   | CloneCheck k Int
+  | Adjust k
+  | UpdateOp k
+  | Mutate k Int
+  | InsertIfAbsent k Int
   deriving stock (Show)
 
 genOps :: Gen k -> Gen [Op k]
@@ -174,6 +190,10 @@ genOps key =
       , (6, Lookup <$> key)
       , (1, Reserve <$> Gen.int (Range.linear 0 300))
       , (1, CloneCheck <$> key <*> val)
+      , (3, Adjust <$> key)
+      , (3, UpdateOp <$> key)
+      , (3, Mutate <$> key <*> val)
+      , (3, InsertIfAbsent <$> key <*> val)
       ]
  where
   val = Gen.int (Range.linear (-1000) 1000)
@@ -218,6 +238,23 @@ runModel t = go Map.empty
       evalIO (H.reserve t n)
       assertInvariants t
       pure model
+    Adjust k -> evalIO (H.adjust t (* 3) k) >> pure (Map.adjust (* 3) k model)
+    UpdateOp k -> do
+      let f v = if even v then Nothing else Just (v + 1)
+      evalIO (H.update t f k)
+      pure (Map.update f k model)
+    Mutate k v -> do
+      -- delete if present and odd, bump if even, insert v if absent; report presence
+      let f = \case
+            Nothing -> (Just v, False)
+            Just old -> (if odd old then Nothing else Just (old + v), True)
+      present <- evalIO (H.mutate t f k)
+      present === Map.member k model
+      pure (Map.alter (fst . f) k model)
+    InsertIfAbsent k v -> do
+      inserted <- evalIO (H.insertIfAbsent t k v)
+      inserted === not (Map.member k model)
+      pure (Map.insertWith (\_ old -> old) k v model)
     CloneCheck k v -> do
       c <- evalIO (H.clone t)
       evalIO (H.insert t k v)
@@ -390,6 +427,79 @@ main = sydTest $ do
       -- inputs untouched
       xa <- evalIO (H.toList a)
       sort xa === Map.toList ma
+
+  describe "bulk in-place updates" $ do
+    it "mapInPlace / filterInPlace / clear / capacity / fromListWith agree with Data.Map" $ property $ do
+      kvs <- forAll (Gen.list (Range.linear 0 3000) ((,) <$> Gen.int (Range.linear 0 4000) <*> Gen.int (Range.linear 0 99)))
+      t <- evalIO (H.fromListWith (+) kvs :: IO (Dictionary RealWorld Unboxed Int Strict Int))
+      let model = Map.fromListWith (+) kvs
+      xs <- evalIO (H.toList t)
+      sort xs === Map.toList model
+      evalIO (H.mapInPlace t (\k v -> k - v))
+      let model' = Map.mapWithKey (\k v -> k - v) model
+      evalIO (H.filterInPlace t (\k v -> even (k + v)))
+      let model'' = Map.filterWithKey (\k v -> even (k + v)) model'
+      ys <- evalIO (H.toList t)
+      sort ys === Map.toList model''
+      assertInvariants t
+      cap <- evalIO (H.capacity t)
+      n <- evalIO (H.size t)
+      diff n (<=) cap
+      g <- evalIO (groupCount t)
+      evalIO (H.clear t)
+      evalIO (H.size t) >>= (=== 0)
+      evalIO (groupCount t) >>= (=== g)
+      evalIO (H.toList t) >>= (=== [])
+      evalIO (H.insert t 1 1)
+      evalIO (H.lookup t 1) >>= (=== Just 1)
+      assertInvariants t
+    it "filterInPlace with a constant-hash key never rehashes and keeps probe paths intact" $ do
+      t <- H.new :: IO (Dictionary RealWorld Strict Collide Unboxed Int)
+      forM_ [0 .. 59] $ \i -> H.insert t (Collide i) i
+      g <- groupCount t
+      H.filterInPlace t (\(Collide k) _ -> k `rem` 3 == 0)
+      groupCount t `shouldReturn` g
+      forM_ [0 .. 59] $ \i -> H.lookup t (Collide i) `shouldReturn` (if i `rem` 3 == 0 then Just i else Nothing)
+      invariants t `shouldReturn` []
+
+  describe "batched operations" $ do
+    it "small tables (plain path) agree with Data.Map" $ property $ do
+      ks <- forAll (Gen.list (Range.linear 0 2000) (Gen.int (Range.linear 0 3000)))
+      let kv = U.fromList ks
+      t <- evalIO (H.new :: IO IntTable)
+      evalIO (H.insertBatch t kv (U.map (* 2) kv))
+      evalIO (H.upsertBatch t (maybe 1 (+ 1)) kv)
+      let model = Map.fromListWith (+) (map (\k -> (k, 1)) ks) `Map.union` Map.empty
+          want = Map.mapWithKey (\k c -> 2 * k + c) model
+      xs <- evalIO (H.toList t)
+      sort xs === Map.toList want
+      probes <- forAll (Gen.list (Range.linear 0 500) (Gen.int (Range.linear 0 4000)))
+      r <- evalIO (H.lookupBatch t (-1) (U.fromList probes) :: IO (U.Vector Int))
+      U.toList r === map (\k -> Map.findWithDefault (-1) k want) probes
+    it "large tables (prefetch pipeline, growing mid-batch) agree with sequential ops" $ do
+      let n = 200000
+          ks = U.generate n (\i -> (i * 7919 + 13) `rem` 150000) -- duplicates on purpose
+      t <- H.new :: IO IntTable
+      H.insertBatch t ks (U.generate n id)
+      ref <- H.new :: IO IntTable
+      U.imapM_ (\i k -> H.insert ref k i) ks
+      (sort <$> H.toList t) `shouldReturnM` (sort <$> H.toList ref)
+      H.upsertBatch t (maybe 0 negate) ks
+      U.mapM_ (H.upsert ref (maybe 0 negate)) ks
+      (sort <$> H.toList t) `shouldReturnM` (sort <$> H.toList ref)
+      probes <- pure (U.generate 50000 (\i -> i * 5))
+      got <- H.lookupBatch t minBound probes :: IO (U.Vector Int)
+      want <- U.mapM (H.findWithDefault ref minBound) probes
+      got `shouldBe` want
+      invariants t `shouldReturn` []
+    it "boxed columns through the prefetch pipeline" $ do
+      let n = 100000
+          ks = V.generate n (\i -> Weak' (i * 31))
+      t <- H.new :: IO (Dictionary RealWorld Strict Weak' Strict Int)
+      H.insertBatch t ks (V.generate n id)
+      r <- H.lookupBatch t (-1) ks :: IO (V.Vector Int)
+      r `shouldBe` V.generate n id
+      invariants t `shouldReturn` []
 
   describe "freezing" $ do
     it "frozen lookups agree with the mutable table" $ property $ do
