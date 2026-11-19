@@ -90,7 +90,7 @@ invariants d = do
         when (tag /= 0) $ do
           k <- readKey (7 * g + j)
           modifyIORef' seen (Map.insertWith (+) k (1 :: Int))
-          let w = W# (hashKey# k)
+          let w = W# (hashKey# mask k)
               want = case w of W# w# -> W# (tagOf# w#)
               step = fromIntegral (2 * tag + 1) :: Int
           when (want /= tag) $ bad ("tag mismatch for " <> show k)
@@ -125,7 +125,7 @@ missProbeGroups d k = do
   case t of
     Table mask ctrl _ _ -> do
       let groups = I# mask + 1
-          w = W# (hashKey# k)
+          w = W# (hashKey# mask k)
           tag = case w of W# w# -> W# (tagOf# w#)
           bit = case tag of W# t# -> W# (uncheckedShiftL# 1## (word2Int# (and# t# 7##)))
           step = fromIntegral (2 * tag + 1) :: Int
@@ -142,6 +142,16 @@ missProbeGroups d k = do
  where
   andW' :: Word -> Word -> Word
   andW' (W# a) (W# b) = W# (and# a b)
+
+-- | Groups whose overflow byte is nonzero.
+overflowedGroups :: Dictionary RealWorld ks k vs v -> IO Int
+overflowedGroups d = do
+  Snapshot t <- readSnapshot d
+  case t of
+    Table mask ctrl _ _ -> do
+      let one (I# g) = IO $ \s -> case readWord8Array# ctrl (16# +# uncheckedIShiftL# g 3# +# 7#) s of
+            (# s1, b #) -> (# s1, if isTrue# (eqWord# (word8ToWord# b) 0##) then 0 else 1 #)
+      sum <$> mapM one [0 .. I# mask]
 
 assertInvariants :: (Hashable k, Ord k, Show k, Storage ks k) => Dictionary RealWorld ks k vs v -> PropertyT IO ()
 assertInvariants d = do
@@ -291,6 +301,8 @@ main = sydTest $ do
       modelProp @Boxed @Weak @Boxed (H.new) (Weak <$> Gen.int (Range.linear 0 120))
     it "presized table" $
       modelProp @Unboxed @Int @Strict (H.initialize 500) (Gen.int (Range.linear 0 1000))
+    it "large table (table-sized hash blocks), dense and sparse keys" $
+      modelProp @Unboxed @Int @Unboxed (H.initialize 110000) (Gen.choice [Gen.int (Range.linear 0 300), Gen.int (Range.linear 0 maxBound)])
 
   describe "issue #43: deleting through alter keeps colliding keys" $ do
     it "alter (const Nothing) on the first of three colliding keys" $ do
@@ -334,6 +346,14 @@ main = sydTest $ do
       let mean = fromIntegral (sum lens) / 10000 :: Double
       putStrLn ("    mean miss probe groups after churn: " <> show mean)
       when (mean > 2.0) $ expectationFailure ("mean miss probe length drifted to " <> show mean)
+      invariants t `shouldReturn` []
+    it "large tables spread a dense key range with no overflow at all" $ do
+      t <- H.initialize 200000 :: IO IntTable
+      g <- groupCount t
+      when (g < bigGroups) $ expectationFailure "table is below the large-table threshold"
+      forM_ [0 .. 199999] $ \i -> H.insert t (i + 5000000) i
+      ovf <- overflowedGroups t
+      ovf `shouldBe` 0
       invariants t `shouldReturn` []
     it "constant-hash churn" $ do
       t <- H.new :: IO (Dictionary RealWorld Strict Collide Unboxed Int)
@@ -492,6 +512,23 @@ main = sydTest $ do
       got <- H.lookupBatch t minBound probes :: IO (U.Vector Int)
       want <- U.mapM (H.findWithDefault ref minBound) probes
       got `shouldBe` want
+      invariants t `shouldReturn` []
+    it "upsertBatch that grows the table mid-pipeline re-finishes in-flight hashes" $ do
+      -- start past the pipeline threshold, one insert short of the load limit
+      let start = maxLoadFor 32768 - 1
+      t <- H.initialize start :: IO IntTable
+      ref <- H.initialize start :: IO IntTable
+      g0 <- groupCount t
+      when (g0 /= 32768) $ expectationFailure ("unexpected start size " <> show g0)
+      forM_ [0 .. start - 1] $ \i -> H.insert t (i * 3) i >> H.insert ref (i * 3) i
+      -- wide keys: the in-flight window must straddle hash-block boundaries, or
+      -- a stale (old-mask) hash happens to equal the fresh one
+      let ks = U.generate 150000 (\i -> ((i `rem` 120000) * 2654435761) `rem` 1099511627776)
+      H.upsertBatch t (maybe 1 (+ 1)) ks
+      U.mapM_ (H.upsert ref (maybe 1 (+ 1))) ks
+      g1 <- groupCount t
+      when (g1 <= g0) $ expectationFailure "table did not grow during the batch"
+      (sort <$> H.toList t) `shouldReturnM` (sort <$> H.toList ref)
       invariants t `shouldReturn` []
     it "boxed columns through the prefetch pipeline" $ do
       let n = 100000

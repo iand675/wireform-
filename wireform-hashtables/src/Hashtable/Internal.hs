@@ -83,6 +83,12 @@ module Hashtable.Internal
   , maxLoadFor
   , groupsFor
     -- * Hashing
+  , rawHash#
+  , finish#
+  , finishSmall#
+  , finishBig#
+  , isBigMask#
+  , bigGroups
   , hashKey#
   , tagOf#
     -- * Group words
@@ -198,33 +204,90 @@ maxGroups = 2 ^ (31 :: Int)
 ------------------------------------------------------------------------
 -- Hashing
 
-{- | Finish the user's 'hash' into the word the table uses: low bits pick
-the home group, the top byte is the tag.
-
-@hashable@ hashes 'Int' as the identity, so the word has to be mixed —
-but a full mix throws away the one useful property of dense integer keys,
-that neighbours are looked up together. So the mix is split:
-
-@
-  m = fold (h >> 8)              -- folded 64x64->128 multiply of the high bits
-  w = (h + m) `xor` (h << 56)
-@
-
-Keys in the same 256-aligned block share @m@, so their home groups are
-consecutive (@h + m@) and a dense ID range turns into sequential memory
-traffic the hardware prefetcher can follow. Across blocks, @m@ is a full
-mix, so placement is as random as hashing everything. Two keys of one block
-cannot share a group once the table has 256 groups (their low bits differ);
-below that, keys strided by exactly the group count can share one, at most
-@256 / G@ deep. The tag gets the key's low byte xor'd in, so neighbours in
-a block also get distinct tags (and overflow bits).
+{- | The user's 'hash', as a 'Word#'. For strings this is the expensive
+part, so code that may outlive a resize (batches, growth) holds on to this
+and re-'finish#'es it against whichever table is current.
 -}
-hashKey# :: Hashable k => k -> Word#
-hashKey# k = case hash k of
-  I# h' ->
-    let h = int2Word# h'
-     in case timesWord2# (uncheckedShiftRL# h 8#) 0x9E3779B97F4A7C15## of
-          (# hi, lo #) -> xor# (plusWord# h (xor# hi lo)) (uncheckedShiftL# h 56#)
+rawHash# :: Hashable k => k -> Word#
+rawHash# k = case hash k of I# h -> int2Word# h
+{-# INLINE rawHash# #-}
+
+{- | Finish a raw hash into the word a table of group mask @mask@ uses: low
+bits pick the home group, the top byte is the tag.
+
+@hashable@ hashes 'Int' as the identity, so the word has to be mixed — but
+a full mix throws away the one useful property of dense integer keys, that
+neighbours are touched together. So the mix is split into a /block/ part,
+mixed with a folded 64×64→128 multiply, and an offset part passed through:
+
+@
+  w = (h + fold block) \`xor\` (h << 56)
+@
+
+Within a block @fold block@ is constant, so consecutive hash values get
+consecutive home groups (a dense ID range streams); across blocks it is a
+full mix, so placement is as random as hashing everything. The tag gets
+the key's low byte xor'd in, so neighbours get distinct tags (and overflow
+bits). The block size adapts to the table:
+
+  * __Small tables__ (fewer than 'bigGroups' groups): blocks of 256,
+    @fold (h >> 8)@. This does not depend on the table, so the multiply
+    runs in parallel with the loads of the table record — the latency that
+    matters when everything is in L1.
+
+  * __Large tables__: blocks of @G@ (the group count), @fold (h .&. complement
+    mask)@. Within a block @h + m (mod G)@ is a bijection onto the groups,
+    so a dense range spreads perfectly evenly (no overflow at all) and a
+    scan in key order walks the table front to back. The multiply now waits
+    for @mask@, a few cycles that disappear under the cache misses of a
+    table this size.
+
+The branch is decided by the table and perfectly predicted, so a small
+table's multiply is issued speculatively before @mask@ arrives. The word
+depends on the table's size either way, so a rehash re-finishes every key.
+-}
+finish# :: Int# -> Word# -> Word#
+finish# mask h =
+  if isTrue# (mask <# BigMask)
+    then inline finishSmall# h
+    else inline finishBig# mask h
+{-# INLINE finish# #-}
+
+-- | 'finish#' for a table below 'bigGroups' (256-value blocks; no
+-- dependency on the table).
+finishSmall# :: Word# -> Word#
+finishSmall# h = inline foldBlock# h (uncheckedShiftRL# h 8#)
+{-# INLINE finishSmall# #-}
+
+-- | 'finish#' for a table of at least 'bigGroups' (table-sized blocks).
+finishBig# :: Int# -> Word# -> Word#
+finishBig# mask h = inline foldBlock# h (and# h (not# (int2Word# mask)))
+{-# INLINE finishBig# #-}
+
+foldBlock# :: Word# -> Word# -> Word#
+foldBlock# h block = case timesWord2# block 0x9E3779B97F4A7C15## of
+  (# hi, lo #) -> xor# (plusWord# h (xor# hi lo)) (uncheckedShiftL# h 56#)
+{-# INLINE foldBlock# #-}
+
+-- | Group mask from which 'finish#' switches to table-sized blocks:
+-- 2^14 groups, about 100k entries at full load, past a core's L2 for
+-- 'Int'/'Int'. Measured: table-sized blocks are 1.2-1.3x on dense keys from
+-- 100k up, and cost 8-13% on L1-resident lookups.
+pattern BigMask :: Int#
+pattern BigMask = 16383#
+
+-- | Whether a table of this group mask uses 'finishBig#'.
+isBigMask# :: Int# -> Bool
+isBigMask# mask = isTrue# (mask >=# BigMask)
+{-# INLINE isBigMask# #-}
+
+-- | 'bigGroups' as a plain number, for documentation and tests.
+bigGroups :: Int
+bigGroups = 16384
+
+-- | 'finish#' of 'rawHash#'.
+hashKey# :: Hashable k => Int# -> k -> Word#
+hashKey# mask k = inline finish# mask (inline rawHash# k)
 {-# INLINE hashKey# #-}
 
 {- | Top byte of the mixed hash, remapped into @[2, 255]@. Empty is 0, and
@@ -311,7 +374,7 @@ with a zero-extending 32-bit move.
 
 {- | Probe step between groups: double hashing with an odd stride from the
 tag, @2·tag + 1@. Odd, so it cycles through every group of a power-of-two
-table. Not triangular @+1, +2, ...@: 'hashKey#' gives neighbouring keys
+table. Not triangular @+1, +2, ...@: 'finish#' gives neighbouring keys
 neighbouring home groups, and a first step of @+1@ would land an overflow on
 the neighbour's home, cascading at high load and saturating the overflow
 bytes along the run. Neighbours have different tags, so their overflows
@@ -455,18 +518,18 @@ insertAbsent# ::
 insertAbsent# ref t@(Table mask ctrl keys vals) w k v s0 =
   case readGrowth# ctrl s0 of
     (# s1, gl #)
-      | isTrue# (gl ==# 0#) -> growAndPlace# ref t w k v s1
+      | isTrue# (gl ==# 0#) -> growAndPlace# ref t k v s1
       | otherwise -> case placeWalk# mask ctrl w s1 of
           (# s2, p #) -> case fillSlot# ctrl keys vals p (inline tagOf# w) k v s2 of
             s3 -> writeGrowth# ctrl (gl -# 1#) s3
 {-# INLINE insertAbsent# #-}
 
 -- | Rehash (growing unless the load budget was eaten by churn), install
--- the new table, then place the key.
+-- the new table, then place the key (re-'finish#'ed for the new size).
 growAndPlace# ::
   (Hashable k, Storage ks k, Storage vs v) =>
-  MutVar# s (Table s ks k vs v) -> Table s ks k vs v -> Word# -> k -> v -> State# s -> State# s
-growAndPlace# ref t@(Table mask ctrl _ _) w k v s0 =
+  MutVar# s (Table s ks k vs v) -> Table s ks k vs v -> k -> v -> State# s -> State# s
+growAndPlace# ref t@(Table mask ctrl _ _) k v s0 =
   case readSize# ctrl s0 of
     (# s1, n #) ->
       let g = mask +# 1#
@@ -480,10 +543,12 @@ growAndPlace# ref t@(Table mask ctrl _ _) w k v s0 =
               | otherwise -> g *# 2#
        in case rehash# t g' s1 of
             (# s2, t'@(Table mask' ctrl' keys' vals') #) -> case writeMutVar# ref t' s2 of
-              s3 -> case placeWalk# mask' ctrl' w s3 of
-                (# s4, p #) -> case fillSlot# ctrl' keys' vals' p (inline tagOf# w) k v s4 of
-                  s5 -> case readGrowth# ctrl' s5 of
-                    (# s6, gl #) -> writeGrowth# ctrl' (gl -# 1#) s6
+              s3 ->
+                let w' = inline hashKey# mask' k
+                 in case placeWalk# mask' ctrl' w' s3 of
+                      (# s4, p #) -> case fillSlot# ctrl' keys' vals' p (inline tagOf# w') k v s4 of
+                        s5 -> case readGrowth# ctrl' s5 of
+                          (# s6, gl #) -> writeGrowth# ctrl' (gl -# 1#) s6
 {-# INLINABLE growAndPlace# #-}
 
 {- | Rebuild into a fresh table of @g@ groups. Every overflow byte is
@@ -508,7 +573,7 @@ rehash# (Table mask ctrl keys vals) g' s0 =
                  in case readM keys i s of
                       (# s2, k #) -> case readM vals i s2 of
                         (# s3, v #) ->
-                          let w = inline hashKey# k
+                          let w = inline hashKey# mask' k
                            in case placeWalk# mask' ctrl' w s3 of
                                 (# s4, p #) -> case fillSlot# ctrl' keys' vals' p (inline tagOf# w) k v s4 of
                                   s5 -> laneLoop g (and# m (minusWord# m 1##)) s5
@@ -557,7 +622,7 @@ cloneTable# (Table mask ctrl keys vals) s0 =
 frozenLookupSlot# ::
   (Hashable k, Storage ks k) =>
   Int# -> ByteArray# -> IArr ks k -> k -> Int#
-frozenLookupSlot# mask ctrl keys k = case inline hashKey# k of
+frozenLookupSlot# mask ctrl keys k = case inline hashKey# mask k of
   w ->
     let pat = timesWord# (inline tagOf# w) Lanes
         groupAt gs = inline indexGroup# ctrl (inline lowHalf# gs)

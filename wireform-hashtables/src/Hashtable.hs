@@ -240,7 +240,7 @@ lookup ::
   (PrimMonad m, Hashable k, Storage ks k, Storage vs v) =>
   Dictionary (PrimState m) ks k vs v -> k -> m (Maybe v)
 lookup (Dictionary ref) k = primitive $ \s -> case readMutVar# ref s of
-  (# s1, Table mask ctrl kcol vcol #) -> case lookupPos# mask ctrl kcol k (inline hashKey# k) s1 of
+  (# s1, Table mask ctrl kcol vcol #) -> case lookupPos# mask ctrl kcol k (inline hashKey# mask k) s1 of
     (# s2, p #)
       | isTrue# (p <# 0#) -> (# s2, Nothing #)
       | otherwise -> case readM vcol (inline slotOf# p) s2 of
@@ -252,7 +252,7 @@ lookup' ::
   (PrimMonad m, Hashable k, Storage ks k, Storage vs v) =>
   Dictionary (PrimState m) ks k vs v -> k -> m v
 lookup' (Dictionary ref) k = primitive $ \s -> case readMutVar# ref s of
-  (# s1, Table mask ctrl kcol vcol #) -> case lookupPos# mask ctrl kcol k (inline hashKey# k) s1 of
+  (# s1, Table mask ctrl kcol vcol #) -> case lookupPos# mask ctrl kcol k (inline hashKey# mask k) s1 of
     (# s2, p #)
       | isTrue# (p <# 0#) -> keyNotFound `seq` (# s2, keyNotFound #)
       | otherwise -> readM vcol (inline slotOf# p) s2
@@ -280,7 +280,7 @@ member ::
   (PrimMonad m, Hashable k, Storage ks k) =>
   Dictionary (PrimState m) ks k vs v -> k -> m Bool
 member (Dictionary ref) k = primitive $ \s -> case readMutVar# ref s of
-  (# s1, Table mask ctrl kcol _ #) -> case lookupPos# mask ctrl kcol k (inline hashKey# k) s1 of
+  (# s1, Table mask ctrl kcol _ #) -> case lookupPos# mask ctrl kcol k (inline hashKey# mask k) s1 of
     (# s2, p #) -> (# s2, isTrue# (p >=# 0#) #)
 {-# INLINE member #-}
 
@@ -289,7 +289,7 @@ findWithDefault ::
   (PrimMonad m, Hashable k, Storage ks k, Storage vs v) =>
   Dictionary (PrimState m) ks k vs v -> v -> k -> m v
 findWithDefault (Dictionary ref) def k = primitive $ \s -> case readMutVar# ref s of
-  (# s1, Table mask ctrl kcol vcol #) -> case lookupPos# mask ctrl kcol k (inline hashKey# k) s1 of
+  (# s1, Table mask ctrl kcol vcol #) -> case lookupPos# mask ctrl kcol k (inline hashKey# mask k) s1 of
     (# s2, p #)
       | isTrue# (p <# 0#) -> (# s2, def #)
       | otherwise -> readM vcol (inline slotOf# p) s2
@@ -302,7 +302,7 @@ findEntry ::
   (PrimMonad m, Hashable k, Storage ks k) =>
   Dictionary (PrimState m) ks k vs v -> k -> m Int
 findEntry (Dictionary ref) k = primitive $ \s -> case readMutVar# ref s of
-  (# s1, Table mask ctrl kcol _ #) -> case lookupPos# mask ctrl kcol k (inline hashKey# k) s1 of
+  (# s1, Table mask ctrl kcol _ #) -> case lookupPos# mask ctrl kcol k (inline hashKey# mask k) s1 of
     (# s2, p #)
       | isTrue# (p <# 0#) -> (# s2, -1 #)
       | otherwise -> (# s2, I# (inline slotOf# p) #)
@@ -326,7 +326,7 @@ insert ::
   Dictionary (PrimState m) ks k vs v -> k -> v -> m ()
 insert (Dictionary ref) k v = primitive_ $ \s -> case readMutVar# ref s of
   (# s1, t@(Table mask ctrl kcol vcol) #) ->
-    let w = inline hashKey# k
+    let w = inline hashKey# mask k
      in case lookupPos# mask ctrl kcol k w s1 of
           (# s2, r #)
             | isTrue# (r >=# 0#) -> writeM vcol (inline slotOf# r) v s2
@@ -340,7 +340,7 @@ insertWith ::
   (v -> v -> v) -> Dictionary (PrimState m) ks k vs v -> k -> v -> m ()
 insertWith f (Dictionary ref) k v = primitive_ $ \s -> case readMutVar# ref s of
   (# s1, t@(Table mask ctrl kcol vcol) #) ->
-    let w = inline hashKey# k
+    let w = inline hashKey# mask k
      in case lookupPos# mask ctrl kcol k w s1 of
           (# s2, r #)
             | isTrue# (r >=# 0#) ->
@@ -356,7 +356,7 @@ insertIfAbsent ::
   Dictionary (PrimState m) ks k vs v -> k -> v -> m Bool
 insertIfAbsent (Dictionary ref) k v = primitive $ \s -> case readMutVar# ref s of
   (# s1, t@(Table mask ctrl kcol _) #) ->
-    let w = hashKey# k
+    let w = hashKey# mask k
      in case lookupPos# mask ctrl kcol k w s1 of
           (# s2, r #)
             | isTrue# (r >=# 0#) -> (# s2, False #)
@@ -367,7 +367,7 @@ delete ::
   (PrimMonad m, Hashable k, Storage ks k, Storage vs v) =>
   Dictionary (PrimState m) ks k vs v -> k -> m ()
 delete (Dictionary ref) k = primitive_ $ \s -> case readMutVar# ref s of
-  (# s1, t@(Table mask ctrl kcol _) #) -> case lookupPos# mask ctrl kcol k (inline hashKey# k) s1 of
+  (# s1, t@(Table mask ctrl kcol _) #) -> case lookupPos# mask ctrl kcol k (inline hashKey# mask k) s1 of
     (# s2, p #)
       | isTrue# (p <# 0#) -> s2
       | otherwise -> deleteAtPos# t p s2
@@ -379,7 +379,7 @@ adjust ::
   (PrimMonad m, Hashable k, Storage ks k, Storage vs v) =>
   Dictionary (PrimState m) ks k vs v -> (v -> v) -> k -> m ()
 adjust (Dictionary ref) f k = primitive_ $ \s -> case readMutVar# ref s of
-  (# s1, Table mask ctrl kcol vcol #) -> case lookupPos# mask ctrl kcol k (hashKey# k) s1 of
+  (# s1, Table mask ctrl kcol vcol #) -> case lookupPos# mask ctrl kcol k (hashKey# mask k) s1 of
     (# s2, p #)
       | isTrue# (p <# 0#) -> s2
       | otherwise ->
@@ -403,7 +403,7 @@ update ::
   (PrimMonad m, Hashable k, Storage ks k, Storage vs v) =>
   Dictionary (PrimState m) ks k vs v -> (v -> Maybe v) -> k -> m ()
 update (Dictionary ref) f k = primitive_ $ \s -> case readMutVar# ref s of
-  (# s1, t@(Table mask ctrl kcol vcol) #) -> case lookupPos# mask ctrl kcol k (hashKey# k) s1 of
+  (# s1, t@(Table mask ctrl kcol vcol) #) -> case lookupPos# mask ctrl kcol k (hashKey# mask k) s1 of
     (# s2, p #)
       | isTrue# (p <# 0#) -> s2
       | otherwise ->
@@ -420,7 +420,7 @@ upsert ::
   Dictionary (PrimState m) ks k vs v -> (Maybe v -> v) -> k -> m ()
 upsert (Dictionary ref) f k = primitive_ $ \s -> case readMutVar# ref s of
   (# s1, t@(Table mask ctrl kcol vcol) #) ->
-    let w = inline hashKey# k
+    let w = inline hashKey# mask k
      in case lookupPos# mask ctrl kcol k w s1 of
           (# s2, r #)
             | isTrue# (r >=# 0#) ->
@@ -438,7 +438,7 @@ alter ::
   Dictionary (PrimState m) ks k vs v -> (Maybe v -> Maybe v) -> k -> m ()
 alter (Dictionary ref) f k = primitive_ $ \s -> case readMutVar# ref s of
   (# s1, t@(Table mask ctrl kcol vcol) #) ->
-    let w = inline hashKey# k
+    let w = inline hashKey# mask k
      in case lookupPos# mask ctrl kcol k w s1 of
           (# s2, r #)
             | isTrue# (r >=# 0#) ->
@@ -461,7 +461,7 @@ mutate ::
   Dictionary (PrimState m) ks k vs v -> (Maybe v -> (Maybe v, a)) -> k -> m a
 mutate (Dictionary ref) f k = primitive $ \s -> case readMutVar# ref s of
   (# s1, t@(Table mask ctrl kcol vcol) #) ->
-    let w = hashKey# k
+    let w = hashKey# mask k
      in case lookupPos# mask ctrl kcol k w s1 of
           (# s2, r #)
             | isTrue# (r >=# 0#) ->
@@ -602,44 +602,67 @@ cheap (an index).
 -}
 batched ::
   (PrimMonad m, Hashable k, Storage ks k, Storage vs v) =>
-  Bool -> Dictionary (PrimState m) ks k vs v -> Int -> (Int -> k) -> (Int -> Word -> m ()) -> m ()
-batched forInsert d@(Dictionary ref) n key step = do
+  Bool -> Dictionary (PrimState m) ks k vs v -> Int -> (Int -> k) -> (Int# -> Int -> Word -> m ()) -> m ()
+batched forInsert d n key step = do
   pipelined <- (&& n > 2 * batchDistance) <$> bigTable d
-  ring <- newPrimArray (if pipelined then ringMask + 1 else 0)
-  let dist = batchDistance
-      !(I# rm) = ringMask
-      stageA j = do
-        let !w@(W# w#) = hashW (key j)
-        writePrimArray ring (I# (andI# (case j of I# j# -> j#) rm)) w
-        primitive_ $ \s -> case readMutVar# ref s of
-          (# s1, Table mask ctrl _ _ #) -> prefetchHome# mask ctrl w# s1
-      stageB j = do
-        W# w# <- readPrimArray ring (I# (andI# (case j of I# j# -> j#) rm))
-        primitive_ $ \s -> case readMutVar# ref s of
-          (# s1, t #) -> prefetchSlot# forInsert t w# s1
-      prime j
-        | j >= min n (2 * dist) = pure ()
-        | otherwise = stageA j >> prime (j + 1)
-      go i
-        | i >= n = pure ()
-        | otherwise = do
-            w <-
-              if pipelined
-                then do
-                  if i + 2 * dist < n then stageA (i + 2 * dist) else pure ()
-                  if i + dist < n then stageB (i + dist) else pure ()
-                  readPrimArray ring (I# (andI# (case i of I# i# -> i#) rm))
-                else pure (hashW (key i))
-            step i w
-            go (i + 1)
-  if pipelined then prime 0 else pure ()
-  go 0
+  batchedWith pipelined forInsert d n key step
 {-# INLINE batched #-}
 
--- | Hash a key outside the pipeline.
-hashW :: Hashable k => k -> Word
-hashW k = W# (hashKey# k)
-{-# INLINE hashW #-}
+-- | 'batched' with the pipelining decision made by the caller.
+batchedWith ::
+  (PrimMonad m, Hashable k, Storage ks k, Storage vs v) =>
+  Bool -> Bool -> Dictionary (PrimState m) ks k vs v -> Int -> (Int -> k) -> (Int# -> Int -> Word -> m ()) -> m ()
+batchedWith pipelined forInsert d@(Dictionary ref) n key step = do
+  -- Hashes are finished against the mask at batch start, a loop invariant:
+  -- the multiply never waits on this iteration's loads. A step whose table
+  -- has since been resized cannot use it: only 'upsertBatch' can resize, and
+  -- its steps hash against the current table themselves.
+  I# m0 <- batchMask d
+  -- Unswitched: the small/large decision is made once per batch, so each
+  -- copy's per-key hash is straight-line ('finishSmall#' needs no mask).
+  if isBigMask# m0
+    then run m0 (\k -> W# (finishBig# m0 (rawHash# k)))
+    else run m0 (\k -> W# (finishSmall# (rawHash# k)))
+ where
+  run m0 finW0 = do
+      ring <- newPrimArray (if pipelined then ringMask + 1 else 0)
+      let dist = batchDistance
+          !(I# rm) = ringMask
+          stageA j = do
+            let !w@(W# w#) = finW (key j)
+            writePrimArray ring (I# (andI# (case j of I# j# -> j#) rm)) w
+            primitive_ $ \s -> case readMutVar# ref s of
+              (# s1, Table mask ctrl _ _ #) -> prefetchHome# mask ctrl w# s1
+          stageB j = do
+            W# w# <- readPrimArray ring (I# (andI# (case j of I# j# -> j#) rm))
+            primitive_ $ \s -> case readMutVar# ref s of
+              (# s1, t #) -> prefetchSlot# forInsert t w# s1
+          finW k = case k of !k' -> finW0 k'
+          prime j
+            | j >= min n (2 * dist) = pure ()
+            | otherwise = stageA j >> prime (j + 1)
+          go i
+            | i >= n = pure ()
+            | otherwise = do
+                w <-
+                  if pipelined
+                    then do
+                      if i + 2 * dist < n then stageA (i + 2 * dist) else pure ()
+                      if i + dist < n then stageB (i + dist) else pure ()
+                      readPrimArray ring (I# (andI# (case i of I# i# -> i#) rm))
+                    else pure (finW (key i))
+                step m0 i w
+                go (i + 1)
+      if pipelined then prime 0 else pure ()
+      go 0
+{-# INLINE batchedWith #-}
+
+-- | Group mask of the table at the start of a batch.
+batchMask :: PrimMonad m => Dictionary (PrimState m) ks k vs v -> m Int
+batchMask (Dictionary ref) = primitive $ \s -> case readMutVar# ref s of
+  (# s1, Table mask _ _ _ #) -> (# s1, I# mask #)
+{-# INLINE batchMask #-}
+
 
 bigTable :: PrimMonad m => Dictionary (PrimState m) ks k vs v -> m Bool
 bigTable (Dictionary ref) = primitive $ \s -> case readMutVar# ref s of
@@ -653,10 +676,10 @@ lookupBatch ::
 lookupBatch d@(Dictionary ref) def ks = do
   let n = G.length ks
   out <- GM.unsafeNew n
-  batched False d n (G.unsafeIndex ks) $ \i (W# w) -> do
+  batched False d n (G.unsafeIndex ks) $ \_ i (W# w0) -> do
     let !k = G.unsafeIndex ks i
     v <- primitive $ \s -> case readMutVar# ref s of
-      (# s1, Table mask ctrl kcol vcol #) -> case lookupPos# mask ctrl kcol k w s1 of
+      (# s1, Table mask ctrl kcol vcol #) -> case lookupPos# mask ctrl kcol k w0 s1 of
         (# s2, p #)
           | isTrue# (p <# 0#) -> (# s2, def #)
           | otherwise -> readM vcol (slotOf# p) s2
@@ -672,14 +695,14 @@ insertBatch ::
 insertBatch d@(Dictionary ref) ks vs = do
   let n = min (G.length ks) (G.length vs)
   reserve d . (+ n) =<< size d
-  batched True d n (G.unsafeIndex ks) $ \i (W# w) -> do
+  batched True d n (G.unsafeIndex ks) $ \_ i (W# w0) -> do
     let !k = G.unsafeIndex ks i
         v = G.unsafeIndex vs i
     primitive_ $ \s -> case readMutVar# ref s of
-      (# s1, t@(Table mask ctrl kcol vcol) #) -> case lookupPos# mask ctrl kcol k w s1 of
+      (# s1, t@(Table mask ctrl kcol vcol) #) -> case lookupPos# mask ctrl kcol k w0 s1 of
         (# s2, r #)
           | isTrue# (r >=# 0#) -> writeM vcol (slotOf# r) v s2
-          | otherwise -> insertAbsent# ref t w k v s2
+          | otherwise -> insertAbsent# ref t w0 k v s2
 {-# INLINE insertBatch #-}
 
 -- | 'upsert' every key of a vector, pipelined: e.g. a histogram is
@@ -688,17 +711,24 @@ upsertBatch ::
   (PrimMonad m, Hashable k, Storage ks k, Storage vs v, G.Vector kv k) =>
   Dictionary (PrimState m) ks k vs v -> (Maybe v -> v) -> kv k -> m ()
 upsertBatch d@(Dictionary ref) f ks =
-  batched True d (G.length ks) (G.unsafeIndex ks) $ \i (W# w) -> do
+  -- Upserts can grow the table mid-batch, which would invalidate a hash
+  -- finished against the batch-start table. So each step hashes against the
+  -- current table itself, like 'upsert'; the pipeline's ring only feeds the
+  -- prefetches, where a stale hint after a resize is merely useless.
+  batched True d (G.length ks) (G.unsafeIndex ks) $ \_ i _ -> do
     let !k = G.unsafeIndex ks i
     primitive_ $ \s -> case readMutVar# ref s of
-      (# s1, t@(Table mask ctrl kcol vcol) #) -> case lookupPos# mask ctrl kcol k w s1 of
-        (# s2, r #)
-          | isTrue# (r >=# 0#) ->
-              let j = slotOf# r
-               in case readM vcol j s2 of
-                    (# s3, old #) -> writeM vcol j (f (Just old)) s3
-          | otherwise -> insertAbsent# ref t w k (f Nothing) s2
+      (# s1, t@(Table mask ctrl kcol vcol) #) ->
+        let w = hashKey# mask k
+         in case lookupPos# mask ctrl kcol k w s1 of
+              (# s2, r #)
+                | isTrue# (r >=# 0#) ->
+                    let j = slotOf# r
+                     in case readM vcol j s2 of
+                          (# s3, old #) -> writeM vcol j (f (Just old)) s3
+                | otherwise -> insertAbsent# ref t w k (f Nothing) s2
 {-# INLINE upsertBatch #-}
+
 
 ------------------------------------------------------------------------
 -- Traversal
