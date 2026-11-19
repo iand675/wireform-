@@ -524,8 +524,13 @@ insertAbsent# ref t@(Table mask ctrl keys vals) w k v s0 =
             s3 -> writeGrowth# ctrl (gl -# 1#) s3
 {-# INLINE insertAbsent# #-}
 
--- | Rehash (growing unless the load budget was eaten by churn), install
--- the new table, then place the key (re-'finish#'ed for the new size).
+{- | Rehash (growing unless the load budget was eaten by churn), place the
+key in the new table (re-'finish#'ed for the new size), and only then
+install it. 'fillSlot#' forces a 'Strict' value, which may throw; until the
+'writeMutVar#' the new table is private and 'rehash#' has only read the
+old one, so a throw leaves the published table, its capacity and every
+entry's position exactly as they were.
+-}
 growAndPlace# ::
   (Hashable k, Storage ks k, Storage vs v) =>
   MutVar# s (Table s ks k vs v) -> Table s ks k vs v -> k -> v -> State# s -> State# s
@@ -542,13 +547,13 @@ growAndPlace# ref t@(Table mask ctrl _ _) k v s0 =
               | isTrue# (g <# 64#) -> g *# 4#
               | otherwise -> g *# 2#
        in case rehash# t g' s1 of
-            (# s2, t'@(Table mask' ctrl' keys' vals') #) -> case writeMutVar# ref t' s2 of
-              s3 ->
-                let w' = inline hashKey# mask' k
-                 in case placeWalk# mask' ctrl' w' s3 of
-                      (# s4, p #) -> case fillSlot# ctrl' keys' vals' p (inline tagOf# w') k v s4 of
-                        s5 -> case readGrowth# ctrl' s5 of
-                          (# s6, gl #) -> writeGrowth# ctrl' (gl -# 1#) s6
+            (# s2, t'@(Table mask' ctrl' keys' vals') #) ->
+              let w' = inline hashKey# mask' k
+               in case placeWalk# mask' ctrl' w' s2 of
+                    (# s3, p #) -> case fillSlot# ctrl' keys' vals' p (inline tagOf# w') k v s3 of
+                      s4 -> case readGrowth# ctrl' s4 of
+                        (# s5, gl #) -> case writeGrowth# ctrl' (gl -# 1#) s5 of
+                          s6 -> writeMutVar# ref t' s6
 {-# INLINABLE growAndPlace# #-}
 
 {- | Rebuild into a fresh table of @g@ groups. Every overflow byte is

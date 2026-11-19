@@ -82,8 +82,16 @@ plus:
   `MVector` type; `keys` / `values` return any `Data.Vector.Generic` vector.
 * Iteration order is slot order: unspecified, and it changes on growth.
   (Upstream happens to iterate in insertion order.)
-* `alterM`, `adjustM` and `mutateM` look the key up again after the callback
-  runs, because the callback may use the table. Two probes, always correct.
+* `alterM`, `adjustM` and `mutateM` may use the table from inside the
+  callback. The callback's result is the key's *final* state: `Just v` leaves
+  the key mapped to `v` and `Nothing` leaves it absent, even if the callback
+  inserted it. That makes each of them equal to "look up, run the callback,
+  then `insert` or `delete`". The key is looked up again after the callback
+  returns, so that's two probes.
+* A throwing `Strict` value (or any exception during an insert) leaves the
+  table exactly as it was, including its capacity and every entry's
+  `lookupIndex`. A growing insert fills the new table privately and only
+  publishes it once the value has been stored.
 * Deleting through `alter` / `update` / `mutate` is the same operation as
   `delete`. (Upstream issue
   [#43](https://github.com/klapaucius/vector-hashtables/issues/43): deleting

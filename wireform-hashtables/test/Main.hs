@@ -288,6 +288,15 @@ modelProp mk key = property $ do
 
 type IntTable = Dictionary RealWorld Unboxed Int Unboxed Int
 
+-- | 'H.insert' / 'H.upsert' compiled without knowing the value storage.
+polyInsert :: Storage vs v => Dictionary RealWorld Unboxed Int vs v -> Int -> v -> IO ()
+polyInsert = H.insert
+{-# NOINLINE polyInsert #-}
+
+polyUpsert :: Storage vs v => Dictionary RealWorld Unboxed Int vs v -> (Maybe v -> v) -> Int -> IO ()
+polyUpsert = H.upsert
+{-# NOINLINE polyUpsert #-}
+
 main :: IO ()
 main = sydTest $ do
   describe "model: random operation sequences agree with Data.Map" $ do
@@ -366,17 +375,33 @@ main = sydTest $ do
     it "Strict: a throwing insert leaves the table untouched" $ do
       t <- H.new :: IO (Dictionary RealWorld Unboxed Int Strict Int)
       forM_ [1 .. 6] $ \i -> H.insert t i i -- table is now exactly at its load limit
-      r1 <- try @ErrorCall (H.insert t 7 (error "boom"))
-      either (const (pure ())) (const (expectationFailure "insert did not throw")) r1
-      r2 <- try @ErrorCall (H.insert t 1 (error "boom"))
-      either (const (pure ())) (const (expectationFailure "overwrite did not throw")) r2
-      r3 <- try @ErrorCall (H.upsert t (const (error "boom")) 2)
-      either (const (pure ())) (const (expectationFailure "upsert did not throw")) r3
-      H.size t `shouldReturn` 6
-      H.lookup t 7 `shouldReturn` Nothing
+      cap0 <- H.capacity t
+      idx0 <- mapM (H.lookupIndex t) [1 .. 6]
+      -- Every way of inserting an absent key at the load limit grows the
+      -- table; the growth must not be published before the value is forced.
+      let throws name act = do
+            r <- try @ErrorCall act
+            either (const (pure ())) (const (expectationFailure (name <> " did not throw"))) r
+            H.capacity t `shouldReturn` cap0
+            mapM (H.lookupIndex t) [1 .. 6] `shouldReturn` idx0
+            H.size t `shouldReturn` 6
+            H.lookup t 7 `shouldReturn` Nothing
+            invariants t `shouldReturn` []
+      throws "insert" (H.insert t 7 (error "boom"))
+      throws "upsert" (H.upsert t (const (error "boom")) 7)
+      throws "alter" (H.alter t (const (Just (error "boom"))) 7)
+      throws "mutate" (H.mutate t (const (Just (error "boom"), ())) 7)
+      throws "insertIfAbsent" (() <$ H.insertIfAbsent t 7 (error "boom"))
+      -- The same through storage-polymorphic callers. At a concrete 'Strict'
+      -- type GHC's strictness analysis forces the value on entry, before any
+      -- rehash, which hides a late publish; an unknown 'writeM' (polymorphic
+      -- user code, -O0, GHCi) keeps the force at the write.
+      throws "insert (polymorphic)" (polyInsert t 7 (error "boom"))
+      throws "upsert (polymorphic)" (polyUpsert t (const (error "boom")) 7)
+      throws "overwrite" (H.insert t 1 (error "boom"))
+      throws "upsert (present)" (H.upsert t (const (error "boom")) 2)
       H.lookup t 1 `shouldReturn` Just 1
       H.lookup t 2 `shouldReturn` Just 2
-      invariants t `shouldReturn` []
     it "Boxed: values are not forced" $ do
       t <- H.new :: IO (Dictionary RealWorld Unboxed Int Boxed Int)
       H.insert t 1 (error "lazy")
@@ -398,6 +423,50 @@ main = sydTest $ do
       H.alterM t (\old -> H.delete t 3 >> pure (fmap negate old)) 3
       H.lookup t 3 `shouldReturn` Just (-3)
       H.size t `shouldReturn` 11
+    it "alterM: Nothing deletes a key the callback inserted" $ do
+      t <- H.new :: IO IntTable
+      forM_ [0 .. 10] $ \i -> H.insert t i i
+      H.alterM t (\_ -> do H.insert t 99 1; pure Nothing) 99
+      H.lookup t 99 `shouldReturn` Nothing
+      H.size t `shouldReturn` 11
+      invariants t `shouldReturn` []
+    it "mutateM: Nothing deletes a key the callback inserted" $ do
+      t <- H.new :: IO IntTable
+      forM_ [0 .. 10] $ \i -> H.insert t i i
+      r <- H.mutateM t (\old -> do H.insert t 99 1; pure (Nothing, old)) 99
+      r `shouldBe` Nothing
+      H.lookup t 99 `shouldReturn` Nothing
+      H.size t `shouldReturn` 11
+      invariants t `shouldReturn` []
+    it "alterM / mutateM: the callback's result is the key's final state" $ property $ do
+      -- Whatever the callback does to the key (nothing, insert, delete, or
+      -- growing the table around it), afterwards the key holds exactly what
+      -- the callback returned and every other key is untouched.
+      kvs <- forAll (Gen.list (Range.linear 0 200) ((,) <$> Gen.int (Range.linear 0 300) <*> Gen.int (Range.linear 0 9)))
+      k <- forAll (Gen.int (Range.linear 0 300))
+      act <- forAll (Gen.element [0 .. 3 :: Int])
+      res <- forAll (Gen.maybe (Gen.int (Range.linear 100 199)))
+      useMutate <- forAll Gen.bool
+      t <- evalIO (H.fromList kvs :: IO IntTable)
+      let model0 = Map.fromList kvs
+          sideEffect = case act of
+            0 -> pure ()
+            1 -> H.insert t k 50
+            2 -> H.delete t k
+            _ -> forM_ [1000 .. 1999] (\i -> H.insert t i i) -- forces a rehash
+          bulk = if act == 3 then Map.fromList (map (\i -> (i, i)) [1000 .. 1999]) else Map.empty
+      seen <- evalIO $
+        if useMutate
+          then H.mutateM t (\old -> sideEffect >> pure (res, old)) k
+          else do
+            ref <- newIORef Nothing
+            H.alterM t (\old -> writeIORef ref old >> sideEffect >> pure res) k
+            readIORef ref
+      seen === Map.lookup k model0
+      let want = Map.alter (const res) k (Map.union bulk model0)
+      xs <- evalIO (H.toList t)
+      sort xs === Map.toList want
+      assertInvariants t
     it "foldM whose callback deletes entries never sees a dead one" $ do
       t <- H.new :: IO (Dictionary RealWorld Strict Int Strict Int)
       forM_ [0 .. 2999] $ \i -> H.insert t i i

@@ -475,37 +475,41 @@ mutate (Dictionary ref) f k = primitive $ \s -> case readMutVar# ref s of
                 (Just new', a) -> (# insertAbsent# ref t w k new' s2, a #)
 {-# INLINE mutate #-}
 
--- | Monadic 'mutate'; looks the key up again after the callback, like
--- 'alterM'.
+-- | Monadic 'mutate', with 'alterM''s semantics: the callback's 'Maybe' is
+-- the key's final state, whatever the callback did to the table meanwhile.
 mutateM ::
   (PrimMonad m, Hashable k, Storage ks k, Storage vs v) =>
   Dictionary (PrimState m) ks k vs v -> (Maybe v -> m (Maybe v, a)) -> k -> m a
 mutateM d f k = do
-  old <- lookup d k
-  (r, a) <- f old
-  case r of
-    Just v -> insert d k v
-    Nothing -> case old of
-      Nothing -> pure ()
-      Just _ -> delete d k
+  (r, a) <- lookup d k >>= f
+  settle d k r
   pure a
 {-# INLINE mutateM #-}
 
-{- | Monadic 'alter'. The callback may itself use the table, so the key is
-looked up again after it returns: two probes, always correct.
+{- | Monadic 'alter'. The callback sees the value at the time of the call
+and may itself use the table, including inserting or deleting @k@; its
+result is then the key's /final/ state: @'Just' v@ leaves @k@ mapped to
+@v@ and 'Nothing' leaves @k@ absent, regardless of what the callback did.
+So @alterM t f k@ always agrees with \"look up, run @f@, then 'insert' or
+'delete'\". The key is looked up again after the callback returns (the
+table may have been rehashed): two probes.
 -}
 alterM ::
   (PrimMonad m, Hashable k, Storage ks k, Storage vs v) =>
   Dictionary (PrimState m) ks k vs v -> (Maybe v -> m (Maybe v)) -> k -> m ()
-alterM d f k = do
-  old <- lookup d k
-  r <- f old
-  case r of
-    Just v -> insert d k v
-    Nothing -> case old of
-      Nothing -> pure ()
-      Just _ -> delete d k
+alterM d f k = lookup d k >>= f >>= settle d k
 {-# INLINE alterM #-}
+
+-- | Make the callback's result the key's state. 'Nothing' always deletes:
+-- the callback may have inserted the key even though it was absent when
+-- the callback was called.
+settle ::
+  (PrimMonad m, Hashable k, Storage ks k, Storage vs v) =>
+  Dictionary (PrimState m) ks k vs v -> k -> Maybe v -> m ()
+settle d k = \case
+  Just v -> insert d k v
+  Nothing -> delete d k
+{-# INLINE settle #-}
 
 ------------------------------------------------------------------------
 -- Bulk in-place updates
