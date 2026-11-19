@@ -171,10 +171,14 @@ Where it loses, and why:
 * **Sequential keys looked up in insertion order** (`lookup-hit/seq` at
   100k+, `insert-grow/seq`, `insert-delete/seq`): `vector-hashtables` keeps
   entries in insertion-ordered dense arrays and hashes `Int` as the identity,
-  so this access pattern streams 8 keys per cache line. `hashKey#` keeps
-  256-key blocks contiguous (consecutive home groups) to get most of that
-  locality back — 41 → 7 ns per hit at 1M — but a 7-lane group still
-  touches about a line per key.
+  so this access pattern streams 8 keys per cache line, and growth never
+  moves an entry. The hash keeps dense ranges contiguous — 256-key blocks
+  for small tables, table-sized blocks from 2^14 groups (~100k entries),
+  where a dense range is a bijection onto the groups with no overflow at all
+  (see `finish#` in `Hashtable.Internal`) — which took 1M seq hits from
+  0.16× to 0.84× and 100k seq misses from 0.54× to 0.90× of
+  `vector-hashtables`; growth stays at 0.72–0.80× because every rehash
+  re-places every key.
 * **Growing from empty at 1k** is at parity (0.98–1.06×, within noise):
   tables under 64 groups grow 4× instead of 2×, halving the tiny rehashes
   (1.10–1.23× over 2× growth in an interleaved A/B).
