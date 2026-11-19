@@ -186,6 +186,31 @@ Where it loses, and why:
   and cons pointers to them; an `Unboxed` column must allocate two `I#`s per
   entry on the way out. `foldM` does not allocate.
 
+Tried and rejected: a **dense-entry engine** (the `vector-hashtables` /
+`indexmap` shape on top of this probe sequence). Keys and values lived in
+insertion-ordered columns, and each group was one 64-byte line holding the
+control word, seven 32-bit entry indices and seven 32-bit hash halves.
+Growth then re-placed `(tag, index, hash)` triples without reading a key or
+hashing anything. Same binary, same harness, against this engine it measured
+0.67–0.80× on hits and misses, 0.54–0.66× on presized inserts and
+0.49–0.64× on growth. Its only win was 1M random hits (1.14×), and 1M
+random misses lost 0.61× in the same table. Why it loses:
+
+* every hit adds a dependent load (group → lane index → key), about 1.5 ns
+  even from L1;
+* 64-byte groups make the probed array 8× the size of 8-byte control words
+  (16 MiB against 2 MiB at 1M entries), so misses and rehash placement fall
+  out of cache;
+* each insert also maintains a free stack, a live bitmap, the append cursor
+  and two lane fields;
+* re-hashing an `Int` is two multiplies, so skipping it saves almost nothing.
+  The stored-hash rebuild also needs a hash that doesn't depend on the table,
+  which gives up the table-sized-block finish that makes sequential rehashes
+  stream.
+
+It might pay for keys that are expensive to hash (long `Text`), where
+skipping the rehash matters. That case was not measured.
+
 ### Writing fast code against it
 
 * Use the table at concrete types. Every operation is `INLINE`, so the probe
