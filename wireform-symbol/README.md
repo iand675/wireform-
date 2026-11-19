@@ -58,4 +58,39 @@ same as `Text`'s `Ord`. `Binary` writes the content as a length-prefixed
 ## Benchmarks
 
 `cabal bench wireform-symbol-bench` compares against `symbolize`, which is
-kept as a bench-only dependency.
+kept as a bench-only dependency. Measured on GHC 9.10.3, `-O2`, a 4-core
+2.1 GHz Xeon VM. Each figure is the minimum over two runs. ns per operation,
+over 24 common header names, or 1000 fresh names for `intern-fresh`:
+
+| op | wireform-symbol | symbolize | speedup |
+|---|---|---|---|
+| intern, already live, `ByteString` | 85.2 | 156.3 | 1.84× |
+| intern, already live, `Text` | 61.1 | 118.6 | 1.94× |
+| intern, fresh names | 91.6 | 293.5 | 3.21× |
+| `hash` | 2.0 | 25.5 | 12.7× |
+| `==` | 2.6 | 2.1 | (both a pointer compare) |
+
+hermes' own `HeaderMap` bench (`cabal bench hermes-bench`), run three times
+interleaved against the symbolize build, minimum of three:
+
+| fixture | op | symbolize (ns) | wireform-symbol (ns) | speedup |
+|---|---|---|---|---|
+| small (5 headers) | `headerMapFromList` | 884.6 | 580.1 | 1.52× |
+| typical (14) | `headerMapFromList` | 2620.6 | 1966.9 | 1.33× |
+| repeated (22) | `headerMapFromList` | 3624.4 | 2637.1 | 1.37× |
+| small | `lookupRawHeader` hit / miss | 41.5 / 29.0 | 32.6 / 19.0 | 1.27× / 1.53× |
+| typical | `lookupRawHeader` hit / miss | 48.0 / 28.7 | 39.1 / 18.4 | 1.23× / 1.56× |
+| repeated | `lookupRawHeader` hit / miss | 82–90¹ / 28.5 | 80–92 / 18.5 | parity / 1.54× |
+| all three | `lookupHeader @CacheControl` | | | 1.02–1.09× |
+| all three | `headerMapToList` | | | 0.89–0.97× |
+
+¹ In two of five runs, symbolize's `repeated` "hit" took about 30 ns,
+which is its miss latency. The hit key is a top-level interned
+`"set-cookie"` and the map holds the same text interned from the wire. If
+the live entry is evicted in between, the two become distinct symbols and
+the lookup misses. That's the failure this package exists to remove, though
+this is inferred from the timings, not instrumented.
+
+`headerMapToList` interns nothing. It copies each name out to a
+`ByteString`, and the 3–11% gap (about 3 ns per header) there is not yet
+explained.
