@@ -3,6 +3,7 @@ packages:
   hermes/
   wireform-core/
   wireform-hashtables/
+  wireform-symbol/
   wireform-network/
   wireform-attoparsec/
   wireform-binary/

@@ -279,7 +279,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Array as A
 import qualified Data.Text.Encoding as TE
 import Data.Text.Internal (Text (..))
-import Symbolize
+import Symbol (Symbol, intern, unintern)
 import Text.Read
 
 
