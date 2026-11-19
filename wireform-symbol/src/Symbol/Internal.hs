@@ -13,10 +13,18 @@ statistics) — they may change in any release.
 
 = Representation
 
-A 'Symbol' is the canonical 'ByteArray#' holding its UTF-8 bytes, plus the
-SipHash of those bytes. Canonical means: while a symbol for some content is
-alive, every 'intern' of that content returns the very same array, so
-equality is pointer equality and 'hash' is a field read.
+A 'Symbol' is the canonical 'ByteArray#' holding its UTF-8 bytes, plus a
+process-unique id. Canonical means: while a symbol for some content is
+alive, every 'intern' of that content returns the very same array (and id),
+so equality is pointer equality and 'hash' is a field read.
+
+The id, not the content's SipHash, is the symbol's 'hash'. The table
+itself stays keyed by SipHash, which is what defends it against chosen
+content. A symbol's hash only has to be stable while it lives and distinct
+from other live symbols, and an id is both, with no collisions at all.
+Ids are dense, so a @HashMap@ keyed by symbols gets compact nodes: with
+random 64-bit hashes, a dozen header names already collide in the low
+bits and push entries into sub-nodes.
 
 = The table
 
@@ -126,8 +134,8 @@ instance Ord Symbol where
                   else compare (I# la) (I# lb)
   {-# INLINE compare #-}
 
--- | 'hash' is the symbol's SipHash, stored with it: a field read. The
--- SipHash key is drawn at start-up, so hashes differ between runs.
+-- | 'hash' is the symbol's id, stored with it: a field read. Ids are
+-- assigned in creation order, so they differ between runs.
 instance Hashable Symbol where
   hash (Symbol _ h) = I# h
   hashWithSalt s (Symbol _ h) = hashWithSalt s (I# h)
@@ -235,12 +243,16 @@ lookup x = withUtf8 x lookupBytes
 -- The table
 
 -- | Weak pointers to the live (or recently dead) symbols with one hash.
--- Chain than one only on a 64-bit SipHash collision.
-data Entry = Single (Weak# ByteArray#) | Chain (Weak# ByteArray#) !Entry
+-- More than one only on a 64-bit SipHash collision. Each carries its
+-- symbol's id (see 'Symbol').
+data Entry = Single (Weak# ByteArray#) Int# | Chain (Weak# ByteArray#) Int# !Entry
 
 type Shard = H.Dictionary RealWorld Unboxed Int Strict Entry
 
-data Global = Global !SipKey !(SmallArray (MVar Shard))
+-- | The SipHash key, the shards, and the next-symbol-id counter.
+data Global = Global !SipKey !(SmallArray (MVar Shard)) Counter
+
+data Counter = Counter (MutableByteArray# RealWorld)
 
 shardBits :: Int
 shardBits = 5
@@ -253,13 +265,16 @@ global :: Global
 global = unsafePerformIO $ do
   key <- newSipKey
   shards <- mapM (const (H.new >>= newMVar)) [1 .. shardCount]
-  pure (Global key (smallArrayFromListN shardCount shards))
+  counter <- IO $ \s -> case newByteArray# 8# s of
+    (# s1, m #) -> case writeIntArray# m 0# 0# s1 of
+      s2 -> (# s2, Counter m #)
+  pure (Global key (smallArrayFromListN shardCount shards) counter)
 {-# NOINLINE global #-}
 
 -- | The shard and table key for some bytes.
 locate :: Bytes -> (# MVar Shard, Int #)
 locate b = case global of
-  Global key shards ->
+  Global key shards _ ->
     let !h = sipHash13 key b
      in (# indexSmallArray shards (fromIntegral (h `uncheckedShiftR64` (64 - shardBits))), fromIntegral h #)
 {-# INLINE locate #-}
@@ -275,7 +290,7 @@ internBytes b = case locate b of
     found <- H.lookup t h
     case found of
       Just e -> IO $ \s -> case liveMatch# b e s of
-        (# s1, (# ba | #) #) -> (# s1, mkSymbol ba h #)
+        (# s1, (# (# ba, i #) | #) #) -> (# s1, Symbol ba i #)
         (# s1, (# | (# #) #) #) -> case insertFresh t b h (Just e) of IO f -> f s1
       Nothing -> do
         sweepBeforeGrowth t
@@ -290,25 +305,23 @@ lookupBytes b = case locate b of
     case found of
       Nothing -> pure Nothing
       Just e -> IO $ \s -> case liveMatch# b e s of
-        (# s1, (# ba | #) #) -> (# s1, Just (mkSymbol ba h) #)
+        (# s1, (# (# ba, i #) | #) #) -> (# s1, Just (Symbol ba i) #)
         (# s1, (# | (# #) #) #) -> (# s1, Nothing #)
 {-# INLINE lookupBytes #-}
 
-mkSymbol :: ByteArray# -> Int -> Symbol
-mkSymbol ba (I# h) = Symbol ba h
-{-# INLINE mkSymbol #-}
-
--- | The live array among @e@'s weak pointers whose content is @b@.
-liveMatch# :: Bytes -> Entry -> State# RealWorld -> (# State# RealWorld, (# ByteArray# | (# #) #) #)
+-- | The live array (and its id) among @e@'s weak pointers whose content
+-- is @b@.
+liveMatch# :: Bytes -> Entry -> State# RealWorld -> (# State# RealWorld, (# (# ByteArray#, Int# #) | (# #) #) #)
 liveMatch# b = go
  where
-  go (Single w) s = check w s
-  go (Chain w rest) s = case check w s of
-    (# s1, (# ba | #) #) -> (# s1, (# ba | #) #)
+  go (Single w i) s = check w i s
+  go (Chain w i rest) s = case check w i s of
+    (# s1, (# hit | #) #) -> (# s1, (# hit | #) #)
     (# s1, (# | (# #) #) #) -> go rest s1
-  check w s = case deRefWeak# w s of
+  check :: Weak# ByteArray# -> Int# -> State# RealWorld -> (# State# RealWorld, (# (# ByteArray#, Int# #) | (# #) #) #)
+  check w i s = case deRefWeak# w s of
     (# s1, alive, ba #)
-      | isTrue# alive, sameBytes b ba -> (# s1, (# ba | #) #)
+      | isTrue# alive, sameBytes b ba -> (# s1, (# (# ba, i #) | #) #)
       | otherwise -> (# s1, (# | (# #) #) #)
 {-# INLINE liveMatch# #-}
 
@@ -326,19 +339,22 @@ sameBytes (BytesAddr a n) ba = isTrue# (n ==# sizeofByteArray# ba) && go 0#
     | otherwise = True
 {-# INLINE sameBytes #-}
 
--- | Copy the bytes into a fresh canonical array, register it (dropping
--- dead weak pointers from the old entry) and return its symbol. Cold:
--- only a new symbol gets here.
+-- | Copy the bytes into a fresh canonical array, give it the next id,
+-- register it (dropping dead weak pointers from the old entry) and return
+-- its symbol. Cold: only a new symbol gets here.
 insertFresh :: Shard -> Bytes -> Int -> Maybe Entry -> IO Symbol
 insertFresh t b h old = do
   live <- maybe (pure Nothing) pruneEntry old
   IO $ \s -> case copyBytes b s of
     (# s1, ba #) -> case mkWeakNoFinalizer# ba ba s1 of
-      (# s2, w #) ->
-        let e = maybe (Single w) (Chain w) live
-         in case H.insert t h e of
-              IO f -> case f s2 of
-                (# s3, () #) -> (# s3, mkSymbol ba h #)
+      (# s2, w #) -> case global of
+        Global _ _ (Counter c) -> case fetchAddIntArray# c 0# 1# s2 of
+          (# s3, prev #) ->
+            let i = prev +# 1#
+                e = maybe (Single w i) (Chain w i) live
+             in case H.insert t h e of
+                  IO f -> case f s3 of
+                    (# s4, () #) -> (# s4, Symbol ba i #)
 {-# NOINLINE insertFresh #-}
 
 copyBytes :: Bytes -> State# RealWorld -> (# State# RealWorld, ByteArray# #)
@@ -353,12 +369,13 @@ copyBytes b s0 = case b of
 -- | The entry without its dead weak pointers, if any are left.
 pruneEntry :: Entry -> IO (Maybe Entry)
 pruneEntry = \case
-  Single w -> keep w Nothing
-  Chain w rest -> pruneEntry rest >>= keep w
+  Single w i -> keep w i Nothing
+  Chain w i rest -> pruneEntry rest >>= keep w i
  where
-  keep w rest = IO $ \s -> case deRefWeak# w s of
+  keep :: Weak# ByteArray# -> Int# -> Maybe Entry -> IO (Maybe Entry)
+  keep w i rest = IO $ \s -> case deRefWeak# w s of
     (# s1, alive, _ #)
-      | isTrue# alive -> (# s1, Just (maybe (Single w) (Chain w) rest) #)
+      | isTrue# alive -> (# s1, Just (maybe (Single w i) (Chain w i) rest) #)
       | otherwise -> (# s1, rest #)
 
 isLiveEntry :: Entry -> IO Bool
@@ -384,7 +401,7 @@ sweepShard t = H.foldM (\() k e -> isLiveEntry e >>= \alive -> unless alive (H.d
 -- | Number of live symbols. Walks every shard.
 symbolTableSize :: IO Int
 symbolTableSize = case global of
-  Global _ shards -> do
+  Global _ shards _ -> do
     let shardLive m = withMVarMasked m $ H.foldM (\acc _ e -> (\a -> if a then acc + 1 else acc) <$> isLiveEntry e) 0
     sum <$> mapM (\i -> shardLive (indexSmallArray shards i)) [0 .. shardCount - 1]
 
@@ -393,5 +410,5 @@ symbolTableSize = case global of
 -- after dropping a large set of symbols, to return the table's memory.
 sweepSymbolTable :: IO ()
 sweepSymbolTable = case global of
-  Global _ shards -> forM_ [0 .. shardCount - 1] $ \i ->
+  Global _ shards _ -> forM_ [0 .. shardCount - 1] $ \i ->
     withMVarMasked (indexSmallArray shards i) sweepShard

@@ -14,6 +14,7 @@ import qualified Data.ByteString.Unsafe as BSU
 import Data.Hashable (hash)
 import Data.List (sortBy)
 import Data.Ord (comparing)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -86,6 +87,14 @@ main = sydTest $ do
           sb = Symbol.intern b
       (sa == sb) === (a == b)
       compare sa sb === compare a b
+    it "live symbols have distinct hashes, stable across re-interning" $ property $ do
+      ts <- forAll (Gen.list (Range.linear 0 200) genUtf8)
+      syms <- evalIO (mapM Symbol.internIO ts)
+      let distinct = Set.fromList ts
+          hashes = Set.fromList (map hash syms)
+      Set.size hashes === Set.size distinct
+      again <- evalIO (mapM Symbol.internIO ts)
+      map hash again === map hash syms
     it "invalid UTF-8 is replaced, like decodeUtf8Lenient" $ do
       let bad = BS.pack [0x61, 0xff, 0x62, 0xc3]
       Symbol.intern bad `shouldBe` Symbol.intern (TE.decodeUtf8Lenient bad)

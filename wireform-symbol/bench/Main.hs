@@ -10,7 +10,7 @@
 -}
 module Main (main) where
 
-import Control.DeepSeq (NFData (..), rwhnf)
+import Control.DeepSeq (NFData (..))
 import Criterion.Main
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Char8 as BS8
@@ -20,10 +20,6 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Symbol
 import qualified Symbolize
-
-newtype WHNF a = WHNF a
-
-instance NFData (WHNF a) where rnf = rwhnf
 
 headerNames :: [ByteString]
 headerNames =
@@ -71,8 +67,8 @@ main = do
         ]
     , bgroup
         "eq"
-        [ bench "wireform-symbol" $ nf (sumBy (\s -> fromEnum (s == head ours))) ours
-        , bench "symbolize" $ nf (sumBy (\s -> fromEnum (s == head theirs))) theirs
+        [ bench "wireform-symbol" $ nf (\xs -> case xs of [] -> 0; (x0 : _) -> sumBy (\s -> fromEnum (s == x0)) xs) ours
+        , bench "symbolize" $ nf (\xs -> case xs of [] -> 0; (x0 : _) -> sumBy (\s -> fromEnum (s == x0)) xs) theirs
         ]
     ]
   -- the hit sets must survive until here
