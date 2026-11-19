@@ -2,6 +2,8 @@ packages:
   .
   hermes/
   wireform-core/
+  wireform-hashtables/
+  wireform-symbol/
   wireform-network/
   wireform-attoparsec/
   wireform-binary/
@@ -67,6 +69,10 @@ package wireform-core
 
 -- transport-bench needs -O2 so parser specialization fires
 package wireform-network
+  optimization: 2
+
+-- wireform-hashtables is a hot-path data structure; benches compare -O2 output
+package wireform-hashtables
   optimization: 2
 
 package flatparse

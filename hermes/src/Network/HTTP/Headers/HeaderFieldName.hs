@@ -277,9 +277,8 @@ import Data.Hashable (Hashable (..))
 import Data.String (IsString (..))
 import qualified Data.Text as T
 import qualified Data.Text.Array as A
-import qualified Data.Text.Encoding as TE
 import Data.Text.Internal (Text (..))
-import Symbolize
+import Symbol (Symbol, intern, unintern)
 import Text.Read
 
 
@@ -316,7 +315,7 @@ toText (HeaderFieldName name) = unintern name
 
 
 toCIByteString :: HeaderFieldName -> CI ByteString
-toCIByteString = unsafeMk . TE.encodeUtf8 . toText
+toCIByteString (HeaderFieldName name) = unsafeMk (unintern name)
 
 
 {- | Construct a 'HeaderFieldName' from a text input.

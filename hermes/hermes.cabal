@@ -327,7 +327,6 @@ library
     , memory
     , mono-traversable
     , parser-combinators
-    , symbolize
     , template-haskell
     , text
     , text-short
@@ -337,6 +336,7 @@ library
     , validation
     , vector
     , wireform-core
+    , wireform-symbol
   default-language: Haskell2010
 
 test-suite hermes-tests

@@ -32,6 +32,12 @@
       "summaries": []
     },
     {
+      "target": "wireform-hashtables:bench:wireform-hashtables-bench",
+      "raw": "hashtables",
+      "benchmarkOptions": ["--time-limit", "2", "+RTS", "-T", "-RTS"],
+      "summaries": []
+    },
+    {
       "target": "wireform-arrow:bench:wireform-arrow-bench",
       "raw": "arrow",
       "summaries": [

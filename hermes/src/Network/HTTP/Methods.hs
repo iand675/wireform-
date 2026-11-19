@@ -83,7 +83,7 @@ import Data.Hashable (Hashable)
 import Data.String (IsString (..))
 import Data.Word (Word8)
 import GHC.Generics (Generic)
-import Symbolize (Symbol, intern, unintern)
+import Symbol (Symbol, intern, unintern)
 
 
 {- | An HTTP request method. The RFC 9110 core verbs (plus @QUERY@) are
