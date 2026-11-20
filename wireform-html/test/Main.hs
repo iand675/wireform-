@@ -1,6 +1,7 @@
 module Main (main) where
 
 import Test.HTML.Derive qualified
+import Test.HTML.Entities qualified
 import Test.Syd
 
 
@@ -9,5 +10,6 @@ main =
   sydTest $
     describe "wireform-html-derive" $
       sequence_
-        [ Test.HTML.Derive.tests
+        [ Test.HTML.Entities.tests
+        , Test.HTML.Derive.tests
         ]

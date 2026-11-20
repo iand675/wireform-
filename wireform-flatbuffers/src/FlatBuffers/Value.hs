@@ -5,16 +5,10 @@ defines a dynamically-typed value covering FlatBuffers' type system:
 scalars (integers, floats, booleans), strings, vectors, tables (with
 optional fields), structs (fixed-size inline), and unions.
 
-@
-import qualified FlatBuffers.Value as FB
-import qualified FlatBuffers.Encode as FBE
-import qualified FlatBuffers.Decode as FBD
-import qualified Data.Vector as V
-
-let val = FB.Table (V.fromList [Just (FB.FBString \"hello\"), Just (FB.Int32 42)])
-let bytes = FBE.encode val
-let Right decoded = FBD.decode bytes
-@
+The dynamic codec requires a schema: use @encode schema value@ and
+@decode schema bytes@. Table and struct vectors follow declaration order.
+A @VUnion tag child@ occupies one logical table field; tag 1 denotes the
+first member in the schema. An absent union is represented by Nothing.
 -}
 module FlatBuffers.Value (
   Value (..),
@@ -47,6 +41,7 @@ data Value
   | VVector !(Vector Value)
   | VTable !(Vector (Maybe Value))
   | VStruct !(Vector Value)
+  | VUnion {-# UNPACK #-} !Word8 !Value
   deriving stock (Show, Eq, Generic)
   deriving anyclass (NFData)
 
@@ -67,3 +62,4 @@ instance Aeson.ToJSON Value where
   toJSON (VVector vs) = Aeson.Array (V.map Aeson.toJSON vs)
   toJSON (VTable vs) = Aeson.Array (V.map (maybe Aeson.Null Aeson.toJSON) vs)
   toJSON (VStruct vs) = Aeson.Array (V.map Aeson.toJSON vs)
+  toJSON (VUnion tag value) = Aeson.object ["tag" Aeson..= tag, "value" Aeson..= value]

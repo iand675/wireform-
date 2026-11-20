@@ -277,7 +277,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Array as A
 import qualified Data.Text.Encoding as TE
 import Data.Text.Internal (Text (..))
-import Symbolize (Symbol, intern, unintern)
+import Symbol (Symbol, intern, unintern)
 import Text.Read
 
 
@@ -288,7 +288,7 @@ newtype HeaderFieldName = HeaderFieldName SBS.ShortByteString
   deriving newtype (Binary, NFData, Eq, Ord, Hashable)
 
 
--- | Intern a name for callers using the Symbolize API.
+-- | Intern a name for callers using the Symbol API.
 fromHeaderFieldName :: HeaderFieldName -> Symbol
 fromHeaderFieldName = intern . headerNameToShortByteString
 

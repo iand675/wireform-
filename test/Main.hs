@@ -33,6 +33,7 @@ import Test.Class (classTests)
 import Test.Columnar (columnarFacadeTests)
 import Test.Columnar.Properties (columnarPropertyTests)
 import Test.EDN (ednTests)
+import Test.EDI (ediTests)
 import Test.FlatBuffers (flatBuffersTests)
 import Test.FlatBuffersCodeGen (flatBuffersCodeGenTests)
 import Test.FlatBuffersParser (flatBuffersParserTests)
@@ -85,6 +86,7 @@ main = do
         , columnarFacadeTests
         , columnarPropertyTests
         , ednTests
+        , ediTests
         , classTests
         , msgPackRPCTests
         , cborDiagnosticTests

@@ -1,0 +1,30 @@
+-- Focused, reproducible build for the conformance follow-up packages.
+-- cabal build --project-file=cabal.project.conformance all
+packages:
+  wireform-core
+  wireform-derive
+  wireform-columnar-core
+  wireform-flatbuffers
+  wireform-arrow
+  wireform-ion
+  wireform-edi
+  wireform-stats
+  wireform-xml
+
+tests: True
+benchmarks: True
+
+package *
+  optimization: 2
+  ghc-options: -fasm
+
+package wireform-arrow
+  flags: -zstd -lz4
+
+constraints: text >= 2.1
+
+package wireform-edi
+  ghc-options: -fasm -ddump-simpl -ddump-to-file -dsuppress-all
+
+package wireform-ion
+  ghc-options: -fasm -ddump-simpl -ddump-to-file -dsuppress-all

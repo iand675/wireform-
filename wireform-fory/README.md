@@ -204,9 +204,9 @@ cabal bench wireform-fory:wireform-fory-bench
 
 | Operation        |  encode |   decode | ratio |
 | :--------------- | ------: | -------: | ----: |
-| int              | 75.7 ns |  62.5 ns | 0.83x |
+| int              | 75.6 ns |  62.5 ns | 0.83x |
 | string           | 85.3 ns |  71.8 ns | 0.84x |
-| bytes 1KB        |  127 ns | 60.10 ns | 0.48x |
+| bytes 1KB        |  127 ns |  61.0 ns | 0.48x |
 | Person struct    |  266 ns |   440 ns | 1.65x |
 | list[Person]*100 | 6630 ns | 10783 ns | 1.63x |
 

@@ -13,6 +13,8 @@ them directly when you need them: "FlatBuffers.Builder", "FlatBuffers.Reader",
 "FlatBuffers.CodeGen", "FlatBuffers.Registry", and "FlatBuffers.QQ".
 -}
 module FlatBuffers (
+  module FlatBuffers.Codec,
+
   -- * Encoding
   module FlatBuffers.Encode,
 
@@ -26,6 +28,7 @@ module FlatBuffers (
   module FlatBuffers.Derive,
 ) where
 
+import FlatBuffers.Codec
 import FlatBuffers.Decode
 import FlatBuffers.Derive
 import FlatBuffers.Encode

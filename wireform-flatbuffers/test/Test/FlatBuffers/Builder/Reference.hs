@@ -1,6 +1,5 @@
 {-# LANGUAGE BangPatterns #-}
 
-
 {- | The original list-of-chunks "FlatBuffers.Builder", kept verbatim
 (minus comments) as a byte-for-byte oracle: the rewritten builder must
 emit exactly the same buffers for the same calls.
@@ -10,7 +9,6 @@ module Test.FlatBuffers.Builder.Reference (
   newBuilder,
   finish,
   currentUOff,
-
   prependBS,
   prependU8,
   prependU16,
@@ -21,19 +19,16 @@ module Test.FlatBuffers.Builder.Reference (
   prependI64,
   prepForObject,
   noteMinAlign,
-
   Field' (..),
   scalar,
   struct,
   voff,
   writeTable,
-
   writeString,
   writeVectorOfOffsets,
   writeVectorOfStructs,
   writeVectorInt32,
   writeVectorInt64,
-
   alignUp,
 ) where
 
@@ -52,10 +47,8 @@ import Foreign.Storable (pokeByteOff)
 
 data Builder = Builder
   { bufPayload :: !(IORef [BS.ByteString])
-
   , bufSize :: !(IORef Int)
   , bufVTables :: !(IORef (Map.Map VTableKey Int))
-
   , bufMinAlign :: !(IORef Int)
   }
 
@@ -140,22 +133,22 @@ currentUOff b = readIORef (bufSize b)
 
 
 data Field' = Field'
-  { fsAlign :: !Int
+  { fsSize :: !Int
+  , fsAlign :: !Int
   , fsWrite :: !(Builder -> Int -> IO ())
-
   }
 
 
 scalar :: Int -> (Builder -> IO ()) -> Field'
-scalar !align writer = Field' align $ \b _ -> writer b
+scalar !align writer = Field' align align $ \b _ -> writer b
 
 
 struct :: Int -> Int -> (Builder -> IO ()) -> Field'
-struct !size !_align writer = Field' size $ \b _ -> writer b
+struct !size !alignment writer = Field' size alignment $ \b _ -> writer b
 
 
 voff :: Int -> Field'
-voff !targetUOff = Field' 4 $ \b _ -> do
+voff !targetUOff = Field' 4 4 $ \b _ -> do
   cur <- currentUOff b
   prependU32 b (fromIntegral (cur + 4 - targetUOff))
 
@@ -164,10 +157,10 @@ writeTable :: Builder -> [Maybe Field'] -> IO Int
 writeTable b slots = do
   let !present = collectPresent 0 slots
       !nSlots = length slots
-      layout !_pos [] = ([], 0)
+      layout !pos [] = ([], pos)
       layout !pos ((idx, fs) : rest) =
         let !padPos = alignUp pos (fsAlign fs)
-            !pos' = padPos + fsAlign fs
+            !pos' = padPos + fsSize fs
             (rs, end) = layout pos' rest
         in ((idx, padPos) : rs, max pos' end)
       (inlineOffs, rawEnd) = layout 4 present
@@ -183,7 +176,7 @@ writeTable b slots = do
         let !off = case lookup idx inlineOffs of
               Just o -> o
               Nothing -> error "FlatBuffers.Builder: internal error (missing inlineOff for present slot)"
-            !fieldEnd = off + fsAlign fs
+            !fieldEnd = off + fsSize fs
             !padAfter = expectedEnd - fieldEnd
         prependBS b (BS.replicate padAfter 0)
         fsWrite fs b 0
@@ -279,7 +272,7 @@ writeVectorOfStructs b elemSize elemAlign writers = do
   let !n = length writers
       !totalBytes = 4 + elemSize * n
       !align = max 4 elemAlign
-  prepForObject b totalBytes align
+  prepForVector b (totalBytes - 4) align
   mapM_ (\w -> w b) (reverse writers)
   prependU32 b (fromIntegral n)
   currentUOff b
@@ -307,7 +300,7 @@ prepForVector :: Builder -> Int -> Int -> IO ()
 prepForVector b dataBytes align = do
   noteMinAlign b align
   !cur <- readIORef (bufSize b)
-  let !pad = (negate cur) .&. (align - 1)
+  let !pad = (negate (cur + dataBytes)) .&. (align - 1)
   prependBS b (BS.replicate pad 0)
   let _ = dataBytes
   pure ()

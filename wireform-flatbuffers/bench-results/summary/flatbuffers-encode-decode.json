@@ -1,6 +1,6 @@
 {
   "id": "flatbuffers-encode-decode",
-  "title": "wireform-flatbuffers encode + decode (zero-copy decode)",
+  "title": "wireform-flatbuffers schema-directed dynamic encode + decode",
   "unit": "Nanos",
   "higherIsBetter": false,
   "groups": [
@@ -11,19 +11,19 @@
     {
       "name": "encode",
       "values": [
-        827.36,
-        95352.16
+        1221.75,
+        99386.64
       ]
     },
     {
       "name": "decode",
       "values": [
-        142.36,
-        75.68
+        185.25,
+        17627.27
       ]
     }
   ],
   "baseline": "encode",
-  "capturedAt": "2026-06-27T11:35:54Z",
-  "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5. Decode is a zero-copy cursor by design: only the outer envelope is resolved at decode time. Per-field reads happen lazily."
+  "capturedAt": "2026-11-06T10:08:02Z",
+  "toolchain": "GHC 9.10.3, Apple Silicon, criterion 1.6.5. Full Value materialization; compiled schemas reused"
 }

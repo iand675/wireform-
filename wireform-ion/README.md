@@ -72,16 +72,35 @@ The runnable version lives in [`examples/IonExample.hs`](../examples/IonExample.
 
 | Module             | Role                                                      |
 |--------------------|-----------------------------------------------------------|
-| `Ion.Value`        | Dynamic untyped `Value` ADT covering every Ion type (`VNull`, `VInt`, `VDecimal`, `VTimestamp`, `VSymbol`, `VString`, `VBlob`, `VClob`, `VList`, `VSExp`, `VStruct`, `VAnnotated`, ...) |
+| `Ion.Value`        | Dynamic `Value`: null, bool, Int64, Double, string, symbol, blob, clob, list, struct and annotations |
 | `Ion.Encoding`     | The `Encoding` builder type used by `ToIon` instances     |
-| `Ion.Encode`       | Low-level encoding primitives building straight onto `wireform-core`'s `Builder` |
-| `Ion.Decode`       | Low-level decoding primitives over the strict `ByteString` input |
+| `Ion.Encode`       | Ion 1.0 binary encoder with direct buffer writes and local symbol interning |
+| `Ion.Decode`       | Bounded Ion 1.0 binary decoder with local symbol table resolution |
 | `Ion.Class`        | Public `ToIon` / `FromIon` typeclasses + `encodeIon` / `decodeIon` |
 | `Ion.Derive`       | `deriveIon` / `deriveToIon` / `deriveFromIon` Template Haskell entry points |
 | `Ion.SchemaLang`   | ISL parser (`parseISL :: Text -> Either String ISLSchema`) |
 | `Ion.ISLSchema`    | ISL AST types (`ISLSchema`, `ISLType`, `ISLConstraint`, `ISLImport`, ...) |
 | `Ion.ISLCodeGen`   | Generate Haskell types and `ToIon` / `FromIon` instances from an ISL schema |
 | `Ion.QQ`           | `[isl| ... |]` quasiquoter                                |
+
+## Binary compatibility
+
+Symbols, field names and annotations use Ion 1.0 symbol IDs. The encoder
+emits a local symbol table before the user value when needed and reuses
+system IDs. The decoder processes table replacement, append imports,
+version-marker resets, duplicate/gap slots and padding. Ordered annotation
+constructors are emitted as one binary wrapper.
+
+The dynamic model is intentionally limited to the types listed above.
+Decimal, timestamp, s-expression, typed-null and unknown-text symbol values
+return `Left`; they are not silently converted into other values. There is
+no shared-symbol catalog API yet. An unavailable import with `max_id`
+reserves its SID range, so subsequent local symbols remain readable;
+referencing its unknown text fails. An import without `max_id` fails because
+its size cannot be resolved without a catalog. The single-value decoder
+requires exactly one user value, apart from system tables, markers and NOPs.
+Earlier implementations wrote symbol text where the binary format requires IDs;
+those nonstandard symbol-bearing bytes are not a supported interchange format.
 
 ## Encode and decode
 
@@ -94,9 +113,9 @@ decodeIon :: FromIon a => ByteString -> Either String a
 
 For dynamic values without a Haskell type to mirror them, work with
 [`Ion.Value`](src/Ion/Value.hs) directly. The `Value` ADT carries
-Ion-specific shapes that JSON has no equivalent for (annotated
-values, symbol tables, decimals, timestamps with timezone offset),
-so you don't lose information by routing through it.
+Ion-specific shapes such as annotations, symbols, blobs and clobs. Check
+the supported-type list above before using it as an interchange model;
+decimals and timestamps are not represented by this ADT.
 
 ## Annotation-driven deriving
 
@@ -159,9 +178,12 @@ The per-format Hedgehog suite lives in `test/`:
 cabal test wireform-ion:wireform-ion-derive-test
 ```
 
-It covers the typeclass instances, the deriver, generic and
-TH-derived round-trips, the dynamic `Value` ADT, the ISL parser, and
-the code generator output.
+It covers the typeclass instances, TH-derived round-trips, dynamic values,
+independent binary fixtures, symbol-table transitions and malformed input.
+Set `WIREFORM_ION_REFERENCE` as described in
+[`interop/ion-rs`](../interop/ion-rs/README.md) to include the pinned official
+Rust interoperability checks. This focused suite does not exercise the ISL
+parser or its code generator.
 
 ## Benchmarks
 
@@ -179,20 +201,16 @@ cabal bench wireform-ion:wireform-ion-bench
 
 | Operation      |   encode |   decode | ratio |
 | :------------- | -------: | -------: | ----: |
-| single Person  |   330 ns |   403 ns | 1.22x |
-| [Person] x 100 | 38449 ns | 41835 ns | 1.09x |
+| single Person  |   554 ns |   450 ns | 0.81x |
+| [Person] x 100 | 10608 ns | 17260 ns | 1.63x |
 
-<sub>Last run 2026-06-27 11:35:54 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
+<sub>Last run 2026-11-04 13:05:38 UTC. GHC 9.10.3 -O2 -fasm on darwin-aarch64, Criterion 1.6.5.0; TH-generated Person codecs.</sub>
 <!-- END_AUTOGEN bench:ion-encode-decode -->
 
-For cross-language comparisons:
-
-- Haskell: no comparable Ion library on Hackage; the natural baseline
-  is the wireform-ion `Value`-level round trip.
-- Java: [ion-java](https://github.com/amazon-ion/ion-java), the
-  reference implementation.
-- Rust: [`ion-rs`](https://crates.io/crates/ion-rs).
-- C: [ion-c](https://github.com/amazon-ion/ion-c).
+The manifest-driven Rust comparisons below separate owned dynamic values
+from generated typed records. Run them sequentially using the commands in
+[`interop/ion-rs`](../interop/ion-rs/README.md). Allocation regressions can be
+captured with `--benchmark-options='--regress allocated:iters'`.
 
 ## License
 
@@ -203,3 +221,44 @@ BSD-3-Clause.
 - [Amazon Ion data model](https://amazon-ion.github.io/ion-docs/docs/spec.html)
 - [Ion binary encoding](https://amazon-ion.github.io/ion-docs/docs/binary.html)
 - [Ion Schema Language 2.0](https://amazon-ion.github.io/ion-schema/docs/isl-2-0/spec)
+
+
+<!-- BEGIN_AUTOGEN bench:ion-rust-codec -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="bench-results/charts/ion-rust-codec-dark.svg">
+  <img src="bench-results/charts/ion-rust-codec-light.svg" alt="Ion 1.0 binary codecs — owned dynamic values">
+</picture>
+
+| Operation             | wireform-ion |   ion-rs | ratio |
+| :-------------------- | -----------: | -------: | ----: |
+| encode Person         |       515 ns |   957 ns | 0.54x |
+| decode Person         |       387 ns |  1729 ns | 0.22x |
+| encode [Person] x 100 |      5719 ns |  6413 ns | 0.89x |
+| decode [Person] x 100 |     15559 ns | 38016 ns | 0.41x |
+| encode symbols x 100  |     16061 ns | 17538 ns | 0.92x |
+| decode symbols x 100  |     30877 ns | 89302 ns | 0.35x |
+
+<sub>Last run 2026-11-04 13:06:38 UTC. GHC 9.10.3 -O2 -fasm, Criterion 1.6.5.0; ion-rs 1.1.0, criterion.rs 0.7; darwin-aarch64.</sub>
+<!-- END_AUTOGEN bench:ion-rust-codec -->
+
+### Generated typed records
+
+The typed Rust reference uses `ion-rs` 1.1.0's experimental serde bridge;
+this is separate from the owned dynamic-value codec comparison. Fixture
+construction is outside the clock on both sides.
+
+<!-- BEGIN_AUTOGEN bench:ion-rust-typed -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="bench-results/charts/ion-rust-typed-dark.svg">
+  <img src="bench-results/charts/ion-rust-typed-light.svg" alt="Ion 1.0 generated typed record codecs">
+</picture>
+
+| Operation             | wireform-ion | ion-rs serde | ratio |
+| :-------------------- | -----------: | -----------: | ----: |
+| encode Person         |       554 ns |      1153 ns | 0.48x |
+| decode Person         |       450 ns |      1731 ns | 0.26x |
+| encode [Person] x 100 |     10608 ns |     17498 ns | 0.61x |
+| decode [Person] x 100 |     17260 ns |     32871 ns | 0.53x |
+
+<sub>Last run 2026-11-04 13:07:17 UTC. GHC 9.10.3 -O2 -fasm, TH-derived records, Criterion 1.6.5.0; ion-rs 1.1.0 experimental-serde, serde derive, criterion.rs 0.7; darwin-aarch64.</sub>
+<!-- END_AUTOGEN bench:ion-rust-typed -->

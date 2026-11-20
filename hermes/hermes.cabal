@@ -342,7 +342,6 @@ library
     , mono-traversable
     , parser-combinators
     , scientific
-    , symbolize
     , template-haskell
     , text
     , text-short
@@ -352,6 +351,7 @@ library
     , validation
     , vector
     , wireform-core
+    , wireform-symbol
   default-language: Haskell2010
 
 benchmark hermes-bench
@@ -364,7 +364,8 @@ benchmark hermes-bench
       base
     , bytestring
     , case-insensitive
-    , criterion
+    , criterion >= 1.5 && < 1.7
+    , deepseq
     , hermes
     , text
     , text-short
@@ -407,6 +408,7 @@ test-suite hermes-tests
       Test.Hermes.FieldLists
       Test.Hermes.Forwarded
       Test.Hermes.Framing
+      Test.Hermes.HeaderMap
       Test.Hermes.IPAddress
       Test.Hermes.Link
       Test.Hermes.Mailbox

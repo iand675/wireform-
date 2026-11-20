@@ -1,11 +1,12 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE MagicHash #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 {- | Zero-copy XML DOM. All strings are (offset, length) pairs into the
 original ByteString. No Text allocation during parse. ~hexml speed.
 -}
 module XML.FastDOM (
-  FastDoc (..),
+  FastDoc (FastDoc, fdSource, fdRoot),
   FastNode (..),
   FastAttr (..),
   Span (..),
@@ -27,11 +28,17 @@ import Control.DeepSeq (NFData (..))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Unsafe qualified as BSU
-import Data.Char (chr, digitToInt, isDigit, isHexDigit, ord)
+import Data.Char (chr)
 import Data.IORef
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import Data.Text.Lazy qualified as TL
+import Data.Text.Lazy.Builder qualified as TB
+import Data.Text.Read qualified as TR
 import Data.Vector (Vector)
 import Data.Vector qualified as V
 import Data.Vector.Mutable qualified as MV
@@ -86,15 +93,41 @@ instance NFData FastAttr where
   rnf (FastAttr n v) = rnf n `seq` rnf v
 
 
-data FastDoc = FastDoc
-  { fdSource :: !ByteString
-  , fdRoot :: !FastNode
+-- Replacement text has different whitespace treatment in attributes (XML 3.3.3).
+data EntityExpansion = EntityExpansion
+  { entityText :: !Text
+  , entityAttribute :: !Text
   }
   deriving stock (Show, Eq)
 
 
+instance NFData EntityExpansion where
+  rnf (EntityExpansion text attribute) = rnf text `seq` rnf attribute
+
+
+type EntityMap = Map Text EntityExpansion
+
+
+data FastDoc = FastDocInternal
+  { fdSource :: !ByteString
+  , fdRoot :: !FastNode
+  , fdEntities :: !EntityMap
+  }
+  deriving stock (Show, Eq)
+
+
+-- Compatibility constructor for documents without an internal subset.
+pattern FastDoc :: ByteString -> FastNode -> FastDoc
+pattern FastDoc bs root <- FastDocInternal bs root _
+  where
+    FastDoc bs root = FastDocInternal bs root Map.empty
+
+
+{-# COMPLETE FastDoc #-}
+
+
 instance NFData FastDoc where
-  rnf (FastDoc bs r) = rnf bs `seq` rnf r
+  rnf (FastDocInternal bs r entities) = rnf bs `seq` rnf r `seq` rnf entities
 
 
 ------------------------------------------------------------------------
@@ -239,13 +272,19 @@ parseFast bs = unsafeDupablePerformIO $
     -- Skip XML declaration if present
     off1 <- skipXMLDecl bs ptr off0 len
     let !off2 = skipSpaces bs off1 len
-    -- Skip DOCTYPE if present
-    let !off3 = skipDoctype bs off2 len
-    let !off4 = skipSpaces bs off3 len
-    result <- parseNode bs ptr off4 len
-    case result of
-      Left err -> pure (Left err)
-      Right (node, _) -> pure (Right (FastDoc bs node))
+    -- Keep declaration parsing (and its result allocation) off the common path.
+    let parseRoot entities offset = do
+          result <- parseNode bs ptr offset len
+          pure $ case result of
+            Left err -> Left err
+            Right (node, _) -> do
+              if Map.null entities then Right () else checkEntityReferences bs entities node
+              Right (FastDocInternal bs node entities)
+    if hasDoctype bs off2 len
+      then case readDoctype bs off2 len of
+        Left err -> pure (Left err)
+        Right (Doctype entities off3) -> parseRoot entities (skipSpaces bs off3 len)
+      else parseRoot Map.empty off2
 
 
 skipXMLDecl :: ByteString -> Ptr Word8 -> Int -> Int -> IO Int
@@ -267,28 +306,211 @@ skipXMLDecl !bs !_ptr !off !len
   | otherwise = pure off
 
 
-skipDoctype :: ByteString -> Int -> Int -> Int
-skipDoctype !bs !off !len
-  | off + 8 < len
-  , BSU.unsafeIndex bs off == 0x3C -- <
-  , BSU.unsafeIndex bs (off + 1) == 0x21 -- !
-  , BSU.unsafeIndex bs (off + 2) == 0x44 -- D
-  , BSU.unsafeIndex bs (off + 3) == 0x4F -- O
-  , BSU.unsafeIndex bs (off + 4) == 0x43 -- C
-  , BSU.unsafeIndex bs (off + 5) == 0x54 -- T
-  , BSU.unsafeIndex bs (off + 6) == 0x59 -- Y
-  , BSU.unsafeIndex bs (off + 7) == 0x50 -- P
-  , BSU.unsafeIndex bs (off + 8) == 0x45 -- E
-    =
-      go (off + 9) (0 :: Int)
-  | otherwise = off
+-- Internal subsets are uncommon: all declaration work stays off the no-DTD
+-- parser path. No external resources are opened by this parser.
+data Doctype = Doctype !EntityMap {-# UNPACK #-} !Int
+
+
+entityLimit :: Int
+entityLimit = 1048576
+
+
+hasDoctype :: ByteString -> Int -> Int -> Bool
+hasDoctype bs off len =
+  off + 9 <= len
+    && at off == 60
+    && at (off + 1) == 33
+    && at (off + 2) == 68
+    && at (off + 3) == 79
+    && at (off + 4) == 67
+    && at (off + 5) == 84
+    && at (off + 6) == 89
+    && at (off + 7) == 80
+    && at (off + 8) == 69
   where
-    go !i !depth
-      | i >= len = i
-      | BSU.unsafeIndex bs i == 0x3E && depth == 0 = i + 1
-      | BSU.unsafeIndex bs i == 0x5B = go (i + 1) (depth + 1)
-      | BSU.unsafeIndex bs i == 0x5D = go (i + 1) (depth - 1)
-      | otherwise = go (i + 1) depth
+    at = BSU.unsafeIndex bs
+{-# INLINE hasDoctype #-}
+
+
+readDoctype :: ByteString -> Int -> Int -> Either String Doctype
+readDoctype bs off len
+  | not (hasDoctype bs off len) = Right (Doctype Map.empty off)
+  | otherwise = header (off + 9) Nothing
+  where
+    at = BSU.unsafeIndex bs
+    header i quote
+      | i >= len = Left "XML.FastDOM: unterminated DOCTYPE"
+      | otherwise = case quote of
+          Just q
+            | at i == q -> header (i + 1) Nothing
+            | otherwise -> header (i + 1) quote
+          Nothing
+            | at i == 34 || at i == 39 -> header (i + 1) (Just (at i))
+            | at i == 62 -> Right (Doctype Map.empty (i + 1))
+            | at i == 91 -> subset (i + 1) Map.empty
+            | otherwise -> header (i + 1) Nothing
+    subset i declarations
+      | i >= len = Left "XML.FastDOM: unterminated internal subset"
+      | at i == 93 = do
+          let end = skipSpaces bs (i + 1) len
+          if end >= len || at end /= 62
+            then Left "XML.FastDOM: expected DOCTYPE terminator"
+            else Doctype <$> resolveDeclarations declarations <*> pure (end + 1)
+      | "<!--" `BS.isPrefixOf` BS.drop i bs = do
+          let (comment, rest) = BS.breakSubstring "-->" (BS.drop (i + 4) bs)
+          if BS.null rest
+            then Left "XML.FastDOM: unterminated DTD comment"
+            else subset (i + 7 + BS.length comment) declarations
+      | "<!ENTITY" `BS.isPrefixOf` BS.drop i bs = do
+          let nameStart = skipSpaces bs (i + 8) len
+          if nameStart <= i + 8 || nameStart >= len || at nameStart == 37
+            then Left "XML.FastDOM: parameter entities are unsupported"
+            else do
+              let nameEnd = skipNameChars bs nameStart len
+                  valueStart = skipSpaces bs nameEnd len
+              if nameEnd == nameStart || valueStart <= nameEnd || valueStart >= len || not (at valueStart == 34 || at valueStart == 39)
+                then Left "XML.FastDOM: expected an internal quoted entity value"
+                else do
+                  let q = at valueStart
+                      (valueBytes, rest) = BS.break (== q) (BS.drop (valueStart + 1) bs)
+                      after = skipSpaces bs (valueStart + 2 + BS.length valueBytes) len
+                  if BS.null rest || after >= len || at after /= 62
+                    then Left "XML.FastDOM: unterminated entity declaration"
+                    else
+                      if BS.elem 60 valueBytes || BS.elem 37 valueBytes
+                        then Left "XML.FastDOM: markup and parameter references in entity values are unsupported"
+                        else do
+                          name <- strictText (sliceBS bs nameStart (nameEnd - nameStart))
+                          rawValue <- strictText valueBytes
+                          value <- cookEntityValue rawValue
+                          let next = Map.insertWith (\_ first -> first) name value declarations
+                          if Map.size next > 4096
+                            then Left "XML.FastDOM: too many entity declarations"
+                            else subset (after + 1) next
+      | at i == 60 = skipDeclaration (i + 1) Nothing >>= \next -> subset next declarations
+      | at i == 37 = Left "XML.FastDOM: parameter entity references are unsupported"
+      | otherwise = subset (i + 1) declarations
+    skipDeclaration i quote
+      | i >= len = Left "XML.FastDOM: unterminated DTD declaration"
+      | otherwise = case quote of
+          Just q
+            | at i == q -> skipDeclaration (i + 1) Nothing
+            | otherwise -> skipDeclaration (i + 1) quote
+          Nothing
+            | at i == 34 || at i == 39 -> skipDeclaration (i + 1) (Just (at i))
+            | at i == 62 -> Right (i + 1)
+            | otherwise -> skipDeclaration (i + 1) Nothing
+    strictText = either (const (Left "XML.FastDOM: invalid UTF-8 in DTD")) Right . TE.decodeUtf8'
+
+
+-- XML 4.5: numeric references are processed while constructing replacement
+-- text; general references are processed when that replacement is included.
+-- For example, &#38;lt; becomes <, whereas &amp;lt; stays the literal &lt;.
+cookEntityValue :: Text -> Either String Text
+cookEntityValue raw = do
+  value <- TL.toStrict . TB.toLazyText <$> go (normalizeLines raw)
+  if T.any (== '<') value
+    then Left "XML.FastDOM: markup in entity replacement text is unsupported"
+    else Right value
+  where
+    go text =
+      let (literal, tailText) = T.breakOn "&" text
+      in if T.null tailText
+           then Right (TB.fromText literal)
+           else do
+             let (name, semi) = T.breakOn ";" (T.drop 1 tailText)
+             if T.null semi
+               then Left "XML.FastDOM: unterminated entity value reference"
+               else do
+                 replacement <-
+                   if "#" `T.isPrefixOf` name
+                     then maybe (Left "XML.FastDOM: invalid numeric entity reference") Right (resolveEntity name)
+                     else Right ("&" <> name <> ";")
+                 rest <- go (T.drop 1 semi)
+                 Right (TB.fromText literal <> TB.fromText replacement <> rest)
+
+
+normalizeLines :: Text -> Text
+normalizeLines = T.replace "\r" "\n" . T.replace "\r\n" "\n"
+
+
+normalizeAttributeLiteral :: Text -> Text
+normalizeAttributeLiteral text
+  | T.any whitespace text = T.map (\c -> if whitespace c then ' ' else c) text
+  | otherwise = text
+  where
+    whitespace c = c == '\t' || c == '\n' || c == '\r'
+
+
+resolveDeclarations :: Map Text Text -> Either String EntityMap
+resolveDeclarations raw = Map.foldlWithKey' step (Right Map.empty) raw
+  where
+    step result name _ = do
+      done <- result
+      text <- resolve False Set.empty 0 entityLimit name
+      attribute <- resolve True Set.empty 0 entityLimit name
+      let used = Map.foldl' (\n value -> n + T.length (entityText value)) (T.length text) done
+      if used > entityLimit
+        then Left "XML.FastDOM: expanded entity table exceeds limit"
+        else Right (Map.insert name (EntityExpansion text attribute) done)
+    resolve :: Bool -> Set.Set Text -> Int -> Int -> Text -> Either String Text
+    resolve attribute seen depth budget name
+      | Set.member name seen = Left "XML.FastDOM: recursive entity declaration"
+      | depth >= 32 = Left "XML.FastDOM: entity nesting exceeds limit"
+      | otherwise = case Map.lookup name raw of
+          Nothing -> Left "XML.FastDOM: undefined entity in declaration"
+          Just value -> expandReferences attribute budget (resolve attribute (Set.insert name seen) (depth + 1)) value
+
+
+-- The callback receives the remaining budget before expansion, so even a
+-- compact exponential declaration is rejected before its output is allocated.
+expandReferences :: Bool -> Int -> (Int -> Text -> Either String Text) -> Text -> Either String Text
+expandReferences attribute limit lookupName input = TL.toStrict . TB.toLazyText <$> go limit input
+  where
+    go budget text =
+      let (rawLiteral, tailText) = T.breakOn "&" text
+          literal = if attribute then normalizeAttributeLiteral rawLiteral else rawLiteral
+          remainingBudget = budget - T.length literal
+      in if remainingBudget < 0
+           then Left "XML.FastDOM: entity expansion exceeds limit"
+           else
+             if T.null tailText
+               then Right (TB.fromText literal)
+               else do
+                 let (name, semi) = T.breakOn ";" (T.drop 1 tailText)
+                 if T.null semi
+                   then Left "XML.FastDOM: unterminated entity reference"
+                   else do
+                     replacement <- case resolveEntity name of
+                       Just value -> Right value
+                       Nothing -> lookupName remainingBudget name
+                     let nextBudget = remainingBudget - T.length replacement
+                     if nextBudget < 0
+                       then Left "XML.FastDOM: entity expansion exceeds limit"
+                       else do
+                         rest <- go nextBudget (T.drop 1 semi)
+                         Right (TB.fromText literal <> TB.fromText replacement <> rest)
+
+
+checkEntityReferences :: ByteString -> EntityMap -> FastNode -> Either String ()
+checkEntityReferences bs entities root = () <$ visit entityLimit root
+  where
+    visit budget (FElement _ attrs children) = do
+      afterAttrs <- V.foldM checkAttr budget attrs
+      V.foldM visit afterAttrs children
+    visit budget (FText span') = checkSpan False budget span'
+    visit budget _ = Right budget
+    checkAttr budget (FastAttr _ valueSpan) = checkSpan True budget valueSpan
+    checkSpan attribute budget (Span off len) = do
+      let raw = normalizeLines (decodeSlice bs off len)
+      if T.any (== '&') raw
+        then do
+          expanded <- expandReferences attribute entityLimit (lookupName attribute) raw
+          -- Count materialized output only for spans with entity references.
+          let remaining = budget - T.length expanded
+          if remaining < 0 then Left "XML.FastDOM: document entity expansion exceeds limit" else Right remaining
+        else Right budget
+    lookupName attribute _ name = maybe (Left "XML.FastDOM: undefined entity reference") (Right . if attribute then entityAttribute else entityText) (Map.lookup name entities)
 
 
 ------------------------------------------------------------------------
@@ -564,20 +786,20 @@ isNameByte !b =
 ------------------------------------------------------------------------
 
 toDocument :: FastDoc -> Document
-toDocument (FastDoc bs root) = Document Nothing (materializeNode bs root)
+toDocument (FastDocInternal bs root entities) = Document Nothing (materializeNode entities bs root)
 
 
-materializeNode :: ByteString -> FastNode -> Node
-materializeNode !bs = go
+materializeNode :: EntityMap -> ByteString -> FastNode -> Node
+materializeNode !entities !bs = go
   where
     go (FElement nameSpan attrs children) =
       let !name = materializeName bs nameSpan
-          !as = V.map (materializeAttr bs) attrs
+          !as = V.map (materializeAttr entities bs) attrs
           !cs = V.map go children
       in Element name as cs
     go (FText (Span off len)) =
       let !raw = decodeSlice bs off len
-      in Text (resolveEntitiesText raw)
+      in Text (resolveDocumentEntities False entities raw)
     go (FCData (Span off len)) =
       CData (decodeSlice bs off len)
     go (FComment (Span off len)) =
@@ -595,21 +817,30 @@ materializeName !bs (Span off len) =
          | otherwise -> qualifiedName local (T.drop 1 rest)
 
 
-materializeAttr :: ByteString -> FastAttr -> Attribute
-materializeAttr !bs (FastAttr (Span nOff nLen) (Span vOff vLen)) =
+materializeAttr :: EntityMap -> ByteString -> FastAttr -> Attribute
+materializeAttr !entities !bs (FastAttr (Span nOff nLen) (Span vOff vLen)) =
   let !rawName = decodeSlice bs nOff nLen
       !rawVal = decodeSlice bs vOff vLen
       !name = case T.breakOn ":" rawName of
         (local, rest)
           | T.null rest -> simpleName local
           | otherwise -> qualifiedName local (T.drop 1 rest)
-      !val = resolveEntitiesText rawVal
+      !val = resolveDocumentEntities True entities rawVal
   in Attribute name val
 
 
 ------------------------------------------------------------------------
 -- Entity resolution (for toDocument materialization)
 ------------------------------------------------------------------------
+
+resolveDocumentEntities :: Bool -> EntityMap -> Text -> Text
+resolveDocumentEntities attribute entities input
+  | Map.null entities = resolveEntitiesText (if attribute then normalizeAttributeLiteral text else text)
+  | otherwise = either (const text) id (expandReferences attribute entityLimit lookupName text)
+  where
+    text = normalizeLines input
+    lookupName _ name = maybe (Left "undefined entity") (Right . if attribute then entityAttribute else entityText) (Map.lookup name entities)
+
 
 resolveEntitiesText :: Text -> Text
 resolveEntitiesText txt
@@ -646,18 +877,17 @@ resolveEntity "gt" = Just ">"
 resolveEntity "apos" = Just "'"
 resolveEntity "quot" = Just "\""
 resolveEntity t
-  | T.isPrefixOf "#x" t || T.isPrefixOf "#X" t =
-      let hex = T.drop 2 t
-      in if T.null hex || not (T.all isHexDigit hex)
-           then Nothing
-           else
-             let !n = T.foldl' (\acc c -> acc * 16 + digitToInt c) 0 hex
-             in if n > 0x10FFFF then Nothing else Just (T.singleton (chr n))
-  | T.isPrefixOf "#" t =
-      let dec = T.drop 1 t
-      in if T.null dec || not (T.all isDigit dec)
-           then Nothing
-           else
-             let !n = T.foldl' (\acc c -> acc * 10 + (ord c - ord '0')) 0 dec
-             in if n > 0x10FFFF then Nothing else Just (T.singleton (chr n))
+  | Just digits <- T.stripPrefix "#x" t = numeric TR.hexadecimal digits
+  | Just digits <- T.stripPrefix "#" t = numeric TR.decimal digits
   | otherwise = Nothing
+  where
+    numeric parser digits = case parser digits :: Either String (Integer, Text) of
+      Right (n, rest) | T.null rest && valid n -> Just (T.singleton (chr (fromInteger n)))
+      _ -> Nothing
+    valid n =
+      n == 9
+        || n == 10
+        || n == 13
+        || (n >= 32 && n <= 0xD7FF)
+        || (n >= 0xE000 && n <= 0xFFFD)
+        || (n >= 0x10000 && n <= 0x10FFFF)

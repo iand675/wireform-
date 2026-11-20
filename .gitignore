@@ -68,3 +68,9 @@ traffic.html
 /oom-*
 /slow-unit-*
 /default.profraw
+
+# Local conformance reference builds.
+/interop/ion-rs/target/
+/interop/arrow-map-rs/target/
+
+/interop/edifact-rs/target/

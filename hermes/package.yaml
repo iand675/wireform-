@@ -48,11 +48,11 @@ dependencies:
 - hashable
 - memory
 - wireform-core
+- wireform-symbol
 - mono-traversable
 - MonadRandom
 - unordered-containers
 - validation
-- symbolize
 - template-haskell
 - text
 - text-short

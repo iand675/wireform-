@@ -41,6 +41,7 @@ ADT for dynamic messages.
 | BSON | `wireform-bson` | `BSON.Class` | MongoDB wire format |
 | Ion | `wireform-ion` | `Ion.Class` | ISL schema + codegen |
 | EDN | `wireform-edn` | `EDN.Class` | Clojure/Datomic format |
+| EDI | `wireform-edi` | `EDI.Class` | X12/EDIFACT segment codecs, envelopes, acknowledgements, TH deriving |
 | Bencode | `wireform-bencode` | `Bencode.Class` | BitTorrent serialization |
 | Fory | `wireform-fory` | none | Apache Fory xlang format (interop-tested against pyfory) |
 

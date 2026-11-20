@@ -1,0 +1,53 @@
+{
+  "id": "edi-rust-codec",
+  "title": "EDIFACT UTF-8 codecs — plain, released and generated typed records",
+  "unit": "Nanos",
+  "higherIsBetter": false,
+  "groups": [
+    "encode plain 1",
+    "decode plain 1",
+    "encode plain 1000",
+    "decode plain 1000",
+    "encode released 1",
+    "decode released 1",
+    "encode released 1000",
+    "decode released 1000",
+    "encode typed FTX",
+    "decode typed FTX"
+  ],
+  "series": [
+    {
+      "name": "wireform-edi",
+      "values": [
+        74.01,
+        280.61,
+        44967.7,
+        244714.08,
+        95.49,
+        307.42,
+        54743.64,
+        256651.12,
+        92.16,
+        243.88
+      ]
+    },
+    {
+      "name": "edifact-rs",
+      "values": [
+        143.78,
+        342.23,
+        53233.28,
+        266205.74,
+        164.35,
+        400.92,
+        79029.29,
+        313898.67,
+        144.24,
+        342.63
+      ]
+    }
+  ],
+  "baseline": "edifact-rs",
+  "toolchain": "GHC 9.10.3 -O2 -fasm, Criterion 1.6.5.0; edifact-rs 0.18.0, criterion.rs 0.7; darwin-aarch64",
+  "capturedAt": "2026-11-04T13:29:28Z"
+}

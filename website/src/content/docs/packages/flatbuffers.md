@@ -33,6 +33,8 @@ value-level codec:
 import FlatBuffers.Decode qualified as FBD
 import FlatBuffers.Derive (ToFlatBuffers (..), FromFlatBuffers (..), deriveFlatBuffers, deriveView)
 import FlatBuffers.Encode qualified as FBE
+import FlatBuffers.Parser (parseFlatBuffers)
+import FlatBuffers.Codec (CompiledSchema, compileSchema)
 import Data.Int (Int32)
 import Data.Text (Text)
 import GHC.Generics (Generic)
@@ -47,20 +49,28 @@ data Widget = Widget
 $(deriveFlatBuffers ''Widget)
 $(deriveView ''Widget)
 
-encodeWidget :: Widget -> ByteString
-encodeWidget = FBE.encode . toFlatBuffers
+widgetSchema :: Either String CompiledSchema
+widgetSchema = parseFlatBuffers "table Widget { name:string; count:int; price:double; } root_type Widget;" >>= compileSchema
+
+encodeWidget :: Widget -> Either String ByteString
+encodeWidget widget = widgetSchema >>= (\schema -> FBE.encodeWith schema (toFlatBuffers widget))
 
 decodeWidget :: ByteString -> Either String Widget
 decodeWidget bs = do
-  val <- FBD.decode bs
+  schema <- widgetSchema
+  val <- FBD.decodeWith schema bs
   fromFlatBuffers val
 
 sample :: Widget
 sample = Widget "wireform" 42 2.718
 
 roundTrip :: Either String Widget
-roundTrip = decodeWidget (encodeWidget sample)
+roundTrip = encodeWidget sample >>= decodeWidget
 ```
+
+Dynamic encode/decode require a parsed or compiled schema; values follow declaration order.
+`decodeWith` materializes a typed `Value` tree and validates references, alignment,
+and required fields. Defaults and optional scalar presence come from that schema.
 
 For zero-copy reads on known schemas, use the view layer after encoding:
 
@@ -93,16 +103,16 @@ wireform-gen flatbuffers -i schema.fbs -o src/Gen/
 
 ## Performance
 
-### Encode/decode (zero-copy decode)
+### Schema-directed dynamic encode/decode
 
 <!-- BEGIN_AUTOGEN bench:flatbuffers-encode-decode -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 400" width="720" height="400" role="img" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif" font-size="12">
-  <title>wireform-flatbuffers encode + decode (zero-copy decode)</title>
+  <title>wireform-flatbuffers schema-directed dynamic encode + decode</title>
   <style>.wf-dark{display:none}@media (prefers-color-scheme:dark){.wf-light{display:none}.wf-dark{display:inline}}</style>
   <g class="wf-light">
     <rect x="0" y="0" width="720" height="400" fill="#ffffff"/>
-    <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">wireform-flatbuffers encode + decode (zero-copy decode)</text>
-    <text x="360" y="44" text-anchor="middle" font-size="11" fill="#656d76">lower is better · ns · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5. Decode is a zero-copy cursor by design: only the outer envelope is resolved at decode time. Per-field reads happen lazily.</text>
+    <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">wireform-flatbuffers schema-directed dynamic encode + decode</text>
+    <text x="360" y="44" text-anchor="middle" font-size="11" fill="#656d76">lower is better · ns · GHC 9.10.3, Apple Silicon, criterion 1.6.5. Full Value materialization; compiled schemas reused</text>
     <g stroke="#d0d7de" stroke-width="1">
       <line x1="80" y1="320" x2="700" y2="320"/>
       <line x1="80" y1="60" x2="80" y2="320"/>
@@ -120,16 +130,16 @@ wireform-gen flatbuffers -i schema.fbs -o src/Gen/
       <text x="72" y="64" text-anchor="end" font-size="10" fill="#656d76">100000</text>
     </g>
     <g>
-      <rect x="171" y="317.8" width="62" height="2.2" rx="2" fill="#0969da"/>
-      <rect x="235" y="319.6" width="62" height="0.4" rx="2" fill="#cf222e"/>
-      <rect x="481" y="72.1" width="62" height="247.9" rx="2" fill="#0969da"/>
-      <rect x="545" y="319.8" width="62" height="0.2" rx="2" fill="#cf222e"/>
+      <rect x="171" y="316.8" width="62" height="3.2" rx="2" fill="#0969da"/>
+      <rect x="235" y="319.5" width="62" height="0.5" rx="2" fill="#cf222e"/>
+      <rect x="481" y="61.6" width="62" height="258.4" rx="2" fill="#0969da"/>
+      <rect x="545" y="274.2" width="62" height="45.8" rx="2" fill="#cf222e"/>
     </g>
     <g>
-      <text x="202" y="313.8" text-anchor="middle" font-size="10" fill="#1f2328">827</text>
-      <text x="266" y="315.6" text-anchor="middle" font-size="10" fill="#1f2328">142</text>
-      <text x="512" y="68.1" text-anchor="middle" font-size="10" fill="#1f2328">95352</text>
-      <text x="576" y="315.8" text-anchor="middle" font-size="10" fill="#1f2328">75.7</text>
+      <text x="202" y="312.8" text-anchor="middle" font-size="10" fill="#1f2328">1222</text>
+      <text x="266" y="315.5" text-anchor="middle" font-size="10" fill="#1f2328">185</text>
+      <text x="512" y="57.6" text-anchor="middle" font-size="10" fill="#1f2328">99387</text>
+      <text x="576" y="270.2" text-anchor="middle" font-size="10" fill="#1f2328">17627</text>
     </g>
     <g>
       <text x="235" y="338" text-anchor="middle" font-size="11" fill="#1f2328">Person table</text>
@@ -148,8 +158,8 @@ wireform-gen flatbuffers -i schema.fbs -o src/Gen/
   </g>
   <g class="wf-dark">
     <rect x="0" y="0" width="720" height="400" fill="#0d1117"/>
-    <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#e6edf3">wireform-flatbuffers encode + decode (zero-copy decode)</text>
-    <text x="360" y="44" text-anchor="middle" font-size="11" fill="#7d8590">lower is better · ns · ghc-9.8.4 on darwin-aarch64, criterion 1.6.5. Decode is a zero-copy cursor by design: only the outer envelope is resolved at decode time. Per-field reads happen lazily.</text>
+    <text x="360" y="26" text-anchor="middle" font-size="15" font-weight="600" fill="#e6edf3">wireform-flatbuffers schema-directed dynamic encode + decode</text>
+    <text x="360" y="44" text-anchor="middle" font-size="11" fill="#7d8590">lower is better · ns · GHC 9.10.3, Apple Silicon, criterion 1.6.5. Full Value materialization; compiled schemas reused</text>
     <g stroke="#30363d" stroke-width="1">
       <line x1="80" y1="320" x2="700" y2="320"/>
       <line x1="80" y1="60" x2="80" y2="320"/>
@@ -167,16 +177,16 @@ wireform-gen flatbuffers -i schema.fbs -o src/Gen/
       <text x="72" y="64" text-anchor="end" font-size="10" fill="#7d8590">100000</text>
     </g>
     <g>
-      <rect x="171" y="317.8" width="62" height="2.2" rx="2" fill="#58a6ff"/>
-      <rect x="235" y="319.6" width="62" height="0.4" rx="2" fill="#ff7b72"/>
-      <rect x="481" y="72.1" width="62" height="247.9" rx="2" fill="#58a6ff"/>
-      <rect x="545" y="319.8" width="62" height="0.2" rx="2" fill="#ff7b72"/>
+      <rect x="171" y="316.8" width="62" height="3.2" rx="2" fill="#58a6ff"/>
+      <rect x="235" y="319.5" width="62" height="0.5" rx="2" fill="#ff7b72"/>
+      <rect x="481" y="61.6" width="62" height="258.4" rx="2" fill="#58a6ff"/>
+      <rect x="545" y="274.2" width="62" height="45.8" rx="2" fill="#ff7b72"/>
     </g>
     <g>
-      <text x="202" y="313.8" text-anchor="middle" font-size="10" fill="#e6edf3">827</text>
-      <text x="266" y="315.6" text-anchor="middle" font-size="10" fill="#e6edf3">142</text>
-      <text x="512" y="68.1" text-anchor="middle" font-size="10" fill="#e6edf3">95352</text>
-      <text x="576" y="315.8" text-anchor="middle" font-size="10" fill="#e6edf3">75.7</text>
+      <text x="202" y="312.8" text-anchor="middle" font-size="10" fill="#e6edf3">1222</text>
+      <text x="266" y="315.5" text-anchor="middle" font-size="10" fill="#e6edf3">185</text>
+      <text x="512" y="57.6" text-anchor="middle" font-size="10" fill="#e6edf3">99387</text>
+      <text x="576" y="270.2" text-anchor="middle" font-size="10" fill="#e6edf3">17627</text>
     </g>
     <g>
       <text x="235" y="338" text-anchor="middle" font-size="11" fill="#e6edf3">Person table</text>
@@ -196,12 +206,12 @@ wireform-gen flatbuffers -i schema.fbs -o src/Gen/
 </svg>
 
 
-| Operation          |   encode |  decode | ratio |
-| :----------------- | -------: | ------: | ----: |
-| Person table       |   827 ns |  142 ns | 0.17x |
-| Person[100] vector | 95352 ns | 75.7 ns | 0.00x |
+| Operation          |   encode |   decode | ratio |
+| :----------------- | -------: | -------: | ----: |
+| Person table       |  1222 ns |   185 ns | 0.15x |
+| Person[100] vector | 99387 ns | 17627 ns | 0.18x |
 
-<sub>Last run 2026-06-27 11:35:54 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5. Decode is a zero-copy cursor by design: only the outer envelope is resolved at decode time. Per-field reads happen lazily..</sub>
+<sub>Last run 2026-11-06 10:08:02 UTC. GHC 9.10.3, Apple Silicon, criterion 1.6.5. Full Value materialization; compiled schemas reused.</sub>
 <!-- END_AUTOGEN bench:flatbuffers-encode-decode -->
 
 Like Cap'n Proto, FlatBuffers decode is a zero-copy cursor. The decode cost is near-constant because only the root table offset is resolved; field access is lazy pointer arithmetic into the original buffer. Encode is proportional to the number of fields and vector elements.

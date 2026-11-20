@@ -123,6 +123,7 @@ only need CBOR, you only build CBOR.
 | [`wireform-msgpack`](wireform-msgpack/README.md) | MessagePack with msgpack-rpc |
 | [`wireform-bson`](wireform-bson/README.md) | BSON |
 | [`wireform-ion`](wireform-ion/README.md) | Amazon Ion with ISL schema |
+| [`wireform-edi`](wireform-edi/README.md) | X12 and EDIFACT segments, envelopes, acknowledgements, and TH deriving |
 | [`wireform-bond`](wireform-bond/README.md) | Microsoft Bond (compact binary) |
 | [`wireform-flatbuffers`](wireform-flatbuffers/README.md) | FlatBuffers (zero-copy) |
 | [`wireform-capnproto`](wireform-capnproto/README.md) | Cap'n Proto (zero-copy) |

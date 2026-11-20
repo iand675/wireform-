@@ -11,19 +11,19 @@
     {
       "name": "encode",
       "values": [
-        329.51,
-        38448.98
+        553.63,
+        10607.79
       ]
     },
     {
       "name": "decode",
       "values": [
-        403.13,
-        41835.08
+        450.4,
+        17259.52
       ]
     }
   ],
   "baseline": "encode",
-  "capturedAt": "2026-06-27T11:35:54Z",
-  "toolchain": "ghc-9.8.4 on darwin-aarch64, criterion 1.6.5"
+  "capturedAt": "2026-11-04T13:05:38Z",
+  "toolchain": "GHC 9.10.3 -O2 -fasm on darwin-aarch64, Criterion 1.6.5.0; TH-generated Person codecs"
 }

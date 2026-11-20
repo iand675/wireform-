@@ -2,6 +2,7 @@ module Main (main) where
 
 import Hedgehog.Internal.Config (resolveSkip)
 import Test.FlatBuffers.Builder qualified
+import Test.FlatBuffers.Codec qualified
 import Test.FlatBuffers.Derive qualified
 import Test.FlatBuffers.View qualified
 import Test.Syd
@@ -17,7 +18,8 @@ main = do
   sydTest $
     describe "wireform-flatbuffers" $
       sequence_
-        [ Test.FlatBuffers.Builder.tests
+        [ Test.FlatBuffers.Codec.tests
+        , Test.FlatBuffers.Builder.tests
         , Test.FlatBuffers.Derive.tests
         , Test.FlatBuffers.View.tests
         ]

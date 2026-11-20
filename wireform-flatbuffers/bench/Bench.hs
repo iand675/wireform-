@@ -21,8 +21,10 @@ import Data.Text qualified as T
 import Data.Vector qualified as V
 import Data.Word (Word8)
 import FlatBuffers.Builder qualified as B
+import FlatBuffers.Codec (CompiledSchema, compileSchema)
 import FlatBuffers.Decode qualified as FBD
 import FlatBuffers.Encode qualified as FBE
+import FlatBuffers.Parser (parseFlatBuffers)
 import FlatBuffers.Value qualified as FB
 
 
@@ -237,8 +239,9 @@ stringVector ss = do
   B.finish b t
 
 
--- | @n@ small tables (same shape, so their vtables dedup), a vector of
--- offsets to them, and a root table.
+{- | @n@ small tables (same shape, so their vtables dedup), a vector of
+offsets to them, and a root table.
+-}
 tableVector :: Int -> IO ByteString
 tableVector n = do
   b <- B.newBuilder
@@ -297,15 +300,15 @@ main =
   defaultMain
     [ bgroup
         "encode"
-        [ bench "Person table" $ nf FBE.encode person
-        , bench "Person[100] vector" $ nf FBE.encode people
+        [ bench "Person table" $ nf (FBE.encodeWith personSchema) person
+        , bench "Person[100] vector" $ nf (FBE.encodeWith peopleSchema) people
         ]
     , bgroup
         "decode"
-        [ env (pure (FBE.encode person)) $ \bs ->
-            bench "Person table" $ nf (FBD.decode :: ByteString -> Either String FB.Value) bs
-        , env (pure (FBE.encode people)) $ \bs ->
-            bench "Person[100] vector" $ nf (FBD.decode :: ByteString -> Either String FB.Value) bs
+        [ env (pure (either error id (FBE.encodeWith personSchema person))) $ \bs ->
+            bench "Person table" $ nf (FBD.decodeWith personSchema) bs
+        , env (pure (either error id (FBE.encodeWith peopleSchema people))) $ \bs ->
+            bench "Person[100] vector" $ nf (FBD.decodeWith peopleSchema) bs
         ]
     , bgroup
         "builder"
@@ -331,3 +334,11 @@ main =
     strings1000 = [T.pack ("string number " <> show i) | i <- [1 :: Int .. 1000]]
     ints1000 = [fromIntegral i * 7919 | i <- [1 :: Int .. 1000]] :: [Int64]
 
+
+personSchema, peopleSchema :: CompiledSchema
+personSchema = compiled "table Person { name:string; age:int; email:string; } root_type Person;"
+peopleSchema = compiled "table Person { name:string; age:int; email:string; } table People { people:[Person]; } root_type People;"
+
+
+compiled :: T.Text -> CompiledSchema
+compiled input = either error id (parseFlatBuffers input >>= compileSchema)

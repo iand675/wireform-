@@ -1,0 +1,92 @@
+{
+  "name": "wireform",
+  "small": -7,
+  "big": 9223372036854775807,
+  "position": {
+    "x": 1,
+    "y": 2,
+    "z": 3
+  },
+  "points": [
+    {
+      "x": 4,
+      "y": 5,
+      "z": 6
+    },
+    {
+      "x": 7,
+      "y": 8,
+      "z": 9
+    }
+  ],
+  "wide": [
+    -9223372036854775808,
+    9223372036854775807
+  ],
+  "child": {
+    "label": "nested"
+  },
+  "children": [
+    {
+      "label": "one",
+      "count": 1
+    },
+    {
+      "label": "two",
+      "count": 2
+    }
+  ],
+  "words": [
+    "",
+    "hello",
+    "😀"
+  ],
+  "mode": "Active",
+  "payload_type": "Child",
+  "payload": {
+    "label": "union"
+  },
+  "optional": 0,
+  "mixed": {
+    "a": 9,
+    "b": 1234567890123,
+    "tail": {
+      "x": 1,
+      "y": 2,
+      "z": 3
+    }
+  },
+  "mixed_points": [
+    {
+      "a": -9,
+      "b": -1234567890123,
+      "tail": {
+        "x": 4,
+        "y": 5,
+        "z": 6
+      }
+    }
+  ],
+  "bytes": [
+    0,
+    127,
+    255
+  ],
+  "flags": [
+    true,
+    false,
+    true
+  ],
+  "shorts": [
+    -32768,
+    0,
+    32767
+  ],
+  "tinies": [
+    {
+      "a": -1,
+      "b": 2,
+      "c": 3
+    }
+  ]
+}

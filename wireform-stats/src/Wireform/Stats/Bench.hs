@@ -51,8 +51,12 @@ import Data.Aeson (
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BSL
+import Data.List (find)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Lazy qualified as TL
+import Data.Text.Lazy.Builder qualified as TB
+import Data.Text.Lazy.Builder.RealFloat qualified as TBF
 import Data.Time.Clock (UTCTime, getCurrentTime)
 import GHC.Generics (Generic)
 import Wireform.Stats.SVG qualified as SVG
@@ -310,10 +314,11 @@ summaryToTable s =
       align = Tbl.AlignLeft : replicate (length (bsSeries s)) Tbl.AlignRight ++ [Tbl.AlignRight]
       baselineSeries =
         case bsBaseline s of
-          Just n -> lookup n [(bsName ss, bsValues ss) | ss <- bsSeries s]
+          Just n -> find ((== n) . bsName) (bsSeries s)
           Nothing -> case bsSeries s of
-            (ss : _) -> Just (bsValues ss)
+            (ss : _) -> Just ss
             [] -> Nothing
+      comparisonSeries = baselineSeries >>= \base -> find ((/= bsName base) . bsName) (bsSeries s)
       mkRow gi g =
         let cell ss = formatValue (bsUnit s) (nthOr 0 gi (bsValues ss))
             -- ratio = (first non-baseline series) / (baseline series).
@@ -321,9 +326,9 @@ summaryToTable s =
             -- For higher-is-better metrics, >1 means comparison wins.
             -- Reader interprets with the higher-is-better hint that
             -- already appears in the chart subtitle / table caption.
-            ratio = case (baselineSeries, bsSeries s) of
-              (Just bv, _ : nextSeries : _) ->
-                let base = nthOr 0 gi bv
+            ratio = case (baselineSeries, comparisonSeries) of
+              (Just baseSeries, Just nextSeries) ->
+                let base = nthOr 0 gi (bsValues baseSeries)
                     cmp = nthOr 0 gi (bsValues nextSeries)
                 in if base == 0 then "-" else formatRatio (cmp / base)
               _ -> "-"
@@ -346,22 +351,18 @@ nthOr d n (_ : xs) = nthOr d (n - 1) xs
 
 
 formatValue :: Unit -> Double -> Text
-formatValue u v = T.pack (showWithPrecision v) <> " " <> unitText u
+formatValue u v = fixed decimals v <> " " <> unitText u
   where
-    showWithPrecision x
-      | abs x >= 1000 = show (round x :: Int)
-      | abs x >= 100 = show (round x :: Int)
-      | abs x >= 10 = case (properFraction x :: (Int, Double)) of
-          (i, f) -> show i <> "." <> show (round (f * 10) :: Int)
-      | otherwise = case (properFraction x :: (Int, Double)) of
-          (i, f) -> show i <> "." <> pad2 (show (round (abs f * 100) :: Int))
-
-    pad2 s = if length s < 2 then '0' : s else s
+    decimals
+      | abs v >= 100 = 0
+      | abs v >= 10 = 1
+      | otherwise = 2
 
 
 formatRatio :: Double -> Text
-formatRatio r = T.pack (showWith r) <> "x"
-  where
-    showWith x = case (properFraction x :: (Int, Double)) of
-      (i, f) -> show i <> "." <> pad2 (show (round (abs f * 100) :: Int))
-    pad2 s = if length s < 2 then '0' : s else s
+formatRatio r = fixed 2 r <> "x"
+
+
+-- Round the whole value so a fractional carry becomes 1.00, not 0.100.
+fixed :: Int -> Double -> Text
+fixed places = TL.toStrict . TB.toLazyText . TBF.formatRealFloat TBF.Fixed (Just places)

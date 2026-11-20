@@ -92,7 +92,7 @@ import GHC.Exts (Int (I#), dataToTag#)
 import GHC.Generics (Generic (..))
 import qualified GHC.Generics as G
 import Network.HTTP.Grammar.Parser (ParserT, isTokenChar, rfc9110TokenBS)
-import Symbolize (Symbol, intern, internUnsafe, unintern)
+import Symbol (Symbol, intern, unintern)
 
 
 {- | An HTTP request method with case-sensitive spelling. The RFC 9110
@@ -113,7 +113,7 @@ data Method
   deriving stock (Eq, Ord)
 
 
--- Keep the symbol as a shared lazy view for callers that use Symbolize.
+-- Keep the symbol as a shared lazy view for callers that use Symbol.
 data MethodExtension = MethodExtension !ByteString Symbol
   deriving stock (Generic)
 
@@ -260,7 +260,7 @@ methodTokenParser = fromToken <$> rfc9110TokenBS
 extensionMethod :: ByteString -> Method
 extensionMethod bytes =
   let owned = BS.copy bytes
-  in ExtensionMethod (MethodExtension owned (internUnsafe owned))
+  in ExtensionMethod (MethodExtension owned (intern owned))
 {-# INLINE extensionMethod #-}
 
 

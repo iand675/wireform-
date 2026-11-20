@@ -1,0 +1,30 @@
+namespace Conformance;
+struct Vec3 { x:float; y:float; z:float; }
+struct Mixed { a:byte; b:long; tail:Vec3; }
+struct Tiny { a:short; b:short; c:short; }
+enum Mode:ubyte { Idle = 0, Active = 3 }
+table Child { label:string; count:uint = 7; }
+union Payload { Child }
+table Root {
+  name:string (required, id:0);
+  small:byte (id:2);
+  big:long (id:1);
+  position:Vec3 (id:3);
+  points:[Vec3] (id:4);
+  wide:[long] (id:5);
+  child:Child (id:6);
+  children:[Child] (id:7);
+  words:[string] (id:8);
+  mode:Mode = Active (id:9);
+  payload:Payload (id:11);
+  optional:short = null (id:12);
+  retired:int (deprecated, id:13);
+  mixed:Mixed (id:14);
+  mixed_points:[Mixed] (id:15);
+  bytes:[ubyte] (id:16);
+  flags:[bool] (id:17);
+  shorts:[short] (id:18);
+  tinies:[Tiny] (id:19);
+}
+root_type Root;
+file_identifier "WF14";

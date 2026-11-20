@@ -32,6 +32,7 @@ import qualified Test.Hermes.Expect
 import qualified Test.Hermes.FieldLists
 import qualified Test.Hermes.Forwarded
 import qualified Test.Hermes.Framing
+import qualified Test.Hermes.HeaderMap
 import qualified Test.Hermes.IPAddress
 import qualified Test.Hermes.Link
 import qualified Test.Hermes.Mailbox
@@ -112,6 +113,7 @@ main = do
         , Test.Hermes.FieldLists.tests
         , Test.Hermes.Forwarded.tests
         , Test.Hermes.Framing.tests
+        , Test.Hermes.HeaderMap.tests
         , Test.Hermes.IPAddress.tests
         , Test.Hermes.Link.tests
         , Test.Hermes.Mailbox.tests

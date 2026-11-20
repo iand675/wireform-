@@ -411,7 +411,7 @@ inlined field codecs.
 | :-------- | -------------: | ---------: | ----: |
 | Small     |        41.6 ns |    81.6 ns | 1.96x |
 | Medium    |         111 ns |     212 ns | 1.90x |
-| Nested    |       80.10 ns |     151 ns | 1.87x |
+| Nested    |        81.0 ns |     151 ns | 1.87x |
 | Repeated  |        1422 ns |    2293 ns | 1.61x |
 
 <sub>Last run 2026-06-27 11:56:42 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>

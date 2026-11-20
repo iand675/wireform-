@@ -140,6 +140,7 @@ let
     wireform-xml           = { path = "wireform-xml";           emoji = ":newspaper:";              tier = "format"; };
     wireform-html          = { path = "wireform-html";          emoji = ":html:";             tier = "format"; };
     wireform-edn           = { path = "wireform-edn";           emoji = ":paperclip:";             tier = "format"; };
+    wireform-edi           = { path = "wireform-edi";           emoji = ":envelope:";             tier = "format"; };
     wireform-bencode       = { path = "wireform-bencode";       emoji = ":open_file_folder:";          tier = "format"; };
     wireform-toml          = { path = "wireform-toml";          emoji = ":wrench:";             tier = "format"; };
     wireform-yaml          = { path = "wireform-yaml";          emoji = ":yaml:";             tier = "format"; };

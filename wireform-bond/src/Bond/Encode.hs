@@ -6,7 +6,7 @@ Implements the Microsoft Bond Compact Binary protocol v1 wire format.
 Field headers use packed delta/type encoding when possible.
 Signed integers use ZigZag + LEB128 varint encoding.
 
-Uses direct buffer writes via 'Proto.Encode.Direct.directEncode' to
+Uses direct buffer writes via 'Wireform.Encode.Direct.directEncode' to
 avoid Builder allocation overhead.
 -}
 module Bond.Encode (

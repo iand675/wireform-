@@ -1,6 +1,6 @@
 cabal-version: 3.0
 name: wireform-arrow
-version: 0.1.0.0
+version: 0.1.1.0
 synopsis: Apache Arrow IPC schema framing and record batch materialization
 description:
   Arrow column arrays and IPC file/stream codecs, with schema and record

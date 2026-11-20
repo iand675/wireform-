@@ -1,0 +1,35 @@
+{
+  "id": "ion-rust-typed",
+  "title": "Ion 1.0 generated typed record codecs",
+  "unit": "Nanos",
+  "higherIsBetter": false,
+  "groups": [
+    "encode Person",
+    "decode Person",
+    "encode [Person] x 100",
+    "decode [Person] x 100"
+  ],
+  "series": [
+    {
+      "name": "wireform-ion",
+      "values": [
+        553.63,
+        450.4,
+        10607.79,
+        17259.52
+      ]
+    },
+    {
+      "name": "ion-rs serde",
+      "values": [
+        1153.17,
+        1730.91,
+        17498.45,
+        32871.29
+      ]
+    }
+  ],
+  "baseline": "ion-rs serde",
+  "toolchain": "GHC 9.10.3 -O2 -fasm, TH-derived records, Criterion 1.6.5.0; ion-rs 1.1.0 experimental-serde, serde derive, criterion.rs 0.7; darwin-aarch64",
+  "capturedAt": "2026-11-04T13:07:17Z"
+}

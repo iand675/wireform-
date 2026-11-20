@@ -103,6 +103,7 @@
           wireform-arrow             = ./wireform-arrow;
           wireform-iceberg           = ./wireform-iceberg;
           wireform-edn               = ./wireform-edn;
+          wireform-edi               = ./wireform-edi;
           wireform-bencode           = ./wireform-bencode;
           wireform-toml              = ./wireform-toml;
           wireform-csv               = ./wireform-csv;
@@ -280,8 +281,8 @@
               # 9.14 (base 4.22). It is pulled in as a transitive test
               # dependency of some upstream package; jailbreak so it builds.
               tasty-hspec = hlib.doJailbreak super.tasty-hspec;
-              # symbolize (a hermes dependency) has a currently-busted test
-              # suite; skip it so the library still builds.
+              # symbolize (the baseline in wireform-symbol's benchmark) has a
+              # currently-busted test suite; skip it so the library still builds.
               symbolize = hlib.dontCheck super.symbolize;
               # http-api-data 0.6.3 (a wireform-http dependency) caps
               # base <4.22 / containers <0.8, which excludes GHC 9.14

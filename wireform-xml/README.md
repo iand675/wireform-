@@ -33,6 +33,15 @@ This package is part of the [wireform](https://github.com/iand675/wireform-)
 monorepo and shares its allocation primitives, annotation deriver, and
 testing discipline with every other format.
 
+`XML.FastDOM` retains internal text entity declarations and expands nested
+general, predefined and numeric references when materializing text/attributes.
+Numeric references are processed at declaration time; general references and
+attribute whitespace follow their inclusion context. Its source spans remain unchanged. Expansion is bounded to 32 levels, 4,096
+declarations and 1,048,576 expanded characters per context/table and document.
+External resources are never fetched. External/parameter entities and markup
+in replacement text are rejected explicitly; this is a text-entity subset,
+not a validating DTD processor. CDATA and comments remain literal.
+
 ## Install
 
 ```cabal
@@ -336,7 +345,7 @@ cabal bench xml-bench
 
 | Operation       | hexml (C bindings) | wireform-xml (FastDOM) | wireform-xml (typed DOM) | xml-conduit | ratio |
 | :-------------- | -----------------: | ---------------------: | -----------------------: | ----------: | ----: |
-| medium document |            30.7 µs |                52.0 µs |                   194 µs |     1626 µs | 0.27x |
+| medium document |            30.7 µs |                52.0 µs |                   194 µs |     1626 µs | 0.16x |
 
 <sub>Last run 2026-06-27 11:56:42 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:dom-parse-medium -->
@@ -349,7 +358,7 @@ cabal bench xml-bench
 
 | Operation       |    xeno | wireform-xml | ratio |
 | :-------------- | ------: | -----------: | ----: |
-| medium document | 45.8 µs |       149 µs | 1.00x |
+| medium document | 45.8 µs |       149 µs | 0.31x |
 
 <sub>Last run 2026-06-27 11:56:42 UTC. ghc-9.8.4 on darwin-aarch64, criterion 1.6.5.</sub>
 <!-- END_AUTOGEN bench:sax-parse-medium -->

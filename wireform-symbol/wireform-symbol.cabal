@@ -1,0 +1,91 @@
+cabal-version: 3.0
+name: wireform-symbol
+version: 0.1.0.0
+synopsis: Interned strings (symbols) on wireform-hashtables
+description:
+  A global, garbage-collected symbol table: 'Symbol.intern' returns one
+  canonical array per content, so equality is pointer equality and hashing
+  is a field read. SipHash-keyed, sharded, finalizer-free. See "Symbol".
+homepage: https://github.com/iand675/wireform-
+bug-reports: https://github.com/iand675/wireform-/issues
+license: BSD-3-Clause
+license-file: LICENSE
+author: Ian Duncan
+maintainer: ian@iankduncan.com
+copyright: 2026 Ian Duncan
+category: Data, Data Structures
+build-type: Simple
+tested-with: GHC == 9.10.3, GHC == 9.12.4, GHC == 9.14.1
+extra-doc-files: README.md
+
+source-repository head
+  type:     git
+  location: https://github.com/iand675/wireform-
+
+common defaults
+  default-language: GHC2021
+  ghc-options:
+    -Wall
+    -Wcompat
+    -Widentities
+    -Wincomplete-record-updates
+    -Wincomplete-uni-patterns
+    -Wpartial-fields
+    -Wredundant-constraints
+    -O2
+  default-extensions:
+    BangPatterns
+    LambdaCase
+    DerivingStrategies
+
+library
+  import: defaults
+  hs-source-dirs: src
+  exposed-modules:
+    Symbol
+    Symbol.Internal
+    Symbol.SipHash
+  build-depends:
+    base >= 4.20 && < 5,
+    binary >= 0.8 && < 0.9,
+    bytestring >= 0.11.3 && < 0.13,
+    deepseq >= 1.4 && < 1.6,
+    entropy >= 0.4 && < 0.5,
+    hashable >= 1.4 && < 1.6,
+    primitive >= 0.9 && < 0.10,
+    text >= 2.0 && < 2.2,
+    wireform-hashtables
+
+test-suite wireform-symbol-test
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is: Main.hs
+  ghc-options: -threaded -rtsopts "-with-rtsopts=-N"
+  build-depends:
+    base >= 4.20 && < 5,
+    wireform-symbol,
+    binary,
+    bytestring,
+    containers >= 0.6 && < 0.9,
+    hashable,
+    text,
+    hedgehog >= 1.4 && < 1.8,
+    sydtest,
+    sydtest-hedgehog
+
+benchmark wireform-symbol-bench
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: bench
+  main-is: Main.hs
+  ghc-options: -threaded -rtsopts "-with-rtsopts=-A64m"
+  build-depends:
+    base >= 4.20 && < 5,
+    wireform-symbol,
+    bytestring,
+    criterion >= 1.6 && < 1.7,
+    deepseq,
+    hashable,
+    symbolize >= 1.0 && < 1.1,
+    text
