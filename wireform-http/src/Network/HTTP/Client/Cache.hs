@@ -17,6 +17,8 @@ non-shared user-agent cache:
 * Conditional revalidation via @ETag@ → @If-None-Match@ and
   @Last-Modified@ → @If-Modified-Since@; on @304 Not Modified@
   the stored body is replayed.
+* Evaluates caller-provided @If-None-Match@ and @If-Modified-Since@
+  against reusable 200 responses and can return a local @304@.
 * An upstream @HEAD 200@ can refresh a matching cached GET or
   retire it when the stored representation cannot be confirmed.
 * Honors @no-store@ on either the request or the response.
@@ -141,6 +143,7 @@ import Data.Text.Short qualified as ShortText
 import Data.Time.Clock (
   NominalDiffTime,
   UTCTime (..),
+  addUTCTime,
   diffTimeToPicoseconds,
   diffUTCTime,
   getCurrentTime,
@@ -165,6 +168,8 @@ import Network.HTTP.Headers.Date qualified as Date
 import Network.HTTP.Headers.ETag qualified as ETag
 import Network.HTTP.Headers.Expires qualified as Expires
 import Network.HTTP.Headers.HeaderFieldName qualified as FieldName
+import Network.HTTP.Headers.IfModifiedSince qualified as IfModifiedSince
+import Network.HTTP.Headers.IfNoneMatch qualified as IfNoneMatch
 import Network.HTTP.Headers.LastModified qualified as LastModified
 import Network.HTTP.Headers.Location qualified as Location
 import Network.HTTP.Headers.Pragma qualified as Pragma
@@ -464,10 +469,11 @@ cacheSize = cacheCount
 
 {- | Cache middleware. On each request:
 
-1. For a bodyless GET or HEAD without caller conditions or a range,
-   build a cache key from the request URI + method.
+1. For a bodyless GET or HEAD without an origin-only precondition or
+   a range, build a cache key from the request URI + method.
 2. Reuse an eligible entry with an @Age@ header, subject to the
    request's Cache-Control constraints and any stale allowance.
+   Evaluate caller conditions against an eligible 200 response.
 3. Else if a cached entry has a valid validator, attach conditional
    headers and call the inner transport. A matching 304 refreshes the
    stored metadata and reuses the cached body.
@@ -477,6 +483,7 @@ cacheSize = cacheCount
 withCache :: Cache -> Middleware IO
 withCache cache inner = Transport $ \req -> do
   let policy = requestCachePolicy (WReq.headers req)
+      mode = cacheRequestMode req
       contactOrigin action
         | crOnlyIfCached policy = pure cacheOnlyMiss
         | otherwise = action
@@ -488,7 +495,7 @@ withCache cache inner = Transport $ \req -> do
             generation <- cacheGeneration cache
             trRaw <$> sendCacheTimed cache generation key inner req
         | otherwise = forwardWithInvalidation cache inner req
-  if crNoStore policy || requestBypassesCache req
+  if crNoStore policy || mode == BypassCache
     then contactOrigin bypass
     else case keyOfRequest req of
       Nothing -> contactOrigin (sendRaw inner req)
@@ -497,18 +504,36 @@ withCache cache inner = Transport $ \req -> do
         mEntry <- lookupEntry cache key (WReq.headers req)
         case mEntry of
           Nothing -> contactOrigin $
-            sendCacheTimed cache generation key inner req >>= maybeStoreAndReturn cache generation key Nothing req
+            if mode == Unconditional
+              then sendCacheTimed cache generation key inner req >>= maybeStoreAndReturn cache generation key Nothing req
+              else bypass
           Just stored -> do
             now <- getCurrentTime
             let entry = seEntry stored
                 timing = entryTiming now stored
-            case cacheDecision policy entry timing of
-              UseCache -> replayHit timing entry
-              UseCacheAndRevalidate -> do
-                unless (crOnlyIfCached policy) $
-                  void (forkIO (revalidateSilent cache inner req generation key entry))
-                replayHit timing entry
-              ContactOrigin -> contactOrigin (revalidateOrReplace cache inner req policy generation key stored)
+                decision = cacheDecision policy entry timing
+            if mode == Unconditional
+              then case decision of
+                UseCache -> replayHit timing entry
+                UseCacheAndRevalidate -> do
+                  unless (crOnlyIfCached policy) $
+                    void (forkIO (revalidateSilent cache inner req generation key entry))
+                  replayHit timing entry
+                ContactOrigin -> contactOrigin (revalidateOrReplace cache inner req policy generation key stored)
+              else case decision of
+                ContactOrigin -> contactOrigin bypass
+                _
+                  | ceStatus entry == S.status200
+                  , Right unchanged <- cachedNotModified now timing entry (WReq.headers req) -> do
+                      case decision of
+                        UseCacheAndRevalidate
+                          | not (crOnlyIfCached policy)
+                          , let fields = filter (not . cacheConditionField . fst) (WReq.headers req)
+                          , varyMatch fields entry ->
+                              void (forkIO (revalidateSilent cache inner req{WReq.headers = fields} generation key entry))
+                        _ -> pure ()
+                      if unchanged then pure (notModifiedResponse timing entry) else replayHit timing entry
+                  | otherwise -> contactOrigin bypass
 
 
 cacheOnlyMiss :: RawResponse
@@ -569,18 +594,33 @@ mutationKeys uri headers = addMethods base (maybe contentKeys (`addMethods` cont
 -- | Stamp an 'Age' header and rebuild the popper for a cache hit.
 replayHit :: EntryTiming -> CacheEntry -> IO RawResponse
 replayHit timing entry = do
-  let fields = ceHeaders entry
-      hdrs = (H.hAge, renderAgeField (etAge timing)) : case etDate timing of
-        Just _ -> H.deleteHeader H.hAge fields
-        Nothing -> (H.hDate, renderDateField (ceResponseTime entry)) : filter (not . isTimingField . fst) fields
   popper <- BSm.popperFromStrict (ceBody entry)
   pure
     RawResponse
       { Resp.statusCode = ceStatus entry
-      , Resp.headers = hdrs
+      , Resp.headers = replayHeaders timing entry
       , Resp.bodyPopper = popper
       , Resp.protocolInfo = HTTP1_1
       }
+
+
+replayHeaders :: EntryTiming -> CacheEntry -> H.Headers
+replayHeaders timing entry = (H.hAge, renderAgeField (etAge timing)) : case etDate timing of
+  Just _ -> H.deleteHeader H.hAge fields
+  Nothing -> (H.hDate, renderDateField (ceResponseTime entry)) : filter (not . isTimingField . fst) fields
+  where
+    fields = ceHeaders entry
+{-# INLINE replayHeaders #-}
+
+
+-- | Metadata for a locally satisfied conditional request (RFC 9110 §15.4.5).
+notModifiedResponse :: EntryTiming -> CacheEntry -> RawResponse
+notModifiedResponse timing entry =
+  RawResponse S.status304 (filter (retained . fst) (replayHeaders timing entry)) (pure BS.empty) HTTP1_1
+  where
+    retained name =
+      isTimingField name || name == H.hETag || name == H.hLastModified || name == H.hVary
+        || name == H.hCacheControl || name == H.hExpires || name == H.hContentLocation
 
 
 {- | Cached entry exists but is stale or marked no-cache. Issue a
@@ -746,7 +786,7 @@ sendRevalidation
   -> WReq.Request BSm.BodyStream
   -> CacheEntry
   -> IO RevalidationReply
-sendRevalidation send req entry = case cachedValidators entry of
+sendRevalidation send req entry = case validatorsForVariant entry of
   CacheValidators Nothing Nothing -> fetchOriginal
   validators -> do
     let sent = attachValidators validators req
@@ -1200,29 +1240,59 @@ cacheableMethod :: M.Method -> Bool
 cacheableMethod m = m == M.mGet || m == M.mHead
 
 
-requestBypassesCache :: WReq.Request BSm.BodyStream -> Bool
-requestBypassesCache req =
-  not (cacheableMethod (WReq.method req))
-    || BSm.knownSize (WReq.body req) /= Just 0
-    || requestHasPreconditions (WReq.headers req)
+data CacheRequestMode = Unconditional | EvaluateConditions | BypassCache
+  deriving stock (Eq)
 
 
--- | The origin handles caller-owned conditions, including WebDAV and
--- extension preconditions, and selects any requested range.
-requestHasPreconditions :: H.Headers -> Bool
-requestHasPreconditions = any requiresOrigin
+-- | Only the origin handles write, range, WebDAV and extension preconditions.
+cacheRequestMode :: WReq.Request BSm.BodyStream -> CacheRequestMode
+cacheRequestMode req
+  | not (cacheableMethod (WReq.method req)) || BSm.knownSize (WReq.body req) /= Just 0 = BypassCache
+  | otherwise = scan Unconditional (WReq.headers req)
   where
-    requiresOrigin (name, _)
-      | len < 2 = False
+    scan !mode [] = mode
+    scan !mode ((name, _):rest)
+      | len < 2 = scan mode rest
       | otherwise = case BSU.unsafeIndex folded 0 of
-          0x69 -> -- "if" or "if-"
-            BSU.unsafeIndex folded 1 == 0x66
-              && (len == 2 || BSU.unsafeIndex folded 2 == 0x2d)
-          0x72 -> folded == "range"
-          _ -> False
+          0x69 -- "if" or "if-"
+            | BSU.unsafeIndex folded 1 == 0x66
+            , len == 2 || BSU.unsafeIndex folded 2 == 0x2d ->
+                if cacheConditionField name then scan EvaluateConditions rest else BypassCache
+          0x72 | folded == "range" -> BypassCache
+          _ -> scan mode rest
       where
         folded = CI.foldedCase name
         len = BS.length folded
+
+
+cacheConditionField :: H.HeaderName -> Bool
+cacheConditionField name = name == H.hIfNoneMatch || name == H.hIfModifiedSince
+
+
+-- | Evaluate the applicable condition for a reusable 200 response.
+-- A malformed entity-tag list is passed through to the origin. RFC 9110
+-- calls for invalid or repeated If-Modified-Since dates to be ignored.
+cachedNotModified :: UTCTime -> EntryTiming -> CacheEntry -> H.Headers -> Either String Bool
+cachedNotModified now timing entry fields = case H.lookupHeaders H.hIfNoneMatch fields of
+  first : rest -> do
+    tagList <- Typed.parseFromHeaders Typed.defaultHeaderSettings (first :| rest)
+    pure $ case tagList of
+      IfNoneMatch.IfNoneMatchAny -> True
+      IfNoneMatch.IfNoneMatchTags tags -> case readETag stored of
+        Right (Just tag) -> any (ETag.weakMatch tag) tags
+        _ -> False
+      IfNoneMatch.IfNoneMatchNoTags -> False
+  [] -> pure $ case readTimedField H.hIfModifiedSince Typed.parseFromHeaders now fields of
+    Right (Just (IfModifiedSince.IfModifiedSince since)) -> case readLastModified received stored of
+      Right (Just modified) -> modified <= since
+      _ -> case etDate timing of
+        Just date -> date <= since
+        -- The synthesized Date represents receipt rounded to wire precision.
+        Nothing -> received < addUTCTime 1 since
+    _ -> False
+  where
+    received = ceResponseTime entry
+    stored = ceHeaders entry
 
 
 data StalenessLimit
@@ -1341,11 +1411,20 @@ cachedETag tag = case tag of
     wire = Conditional.renderETag tag
 
 
-cachedValidators :: CacheEntry -> CacheValidators
-cachedValidators entry =
-  CacheValidators (cachedETag <$> usable (readETag fields)) (usable (readLastModified (ceResponseTime entry) fields))
+-- | Cache-owned requests start without conditions. Keep a condition absent
+-- when its field selects the variant. If the entry has a usable ETag,
+-- validation requires sending that tag. The date can be omitted independently.
+validatorsForVariant :: CacheEntry -> CacheValidators
+validatorsForVariant entry
+  | Just _ <- tag, selectsBy H.hIfNoneMatch = CacheValidators Nothing Nothing
+  | otherwise = CacheValidators tag date
   where
     fields = ceHeaders entry
+    tag = cachedETag <$> usable (readETag fields)
+    date
+      | selectsBy H.hIfModifiedSince = Nothing
+      | otherwise = usable (readLastModified (ceResponseTime entry) fields)
+    selectsBy name = any ((== name) . fst) (ceVaryFields entry)
     usable = either (const Nothing) id
 
 

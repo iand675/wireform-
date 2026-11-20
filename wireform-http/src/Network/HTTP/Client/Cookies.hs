@@ -5,7 +5,8 @@
 {- | Cookie jar and middleware.
 
 Implements RFC 6265 scheme, host, path and expiry matching. The
-jar stores @SameSite@ and @HttpOnly@ as metadata. Request matching
+request field orders cookies by descending path length, then by creation.
+The jar stores @SameSite@ and @HttpOnly@ as metadata. Request matching
 has no top-level navigation or non-HTTP context.
 
 The jar is intentionally stored in an 'STM.TVar' for cheap
@@ -46,9 +47,11 @@ import Data.Char (toLower)
 import Data.List qualified as List
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (mapMaybe)
 import Data.Text.Encoding qualified as TE
 import Data.Text.Short qualified as ST
 import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime)
+import Data.Word (Word64)
 import Network.HTTP.Client.Request
 import Network.HTTP.Client.Response
 import Network.HTTP.Client.Transport
@@ -77,9 +80,8 @@ data Cookie = Cookie
   the response carried no @Domain=...@ attribute.
   -}
   , cookieDomainExplicit :: !Bool
-  {- ^ 'True' when the response carried a @Domain=...@ attribute
-  (defaulted from the request host otherwise). Needed by
-  the @__Host-@ prefix check.
+  {- ^ 'True' for an accepted @Domain@ scope. Host-only cookies use
+  'False', including an exact-host public suffix normalized at ingest.
   -}
   , cookiePath :: !ByteString
   , cookieExpires :: !(Maybe UTCTime)
@@ -90,14 +92,15 @@ data Cookie = Cookie
   deriving stock (Eq, Show)
 
 
--- The map key is @(domain, path, name)@: per RFC 6265, two cookies
--- with the same name but different domain or path are distinct.
-type CookieKey = (ByteString, ByteString, ByteString)
+-- Include the effective domain scope so both kinds of cookie can coexist.
+data CookieKey = CookieKey !ByteString !ByteString !ByteString !Bool
+  deriving stock (Eq, Ord)
 
 
 {- | Predicate run on @Set-Cookie@'s @Domain=...@: returns 'True' for
-a domain that's on the public suffix list (e.g. @co.uk@,
-@github.io@) and so MUST NOT have cookies set against it.
+a domain that's on the public suffix list (e.g. @co.uk@ or @github.io@).
+An exact match to the setting host becomes host-only. Other requests to
+set a cookie with that @Domain@ are rejected.
 Defaults to 'noPublicSuffix' which never reports a hit; wire your
 own (e.g. backed by @publicsuffix@ data) for browser-grade
 behaviour.
@@ -121,8 +124,8 @@ data CookieJarLimits = CookieJarLimits
   { cjlMaxNameValueBytes :: !Int
   -- ^ Max combined byte size of @name=value@. Default 4096.
   , cjlMaxAttributeBytes :: !Int
-  {- ^ Max byte size of any single attribute (Domain, Path, …).
-  Default 1024.
+  {- ^ Max byte size of a trimmed response attribute value. An oversized
+  attribute is ignored. Default 1024.
   -}
   }
   deriving stock (Eq, Show)
@@ -137,10 +140,27 @@ defaultCookieJarLimits =
 
 
 data CookieJar = CookieJar
-  { cjStore :: !(TVar (Map CookieKey Cookie))
+  { cjStore :: !(TVar CookieStore)
   , cjPSL :: !PublicSuffixCheck
   , cjLimits :: !CookieJarLimits
   }
+
+
+data CookieStore = CookieStore
+  { nextCreationOrder :: {-# UNPACK #-} !Word64
+  , storedCookies :: !(Map CookieKey StoredCookie)
+  }
+
+
+data StoredCookie = StoredCookie
+  { storedCookie :: !Cookie
+  , creationOrder :: {-# UNPACK #-} !Word64
+  , storedPairBytes :: ~ByteString
+  }
+
+
+emptyCookieStore :: CookieStore
+emptyCookieStore = CookieStore 0 Map.empty
 
 
 newCookieJar :: IO CookieJar
@@ -157,22 +177,40 @@ limits.
 -}
 newCookieJarWith :: PublicSuffixCheck -> CookieJarLimits -> IO CookieJar
 newCookieJarWith psl limits = do
-  s <- newTVarIO Map.empty
+  s <- newTVarIO emptyCookieStore
   pure CookieJar {cjStore = s, cjPSL = psl, cjLimits = limits}
 
 
 cookieKey :: Cookie -> CookieKey
-cookieKey c = (cookieDomain c, cookiePath c, cookieName c)
+cookieKey c = CookieKey (cookieDomain c) (cookiePath c) (cookieName c) (cookieDomainExplicit c)
 
 
 insertCookie :: CookieJar -> Cookie -> IO ()
-insertCookie jar c =
-  atomically $ modifyTVar' (cjStore jar) (Map.insert (cookieKey c) c)
+insertCookie jar c = do
+  now <- getCurrentTime
+  atomically $ modifyTVar' (cjStore jar) (rememberCookie now c)
 
 
-{- | Insert with full RFC 6265bis validation: name and value must pass
-the cookie-octet grammar, and the cookie's @Domain@ must not be
-on the configured public suffix list.
+-- Replacements retain their creation order. Assign order and update the
+-- map together so responses received by concurrent clients cannot tie.
+rememberCookie :: UTCTime -> Cookie -> CookieStore -> CookieStore
+rememberCookie now cookie store =
+  case Map.lookup key cookies of
+    Just previous | notExpired now (storedCookie previous) ->
+      withOrder (creationOrder previous) next
+    _ -> withOrder next (next + 1)
+  where
+    key = cookieKey cookie
+    cookies = storedCookies store
+    next = nextCreationOrder store
+    withOrder order following = CookieStore following (Map.insert key new cookies)
+      where
+        new = StoredCookie cookie order (renderCookiePair cookie)
+
+
+{- | Insert a cookie after checking its grammar, flags, size, and
+effective domain scope. A domain-scoped manual insert must supply
+a domain outside the configured public suffix list.
 -}
 insertCookieChecked :: CookieJar -> Cookie -> IO (Either CookieError ())
 insertCookieChecked jar c = case validateCookie jar c of
@@ -181,17 +219,18 @@ insertCookieChecked jar c = case validateCookie jar c of
 
 
 getCookies :: CookieJar -> IO [Cookie]
-getCookies jar = Map.elems <$> readTVarIO (cjStore jar)
+getCookies jar = map storedCookie . Map.elems . storedCookies <$> readTVarIO (cjStore jar)
 
 
 clearCookies :: CookieJar -> IO ()
-clearCookies jar = atomically $ writeTVar (cjStore jar) Map.empty
+clearCookies jar = atomically $ writeTVar (cjStore jar) emptyCookieStore
 
 
 pruneExpired :: CookieJar -> IO ()
 pruneExpired jar = do
   now <- getCurrentTime
-  atomically $ modifyTVar' (cjStore jar) (Map.filter (notExpired now))
+  atomically $ modifyTVar' (cjStore jar) $ \store ->
+    store{storedCookies = Map.filter (notExpired now . storedCookie) (storedCookies store)}
 
 
 -- ---------------------------------------------------------------------------
@@ -258,9 +297,9 @@ validateCookie jar c = do
   validateCookieName (cookieName c)
   validateCookieValue (cookieValue c)
   validateSize jar c
-  validatePrefixes c
+  validatePrefixes (cookiePath c == "/") c
   validateSameSite c
-  if cjPSL jar (cookieDomain c)
+  if cookieDomainExplicit c && cjPSL jar (cookieDomain c)
     then Left (CookieDomainIsPublicSuffix (cookieDomain c))
     else Right ()
 
@@ -269,19 +308,23 @@ validateCookie jar c = do
 @__Host-@ prefix additionally requires no @Domain@ and
 @Path=\/@.
 -}
-validatePrefixes :: Cookie -> Either CookieError ()
-validatePrefixes c
-  | "__Host-" `BS.isPrefixOf` cookieName c =
+validatePrefixes :: Bool -> Cookie -> Either CookieError ()
+validatePrefixes rootPathSupplied c
+  | hasPrefix "__host-" =
       if cookieSecure c
-        && cookiePath c == "/"
+        && rootPathSupplied
         && not (cookieDomainExplicit c)
         then Right ()
         else Left (CookieHostPrefixViolation (cookieName c))
-  | "__Secure-" `BS.isPrefixOf` cookieName c =
+  | hasPrefix "__secure-" =
       if cookieSecure c
         then Right ()
         else Left (CookieSecurePrefixWithoutSecure (cookieName c))
   | otherwise = Right ()
+  where
+    name = cookieName c
+    hasPrefix prefix =
+      "__" `BS.isPrefixOf` name && BS8.map toLower (BS.take (BS.length prefix) name) == prefix
 
 
 validateSameSite :: Cookie -> Either CookieError ()
@@ -315,15 +358,18 @@ the jar.
 -}
 withCookies :: CookieJar -> Middleware IO
 withCookies jar inner = Transport $ \req -> do
-  now <- getCurrentTime
-  all_ <- readTVarIO (cjStore jar)
-  case renderRequestURI (requestURI req) of
-    Left _ -> sendRaw inner req
-    Right resolved -> do
-      let matching = matchCookies now resolved (Map.elems all_)
-          req' = case matching of
+  cookies <- storedCookies <$> readTVarIO (cjStore jar)
+  let target = renderRequestURI (requestURI req)
+  req' <-
+    if Map.null cookies
+      then pure req
+      else case target of
+        Left _ -> pure req
+        Right resolved -> do
+          now <- getCurrentTime
+          pure $ case matchCookies now resolved (Map.elems cookies) of
             [] -> req
-            _ ->
+            matching ->
               req
                 { Network.HTTP.Client.Request.headers =
                     H.insertHeader
@@ -331,49 +377,43 @@ withCookies jar inner = Transport $ \req -> do
                       (renderCookieHeader matching)
                       (Network.HTTP.Client.Request.headers req)
                 }
-      raw <- sendRaw inner req'
-      receivedAt <- getCurrentTime
-      let setCookies =
-            [ c
-            | c <-
-                parseSetCookieHeaders
-                  receivedAt
-                  resolved
-                  (Network.HTTP.Client.Response.headers raw)
-            , -- Drop cookies whose Domain is a public suffix; this is the
-            -- principal protection the PSL gives the cookie subsystem.
-            not (cjPSL jar (cookieDomain c))
-            , -- Validate the cookie's name and value at the boundary;
-            -- silently ignore malformed entries.
-            Right () <- [validateCookieName (cookieName c)]
-            , Right () <- [validateCookieValue (cookieValue c)]
-            ]
-      let store acc c
-            | notExpired receivedAt c = Map.insert (cookieKey c) c acc
-            | otherwise = Map.delete (cookieKey c) acc
-      atomically $ modifyTVar' (cjStore jar) $ \m -> List.foldl' store m setCookies
-      pure raw
+  raw <- sendRaw inner req'
+  case H.lookupHeaders H.hSetCookie (Network.HTTP.Client.Response.headers raw) of
+    fields@(_ : _) | Right resolved <- target -> do
+      now <- getCurrentTime
+      case mapMaybe (parseSetCookie jar now resolved) fields of
+        [] -> pure ()
+        accepted -> atomically $ modifyTVar' (cjStore jar) $ \store ->
+          List.foldl' (applySetCookie (uriScheme resolved == SchemeHttps) now) store accepted
+    _ -> pure ()
+  pure raw
+  where
+    applySetCookie secureOrigin now store c
+      | not secureOrigin
+      , any (overlapsSecureCookie now c) (storedCookies store) = store
+      | notExpired now c = rememberCookie now c store
+      | otherwise = store{storedCookies = Map.delete (cookieKey c) (storedCookies store)}
 
 
-{- | Render an outgoing @Cookie@ header value via hermes's
-'Hermes.renderCookie', so the serialisation matches the same RFC
-6265 grammar as the response-side parser.
--}
-renderCookieHeader :: [Cookie] -> ByteString
-renderCookieHeader cs =
-  let mk c =
-        Hermes.CookiePair
-          { Hermes.cookieName = bytesToShort (cookieName c)
-          , Hermes.cookieValue = bytesToShort (cookieValue c)
-          }
-  in WB.toStrictByteString (Hermes.renderCookie (Hermes.Cookie (map mk cs)))
+-- | Combine the already encoded cookie pairs in RFC 6265 request order.
+renderCookieHeader :: [StoredCookie] -> ByteString
+renderCookieHeader [cookie] = storedPairBytes cookie
+renderCookieHeader cookies = BS.intercalate "; " (map storedPairBytes ordered)
+  where
+    ordered = List.sortBy compareForRequest cookies
+    compareForRequest left right =
+      compare (pathLength right) (pathLength left) <> compare (creationOrder left) (creationOrder right)
+    pathLength = BS.length . cookiePath . storedCookie
 
 
-{- | UTF-8 'ByteString' to 'ShortText'. Cookie names and values are
-ASCII / token-safe in practice, but fall back to a lossless
-encoding for any non-UTF-8 bytes so we never throw at the
-serialisation boundary.
--}
+renderCookiePair :: Cookie -> ByteString
+renderCookiePair cookie = WB.toStrictByteString (Hermes.renderCookie (Hermes.Cookie [pair]))
+  where
+    pair = Hermes.CookiePair (bytesToShort (cookieName cookie)) (bytesToShort (cookieValue cookie))
+
+
+-- | Convert to 'ShortText', with replacement for malformed UTF-8
+-- supplied through unchecked manual insertion.
 bytesToShort :: ByteString -> ST.ShortText
 bytesToShort bs = case ST.fromByteString bs of
   Just t -> t
@@ -384,8 +424,8 @@ bytesToShort bs = case ST.fromByteString bs of
 -- matches the request host, its path is a prefix of the request
 -- path, the scheme is HTTPS if 'secure' is set, and it hasn't
 -- expired.
-matchCookies :: UTCTime -> URI -> [Cookie] -> [Cookie]
-matchCookies now uri_ = filter ok
+matchCookies :: UTCTime -> URI -> [StoredCookie] -> [StoredCookie]
+matchCookies now uri_ = filter (ok . storedCookie)
   where
     host = BS8.map toLower (uriHost uri_)
     pathBytes = uriPath uri_
@@ -421,56 +461,63 @@ pathMatches reqPath cookiePathBs
   | otherwise = False
 
 
+-- Compare the incoming path against the existing secure path, in that order.
+overlapsSecureCookie :: UTCTime -> Cookie -> StoredCookie -> Bool
+overlapsSecureCookie now incoming stored =
+  cookieSecure existing
+    && cookieName incoming == cookieName existing
+    && notExpired now existing
+    && pathMatches (cookiePath incoming) (cookiePath existing)
+    && (domainMatches domain oldDomain || domainMatches oldDomain domain)
+  where
+    existing = storedCookie stored
+    domain = cookieDomain incoming
+    oldDomain = cookieDomain existing
+
+
 -- ---------------------------------------------------------------------------
 -- Set-Cookie parsing (delegates to hermes)
 -- ---------------------------------------------------------------------------
 
-parseSetCookieHeaders :: UTCTime -> URI -> [H.Header] -> [Cookie]
-parseSetCookieHeaders now ctx hdrs =
-  [ c
-  | (n, v) <- hdrs
-  , n == H.hSetCookie
-  , Just c <- [parseSetCookie now ctx v]
-  ]
+-- | Use the typed response codec, then apply the jar's origin policy.
+parseSetCookie :: CookieJar -> UTCTime -> URI -> ByteString -> Maybe Cookie
+parseSetCookie jar now ctx raw = do
+  let limits = cjLimits jar
+  parsed <- either (const Nothing) Just $
+    Hermes.parseSetCookieFieldWithLimits (cjlMaxNameValueBytes limits) (cjlMaxAttributeBytes limits) raw
+  cookie <- fromHermesSetCookie (cjPSL jar) now ctx parsed
+  guard (not (cookieSecure cookie) || uriScheme ctx == SchemeHttps)
+  case validatePrefixes (Hermes.setCookiePath parsed == Just "/") cookie >> validateSameSite cookie of
+    Left _ -> Nothing
+    Right () -> Just cookie
 
 
-{- | Parse a single @Set-Cookie@ header value via
-'Hermes.parseSetCookieField' and project the result into the
-wireform 'Cookie' shape, applying the RFC 6265 defaults for any
-attributes the response omitted.
--}
-parseSetCookie :: UTCTime -> URI -> ByteString -> Maybe Cookie
-parseSetCookie now ctx raw = do
-  parsed <- either (const Nothing) Just (Hermes.parseSetCookieField raw)
-  let cookie = fromHermesSetCookie now ctx parsed
-  guard (domainMatches (BS8.map toLower (uriHost ctx)) (cookieDomain cookie))
-  pure cookie
-
-
-fromHermesSetCookie :: UTCTime -> URI -> Hermes.SetCookie -> Cookie
-fromHermesSetCookie now ctx sc =
-  let stBytes = ST.toByteString
-      hasDomain = case Hermes.setCookieDomain sc of
-        Just _ -> True
-        Nothing -> False
-      domainBytes =
-        maybe
-          (BS8.map toLower (uriHost ctx))
-          (BS8.map toLower . stripLeadingDot . stBytes)
-          (Hermes.setCookieDomain sc)
-      pathBytes = case stBytes <$> Hermes.setCookiePath sc of
+fromHermesSetCookie :: PublicSuffixCheck -> UTCTime -> URI -> Hermes.SetCookie -> Maybe Cookie
+fromHermesSetCookie isPublicSuffix now ctx sc = case Hermes.setCookieDomain sc of
+  Nothing -> Just hostCookie
+  Just raw
+    | BS.null domain -> Just hostCookie
+    | not (domainMatches host domain) -> Nothing
+    | not (isPublicSuffix domain) -> Just (newCookie domain True)
+    | domain == host -> Just hostCookie
+    | otherwise -> Nothing
+    where
+      domain = BS8.map toLower (stripLeadingDot (ST.toByteString raw))
+  where
+    host = BS8.map toLower (uriHost ctx)
+    hostCookie = newCookie host False
+    stBytes = ST.toByteString
+    pathBytes = case stBytes <$> Hermes.setCookiePath sc of
         Just path | "/" `BS.isPrefixOf` path -> path
         _ -> defaultPath (uriPath ctx)
-      -- RFC 6265 §5.2.2: when both Expires and Max-Age are given,
-      -- Max-Age wins. Hermes parses both into separate fields, so we
-      -- combine here.
-      expires = case Hermes.setCookieMaxAge sc of
+    -- RFC 6265 §5.2.2 gives Max-Age precedence over Expires.
+    expires = case Hermes.setCookieMaxAge sc of
         Just s -> Just (addUTCTime (fromIntegral s :: NominalDiffTime) now)
         Nothing -> Hermes.setCookieExpires sc
-  in Cookie
+    newCookie domain hasDomain = Cookie
        { cookieName = stBytes (Hermes.setCookieName sc)
        , cookieValue = stBytes (Hermes.setCookieValue sc)
-       , cookieDomain = domainBytes
+       , cookieDomain = domain
        , cookieDomainExplicit = hasDomain
        , cookiePath = pathBytes
        , cookieExpires = expires

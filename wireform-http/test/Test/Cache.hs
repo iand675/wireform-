@@ -430,7 +430,9 @@ unit_only_if_cached = it "serves an eligible cached response or returns a local 
   (fetch (light : only) >>= drainBody) `shouldReturn` "light"
   expects504 (("X-Theme", "dark") : only)
   expects504 (light : (H.hRange, "bytes=0-1") : only)
-  expects504 (light : (H.hIfNoneMatch, "*") : only)
+  unchanged <- fetch (light : (H.hIfNoneMatch, "*") : only)
+  Resp.statusCode unchanged `shouldBe` S.status304
+  drainBody unchanged `shouldReturn` ""
   expects504 [light, (H.hCacheControl, "only-if-cached, no-cache")]
   expects504 [light, (H.hCacheControl, "only-if-cached, no-store")]
   expects504 [light, (H.hCacheControl, "only-if-cached, max-age=10")]
@@ -748,14 +750,14 @@ unit_etag_revalidation = it "stale entry revalidates with ETag and replays on 30
 
 
 unit_forward_request_preconditions :: Spec
-unit_forward_request_preconditions = it "forwards caller preconditions and ranges even when a cached response exists" $ do
+unit_forward_request_preconditions = it "forwards origin-only preconditions and ranges when a cached response exists" $ do
   let stored age = [(H.hCacheControl, age), (H.hETag, "\"stored\"")]
-      callerFields = [(H.hIfNoneMatch, "\"client\""), (H.hIfNoneMatch, "W/\"other\"")]
+      callerFields = [(H.hIfNoneMatch, "\"stored\""), ("If-Match", "\"client\"")]
       rangeFields = [(H.hRange, "bytes=0-1"), (H.hIfRange, "\"client\"")]
   (t, calls, sent) <-
     mkTransport
       [ (S.status200, stored "max-age=60", "fresh")
-      , (S.status304, [], "")
+      , (S.Status 412, [], "origin precondition")
       , (S.status200, stored "max-age=0", "stale")
       , (S.Status 206, [], "ab")
       ]
@@ -765,12 +767,139 @@ unit_forward_request_preconditions = it "forwards caller preconditions and range
   let fetch = sendRaw (withCache cache t)
   (fetch freshReq >>= drainBody) `shouldReturn` "fresh"
   conditional <- fetch freshReq{WReq.headers = callerFields}
-  Resp.statusCode conditional `shouldBe` S.status304
-  drainBody conditional `shouldReturn` ""
+  Resp.statusCode conditional `shouldBe` S.Status 412
+  drainBody conditional `shouldReturn` "origin precondition"
   (fetch staleReq >>= drainBody) `shouldReturn` "stale"
   (fetch staleReq{WReq.headers = rangeFields} >>= drainBody) `shouldReturn` "ab"
   readIORef calls `shouldReturn` 4
   map WReq.headers . take 3 <$> readIORef sent `shouldReturn` [rangeFields, WReq.headers staleReq, callerFields]
+
+
+unit_cached_entity_tag_conditions :: Spec
+unit_cached_entity_tag_conditions = it "evaluates repeated If-None-Match with weak byte comparison on the selected variant" $ do
+  now <- getCurrentTime
+  let opaqueTag = "\"id-" <> BS.singleton 0xFF <> "\""
+      current = formatHttpDate now
+      metadata =
+        [ (H.hETag, "W/" <> opaqueTag)
+        , (H.hDate, current)
+        , (H.hCacheControl, "max-age=60")
+        , (H.hExpires, formatHttpDate (addUTCTime 60 now))
+        , (H.hVary, "Accept-Language")
+        , (H.hContentLocation, "/en")
+        ]
+      fields = metadata <> [(H.hContentLength, "5"), (H.hContentType, "text/plain"), ("Content-Digest", "sha-256=:AQ==:")]
+      english = (H.hAcceptLanguage, "en")
+      inm value = (H.hIfNoneMatch, value)
+      ims = (H.hIfModifiedSince, current)
+  (t, calls, _) <- mkTransport [(S.status200, fields, "hello")]
+  cache <- newCache defaultCacheConfig
+  req <- makeRequest "/cached-tag"
+  let fetch headers = sendRaw (withCache cache t) req{WReq.headers = headers}
+  (fetch [english] >>= drainBody) `shouldReturn` "hello"
+  matched <- fetch [english, inm "\"other\"", inm (" \t" <> opaqueTag), ims, (H.hCacheControl, "only-if-cached")]
+  Resp.statusCode matched `shouldBe` S.status304
+  drainBody matched `shouldReturn` ""
+  Resp.rawResponseTrailers matched `shouldReturn` []
+  H.hasHeader H.hAge (Resp.headers matched) `shouldBe` True
+  H.deleteHeader H.hAge (Resp.headers matched) `shouldBe` metadata
+  wildcard <- fetch [english, inm "*"]
+  Resp.statusCode wildcard `shouldBe` S.status304
+  drainBody wildcard `shouldReturn` ""
+  let expectBody tag = do
+        reply <- fetch [english, ims, inm tag]
+        Resp.statusCode reply `shouldBe` S.status200
+        drainBody reply `shouldReturn` "hello"
+  expectBody "\"other\""
+  expectBody ""
+  missed <- fetch [(H.hAcceptLanguage, "fr"), inm "*", (H.hCacheControl, "only-if-cached")]
+  Resp.statusCode missed `shouldBe` S.status504
+  readIORef calls `shouldReturn` 1
+
+
+unit_cached_date_conditions :: Spec
+unit_cached_date_conditions = it "evaluates If-Modified-Since against Last-Modified, Date, or the stored receipt time" $ do
+  now <- getCurrentTime
+  let current = formatHttpDate now
+      modified = formatHttpDate (addUTCTime (-60) now)
+      earlier = formatHttpDate (addUTCTime (-61) now)
+      check method extra date = do
+        (t, calls, _) <- mkTransport [(S.status200, (H.hCacheControl, "max-age=60") : extra, "")]
+        cache <- newCache defaultCacheConfig
+        req <- makeRequest "/cached-date"
+        let fetch fields = sendRaw (withCache cache t) req{WReq.method = method, WReq.headers = fields}
+        _ <- fetch []
+        hit <- fetch []
+        let toCondition captured = [(H.hIfModifiedSince, captured)]
+        threshold <- case date of
+          Just value -> pure value
+          Nothing -> case H.lookupHeader H.hDate (Resp.headers hit) of
+            Just value -> pure value
+            Nothing -> expectationFailure "Expected a synthesized Date"
+        matched <- fetch (toCondition threshold)
+        Resp.statusCode matched `shouldBe` S.status304
+        drainBody matched `shouldReturn` ""
+        mapM_ (\fields -> fetch fields >>= \reply -> Resp.statusCode reply `shouldBe` S.status200)
+          [toCondition earlier, toCondition "bad date", toCondition threshold <> toCondition threshold]
+        readIORef calls `shouldReturn` 1
+  check M.mGet [(H.hDate, current), (H.hLastModified, modified)] (Just modified)
+  check M.mHead [(H.hDate, current)] (Just current)
+  check M.mGet [] Nothing
+
+
+unit_forward_conditional_cache_misses :: Spec
+unit_forward_conditional_cache_misses = it "forwards the caller's exact validators when the selected entry cannot be reused" $ do
+  let own = [(H.hIfNoneMatch, "\"client\""), (H.hIfNoneMatch, "W/\"other\"")]
+      inherit = [(H.hETag, "\"stored\"")]
+      check cached headers = do
+        (t, calls, sent) <- mkTransport (cached <> [(S.status304, inherit, "")])
+        cache <- newCache defaultCacheConfig
+        req <- makeRequest "/forward-validator"
+        let fetch = sendRaw (withCache cache t)
+        mapM_ (const (fetch req >>= drainBody)) cached
+        reply <- fetch req{WReq.headers = headers}
+        Resp.statusCode reply `shouldBe` S.status304
+        Resp.headers reply `shouldBe` inherit
+        drainBody reply `shouldReturn` ""
+        readIORef calls `shouldReturn` length cached + 1
+        map WReq.headers . take 1 <$> readIORef sent `shouldReturn` [headers]
+      stored freshness = [(S.status200, (H.hCacheControl, freshness) : inherit, "stored")]
+  check [] own
+  check (stored "max-age=0") own
+  check (stored "max-age=60") (own <> [(H.hCacheControl, "no-cache")])
+  check (stored "max-age=60") (own <> [(H.hCacheControl, "no-store")])
+  check (stored "max-age=60") [(H.hIfNoneMatch, "* , \"other\"")]
+  check [(S.status203, (H.hCacheControl, "max-age=60") : inherit, "transformed")] own
+
+
+unit_conditional_background_validation :: Spec
+unit_conditional_background_validation = it "serves conditional stale-while-revalidate hits with cache-owned background validators" $ do
+  let tag = (H.hETag, "\"stored\"")
+      check variant = do
+        let stale = [(H.hCacheControl, "max-age=0, stale-while-revalidate=60"), tag] <> variant
+        received <- newEmptyMVar
+        first <- newIORef True
+        let peer = Transport $ \req -> do
+              initial <- atomicModifyIORef' first (\value -> (False, value))
+              if initial
+                then do
+                  body <- BSm.popperFromStrict "stored"
+                  pure (RawResponse S.status200 stale body HTTP1_1)
+                else do
+                  putMVar received (WReq.headers req)
+                  pure (RawResponse S.status304 [tag, (H.hCacheControl, "max-age=60")] (pure "") HTTP1_1)
+        cache <- newCache defaultCacheConfig
+        req <- makeRequest "/stale-conditional"
+        let fetch = sendRaw (withCache cache peer)
+        (fetch req >>= drainBody) `shouldReturn` "stored"
+        reply <- fetch req{WReq.headers = [(H.hIfNoneMatch, "*")]}
+        Resp.statusCode reply `shouldBe` S.status304
+        drainBody reply `shouldReturn` ""
+        fields <- takeMVar received
+        H.lookupHeaders H.hIfNoneMatch fields `shouldBe` ["\"stored\""]
+        H.lookupHeaders H.hIfModifiedSince fields `shouldBe` []
+  check []
+  check [(H.hVary, "If-Modified-Since"), (H.hLastModified, "Sun, 06 Nov 1994 08:49:37 GMT")]
 
 
 unit_unmatched_304 :: Spec
@@ -1287,6 +1416,66 @@ unit_revalidated_vary_uses_sent_request = it "keys a revalidated response on the
   readIORef calls `shouldReturn` 3
 
 
+unit_validators_preserve_vary :: Spec
+unit_validators_preserve_vary = it "keeps foreground validation on the same Vary selection" $ do
+  let tag = (H.hETag, "\"v1\"")
+      date = (H.hLastModified, "Sun, 06 Nov 1994 08:49:37 GMT")
+      tagCondition = (H.hIfNoneMatch, snd tag)
+      dateCondition = (H.hIfModifiedSince, snd date)
+      language = (H.hAcceptLanguage, "en")
+      check varying validators expected = do
+        let vary = [(H.hVary, "Accept-Language"), (H.hVary, varying)]
+            stale = (H.hCacheControl, "max-age=0") : vary <> validators
+            fresh = (H.hCacheControl, "max-age=60") : vary <> validators
+            unchanged = not (null expected)
+            wantBody = if unchanged then "original" else "replacement"
+        count <- newIORef (0 :: Int)
+        let send = Transport $ \req -> do
+              n <- atomicModifyIORef' count (\old -> (old + 1, old))
+              let fields = filter ((/= H.hAcceptLanguage) . fst) (WReq.headers req)
+                  (status, headers, bytes)
+                    | n == 0 = (S.status200, stale, "original")
+                    | fields /= expected = (S.status200, fresh, "another variant")
+                    | unchanged = (S.status304, fresh, "")
+                    | otherwise = (S.status200, fresh, "replacement")
+              body <- BSm.popperFromStrict bytes
+              pure (RawResponse status headers body HTTP1_1)
+        cache <- newCache defaultCacheConfig
+        req <- makeRequest "/vary-validator"
+        let fetch = sendRaw (withCache cache send) req{WReq.headers = [language]} >>= drainBody
+        fetch `shouldReturn` "original"
+        fetch `shouldReturn` wantBody
+        fetch `shouldReturn` wantBody
+        readIORef count `shouldReturn` 2
+  check "iF-nOnE-mAtCh" [tag, date] []
+  check "If-Modified-Since" [date] []
+  check "If-Modified-Since" [tag, date] [tagCondition]
+  check "If-None-Match" [date] [dateCondition]
+
+
+unit_background_validators_preserve_vary :: Spec
+unit_background_validators_preserve_vary = it "refreshes a stale Vary variant without adding its selecting header" $ do
+  let tag = (H.hETag, "\"stored\"")
+      vary = (H.hVary, "If-None-Match")
+      stale = [(H.hCacheControl, "max-age=0, stale-while-revalidate=60"), vary, tag]
+      fresh = [(H.hCacheControl, "max-age=60"), vary, tag]
+  (peer, calls, sent) <- mkTransport [(S.status200, stale, "old"), (S.status200, fresh, "replacement")]
+  store <- newInMemoryStore 4
+  inserted <- newEmptyMVar
+  let notifying = store{csInsert = \key entry -> csInsert store key entry >> putMVar inserted entry}
+      cache = newCacheWith notifying defaultCacheConfig
+  req <- makeRequest "/vary-background-validator"
+  let fetch = sendRaw (withCache cache peer) req >>= drainBody
+  fetch `shouldReturn` "old"
+  _ <- takeMVar inserted
+  fetch `shouldReturn` "old"
+  refreshed <- takeMVar inserted
+  ceBody refreshed `shouldBe` "replacement"
+  (map WReq.headers <$> readIORef sent) `shouldReturn` replicate 2 (WReq.headers req)
+  fetch `shouldReturn` "replacement"
+  readIORef calls `shouldReturn` 2
+
+
 unit_background_revalidated_vary :: Spec
 unit_background_revalidated_vary = it "refreshes Vary and freshness after a background 304" $ do
   let etag = (H.hETag, "\"v1\"")
@@ -1517,6 +1706,10 @@ tests =
       , unit_mutation_blocks_late_publication
       , unit_etag_revalidation
       , unit_forward_request_preconditions
+      , unit_cached_entity_tag_conditions
+      , unit_cached_date_conditions
+      , unit_forward_conditional_cache_misses
+      , unit_conditional_background_validation
       , unit_unmatched_304
       , unit_validation_fallback_once
       , unit_weak_etag_revalidation
@@ -1541,6 +1734,8 @@ tests =
       , unit_concurrent_revalidation_preserves_newer
       , unit_background_uncacheable_replacement
       , unit_revalidated_vary_uses_sent_request
+      , unit_validators_preserve_vary
+      , unit_background_validators_preserve_vary
       , unit_background_revalidated_vary
       , unit_background_unmatched_304
       , unit_custom_store_is_used

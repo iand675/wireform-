@@ -4381,8 +4381,10 @@ Full gRPC passed 91 tests with one existing case pending.
 
 ## HTTP cache validator selection
 
-The client cache forwards caller preconditions and range requests to the
-origin, preserving the field lines. It also bypasses requests with a
+At this stage the client cache forwarded all caller preconditions and
+range requests to the origin, preserving the field lines. The
+[caller condition follow-up](#caller-conditions-on-cache-hits) evaluates
+two of those fields on cache hits. The cache bypasses requests with a
 nonempty or unknown-length body, so an automatic retry can only replay a
 bodyless GET or HEAD. Cache-owned revalidation sends typed singleton
 ETag and Last-Modified validators. Invalid or repeated stored validators
@@ -5580,9 +5582,9 @@ applies the existing metadata merge, retaining the fields tied to
 the stored body. [RFC 9111 §4.3.5](https://www.rfc-editor.org/rfc/rfc9111.html#section-4.3.5).
 
 The cache selects the GET variant before sending HEAD and applies
-the existing snapshot check on publication. Inbound HEADs with
-caller conditions still forward those conditions. A request
-no-store directive bypasses the metadata update.
+the existing snapshot check on publication. A HEAD forwarded to the
+origin preserves caller conditions. A request no-store directive
+bypasses the metadata update.
 
 Two new regressions failed before the change. The tests exercise
 matching validators with different wire spellings, validator and
@@ -5686,3 +5688,158 @@ packed load. The long-delay branch scans the input in place.
 The checked-in typed codec benchmarks had stable allocation at 120 B
 for the four-digit value and 4,512 B for the 4,096-digit value. They
 took 8.9–9.5 ns and 505–510 ns across the baseline and candidate runs.
+
+## Caller conditions on cache hits
+
+The private cache applies caller `If-None-Match` and `If-Modified-Since`
+to reusable stored 200 responses for bodyless GET and HEAD. Cache
+policy and the `Vary` selection run before evaluating the condition.
+Hermes combines repeated entity-tag lines, compares opaque bytes with
+weak comparison, and gives that field precedence over the date.
+The date condition uses Last-Modified, then Date, then the cache's
+receipt time at wire precision. Invalid or repeated date conditions
+are ignored. A matching condition returns a bodyless 304 with Age,
+Date, and the applicable stored validator and cache fields.
+[RFC 9111 §4.3.2](https://www.rfc-editor.org/rfc/rfc9111.html#section-4.3.2)
+and [RFC 9110 §15.4.5](https://www.rfc-editor.org/rfc/rfc9110.html#section-15.4.5).
+
+Cache misses, malformed entity-tag lists, origin-only preconditions,
+and ranges preserve the request field lines on forwarding. Eligible
+conditional hits also work with `only-if-cached`. For stale-while-revalidate
+the foreground result uses the caller's condition, and background
+validation uses cache-owned validators when stripping the caller's
+conditions preserves the selected variant.
+
+Three new regressions failed on the baseline. GHC 9.10.3 passed 65
+cache, 459 aggregate HTTP, 1,105 Hermes, 137 Connect, 18 WAI, 95 HTTP/1,
+and 125 HTTP/2 tests. Aggregate HTTP and Connect passed under both
+schedules. TLS and minimal gRPC passed. Full gRPC passed 91 tests with
+one existing pending case.
+
+Criterion compared ordinary cache hits and the checked-in decoded-body
+revalidation fixture on GHC 9.10.3. The timing intervals overlapped
+on both paths. Allocation increased by 48 bytes per operation in
+each fixture. Optimized Core keeps the request field scan allocation
+free per field and enters typed condition parsing only on a reusable
+conditional response.
+
+| Fixture | Before | After |
+| --- | ---: | ---: |
+| Ordinary cache hit | 435 ns / 3,520 B | 431 ns / 3,568 B |
+| Revalidate cached decoded body | 4.31 µs / 53,395 B | 4.27 µs / 53,442 B |
+
+Local conditional hits took 602 ns and 4,415 B for the weak ETag
+fixture and 799 ns and 5,671 B for the date fixture. The baseline
+forwarded both requests to the origin stub. The conditional timings
+exclude network round-trip time.
+
+## Preserving Vary during cache revalidation
+
+Foreground and background cache-owned validation preserve the fields
+that select the cached response. If `Vary` names `If-None-Match` and
+the response has a usable ETag, the cache refetches with the original
+request fields. If `Vary` names `If-Modified-Since`, the cache omits
+that date condition. An available ETag can still validate the response
+when its condition does not affect selection. A date-only validator
+can still be used when only the tag condition would affect selection.
+For stale-while-revalidate, a conditional hit can refresh in the
+background when removing the caller's conditions leaves the Vary
+key unchanged.
+[RFC 9111 §4.1](https://www.rfc-editor.org/rfc/rfc9111.html#section-4.1)
+and [§4.3.1](https://www.rfc-editor.org/rfc/rfc9111.html#section-4.3.1).
+
+Two regressions failed on the baseline, including a foreground reply
+that delivered a different representation when its request carried
+an added selector. A separate matrix checked 100 combinations of
+selector names and valid, missing, malformed, and repeated stored
+validators. GHC 9.10.3 passed 67 cache, 461 aggregate HTTP, 1,105
+Hermes, 137 Connect, 18 WAI, 95 HTTP/1, and 125 HTTP/2 tests. Aggregate
+HTTP and Connect passed under both schedules. TLS and minimal gRPC
+passed. Full gRPC passed 91 tests with one existing pending case.
+
+The checked-in decoded-body revalidation benchmark had overlapping
+timing intervals at 4.53 µs before and 4.52 µs after. The isolated
+validator fixture took about 165 ns and 1,600 B in both ordinary runs.
+With `Vary: If-Modified-Since`, the ETag-only path took 61 ns and 600 B.
+With `Vary: If-None-Match`, deciding to refetch took 40 ns and 304 B.
+These isolated timings exclude the origin exchange. Optimized Core
+checks the selecting names before parsing an unavailable date condition.
+
+## Cookie request ordering
+
+The outbound `Cookie` field sends longer paths first. Cookies with equal
+path lengths follow creation order, including cookies stored from separate
+`Set-Cookie` lines in one response. A live replacement keeps its position.
+Deletion or expiry gives a later insertion a new position. Manual and
+response inserts assign order atomically with the jar update.
+[RFC 6265 §5.3](https://www.rfc-editor.org/rfc/rfc6265.html#section-5.3)
+and [§5.4](https://www.rfc-editor.org/rfc/rfc6265.html#section-5.4).
+
+The jar shares the encoded Hermes name-value pair across requests. It
+combines matching pairs into one field. An empty jar can pass a request
+through without resolving its URI or reading the wall clock. Responses
+with no applicable cookie updates leave the jar alone.
+
+Both new order regressions failed on the baseline. An independent stable
+path-length sort matched all 24 permutations of four input fields. Go's
+standard jar emitted the same wire bytes for the initial, replacement,
+and deletion-then-recreation cases.
+[Go `cookiejar`](https://github.com/golang/go/blob/master/src/net/http/cookiejar/jar.go).
+
+GHC 9.10.3 passed 16 cookie, 463 aggregate HTTP, 1,105 Hermes, 137
+Connect, 18 WAI, 95 HTTP/1, and 125 HTTP/2 tests. Aggregate HTTP and
+Connect passed under both schedules. TLS and minimal gRPC passed.
+Full gRPC passed 91 tests with one existing pending case.
+
+Criterion measured warm jars through the HTTP middleware with a local
+response stub. Go 1.26.10 measured `Jar.Cookies` and `Request.AddCookie`
+with a pre-parsed URL and a fresh request header map. Both fixtures
+force the resulting Cookie field and exclude network time. Optimized
+Core keeps URI resolution behind the nonempty-jar and response-cookie
+branches. The singleton branch returns the stored field value.
+
+| Request fixture | Previous Wireform | Current Wireform | Go 1.26.10 |
+| --- | ---: | ---: | ---: |
+| Empty jar | 190 ns / 1,864 B | 13.3 ns / 152 B | 90–92 ns / 48 B |
+| One quoted cookie | 319 ns / 2,936 B | 240 ns / 2,352 B | 409–423 ns / 512 B |
+| Four matching cookies | 492 ns / 4,048 B | 440 ns / 3,896 B | 1.47–1.51 µs / 2,528 B |
+
+## Set-Cookie ingestion policy
+
+The client passes its configured limits to Hermes' typed field parser.
+A cookie whose `name=value` pair exceeds the jar's byte limit is
+discarded. The count includes the equals sign, as in the jar's manual
+insertion API. Each oversized trimmed attribute value is ignored before
+it can replace an earlier valid value. The ordinary codec remains usable
+for parsing and rendering fields without those jar limits.
+[HTTPbis cookie draft §5.6](https://datatracker.ietf.org/doc/html/draft-ietf-httpbis-rfc6265bis-22#section-5.6).
+
+Response and checked manual insertion share the case-insensitive name
+prefix and SameSite checks. Wire `__Host-` cookies require an explicit
+`Path=/`. The response path accepts `Secure` cookies from HTTPS
+origins and requires `Secure` for `SameSite=None`.
+[HTTPbis cookie draft §5.7](https://datatracker.ietf.org/doc/html/draft-ietf-httpbis-rfc6265bis-22#section-5.7).
+
+Both new middleware regressions failed on the baseline. An independent
+trim-and-filter model agreed on 5,915 combinations of pair limits,
+attribute limits, and repeated fields, including Path, Max-Age, Expires,
+flags, and retained extensions.
+
+GHC 9.10.3 passed 18 cookie, 465 aggregate HTTP, 1,106 Hermes, 137
+Connect, 18 WAI, 95 HTTP/1, and 125 HTTP/2 tests. TLS and minimal
+gRPC passed. Full gRPC passed 91 tests with one existing pending case.
+Two transport stress cases timed out in the first concurrent HTTP run.
+The concurrent HTTP and Connect suites passed on the rerun.
+
+The checked-in ordinary pair fixture held at about 42 ns and 416 B.
+The ordinary attribute fixture went from 152 to 167 ns and held at
+1,168 B. The ordinary scoped fixture went from 159 to 172 ns while
+allocation fell from 1,272 to 1,256 B. The bounded parser uses a
+delimiter search on the remaining input and checks attribute length
+before decoding. Core confirms the delimiter search calls `memchr`.
+
+| Parse fixture | Previous unbounded parser | Current bounded parser |
+| --- | ---: | ---: |
+| Ordinary scoped cookie | 176 ns / 1,232 B | 186 ns / 1,264 B |
+| 8 KiB cookie value | 4.74 µs / 8,600 B | 4.79 µs / 352 B |
+| 8 KiB Path value | 4.88 µs / 9,176 B | 4.40 µs / 1,160 B |

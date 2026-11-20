@@ -131,6 +131,22 @@ responseCookies = describe "response Set-Cookie" $ do
     value "-999999999999999999999999999999999" `shouldBe` Right (Just minBound)
     value "999999999999999999999999999999999bad" `shouldBe` Right Nothing
     value "-0" `shouldBe` Right (Just 0)
+  it "bounds the cookie pair and ignores each oversized attribute before applying it" $ do
+    let wire = " id = \"x\" ; Path = /ok\t; Path=/long; Max-Age=0007; Max-Age=00000; Secure=value; HttpOnly; Priority = high ; X=12345"
+    isLeft (parseSetCookieFieldWithLimits 5 4 wire) `shouldBe` True
+    isLeft (parseSetCookieFieldWithLimits 6 4 ("id=" <> BS.replicate 4096 120)) `shouldBe` True
+    isLeft (parseSetCookieFieldWithLimits 6 4 "id=x; Path=/long\r\n; Secure") `shouldBe` True
+    case parseSetCookieFieldWithLimits 6 4 wire of
+      Right cookie -> do
+        setCookieValue cookie `shouldBe` "\"x\""
+        setCookiePath cookie `shouldBe` Just "/ok"
+        setCookieMaxAge cookie `shouldBe` Just 7
+        setCookieSecure cookie `shouldBe` False
+        setCookieHttpOnly cookie `shouldBe` True
+        map setCookieExtensionText (setCookieExtensions cookie) `shouldBe` ["Priority = high"]
+      result -> expectationFailure (show result)
+    fmap setCookiePath (parseSetCookieField wire) `shouldBe` Right (Just "/long")
+    parseSetCookieFieldWithLimits 4096 1024 wire `shouldBe` parseSetCookieField wire
   it "uses the default policy and path when the last attributes have no value" $
     parseSetCookieField "session=\"ab+c/def==\"; SameSite=Strict; SameSite; Path=/first; Path"
       `shouldBe` Right fixture {setCookiePath = Just ""}

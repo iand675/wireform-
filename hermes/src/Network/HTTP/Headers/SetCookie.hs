@@ -38,11 +38,13 @@ module Network.HTTP.Headers.SetCookie (
   SetCookies (..),
   setCookieParser,
   parseSetCookieField,
+  parseSetCookieFieldWithLimits,
   renderSetCookie,
 ) where
 
 import Data.Bits ((.|.))
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Short as SBS
 import qualified Data.ByteString.Unsafe as BU
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
@@ -158,11 +160,38 @@ instance KnownHeader SetCookies where
 
 -- | Parse one physical field line with the same rules as typed lookup.
 parseSetCookieField :: B.ByteString -> Either String SetCookie
-parseSetCookieField bytes =
-  case parseByteString (ows *> setCookieParser <* ows <* eof) bytes of
+parseSetCookieField = parseSetCookieLine setCookieParser
+{-# INLINE parseSetCookieField #-}
+
+
+-- | Parse one physical line with limits on the @name=value@ pair and on
+-- each attribute value, measured in bytes after trimming field whitespace.
+-- An oversized pair fails. Oversized attributes are ignored individually.
+parseSetCookieFieldWithLimits :: Int -> Int -> B.ByteString -> Either String SetCookie
+parseSetCookieFieldWithLimits pairLimit attributeLimit bytes
+  | B.length bytes <= pairLimit, B.length bytes <= attributeLimit = parseSetCookieField bytes
+  | otherwise = parseSetCookieLine parser bytes
+  where
+    parser = do
+      cookie <- parseCookiePair limitedName limitedValue
+      cookieAttributes (checkAttributeLimit (max 0 attributeLimit)) limitedExtension cookie
+    limitedName = do
+      name <- rfc9110TokenBS
+      if B.length name < pairLimit then pure (STU.fromByteStringUnsafe name) else failed
+    limitedValue name = withByteString cookieValueBytes $ \() value ->
+      let available = pairLimit - SBS.length (ST.toShortByteString name) - 1
+      in if B.length value <= available then pure (STU.fromByteStringUnsafe value) else failed
+    limitedExtension wire = case B.elemIndex 0x3d wire of
+      Just eq | not (attributeFits (max 0 attributeLimit) (B.drop (eq + 1) wire)) -> Nothing
+      _ -> mkSetCookieExtension wire
+
+
+parseSetCookieLine :: ParserT st String SetCookie -> B.ByteString -> Either String SetCookie
+parseSetCookieLine parser bytes =
+  case parseByteString (ows *> parser <* ows <* eof) bytes of
     Right cookie -> Right cookie
     Left _ -> Left "Failed to parse Set-Cookie header"
-{-# INLINE parseSetCookieField #-}
+{-# INLINE parseSetCookieLine #-}
 
 
 {- | Parse a cookie pair and its attributes. Invalid standard attribute
@@ -170,21 +199,40 @@ values are ignored as in RFC 6265 section 5.2. Extension attributes
 retain their spelling and relative order.
 -}
 setCookieParser :: ParserT st String SetCookie
-setCookieParser = do
-  name <- rfc9110Token <* ows
+setCookieParser =
+  parseCookiePair rfc9110Token (const (shortASCIIFromParser_ cookieValueBytes))
+    >>= cookieAttributes (pure ()) mkSetCookieExtension
+{-# INLINE setCookieParser #-}
+
+
+parseCookiePair
+  :: ParserT st String ST.ShortText
+  -> (ST.ShortText -> ParserT st String ST.ShortText)
+  -> ParserT st String SetCookie
+parseCookiePair parseName parseValue = do
+  name <- parseName <* ows
   $(char '=')
   ows
-  value <- shortASCIIFromParser_ cookieValueBytes
-  attributes (SetCookie name value Nothing Nothing Nothing Nothing False False Nothing) []
+  value <- parseValue name
+  pure (SetCookie name value Nothing Nothing Nothing Nothing False False Nothing)
+{-# INLINE parseCookiePair #-}
+
+
+cookieAttributes
+  :: ParserT st String ()
+  -> (B.ByteString -> Maybe SetCookieExtension)
+  -> SetCookie
+  -> ParserT st String SetCookie
+cookieAttributes checkValue parseExtension initial = attributes initial []
   where
     attributes !cookie !extensions =
       branch (ows *> $(char ';') *> ows) next (pure (withSetCookieExtensions (reverse extensions) cookie))
       where
-        next = withOption (knownAttribute cookie)
+        next = withOption (knownAttribute checkValue cookie)
           (\updated -> attributes updated extensions)
           (withByteString skipAttributeValue $ \() wire ->
-            attributes cookie (maybe extensions (: extensions) (mkSetCookieExtension wire)))
-{-# INLINE setCookieParser #-}
+            attributes cookie (maybe extensions (: extensions) (parseExtension wire)))
+{-# INLINE cookieAttributes #-}
 
 
 data CookieAttributeKind
@@ -214,14 +262,14 @@ cookieAttributeKind name = case B.length name of
 {-# INLINE cookieAttributeKind #-}
 
 
-knownAttribute :: SetCookie -> ParserT st String SetCookie
-knownAttribute cookie = do
+knownAttribute :: ParserT st String () -> SetCookie -> ParserT st String SetCookie
+knownAttribute checkValue cookie = do
   name <- rfc9110TokenBS <* ows
   case cookieAttributeKind name of
     CookieExtensionAttribute -> failed
     kind ->
       branch $(char '=')
-        ((ows *> withValue kind <* attributeEnd) <|> (cookie <$ skipAttributeValue))
+        ((ows *> checkValue *> withValue kind <* attributeEnd) <|> (cookie <$ skipAttributeValue))
         (withoutValue kind <$ attributeEnd)
   where
     withValue = \case
@@ -247,6 +295,21 @@ knownAttribute cookie = do
     flag _ = cookie
 
     attributeEnd = ows *> (eof <|> lookahead $(char ';'))
+{-# INLINE knownAttribute #-}
+
+
+checkAttributeLimit :: Int -> ParserT st String ()
+checkAttributeLimit limit = lookahead $ do
+  rest <- takeRest
+  let value = maybe rest (`B.take` rest) (B.elemIndex 0x3b rest)
+  if attributeFits limit value then pure () else failed
+{-# INLINE checkAttributeLimit #-}
+
+
+attributeFits :: Int -> B.ByteString -> Bool
+attributeFits limit wire =
+  B.length wire <= limit || B.length (B.dropWhileEnd isCookieSpace (B.dropWhile isCookieSpace wire)) <= limit
+{-# INLINE attributeFits #-}
 
 
 skipAttributeValue :: ParserT st String ()
